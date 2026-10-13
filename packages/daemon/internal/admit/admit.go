@@ -109,6 +109,13 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// that claim moves it, and it is the turn that posts the day's report.
 		return nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
 	}
+	if handover, ok := fact.(intake.Handover); ok {
+		if err := a.consumeHandover(ctx, tx, handover); err != nil {
+			return nil, err
+		}
+		_, err := a.promote(ctx, tx)
+		return nil, err
+	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
@@ -414,7 +421,7 @@ func (a *Admission) applySummary(ctx context.Context, tx pgx.Tx, summary dispatc
 		stored, status = refreshed, summary.Status
 	}
 	if summary.Status == "todo" && handed && readmittable(*stored) {
-		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq)
+		return a.readmit(ctx, tx, *stored, summary.Title, deref(summary.Parent), summary.Rank, seq, false)
 	}
 	if summary.Status == "todo" && stored.Status == "in_progress" {
 		if _, active := slotted[stored.Key]; active {
@@ -436,21 +443,64 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		return nil
 	}
 	handed := observation.HandedOver
+	if observation.DaemonActor && observation.HandedOver && observation.Status == "todo" {
+		if handover, err := a.store.Handover(ctx, tx, stored.Key); err != nil || handover == nil {
+			if err != nil {
+				return err
+			}
+		} else if stored.Tree == handover.Tree {
+			root, err := a.store.Issue(ctx, tx, handover.Tree)
+			if err != nil {
+				return err
+			}
+			if !handover.Cancelled && root != nil && root.LingersAt(handover.Generation) {
+				a.log.Info("admission hand-over", "issue", stored.Key, "tree", handover.Tree, "linger", handover.Generation)
+				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
+			}
+		}
+	}
 	if observation.Status == "todo" && handed && readmittable(stored) {
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, false)
 	}
 	orphan, err := a.orphan(ctx, tx, stored, observation.Status, handed)
 	if err != nil {
 		return err
 	}
 	if orphan {
+		// An orphan that started a phase is the same work as a hand-over, whoever handed it to
+		// Legion: a child stranded by a root that closed before its hand-over existed carries its
+		// phase, gate and pull request too (startedRun).
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq)
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
 		Status: observation.Status, Shown: observation.Status, HandedOver: handed, Seq: observation.Seq,
 	})
+}
+
+// consumeHandover completes an outbox hand-over when Dispatch already showed its todo and label.
+// It is the direct equivalent of the daemon-authored event path, but cannot be mistaken for an
+// ordinary daemon todo echo because it carries the persisted fence identity. It logs the hand-over
+// as the event path does, marked as the outbox's, once it commits: the live proof tells the two
+// consumers of a person's labelled todo (this, or admission's orphan carry) apart by it.
+func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.Handover) error {
+	stored, err := a.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || stored == nil {
+		return err
+	}
+	handover, err := a.store.Handover(ctx, tx, fact.Issue)
+	if err != nil || handover == nil || handover.Cancelled || handover.Tree != fact.Tree || handover.Generation != fact.Generation || stored.Tree != fact.Tree {
+		return err
+	}
+	root, err := a.store.Issue(ctx, tx, fact.Tree)
+	if err != nil || root == nil || !root.LingersAt(fact.Generation) {
+		return err
+	}
+	intake.OnCommit(ctx, func() {
+		a.log.Info("admission hand-over", "issue", fact.Issue, "tree", fact.Tree, "linger", fact.Generation, "via", "outbox")
+	})
+	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, startedRun(*stored))
 }
 
 // orphan says whether an observation makes a recorded child an orphan, admitted as a root of its
@@ -517,28 +567,93 @@ func readmittable(stored record.Issue) bool {
 	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.Lingers() || stored.Phase == phase.Done)
 }
 
-// readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting for
-// a slot. Each caller re-admits an issue handed to Legion. The new generation owns its facts: the old
-// one's pull request, design gate, handoffs, review rounds, and pending READY are cleared, so its
-// architect registers the gate again and its implementer waits for its own pull request.
-func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64) error {
+// startedRun says whether a child moving to a root of its own carries its run there: it started a
+// phase, and its tree neither left it admitted nor finished or parked it (phase done). One still
+// admitted never started under its old tree's gate, and a finished one (set back to todo during its
+// tree's linger, say) has no run to carry: carried at done, its new root would take a slot and start
+// an architect with nothing to run. Every path that moves a child to a tree of its own applies it:
+// a hand-over's event, the outbox's direct consumption, and a person's labelling of an orphan.
+func startedRun(issue record.Issue) bool {
+	return issue.Phase != phase.Admitted && issue.Phase != phase.Done
+}
+
+// readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
+// for a slot. A root starts a fresh generation: its facts clear across its whole tree, as do those
+// of an orphan readmitted without carry. An orphan readmitted with carry (one that started a phase)
+// is the same work moving from a finished root to a root of its own, so its phase, phase rows, gate
+// and pull request (with its observed head) carry into the new generation, and its promotion starts
+// both its architect and the role of that carried phase. A merged pull request is never observed as
+// merged again, and a review, READY or production check would otherwise rerun work already decided
+// or landed.
+func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
+	}
+	orphan := carry && !claim.IsTreeRoot(stored.Key, stored.Tree)
+	oldTree, oldGeneration := stored.Tree, stored.Generation
+	var gate *record.DesignGate
+	var pr *record.PullRequest
+	var err error
+	if orphan {
+		gate, err = a.store.Gate(ctx, tx, oldTree)
+		if err != nil {
+			return fmt.Errorf("read gate of re-admitted orphan %s: %w", stored.Key, err)
+		}
+		pr, err = a.store.PullRequest(ctx, tx, stored.Key)
+		if err != nil {
+			return fmt.Errorf("read pull request of re-admitted orphan %s: %w", stored.Key, err)
+		}
 	}
 	stored.Project = a.project
 	stored.Title = title
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(parentKey)
 	stored.Tree = stored.Key
-	stored.Phase = phase.Admitted
+	if !orphan {
+		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
+	}
 	stored.Generation++
 	stored.Status, stored.DispatchStatus = "todo", "todo"
 	stored.Rank = rank
 	stored.LingerUntil = nil
-	stored.Hold = nil
 	stored.LastDispatchSeq = seq
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
+	}
+	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
+	// it would read a later daemon todo of this root (a controller's reopen) as the stale hand-over.
+	if oldTree != stored.Key {
+		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
+			return err
+		}
+	}
+	if orphan {
+		if pr != nil {
+			pr.Generation = int64(stored.Generation)
+			if err := a.store.PutPullRequest(ctx, tx, *pr); err != nil {
+				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
+			}
+		}
+		// Every root a hand-over created is recorded as one, so its architect's catch-up says it was
+		// handed over and decomposes nothing anew; it is marked as carrying a gate, which tells the
+		// architect never to register its own spec, only when its old root had one. A root reopened
+		// in its linger has its gate cleared with the generation, so a second close hands its
+		// children over with none: such a child keeps its phase and pull request, and its architect
+		// registers its spec as a fresh root's does, the gate its READY needs.
+		if gate != nil {
+			gate.Issue = stored.Key
+			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
+				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
+			}
+		}
+		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: gate != nil})
+	}
+	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
+	// tree admitted by a person leaves its siblings' fences standing.
+	if claim.IsTreeRoot(stored.Key, oldTree) {
+		if err := a.store.CancelTreeHandovers(ctx, tx, oldTree, oldGeneration); err != nil {
+			return err
+		}
 	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
 	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.
@@ -681,7 +796,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		if err := a.enqueue(ctx, tx, candidate.Key, record.SuperviseRequest{Op: "start", Tree: candidate.Tree, Role: claim.RoleArchitect, Generation: candidate.Generation}, now); err != nil {
 			return admitted, err
 		}
-		if err := a.startMidPhaseChildren(ctx, tx, candidate, issues, now); err != nil {
+		if err := a.startMidPhaseMembers(ctx, tx, candidate, append(issues, candidate), now); err != nil {
 			return admitted, err
 		}
 		if err := a.reenterStrandedChildren(ctx, tx, candidate, issues); err != nil {
@@ -807,57 +922,64 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 	return own
 }
 
-// startMidPhaseChildren starts the worker of every child of the admitted tree that a previous run
-// left mid-phase. A tree that closed retired every member's claim, and a re-admitted root only
-// brings back its own architect: a child left in testing has no worker, only its worker's handoff
-// moves it, and the architect cannot release a child already in the workflow. Each start carries
-// the child's own generation and phase, which is what the outbox fences it against, and the task
-// that says to carry the phase on: a start with no task leaves the resumed agent holding its old
-// transcript with nothing asked of it, and only its own handoff moves the phase. The task is marked
-// as the phase's resume task, so the executor does not deliver it to a claim that still holds a
-// task for the same generation and phase when the start runs: that claim is given the one it holds
-// once it is ready. A child whose worker is already started for this run (a fact moved it while
-// the root waited for its slot, and that start is queued or has run) is not started a second time.
-// A child whose claim a stop from the tree's close will still suspend is started, so this start
-// ends last or supersedes the stop (workflow.StartFor, over the role's queued rows and this
-// daemon's own claim). Each start is queued behind a row creating its child's branch, as the root's
-// architect start is. A child resumes in workflow.ResumePhase, recorded before its start.
-func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
+// startMidPhaseMembers starts each previous run that promotion brings back, the re-admitted root
+// included. A hand-over turns a child into that root while preserving its phase, so its phase role
+// needs the same resume start ordinary mid-phase children receive (workflow.ResumeTask, which tells
+// a carried merger its carried approved head). A root promoted held, which only a hand-over leaves
+// (every other re-admission starts its root at admitted), starts no worker, and the hold's notice
+// went to the architect of the tree it was handed over from, so its own architect is told of the
+// hold (workflow.HeldNotice), whether or not it carried a gate. Promotion already queued the root's
+// branch; each other member queues its own before starting. Every member resumes in
+// workflow.ResumePhase, recorded before its start: a child of a re-admitted tree, and a root a
+// hand-over created, left awaiting its merge resume in merging, since the old tree's linger disarmed
+// the pull request (beginLinger) and only a new READY from the merger arms it again.
+func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
 		return err
 	}
-	for _, child := range issues {
-		if child.Key == root.Key || child.Tree != root.Tree || record.OutOfWorkflow(child.Status) {
+	if root.Phase == phase.Held && root.Hold != nil {
+		if err := a.enqueue(ctx, tx, root.Key, workflow.HeldNotice(root), now); err != nil {
+			return err
+		}
+	}
+	for _, member := range issues {
+		if member.Tree != root.Tree || record.OutOfWorkflow(member.Status) {
 			continue
 		}
-		if resume := workflow.ResumePhase(child); resume != child.Phase {
-			child.Phase = resume
-			if err := a.store.PutIssue(ctx, tx, child); err != nil {
-				return fmt.Errorf("resume child %s in %s: %w", child.Key, resume, err)
+		if resume := workflow.ResumePhase(member); resume != member.Phase {
+			member.Phase = resume
+			if err := a.store.PutIssue(ctx, tx, member); err != nil {
+				return fmt.Errorf("resume %s in %s: %w", member.Key, resume, err)
 			}
 		}
-		role := workflow.RoleFor(child.Phase)
+		role := workflow.RoleFor(member.Phase)
 		if role == "" {
 			continue
 		}
-		token, err := claim.NewToken(project, child.Key, role)
+		token, err := claim.NewToken(project, member.Key, role)
 		if err != nil {
 			return err
 		}
-		run, err := a.store.RoleRun(ctx, tx, token, child.Key, role, child.Generation)
+		run, err := a.store.RoleRun(ctx, tx, token, member.Key, role, member.Generation)
 		if err != nil {
 			return err
 		}
-		if !workflow.StartFor(run, root, child.Generation, child.Phase) {
+		if !workflow.StartFor(run, root, member.Generation, member.Phase) {
 			continue
 		}
-		if err := a.enqueue(ctx, tx, child.Key, record.IssueBranch{Generation: child.Generation}, now); err != nil {
+		if member.Key != root.Key {
+			if err := a.enqueue(ctx, tx, member.Key, record.IssueBranch{Generation: member.Generation}, now); err != nil {
+				return err
+			}
+		}
+		task, err := workflow.ResumeTask(ctx, a.store, tx, member, role)
+		if err != nil {
 			return err
 		}
-		payload := record.SuperviseRequest{Op: "start", Tree: child.Tree, Role: role, Generation: child.Generation, Phase: child.Phase,
-			Task: workflow.ResumePhaseTask(child), ResumeTask: true}
-		if err := a.enqueue(ctx, tx, child.Key, payload, now); err != nil {
+		payload := record.SuperviseRequest{Op: "start", Tree: member.Tree, Role: role, Generation: member.Generation, Phase: member.Phase,
+			Task: task, ResumeTask: true}
+		if err := a.enqueue(ctx, tx, member.Key, payload, now); err != nil {
 			return err
 		}
 	}

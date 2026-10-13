@@ -163,6 +163,16 @@ const SearchQueryMax = 1000
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = "search with a short phrase of a few words, not a passage"
 
+// ProjectKeyRule says the project-key pattern's rule in words; every refusal of a key that is not
+// a project key gives it. Generated from PROJECT_KEY_RULE in packages/contracts so the server and
+// the tool word it once.
+const ProjectKeyRule = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
+
+// ProjectKeyPattern is a whole project key, as the server creates them and the projects.key check
+// constraint holds. Generated from PROJECT_KEY_PATTERN in packages/contracts, which the dispatch
+// command checks a key against, so the two accept the same keys.
+const ProjectKeyPattern = "^[A-Z][A-Z0-9]{1,9}$"
+
 // SearchKindDepth is how many of its best matches each kind of content lists before
 // GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
 // returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
@@ -190,6 +200,11 @@ const DefaultIssuePageLimit = 50
 // PATCH /api/v1/issues/{key} accept. Generated from ISSUE_TITLE_MAX in packages/contracts so the
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = 1000
+
+// ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
+// accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
+// Settings name field and the dispatch command cannot drift apart.
+const ProjectNameMax = 80
 
 // DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
 // outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and

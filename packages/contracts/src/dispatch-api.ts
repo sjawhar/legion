@@ -338,6 +338,16 @@ export const MAX_ISSUE_BLOCKERS = 20;
 export const ISSUE_TITLE_MAX = 1000;
 
 /**
+ * The longest project name, in UTF-16 units, counted after the trim `POST /api/v1/projects`
+ * applies; a longer one is `400 CAP_EXCEEDED`. A name shows beside its key in the sidebar's
+ * 20rem rail and in every project picker's `KEY · Name` option, any bearer may write one, and no
+ * route renames a project, so it is held to about two lines of that rail; production's longest name
+ * was 25 characters when this was set. Generated into Go as `contracts.ProjectNameMax`, which the
+ * server enforces, and the Settings name field and `dispatch project` take it as their maximum.
+ */
+export const PROJECT_NAME_MAX = 80;
+
+/**
  * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
  * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's
  * `limit` takes the same bound, so the two ends agree.
@@ -534,6 +544,36 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+  /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
+   *  server older than the listing. */
+  readonly table?: BlockTable;
+}
+
+/** A table block's rows in child order, the header row first, each row and cell placed as
+ *  `GET /api/v1/artifacts/{id}/blocks/{block_id}` places it, from the same live tree. */
+export interface BlockTable {
+  readonly rows: readonly BlockTableRow[];
+}
+
+/** One row of a table: its block id ("" for a row the live document has not stamped yet), its
+ *  index among the table's rows (0 is the header row, the index `delete_row` takes) and its cells
+ *  in child order. */
+export interface BlockTableRow {
+  readonly id: string;
+  readonly index: number;
+  readonly cells: readonly BlockTableCell[];
+}
+
+/** One cell of a table row: its block id ("" for a cell the live document has not stamped yet),
+ *  its row index, its column (its index in its row, the index `delete_column` takes, so a cell
+ *  spanning columns counts once), the opening words of the header cell drawn above it ("" where
+ *  none is) and its own opening words. */
+export interface BlockTableCell {
+  readonly id: string;
+  readonly row: number;
+  readonly column: number;
+  readonly header: string;
+  readonly text: string;
 }
 
 /** One node on a block's path from the document's top-level block down to the block: its type,
@@ -795,6 +835,41 @@ export interface MyAnswerRow {
 
 export interface MyAnswersResponse {
   readonly rows: MyAnswerRow[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** The newest write someone else made in a thread on `GET /api/v1/me/replies`: a reply (a comment
+ *  or a message), or the ask's answer, whose `id` is the ask's, whose `author` is the person who
+ *  answered and whose `first_line` is the chosen options and the answer's text. */
+export interface MyReplyReply {
+  readonly id: string;
+  readonly kind: "reply" | "answer";
+  readonly author: Actor;
+  /** The reply's or the answer's first non-empty line, at most 160 characters. */
+  readonly first_line: string;
+  readonly created_at: string;
+}
+
+/** One thread the caller wrote in where someone else has written since the caller last read it:
+ *  an ask's thread, a comment thread by its root, or an issue message thread by its root. */
+export interface MyReplyRow {
+  /** The ask's id, or the comment or message thread's root id: what
+   *  `PUT /api/v1/me/threads/{id}/read` marks. */
+  readonly thread_id: string;
+  readonly kind: "ask" | "comment" | "message";
+  /** Relative Dispatch deep link to the thread's root, never to the reply. */
+  readonly ref: string;
+  readonly issue?: Pick<Issue, "key" | "title">;
+  readonly document?: InboxDocument;
+  /** The ask's question, or the root's first line, at most 160 characters. */
+  readonly subject: string;
+  readonly reply: MyReplyReply;
+}
+
+export interface MyRepliesResponse {
+  readonly rows: MyReplyRow[];
   readonly total: number;
   readonly limit: number;
   readonly offset: number;
@@ -1563,6 +1638,13 @@ export interface UserAgentStateUpdatedEventPayload {
   readonly session_id: string;
 }
 
+/** `user_thread_state.updated`: one viewer's read mark on one thread of the Replies page moved.
+ *  It carries no state; the viewer's other tabs and devices refetch their replies. */
+export interface UserThreadStateUpdatedEventPayload {
+  readonly login: string;
+  readonly thread_id: string;
+}
+
 /**
  * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
  * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
@@ -1623,6 +1705,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_agent_state.updated";
       readonly payload: UserAgentStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "user_thread_state.updated";
+      readonly payload: UserThreadStateUpdatedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })

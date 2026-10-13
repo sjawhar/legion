@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 import { secondaryButtonBorder, textSecondaryOnSurface } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import type { DwellRef } from "../shell/useDwell";
 import { Avatar } from "./Avatar";
 import type { Author } from "./authors";
 import { ReplyButton } from "./ReplyButton";
@@ -61,6 +62,7 @@ export function ReplyTurn({
   body,
   current = false,
   delivery,
+  markRef,
   onReply,
   quote,
   replyDisabled = false,
@@ -72,6 +74,8 @@ export function ReplyTurn({
   body: ReactNode;
   current?: boolean;
   delivery?: ReplyDelivery;
+  /** The Replies page's read mark, on the newest reply of a thread: the element it watches. */
+  markRef?: DwellRef;
   onReply?: () => void;
   quote?: { readonly author: string | undefined; readonly excerpt: string; readonly to?: string };
   /** Holds the Reply button while the composer it would address is busy with a send. */
@@ -91,6 +95,7 @@ export function ReplyTurn({
       className="flex gap-3 rounded-lg py-1"
       data-reply=""
       data-turn={turnID}
+      ref={markRef}
     >
       <Avatar author={author} />
       <div className="min-w-0 flex-1">

@@ -216,7 +216,7 @@ test("Conversation updates an open ask in place after an agent edit and preserve
 
 test("a deep link to an old unanchored comment scrolls its Conversation turn into view", async ({
   browser,
-}) => {
+}, testInfo) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Old comment target" });
   const comment = await createComment(issue.key, { body: "Deep linked comment" }, agent);
@@ -229,6 +229,14 @@ test("a deep link to an old unanchored comment scrolls its Conversation turn int
     const page = await alice.newPage();
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
 
+    // On a phone the link opens the comment's thread full-screen over the Conversation; Back
+    // leaves it on the focused turn.
+    if (testInfo.project.name === "iphone") {
+      const thread = page.getByRole("dialog", { name: "Thread" });
+      await expect(thread.getByText("Deep linked comment")).toBeVisible();
+      await thread.getByRole("button", { name: "Back" }).click();
+      await expect(thread).toHaveCount(0);
+    }
     const target = page
       .getByRole("list", { name: "Conversation turns" })
       .locator('li[aria-current="true"]');

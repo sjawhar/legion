@@ -90,6 +90,7 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 		"block.repaired", "block.invalid",
 		"project.created", "project.updated", "settings.repo_project.updated", "settings.architecture_source.updated",
 		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated",
+		"user_thread_state.updated",
 	}
 	askEventTypes := map[string]bool{
 		"ask.opened": true, "ask.anchor_refreshed": true, "ask.answered": true, "ask.resolved": true,

@@ -1020,8 +1020,8 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode the daemon's own write: %v", err)
 	}
-	if issue, ok := daemon.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
-		t.Fatalf("fact = %#v, want no session actor for the daemon's own write", daemon.Fact)
+	if issue, ok := daemon.Fact.(DispatchIssue); !ok || issue.ActorSession != "" || !issue.DaemonActor {
+		t.Fatalf("fact = %#v, want the daemon's own actor", daemon.Fact)
 	}
 }
 

@@ -15,6 +15,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
+import { pictureNodeView } from "./picture-view";
 
 /**
  * `blockId` is the block's own identity rather than one of its schema attributes, so it is the
@@ -355,9 +356,10 @@ export const askBlockEditingPlugin = new Plugin({
 
 /** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
  * reporting the live set of hosts (in document order) whenever it changes,
- * `renderTypedBlock`'s node view for every other type in the block schema while keeping the
- * library's other node views, and `askBlockEditingPlugin`. Call once per editor, right after it
- * is created. */
+ * `renderTypedBlock`'s node view for every other type in the block schema, `pictureNodeView` for
+ * every `image` node (a picture whose source is a Dispatch reference draws from its version's
+ * bytes route), while keeping the library's other node views, and `askBlockEditingPlugin`. Call
+ * once per editor, right after it is created. */
 export function installTypedBlocks(
   view: EditorView,
   blockSchema: BlockSchema,
@@ -385,6 +387,7 @@ export function installTypedBlocks(
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
+      image: pictureNodeView(view),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
   });

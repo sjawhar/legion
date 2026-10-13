@@ -294,7 +294,26 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("read Dispatch issue %s before status write: %w", row.Issue, err)
 	}
 	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
+		if payload.HandOver {
+			if err := r.dropHandover(ctx, row.Issue, payload); err != nil {
+				return err
+			}
+		}
 		return nil
+	}
+	if payload.HandOver {
+		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
+			return err
+		}
+		if issue.Status == payload.Status && issue.HandedOver {
+			return r.consumeHandover(ctx, row, payload)
+		}
+		// Every hand-over write is conditional on the sequence just read (dispatch HandOver), the
+		// label added when the child lacks it, so a person's move since that read stands.
+		if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
+			return fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
+		}
+		return r.consumeHandover(ctx, row, payload)
 	}
 	if issue.Status == payload.Status {
 		return nil
@@ -310,6 +329,60 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
 	return nil
+}
+
+// consumeHandover applies the hand-over to the record once Dispatch shows it: the row's hand-over
+// write just set it, or Dispatch already showed the todo and label (which a write would make no
+// event for). It does not wait for the write's event: a restart between the write and that event's
+// publication lets the boot read record the event's sequence, and the live event then stops at the
+// sequence fence. The fact is idempotent (admit's consumeHandover reads the fence it deletes), so
+// the event, or this row's retry after a failure here, changes nothing more.
+func (r *outbox) consumeHandover(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) error {
+	_, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("handover:%s:%d", row.Issue, row.ID),
+		intake.Handover{Issue: row.Issue, Tree: payload.HandOverTree, Generation: payload.HandOverLinger}, r.handlers...)
+	return err
+}
+
+// handOverHolds is an early check only; the durable fence is enforced again by intake when the
+// PATCH's daemon event arrives. The one transaction confirms this row still owns the child and the
+// linger it names, avoiding a needless write once a root reopen already removed that fence.
+func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) (bool, error) {
+	var issue, root *record.Issue
+	var handover *record.Handover
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = r.records.Issue(ctx, tx, row.Issue)
+		if err != nil || issue == nil {
+			return err
+		}
+		handover, err = r.records.Handover(ctx, tx, row.Issue)
+		if err != nil || handover == nil {
+			return err
+		}
+		if handover.Cancelled {
+			return r.records.DeleteHandoverAt(ctx, tx, row.Issue, payload.HandOverTree, payload.HandOverLinger)
+		}
+		root, err = r.records.Issue(ctx, tx, handover.Tree)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read hand-over of %s: %w", row.Issue, err)
+	}
+	if issue != nil && handover != nil && !handover.Cancelled && root != nil && issue.Tree == handover.Tree && handover.Tree == payload.HandOverTree &&
+		handover.Generation == payload.HandOverLinger && root.LingersAt(handover.Generation) {
+		return true, nil
+	}
+	r.log.Info("outbox hand-over no longer holds; finished without writing", "row", row.ID, "issue", row.Issue,
+		"tree", payload.HandOverTree, "linger", payload.HandOverLinger)
+	return false, nil
+}
+
+// dropHandover deletes the fence of a hand-over a person's move superseded, but only this row's
+// own: the tree and linger generation the row names. A newer linger's fence on the same child is
+// its own row's to settle.
+func (r *outbox) dropHandover(ctx context.Context, issue string, payload record.StatusWrite) error {
+	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		return r.records.DeleteHandoverAt(ctx, tx, issue, payload.HandOverTree, payload.HandOverLinger)
+	})
 }
 
 func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload record.MessagePost) error {

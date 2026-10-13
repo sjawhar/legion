@@ -69,15 +69,9 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 			!StartFor(run, root, issue.Generation, issue.Phase) {
 			continue
 		}
-		task := ResumePhaseTask(issue)
-		if role == claim.RoleMerger {
-			head, err := e.approvedHead(ctx, tx, issue.Key)
-			if err != nil {
-				return intake.Result{}, err
-			}
-			if head != "" {
-				task += " " + approvedHeadLabel + ": " + head + "."
-			}
+		task, err := ResumeTask(ctx, e.store, tx, issue, role)
+		if err != nil {
+			return intake.Result{}, err
 		}
 		if err := e.enqueue(ctx, tx, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: role, Generation: issue.Generation,
 			Phase: issue.Phase, Task: task, ResumeTask: true, RuleResume: true}); err != nil {

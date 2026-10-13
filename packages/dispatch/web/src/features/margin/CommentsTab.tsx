@@ -149,6 +149,7 @@ export function MarginAskCard({
         ask={ask}
         artifactSlug={artifactSlug}
         documentLink={false}
+        markRead
         owner={owner.kind === "document" ? owner : undefined}
         variant="compact"
       />

@@ -17,6 +17,17 @@ on:
       - "packages/pi-shared/**"
       # The plugins' shared prepack, which their pack steps and pi-shared's partition test run.
       - "scripts/pi-plugin-prepack.sh"
+      # What the jobs' checks read outside their packages beyond the entries here: pi-envoy's
+      # prepack test packs through pack-plugin.sh, pi-legion's skills guard sweeps the root guides
+      # and docs below, and every Bun job installs Bun through setup-bun from .bun-version.
+      - "scripts/e2e/lib/pack-plugin.sh"
+      - "AGENTS.md"
+      - "README.md"
+      - "docs/kubernetes.md"
+      - "docs/site/src/content/docs/**"
+      - "deploy/kubernetes/daemon/controller.yaml.example"
+      - ".bun-version"
+      - ".github/actions/setup-bun/**"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
       - "patches/**"
@@ -57,6 +68,14 @@ on:
       - "packages/pi-legion/**"
       - "packages/pi-shared/**"
       - "scripts/pi-plugin-prepack.sh"
+      - "scripts/e2e/lib/pack-plugin.sh"
+      - "AGENTS.md"
+      - "README.md"
+      - "docs/kubernetes.md"
+      - "docs/site/src/content/docs/**"
+      - "deploy/kubernetes/daemon/controller.yaml.example"
+      - ".bun-version"
+      - ".github/actions/setup-bun/**"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
       - "patches/**"
@@ -115,19 +134,36 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
+          # Each filter names everything its job's checks read: the package and what its tests
+          # and typecheck read outside it, the composite actions the job installs its tools
+          # through, and, for a Go build in workspace mode, every module go.work binds, whose
+          # go.mod moves the versions the build compiles. `bun_toolchain` is no job's gate: it is
+          # the Bun pin and the action that installs it (.github/actions/setup-bun reads
+          # .bun-version), written once and named by every Bun job's filter through its anchor,
+          # which dorny/paths-filter flattens into the list that names it.
           filters: |
+            bun_toolchain: &bun_toolchain
+              - '.bun-version'
+              - '.github/actions/setup-bun/**'
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
+              # The Go copies its tests hold the TypeScript to: src/dispatch-text-references.test.ts
+              # and src/dispatch-href.test.ts read the Go reader's JSON tables, and
+              # scripts/gen-go.test.ts checks the generated Go file is current.
+              - 'packages/envoy/internal/dispatch/text/testdata/**'
+              - 'packages/envoy/internal/contracts/generated.go'
               # A lockfile or root manifest change moves what the package resolves (#1519 nested
               # a second zod under contracts through the lock alone).
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
             envoy_client:
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
@@ -135,9 +171,17 @@ jobs:
               - 'skills/dispatch/**'
               - 'go.work'
               - 'go.work.sum'
+              # The Go builds run in workspace mode, where the daemon module's requirements raise
+              # the versions envoy compiles with.
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
               # Its bun run gen:go step imports contracts' zod schemas.
               - 'package.json'
               - 'bun.lock'
+              # The pmdoc fixture check and pmdoc's render tests run pmdoc/gen, which reads the
+              # editor's schema through @milkdown/preset-gfm; bun.lock names the patch only by path.
+              - 'patches/**'
+              - *bun_toolchain
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
@@ -183,16 +227,25 @@ jobs:
               - 'packages/contracts/**'
               - 'go.work'
               - 'go.work.sum'
+              # The listener it builds compiles in workspace mode (envoy's note above).
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
+              # Its prepack copies the repository's skills/ into the tarball scripts/prepack.test.ts
+              # unpacks, and src/__tests__/config.test.ts loads the server from the checkout, where
+              # it reads skills/dispatch-first.
+              - 'skills/**'
             claude_plugin:
               - 'packages/claude-envoy/**'
               - 'packages/envoy-client/**'
@@ -201,6 +254,12 @@ jobs:
               - 'bun.lock'
               # check-dist rebuilds the committed dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
+              # scripts/build.ts, which check-dist and tests/dist-fresh.test.ts run, builds only under
+              # the Bun .bun-version pins, since the committed bundle depends on it.
+              - *bun_toolchain
+              # tests/dispatch-first-hook.test.ts reads the skill through the plugin's skills/ link
+              # and holds the hook's context to Claude Code's 10,000-character cap.
+              - 'skills/dispatch-first/**'
             # The private workspace package both Oh My Pi plugins import. Its tests stage each
             # plugin's skills through the prepack script and hold the two lists to a partition of
             # skills/ (test/skills-partition.test.ts).
@@ -210,13 +269,18 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
-            # The Envoy plugin: its own sources, the workspace packages its bundle inlines, the
-            # four skills it ships (src/skills-guard.test.ts checks them; scripts/prepack.test.ts
-            # stages them through the prepack script, which its pack step runs), and the Oh My Pi
-            # pin its real-binary test runs (extensions/dispatch-first-omp.test.ts), installed
-            # through the mise install-jj leaves.
+            # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
+            # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
+            # installed through the mise install-jj leaves. Every skill and every daemon prompt:
+            # src/skills-guard.test.ts stages its four skills through the prepack script and resolves
+            # their skill:// links across all of skills/, and its native-tool-name rule scans every
+            # .md under skills/ and packages/daemon/internal/prompts, so a prompt that names a
+            # Dispatch tool fails the pull request that writes it, not the next one to touch this
+            # package. scripts/prepack.test.ts packs the plugin through pack-plugin.sh, as the
+            # release does.
             pi_envoy:
               - 'packages/pi-envoy/**'
               - 'packages/pi-shared/**'
@@ -224,21 +288,34 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
-              - 'skills/dispatch/**'
-              - 'skills/dispatch-first/**'
-              - 'skills/dispatch-brainstorming/**'
-              - 'skills/envoy/**'
+              - 'scripts/e2e/lib/pack-plugin.sh'
+              - 'skills/**'
+              - 'packages/daemon/internal/prompts/**'
               - '.omp-pin'
               - '.github/actions/install-omp/**'
               - '.github/actions/install-jj/**'
-            # The Legion plugin: the same shape over its eight skills, the Oh My Pi pin its
-            # real-binary test runs (extensions/legion-phase-stall-omp.test.ts), and the daemon: the
-            # skill-scenario rig's scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go
-            # inside the daemon module, so a change to the daemon (or to the worker image's jj,
-            # whose version its Dockerfile there pins for the tests) runs it.
+              # install-jj reads the mise version and checksum it installs from here.
+              - 'packages/daemon/docker/worker.Dockerfile'
+            # The Legion plugin: its own sources, the workspace packages its bundle inlines, the Oh
+            # My Pi pin its real-binary tests run (extensions/legion-phase-stall-omp.test.ts), and
+            # every file its tests and typecheck read outside the package:
+            # - every skill: src/skills-guard.test.ts resolves each skill:// link across all of
+            #   skills/ (the Legion skills link into skills/dispatch by heading), and the Envoy entry
+            #   its tests load beside this one reads skills/dispatch-first at load;
+            # - the Envoy plugin, whose entry extensions/legion.test.ts, legion-role-claim.test.ts and
+            #   the omp harness load beside this one, and whose sources the typecheck reaches;
+            # - the daemon: its prompts are the skills guard's other linking root, and
+            #   scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go inside the daemon
+            #   module in workspace mode, where the envoy module's requirements move the versions it
+            #   builds with and the worker image's Dockerfile pins the jj the tests drive;
+            # - the guides and docs the skills guard sweeps for a claim that the controller holds no
+            #   GitHub credential;
+            # - the Dispatch e2e client scripts/skill-scenarios/seed.ts imports, which the
+            #   typecheck compiles.
             pi_legion:
               - 'packages/pi-legion/**'
               - 'packages/pi-shared/**'
@@ -246,40 +323,52 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
-              - 'skills/legion-architect/**'
-              - 'skills/legion-controller/**'
-              - 'skills/legion-oracle/**'
-              - 'skills/legion-retro/**'
-              - 'skills/legion-worker/**'
-              - 'skills/ce-simplify-code/**'
-              - 'skills/thermonuclear-code-quality/**'
-              - 'skills/thermonuclear-deep-review/**'
-              # The Legion skills link into skills/dispatch/SKILL.md by heading
-              # (`skill://dispatch/SKILL.md#…`), and src/skills-guard.test.ts is the one check that
-              # those anchors resolve: a heading rename there must run it on its own pull request,
-              # not merge green and fail the next unrelated pi-legion change.
-              - 'skills/dispatch/**'
+              - 'skills/**'
+              - 'packages/pi-envoy/**'
               - '.omp-pin'
               - '.github/actions/install-omp/**'
               - 'packages/daemon/**'
               - 'go.work'
               - 'go.work.sum'
+              - 'packages/envoy/go.mod'
+              - 'packages/envoy/go.sum'
               - '.github/actions/install-jj/**'
+              - 'AGENTS.md'
+              - 'README.md'
+              - 'docs/kubernetes.md'
+              - 'docs/site/src/content/docs/**'
+              - 'deploy/kubernetes/daemon/controller.yaml.example'
+              - 'packages/dispatch/e2e/api.ts'
+              - 'packages/dispatch/e2e/harness-ports.ts'
+              - 'packages/dispatch/web/src/api/types.ts'
             dispatch:
               - 'packages/dispatch/**'
               - 'packages/proof-editor/**'
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
+              # The other envoy packages the Dispatch server the browser tests build compiles
+              # (`go list -deps ./cmd/dispatch` in packages/envoy), and the file store image the
+              # job's S3 step reads.
+              - 'packages/envoy/internal/bus/**'
+              - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/internal/oidc/**'
+              - 'packages/envoy/internal/pgmigrate/**'
+              - 'packages/envoy/internal/routing/**'
+              - 'packages/envoy/internal/tests3/seaweedfs.go'
               # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
               # dev-postgres.test.sh (envoy-go) reads too.
               - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The modules the Dispatch server the browser tests start is built from, ygo's
-              # document and websocket server among them.
+              # document and websocket server among them, and the daemon module's, whose
+              # requirements the workspace build takes too.
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
+              - 'packages/daemon/go.mod'
+              - 'packages/daemon/go.sum'
               - 'go.work'
               - 'go.work.sum'
               # The editor's source pin and its remaining patches can change document rendering,
@@ -287,6 +376,7 @@ jobs:
               - 'patches/**'
               - 'package.json'
               - 'bun.lock'
+              - *bun_toolchain
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt.
               - 'scripts/third-party-notices.ts'
 

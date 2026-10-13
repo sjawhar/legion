@@ -31,6 +31,7 @@ type Client interface {
 	ListIssues(ctx context.Context, project string, statuses []string) ([]IssueSummary, error)
 	GetIssue(ctx context.Context, key string) (Issue, error)
 	SetStatus(ctx context.Context, key, status string) error
+	HandOver(ctx context.Context, issue Issue, status string) error
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
@@ -70,13 +71,18 @@ type IssueSummary struct {
 	LastSeq int64
 }
 
-// Issue is the workflow data from Dispatch's issue-detail route.
+// Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
+// the client boundary, as IssueSummary's is. Labels remain available to readers, while HandOver
+// adds LegionLabel through Dispatch's additive labels_add update rather than rewriting them.
 type Issue struct {
 	Key               string
 	Project           string
 	Title             string
 	Status            string
 	Parent            *string
+	Rank              string
+	Labels            []string
+	HandedOver        bool
 	PrimaryArtifactID string
 	LastSeq           int64
 }
@@ -122,23 +128,40 @@ const ParentContended = "PARENT_CONTENDED"
 // an operator restores it and the same body is taken — so reading one as permanent would drop the
 // write for good. PARENT_CONTENDED is an issue PATCH that found its parent moved by a concurrent
 // reparent at every attempt to lock it, so nothing was applied and the same body is taken once the
-// reparents stop.
+// reparents stop. So is an older Dispatch's refusal of a field this daemon added (newerFields): it
+// ends when Dispatch is upgraded, so the two deploy in either order.
 func PermanentRefusal(err error) (*Error, bool) {
 	var refusal *Error
 	if !errors.As(err, &refusal) {
 		return nil, false
 	}
 	switch {
-	case refusal.Code == "",
+	case refusal.Code == "ISSUE_CHANGED",
+		refusal.Code == "",
 		refusal.Status < 400 || refusal.Status >= 500,
 		refusal.Status == http.StatusRequestTimeout,
 		refusal.Status == http.StatusTooManyRequests,
 		refusal.Status == http.StatusUnauthorized,
 		refusal.Status == http.StatusForbidden,
-		refusal.Status == http.StatusConflict && refusal.Code == ParentContended:
+		refusal.Status == http.StatusConflict && refusal.Code == ParentContended,
+		refusal.Status == http.StatusBadRequest && refusal.Code == "INVALID_JSON" && unknownNewerField(refusal.Message):
 		return nil, false
 	}
 	return refusal, true
+}
+
+// newerFields are the request fields this daemon sends that a Dispatch one release older does not
+// know: a hand-over's labels_add and expected_sequence. That Dispatch's decoder refuses an unknown
+// field by name; any other malformed body stays a permanent refusal.
+var newerFields = []string{"labels_add", "expected_sequence"}
+
+func unknownNewerField(message string) bool {
+	for _, field := range newerFields {
+		if strings.Contains(message, `unknown field "`+field+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 // TransientError wraps a Dispatch request failure that is a transport problem — no response at

@@ -45,6 +45,14 @@ type StatusWrite struct {
 	// writes the status, since Dispatch refuses a message on a closed issue. Empty for a write
 	// with no reason to record.
 	Reason string `json:"reason,omitempty"`
+	// HandOver also puts dispatch.LegionLabel on the issue, in the same Dispatch write: the write
+	// hands the issue to Legion, and the runner writes it while the label is missing even where
+	// Dispatch already shows Status. HandOverTree and HandOverLinger fence it: the runner writes it
+	// only while the issue is still that tree's and the tree's root still lingers at that
+	// generation (Issue.LingersAt), so a root re-admitted since keeps the issue as its child.
+	HandOver       bool   `json:"handOver,omitempty"`
+	HandOverTree   string `json:"handOverTree,omitempty"`
+	HandOverLinger uint64 `json:"handOverLinger,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
@@ -135,11 +143,16 @@ type Notice struct {
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
 // (a catch-up notice), which is the architect's first instruction: admission launches it with no
 // task. It is the tree as the daemon records it then: the root's generation, the launch of the
-// architect's claim it was written for, the design gate policy and the root's gate, and every issue
-// of the tree.
+// architect's claim it was written for, whether a hand-over created the root at this generation
+// with its child's phase and pull request (HandedOver) and whether its old root's gate came with
+// them (Carried), the design gate policy and the root's gate, and every issue of the tree. A
+// handed-over root's workers already run their phases, so its architect decomposes nothing anew;
+// one that carried no gate registers its own spec.
 type CatchUp struct {
 	Generation uint64         `json:"generation"`
 	Launch     uint64         `json:"launch"`
+	HandedOver bool           `json:"handed_over,omitempty"`
+	Carried    bool           `json:"carried,omitempty"`
 	Gate       CatchUpGate    `json:"gate"`
 	Issues     []CatchUpIssue `json:"issues"`
 }
@@ -513,7 +526,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

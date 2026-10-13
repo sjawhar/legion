@@ -26,6 +26,51 @@
   closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
   a bearer, one JSON line per frame, and compares what it applied with the GET routes.
 
+- Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
+  comment thread, an issue message thread - where someone else has written since they last read
+  it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact
+  header. A reply, a message, or an answer someone else gives to an ask counts; the row names who
+  wrote it, and an answer reads as `answered` with its chosen options and text. Reading the thread
+  on screen, replying in it, or **Mark read** clears the row, and a later write brings it back; an
+  open ask the Inbox lists stays off the page, and the Inbox is unchanged. Migrations 0095-0099
+  add `user_threads`, kept by triggers on `comments`, `asks` and `messages`, seed it from history
+  with every thread read, so the deploy marks nothing unread, and catch up any write that landed
+  while the seed ran. `GET /api/v1/me/replies` lists the threads and
+  `PUT /api/v1/me/threads/{id}/read` moves one forward, appending `user_thread_state.updated`,
+  which never notifies. Opening a link to a comment (`/issues/<KEY>/comments/<id>`) now opens its
+  thread.
+- A table's entry in `GET /api/v1/artifacts/{id}/blocks` (and the issue- and project-slug forms)
+  lists its rows and cells as `table.rows`: each row's block id and index (the index `delete_row`
+  takes, 0 the header) and each cell's block id, row, column (its index in its row, the index
+  `delete_column` takes, so a cell spanning columns or rows counts once), the opening words of the
+  header drawn above it, and its own. They are placed by the same walk of the same live tree as
+  `GET /api/v1/artifacts/{id}/blocks/{block_id}`, so the two routes agree for every row and cell,
+  and the list still holds one entry per table. The document's tables are laid out in document
+  order on the one budget of span cells a render of it spends, so a cell's header is the one `GET
+  .../text` draws above it, and the block route places a cell under that same header; a table past
+  the budget is listed as its markdown draws it, its spans adding nothing (LEGION-693).
+
+- An agent session creates a Dispatch project (LEGION-684). `POST /api/v1/projects` accepts a
+  bearer as well as a signed-in person, so a session with its token makes the project its work
+  needs, with its `project.created` event naming that session, rather than asking a person to
+  make it in Settings. A key that already exists is still `409 PROJECT_EXISTS` whoever asks, and a
+  key that is not a project key or an empty name `400 INVALID_PROJECT`. `GET /api/v1` lists the
+  route as `any`. A name is at most 80 characters (`contracts.ProjectNameMax`, UTF-16 units after
+  the trim; past it `400 CAP_EXCEEDED`), and is `400 INVALID_PROJECT` when it holds a control
+  character (Unicode Cc) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), or
+  has no visible character (a letter, number, punctuation or symbol other than the blank fillers
+  U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned,
+  such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point
+  ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF);
+  combining marks, format characters, private-use characters and whitespace don't count); every
+  other format character (an emoji's joiner, a flag's tags, a direction mark, a soft hyphen) and
+  every combining mark is allowed beside a visible one. Any bearer
+  writes a name into the project list every dashboard reads and no route renames a project. Every route
+  that refuses a project key that is not one (creating a project or an issue, mapping a repository,
+  search) now says the rule one way, `<field> "x" is not a project key: an uppercase letter, then 1
+  to 9 uppercase letters or digits, such as CORE`, from `contracts.ProjectKeyRule`, and the key
+  pattern itself is generated as `contracts.ProjectKeyPattern`. Creating an issue without a title
+  answers `title is required`.
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
@@ -615,6 +660,15 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
+  line a pasted picture is written as, now shows in the document editor and in a past version,
+  drawn from the version's bytes route; before, the editor's `<img>` carried the `dispatch://`
+  address as its source, which no browser fetches, so the line showed nothing. A version the
+  browser cannot draw (a markdown document, another file, a missing version), or a source that
+  pins no version, shows a link to what it names instead, its text the reference's short form
+  (`CORE-1 notes-md`). A picture from another website is drawn as before (LEGION-695).
+
 - A listener's shutdown drain no longer waits out 5 s of its 10 s budget when its NATS connection
   closes while nats.go drains it. nats.go v1.50.0 marks a connection closed during its drain as
   draining again and waits 5 s for a reply on the socket it closed, and the drain read the

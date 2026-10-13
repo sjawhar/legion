@@ -104,6 +104,39 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	return nil
 }
 
+// settleUnfinished records a hand-over for every child a done root leaves in the workflow at the
+// end of its linger. A reopen inside the linger resumes those children in the old tree instead:
+// lingerExpired is fenced on the root generation, and the durable hand-over record makes a late
+// daemon PATCH no-op when the root came back before its event arrives. Each hand-over keeps the
+// child's phase, gate, phase rows and pull request across a new root generation; promotion starts
+// the phase's role again in that phase. A child still admitted never started under its tree's
+// design, and one finished or parked has no run to carry on.
+func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
+	for _, member := range members {
+		if member.Key == root.Key || member.Phase == phase.Admitted || record.OutOfWorkflow(member.Status) {
+			continue
+		}
+		if err := e.handOver(ctx, tx, root, member); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// handOver writes the durable fence before queuing the one Dispatch PATCH that sets the child todo
+// and adds the legion label. intake consumes its daemon-authored event only while the fence names a
+// root that still lingers at this generation; the direct child re-admission then carries state into
+// the child's independent tree.
+func (e *Engine) handOver(ctx context.Context, tx pgx.Tx, root, child record.Issue) error {
+	if err := e.store.PutHandover(ctx, tx, record.Handover{Issue: child.Key, Tree: root.Tree, Generation: root.Generation}); err != nil {
+		return err
+	}
+	e.logOnCommit(ctx, "workflow: a finished root hands its unfinished child to Legion", "issue", child.Key, "tree", root.Key,
+		"phase", child.Phase, "status", child.Status)
+	return e.enqueue(ctx, tx, child.Key, record.StatusWrite{Status: "todo", ObservedStatus: child.Status, HandOver: true,
+		HandOverTree: root.Tree, HandOverLinger: root.Generation})
+}
+
 func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.LingerExpired) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil || issue.Generation != fact.Generation || !issue.Lingers() {
@@ -127,5 +160,8 @@ func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.Linge
 		}
 	}
 	e.logOnCommit(ctx, "workflow: linger closed the tree", "tree", issue.Key, "generation", issue.Generation, "issues", len(members))
+	if issue.Status == "done" {
+		return intake.Result{}, e.settleUnfinished(ctx, tx, *issue, members)
+	}
 	return intake.Result{}, nil
 }

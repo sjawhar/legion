@@ -20,6 +20,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		Status        *string               `json:"status"`
 		Rank          *rankInput            `json:"rank"`
 		Labels        *[]string             `json:"labels"`
+		LabelsAdd     *[]string             `json:"labels_add"`
+		ExpectedSeq   *int64                `json:"expected_sequence"`
 		Priority      json.RawMessage       `json:"priority"`
 		Route         *string               `json:"route"`
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
@@ -75,10 +77,22 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	var labels []string
+	var labels, labelsAdd []string
+	if input.Labels != nil && input.LabelsAdd != nil {
+		writeError(w, "LABELS_INPUT", http.StatusBadRequest, "labels and labels_add cannot both be set")
+		return
+	}
 	if input.Labels != nil {
 		var err error
 		labels, err = normalizeIssueLabels(*input.Labels)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if input.LabelsAdd != nil {
+		var err error
+		labelsAdd, err = normalizeIssueLabels(*input.LabelsAdd)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -168,6 +182,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if input.ExpectedSeq != nil && *input.ExpectedSeq != int64(before.LastSeq) {
+		writeError(w, "ISSUE_CHANGED", http.StatusConflict, "issue changed since the hand-over read")
+		return
+	}
 	if parentProvided && parent != nil {
 		if err := validateIssueParent(r.Context(), tx, key, before.Project, *parent); err != nil {
 			s.writeHandlerError(w, err)
@@ -178,7 +196,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// A closed issue takes only its rank (board order) and its component attachment
 		// (classified without reopening), alone or beside a reopening status; every other
 		// field, and closing it again, waits for a reopen.
-		others := input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided || input.BlockedBy != nil
+		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided || input.BlockedBy != nil
 		reopening := input.Status != nil && status != "done"
 		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
@@ -231,6 +249,14 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 			parentValue = *parent
 		}
 		set("parent_key", parentValue)
+	}
+	if input.LabelsAdd != nil {
+		labels, err = mergeIssueLabels(before.Labels, labelsAdd)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		set("labels", labels)
 	}
 	if input.Labels != nil {
 		set("labels", labels)
@@ -428,4 +454,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(events...)
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
+}
+
+// mergeIssueLabels adds labels to existing without dropping a concurrent writer's labels. The total
+// still passes through the same cap and de-duplication as a full labels replacement.
+func mergeIssueLabels(existing, added []string) ([]string, error) {
+	return normalizeIssueLabels(append(append([]string{}, existing...), added...))
 }

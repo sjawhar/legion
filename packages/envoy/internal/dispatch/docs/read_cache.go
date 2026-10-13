@@ -65,9 +65,10 @@ var coldReadTimeout = 60 * time.Second
 // TextWithToken, TextWithBlocks and BlockPath), rendered from one tree of one stored state, the
 // state stamp names. Nothing writes it once it is built: a read hands out its strings, a copy of
 // its blocks (a caller writes References into its slice) and a copy of a path's entries. A table
-// block's DescendantIDs and a path's table position (its Row, Column, Header and Cells) are handed
-// out as they are, shared with every later read of the same stored head, so no caller may write
-// through them; none does, and copying them would cost every hit an allocation for a table's size.
+// block's DescendantIDs and Table, and a path's table position (its Row, Column, Header and Cells),
+// are handed out as they are, shared with every later read of the same stored head, so no caller
+// may write through them; none does, and copying them would cost every hit an allocation for a
+// table's size.
 type documentRead struct {
 	artifactID string
 	stamp      DocumentStamp
@@ -157,14 +158,22 @@ const (
 // measure is the bytes the rendering's strings and slices hold, and its fixed overheads. A block id
 // is counted where each part of the rendering holds it - a block, a path's key, a table's list of
 // the blocks it holds - but not again on the path entries that name it. Storage that paths share
-// is counted once however many share it (tablePositionsWeight).
+// is counted once however many share it (tablePositionsWeight), and so is a table block's rows
+// (blockTableWeight).
 func (read *documentRead) measure() int64 {
 	weight := readEntryOverhead + int64(len(read.artifactID)+len(read.stamp.Row)+len(read.markdown)+len(read.token))
 	weight += int64(cap(read.blocks)) * int64(unsafe.Sizeof(model.ArtifactBlock{}))
+	tables := make(map[*model.BlockTable]struct{})
 	for _, block := range read.blocks {
 		weight += int64(len(block.ID)+len(block.Type)+len(block.Token)) + int64(cap(block.DescendantIDs))*int64(unsafe.Sizeof(""))
 		for _, id := range block.DescendantIDs {
 			weight += int64(len(id))
+		}
+		if block.Table != nil {
+			if _, seen := tables[block.Table]; !seen {
+				tables[block.Table] = struct{}{}
+				weight += blockTableWeight(block.Table)
+			}
 		}
 	}
 	positions := make(map[*pmdoc.TablePosition]struct{})
@@ -177,9 +186,22 @@ func (read *documentRead) measure() int64 {
 	return weight + tablePositionsWeight(positions)
 }
 
+// blockTableWeight is the bytes a table block's rows hold beside the strings they name: a cell's
+// id and opening words, and its header's (the header row's), are the strings the table's paths
+// hold (pmdoc.BlockPathsAndTableRows lists them from the same layout), which a path's key and its
+// table position count. A stored tree carries a block id on every row and cell, since settlement
+// mints them before it persists.
+func blockTableWeight(table *model.BlockTable) int64 {
+	weight := int64(unsafe.Sizeof(model.BlockTable{})) + int64(cap(table.Rows))*int64(unsafe.Sizeof(model.BlockTableRow{}))
+	for _, row := range table.Rows {
+		weight += int64(cap(row.Cells)) * int64(unsafe.Sizeof(model.BlockTableCell{}))
+	}
+	return weight
+}
+
 // tablePositionsWeight is the bytes the distinct table positions hold, each once however many paths
 // share it (every block in a cell shares its cell's), and the storage they point into, each once
-// however many positions point at it (pmdoc.BlockPaths shares it within a table): a row's cells'
+// however many positions point at it (pmdoc.BlockPathsAndTableRows shares it within a table): a row's cells'
 // opening words, a header's text and its slot in the table's array of headers, and the slots of the
 // table's array of ordinals that Row and Column point at.
 func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {
@@ -217,18 +239,19 @@ func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {
 }
 
 // buildDocumentRead renders tree, the document as of stamp, into everything the four reads answer,
-// with one render: an error when any of them refuses the tree, a document outside the schema, as
-// the read computing it from the tree would.
+// with one render and one placement walk, which lays each table out once for its paths and its
+// rows: an error when any of them refuses the tree, a document outside the schema, as the read
+// computing it from the tree would.
 func buildDocumentRead(artifactID string, stamp DocumentStamp, tree *pmdoc.Node) (*documentRead, error) {
-	markdown, blocks, err := documentBlocks(tree)
+	paths, rows, err := pmdoc.BlockPathsAndTableRows(tree)
+	if err != nil {
+		return nil, err
+	}
+	markdown, blocks, err := renderedBlocks(tree, rows)
 	if err != nil {
 		return nil, err
 	}
 	token, err := nodeToken(tree)
-	if err != nil {
-		return nil, err
-	}
-	paths, err := pmdoc.BlockPaths(tree)
 	if err != nil {
 		return nil, err
 	}

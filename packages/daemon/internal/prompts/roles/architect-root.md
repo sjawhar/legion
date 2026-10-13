@@ -43,6 +43,34 @@ delivered `catch-up` notice is the authoritative wake-equivalent: when its desig
 the daemon is already running the tree's phases, and you start none.
 During a live session, react only to delivered wakes; do not poll.
 
+When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
+its phase, its design gate, its phase records and its pull request. Never `register_gate`, and do
+not begin planning anew: the daemon has already started the role of its current phase, or, when
+the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
+is a copy on the old root's spec document, which belongs to the old tree: nothing done to that
+document after the carry closes your gate, and a gate carried closed opens when a human approves
+the old document at the carried version or a later one, releasing any READY it refused; you are
+told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
+else about that document: never revise it, request its approval, or register it; when a READY
+waits on that approval, tell the controller. Resume the tree from there; at `production_check`,
+once the check finishes and you have verified its record on the pull request and the issue,
+`sign_off`.
+
+A `catch-up` that says `handed_over` but not `carried` is a child handed over from a tree that had
+no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
+its children over without one). Its workers already run their phases from its carried phase
+records and pull request, so do not start section 2 of your skill: decompose nothing and release
+no wave. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
+phase the hold came from, which its `held` notice names. Before `awaiting_merge` (planning through
+merging), register its spec with `register_gate`: its READY waits for that gate, and when the
+gate's `design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
+`awaiting_merge` or `production_check` the READY is already through and the work may have merged,
+so register no spec and ask no human to approve one: wait for the merge and the production check,
+verify its record on the pull request and the issue, then `sign_off`. `awaiting_merge` can move
+back: a red or conflicting head returns the root to `implementing`, and its next READY reads the
+gate again. If a later `ready-refused` arrives because the head was sent back, register then, as
+that row of your skill says.
+
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or

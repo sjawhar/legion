@@ -51,10 +51,18 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 		CatchUp: &catchUp})
 }
 
-// catchUp is root's tree as the record holds it: the design gate policy and the root's gate, and
-// every issue of the tree in key order.
+// catchUp is root's tree as the record holds it: whether a hand-over created the root at this
+// generation, and whether its old root's gate came with it, the design gate policy and the root's
+// gate, and every issue of the tree in key order.
 func (e *Engine) catchUp(ctx context.Context, tx pgx.Tx, root record.Issue) (record.CatchUp, error) {
 	catchUp := record.CatchUp{Generation: root.Generation, Gate: record.CatchUpGate{Policy: string(e.cfg.DesignGate)}}
+	handed, err := e.store.HandedOverRoot(ctx, tx, root.Key)
+	if err != nil {
+		return record.CatchUp{}, err
+	}
+	if handed != nil && handed.Generation == root.Generation {
+		catchUp.HandedOver, catchUp.Carried = true, handed.GateCarried
+	}
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
 		return record.CatchUp{}, err

@@ -313,6 +313,34 @@ type OutboxRow struct {
 	LeaseUntil *time.Time
 }
 
+// Handover is a root linger's pending move of one child to an independent tree. It persists from
+// the decision until the daemon-authored Dispatch event consumes or rejects it.
+type Handover struct {
+	Issue      string
+	Tree       string
+	Generation uint64
+	Cancelled  bool
+}
+
+// ReleaseRetry is the bounded wait for a released todo child whose parent event has not reached the
+// daemon yet. A changed Dispatch sequence begins a fresh bounded attempt.
+type ReleaseRetry struct {
+	Issue     string
+	Sequence  int64
+	Attempts  int
+	NextAt    time.Time
+	Exhausted bool
+}
+
+// HandedOverRoot is a root a hand-over created: the generation at which the child became a root of
+// its own, carrying its phase, phase rows and pull request, and whether its old root's gate came
+// with them.
+type HandedOverRoot struct {
+	Issue       string
+	Generation  uint64
+	GateCarried bool
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -343,6 +371,9 @@ type Store interface {
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
+	// GatesForArtifact is every gate registered on artifactID, in issue order: the document owner's
+	// gate and each copy a hand-over carried to a child of its tree.
+	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
@@ -367,6 +398,20 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
+	PutHandover(ctx context.Context, tx pgx.Tx, handover Handover) error
+	CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree string, generation uint64) error
+	DeleteHandover(ctx context.Context, tx pgx.Tx, issue string) error
+	// DeleteHandoverAt deletes issue's fence only while it is the one tree and linger generation
+	// name: a newer linger's fence on the same issue belongs to its own outbox row.
+	DeleteHandoverAt(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64) error
+	ReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) (*ReleaseRetry, error)
+	PutReleaseRetry(ctx context.Context, tx pgx.Tx, retry ReleaseRetry) error
+	DeleteReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) error
+	// HandedOverRoot is issue's record as a root a hand-over created, nil for none;
+	// PutHandedOverRoot records it.
+	HandedOverRoot(ctx context.Context, tx pgx.Tx, issue string) (*HandedOverRoot, error)
+	PutHandedOverRoot(ctx context.Context, tx pgx.Tx, root HandedOverRoot) error
 	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.

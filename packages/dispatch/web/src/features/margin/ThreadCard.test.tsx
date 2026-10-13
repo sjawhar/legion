@@ -1,6 +1,7 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   type RenderResult,
   render,
@@ -12,8 +13,13 @@ import { type ComponentProps, useState } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import {
+  type IntersectionControl,
+  installIntersectionObserver,
+} from "../../__tests__/intersection-observer";
 import { api } from "../../api/client";
 import type { Comment } from "../../api/types";
+import { seedUnread } from "../replies/replies-fixture";
 import { ThreadCard } from "./ThreadCard";
 import type { Thread } from "./useMarginItems";
 
@@ -99,11 +105,11 @@ function EditableCard(props: EditableCardProps) {
 
 function renderCard(
   currentThread = thread(),
-  overrides: Partial<ComponentProps<typeof ThreadCard>> = {}
-) {
-  const queryClient = new QueryClient({
+  overrides: Partial<ComponentProps<typeof ThreadCard>> = {},
+  queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
-  });
+  })
+) {
   return render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -512,5 +518,68 @@ test("a collapsed suggestion card previews its note formatted on one line", asyn
     expect(preview.querySelector("ul, li, p")).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+});
+
+/** Renders the card on `CORE-1`, whose root-1 thread is unread for alice, with time and the
+ *  screen in the test's hands. */
+function renderUnreadCard(expanded: boolean) {
+  jest.useFakeTimers();
+  const screen = installIntersectionObserver();
+  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { retry: false },
+      queries: { retry: false, staleTime: Number.POSITIVE_INFINITY },
+    },
+  });
+  seedUnread(queryClient, { issue: "CORE-1" }, [root.id]);
+  const view = renderCard(thread(), { expanded }, queryClient);
+  return {
+    cleanup: () => {
+      view.unmount();
+      mark.mockRestore();
+      screen.restore();
+    },
+    mark,
+    screen,
+    view,
+  };
+}
+
+async function dwellOn(element: Element, screen: IntersectionControl) {
+  act(() => screen.show(element));
+  act(() => {
+    jest.advanceTimersByTime(1_000);
+  });
+  for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+}
+
+test("an expanded thread is marked read once its newest reply has been on screen", async () => {
+  const card = renderUnreadCard(true);
+  try {
+    const newest = (await card.view.findByText("First reply")).closest("li");
+    if (newest === null) throw new Error("expected the newest reply's item");
+    // The watched element is the newest reply's own, not the card around the whole thread.
+    expect(card.screen.observed()).toEqual([newest]);
+    await dwellOn(newest, card.screen);
+    expect(card.mark.mock.calls).toEqual([[root.id, reply.created_at]]);
+  } finally {
+    card.cleanup();
+  }
+});
+
+test("a collapsed thread shows no reply and marks nothing", async () => {
+  const card = renderUnreadCard(false);
+  try {
+    expect(card.screen.observed()).toEqual([]);
+    await dwellOn(screen.getByTestId(`margin-comment-${root.id}`), card.screen);
+    expect(card.mark).not.toHaveBeenCalled();
+  } finally {
+    card.cleanup();
   }
 });

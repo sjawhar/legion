@@ -2,10 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
-import { whoAmIQuery } from "../../api/queries";
 import type { Ask, AskFollower, Subscriber } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
+import { useIsHuman } from "../../hooks/useIsHuman";
 import { textMutedOnSurface } from "../../theme/classes";
 import { useAgents } from "../conversation/useAgents";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
@@ -92,13 +92,13 @@ export function AskRecipients({
   const subscription = ownerSubscription(owner);
   // The subscribers endpoints are human-only; the card only asks once the signed-in principal
   // is known to be a user, so no other bearer ever cycles on a 403.
-  const whoAmI = useQuery(whoAmIQuery());
+  const human = useIsHuman();
   // Same key as the issue header (`IssueHeader`) and the project document page
   // (`DocumentPage`), so an Inbox of cards on one issue shares one fetch with its header. Each
   // fetch is two Envoy listener round trips (interests + sessions), so it is held fresh for a
   // while rather than refetched on every mount and focus; SSE invalidation still refreshes it.
   const subscribersQuery = useQuery({
-    enabled: subscription !== undefined && whoAmI.data?.kind === "user",
+    enabled: subscription !== undefined && human,
     queryKey: ["subscribers", subscription?.id],
     queryFn: () => {
       if (subscription === undefined) {

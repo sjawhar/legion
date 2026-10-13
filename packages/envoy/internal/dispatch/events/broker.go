@@ -256,7 +256,8 @@ func (b *Broker) Notify(e model.Event) bool {
 		// author. Retain it for every stream consumer without waking anyone.
 		return false
 	case "project.created", "settings.repo_project.updated", "settings.architecture_source.updated",
-		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated":
+		"architecture.synced", "architecture.sync_failed", "user_state.updated", "user_agent_state.updated",
+		"user_thread_state.updated":
 		// Settings, importer and per-viewer bookkeeping: retained on their log and carried by
 		// SSE, but nobody is woken by them.
 		return false

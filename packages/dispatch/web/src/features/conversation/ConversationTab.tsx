@@ -59,7 +59,9 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { replyPreviewMarkdown } from "../refs/markdown-fragment";
 import { buildIssuePath, documentItemPath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
+import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
@@ -197,6 +199,7 @@ function ConversationReply({
   currentTurnId,
   isClosed,
   issueKey,
+  markRef,
   onReply,
   reply,
   replyDisabled,
@@ -207,6 +210,8 @@ function ConversationReply({
   currentTurnId: string | undefined;
   isClosed: boolean;
   issueKey: string;
+  /** The Replies page's read mark, on the thread's newest reply. */
+  markRef?: DwellRef;
   onReply: (target: ReplyTarget) => void;
   reply: ThreadReply;
   replyDisabled: boolean;
@@ -239,6 +244,7 @@ function ConversationReply({
       author={author}
       body={<EventBody event={reply.event} />}
       current={reply.id === currentTurnId}
+      markRef={markRef}
       delivery={
         lastAttempt === undefined
           ? undefined
@@ -307,6 +313,15 @@ function Thread({
   root: ThreadRoot;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
+  // The Replies page's read mark: the thread is read once its newest reply has been on screen.
+  // It watches that reply's own element, so a thread taller than the screen still clears.
+  const newest = root.replies.at(-1);
+  const markRef = useMarkThreadRead({
+    enabled: true,
+    newestShownAt: newest?.event.payload.created_at,
+    owner: { issue: issueKey },
+    threadId: root.event.payload.id,
+  });
   if (root.replies.length === 0) return null;
   return (
     <ThreadReplies>
@@ -317,6 +332,7 @@ function Thread({
           isClosed={isClosed}
           issueKey={issueKey}
           key={reply.id}
+          markRef={reply === newest ? markRef : undefined}
           onReply={onReply}
           reply={reply}
           replyDisabled={replyDisabled}
@@ -375,7 +391,7 @@ function MessageTurn({
   onPin: () => void;
   onReply: (target: ReplyTarget) => void;
   pinned: boolean;
-  register: (element: HTMLElement | null) => void;
+  register: DwellRef;
   replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
@@ -584,7 +600,7 @@ function CommentTurn({
   onRetryAction: () => void;
   pendingAction: boolean;
   pinned: boolean;
-  register?: (element: HTMLElement | null) => void;
+  register?: DwellRef;
   replyDisabled: boolean;
   /** The tab's send name, beneath which the thread card's own reply composer names its send
    *  (`threadReplySendKey`). */
@@ -753,7 +769,7 @@ function TargetedMessageTurn({
   issueKey: string;
   item: Extract<ConversationItem, { kind: "targeted-message" }>;
   onReply: (target: ReplyTarget) => void;
-  register: (element: HTMLElement | null) => void;
+  register: DwellRef;
   replyDisabled: boolean;
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
@@ -866,8 +882,6 @@ export function ConversationTab({
   });
   const issueState = stateForIssue(state, issueKey);
   const lastRead = useRef(issueState.last_read_seq);
-  const observed = useRef(new Map<Element, number>());
-  const timers = useRef(new Map<Element, number>());
   const events = useMemo(() => eventItems(log.data), [log.data]);
   const today = dateKey(new Date().toISOString());
   // A claim event's activity line names a session, so it reads the registry like every other
@@ -1044,6 +1058,9 @@ export function ConversationTab({
       return;
     }
     if (targetTurnId !== undefined) {
+      // The first `data-turn` in the document is the Conversation list's own turn. While the phone
+      // thread dialog is open it holds a second copy of the root, which this never scrolls to: the
+      // dialog shows its root at its top, and the list's collapsed copy renders no reply to match.
       const target = document.querySelector<HTMLElement>(`[data-turn="${targetTurnId}"]`);
       if (target !== null) {
         target.scrollIntoView({ block: "center" });
@@ -1064,95 +1081,53 @@ export function ConversationTab({
     visible,
   ]);
 
+  // A link to a comment (`/issues/<key>/comments/<id>`, from a Replies row, the Inbox, search or
+  // a copied reference) opens that comment's thread as it lands, so its replies are on screen:
+  // inline at a desktop width, the thread dialog on a phone. Once per link; the reader closes it
+  // as any thread.
+  const openedFocusThread = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!visible || focusItemId === undefined || openedFocusThread.current === focusItemId) return;
+    const root = shown.find(
+      (item): item is Extract<ConversationItem, { kind: "comment" }> =>
+        item.kind === "comment" &&
+        (item.event.payload.id === focusItemId ||
+          item.replies.some((reply) => reply.event.payload.id === focusItemId))
+    );
+    if (root === undefined) return;
+    openedFocusThread.current = focusItemId;
+    if (isPhoneViewport) phone.open(root.event.payload.id);
+    else setThreadOpen(root.event.payload.id, true);
+  }, [focusItemId, isPhoneViewport, phone.open, setThreadOpen, shown, visible]);
+
   useEffect(() => {
     lastRead.current = issueState.last_read_seq;
   }, [issueState.last_read_seq]);
 
-  useEffect(() => {
-    if (!visible || observedTurnKey === "") {
-      return;
-    }
-    const visibleEvents = new Set<Element>();
-    let active = true;
-    const scheduleRead = (target: Element, sequence: number) => {
-      if (
-        !active ||
-        !visibleEvents.has(target) ||
-        sequence <= lastRead.current ||
-        timers.current.has(target)
-      ) {
-        return;
+  // The issue's read mark: a turn three-quarters on screen for a second reads the issue through
+  // its sequence. A write the server refuses re-reads the stored mark and dwells again while the
+  // turn stays on screen (`useDwell` re-arms on the rejection this rethrows).
+  const registerObserved = useDwell({
+    enabled: visible && observedTurnKey !== "",
+    onDwell: async (target) => {
+      const sequence = Number(target.getAttribute("data-event-seq"));
+      if (sequence <= lastRead.current) return;
+      lastRead.current = sequence;
+      try {
+        const next = await api.putIssueState(issueKey, { last_read_seq: sequence });
+        queryClient.setQueryData<UserState>(["user-state"], (current) => ({
+          ...current,
+          [issueKey]: next,
+        }));
+      } catch (error) {
+        const current = await queryClient.fetchQuery(userStateQuery()).catch(() => undefined);
+        lastRead.current = stateForIssue(current, issueKey).last_read_seq;
+        throw error;
       }
-      const timer = window.setTimeout(() => {
-        timers.current.delete(target);
-        if (!active || !visibleEvents.has(target) || sequence <= lastRead.current) {
-          return;
-        }
-        lastRead.current = sequence;
-        void api
-          .putIssueState(issueKey, { last_read_seq: sequence })
-          .then((next) => {
-            queryClient.setQueryData<UserState>(["user-state"], (current) => ({
-              ...current,
-              [issueKey]: next,
-            }));
-          })
-          .catch(async () => {
-            const current = await queryClient.fetchQuery(userStateQuery()).catch(() => undefined);
-            if (!active) {
-              return;
-            }
-            lastRead.current = stateForIssue(current, issueKey).last_read_seq;
-            scheduleRead(target, sequence);
-          });
-      }, 1_000);
-      timers.current.set(target, timer);
-    };
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          const sequence = observed.current.get(entry.target);
-          if (sequence === undefined) {
-            continue;
-          }
-          if (!entry.isIntersecting) {
-            visibleEvents.delete(entry.target);
-            const currentTimer = timers.current.get(entry.target);
-            if (currentTimer !== undefined) {
-              window.clearTimeout(currentTimer);
-              timers.current.delete(entry.target);
-            }
-            continue;
-          }
-          visibleEvents.add(entry.target);
-          scheduleRead(entry.target, sequence);
-        }
-      },
-      { threshold: 0.75 }
-    );
-    for (const [element] of observed.current) {
-      if (!element.isConnected) {
-        observed.current.delete(element);
-        continue;
-      }
-      observed.current.set(element, Number(element.getAttribute("data-event-seq")));
-      observer.observe(element);
-    }
-    return () => {
-      active = false;
-      observer.disconnect();
-      for (const timer of timers.current.values()) {
-        window.clearTimeout(timer);
-      }
-      timers.current.clear();
-    };
-  }, [issueKey, observedTurnKey, queryClient, visible]);
-
-  const registerObserved = useCallback((element: HTMLElement | null) => {
-    if (element !== null) {
-      observed.current.set(element, Number(element.dataset.eventSeq));
-    }
-  }, []);
+    },
+    resetKey: `${issueKey} ${observedTurnKey}`,
+    shouldDwell: (target) => Number(target.getAttribute("data-event-seq")) > lastRead.current,
+  });
 
   const applyOptimisticOperations = (operations: PinStateOperation[]) => {
     queryClient.setQueryData<UserState>(["user-state"], (current) => {
@@ -1489,7 +1464,7 @@ export function ConversationTab({
                       controls twice on one screen. The timeline is the record: it carries the
                       compact density, whose options answer in one click and whose note field
                       stays behind its own disclosure. */}
-                  <AskCard ask={item.ask} thread="collapsed" variant="compact" />
+                  <AskCard ask={item.ask} markRead thread="collapsed" variant="compact" />
                 </div>
                 <TurnPin disabled={hasFailedOps} onPin={onPin} pinned={pinned} />
               </li>

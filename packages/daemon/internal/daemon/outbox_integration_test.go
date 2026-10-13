@@ -275,6 +275,9 @@ func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
 	}
 	return fail
 }
+func (d *blockingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("blockingDispatch takes no hand-over")
+}
 func (d *blockingDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *blockingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
@@ -422,6 +425,9 @@ func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string)
 	d.status = status
 	return nil
 }
+func (d *refusingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("refusingDispatch takes no hand-over")
+}
 func (d *refusingDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
@@ -449,6 +455,9 @@ func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) er
 	}
 	d.status = status
 	return nil
+}
+func (d *boardDispatch) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("boardDispatch takes no hand-over")
 }
 func (d *boardDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {

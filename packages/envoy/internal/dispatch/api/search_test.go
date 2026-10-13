@@ -684,7 +684,7 @@ func TestSearchRefusesAProjectThatIsNotAKey(t *testing.T) {
 			Code  string `json:"code"`
 			Error string `json:"error"`
 		}](t, response)
-		if response.Code != http.StatusBadRequest || body.Code != "INVALID_PROJECT" || body.Error != "project must be a project key such as CORE" {
+		if response.Code != http.StatusBadRequest || body.Code != "INVALID_PROJECT" || body.Error != projectKeyProblem("project", strings.TrimSpace(project)) {
 			t.Fatalf("project %q: status=%d refusal=%+v, want 400 INVALID_PROJECT", project, response.Code, body)
 		}
 	}

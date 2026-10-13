@@ -68,7 +68,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Project = strings.TrimSpace(input.Project)
 	if !projectKeyPattern.MatchString(input.Project) {
-		writeError(w, "INVALID_REPO_PROJECT", http.StatusBadRequest, "project is required")
+		writeError(w, "INVALID_REPO_PROJECT", http.StatusBadRequest, projectKeyProblem("project", input.Project))
 		return
 	}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", input.Project).Scan(new(string)); err != nil {

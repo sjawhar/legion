@@ -1,9 +1,12 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -59,14 +62,24 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "projects may only be created by a user")
-		return
-	}
 	input.Key = strings.TrimSpace(input.Key)
 	input.Name = strings.TrimSpace(input.Name)
-	if !projectKeyPattern.MatchString(input.Key) || input.Name == "" {
-		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project key and name are required")
+	if !projectKeyPattern.MatchString(input.Key) {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, projectKeyProblem("key", input.Key))
+		return
+	}
+	if input.Name == "" {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project name is required")
+		return
+	}
+	// Any bearer writes a name into the project list every dashboard reads, and no route renames a
+	// project, so a name is capped as an issue title is and shows a reader what it says.
+	if length := len16(input.Name); length > contracts.ProjectNameMax {
+		capExceeded(w, "name", length, contracts.ProjectNameMax)
+		return
+	}
+	if problem := projectNameProblem(input.Name); problem != "" {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, problem)
 		return
 	}
 	tx, err := s.begin(r.Context())
@@ -97,4 +110,60 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(event)
 	WriteJSON(w, http.StatusCreated, project)
+}
+
+// projectNameProblem refuses a project name that would mislead its reader: one holding a control
+// character, one holding a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), the
+// controls a Trojan Source spoof reorders text with, and one with no visible character: no letter,
+// number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and
+// U+2800, and no code point Go's Unicode tables leave unassigned other than a noncharacter or a
+// reserved default-ignorable (visibleCharacter). Every other format character and combining mark
+// does visible work in real names and stays beside a visible one: the joiner inside an emoji, a
+// flag's tag characters, a direction mark (U+200E, U+200F, U+061C) in mixed-direction text, a soft
+// hyphen, an accent written as a combining mark. It answers "" for a name it takes.
+func projectNameProblem(name string) string {
+	visible := false
+	for _, character := range name {
+		switch {
+		case unicode.Is(unicode.Cc, character):
+			return fmt.Sprintf("name holds U+%04X, a control character", character)
+		case (character >= 0x202A && character <= 0x202E) || (character >= 0x2066 && character <= 0x2069):
+			return fmt.Sprintf("name holds U+%04X, a bidi control that reorders the text a reader sees", character)
+		case visibleCharacter(character):
+			visible = true
+		}
+	}
+	if !visible {
+		return "name has no visible character"
+	}
+	return ""
+}
+
+// blankGlyphs are characters Unicode files as letters or symbols that render as blank space: the
+// Hangul fillers (U+115F, U+1160, U+3164, U+FFA0, category Lo) and the Braille pattern blank
+// (U+2800, So). A name of only these looks empty wherever it is shown.
+var blankGlyphs = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true}
+
+// visibleCharacter reports whether the character is one a reader sees: a letter, number,
+// punctuation or symbol (Unicode L, N, P, S) other than the blank fillers, or a code point Go's
+// Unicode tables leave unassigned (Cn), since a newer Unicode may have made it a character the
+// reader's device draws (U+1FAE9 is Unicode 16; Go 1.26's tables are Unicode 15.0). Two kinds of
+// unassigned code point are not visible: a noncharacter (U+FDD0-U+FDEF and each code point ending
+// in FFFE or FFFF), which Unicode's stability policy guarantees is never assigned, and a reserved
+// default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF), the ranges Unicode sets aside for
+// characters that render as nothing; that reservation is Unicode's allocation practice, not a
+// stability guarantee. The two property tables hold exactly those unassigned code points. A code
+// point a future Unicode assigns outside them as whitespace or a format character counts as visible
+// here until Go's tables learn it. Combining marks, format characters, private-use characters (Co)
+// and whitespace are not visible. A surrogate (Cs) never reaches here: ranging over a Go string
+// yields U+FFFD for invalid UTF-8, which an encoded surrogate is, and JSON decoding writes a lone
+// surrogate escape as U+FFFD too.
+func visibleCharacter(character rune) bool {
+	switch {
+	case unicode.In(character, unicode.L, unicode.N, unicode.P, unicode.S):
+		return !blankGlyphs[character]
+	case unicode.Is(unicode.Cn, character):
+		return !unicode.In(character, unicode.Noncharacter_Code_Point, unicode.Other_Default_Ignorable_Code_Point)
+	}
+	return false
 }

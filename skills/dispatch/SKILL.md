@@ -157,6 +157,8 @@ Labels are optional: Dispatch trims them, preserves their case, and removes case
 the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 
+When the work needs a project that does not exist yet, create it yourself with `dispatch project --key <KEY> --name '<name>'`; nobody has to make it by hand. Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first with `dispatch projects`. A key that already exists is refused with `PROJECT_EXISTS`.
+
 ## Search first
 
 `skill://dispatch-first`, which every session with Dispatch carries, says how to search before
@@ -404,7 +406,9 @@ every version that records a decision is named with `dispatch doc-edit --summary
 
 Read the current document before changing it with `dispatch doc-read` (`--issue`, or `--project`
 and `--artifact`, an optional `--version`, or `--ref`).
-It prints live or versioned markdown with open marks. A live read ends with a document token; `--issue` with no
+It prints live or versioned markdown with open marks. A live read ends with a document token; `--blocks` lists the live
+document's block ids, tokens and table rows instead, which `dispatch doc-edit` takes to address a block that is not a typed
+block. `--issue` with no
 `--artifact` reads the issue specification; a project needs `--artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
 `dispatch artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.

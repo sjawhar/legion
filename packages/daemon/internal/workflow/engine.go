@@ -141,6 +141,9 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 	if issue == nil {
 		return e.recordChildUnderLiveTree(ctx, tx, fact)
 	}
+	if consumed, err := e.rejectStaleHandover(ctx, tx, *issue, fact); err != nil || consumed {
+		return intake.Result{}, err
+	}
 	// Admission, which runs after this handler, records every newer observation of a recorded
 	// issue (its title, rank, parent, and status) and owns a todo's re-admission. The engine reacts
 	// only to a newer status, and records the observation itself when it keeps its own status over it.
@@ -217,6 +220,41 @@ func (e *Engine) keepStatus(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	issue.Title, issue.Rank, issue.Parent, issue.LastDispatchSeq = fact.Title, fact.Rank, record.ParentOf(fact.Parent), fact.Seq
 	issue.HandedOver, issue.DispatchStatus = fact.HandedOver, fact.Status
 	return e.store.PutIssue(ctx, tx, issue)
+}
+
+// rejectStaleHandover consumes a daemon-authored todo that was written for a closed tree but
+// arrived after its root came back. The durable hand-over fence is checked in intake's serialized
+// transaction, not before the outbox PATCH: otherwise the reopen and this event could both act on
+// the child. Keep the child in its live tree, reassert its workflow status, and fence admission
+// from seeing this todo by recording the event sequence.
+func (e *Engine) rejectStaleHandover(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
+	if !fact.DaemonActor || !fact.HandedOver || fact.Status != "todo" {
+		return false, nil
+	}
+	handover, err := e.store.Handover(ctx, tx, issue.Key)
+	if err != nil || handover == nil {
+		return false, err
+	}
+	root, err := e.store.Issue(ctx, tx, handover.Tree)
+	if err != nil {
+		return false, err
+	}
+	if !handover.Cancelled && issue.Tree == handover.Tree && root != nil && root.LingersAt(handover.Generation) {
+		return false, nil
+	}
+	if err := e.store.DeleteHandover(ctx, tx, issue.Key); err != nil {
+		return false, err
+	}
+	if err := e.keepStatus(ctx, tx, issue, fact); err != nil {
+		return false, err
+	}
+	if issue.Status != fact.Status {
+		if err := e.enqueue(ctx, tx, issue.Key, record.StatusWrite{Status: issue.Status, ObservedStatus: fact.Status}); err != nil {
+			return false, err
+		}
+	}
+	e.logOnCommit(ctx, "workflow: rejected stale hand-over event", "issue", issue.Key, "tree", handover.Tree, "linger", handover.Generation)
+	return true, nil
 }
 
 // admittedRoot says whether issue is the root of a tree that runs: it holds an admission slot and

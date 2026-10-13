@@ -2,11 +2,12 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { ISSUE_TITLE_MAX } from "./dispatch-api";
+import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
+  PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
@@ -104,6 +105,8 @@ const validCalls = {
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
   dispatch_issues: { project: "ACME" },
+  dispatch_project: { key: "CORE", name: "Core" },
+  dispatch_projects: {},
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
@@ -163,6 +166,8 @@ describe("dispatchToolSpecs", () => {
       "dispatch_read",
       "dispatch_search",
       "dispatch_issues",
+      "dispatch_project",
+      "dispatch_projects",
       "dispatch_architecture_sync",
       "dispatch_open_asks",
       "dispatch_whoami",
@@ -265,9 +270,13 @@ describe("dispatchToolSpecs", () => {
     ]) {
       const refused = schema.safeParse({ query: "ok", project });
       expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
-        "project must be a project key such as CORE",
+        `project is not a project key: ${PROJECT_KEY_RULE}`,
       ]);
     }
+  });
+
+  test("dispatch_project's description gives the project-key rule", () => {
+    expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
@@ -346,6 +355,23 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_project takes a key and a name and nothing else", () => {
+    const schema = schemaFor("dispatch_project");
+
+    expect(schema.safeParse({ key: "CORE", name: "Core" }).success).toBe(true);
+    for (const args of [{ key: "CORE" }, { name: "Core" }, {}]) {
+      expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(false);
+    }
+    expect(schema.safeParse({ key: "CORE", name: "Core", force: true }).success).toBe(false);
+    expect(schema.safeParse({ key: "CORE", name: "n".repeat(PROJECT_NAME_MAX) }).success).toBe(
+      true
+    );
+    const over = schema.safeParse({ key: "CORE", name: "n".repeat(PROJECT_NAME_MAX + 1) });
+    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+      `is 1 characters over the ${PROJECT_NAME_MAX}-character limit (${PROJECT_NAME_MAX + 1}/${PROJECT_NAME_MAX})`,
+    ]);
   });
 
   test("dispatch_issue accepts an assignee login", () => {

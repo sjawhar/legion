@@ -158,6 +158,8 @@ export type {
   MessageRead,
   MyAnswerRow,
   MyAnswersResponse,
+  MyRepliesResponse,
+  MyReplyRow,
   OpenAskOwner,
   ProgressCount,
   Project,

@@ -171,6 +171,12 @@
     },
     {
       "pattern": "api-key-header",
+      "name": "a Datadog application key in its dd-application-key header",
+      "detail": "datadog: 403 with dd-application-key: EXAMPLE-not-a-real-application-key-0000 rejected",
+      "want": "datadog: 403 with dd-application-key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
       "name": "an X-Subscription-Token header",
       "detail": "X-Subscription-Token: braveSecret123 rejected",
       "want": "X-Subscription-Token: *** rejected"
@@ -294,6 +300,24 @@
       "name": "a Dispatch agent token (dsp_)",
       "detail": "dispatch: token dsp_EXAMPLEtoken0123456789abcdefghijklmnopqrstu revoked",
       "want": "dispatch: token dsp_*** revoked"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a Datadog Service Access Token (ddsat_)",
+      "detail": "dispatch: 401 for ddsat_EXAMPLE-not-a-real-token-00000000 revoked",
+      "want": "dispatch: 401 for ddsat_*** revoked"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a Datadog Personal Access Token (ddpat_)",
+      "detail": "datadog: 401 for ddpat_EXAMPLE_not-a-real-token-0000000 expired",
+      "want": "datadog: 401 for ddpat_*** expired"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a Datadog application key (ddapp_)",
+      "detail": "datadog: 403 for ddapp_EXAMPLE_not-a-real-app-key-000000 revoked",
+      "want": "datadog: 403 for ddapp_*** revoked"
     },
     {
       "pattern": "prefixed-token",

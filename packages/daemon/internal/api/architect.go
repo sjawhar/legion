@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -249,13 +250,13 @@ func (s *server) documentOfIssue(w http.ResponseWriter, r *http.Request, artifac
 // membership over its mirrored issue graph. An issue already in the workflow is refused, since
 // writing todo would move an in-progress child back.
 //
-// A child already todo is neither: todo is what this call writes, so it is one an earlier attempt
-// of this same wave released before Dispatch failed it part way through. It is accepted and needs
-// no write, which is what makes the architect's retry of the whole wave finish it.
-func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string, read issueReader) (write bool, ok bool) {
+// A child already todo is neither: todo is what this call writes, so it needs no write. It is
+// accepted, which is what makes the architect's retry of a wave Dispatch failed part way through
+// finish it, and waveRelease records it if nothing has (enterTodoChild).
+func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, key string, read issueReader) (child dispatch.Issue, write bool, ok bool) {
 	child, found := read(w, r, key)
 	if !found {
-		return false, false
+		return dispatch.Issue{}, false, false
 	}
 	write = true
 	switch child.Status {
@@ -264,22 +265,144 @@ func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, k
 		write = false
 	default:
 		writeFailure(w, http.StatusConflict, "ISSUE_ALREADY_RELEASED", fmt.Sprintf("%s is %s; release_children releases only a triage, backlog, or icebox child", key, child.Status))
-		return false, false
+		return dispatch.Issue{}, false, false
 	}
 	seen := map[string]bool{key: true}
 	for parent := child.Parent; parent != nil && !seen[*parent]; {
 		if *parent == tree {
-			return write, true
+			return child, write, true
 		}
 		seen[*parent] = true
 		ancestor, found := read(w, r, *parent)
 		if !found {
-			return false, false
+			return dispatch.Issue{}, false, false
 		}
 		parent = ancestor.Parent
 	}
 	writeFailure(w, http.StatusForbidden, "ISSUE_OUTSIDE_TREE", fmt.Sprintf("%s is outside the architect tree %s", key, tree))
-	return false, false
+	return dispatch.Issue{}, false, false
+}
+
+// enterTodoChild records a released child Dispatch already shows todo that the daemon has no
+// record of. The workflow records a child from an observation of it in todo while its tree is live
+// (workflow's recordChildUnderLiveTree), and a child set todo before its tree was live, by a person
+// or another session, has none: the release writes it nothing, and Dispatch would make no event for
+// a status the issue already has. So the release applies Dispatch's view of the child, as just read,
+// as that observation, at the child's own Dispatch sequence: the child takes the path its todo event
+// would, recorded under the live tree and started once its gate is open, and a live event of it
+// from before the read stops at the sequence fence. A child already recorded, which the earlier
+// attempt of a wave this call retries released, has had that observation.
+//
+// The workflow records a child only under a recorded parent, and a parent this same wave released
+// is recorded only once its own todo event arrives. A child the observation did not record is
+// answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
+// retry applies the observation again once the parent is recorded, and the engine's and admission's
+// sequence fences make an observation the record already holds change nothing.
+const (
+	maxChildReleaseAttempts = 3
+	childReleaseBackoff     = time.Second
+)
+
+// enterTodoChild records a released child Dispatch already shows todo that the daemon has no
+// record of. The workflow records a child from an observation of it in todo while its tree is live
+// (workflow's recordChildUnderLiveTree), and a child set todo before its tree was live, by a person
+// or another session, has none: the release writes it nothing, and Dispatch would make no event for
+// a status the issue already has. So the release applies Dispatch's view of the child, as just read,
+// as that observation, at the child's own Dispatch sequence.
+//
+// A child whose parent this wave released may reach here before that parent's todo event reaches
+// intake. Its durable retry record bounds attempts with exponential backoff; after the limit, it
+// queues one notice to the tree architect instead of asking an architect to retry forever.
+func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, tree string, child dispatch.Issue) bool {
+	recorded, err := s.recordedIssue(r.Context(), child.Key)
+	if err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", child.Key))
+		return false
+	}
+	if recorded != nil {
+		return s.clearChildReleaseRetry(w, r, child.Key)
+	}
+	parent := ""
+	if child.Parent != nil {
+		parent = *child.Parent
+	}
+	observed := intake.DispatchIssue{
+		Key: child.Key, Seq: child.LastSeq, Status: child.Status, Title: child.Title, Parent: parent, Rank: child.Rank, HandedOver: child.HandedOver,
+	}
+	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("waves/release"), observed, s.handlers...); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("could not record %s", child.Key))
+		return false
+	}
+	if recorded, err = s.recordedIssue(r.Context(), child.Key); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", child.Key))
+		return false
+	}
+	if recorded != nil {
+		return s.clearChildReleaseRetry(w, r, child.Key)
+	}
+	return s.scheduleChildReleaseRetry(w, r, tree, child, parent)
+}
+
+func (s *server) clearChildReleaseRetry(w http.ResponseWriter, r *http.Request, issue string) bool {
+	if err := pgx.BeginFunc(r.Context(), s.pool, func(tx pgx.Tx) error {
+		return s.records.DeleteReleaseRetry(r.Context(), tx, issue)
+	}); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not clear the release retry of %s", issue))
+		return false
+	}
+	return true
+}
+
+func (s *server) scheduleChildReleaseRetry(w http.ResponseWriter, r *http.Request, tree string, child dispatch.Issue, parent string) bool {
+	now := time.Now().UTC()
+	var retry record.ReleaseRetry
+	var exhausted, backoff bool
+	if err := pgx.BeginFunc(r.Context(), s.pool, func(tx pgx.Tx) error {
+		current, err := s.records.ReleaseRetry(r.Context(), tx, child.Key)
+		if err != nil {
+			return err
+		}
+		switch {
+		case current != nil && current.Sequence == child.LastSeq && current.Exhausted:
+			retry, exhausted = *current, true
+			return nil
+		case current != nil && current.Sequence == child.LastSeq && now.Before(current.NextAt):
+			retry, backoff = *current, true
+			return nil
+		case current != nil && current.Sequence == child.LastSeq:
+			retry = *current
+			retry.Attempts++
+		default:
+			retry = record.ReleaseRetry{Issue: child.Key, Sequence: child.LastSeq, Attempts: 1}
+		}
+		retry.NextAt = now.Add(childReleaseBackoff << (retry.Attempts - 1))
+		retry.Exhausted = retry.Attempts >= maxChildReleaseAttempts
+		if retry.Exhausted {
+			row, err := record.NewOutboxRow(tree, record.Notice{Kind: "child-release-stalled", Role: claim.RoleArchitect,
+				Reason: fmt.Sprintf("%s is todo but its parent %s has not reached the daemon after %d releases; inspect the tree before trying again", child.Key, parent, retry.Attempts)}, now)
+			if err != nil {
+				return err
+			}
+			if err := s.records.Enqueue(r.Context(), tx, row); err != nil {
+				return err
+			}
+			exhausted = true
+		}
+		return s.records.PutReleaseRetry(r.Context(), tx, retry)
+	}); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RETRY_UNAVAILABLE", fmt.Sprintf("could not record the release retry of %s", child.Key))
+		return false
+	}
+	if exhausted {
+		writeFailure(w, http.StatusConflict, "CHILD_RELEASE_STALLED", fmt.Sprintf("%s is todo but its parent %s has not reached the daemon after %d attempts; the tree architect was notified", child.Key, parent, retry.Attempts))
+		return false
+	}
+	if backoff {
+		writeFailure(w, http.StatusConflict, "CHILD_RELEASE_BACKOFF", fmt.Sprintf("%s is waiting for %s's release; retry after %s", child.Key, parent, time.Until(retry.NextAt).Round(time.Millisecond)))
+		return false
+	}
+	writeFailure(w, http.StatusConflict, "CHILD_NOT_RECORDED", fmt.Sprintf("%s is todo but not recorded: the daemon records a child only under a recorded parent (%s) of a live tree; retry after %s", child.Key, parent, childReleaseBackoff<<(retry.Attempts-1)))
+	return false
 }
 
 // issueReader reads one issue for a request, answering its own failures.
@@ -336,17 +459,20 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	// per child: the reads are cached for the life of this request.
 	read := s.cachedIssueReader()
 	unreleased := make([]string, 0, len(req.Issues))
+	var todo []dispatch.Issue
 	for _, issue := range req.Issues {
 		if !claim.IsIssueKey(issue) {
 			writeFailure(w, http.StatusBadRequest, "INVALID_ISSUE", "issues must contain issue keys")
 			return
 		}
-		write, ok := s.releasableChild(w, r, grant.Tree, issue, read)
+		child, write, ok := s.releasableChild(w, r, grant.Tree, issue, read)
 		if !ok {
 			return
 		}
 		if write {
 			unreleased = append(unreleased, issue)
+		} else {
+			todo = append(todo, child)
 		}
 	}
 	for _, issue := range unreleased {
@@ -357,6 +483,11 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", "Dispatch status update failed")
+			return
+		}
+	}
+	for _, child := range todo {
+		if !s.enterTodoChild(w, r, grant.Tree, child) {
 			return
 		}
 	}

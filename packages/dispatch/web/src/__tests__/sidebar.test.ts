@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { createElement } from "react";
 import { MemoryRouter } from "react-router-dom";
 
@@ -216,6 +216,41 @@ test("sidebar never requests the full issue list", async () => {
     sidebar.listProjects.mockRestore();
   }
 });
+
+for (const [unread, name] of [
+  [2, "Replies 2"],
+  [0, "Replies"],
+] as const) {
+  test(`sidebar lists the Replies row with ${unread === 0 ? "no badge" : "its count"} at ${unread}`, async () => {
+    const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+    const listMyReplies = spyOn(api, "listMyReplies").mockResolvedValue({
+      limit: 1,
+      offset: 0,
+      rows: [],
+      total: unread,
+    });
+    const sidebar = renderSidebar("/replies");
+
+    try {
+      const row = await screen.findByRole("link", { name });
+      expect(row.getAttribute("href")).toBe("/replies");
+      expect(row.getAttribute("aria-current")).toBe("page");
+      await waitFor(() => expect(listMyReplies).toHaveBeenCalledWith({ limit: 1 }));
+      expect(screen.getByRole("link", { name }).textContent).toBe(
+        unread === 0 ? "Replies" : `Replies${unread}`
+      );
+    } finally {
+      sidebar.view.unmount();
+      sidebar.getCredentialPending.mockRestore();
+      sidebar.getInbox.mockRestore();
+      sidebar.getIssue.mockRestore();
+      sidebar.listIssues.mockRestore();
+      sidebar.listProjects.mockRestore();
+      whoAmI.mockRestore();
+      listMyReplies.mockRestore();
+    }
+  });
+}
 
 test("sidebar keeps its hide control available while navigation loads", () => {
   const getInbox = spyOn(api, "getInbox").mockImplementation(() => new Promise<never>(() => {}));

@@ -21,6 +21,7 @@ import type {
   CreateCommentInput,
   CreateIssueInput,
   CreateMessageInput,
+  CreateProjectInput,
   CreateVersionInput,
   DispatchServiceErrorShape,
   EditArtifactInput,
@@ -41,6 +42,7 @@ import type {
   MessageReplyInput,
   MessageReplyResult,
   OpenAsksResponse,
+  Project,
   ResolveAskInput,
   SearchResponse,
   UpdateIssueInput,
@@ -479,6 +481,17 @@ export class DispatchClient {
 
   async whoami(): Promise<WhoamiResponse> {
     return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+
+  /** `POST /api/v1/projects`: create a project. A key that already exists is 409
+   *  PROJECT_EXISTS, and a key that is not a project key or an empty name 400 INVALID_PROJECT. */
+  async createProject(input: CreateProjectInput): Promise<Project> {
+    return this.#json("POST", ["api", "v1", "projects"], input);
+  }
+
+  /** `GET /api/v1/projects`: every project, ordered by key. */
+  async listProjects(): Promise<Project[]> {
+    return this.#json("GET", ["api", "v1", "projects"]);
   }
 
   /** `POST /api/v1/projects/{key}/architecture-source/sync`: import the

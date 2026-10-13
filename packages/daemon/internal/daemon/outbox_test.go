@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -71,6 +73,8 @@ func TestOutboxFinishesMessageAlreadyPostedBeforeCrash(t *testing.T) {
 type outboxDispatch struct {
 	issue          dispatch.Issue
 	statuses       []string
+	handOvers      []string
+	handOverHook   func() error
 	bodies         []string
 	messages       []string
 	getErr         error
@@ -89,6 +93,13 @@ func (d *outboxDispatch) GetIssue(context.Context, string) (dispatch.Issue, erro
 }
 func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) error {
 	d.statuses = append(d.statuses, status)
+	return d.statusErr
+}
+func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
+	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
+	if d.handOverHook != nil {
+		return d.handOverHook()
+	}
 	return d.statusErr
 }
 func (d *outboxDispatch) PostMessage(_ context.Context, _ string, body string) error {
@@ -116,6 +127,385 @@ func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 	client.getErr = errors.New("Dispatch unavailable")
 	if err := (&outbox{dispatch: client}).execute(context.Background(), row); err == nil || !strings.Contains(err.Error(), "Dispatch unavailable") {
 		t.Fatalf("status write failure = %v, want Dispatch read failure", err)
+	}
+}
+
+// A hand-over writes its status and the legion label together, in one Dispatch write that keeps
+// the labels the issue carries, and still writes the label where Dispatch already shows the status.
+// An issue that already carries the label takes the plain status write, and one a person moved
+// since the write was queued takes none. The write is fenced on the linger that ended: a root a
+// person set todo again before it runs, re-admitted at its next generation, keeps its child, and so
+// does a child no longer that tree's — neither is written.
+func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	until := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	parent := root
+	lingering := record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}
+	reopened := lingering
+	reopened.Generation, reopened.LingerUntil, reopened.Phase, reopened.Status = 4, nil, phase.Admitted, "in_progress"
+	member := record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	orphaned := member
+	orphaned.Tree = child
+	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now())
+	for _, tc := range []struct {
+		name                string
+		root, child         record.Issue
+		shown               dispatch.Issue
+		statuses, handOvers []string
+	}{
+		{name: "unlabelled, mid-run", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress", Labels: []string{"repo:x"}},
+			handOvers: []string{"LEGION-208 todo [repo:x]"}},
+		{name: "unlabelled, already todo", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "todo"},
+			handOvers: []string{"LEGION-208 todo []"}},
+		{name: "labelled, mid-run", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress", Labels: []string{"Legion"}, HandedOver: true},
+			handOvers: []string{"LEGION-208 todo [Legion]"}},
+		{name: "labelled, already todo", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "todo", Labels: []string{"legion"}, HandedOver: true}},
+		{name: "moved by a person", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "backlog"}},
+		{name: "root reopened since", root: reopened, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress"}},
+		{name: "child no longer the tree's", root: lingering, child: orphaned, shown: dispatch.Issue{Key: child, Status: "in_progress"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				if err := records.PutIssue(context.Background(), tx, tc.root); err != nil {
+					return err
+				}
+				if err := records.PutIssue(context.Background(), tx, tc.child); err != nil {
+					return err
+				}
+				return records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 3})
+			}); err != nil {
+				t.Fatalf("seed the tree: %v", err)
+			}
+			client := &outboxDispatch{issue: tc.shown}
+			if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), row); err != nil {
+				t.Fatalf("execute the hand-over: %v", err)
+			}
+			if !slices.Equal(client.statuses, tc.statuses) || !slices.Equal(client.handOvers, tc.handOvers) {
+				t.Fatalf("status writes %v and hand-overs %v, want %v and %v", client.statuses, client.handOvers, tc.statuses, tc.handOvers)
+			}
+		})
+	}
+}
+
+// The outbox can verify a hand-over fence, then lose the root to a reopen before its PATCH reaches
+// Dispatch. The daemon event from that late PATCH is still fenced in intake: re-admission cancels
+// the persistent hand-over, so the child stays in the reopened root's tree rather than restarting
+// there or becoming an orphan.
+func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(time.Hour)
+	parent := root
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed hand-over: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	reopen := func() error {
+		_, err := intake.ApplyFact(context.Background(), pool, "dispatch", "root-reopened", intake.DispatchIssue{
+			Key: root, Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "A", HandedOver: true,
+		}, engine, admission)
+		return err
+	}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: reopen}
+	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), row); err != nil {
+		t.Fatalf("write the hand-over: %v", err)
+	}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "late-handover", intake.DispatchIssue{
+		Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true,
+	}, engine, admission); err != nil {
+		t.Fatalf("consume the late hand-over: %v", err)
+	}
+	var got *record.Issue
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = records.Issue(context.Background(), tx, child)
+		return err
+	}); err != nil {
+		t.Fatalf("read child: %v", err)
+	}
+	if got.Tree != root || got.Phase != phase.Planning || got.Generation != 1 || got.Status != "in_progress" {
+		t.Fatalf("child after reopen race = %#v, want its live root's planning run", got)
+	}
+}
+
+// The old tree's queued closes name the generation a child had before its hand-over. Carrying the
+// child into a new root generation makes those rows finish at the generation fence before checking
+// their old tree name, so they never retry forever on a tree mismatch.
+func TestAnOldTreeCloseOfAHandedOverChildFinishesAtTheGenerationFence(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "child", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: "LEGION-207", Role: claim.RoleImplementer, Generation: 1, Linger: 1}, time.Now())
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	if err := (&outbox{pool: pool, records: records, supervisor: sup, log: quietLogger()}).execute(context.Background(), row); err != nil {
+		t.Fatalf("old tree close = %v, want its older generation to finish without checking the old tree", err)
+	}
+}
+
+// When Dispatch already shows both todo and legion, PATCH would make no event. The status executor
+// consumes the durable fence through an intake.Handover fact instead; the child still becomes its
+// own carried-state root and the row finishes.
+func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(time.Hour)
+	parent := root
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed hand-over: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "todo", HandedOver: true, Labels: []string{"legion"}}}
+	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
+		t.Fatalf("consume already-todo hand-over: %v", err)
+	}
+	var got *record.Issue
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = records.Issue(context.Background(), tx, child)
+		return err
+	}); err != nil {
+		t.Fatalf("read child: %v", err)
+	}
+	if got.Tree != child || got.Generation != 2 || got.Phase != phase.Planning || got.Status != "in_progress" {
+		t.Fatalf("already-todo hand-over child = %#v, want its own carried planning root", got)
+	}
+}
+
+// A hand-over write Dispatch takes is consumed by the outbox at once, with the same intake.Handover
+// fact the already-todo path applies, rather than only by the event the write makes. That event can
+// be lost to a restart: a boot read records the sequence before the live event arrives, and the
+// event then stops at the sequence fence. This holds for both writes a hand-over can make: the PATCH
+// that adds the label to an unlabelled child, and the status write alone for a child a person
+// already labelled, each on the issue's sequence. The fact is idempotent, so the event, when it does
+// come, changes nothing more.
+func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		shown               dispatch.Issue
+		handOvers, statuses int
+	}{
+		{name: "unlabelled: the hand-over PATCH", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", LastSeq: 4}, handOvers: 1},
+		{name: "already labelled: the hand-over's status write", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", Labels: []string{"legion"}, HandedOver: true, LastSeq: 4}, handOvers: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const root, child = "LEGION-207", "LEGION-208"
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			until := time.Now().Add(time.Hour)
+			parent := root
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				} {
+					if put != nil {
+						return put
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("seed hand-over: %v", err)
+			}
+			engine := workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())
+			admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+			client := &outboxDispatch{issue: tc.shown}
+			row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
+				t.Fatalf("write the hand-over: %v", err)
+			}
+			if len(client.handOvers) != tc.handOvers || len(client.statuses) != tc.statuses {
+				t.Fatalf("hand-over PATCHes %v and status writes %v, want %d and %d", client.handOvers, client.statuses, tc.handOvers, tc.statuses)
+			}
+			read := func() *record.Issue {
+				t.Helper()
+				var got *record.Issue
+				if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+					var err error
+					got, err = records.Issue(context.Background(), tx, child)
+					return err
+				}); err != nil {
+					t.Fatalf("read child: %v", err)
+				}
+				return got
+			}
+			if got := read(); got.Tree != child || got.Generation != 2 || got.Phase != phase.Planning || got.Status != "in_progress" {
+				t.Fatalf("child after its hand-over write = %#v, want its own carried planning root without waiting for the event", got)
+			}
+			// The write's own event, arriving afterward, changes nothing more.
+			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "handover-event", intake.DispatchIssue{
+				Key: child, Seq: 5, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true,
+			}, engine, admission); err != nil {
+				t.Fatalf("apply the hand-over's event: %v", err)
+			}
+			if got := read(); got.Tree != child || got.Generation != 2 || got.Phase != phase.Planning || got.Status != "in_progress" {
+				t.Fatalf("child after the hand-over's event = %#v, want it unchanged", got)
+			}
+		})
+	}
+}
+
+// A person's status move after the executor read the issue is caught by Dispatch's expected
+// sequence under its row lock, on either hand-over write: the PATCH that adds the label, and the
+// status write for a child a person already labelled. The outbox keeps the row for that transient
+// conflict, then observes the person's status and drops the hand-over fence without overwriting it.
+func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		labels []string
+	}{
+		{name: "unlabelled: the hand-over PATCH"},
+		{name: "already labelled: the hand-over's status write", labels: []string{"legion"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const root, child = "LEGION-207", "LEGION-208"
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			now := time.Now()
+			until := now.Add(time.Hour)
+			parent := root
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "B"}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				} {
+					if put != nil {
+						return put
+					}
+				}
+				row, err := record.NewOutboxRow(child, record.StatusWrite{ObservedStatus: "testing", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, now)
+				if err != nil {
+					return err
+				}
+				return records.Enqueue(context.Background(), tx, row)
+			}); err != nil {
+				t.Fatalf("seed hand-over: %v", err)
+			}
+			client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "testing", Labels: tc.labels, HandedOver: tc.labels != nil, LastSeq: 7}}
+			client.handOverHook = func() error {
+				client.issue.Status, client.issue.LastSeq = "backlog", 8
+				return &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CHANGED", Message: "issue changed"}
+			}
+			runner := &outbox{pool: pool, records: records, dispatchProject: "LEGION", dispatch: client, now: func() time.Time { return now }, log: quietLogger()}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("the sequence conflict is retried, not a tick failure: %v", err)
+			}
+			if rows := outboxRows(t, pool); rows != 1 {
+				t.Fatalf("rows after the sequence conflict = %d, want the hand-over retained", rows)
+			}
+			client.handOverHook = nil
+			runner.now = func() time.Time { return now.Add(time.Minute) }
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("observe the person's move: %v", err)
+			}
+			if rows := outboxRows(t, pool); rows != 0 {
+				t.Fatalf("rows after the person's move = %d, want the hand-over finished", rows)
+			}
+			if len(client.handOvers) != 1 || len(client.statuses) != 0 {
+				t.Fatalf("hand-over writes %v and unconditional status writes %v, want the one conditional attempt alone", client.handOvers, client.statuses)
+			}
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				handover, err := records.Handover(context.Background(), tx, child)
+				if err != nil || handover != nil {
+					t.Fatalf("hand-over fence after the person move = %#v, %v, want none", handover, err)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+// A hand-over row only ever removes its own fence. A row from an earlier linger (a root that came
+// back, then closed and lingered out again) still in the outbox meets the newer linger's fence on
+// the same child. Whether Dispatch shows a person's move, or the newer fence is itself cancelled
+// (its own row's to clear), the stale row finishes without deleting the newer fence.
+func TestAStaleHandOverRowLeavesANewerLingersFence(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	for _, tc := range []struct {
+		name      string
+		shown     dispatch.Issue
+		cancelled bool
+	}{
+		{name: "a person moved the child", shown: dispatch.Issue{Key: child, Status: "backlog"}},
+		{name: "the newer fence is cancelled", shown: dispatch.Issue{Key: child, Status: "in_progress"}, cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			until := time.Now().Add(time.Hour)
+			parent := root
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 2}),
+					func() error {
+						if !tc.cancelled {
+							return nil
+						}
+						return records.CancelTreeHandovers(context.Background(), tx, root, 2)
+					}(),
+				} {
+					if put != nil {
+						return put
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("seed the newer linger's fence: %v", err)
+			}
+			client := &outboxDispatch{issue: tc.shown}
+			stale := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), stale); err != nil {
+				t.Fatalf("execute the stale hand-over row: %v", err)
+			}
+			if len(client.handOvers) != 0 || len(client.statuses) != 0 {
+				t.Fatalf("stale row wrote hand-overs %v and statuses %v, want none", client.handOvers, client.statuses)
+			}
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				fence, err := records.Handover(context.Background(), tx, child)
+				if err != nil || fence == nil || fence.Generation != 2 || fence.Cancelled != tc.cancelled {
+					t.Fatalf("newer linger's fence after the stale row = %#v, %v; want it left at generation 2 (cancelled %t)", fence, err, tc.cancelled)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
