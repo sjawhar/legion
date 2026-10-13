@@ -6,8 +6,8 @@ import { join } from "node:path";
 // ensure_project and write_dispatch_header (lib/workflow.sh) against a fake curl on PATH: it logs
 // every invocation, writes FAKE_CURL_BODY to whatever file follows -o, prints FAKE_CURL_STATUS to
 // stdout (curl's own -w '%{http_code}' convention, since -o diverts the body), and on a nonzero
-// FAKE_CURL_EXIT prints FAKE_CURL_ERROR to stderr instead and writes nothing, as a real connection
-// failure would (no response, so no status to interpolate).
+// FAKE_CURL_EXIT prints FAKE_CURL_ERROR to stderr and 000 to stdout and writes nothing, as real curl
+// does when the connection fails (no response, so -w writes the status as 000).
 const lib = join(import.meta.dir, "workflow.sh");
 const dir = mkdtempSync(join(tmpdir(), "ensure-project-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -20,6 +20,7 @@ for ((i = 0; i < \${#args[@]}; i++)); do [ "\${args[i]}" = -o ] && out=\${args[i
 printf 'curl %s\\n' "$*" >>"$FAKE_CURL_LOG"
 if [ "\${FAKE_CURL_EXIT:-0}" != 0 ]; then
   printf '%s\\n' "\${FAKE_CURL_ERROR:-curl: (7) Failed to connect}" >&2
+  printf '000'
   exit "$FAKE_CURL_EXIT"
 fi
 [ -z "$out" ] || printf '%s' "$FAKE_CURL_BODY" >"$out"
@@ -82,6 +83,7 @@ function run(
     status: result.exitCode,
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
+    work,
     calls: readFileSync(log, "utf8").split("\n").filter(Boolean),
     bearer: (() => {
       try {
@@ -114,6 +116,9 @@ describe("ensure_project", () => {
     expect(r.calls).toHaveLength(1);
     expect(r.calls[0]).toContain("-X POST");
     expect(r.calls[0]).toContain("/api/v1/projects");
+    // The bearer goes by the header file write_dispatch_header wrote, never in argv.
+    expect(r.calls[0]).toContain(`-H @${r.work}/dispatch-human-header `);
+    expect(r.bearer).toBe("Authorization: Bearer stage4b-fake-bearer\n");
     expect(r.calls[0]).toContain(
       `{"key":"LPROOF2","name":"LPROOF2","actor":{"kind":"session","id":"${proofActor}"}}`
     );
@@ -173,13 +178,16 @@ describe("ensure_project", () => {
     expect(r.stderr).toContain('{"error":"internal error"}');
   });
 
-  test("a connection failure fails loudly as unreachable, never as a refusal", () => {
+  // Real curl prints 000 on stdout when the connection fails; the FAIL line carries curl's error
+  // alone, on one line.
+  test("a connection failure fails loudly as unreachable, in one line, never as a refusal", () => {
     const r = run("write_dispatch_header\nensure_project", {
       exit: 7,
       error: "curl: (7) Failed to connect to dispatch.example port 443",
     });
     expect(r.status).toBe(1);
-    expect(r.stderr).toContain("could not be reached");
-    expect(r.stderr).toContain("Failed to connect");
+    expect(r.stderr.trimEnd().split("\n")).toEqual([
+      "CHECK prerequisites: FAIL: Dispatch could not be reached to create LPROOF2: curl: (7) Failed to connect to dispatch.example port 443",
+    ]);
   });
 });

@@ -1741,12 +1741,16 @@ Stage 3 sources it after [`lib/rig.sh`](#librigsh).
 . "$root/scripts/e2e/lib/workflow.sh"     # sourced, never run
 ```
 
-The caller sets `work` (holding `dispatch-token`, `legion.yaml` and `operator-token`),
+The caller sets `work` (holding `legion`, `legion.yaml`, `dispatch-auth-header` and
+`dispatch-human-header`, the last two written by the caller or by `write_dispatch_header`),
 `evidence`, `project` (the Dispatch project; the daemon writes as `legion-daemon:<project>`),
-`repo`, `port_dispatch`, `port_daemon`, `pg_container` (the daemon's Postgres), and, once they
-exist, `pr_number` and `smoke_file` (the one product file the pull request's first implementation
-changed). It defines `note`, `pass` and `fail`, and the runtime seam, the only reads that depend on
-where an agent runs:
+`repo`, `dispatch_base`, `dispatch_actor` (the session every proof-human write names as its actor,
+or empty), `dispatch_token_file` (the file holding the agents' Dispatch bearer, which
+`write_dispatch_header` reads: Stage 4b's `LEGION_E2E_DISPATCH_TOKEN_FILE`), `pg_container` (the
+daemon's Postgres), and, once they exist, `pr_number` and `smoke_file` (the one product file the
+pull request's first implementation changed). It defines `note`, `pass` and `fail`, `scrub` (the
+filter that hides the run's private hosts in what it prints, which only a caller of
+`ensure_project` needs), and the runtime seam, the only reads that depend on where an agent runs:
 
 | seam | the caller's definition |
 | :--- | :--- |
@@ -1758,6 +1762,13 @@ where an agent runs:
 label `legion`, which hands it to the Go daemon (the daemon admits no root without it), and `SPEC`
 as its primary document, `smoke_spec` when `SPEC` is omitted. A child carries neither, since it runs
 under its root's tree.
+
+`write_dispatch_header` writes the two header files from `dispatch_token_file`; Stage 4b's
+`prerequisites` calls it first, before the lock, and `read_bearers` calls it again for the run
+proper. `ensure_project` creates `project` as a proof-human write, naming `dispatch_actor`: 201 and
+409 `PROJECT_EXISTS` both leave it ready, any other status fails the check naming the status and
+the body, and a failed connection fails it in one line naming curl's error.
+`lib/ensure-project.test.ts` drives both against a fake `curl`.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox
