@@ -52,20 +52,26 @@ export async function userConfigChain(
       stdout: "pipe",
       stderr: "pipe",
     });
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The group exited before cleanup reached it.
+      }
+    };
+    // Every descendant belongs to this call's group. Kill it as soon as the leader exits, before
+    // either its output can answer successfully or a non-zero exit can answer unsuccessfully.
+    const exited = child.exited.finally(killGroup);
     // Include both streams in the deadline: a wrapper can fork a helper that inherits them after
     // its leader exits, and attribution must never wait for that helper.
     const completed = Promise.all([
-      child.exited,
+      exited,
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
     ]);
     const stdout = await new Promise<string | undefined>((resolve) => {
       const timer = setTimeout(() => {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          // The group exited between the deadline and the signal.
-        }
+        killGroup();
         resolve(undefined);
       }, timeoutMs);
       void completed.then(

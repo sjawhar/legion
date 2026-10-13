@@ -183,6 +183,26 @@ describe("userConfigChain", () => {
     }
   });
 
+  it("kills a wrapper's detached child after jj returns a config path", async () => {
+    const pidFile = path.join(await mkdtemp(path.join(tmpdir(), "jj-attribution-child-")), "pid");
+    dirs.push(path.dirname(pidFile));
+    const env = await withJj(
+      `sleep 30 </dev/null >/dev/null 2>&1 & echo $! > ${JSON.stringify(pidFile)}; printf '/u/a.toml\\n'`
+    );
+    const paths = await userConfigChain(200, env);
+    const pid = await pidFrom(pidFile);
+    try {
+      expect(paths).toBe("/u/a.toml");
+      expect(await stops(pid)).toBe(true);
+    } finally {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {
+        // The expected path: the process group killed it first.
+      }
+    }
+  });
+
   it("bounds jj at 10 s, inside the 30 s Oh My Pi gives the session_start handler", () => {
     expect(JJ_CONFIG_PATH_TIMEOUT_MS).toBe(10_000);
     expect(JJ_CONFIG_PATH_TIMEOUT_MS).toBeLessThan(30_000);
