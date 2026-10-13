@@ -13,6 +13,7 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
+  type SessionConfigFile,
   sessionConfigFile,
   sessionDispatchSettings,
   sessionSettings,
@@ -143,6 +144,11 @@ export interface ChannelSessionOptions {
     "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
   >
   readonly heartbeatMs: number
+  /**
+   * The session's envoy.json (`sessionConfigFile`): a rejected Dispatch frame is answered with the
+   * Dispatch URL and token read from it at that moment.
+   */
+  readonly configFile: SessionConfigFile
   /** How long a handoff waits for NATS to confirm the new direct subject before it retries. */
   readonly handoffFlushTimeoutMs?: number
   /** `${CLAUDE_PLUGIN_DATA}`: role state per session id and the per-process handoff files. */
@@ -188,11 +194,6 @@ function projectDirectory(): string {
   )
 }
 
-// The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
-// set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
-// use, so a file that moved its server takes effect without a restart.
-const CONFIG_FILE = sessionConfigFile("claude", process.env)
-
 export function channelToolDefinitions() {
   return envoyToolSpecs.map((spec) => ({
     name: spec.name,
@@ -226,10 +227,11 @@ export function sanitizeChannelMetadata(
  */
 async function postDispatchReply(
   identity: SessionIdentity,
+  configFile: SessionConfigFile,
   delivery: DispatchDelivery,
   result: { readonly error: string },
 ): Promise<void> {
-  const config = sessionDispatchSettings(CONFIG_FILE, process.env, {
+  const config = sessionDispatchSettings(configFile, process.env, {
     cwd: identity.directory,
   }).dispatch
   if (!config.enabled) throw new Error(config.error ?? config.notice)
@@ -243,6 +245,8 @@ async function postDispatchReply(
 export function createChannelDelivery(input: {
   readonly identity: SessionIdentity
   readonly notifier: ChannelNotifier
+  /** The session's envoy.json, which a rejected Dispatch frame's reply reads. */
+  readonly configFile: SessionConfigFile
 }): ChannelDelivery {
   const inbox: ChannelInboxEntry[] = []
   let tail = Promise.resolve()
@@ -267,7 +271,7 @@ export function createChannelDelivery(input: {
         process.stderr.write(
           `envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}\n`,
         )
-        return postDispatchReply(input.identity, rejected, {
+        return postDispatchReply(input.identity, input.configFile, rejected, {
           error: "Invalid Dispatch targeted delivery frame",
         }).then(
           () => false,
@@ -371,7 +375,11 @@ export async function enqueueChannelMessage(
 export async function startChannelSession(options: ChannelSessionOptions): Promise<ChannelSession> {
   const { identity } = options
   let directSubject = agentSubject(identity.id)
-  const delivery = createChannelDelivery({ identity, notifier: options.notifier })
+  const delivery = createChannelDelivery({
+    identity,
+    notifier: options.notifier,
+    configFile: options.configFile,
+  })
   const userTopics = new Set<string>()
   let heldRole: string | undefined
   let shuttingDown = false
@@ -902,13 +910,17 @@ async function serveEnvoyOff(refusal: string): Promise<void> {
   }
 }
 
-/** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json
- * (`CONFIG_FILE`). With Envoy off it serves no tool (`serveEnvoyOff`). With Envoy on and no NATS
- * server, or its seed refused (`inboundError`), it serves the tools, which call the listener, on an
- * inbound-off session (`inboundOffChannelSession`); the start notice has said why on stderr. */
+/** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json. With
+ * Envoy off it serves no tool (`serveEnvoyOff`). With Envoy on and no NATS server, or its seed
+ * refused (`inboundError`), it serves the tools, which call the listener, on an inbound-off session
+ * (`inboundOffChannelSession`); the start notice has said why on stderr. */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
-  const { envoy, notice } = sessionSettings(CONFIG_FILE, process.env, { cwd: directory })
+  // The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
+  // set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
+  // use, so a file that moved its server takes effect without a restart.
+  const configFile = sessionConfigFile("claude", process.env)
+  const { envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
   if (!envoy.enabled) {
@@ -986,6 +998,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
         notifier: server,
         client,
         heartbeatMs: envoy.heartbeatMs,
+        configFile,
         stateDirectory,
         // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
         ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),

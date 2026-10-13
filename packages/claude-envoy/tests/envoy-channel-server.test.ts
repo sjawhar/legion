@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
+import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import { nkeys } from "nats"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
@@ -50,6 +51,7 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })
@@ -263,6 +265,7 @@ test("retains only the latest fifty inbound envelope summaries", async () => {
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   for (let index = 0; index < 51; index += 1) {
@@ -420,6 +423,7 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", process.cwd()),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   try {
@@ -528,6 +532,7 @@ test("answers a malformed targeted comment through its supplied comment reply ad
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", process.cwd()),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   try {
@@ -557,6 +562,7 @@ test("drops a malformed targeted frame that has no reply address", async () => {
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   await delivery.enqueue({

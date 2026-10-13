@@ -42838,7 +42838,6 @@ function mcpResult(value) {
 function projectDirectory() {
   return claudeProjectDirectory({ CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] }, process.cwd());
 }
-var CONFIG_FILE = sessionConfigFile("claude", process.env);
 function channelToolDefinitions() {
   return envoyToolSpecs.map((spec) => ({
     name: spec.name,
@@ -42863,8 +42862,8 @@ function sanitizeChannelMetadata(metadata) {
   }
   return sanitized;
 }
-async function postDispatchReply(identity, delivery, result) {
-  const config2 = sessionDispatchSettings(CONFIG_FILE, process.env, {
+async function postDispatchReply(identity, configFile, delivery, result) {
+  const config2 = sessionDispatchSettings(configFile, process.env, {
     cwd: identity.directory
   }).dispatch;
   if (!config2.enabled)
@@ -42891,7 +42890,7 @@ function createChannelDelivery(input) {
         const rejected = rendered.rejectedDelivery;
         process.stderr.write(`envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}
 `);
-        return postDispatchReply(input.identity, rejected, {
+        return postDispatchReply(input.identity, input.configFile, rejected, {
           error: "Invalid Dispatch targeted delivery frame"
         }).then(() => false, (error48) => {
           process.stderr.write(`envoy-channel: could not report the rejected delivery to Dispatch \u2014 ${messageFor(error48)}
@@ -42966,7 +42965,11 @@ async function enqueueChannelMessage(delivery, connection, directSubject, messag
 async function startChannelSession(options) {
   const { identity } = options;
   let directSubject = agentSubject(identity.id);
-  const delivery = createChannelDelivery({ identity, notifier: options.notifier });
+  const delivery = createChannelDelivery({
+    identity,
+    notifier: options.notifier,
+    configFile: options.configFile
+  });
   const userTopics = new Set;
   let heldRole;
   let shuttingDown = false;
@@ -43344,7 +43347,8 @@ async function serveEnvoyOff(refusal) {
 }
 async function runEnvoyChannelServer() {
   const directory = projectDirectory();
-  const { envoy, notice } = sessionSettings(CONFIG_FILE, process.env, { cwd: directory });
+  const configFile = sessionConfigFile("claude", process.env);
+  const { envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory });
   if (notice !== null)
     process.stderr.write(`envoy-channel: ${notice}
 `);
@@ -43416,6 +43420,7 @@ async function runEnvoyChannelServer() {
         notifier: server,
         client,
         heartbeatMs: envoy.heartbeatMs,
+        configFile,
         stateDirectory,
         ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
       });
