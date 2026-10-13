@@ -45,6 +45,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- A production check whose deploy the implementer cannot perform goes to the agent or role the
+  deployment instructions name for that deploy, with the merge commit, and waits on the production
+  signal they name (LEGION-447). It opens a `dispatch ask` to a person only when the instructions
+  name nobody, and never asks for approval to deploy. `legion-architect`'s sign-off step,
+  `legion-worker`'s merge-gate reference, `legion-retro`'s `Production check:` line and the
+  daemon's implementer prompt say so in place of a deploy ask to a human.
+
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
   controller locator; a session whose plugin speaks another contract is relaunched onto the

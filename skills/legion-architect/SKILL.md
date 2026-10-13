@@ -314,9 +314,12 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Sign off only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
-   closed one; if the implementer cannot perform the deploy, it opens a `dispatch ask` that starts
-   with the production gap and why it matters, then names the required step, its risk, and
-   outcome-named options. The issue waits for that answer.
+   closed one. If the implementer cannot perform the deploy itself, it asks the agent or role the
+   deployment instructions name for that deploy (an Envoy role), gives it the merge commit, and
+   waits on the production signal the instructions name; the issue waits with it. It opens a
+   `dispatch ask` to a person only when the instructions name nobody for that deploy, starting
+   with the production gap and why it matters, then naming the required step, its risk, and
+   outcome-named options. No one is ever asked for approval to deploy.
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/` and the issue's `.legion/<issue>/`, or a
