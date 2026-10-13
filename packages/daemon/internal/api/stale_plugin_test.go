@@ -141,6 +141,68 @@ func TestUndecodableGrantsBodyRefusesAStaleClaimButNamesTheFieldForACurrentOne(t
 	}
 }
 
+// An undecodable claims/ready body (an unknown field) from a stale claim is refused the
+// stale-caller 409, in the claim-route shape (claim.StalePluginContract, {"error": …}) rather than
+// the grants route's Failure{Code}; the identical body from a current claim gets today's 400
+// naming the field, exactly as the grants family's own undecodable body does
+// (claimSecretCheck, the identity check ready and exit share).
+func TestUndecodableReadyBodyRefusesAStaleClaimButNamesTheFieldForACurrentOne(t *testing.T) {
+	h, _ := newStaleHarness(t)
+	withClaim := func(token claim.Token, session, secret string) string {
+		return fmt.Sprintf(`{"claimToken":%q,"sessionId":%q,"secret":%q,"generation":1,"push":true}`, token, session, secret)
+	}
+
+	staleToken, staleBoot := h.launch("LEGION-208", claim.RoleImplementer)
+	staleSession := "ses_stale_ready"
+	staleCurrent := h.registerContract(staleBoot, staleSession, DaemonAPIVersion, true)
+	stale := DaemonAPIVersion - 1
+	h.makeStale(t, staleToken, staleSession, staleCurrent.Secret, stale)
+	staleRecorder := h.request(http.MethodPost, "/legion/v1/claims/ready", withClaim(staleToken, staleSession, staleCurrent.Secret), nil)
+	wantRefusal(t, staleRecorder, http.StatusConflict, claim.StalePluginContract(stale, DaemonAPIVersion).Message)
+
+	currentToken, currentBoot := h.launch("LEGION-209", claim.RoleImplementer)
+	currentSession := "ses_current_ready"
+	currentRegistered := h.registerContract(currentBoot, currentSession, DaemonAPIVersion, true)
+	currentRecorder := h.request(http.MethodPost, "/legion/v1/claims/ready", withClaim(currentToken, currentSession, currentRegistered.Secret), nil)
+	if currentRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("a current claim's unknown-field ready body = %d, want 400; body %s", currentRecorder.Code, currentRecorder.Body)
+	}
+	if !strings.Contains(currentRecorder.Body.String(), "push") {
+		t.Fatalf("400 body %s does not name the unknown field", currentRecorder.Body)
+	}
+}
+
+// An undecodable handoff/complete body (an unknown field), naming a grant minted while the claim
+// was current and still valid now that it has gone stale, is refused the stale-caller 409 in the
+// grant-bearing shape (Failure{Code: "STALE_PLUGIN_CONTRACT"}); the identical body naming a
+// current claim's grant gets today's 400 naming the field — redeemIdentityCheck, the identity
+// check every grant-bearing route shares with the grants route's own claim form.
+func TestUndecodableHandoffCompleteBodyRefusesAStaleClaimButNamesTheFieldForACurrentOne(t *testing.T) {
+	github := newHandoffGitHub(t)
+	h, _ := newHandoffHarness(t, github, nil, nil)
+	seedIssueAt(t, h, "LEGION-208", phase.Implementing)
+	stale := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+	staleGrant := stale.grant(t)
+	h.makeStale(t, stale.token, stale.session, stale.secret, DaemonAPIVersion-1)
+	staleBody := fmt.Sprintf(`{"grantId":%q,"summary":"implemented","commit":"aabbcc","push":true}`, staleGrant)
+
+	staleRecorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", staleBody, nil)
+	wantFailure(t, staleRecorder, http.StatusConflict, "STALE_PLUGIN_CONTRACT")
+
+	seedIssueAt(t, h, "LEGION-209", phase.Implementing)
+	current := newLiveClaim(t, h, "LEGION-209", claim.RoleImplementer)
+	currentGrant := current.grant(t)
+	currentBody := fmt.Sprintf(`{"grantId":%q,"summary":"implemented","commit":"aabbcc","push":true}`, currentGrant)
+
+	currentRecorder := h.request(http.MethodPost, "/legion/v1/handoff/complete", currentBody, nil)
+	if currentRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("a current claim's unknown-field handoff/complete body = %d, want 400; body %s", currentRecorder.Code, currentRecorder.Body)
+	}
+	if !strings.Contains(currentRecorder.Body.String(), "push") {
+		t.Fatalf("400 body %s does not name the unknown field", currentRecorder.Body)
+	}
+}
+
 // The register route decodes leniently from the start: its body carries the contract the
 // record-and-relaunch path needs, so an unknown field reaches registration rather than a 400.
 func TestUndecodableRegisterBodyReachesRegistration(t *testing.T) {

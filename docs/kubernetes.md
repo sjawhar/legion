@@ -915,7 +915,9 @@ instead of relaunched, and its next resume launches on the current plugin; a cla
 is left to its registration, which decides it the moment it arrives). Each relaunch logs one line, exactly
 `supervise: the process speaks another plugin contract; relaunching it onto the current plugin`,
 naming `claim`, `incarnation`, `pluginContract` (0 when the claim recorded none), `daemonApiVersion`
-and `trigger` (`boot` or `registration`).
+and `trigger` (`boot`, `registration`, or `sweep`: a relaunch the tree lifecycle or the store
+refuses leaves the claim live and stale, so every orphan sweep posts it again until one attempt
+starts, the cadence a moved address is retried at).
 
 Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
 replacing it: the role container's shim runs an install script,
@@ -963,7 +965,7 @@ the same sentence — a claim route answers `{"error": …}`, a credential or wo
 `{"code":"STALE_PLUGIN_CONTRACT","error": …}` — logged
 `api: refused a call from a process on another plugin contract`; the operator's own controller
 instead gets `…: run legion controller start from the release built with this daemon`, since there
-is no pod for the daemon to relaunch it in. Every undecodable request body is now logged
+is no pod for the daemon to relaunch it in. Every other undecodable request body is logged
 `api: refused an undecodable request body` naming the route and the decoder's error. A relaunched
 process that registers still on the old contract is charged as a launch failure (the claim
 remembers `PluginRelaunchFor`), ending, like any other exhausted budget, in a `worker-died`. The

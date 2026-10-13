@@ -137,6 +137,13 @@ type overrides struct {
 	// that default, which a kubernetes-runtime test without a real cluster has no other way to
 	// drive, since such a test configures no runtime.kubernetes.plugins and links no plugin pair.
 	pluginRelaunchable *bool
+	// checkLaunch stands in for the store's own CheckLaunch (supervise.Store), wrapping the real
+	// store so every launch's recheck answers this instead when it is non-nil and falls through to
+	// the real store otherwise (launchGatedStore, internal/daemon/launchgate.go): a test's way to
+	// refuse a relaunch the way a reserved tree cleanup or a transient store error would, without a
+	// lifecycle this pod has none of to reserve. nil, in production, is nothing: every launch
+	// reaches the real store's own check.
+	checkLaunch func(context.Context, supervise.Claim) error
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -549,6 +556,9 @@ type plan struct {
 	secretsLogin *agentsecrets.Client
 	// strandedReported is overrides.strandedReported; nil runs nothing.
 	strandedReported func()
+	// checkLaunch is overrides.checkLaunch; nil wraps the store with nothing, so every launch
+	// reaches the real store's own CheckLaunch.
+	checkLaunch func(context.Context, supervise.Claim) error
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -612,7 +622,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
-		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource,
+		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -1024,7 +1034,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
+		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
@@ -1068,9 +1078,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
 // leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
 // resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
-// any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted a stale-
-// plugin relaunch first (refreshStalePlugins), over every one before any of them is relaunched. A
-// daemon that leaves the controller to its operator first stops the controller's claim an earlier
+// any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted its boot
+// stale-plugin relaunch first (refreshStalePlugins), over every one before any of them is
+// relaunched; a claim a refused attempt leaves stale is retried at the orphan sweep's own cadence
+// from then on (reconcileOrphans), not just at this boot pass. A daemon that leaves the controller
+// to its operator first stops the controller's claim an earlier
 // boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
 // retired. The only controller claim among the unrecorded launches is a
 // launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
@@ -1125,32 +1137,40 @@ func (s *supervision) start(boot context.Context) error {
 		defer s.wg.Done()
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
-	s.refreshStalePlugins()
+	s.refreshStalePlugins(s.claims, "boot")
 	if len(unfinished) > 0 {
 		s.relaunchUnfinished(unfinished, reconciled)
 	}
 	return nil
 }
 
-// refreshStalePlugins posts StalePlugin to every re-adopted claim whose recorded plugin contract is
-// not this daemon's — an earlier daemon's, or none at all, at the first boot on this release —
-// before any of them is relaunched (relaunchUnfinished runs after this). A claim still launching is
-// left to its own registration, which decides the comparison the moment it arrives, so only the
-// four states whose process has registered are read. A daemon that cannot relaunch onto a plugin
-// (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing and instead logs
-// one Error line per stale claim: the fleet runs on, unrelaunched, until an operator names a plugin
-// source.
-func (s *supervision) refreshStalePlugins() {
-	for _, c := range s.claims {
+// refreshStalePlugins posts StalePlugin to every live claim whose recorded plugin contract is not
+// this daemon's — an earlier daemon's, or none at all, at the first boot on this release, or one a
+// prior relaunch attempt the tree lifecycle or the store refused left stale (launch returns such a
+// refusal before the claim's state, locator, or contract change). Trigger says which pass is
+// posting: "boot", once over the restored claims before any of them is relaunched
+// (relaunchUnfinished runs after this); "sweep", at every orphan sweep's own cadence, over the
+// claims it already reads each tick, so a relaunch the boot pass could not complete is retried
+// without waiting for the next restart. refreshPlugin's own re-check makes a re-post for a claim a
+// prior attempt already moved on — relaunched, or registered current — a no-op. A claim still
+// launching is left to its own registration, which decides the comparison the moment it arrives,
+// so only the four states whose process has registered are read. A daemon that cannot relaunch
+// onto a plugin (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing;
+// it logs one Error line per stale claim at boot only — a sweep's finding would only repeat a line
+// the boot already wrote, since nothing relaunchable has changed in between.
+func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger string) {
+	for _, c := range claims {
 		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {
-			s.log.Error(supervise.NoPluginSourceMessage,
-				"claim", c.Token, "incarnation", c.Locator.Incarnation, "pluginContract", c.PluginContract, "daemonApiVersion", api.DaemonAPIVersion)
+			if trigger == "boot" {
+				s.log.Error(supervise.NoPluginSourceMessage,
+					"claim", c.Token, "incarnation", c.Locator.Incarnation, "pluginContract", c.PluginContract, "daemonApiVersion", api.DaemonAPIVersion)
+			}
 			continue
 		}
-		s.supervisor.post(c.Token, supervise.StalePlugin{Claim: c.Token})
+		s.supervisor.post(c.Token, supervise.StalePlugin{Claim: c.Token, Trigger: trigger})
 	}
 }
 
@@ -1284,7 +1304,10 @@ func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) 
 }
 
 // reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
-// the claims the daemon has not retired, once it has idled past the grace.
+// the claims the daemon has not retired, once it has idled past the grace, and re-posts
+// StalePlugin for every live claim whose contract still differs — the retry a relaunch the boot
+// pass (refreshStalePlugins) could not complete needs, at the same cadence the moved-address twin
+// (StaleAddress) already gets from this same sweep.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -1304,6 +1327,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 		if err := s.runtime.ReconcileOrphans(ctx, knownClaims(claims), orphanGrace); err != nil && ctx.Err() == nil {
 			s.log.Error("reconcile orphans", "error", err)
 		}
+		s.refreshStalePlugins(claims, "sweep")
 	}
 }
 

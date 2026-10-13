@@ -274,19 +274,26 @@ func readPlugins(value *yaml.Node) (*PluginsConfig, error) {
 }
 
 // readPluginSource is one key of `runtime.kubernetes.plugins`: an exact version, an absolute
-// tarball path, or an http(s) URL the pod can read. A dist-tag or a range (an npm range such as
-// `latest`, `^9`, `9.x`, `~9.6`) is refused naming the key and that the pair must be one release's
-// exact versions.
+// tarball path, or an http(s) URL the pod can read, returned in the canonical form the install
+// uses — url.Parse lowercases a URL's scheme, so `HTTPS://cache/pi-legion.tgz` is stored as
+// `https://cache/pi-legion.tgz`, the form bunSpec (internal/runtime/sandbox/plugins.go) and the
+// install it renders for agree on. A dist-tag or a range (an npm range such as `latest`, `^9`,
+// `9.x`, `~9.6`) is refused naming the key and that the pair must be one release's exact versions;
+// a source beginning with `//` is refused by name too — path.IsAbs calls it an absolute path, but
+// it reads as a network-path reference to no host bun can fetch a tarball from.
 func readPluginSource(value *yaml.Node, key string) (string, error) {
 	source, err := requiredString(value, key, "")
 	if err != nil {
 		return "", err
 	}
+	if strings.HasPrefix(source, "//") {
+		return "", fmt.Errorf("%s must not begin with //: that is a network-path reference, not a tarball bun can fetch; got %q", key, source)
+	}
 	if path.IsAbs(source) {
 		return source, nil
 	}
 	if u, err := url.Parse(source); err == nil && u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") {
-		return source, nil
+		return u.String(), nil
 	}
 	if !pluginVersion.MatchString(source) {
 		return "", fmt.Errorf("%s must be an exact version (N.N.N), an absolute tarball path, or an http(s) URL — never an npm dist-tag or a range: the pair must be one release's exact versions; got %q", key, source)

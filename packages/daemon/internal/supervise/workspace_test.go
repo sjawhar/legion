@@ -71,7 +71,7 @@ func TestAWorkspaceLostGoneRelaunchesAFreshSessionOnce(t *testing.T) {
 	}
 
 	h.connect()
-	h.must(RequestRegister{Claim: rootToken, Generation: h.generation(), Session: "ses_fresh", SessionFile: "/state/sessions/fresh.jsonl", CapabilityHash: []byte("capability")})
+	h.must(RequestRegister{Claim: rootToken, Generation: h.generation(), Session: "ses_fresh", SessionFile: "/state/sessions/fresh.jsonl", CapabilityHash: []byte("capability"), PluginContract: h.deps.PluginContract})
 
 	if c := h.claim(); c.Session != "ses_fresh" || c.WorkspaceLost {
 		t.Errorf("claim %+v after the fresh registration, want its new session recorded and the loss over", c)

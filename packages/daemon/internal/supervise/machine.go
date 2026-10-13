@@ -316,6 +316,7 @@ func (d Deps) check() error {
 		{"Limits.PromptFailures", d.Limits.PromptFailures},
 		{"Limits.PromptRetires", d.Limits.PromptRetires},
 		{"Timeouts.RegistrationIntervals", d.Timeouts.RegistrationIntervals},
+		{"PluginContract", d.PluginContract},
 	} {
 		if bound.value < 1 {
 			return fmt.Errorf("supervise: %s must be at least 1, got %d", bound.name, bound.value)

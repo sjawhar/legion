@@ -1042,6 +1042,19 @@ func TestPluginsBlockAcceptsAPathAndAURL(t *testing.T) {
 	}
 }
 
+// An upper-case scheme is accepted — url.Parse lowercases it — and stored in its canonical,
+// lower-case form: the one bunSpec (internal/runtime/sandbox/plugins.go) renders for the install.
+func TestPluginsBlockCanonicalizesAnUppercaseScheme(t *testing.T) {
+	path := writeConfigFile(t, kubernetesFile+"    plugins:\n      pi_legion: HTTPS://cache/pi-legion.tgz\n      pi_envoy: 9.6.1\n")
+	cfg, err := LoadForValidation(path, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Runtime.Kubernetes.Plugins.PiLegion; got != "https://cache/pi-legion.tgz" {
+		t.Fatalf("pi_legion = %q, want the canonical lower-case scheme", got)
+	}
+}
+
 // A half block (one key alone), a dist-tag, and a range are each refused naming the missing or
 // offending key; the pair must be one release's exact versions.
 func TestPluginsBlockRefusals(t *testing.T) {
@@ -1055,6 +1068,8 @@ func TestPluginsBlockRefusals(t *testing.T) {
 		"an x-range":    {"    plugins:\n      pi_legion: 9.x\n      pi_envoy: 9.6.1\n", "runtime.kubernetes.plugins.pi_legion must be an exact version"},
 		"a tilde range": {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: ~9.6\n", "runtime.kubernetes.plugins.pi_envoy must be an exact version"},
 		"unknown key":   {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: 9.6.1\n      pi_shared: 1.0.0\n", "unknown key runtime.kubernetes.plugins.pi_shared"},
+		"a network-path reference": {"    plugins:\n      pi_legion: //host/x.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion must not begin with //"},
 		"not a mapping": {"    plugins: yes\n", "runtime.kubernetes.plugins must be a mapping"},
 	} {
 		t.Run(name, func(t *testing.T) {

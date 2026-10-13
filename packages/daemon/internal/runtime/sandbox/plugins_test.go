@@ -172,6 +172,17 @@ func TestATarballOrURLSourceReachesBunVerbatim(t *testing.T) {
 	}
 }
 
+// An upper-case scheme reaches bun verbatim too: the loader already canonicalises it to lower
+// case, but bunSpec's own guard is case-insensitive, so the two never disagree over what counts as
+// a URL.
+func TestAnUppercaseSchemeReachesBunVerbatim(t *testing.T) {
+	legion := "HTTPS://cache/x.tgz"
+	args := bunInstallArgs(t, &runtime.PluginInstall{PiLegion: legion, PiEnvoy: "9.6.1", Contract: 24})
+	if !slices.Contains(args, legion) {
+		t.Fatalf("bun add was asked for %q, want %q verbatim", args, legion)
+	}
+}
+
 // installArgv returns agent unchanged when plugins is nil: a plain launch's argv is never wrapped.
 func TestInstallArgvIsAgentUnchangedWithoutPlugins(t *testing.T) {
 	agent := []string{"/opt/omp/bin/omp", "--mode", "rpc"}

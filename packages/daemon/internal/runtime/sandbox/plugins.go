@@ -35,12 +35,20 @@ func pluginRoots(genDir string) (envoy, legion string) {
 // bunSpec is what `bun add` is handed for one plugin source: a tarball path (absolute) or an
 // http(s) URL travels as written, since bun resolves those by their own shape; anything else is
 // the exact version the loader admitted (config.readPluginSource, and the release's linked bare
-// versions), which bun reads as a package name unless it is spelled pkg@version.
+// versions), which bun reads as a package name unless it is spelled pkg@version. The loader already
+// canonicalises a URL's scheme to lower case before this is reached; the prefix test is
+// case-insensitive anyway, so the renderer never disagrees with the loader over what counts as a
+// URL.
 func bunSpec(pkg, source string) string {
-	if strings.HasPrefix(source, "/") || strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+	if strings.HasPrefix(source, "/") || hasSchemeFold(source, "http://") || hasSchemeFold(source, "https://") {
 		return source
 	}
 	return pkg + "@" + source
+}
+
+// hasSchemeFold reports whether source begins with scheme, ignoring case.
+func hasSchemeFold(source, scheme string) bool {
+	return len(source) >= len(scheme) && strings.EqualFold(source[:len(scheme)], scheme)
 }
 
 // pluginCheckScript is the node -e script the install wrapper runs over the installed pi-legion's

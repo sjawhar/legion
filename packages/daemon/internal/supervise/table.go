@@ -108,12 +108,19 @@ type Timer struct {
 // was on that volume, and is gone with it. The daemon sends it to the issue's other claims.
 type IssueVolumeLost struct{ Claim claim.Token }
 
-// StalePlugin is the boot's own finding that a re-adopted claim's recorded plugin contract is not
-// this daemon's — an earlier daemon's, or none at all, at the first boot on this release
-// (refreshStalePlugins in internal/daemon). It is posted once per restored claim, before any of
-// them is relaunched, for a claim in a state whose process has registered; one still launching is
-// left to its own registration, which decides the comparison the moment it arrives.
-type StalePlugin struct{ Claim claim.Token }
+// StalePlugin is a re-adopted claim found still speaking a plugin contract this daemon does not,
+// posted once at boot for every restored claim in that state (refreshStalePlugins in
+// internal/daemon), before any of them is relaunched, and again at every orphan sweep for a claim
+// still live whose contract still differs (the same cadence StaleAddress already has): a relaunch
+// the tree lifecycle or the store refuses leaves the claim live, its contract unchanged, and
+// nothing else re-tries it, so without the sweep's re-post the claim would stay stale for the rest
+// of the daemon's life. Trigger says which pass posted it — "boot" or "sweep" — for the log line
+// the relaunch writes; a claim still launching is left to its own registration, which decides the
+// comparison the moment it arrives.
+type StalePlugin struct {
+	Claim   claim.Token
+	Trigger string
+}
 
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
@@ -492,7 +499,7 @@ func fillTable(t *builder) {
 	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
 		StateRegistered, StateReady, StateWorking, StateIdle)
 
-	// The boot's own finding that a re-adopted claim speaks another plugin contract.
+	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
 	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
 		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",

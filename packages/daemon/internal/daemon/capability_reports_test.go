@@ -63,8 +63,9 @@ func sessionReport(c supervise.Claim, incarnation string) capabilities.Report {
 func supervisorOf(t *testing.T, claims ...supervise.Claim) *supervisor {
 	t.Helper()
 	deps := supervise.Deps{
-		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
-		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
+		Limits:         supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Timeouts:       supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
+		PluginContract: 24,
 	}
 	all := make([]*supervise.Machine, 0, len(claims))
 	for _, c := range claims {

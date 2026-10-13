@@ -26,7 +26,7 @@ func TestAStalePluginRelaunchesTheClaimChargingNothing(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 			stale := h.locator()
-			h.m.deps.PluginContract = 24
+			h.m.deps.PluginContract = 25
 
 			if err := h.handle(StalePlugin{Claim: h.token}); err != nil {
 				t.Fatalf("StalePlugin while %s = %v, want nil", state, err)
@@ -34,8 +34,8 @@ func TestAStalePluginRelaunchesTheClaimChargingNothing(t *testing.T) {
 
 			h.wantState(StateLaunching)
 			h.wantBudgets(Budgets{})
-			if claim := h.claim(); claim.PluginRelaunchFor != 24 {
-				t.Fatalf("PluginRelaunchFor after the relaunch = %d, want 24", claim.PluginRelaunchFor)
+			if claim := h.claim(); claim.PluginRelaunchFor != 25 {
+				t.Fatalf("PluginRelaunchFor after the relaunch = %d, want 25", claim.PluginRelaunchFor)
 			}
 			resume := h.wantCalls("Resume", 1)[0]
 			if resume.Previous == nil || *resume.Previous != stale || resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
@@ -51,8 +51,8 @@ func TestAStalePluginRelaunchesTheClaimChargingNothing(t *testing.T) {
 func TestAStalePluginAlreadyCurrentDoesNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
-	// m.deps.PluginContract stays at its zero value, the harness default, which register() above
-	// already recorded: the claim is current from the start.
+	// m.deps.PluginContract stays at the harness default, which register() above already recorded
+	// for the claim: it is current from the start.
 
 	if err := h.handle(StalePlugin{Claim: h.token}); err != nil {
 		t.Fatalf("StalePlugin while current = %v, want nil", err)
@@ -73,7 +73,7 @@ func TestAStalePluginMidTurnInterruptsTheTaskChargingNothing(t *testing.T) {
 	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
 	h.must(StreamTurnStart{Claim: testToken})
 	sent := h.wantPrompts(1)[0].DeliveryID
-	h.m.deps.PluginContract = 24
+	h.m.deps.PluginContract = 25
 
 	if err := h.handle(StalePlugin{Claim: h.token}); err != nil {
 		t.Fatalf("StalePlugin mid-turn = %v, want nil", err)
@@ -99,7 +99,7 @@ func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testi
 	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn = %v, want ErrSuspendHeld", err)
 	}
-	h.m.deps.PluginContract = 24
+	h.m.deps.PluginContract = 25
 
 	if err := h.handle(StalePlugin{Claim: h.token}); err != nil {
 		t.Fatalf("StalePlugin while held = %v, want nil", err)

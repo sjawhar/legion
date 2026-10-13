@@ -1155,7 +1155,7 @@ func startSupervisedSandboxRole(
 	}
 	for _, event := range []supervise.Event{
 		supervise.StreamHello{Claim: spec.Claim, Generation: 1},
-		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile},
+		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile, PluginContract: 24},
 		supervise.RequestReady{Claim: spec.Claim, Generation: 1, Session: "ses-tester"},
 	} {
 		if err := machine.Handle(g.ctx, event); err != nil {
@@ -1361,6 +1361,7 @@ func supervisedSandboxMachine(
 		Timeouts: supervise.Timeouts{
 			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour,
 		},
+		PluginContract: 24,
 	}, c)
 	if err != nil {
 		t.Fatalf("new Machine: %v", err)

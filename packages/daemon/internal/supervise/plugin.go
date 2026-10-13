@@ -25,6 +25,17 @@ import (
 // keeps whatever LaunchFailures a true launch failure already charged it, and a registration that
 // arrives at that generation still speaking the old contract is not this path's to decide again —
 // it is staleRegistration's, which charges it.
+//
+// launch can refuse the relaunch it starts — a tree lifecycle cleanup already reserved, a moved
+// epoch, a transient store error — and returns that refusal before the claim's state, locator, or
+// contract change (replaceProcess's own launch), so a refused attempt leaves the claim exactly as
+// stale as it found it: live, on the old contract, and still selected by HoldsCapability. Nothing
+// else retries that attempt, so the orphan sweep re-posts StalePlugin for it every interval
+// (refreshStalePlugins in internal/daemon) until one attempt succeeds; the re-check at the top of
+// this function makes a re-post for a claim a prior attempt already moved on — relaunched, or
+// registered current in the meantime — a no-op. Interrupting an already-interrupted turn
+// (interrupted) is itself a no-op, the pending delivery already marked, so a retried attempt never
+// re-delivers or charges a task twice.
 func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
@@ -36,10 +47,10 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn")
 }
 
-// refreshStalePlugin is the StalePlugin event's row: the boot's own trigger, for the four states a
-// claim's relaunched process can run in.
-func refreshStalePlugin(m *Machine, ctx context.Context, _ Event) error {
-	return m.refreshPlugin(ctx, "boot")
+// refreshStalePlugin is the StalePlugin event's row, for the four states a claim's relaunched
+// process can run in: the event's own Trigger (boot or sweep) names the pass that posted it.
+func refreshStalePlugin(m *Machine, ctx context.Context, ev Event) error {
+	return m.refreshPlugin(ctx, ev.(StalePlugin).Trigger)
 }
 
 // staleRegistration is what register and reregister run once they have recorded the plugin

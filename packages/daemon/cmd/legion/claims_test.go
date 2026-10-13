@@ -187,6 +187,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Timeouts: supervise.Timeouts{
 			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second,
 		},
+		PluginContract: 24,
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,

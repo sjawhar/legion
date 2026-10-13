@@ -14,12 +14,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,6 +38,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -139,6 +142,86 @@ func TestRunRelaunchesAClaimOnAnotherPluginContractAtBootChargingNothing(t *test
 	}
 }
 
+// A boot relaunch the launch path itself refuses — a tree lifecycle cleanup already reserved, here
+// — leaves the claim exactly as stale as it found it: live, ready, at the generation it had. The
+// orphan sweep re-posts the stale-plugin event at its own cadence, so once the refusal clears, the
+// claim relaunches at the next sweep without a restart — the retry StaleAddress's twin already
+// gets. A current claim seeded beside it is never touched.
+func TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	cfg := testConfig(t)
+	cfg.PostgresDSN = pool.Config().ConnString()
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := cfg.Project + "-1"
+	stale, err := claim.NewToken(project, root, claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := claim.NewToken(project, root, claim.RoleArchitect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionFile := filepath.Join(cfg.StateDir, "implementer.jsonl")
+	seedWorkflowTree(t, cfg.PostgresDSN, project,
+		record.Issue{Key: root, Project: cfg.Project, Tree: root, Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress", HandedOver: true, Rank: "U"},
+		supervise.Claim{Token: stale, Project: project, Tree: root, Issue: root, Role: claim.RoleImplementer,
+			Generation: 1, State: supervise.StateReady, Session: "ses_implementer", SessionFile: sessionFile,
+			PluginContract: 0, Locator: pluginTestLocator(stale)},
+		supervise.Claim{Token: current, Project: project, Tree: root, Issue: root, Role: claim.RoleArchitect,
+			Generation: 1, State: supervise.StateReady, Session: "ses_architect", SessionFile: filepath.Join(cfg.StateDir, "architect.jsonl"),
+			PluginContract: api.DaemonAPIVersion, Locator: pluginTestLocator(current)},
+	)
+	rt := fake.NewRuntime()
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 20 * time.Millisecond
+	var refuse atomic.Bool
+	refuse.Store(true)
+	o.checkLaunch = func(context.Context, supervise.Claim) error {
+		if refuse.Load() {
+			return fmt.Errorf("launch claim: %w", treelifecycle.ErrCleanupReserved)
+		}
+		return nil
+	}
+	logs := &syncBuffer{}
+
+	d := startDaemonLogging(t, cfg, o, jsonLogger(logs))
+
+	testwait.Eventually(t, "the boot's own refused relaunch of "+string(stale), func() bool {
+		return len(loggedLines(t, logs.String(), "trigger\":\"boot")) > 0
+	})
+	if c := d.claim(stale); c.Generation != 1 || c.State != string(supervise.StateReady) {
+		t.Fatalf("the stale claim after the refused boot relaunch = %+v, want ready at generation 1", c)
+	}
+	if c := d.claim(stale); c.Budgets != (api.BudgetsView{}) {
+		t.Fatalf("budgets after the refused relaunch = %+v, want zero: the refusal is not a launch failure", c.Budgets)
+	}
+	if calls := resumesOf(rt, stale); len(calls) != 0 {
+		t.Fatalf("resumed %v while the launch path refuses every attempt, want none", calls)
+	}
+
+	refuse.Store(false)
+
+	testwait.Eventually(t, "the sweep's retry of "+string(stale), func() bool {
+		return len(resumesOf(rt, stale)) == 1
+	})
+	resume := resumesOf(rt, stale)[0]
+	if resume.Spec.ResumeSessionFile != sessionFile || resume.Spec.Generation != 2 {
+		t.Fatalf("resumed %+v, want the recorded session at generation 2", resume.Spec)
+	}
+	if c := d.claim(stale); c.Budgets != (api.BudgetsView{}) {
+		t.Fatalf("budgets after the sweep's relaunch = %+v, want zero", c.Budgets)
+	}
+	if lines := loggedLines(t, logs.String(), `"trigger":"sweep"`); len(lines) == 0 {
+		t.Fatalf("logs %s carry no sweep-triggered relaunch line", logs.String())
+	}
+	if calls := resumesOf(rt, current); len(calls) != 0 {
+		t.Fatalf("resumed the current claim %v, want it untouched across every sweep", calls)
+	}
+}
+
 // A claim re-adopted at boot already on the daemon's own contract is left alone: nothing is
 // relaunched, and no line is logged. Driven through a real daemon boot like the relaunch case above;
 // a second seeded claim still on another contract proves the boot pass ran at all once its own
@@ -216,7 +299,7 @@ func TestBootLeavesALaunchingClaimToItsRegistration(t *testing.T) {
 	}
 	s := &supervision{log: quietLogger(), supervisor: sup, claims: []supervise.Claim{c}, plan: plan{pluginRelaunchable: true}}
 
-	s.refreshStalePlugins()
+	s.refreshStalePlugins(s.claims, "boot")
 
 	m, ok := sup.Machine(token)
 	if !ok {
@@ -258,7 +341,7 @@ func TestBootSuspendsAStaleClaimWhoseSuspensionIsHeld(t *testing.T) {
 	}
 	s := &supervision{log: quietLogger(), supervisor: sup, claims: []supervise.Claim{c}, plan: plan{pluginRelaunchable: true}}
 
-	s.refreshStalePlugins()
+	s.refreshStalePlugins(s.claims, "boot")
 
 	testwait.Eventually(t, "the held suspension to end the stale claim", func() bool {
 		return m.Claim().State == supervise.StateSuspended
