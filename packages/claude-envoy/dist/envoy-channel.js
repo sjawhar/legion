@@ -39069,7 +39069,8 @@ import {
   openSync,
   readFileSync as readFileSync2,
   readlinkSync,
-  rmSync
+  rmSync,
+  statSync
 } from "fs";
 import { homedir, tmpdir } from "os";
 import * as path from "path";
@@ -39328,8 +39329,12 @@ function parseFile(filePath, schema, checkout) {
   }
   return { kind: "valid", settings: parsed.data };
 }
-var commandOutcomes = new Map;
-function runCommand(command, env) {
+var FAILURE_KEPT_MS = 60000;
+var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands");
+var processGlobal = globalThis;
+var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
+processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
+function runCommand(command, env, cwd) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
     if (variable !== undefined)
@@ -39343,6 +39348,7 @@ function runCommand(command, env) {
     let result;
     try {
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        cwd,
         env: childEnv,
         stdin: "ignore",
         stdout: fd,
@@ -39383,23 +39389,46 @@ function fileValue(value, field, filePath, env) {
     return value;
   }
   const command = value.slice(1);
-  let outcome = commandOutcomes.get(command);
-  if (outcome === undefined) {
-    outcome = runCommand(command, env);
-    commandOutcomes.set(command, outcome);
+  const cwd = path.dirname(path.resolve(filePath));
+  const key = JSON.stringify([command, filePath, cwd]);
+  let outcome = commandOutcomes.get(key);
+  if (outcome === undefined || "failure" in outcome && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
+    commandOutcomes.set(key, outcome);
   }
   if ("failure" in outcome)
     throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
   return outcome.value;
 }
-function oldUserFileNotice(filePath, env) {
+function statDevice(directory) {
+  try {
+    return statSync(directory).dev;
+  } catch {
+    return;
+  }
+}
+function moveNotice(oldFile, newFile, move, deviceOf) {
+  const oldDevice = deviceOf(path.dirname(oldFile));
+  let ancestor = path.dirname(newFile);
+  let newDevice = deviceOf(ancestor);
+  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
+    ancestor = path.dirname(ancestor);
+    newDevice = deviceOf(ancestor);
+  }
+  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
+    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
+  }
+  return `${oldFile} is not read: ${move}`;
+}
+function oldUserFileNotice(filePath, env, deviceOf) {
   const home = nonEmpty(env.HOME) ?? homedir();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
     return;
   const selected = path.resolve(filePath);
-  if (selected === path.resolve(home, ".config", "legion", "envoy.json")) {
-    return `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
+  if (selected === userFile) {
+    return moveNotice(old, userFile, "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/", deviceOf);
   }
   const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"));
   if (profileFile) {
@@ -39418,6 +39447,7 @@ function missingConfigNotice(filePath, missing, off) {
   return `no envoy.json at ${filePath}${link}: ${off}${old}`;
 }
 function readEnvoyConfig(filePath, env, options) {
+  const deviceOf = options.deviceOf ?? statDevice;
   const chosen = parseFile(filePath, EnvoyFileSchema, false);
   if (chosen.kind === "invalid")
     return { kind: "failed", path: filePath, error: chosen.reason };
@@ -39438,9 +39468,9 @@ function readEnvoyConfig(filePath, env, options) {
   }
   const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
   const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
-    `${oldCheckout} is not read: mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`
+    moveNotice(oldCheckout, checkoutPath, `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`, deviceOf)
   ] : [];
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
   return {
     kind: "read",
     path: filePath,
@@ -39503,44 +39533,45 @@ function checkoutPair(checkout, serverUrl) {
   };
 }
 function writtenToken(config2, checkout) {
-  const field = "dispatch.token";
   if (checkout?.dispatch.token !== undefined) {
-    const { serverUrl, token } = checkout.dispatch;
-    if (serverUrl === undefined) {
-      throw new Error(`${checkout.path}: dispatch.token requires dispatch.serverUrl in the same file`);
-    }
-    return { token, field, path: checkout.path, server: serverUrl, checkout: true };
+    throw new Error(`${checkout.path}: dispatch.token requires dispatch.serverUrl in the same file`);
   }
   const own = config2.dispatch;
   if (own.token === undefined)
     return;
   const server = own.serverUrl ?? DEFAULT_SERVER_URL;
-  return { token: own.token, field, path: config2.path, server, checkout: false };
+  return {
+    token: own.token,
+    field: "dispatch.token",
+    path: config2.path,
+    server,
+    checkout: false
+  };
 }
 function dispatchSettings(env, config2) {
   if (config2.kind === "failed")
     return offWithError(config2.error);
   const explicitUrl = nonEmpty(env.DISPATCH_URL);
-  if (config2.checkout?.kind === "invalid" && explicitUrl === undefined) {
-    return offWithError(config2.checkout.error);
-  }
-  const checkout = config2.checkout?.kind === "valid" ? config2.checkout : null;
+  const checkoutFile = explicitUrl === undefined ? config2.checkout : null;
+  if (checkoutFile?.kind === "invalid")
+    return offWithError(checkoutFile.error);
+  const checkout = checkoutFile?.kind === "valid" ? checkoutFile : null;
   const own = config2.dispatch;
   if (own.enabled === false) {
     return offWithNotice(`${config2.path} sets dispatch.enabled to false: Dispatch is off`);
   }
-  if (checkout?.dispatch.enabled === false && explicitUrl === undefined) {
+  if (checkout?.dispatch.enabled === false) {
     return offWithNotice(`${checkout.path} sets dispatch.enabled to false: Dispatch is off`);
   }
-  const enabled = checkout?.dispatch.enabled === true || own.enabled === true;
-  if (explicitUrl === undefined && !enabled) {
-    return offWithNotice(config2.missing === null ? `${config2.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, config2.missing, "Dispatch is off"));
+  const checkoutServer = checkout?.dispatch.serverUrl;
+  const addressed = explicitUrl !== undefined || checkoutServer !== undefined || own.serverUrl !== undefined || own.enabled === true;
+  if (!addressed) {
+    return offWithNotice(config2.missing === null ? `${config2.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, config2.missing, "Dispatch is off"));
   }
   if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
     return offWithError("DISPATCH_URL must be an http or https URL");
   }
   try {
-    const checkoutServer = explicitUrl === undefined ? checkout?.dispatch.serverUrl : undefined;
     const source = checkout !== null && checkoutServer !== undefined ? checkoutPair(checkout, checkoutServer) : bearerSource(env, "DISPATCH", () => writtenToken(config2, checkout));
     if (source.kind === "none") {
       return offWithError(explicitUrl === undefined ? `${config2.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config2.path}`);
@@ -39574,13 +39605,20 @@ function natsSeedFromEnvironment(env) {
     throw new Error("NATS_NKEY_SEED is set but empty");
   return { value, source: "NATS_NKEY_SEED" };
 }
+function natsServerKey(url2) {
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url2);
+  if (match === null)
+    return url2;
+  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
+  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
+}
 function natsCredential(env, section, namedNatsUrls, filePath) {
   const fromEnvironment = natsSeedFromEnvironment(env);
   if (fromEnvironment !== undefined || section.natsSeed === undefined)
     return fromEnvironment;
   if (namedNatsUrls.length > 0) {
-    const servers = new Set(section.natsUrls ?? []);
-    const named = new Set(namedNatsUrls);
+    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
+    const named = new Set(namedNatsUrls.map(natsServerKey));
     if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
       throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
     }
@@ -39593,22 +39631,22 @@ function natsCredential(env, section, namedNatsUrls, filePath) {
 function envoySettings(env, config2, options = {}) {
   if (config2.kind === "failed")
     return offWithError(config2.error);
-  const own = config2.envoy;
-  if (own.enabled === false) {
+  const section = config2.envoy;
+  if (section.enabled === false) {
     return offWithNotice(`${config2.path} sets envoy.enabled to false: Envoy is off`);
   }
   const namedUrl = nonEmpty(env.ENVOY_URL);
   const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url3) => url3.trim()).filter((url3) => url3.length > 0);
-  if (own.enabled !== true && namedUrl === undefined && namedNatsUrls.length === 0) {
-    return offWithNotice(config2.missing === null ? `${config2.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config2.path, config2.missing, "Envoy is off"));
+  const addressed = namedUrl !== undefined || namedNatsUrls.length > 0 || section.url !== undefined || (section.natsUrls ?? []).length > 0 || section.enabled === true;
+  if (!addressed) {
+    return offWithNotice(config2.missing === null ? `${config2.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config2.path, config2.missing, "Envoy is off"));
   }
   if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
     return offWithError("ENVOY_URL must be an http or https URL");
   }
-  const section = own.enabled === true ? own : {};
-  const natsUrls = options.nats === false ? [] : namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
   const listener = section.url ?? DEFAULT_ENVOY_URL;
   const url2 = namedUrl ?? listener;
+  let token;
   try {
     const source = bearerSource(env, "ENVOY", () => section.token === undefined ? undefined : {
       token: section.token,
@@ -39617,20 +39655,31 @@ function envoySettings(env, config2, options = {}) {
       server: listener,
       checkout: false
     });
-    const token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url2, "ENVOY", env);
-    const natsSeed = natsUrls.length > 0 ? natsCredential(env, section, namedNatsUrls, config2.path) : undefined;
-    const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
-    return {
-      enabled: true,
-      url: normalizeEnvoyUrl(url2),
-      natsUrls,
-      token,
-      natsSeed,
-      heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
-    };
+    token = source.kind === "none" ? undefined : source.kind === "variable" ? source.token : fileBearer(source, url2, "ENVOY", env);
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
+  let natsUrls = options.nats === false ? [] : namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  let natsSeed;
+  let inboundError = null;
+  if (natsUrls.length > 0) {
+    try {
+      natsSeed = natsCredential(env, section, namedNatsUrls, config2.path);
+    } catch (error48) {
+      natsUrls = [];
+      inboundError = messageFor(error48);
+    }
+  }
+  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  return {
+    enabled: true,
+    url: normalizeEnvoyUrl(url2),
+    natsUrls,
+    token,
+    natsSeed,
+    inboundError,
+    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+  };
 }
 function normalizeEnvoyUrl(value) {
   return value.replace(/\/+$/, "");
@@ -39652,7 +39701,7 @@ function handedConfigFile(env) {
     return { path: null, error: messageFor(error48) };
   }
 }
-function startNotice(config2, dispatch, envoy) {
+function startNotice(config2, dispatch, envoy, nats) {
   if (config2.kind === "failed")
     return `${config2.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config2;
@@ -39679,6 +39728,11 @@ function startNotice(config2, dispatch, envoy) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
   parts.push(...config2.warnings);
+  if (envoy.enabled && nats && envoy.inboundError !== null) {
+    parts.push(`Envoy's inbound messages are off: ${envoy.inboundError}; the Envoy tools still work`);
+  } else if (envoy.enabled && nats && envoy.natsUrls.length === 0) {
+    parts.push("Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work");
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -39689,7 +39743,7 @@ function sessionSettings(file2, env, options) {
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
   const envoy = envoySettings(env, config2, { nats: options.nats });
-  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy) };
+  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy, options.nats !== false) };
 }
 function sessionDispatchSettings(file2, env, options) {
   if (file2.path === null)
@@ -43162,6 +43216,26 @@ async function startChannelSession(options) {
     }
   };
 }
+function inboundOffChannelSession(options) {
+  const { identity, stateDirectory, why } = options;
+  return {
+    delivery: { enqueue: async () => false, inbox: () => [] },
+    topics: () => [],
+    async follow() {
+      throw new Error(`inbound messages are off for this session: ${why}`);
+    },
+    unfollow: async () => [],
+    async rememberRole(role) {
+      await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
+        session_id: identity.id,
+        role
+      });
+    },
+    shutdown: async () => {
+      return;
+    }
+  };
+}
 async function executeEnvoyTool(runtime, name, input) {
   const { identity } = runtime;
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
@@ -43278,9 +43352,6 @@ async function runEnvoyChannelServer() {
     await serveEnvoyOff(`Envoy is off for this session: ${envoy.error ?? envoy.notice}`);
     return;
   }
-  if (envoy.natsUrls.length === 0) {
-    throw new Error("the Envoy Claude channel server needs a NATS server (envoy.natsUrls, ENVOY_NATS_URL)");
-  }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
   const identity = new SessionIdentity(claudeSessionId({
     ENVOY_SESSION_ID: overrideSessionId,
@@ -43324,23 +43395,31 @@ async function runEnvoyChannelServer() {
   await server.connect(new StdioServerTransport);
   let connection;
   try {
-    connection = await import_nats2.connect({
-      servers: [...envoy.natsUrls],
-      name: `claude-envoy-channel-${identity.id}`,
-      ...natsAuthOptions(envoy.natsSeed),
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait: 2000
-    });
-    session = await startChannelSession({
-      identity,
-      connection,
-      notifier: server,
-      client,
-      heartbeatMs: envoy.heartbeatMs,
-      stateDirectory,
-      ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
-    });
+    if (envoy.natsUrls.length === 0) {
+      session = inboundOffChannelSession({
+        identity,
+        stateDirectory,
+        why: envoy.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)"
+      });
+    } else {
+      connection = await import_nats2.connect({
+        servers: [...envoy.natsUrls],
+        name: `claude-envoy-channel-${identity.id}`,
+        ...natsAuthOptions(envoy.natsSeed),
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        reconnectTimeWait: 2000
+      });
+      session = await startChannelSession({
+        identity,
+        connection,
+        notifier: server,
+        client,
+        heartbeatMs: envoy.heartbeatMs,
+        stateDirectory,
+        ...configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}
+      });
+    }
     runtime = { identity, client, session };
     if (stopping)
       await session.shutdown();
