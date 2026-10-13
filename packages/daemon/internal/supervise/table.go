@@ -111,11 +111,12 @@ type IssueVolumeLost struct{ Claim claim.Token }
 // StalePlugin is a re-adopted claim found still speaking a plugin contract this daemon does not,
 // posted once at boot for every restored claim in that state (refreshStalePlugins in
 // internal/daemon), before any of them is relaunched, and again at every orphan sweep for a claim
-// still live whose contract still differs (the same cadence StaleAddress already has): a relaunch
-// the tree lifecycle or the store refuses leaves the claim live, its contract unchanged, and
-// nothing else re-tries it, so without the sweep's re-post the claim would stay stale for the rest
-// of the daemon's life. Trigger says which pass posted it — "boot" or "sweep" — for the log line
-// the relaunch writes; a claim still launching is left to its own registration, which decides the
+// still live whose contract still differs: the sweep is the one periodic pass that already reads
+// every claim, so a relaunch the tree lifecycle or the store refuses — which leaves the claim
+// live, its contract unchanged, and nothing else re-tried — rides that same pass rather than a
+// timer of its own; without the sweep's re-post the claim would stay stale for the rest of the
+// daemon's life. Trigger says which pass posted it — "boot" or "sweep" — for the log line the
+// relaunch writes; a claim still launching is left to its own registration, which decides the
 // comparison the moment it arrives.
 type StalePlugin struct {
 	Claim   claim.Token

@@ -138,11 +138,11 @@ type overrides struct {
 	// drive, since such a test configures no runtime.kubernetes.plugins and links no plugin pair.
 	pluginRelaunchable *bool
 	// checkLaunch stands in for the store's own CheckLaunch (supervise.Store), wrapping the real
-	// store so every launch's recheck answers this instead when it is non-nil and falls through to
-	// the real store otherwise (launchGatedStore, internal/daemon/launchgate.go): a test's way to
-	// refuse a relaunch the way a reserved tree cleanup or a transient store error would, without a
-	// lifecycle this pod has none of to reserve. nil, in production, is nothing: every launch
-	// reaches the real store's own check.
+	// store so every launch's recheck refuses first when this does, then asks the real store
+	// (launchGatedStore, internal/daemon/launchgate.go): a test's way to refuse a relaunch the way
+	// a reserved tree cleanup or a transient store error would, without a lifecycle this pod has
+	// none of to reserve. nil, in production, is nothing: every launch reaches the real store's
+	// own check.
 	checkLaunch func(context.Context, supervise.Claim) error
 }
 
@@ -1306,8 +1306,8 @@ func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) 
 // reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
 // the claims the daemon has not retired, once it has idled past the grace, and re-posts
 // StalePlugin for every live claim whose contract still differs — the retry a relaunch the boot
-// pass (refreshStalePlugins) could not complete needs, at the same cadence the moved-address twin
-// (StaleAddress) already gets from this same sweep.
+// pass (refreshStalePlugins) could not complete needs, riding the sweep because it is the one
+// periodic pass that already reads every claim, rather than running a timer of its own.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()

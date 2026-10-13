@@ -1069,7 +1069,11 @@ func TestPluginsBlockRefusals(t *testing.T) {
 		"a tilde range": {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: ~9.6\n", "runtime.kubernetes.plugins.pi_envoy must be an exact version"},
 		"unknown key":   {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: 9.6.1\n      pi_shared: 1.0.0\n", "unknown key runtime.kubernetes.plugins.pi_shared"},
 		"a network-path reference": {"    plugins:\n      pi_legion: //host/x.tgz\n      pi_envoy: 9.6.1\n",
-			"runtime.kubernetes.plugins.pi_legion must not begin with //"},
+			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
+		"an https URL with no host": {"    plugins:\n      pi_legion: https:///x.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
+		"an http URL with a single slash and no host": {"    plugins:\n      pi_legion: http:/cache/x.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
 		"not a mapping": {"    plugins: yes\n", "runtime.kubernetes.plugins must be a mapping"},
 	} {
 		t.Run(name, func(t *testing.T) {

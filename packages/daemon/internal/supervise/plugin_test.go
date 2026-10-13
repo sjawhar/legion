@@ -10,10 +10,12 @@ package supervise
 // mark the relaunch left.
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // A claim found re-adopted, registered or later, on a plugin contract the daemon does not speak is
@@ -113,6 +115,73 @@ func TestAStalePluginWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testi
 	h.wantCalls("Resume", 0)
 	if claim := h.claim(); claim.SuspensionHeld {
 		t.Fatalf("claim %+v after the stale-plugin event, want the held suspension ended", claim)
+	}
+}
+
+// refusableCheckLaunchStore wraps memStore's CheckLaunch so a test can make the launch path's
+// lifecycle recheck refuse on demand, the same way a reserved tree cleanup refuses a live launch.
+type refusableCheckLaunchStore struct {
+	*memStore
+	refuse bool
+}
+
+func (s *refusableCheckLaunchStore) CheckLaunch(ctx context.Context, c Claim) error {
+	if s.refuse {
+		return treelifecycle.ErrCleanupReserved
+	}
+	return s.memStore.CheckLaunch(ctx, c)
+}
+
+// A relaunch the launch path refuses (a reserved tree cleanup, the same refusal
+// relaunchAfterFailure already pays for before its charge) leaves a stale claim exactly as it
+// found it: refreshPlugin's own checkLaunch runs before the Warn, the PluginRelaunchFor mark, and
+// the turn's interruption, so the refused boot attempt changes nothing — the claim stays working
+// its turn on the stale contract, its confirmed pending delivery untouched. Once the refusal
+// clears, the sweep's re-post (refreshStalePlugins in internal/daemon) relaunches it for real.
+func TestAStalePluginRefusedByTheLaunchPathChangesNothing(t *testing.T) {
+	h := newBareHarness(t)
+	c := fixture(StateWorking)
+	c.PluginContract = 1
+	if err := h.store.PutClaim(h.ctx, c); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.PutDelivery(h.ctx, c.Token, *c.Pending); err != nil {
+		t.Fatal(err)
+	}
+	h.start(c)
+	store := &refusableCheckLaunchStore{memStore: h.store, refuse: true}
+	h.m.deps.Store = store
+	h.m.deps.PluginContract = 24
+
+	if err := h.handle(StalePlugin{Claim: h.token, Trigger: "boot"}); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("StalePlugin refused by the launch path = %v, want the reservation's wait", err)
+	}
+	h.wantState(StateWorking)
+	if claim := h.claim(); claim.PluginRelaunchFor != 0 {
+		t.Fatalf("PluginRelaunchFor after the refusal = %d, want 0", claim.PluginRelaunchFor)
+	}
+	if p := h.pending(); p.Interrupted || p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending after the refusal = %+v, want the confirmed delivery untouched", p)
+	}
+	h.wantCalls("Resume", 0)
+	if lines := h.logs.lines("relaunching it onto the current plugin"); len(lines) != 0 {
+		t.Fatalf("logged %v, want no relaunching line while the refusal lasts", lines)
+	}
+
+	store.refuse = false
+	if err := h.handle(StalePlugin{Claim: h.token, Trigger: "sweep"}); err != nil {
+		t.Fatalf("StalePlugin once the refusal clears = %v, want nil", err)
+	}
+	h.wantState(StateLaunching)
+	if claim := h.claim(); claim.PluginRelaunchFor != 24 || claim.Generation != 4 {
+		t.Fatalf("claim after the sweep relaunch = %+v, want PluginRelaunchFor 24 at generation 4", claim)
+	}
+	h.wantCalls("Resume", 1)
+	if p := h.pending(); !p.Interrupted || !p.ConfirmedAt.IsZero() {
+		t.Fatalf("pending after the sweep relaunch = %+v, want the task taken back, unconfirmed and interrupted", p)
+	}
+	if lines := h.logs.lines("relaunching it onto the current plugin"); len(lines) != 1 {
+		t.Fatalf("logged %v, want exactly one relaunching line once the refusal clears", lines)
 	}
 }
 

@@ -916,8 +916,8 @@ is left to its registration, which decides it the moment it arrives). Each relau
 `supervise: the process speaks another plugin contract; relaunching it onto the current plugin`,
 naming `claim`, `incarnation`, `pluginContract` (0 when the claim recorded none), `daemonApiVersion`
 and `trigger` (`boot`, `registration`, or `sweep`: a relaunch the tree lifecycle or the store
-refuses leaves the claim live and stale, so every orphan sweep posts it again until one attempt
-starts, the cadence a moved address is retried at).
+refuses leaves the claim live and stale, so the orphan sweep — the one periodic pass that already
+reads every claim — posts it again until one attempt starts).
 
 Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
 replacing it: the role container's shim runs an install script,
@@ -940,9 +940,12 @@ failure, and the claim is retried until the budget ends it in a `worker-died`.
 
 The pair the install uses is `runtime.kubernetes.plugins: { pi_legion: <exact version | absolute
 tarball path | http(s) URL>, pi_envoy: <same> }` (both keys together; a dist-tag or version range
-is refused), or, when that key is absent, the pair a release build links into the binary —
-`legion version` then prints a second line, `plugins @sjawhar/pi-legion <v> @sjawhar/pi-envoy <v>`
-(the worker image's own `legion` links one too). `legion start --check-config` prints, under
+is refused), or, when that key is absent, the pair a release build links into the binary — a
+binary that links one prints it as `legion version`'s second line, `plugins @sjawhar/pi-legion <v>
+@sjawhar/pi-envoy <v>` (the worker image's own `legion` links one too). An exact version is pinned
+by npm's own immutable version; a tarball path or URL source carries no integrity pin beyond the
+installed `pi-legion`'s declared-contract check above — it is operator trust in what that path or
+URL serves. `legion start --check-config` prints, under
 `runtime: kubernetes`, after its OK line and its capability lines, either
 `plugins: @sjawhar/pi-legion <v> @sjawhar/pi-envoy <v> (from legion.yaml|from the binary)` or
 `plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none

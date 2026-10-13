@@ -279,20 +279,25 @@ func readPlugins(value *yaml.Node) (*PluginsConfig, error) {
 // `https://cache/pi-legion.tgz`, the form bunSpec (internal/runtime/sandbox/plugins.go) and the
 // install it renders for agree on. A dist-tag or a range (an npm range such as `latest`, `^9`,
 // `9.x`, `~9.6`) is refused naming the key and that the pair must be one release's exact versions;
-// a source beginning with `//` is refused by name too — path.IsAbs calls it an absolute path, but
-// it reads as a network-path reference to no host bun can fetch a tarball from.
+// a source beginning with `//` is refused by the same message an http(s) URL with no host gets
+// (`https:///x.tgz`, `http:/cache/x.tgz` — the one slash u.Parse still calls absolute) — neither
+// names a host bun can fetch a tarball from.
 func readPluginSource(value *yaml.Node, key string) (string, error) {
 	source, err := requiredString(value, key, "")
 	if err != nil {
 		return "", err
 	}
+	noHost := fmt.Errorf("%s names no host bun can fetch a tarball from: got %q", key, source)
 	if strings.HasPrefix(source, "//") {
-		return "", fmt.Errorf("%s must not begin with //: that is a network-path reference, not a tarball bun can fetch; got %q", key, source)
+		return "", noHost
 	}
 	if path.IsAbs(source) {
 		return source, nil
 	}
 	if u, err := url.Parse(source); err == nil && u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") {
+		if u.Host == "" {
+			return "", noHost
+		}
 		return u.String(), nil
 	}
 	if !pluginVersion.MatchString(source) {

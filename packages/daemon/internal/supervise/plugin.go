@@ -27,18 +27,25 @@ import (
 // it is staleRegistration's, which charges it.
 //
 // launch can refuse the relaunch it starts — a tree lifecycle cleanup already reserved, a moved
-// epoch, a transient store error — and returns that refusal before the claim's state, locator, or
-// contract change (replaceProcess's own launch), so a refused attempt leaves the claim exactly as
-// stale as it found it: live, on the old contract, and still selected by HoldsCapability. Nothing
-// else retries that attempt, so the orphan sweep re-posts StalePlugin for it every interval
-// (refreshStalePlugins in internal/daemon) until one attempt succeeds; the re-check at the top of
-// this function makes a re-post for a claim a prior attempt already moved on — relaunched, or
-// registered current in the meantime — a no-op. Interrupting an already-interrupted turn
-// (interrupted) is itself a no-op, the pending delivery already marked, so a retried attempt never
-// re-delivers or charges a task twice.
+// epoch, a transient store error — so when no suspension is already held (m.held nil, the case
+// replaceProcess would launch rather than end in a suspension) that same check runs here first,
+// before the Warn, the PluginRelaunchFor mark, or interrupted's turn recovery: a refused attempt
+// returns having changed nothing, exactly as stale as it found it, and the orphan sweep's re-post
+// of StalePlugin for it (refreshStalePlugins in internal/daemon) is a true no-op until the refusal
+// clears. A held suspension is checked nothing here, since replaceProcess ends it in a suspension
+// (endHeld) rather than a launch, and endHeld makes no launch-path call to refuse. launch rechecks
+// the same thing inside replaceProcess's own call — that second check is the price of keeping
+// launch whole, the same price relaunchAfterFailure already pays (budgets.go). Interrupting an
+// already-interrupted turn (interrupted) is itself a no-op, the pending delivery already marked,
+// so a retried attempt never re-delivers or charges a task twice.
 func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 	if m.claim.PluginContract == m.deps.PluginContract {
 		return nil
+	}
+	if m.held == nil {
+		if err := m.checkLaunch(ctx); err != nil {
+			return err
+		}
 	}
 	m.log.Warn("supervise: the process speaks another plugin contract; relaunching it onto the current plugin",
 		"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
