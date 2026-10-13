@@ -77,30 +77,33 @@ runs; `dispatch` then takes host `claude` and Claude Code's rule, so `CLAUDE_CON
 session's own directory, comes ahead of any `ENVOY_CONFIG_FILE` an outer session exported.
 
 `readEnvoyConfig(path, env, { cwd })` reads that file and a checkout's `<cwd>/.envoy/envoy.json`
-as written, running no command. Each section is strict: an unknown key is refused naming it, and
-so is a top-level `natsUrls`, which belongs in `envoy.natsUrls`. JSON that does not parse is
-refused at its line and column, never with the parser's message, which quotes the text it stopped
-at. A missing chosen file contributes nothing and sets `missing`: each section is then on only when
-its variables name it, and a section still off says `no envoy.json at <path>: Dispatch is off`
-(`Envoy is off`, or `Dispatch and Envoy are off` when neither is on), with
+as written, running no command. Each section is strict: an unknown key is refused naming it. A
+chosen file's top-level `natsUrls` is read as `envoy.natsUrls` with a warning to move it; a later
+release stops reading it. Setting it beside `envoy.natsUrls` is refused, naming the latter. JSON
+that does not parse is refused at its line and column, never with the parser's message, which
+quotes the text it stopped at. A missing chosen file contributes nothing and sets `missing`: each
+section is then on only when its variables name it, and a section still off says `no envoy.json at
+<path>: Dispatch is off` (`Envoy is off`, or `Dispatch and Envoy are off` when neither is on), with
 `(a link to <target>, which does not exist)` after the path when it is a dangling link. When that
 file is the neutral one at `$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or
-`$HOME/.config`) and `~/.config/opencode/envoy.json` still exists, the notice ends
-`; <old file> is no longer read: move it to <path>`. An `XDG_CONFIG_HOME` naming another directory,
-as a Legion pane's does, gets no such hint. Nothing reads the old file. A chosen file that cannot
-be read or is not valid is `failed`, naming the file and the key, and both sections are off with
-that error.
+`$HOME/.config`) and `~/.config/opencode/envoy.json` still exists, it reads that old file with a
+warning to move it to the neutral path; a later release stops reading it. An `XDG_CONFIG_HOME`
+naming another directory, as a Legion pane's does, gets no fallback. A chosen file that cannot be
+read or is not valid is `failed`, naming the file and the key, and both sections are off with that
+error.
 
 A checkout's file is the repository's, and its failure is its own: one that cannot be read or is
 not valid refuses Dispatch with its error only while `DISPATCH_URL` is unset (a session's start
 notice then says `<error>; not read while DISPATCH_URL is set`), Envoy never reads it, and a `.envoy`
-that is a plain file is no checkout file. It may configure Dispatch alone: a top-level `natsUrls`
-there is refused saying a checkout's envoy.json holds only a `dispatch` section, and an `envoy`
-section, whatever it holds, is not read, which the start notice says
-(`<checkout>: envoy is not read from a checkout's envoy.json; put it in <chosen file>`). So a cloned
-repository neither chooses where a session's deliveries come from or which servers the user's NATS
-seed signs in to, nor turns off the Envoy the session's environment configured. The Go Dispatch
-server, which reads the same files, refuses to start on a checkout's `envoy` section.
+that is a plain file is no checkout file. It may configure Dispatch alone: its top-level `natsUrls`
+remains refused because a checkout holds only a `dispatch` section, and an `envoy` section,
+whatever it holds, is not read, which the start notice says (`<checkout>: envoy is not read from a
+checkout's envoy.json; put it in <chosen file>`). When `.envoy/envoy.json` is absent, the legacy
+`.opencode/envoy.json` is read under the same checkout rule with a warning to move it; a later
+release stops reading it. So a cloned repository neither chooses where a session's deliveries come
+from or which servers the user's NATS seed signs in to, nor turns off the Envoy the session's
+environment configured. The Go Dispatch server, which reads the same files, refuses to start on a
+checkout's `envoy` section.
 
 Each section is resolved on its own: `dispatchSettings(env, config)` merges the checkout's
 `dispatch` section over the chosen file's, key by key, and `envoySettings(env, config)` reads the
@@ -154,13 +157,15 @@ a throw, so a plugin that cannot work out its file still loads, with both sectio
 `sessionSettings(file, env, { cwd, nats })` reads it once and returns both sections
 (`dispatchSettings`, `envoySettings`) and the one notice the session shows at its start: the
 file's error (`<error>: Dispatch and Envoy are off`), the missing file's notice, the missing-file
-text for a section still off when a variable turned the other on, or a section's own error
-(`Dispatch is off: <error>`, `Envoy is off: <error>`), then what a checkout's file holds that the
+text for a section still off when a variable turned the other on, a section's own error
+(`Dispatch is off: <error>`, `Envoy is off: <error>`), what a checkout's file holds that the
 session does not read (its `envoy` section, or the file's own error while `DISPATCH_URL` replaces
-it); a file that turns a section off, or holds no section for it, says nothing.
-`sessionDispatchSettings(file, env, { cwd })` re-reads Dispatch from the same file on each use, for
-a plugin whose Dispatch calls follow a file that changes. `resolveDispatchConfig(env, { harness,
-cwd })` and `activeDispatchConfig` resolve Dispatch for a caller from its harness's file.
+it), or a migration warning; a file that turns a section off, or holds no section for it, says
+nothing. `sessionDispatchSettings(file, env, { cwd })` re-reads Dispatch from the same file on
+each use, for a plugin whose Dispatch calls follow a file that changes.
+`resolveDispatchConfig(env, { harness, cwd })` and `activeDispatchConfig` resolve Dispatch for a
+caller from its harness's file. `resolveDispatchConfigWithWarnings` returns that same resolution
+with each warning for a saved input the caller must move.
 
 ## Dispatch
 

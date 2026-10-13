@@ -118,7 +118,7 @@ export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironme
 const httpUrlSchema = z.url({ protocol: /^https?$/, error: "must be an http or https URL" });
 
 // Strict per section, http(s) addresses, tolerant top level. The Dispatch server reads the same
-// file (the Go loader in packages/envoy/internal/dispatch/config), and refuses what this refuses.
+// file and follows these validation and migration rules.
 const DispatchSectionSchema = z.strictObject({
   enabled: z.boolean().optional(),
   serverUrl: httpUrlSchema.optional(),
@@ -136,7 +136,7 @@ const EnvoySectionSchema = z.strictObject({
 });
 
 // A top-level `natsUrls` is the layout before the `envoy` section: `readEnvoyConfig` reads it as
-// `envoy.natsUrls` until it moves.
+// `envoy.natsUrls` with a warning until it moves; a later release stops reading it.
 const EnvoyFileSchema = z.looseObject({
   $schema: z.string().optional(),
   dispatch: DispatchSectionSchema.optional(),
@@ -503,8 +503,8 @@ function openCodeUserFile(filePath: string, env: EnvoyConfigEnvironment): string
   return path.join(home, ".config", "opencode", "envoy.json");
 }
 
-/** A chosen file's sections, with a top-level `natsUrls` read as `envoy.natsUrls` (and `warn`
- * said) when the `envoy` section names none, and refused when it does. */
+/** A chosen file's sections, with a top-level `natsUrls` read as `envoy.natsUrls` with a warning
+ * until it moves (a later release stops reading it), and refused when it is also set in `envoy`. */
 function chosenSections(
   filePath: string,
   settings: EnvoyFile,
@@ -541,8 +541,9 @@ function chosenSections(
  * `warnings`: in place of a missing neutral file at `$HOME/.config/legion/envoy.json`, the
  * OpenCode-era `~/.config/opencode/envoy.json`, trusted as the chosen file is; in place of a
  * missing `.envoy/envoy.json`, the checkout's `.opencode/envoy.json`, under every checkout rule;
- * and a chosen file's top-level `natsUrls` as `envoy.natsUrls`, refused beside an
- * `envoy.natsUrls` (a checkout's stays refused: it holds only a `dispatch` section).
+ * and a chosen file's top-level `natsUrls` as `envoy.natsUrls`. A later release stops reading
+ * each input; a checkout's top-level `natsUrls` and one set beside `envoy.natsUrls` remain
+ * refused.
  */
 export function readEnvoyConfig(
   filePath: string,

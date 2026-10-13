@@ -108,7 +108,8 @@ func (e *InvalidConfigError) Error() string {
 // the user file is ~/.config/legion/envoy.json (XDG_CONFIG_HOME unset, empty or ~/.config) and none
 // is there, ~/.config/opencode/envoy.json in its place; while the checkout has no
 // .envoy/envoy.json, its .opencode/envoy.json, under every checkout rule; and a user file's
-// top-level natsUrls as envoy.natsUrls, refused beside an envoy.natsUrls.
+// top-level natsUrls as envoy.natsUrls. A later release stops reading them; setting the top-level
+// key beside envoy.natsUrls remains refused.
 func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
@@ -278,9 +279,10 @@ func jsonError(data []byte, err error) string {
 
 // parseAndValidate mirrors the TS validator (envoy-client/src/envoy-config.ts): an object at the
 // top, type checks with null refused, unknown-key rejection under dispatch and envoy, http(s) URLs,
-// non-empty NATS URLs, the refusal of the top-level natsUrls, which is envoy.natsUrls, and, for a
-// checkout's file (checkoutOf set), the refusal of any envoy section, naming the user file it
-// belongs in.
+// non-empty NATS URLs, a user file's top-level natsUrls read as envoy.natsUrls with a warning until
+// it moves (a later release stops reading it), and the refusal when it is set beside
+// envoy.natsUrls. For a checkout's file (checkoutOf set), it refuses top-level natsUrls and any
+// envoy section, naming the user file the section belongs in.
 func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {

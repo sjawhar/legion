@@ -154,8 +154,12 @@ a section is off for a reason worth saying, the session says so once at its star
 checkout's file holds that is not read, or that inbound messages are off. Invalid configuration, an
 invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the error.
 
-`~/.config/opencode/envoy.json` is no longer read; move it with
-`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, and move a
+Until they move, `~/.config/opencode/envoy.json` is read when the neutral file is missing at
+`~/.config/legion/envoy.json`, a checkout's `.opencode/envoy.json` is read when its
+`.envoy/envoy.json` is absent, and a chosen file's top-level `natsUrls` is read as
+`envoy.natsUrls`; each prints a warning and a later release stops reading it. A checkout's
+top-level `natsUrls` and one set beside `envoy.natsUrls` remain refused. Move the user file with
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move
 top-level `natsUrls` into `envoy.natsUrls`.
 
 A command that writes to an owner names either an issue (`--issue`, a native `KEY` or an external

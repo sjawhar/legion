@@ -272,22 +272,23 @@
   as any key's value, is refused naming the key (`dispatch: Expected object`,
   `envoy.natsUrls: Expected string array`), as the clients refuse it, and JSON that does not parse
   is refused naming the file, the line and the column, never the text it stopped at, which can be
-  the start of a token or seed. A checkout's top-level `natsUrls` is refused saying a checkout's
-  envoy.json holds only a `dispatch` section.
-  `~/.config/opencode/envoy.json` and `.opencode/envoy.json` are not read: while the old user file
-  is the only one and the user file is `~/.config/legion/envoy.json`, startup refuses, naming both
-  paths and saying to move it, and a file that still carries a top-level `natsUrls` is refused,
-  naming `envoy.natsUrls`. The `envoy` section takes `enabled`, `url`, `natsUrls`, `token` and
-  `natsSeed` and refuses any other key; the server reads `envoy.natsUrls` whatever
-  `envoy.enabled` says, since `enabled` switches a session's Envoy. `XDG_CONFIG_HOME` is a row of
-  the settings table, and one set to a path that is not absolute refuses startup, naming it.
-  `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files, but not the old-file refusal.
-  No Go process runs `envoy.natsSeed`: `natstail` and `envoy-dispatch redeliver-webhooks` connect
-  as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names, so a run against a NATS that
-  requires a user needs `NATS_NKEY_SEED_FILE`, which the session launchers no longer export.
-  The compose deployment (`deploy/compose/dispatch.compose.yml`) mounts no `envoy.json` and needs
-  no change. A server started on a host whose user has only `~/.config/opencode/envoy.json`
-  refuses until the file moves:
+  the start of a token or seed. A checkout's top-level `natsUrls` remains refused because a
+  checkout holds only a `dispatch` section.
+  Until a later release stops reading them, a missing neutral user file at
+  `~/.config/legion/envoy.json` falls back to `~/.config/opencode/envoy.json`, a checkout without
+  `.envoy/envoy.json` falls back to `.opencode/envoy.json`, and a chosen file's top-level
+  `natsUrls` is read as `envoy.natsUrls`; each fallback logs a WARN to move it. Setting top-level
+  `natsUrls` beside `envoy.natsUrls` remains refused. The `envoy` section takes `enabled`, `url`,
+  `natsUrls`, `token` and `natsSeed` and refuses any other key; the server reads
+  `envoy.natsUrls` whatever `envoy.enabled` says, since `enabled` switches a session's Envoy.
+  `XDG_CONFIG_HOME` is a row of the settings table, and one set to a path that is not absolute
+  refuses startup, naming it. `DISPATCH_SERVER_URL` and `NATS_URLS` still override resolved file
+  values. No Go process runs `envoy.natsSeed`: `natstail` and `envoy-dispatch redeliver-webhooks`
+  connect as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names, so a run against a
+  NATS that requires a user needs `NATS_NKEY_SEED_FILE`, which the session launchers no longer
+  export. The compose deployment (`deploy/compose/dispatch.compose.yml`) mounts no `envoy.json` and
+  needs no change. A server started on a host whose user has only
+  `~/.config/opencode/envoy.json` starts with the migration warning until the file moves:
   `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move a
   top-level `natsUrls` into `envoy.natsUrls`.
 - **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's

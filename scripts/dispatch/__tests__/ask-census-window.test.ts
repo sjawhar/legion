@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { approvalAsk, edited, handedBack, opened, recordedAt } from "./approval-events.ts";
 
@@ -64,5 +66,55 @@ describe("ask census since #1671", () => {
     const flagged = stdout.slice(stdout.indexOf("Approval rounds above the human-turn budget"));
     // No ask opened in the window, two arrivals (the hand-backs), no human turn.
     expect(flagged).toMatch(/│ TEST-1\s*│ artifact-1\s*│ 0\s*│ 2\s*│ 0\s*│ true\s*│/);
+  });
+  test("prints configuration migration warnings on stderr", async () => {
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch(request) {
+        if (new URL(request.url).pathname === "/api/v1/issues") return Response.json([]);
+        return new Response("not found", { status: 404 });
+      },
+    });
+    servers.push(server);
+
+    const home = await mkdtemp(join(tmpdir(), "ask-census-"));
+    const oldConfig = join(home, ".config", "opencode", "envoy.json");
+    await mkdir(join(home, ".config", "opencode"), { recursive: true });
+    await writeFile(
+      oldConfig,
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: `http://127.0.0.1:${server.port}`, token: "token" },
+      })
+    );
+    const {
+      CLAUDE_CONFIG_DIR: _claudeConfigDir,
+      DISPATCH_TOKEN: _dispatchToken,
+      DISPATCH_TOKEN_FILE: _dispatchTokenFile,
+      DISPATCH_URL: _dispatchUrl,
+      ENVOY_CONFIG_FILE: _envoyConfigFile,
+      OMP_PROFILE: _ompProfile,
+      OPENCODE_CONFIG_DIR: _openCodeConfigDir,
+      PI_CODING_AGENT_DIR: _piCodingAgentDir,
+      XDG_CONFIG_HOME: _xdgConfigHome,
+      ...environment
+    } = process.env;
+    const census = Bun.spawn(
+      ["bun", script, "--from", recordedAt(2), "--to", recordedAt(7), "--project", "TEST"],
+      {
+        env: { ...environment, HOME: home },
+        stdout: "pipe",
+        stderr: "pipe",
+      }
+    );
+    const [stderr, exitCode] = await Promise.all([
+      new Response(census.stderr).text(),
+      census.exited,
+    ]);
+
+    expect(stderr).toBe(
+      `dispatch: ${oldConfig} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${oldConfig} ${join(home, ".config", "legion", "envoy.json")}, then move a top-level natsUrls into envoy.natsUrls\n`
+    );
+    expect(exitCode).toBe(0);
   });
 });

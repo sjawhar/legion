@@ -61,8 +61,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
   with the `dispatch` section of the workspace's `.envoy/envoy.json` over it. `DISPATCH_URL` and
   `DISPATCH_TOKEN_FILE`, which the daemon sets on every pane when Dispatch is configured
-  (`dispatch_url`), still override both. `~/.config/opencode/envoy.json` and `.opencode/envoy.json`
-  are no longer read.
+  (`dispatch_url`), still override both. Until a later release stops reading them, a missing neutral
+  file falls back to `~/.config/opencode/envoy.json`, a checkout without `.envoy/envoy.json` falls
+  back to `.opencode/envoy.json`, and a chosen file reads top-level `natsUrls` as
+  `envoy.natsUrls`; each fallback prints a warning to move it. A checkout's top-level `natsUrls`
+  and one set beside `envoy.natsUrls` remain refused.
 - `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an

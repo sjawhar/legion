@@ -204,11 +204,15 @@ Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the
 configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
 throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
 off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
-Envoy are off`, which also names `~/.config/opencode/envoy.json` while that old file is still
-there), a section's error, what a checkout's file holds that the session does not read, or that
-inbound messages are off; a file that turns a section off says nothing. A file location that cannot
-be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`) still
-loads the extension, with both sections off, nothing handed on, and that refusal as the notice.
+Envoy are off`), a section's error, what a checkout's file holds that the session does not read, or
+that inbound messages are off; a file that turns a section off says nothing. It also shows a
+migration warning when the neutral file is missing and `~/.config/opencode/envoy.json` is read, a
+checkout's `.envoy/envoy.json` is missing and `.opencode/envoy.json` is read, or a chosen file's
+top-level `natsUrls` is read as `envoy.natsUrls`. Each warning says to move the input; a later
+release stops reading it. A checkout's top-level `natsUrls` and one set beside
+`envoy.natsUrls` remain refused. A file location that cannot be worked out (a relative
+`XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`) still loads the extension, with
+both sections off, nothing handed on, and that refusal as the notice.
 
 ## The `dispatch` command
 

@@ -22,6 +22,11 @@
   `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move its
   top-level `natsUrls` into the `envoy` section (`envoy.natsUrls`), and a checkout's
   `.opencode/envoy.json` to `.envoy/envoy.json`, leaving out any Envoy setting.
+- Until a later release stops reading them, a missing neutral file falls back to
+  `~/.config/opencode/envoy.json`, a checkout without `.envoy/envoy.json` falls back to
+  `.opencode/envoy.json`, and a chosen file's top-level `natsUrls` is read as
+  `envoy.natsUrls`; each fallback prints a warning to move it. A top-level `natsUrls` remains
+  refused in a checkout and beside `envoy.natsUrls`.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
 - The `dispatch` command reads the envoy.json its session's plugin chose: with `DISPATCH_HOST` set,
@@ -52,9 +57,6 @@
 
 - `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
 - `envoyDefaultsFromEnvironment`, replaced by `envoySettings`.
-- `~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read; a missing
-  neutral file's notice names the first when it is still there and the neutral file is
-  `$HOME/.config/legion/envoy.json`. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
 
 ### Added
 

@@ -40,8 +40,12 @@ own. The `dispatch` command reads the file the `shell.env` hook hands it in `ENV
 Dispatch on, every session also carries the `dispatch-first` skill as an instruction file; with
 Envoy off, the plugin registers no Envoy tool and calls no listener. Why a section is off is logged
 once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or what a
-checkout's file holds that is not read). `~/.config/opencode/envoy.json` is no longer read: move it
-with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`.
+checkout's file holds that is not read). Until they move, `~/.config/opencode/envoy.json` is read
+when the neutral file is missing at `~/.config/legion/envoy.json`, a checkout's
+`.opencode/envoy.json` is read when `.envoy/envoy.json` is absent, and a chosen file's top-level
+`natsUrls` is read as `envoy.natsUrls`; each prints a warning and a later release stops reading it.
+A checkout's top-level `natsUrls` and one set beside `envoy.natsUrls` remain refused. Move the
+user file with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

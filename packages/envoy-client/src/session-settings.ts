@@ -119,15 +119,33 @@ export interface DispatchConfigOptions {
   readonly cwd?: string;
 }
 
-/** Dispatch for a caller running in `options.harness`: `sessionDispatchSettings` over the file
- * that harness's rule chooses (`sessionConfigFile`). */
+/** Dispatch and migration warnings for a caller running in `options.harness`. */
+export interface ResolvedDispatchConfig {
+  readonly dispatch: DispatchConfigResolution;
+  /** Saved inputs the caller read that a later release stops reading. */
+  readonly warnings: readonly string[];
+}
+
+/** Dispatch and migration warnings from the envoy.json that `options.harness` reads. */
+export function resolveDispatchConfigWithWarnings(
+  env: DispatchEnvironment,
+  options: DispatchConfigOptions
+): ResolvedDispatchConfig {
+  const file = sessionConfigFile(options.harness, env);
+  if (file.path === null) return { dispatch: offWithError(file.error), warnings: [] };
+  const config = readEnvoyConfig(file.path, env, { cwd: options.cwd ?? process.cwd() });
+  return {
+    dispatch: dispatchSettings(env, config),
+    warnings: config.kind === "read" ? config.warnings : [],
+  };
+}
+
+/** Dispatch for a caller running in `options.harness`, from the envoy.json that harness reads. */
 export function resolveDispatchConfig(
   env: DispatchEnvironment,
   options: DispatchConfigOptions
 ): DispatchConfigResolution {
-  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
-    cwd: options.cwd ?? process.cwd(),
-  });
+  return resolveDispatchConfigWithWarnings(env, options).dispatch;
 }
 
 /** The active Dispatch configuration (`resolveDispatchConfig`, then `activeDispatchSettings`). */
