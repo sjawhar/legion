@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import {
   chmodSync,
   existsSync,
@@ -13,6 +13,7 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
+import type * as EnvoyConfigModule from "../envoy-config";
 import {
   type EnvoyConfig,
   type EnvoyHarness,
@@ -797,22 +798,71 @@ describe("a ! command in envoy.json", () => {
     }
   });
 
-  test("runs once per process, its value or its failure kept for every later resolution", () => {
+  test("keeps its value for the process, and a failure for 60 s, then runs again", () => {
     const home = tempDir();
     const env = commandEnvironment(home);
     const runs = path.join(home, "runs");
     const failures = path.join(home, "failures");
+    const late = path.join(home, "late-token");
     const file = writeFile(path.join(home, "envoy.json"), {
       dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo cached-secret` },
-      envoy: { ...envoyOn, token: `!echo run >> ${failures}; exit 1` },
+      envoy: { ...envoyOn, token: `!echo run >> ${failures}; cat ${late}` },
     });
-    for (let resolution = 0; resolution < 2; resolution += 1) {
+    const resolve = () => {
       const config = readEnvoyConfig(file, env, { cwd: tempDir() });
-      expect(dispatchSettings(env, config)).toMatchObject({ token: "cached-secret" });
-      expect(envoySettings(env, config)).toMatchObject({ enabled: false });
+      return { dispatch: dispatchSettings(env, config), envoy: envoySettings(env, config) };
+    };
+    const start = Date.now();
+    try {
+      for (let resolution = 0; resolution < 2; resolution += 1) {
+        expect(resolve()).toMatchObject({
+          dispatch: { token: "cached-secret" },
+          envoy: { enabled: false },
+        });
+      }
+      // The cause goes away, as a keyring unlocked after the session started.
+      writeFileSync(late, "late-secret\n");
+      setSystemTime(new Date(start + 59_000));
+      expect(resolve().envoy).toMatchObject({ enabled: false });
+      expect(readFileSync(failures, "utf-8")).toBe("run\n");
+      setSystemTime(new Date(start + 61_000));
+      expect(resolve()).toMatchObject({
+        dispatch: { token: "cached-secret" },
+        envoy: { enabled: true, token: "late-secret" },
+      });
+      expect(readFileSync(failures, "utf-8")).toBe("run\nrun\n");
+      expect(readFileSync(runs, "utf-8")).toBe("run\n");
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  // Oh My Pi loads each extension instance as a fresh module: a cache held by one module instance
+  // would run every command again in each, blocking the parent's event loop at a subagent's start.
+  test("is kept for every copy of the module in the process, by command, file and directory", async () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const token = `!echo run >> ${runs}; echo shared-secret`;
+    const first = writeFile(path.join(home, "one", "envoy.json"), { dispatch: { token } });
+    const second = writeFile(path.join(home, "two", "envoy.json"), { dispatch: { token } });
+    // Each query string on a relative specifier loads a module of its own, as the host's loader
+    // does (a file: URL's query is dropped, so it would load this one).
+    const source = "../envoy-config.ts";
+    const copies: (typeof EnvoyConfigModule)[] = [
+      await import(`${source}?a`),
+      await import(`${source}?b`),
+    ];
+    expect(copies[0]).not.toBe(copies[1]);
+    for (const copy of copies) {
+      expect(copy.fileValue(token, "dispatch.token", first, env)).toBe("shared-secret");
     }
     expect(readFileSync(runs, "utf-8")).toBe("run\n");
-    expect(readFileSync(failures, "utf-8")).toBe("run\n");
+    // Another file is another key, and its command runs in its own directory.
+    for (const copy of copies) {
+      expect(copy.fileValue(token, "dispatch.token", second, env)).toBe("shared-secret");
+    }
+    expect(readFileSync(runs, "utf-8")).toBe("run\nrun\n");
   });
 
   // A failing natsSeed command turns off only inbound messages: the seed is for NATS alone.

@@ -144,8 +144,12 @@ file and not whatever repository the session started in. It runs in its own proc
 most 10 s, and its trimmed stdout is the value. Its
 exit status decides: a command that exited 0 has printed its value even when a process it left
 running holds stdout open; a timeout kills the whole group. It runs only when its section's
-resolver is about to use the value (the section on, no variable overriding the field), and once per
-process: its outcome, value or failure, is kept by command. The `dispatch` command is one process
+resolver is about to use the value (the section on, no variable overriding the field). Its value
+is kept for the process, shared across module instances (one map on `globalThis` under
+`Symbol.for("legion.envoy-config.commands")`, since Oh My Pi loads each extension instance, a
+`task` subagent's included, as a fresh module), and keyed by the command, its file and its working
+directory; a failure is kept for 60 s, then the command runs again, so a cause that clears (a
+keyring unlocked after the session started) needs no restart. The `dispatch` command is one process
 per call, and each Claude Code hook one per event, so a `!` token runs once for each. A non-zero
 exit, a timeout or empty output is an error naming the field and the file, never the output. A
 value with whitespace or a control character inside it, written, printed by a command, or given in

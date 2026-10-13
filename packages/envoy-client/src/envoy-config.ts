@@ -308,8 +308,23 @@ function parseFile<Settings>(
 /** What a `!` command came to: its value, or why it gave none. */
 type CommandOutcome = { readonly value: string } | { readonly failure: string };
 
-/** The outcome of every `!` command already run in this process, by command. */
-const commandOutcomes = new Map<string, CommandOutcome>();
+/** A kept outcome, and when it was kept. */
+type KeptOutcome = CommandOutcome & { readonly at: number };
+
+/** How long a failed `!` command is kept before it runs again: a transient cause (a locked
+ * keyring, a loaded machine past the timeout) clears without a restart. */
+const FAILURE_KEPT_MS = 60_000;
+
+/** The process-wide store of kept outcomes, by command, file and working directory. It lives on
+ * `globalThis` under a registered symbol because Oh My Pi loads each extension instance as a fresh
+ * module, and every bundle of this module in one process (pi-envoy's, pi-legion's) shares it; an
+ * entry's shape (`KeptOutcome`) is its contract across them. */
+const COMMAND_OUTCOMES: unique symbol = Symbol.for("legion.envoy-config.commands");
+const processGlobal = globalThis as typeof globalThis & {
+  [COMMAND_OUTCOMES]?: Map<string, KeptOutcome>;
+};
+const commandOutcomes: Map<string, KeptOutcome> = processGlobal[COMMAND_OUTCOMES] ?? new Map();
+processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
 
 function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): CommandOutcome {
   const childEnv: Record<string, string> = {};
@@ -368,13 +383,14 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
  * A value from the chosen file: as written, or, for one starting with `!`, its command's trimmed
  * stdout. The command runs under `/bin/sh -c` with `env`, in the directory of the file that names
  * it (never the session's working directory, so a relative command or a directory-configured shim
- * resolves against that file), in its own process group, for at most 10 s, once per process: its
- * outcome, value or failure, is kept by command. Its exit status decides, and the wait is for the
- * shell alone: once it exits or runs out of time, every process of its group still running is
- * killed, then its output is read. A non-zero exit, a timeout or empty output throws naming the
- * field and the file. A value with whitespace or a control character inside it, as written or as
- * printed, throws too, since it cannot be sent as one bearer. No error carries the value or either
- * stream.
+ * resolves against that file), in its own process group, for at most 10 s. Its value is kept for
+ * the process, shared by every copy of this module loaded in it, keyed by the command, its file and
+ * its working directory; a failure is kept for 60 s, then the command runs again. Its exit status
+ * decides, and the wait is for the shell alone: once it exits or runs out of time, every process of
+ * its group still running is killed, then its output is read. A non-zero exit, a timeout or empty
+ * output throws naming the field and the file. A value with whitespace or a control character
+ * inside it, as written or as printed, throws too, since it cannot be sent as one bearer. No error
+ * carries the value or either stream.
  */
 export function fileValue(
   value: string,
@@ -389,10 +405,15 @@ export function fileValue(
     return value;
   }
   const command = value.slice(1);
-  let outcome = commandOutcomes.get(command);
-  if (outcome === undefined) {
-    outcome = runCommand(command, env, path.dirname(path.resolve(filePath)));
-    commandOutcomes.set(command, outcome);
+  const cwd = path.dirname(path.resolve(filePath));
+  const key = JSON.stringify([command, filePath, cwd]);
+  let outcome = commandOutcomes.get(key);
+  if (
+    outcome === undefined ||
+    ("failure" in outcome && Date.now() - outcome.at >= FAILURE_KEPT_MS)
+  ) {
+    outcome = { ...runCommand(command, env, cwd), at: Date.now() };
+    commandOutcomes.set(key, outcome);
   }
   if ("failure" in outcome) throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
   return outcome.value;
