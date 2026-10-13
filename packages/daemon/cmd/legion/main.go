@@ -57,7 +57,7 @@ var release string
 // revision and release; both empty in every other build. They are this binary's own plugin
 // pair for a stale-plugin relaunch under Kubernetes (LEGION-164) when `legion.yaml` names none
 // (`runtime.kubernetes.plugins`) — `legion version`'s second line, and start's and
-// --check-config's resolution of the pair to install (linkedPlugins, applyLinkedPlugins).
+// --check-config's resolution of the pair to install (applyLinkedPlugins, daemon.ResolvedPlugins).
 var piLegionVersion, piEnvoyVersion string
 
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
@@ -207,10 +207,10 @@ func applyLinkedPlugins(cfg *config.Config) {
 	k.PluginsFromBinary = true
 }
 
-// pluginsSourceWords is ResolvedPlugins' source ("legion.yaml" or "binary") as the
-// `--check-config` line's parenthetical names it.
+// pluginsSourceWords is ResolvedPlugins' source (daemon.PluginsFromFile or daemon.PluginsFromBinary)
+// as the `--check-config` line's parenthetical names it.
 func pluginsSourceWords(source string) string {
-	if source == "binary" {
+	if source == daemon.PluginsFromBinary {
 		return "the binary"
 	}
 	return source

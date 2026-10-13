@@ -142,7 +142,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	if s.refuseIfStaleClaim(w, r, m) {
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
 		return
 	}
 	ctx, decided := s.decision(r, req.ClaimToken)
@@ -206,7 +206,7 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	if s.refuseIfStaleClaim(w, r, m) {
+	if s.refuseIfStaleClaim(w, r, m.Claim()) {
 		return
 	}
 	ctx, decided := s.decision(r, req.ClaimToken)
@@ -328,18 +328,17 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 	return true
 }
 
-// staleClaim reports m's claim's recorded contract and whether the claim is a stale process the
-// daemon is relaunching. A claim holds a capability hash only in a live state (registered, ready,
-// working, idle — supervise.Machine.holdsCapability): the relaunch that follows a stale
-// registration or a boot-time refreshPlugin moves the claim out of those states in the same
-// decision that discovers it, and Machine.persist clears the hash the moment it does, so a caller
-// that can still authenticate here is necessarily in that window — after the daemon has found it
-// stale (at boot, or at the registration that recorded the mismatch) and before its relaunch has
-// taken effect. A daemon that can relaunch nothing (PluginRelaunchable false, LEGION-164's
-// degraded Kubernetes mode) never starts that relaunch, so a stale claim there is left running and
+// staleClaim reports c's recorded contract and whether the claim is a stale process the daemon is
+// relaunching. A claim holds a capability hash only in a live state (registered, ready, working,
+// idle — supervise.HoldsCapability): the relaunch that follows a stale registration or a
+// boot-time refreshPlugin moves the claim out of those states in the same decision that discovers
+// it, and Machine.persist clears the hash the moment it does, so a caller that can still
+// authenticate here is necessarily in that window — after the daemon has found it stale (at
+// boot, or at the registration that recorded the mismatch) and before its relaunch has taken
+// effect. A daemon that can relaunch nothing (PluginRelaunchable false, LEGION-164's degraded
+// Kubernetes mode) never starts that relaunch, so a stale claim there is left running and
 // answered as any other: refusing it would stall agents that work today.
-func (s *server) staleClaim(m *supervise.Machine) (int, bool) {
-	c := m.Claim()
+func (s *server) staleClaim(c supervise.Claim) (int, bool) {
 	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion
 }
 
@@ -353,12 +352,12 @@ func (s *server) logStaleRefusal(r *http.Request, identityKey, identityValue str
 // refuseIfStaleClaim is the claim-route refusal shape (ready, exit): errorBody naming both
 // contracts, by way of claim.Refusal, which a claim route already answers with on any other
 // refusal.
-func (s *server) refuseIfStaleClaim(w http.ResponseWriter, r *http.Request, m *supervise.Machine) bool {
-	got, stale := s.staleClaim(m)
+func (s *server) refuseIfStaleClaim(w http.ResponseWriter, r *http.Request, c supervise.Claim) bool {
+	got, stale := s.staleClaim(c)
 	if !stale {
 		return false
 	}
-	s.logStaleRefusal(r, "claim", string(m.Claim().Token), got)
+	s.logStaleRefusal(r, "claim", string(c.Token), got)
 	refusal := claim.StalePluginContract(got, DaemonAPIVersion)
 	writeJSON(w, refusal.Status, refusal)
 	return true
@@ -366,12 +365,12 @@ func (s *server) refuseIfStaleClaim(w http.ResponseWriter, r *http.Request, m *s
 
 // refuseIfStaleClaimFailure is the credential- and workflow-route refusal shape (the grants
 // route's claim form, every grant-bearing route): Failure{Code: "STALE_PLUGIN_CONTRACT"}.
-func (s *server) refuseIfStaleClaimFailure(w http.ResponseWriter, r *http.Request, m *supervise.Machine) bool {
-	got, stale := s.staleClaim(m)
+func (s *server) refuseIfStaleClaimFailure(w http.ResponseWriter, r *http.Request, c supervise.Claim) bool {
+	got, stale := s.staleClaim(c)
 	if !stale {
 		return false
 	}
-	s.logStaleRefusal(r, "claim", string(m.Claim().Token), got)
+	s.logStaleRefusal(r, "claim", string(c.Token), got)
 	writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", claim.StalePluginContract(got, DaemonAPIVersion).Message)
 	return true
 }
@@ -390,7 +389,7 @@ func (s *server) claimSecretCheck(w http.ResponseWriter, r *http.Request, body [
 	if !ok {
 		return false
 	}
-	return s.refuseIfStaleClaim(w, r, m)
+	return s.refuseIfStaleClaim(w, r, m.Claim())
 }
 
 type field struct{ name, value string }

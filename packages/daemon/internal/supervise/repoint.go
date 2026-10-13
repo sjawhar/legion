@@ -24,7 +24,18 @@ import (
 func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: the process is alive at a stale address; replacing it with one at the current address",
 		"incarnation", m.claim.Locator.Incarnation, "detail", observation.Detail)
-	if err := m.interrupted(ctx, "the process at a stale address is replaced mid-turn"); err != nil {
+	return m.replaceProcess(ctx, "the process at a stale address is replaced mid-turn")
+}
+
+// replaceProcess is the recovery a stale process already found (repoint's stale address,
+// refreshPlugin's stale plugin contract) shares once logged: a task whose turn the process was
+// running goes back to waiting first (interrupted), the same recovery a death in a turn gets; a
+// held suspension ends here as it does for a death (endHeld), suspended rather than relaunched;
+// otherwise the claim is relaunched at once through the launch path a death uses (launch), a
+// Resume of its recorded session or a Spawn over its existing Sandbox when it has not registered
+// yet. interruption is the sentence the turn's recovery is logged with.
+func (m *Machine) replaceProcess(ctx context.Context, interruption string) error {
+	if err := m.interrupted(ctx, interruption); err != nil {
 		return err
 	}
 	if m.held != nil {

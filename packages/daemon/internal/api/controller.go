@@ -300,8 +300,7 @@ func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, 
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
 		return
 	}
-	if !found || !record.Registered() || record.Session != req.SessionID ||
-		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(req.Secret)) != 1 {
+	if !found || !controllerSessionRegistered(record, req.SessionID, req.Secret) {
 		writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
 		return
 	}
@@ -309,6 +308,14 @@ func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	s.mintControllerGrant(w)
+}
+
+// controllerSessionRegistered is the one authentication of a controller session against its
+// record: the current capability's registration, naming this session, whose secret hashes to the
+// recorded one. controllerSessionGrant and refuseIfStaleControllerSession both authenticate by it.
+func controllerSessionRegistered(record controller.Record, session, secret string) bool {
+	return record.Registered() && record.Session == session &&
+		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(secret)) == 1
 }
 
 // refuseIfStaleController is the stale-caller refusal for the operator's controller record
@@ -333,7 +340,8 @@ func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request,
 	if !found {
 		return false
 	}
-	got, stale := s.staleClaim(m)
+	c := m.Claim()
+	got, stale := s.staleClaim(c)
 	if !stale {
 		return false
 	}
@@ -350,8 +358,7 @@ func (s *server) refuseIfStaleControllerSession(w http.ResponseWriter, r *http.R
 	s.controllerMu.Lock()
 	record, found, err := s.controller.Controller(r.Context(), s.project)
 	s.controllerMu.Unlock()
-	if err != nil || !found || !record.Registered() || record.Session != sessionID ||
-		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(secret)) != 1 {
+	if err != nil || !found || !controllerSessionRegistered(record, sessionID, secret) {
 		return false
 	}
 	return s.refuseIfStaleController(w, r, record)

@@ -224,6 +224,48 @@ func TestOperatorControllersStaleGrantIsRefused(t *testing.T) {
 	}
 }
 
+// An operator-bearer grant (the Controller: true grant `legion status` redeems on
+// POST /legion/v1/issues/status with --operator-token-file) is returned by redeem without
+// consulting the controller record at all (LEGION-164): a mint for it checks nothing about the
+// record either (mintControllerGrant, the grant route's operator form), so its own staleness is
+// never the record's to answer for — only the controller session's own grant mint is
+// (controllerSessionGrant). The record's stale contract that refuses the session's own mint
+// (TestOperatorControllersStaleGrantIsRefused) leaves the operator-bearer grant's redeem
+// untouched.
+func TestOperatorBearerGrantRedeemsDespiteTheControllerRecordsStaleContract(t *testing.T) {
+	h := newControllerHarness(t, false)
+	capability := h.mintedSecret()
+	registration := h.registeredController(capability, "ses_operator")
+	stale := DaemonAPIVersion - 1
+	controllerRecord, found, err := h.store.Controller(context.Background(), testProject)
+	if err != nil || !found {
+		t.Fatalf("read the controller record: found=%v err=%v", found, err)
+	}
+	if ok, err := h.store.RegisterController(context.Background(), testProject, controllerRecord.Generation,
+		"ses_operator", secretHash(registration.Secret), time.Now().UTC(), stale); err != nil || !ok {
+		t.Fatalf("seed the controller's stale contract: ok=%v err=%v", ok, err)
+	}
+
+	grant := controllerGrant(t, h)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/issues/status", IssueStatusRequest{
+		GrantID: grant.GrantID, Issue: "LEGION-208", Status: "todo",
+	}, nil)
+	if recorder.Code == http.StatusConflict {
+		t.Fatalf("operator-bearer grant redeem = 409, want no stale refusal; body %s", recorder.Body)
+	}
+
+	sessionRecorder := h.controllerSessionGrant("ses_operator", registration.Secret)
+	if sessionRecorder.Code != http.StatusConflict {
+		t.Fatalf("controller session's own grant mint = %d, want 409; body %s", sessionRecorder.Code, sessionRecorder.Body)
+	}
+	var sessionFailure Failure
+	decodeInto(t, sessionRecorder, &sessionFailure)
+	if want := claim.StaleControllerContract(stale, DaemonAPIVersion).Message; sessionFailure.Error != want {
+		t.Fatalf("controller session grant refusal sentence = %q, want %q", sessionFailure.Error, want)
+	}
+}
+
 // Wrong secret is still refused 403, exactly as today, regardless of the claim's recorded
 // contract: the stale-caller refusal only ever replaces a 400 or runs after authentication, never
 // before it.

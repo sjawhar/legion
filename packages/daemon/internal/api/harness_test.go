@@ -436,7 +436,7 @@ func (h *harness) registerContract(bootToken, session string, contract int, rela
 // rather than the daemon's own, live and holding a capability — exactly the window between the
 // daemon finding a process stale (at boot, or at the registration that recorded the mismatch) and
 // its relaunch taking effect (supervise.refreshPlugin, supervise.staleRegistration), before
-// Machine.persist clears the capability a relaunched claim never keeps (holdsCapability). The
+// Machine.persist clears the capability a relaunched claim never keeps (supervise.HoldsCapability). The
 // claim is written to the store directly and the machine rebuilt from it (testSupervisor.restart),
 // as a daemon restart re-adopting a claim recorded this way would.
 func (h *harness) makeStale(t *testing.T, token claim.Token, session, secret string, contract int) {

@@ -33,13 +33,7 @@ func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
 		"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
 		"daemonApiVersion", m.deps.PluginContract, "trigger", trigger)
 	m.claim.PluginRelaunchFor = m.deps.PluginContract
-	if err := m.interrupted(ctx, "the process on another plugin contract is replaced mid-turn"); err != nil {
-		return err
-	}
-	if m.held != nil {
-		return m.endHeld(ctx)
-	}
-	return m.launch(ctx)
+	return m.replaceProcess(ctx, "the process on another plugin contract is replaced mid-turn")
 }
 
 // refreshStalePlugin is the StalePlugin event's row: the boot's own trigger, for the four states a
@@ -70,7 +64,7 @@ func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 		return nil
 	}
 	if !m.deps.PluginRelaunchable {
-		m.log.Error("supervise: the process speaks another plugin contract, and this daemon knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins",
+		m.log.Error(NoPluginSourceMessage,
 			"incarnation", m.claim.Locator.Incarnation, "pluginContract", got, "daemonApiVersion", m.deps.PluginContract)
 		return nil
 	}
@@ -85,3 +79,9 @@ func (m *Machine) staleRegistration(ctx context.Context, got int) error {
 	}
 	return claim.StalePluginContract(got, m.deps.PluginContract)
 }
+
+// NoPluginSourceMessage is logged whenever a daemon that can relaunch nothing onto a plugin
+// (supervise.Deps.PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) finds a stale
+// process instead of relaunching it: staleRegistration here, refreshStalePlugins
+// (internal/daemon/daemon.go) at boot.
+const NoPluginSourceMessage = "supervise: the process speaks another plugin contract, and this daemon knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins"

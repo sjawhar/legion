@@ -663,7 +663,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	bootToken := "interrupted-" + randomSuffix(t)
 	oldSecret := "old-secret"
 	oldCapability := sha256.Sum256([]byte(oldSecret))
-	// A launching claim holds no capability in reality (holdsCapability); the hash here stands in
+	// A launching claim holds no capability in reality (supervise.HoldsCapability); the hash here stands in
 	// for a process at this daemon's own contract, so the register/ready exchange below exercises
 	// the "previous launch" refusal rather than the stale-plugin one.
 	putClaim(t, cfg, supervise.Claim{

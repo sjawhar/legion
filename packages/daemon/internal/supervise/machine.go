@@ -1133,7 +1133,7 @@ func (m *Machine) forgetSend() {
 // delivery they change, each in one transaction, and every write hands the store the same shape
 // (stored).
 func (m *Machine) persist(ctx context.Context) error {
-	if !holdsCapability(m.claim.State) {
+	if !HoldsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
 	if m.claim.State != StateSuspended {
@@ -1152,7 +1152,7 @@ func (m *Machine) persist(ctx context.Context) error {
 func (m *Machine) stored() Claim {
 	c := m.claim
 	c.Pending = nil
-	if !holdsCapability(c.State) {
+	if !HoldsCapability(c.State) {
 		c.CapabilityHash = nil
 	}
 	if c.State != StateSuspended {
@@ -1161,8 +1161,8 @@ func (m *Machine) stored() Claim {
 	return c
 }
 
-// holdsCapability says whether a claim in state has a registered agent with a running process.
-func holdsCapability(state ClaimState) bool {
+// HoldsCapability says whether a claim in state has a registered agent with a running process.
+func HoldsCapability(state ClaimState) bool {
 	switch state {
 	case StateRegistered, StateReady, StateWorking, StateIdle:
 		return true

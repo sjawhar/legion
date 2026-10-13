@@ -90,10 +90,11 @@ func (s *server) claimGrant(w http.ResponseWriter, r *http.Request, req GrantReq
 		writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
 		return
 	}
-	if s.refuseIfStaleClaimFailure(w, r, machine) {
+	c := machine.Claim()
+	if s.refuseIfStaleClaimFailure(w, r, c) {
 		return
 	}
-	grant, err := s.grants.Mint(machine.Claim())
+	grant, err := s.grants.Mint(c)
 	if err != nil {
 		s.log.Error("api: mint claim grant", "error", err)
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
@@ -138,7 +139,7 @@ func (s *server) grantIdentityCheck(w http.ResponseWriter, r *http.Request, body
 		if err != nil || !authenticated {
 			return false
 		}
-		return s.refuseIfStaleClaimFailure(w, r, machine)
+		return s.refuseIfStaleClaimFailure(w, r, machine.Claim())
 	case id.SessionID != "" || id.Secret != "":
 		return s.refuseIfStaleControllerSession(w, r, id.SessionID, id.Secret)
 	default:
@@ -150,10 +151,20 @@ const timeFormat = "2006-01-02T15:04:05.999999999Z07:00"
 
 // redeem is every route's one grant check. A grant serves each request of the command it was
 // minted for until it expires, and a claim grant only while its claim is supervised under the
-// registration that minted it; the credential routes check that again after their GitHub await.
-// A grant whose claim or controller record speaks another plugin contract than the daemon's is
-// refused the stale-caller 409 here, once every other check has passed: every grant-bearing
-// route takes its caller's staleness from this one place.
+// registration that minted it; the credential routes check that again after their GitHub await. A
+// claim grant whose claim speaks another plugin contract than the daemon's is refused the
+// stale-caller 409 here, once every other check has passed: every grant-bearing route takes its
+// claim caller's staleness from this one place.
+//
+// A controller grant is returned here without consulting the controller record at all (LEGION-164):
+// its own staleness is refused at mint (controllerSessionGrant -> refuseIfStaleController), grants
+// live in process memory and die with a daemon restart, and a registration that changes the
+// record's contract comes after a mint that revokes every controller grant (RevokeControllers), so
+// a redeemable controller grant was always minted for a controller current at the time. Refusing
+// here on the record's contract would also catch the operator-bearer grant `legion status`
+// redeems on this route — also Controller: true — which after migration 0042 leaves every existing
+// controllers row at plugin_contract 0 until its next registration, refusing the operator's own
+// call at the first boot on this release.
 func (s *server) redeem(w http.ResponseWriter, r *http.Request, id string) (credential.Grant, bool) {
 	grant, err := s.grants.Redeem(id)
 	if errors.Is(err, credential.ErrExpired) {
@@ -165,23 +176,14 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request, id string) (cred
 		return credential.Grant{}, false
 	}
 	if grant.Controller {
-		record, found, err := s.controller.Controller(r.Context(), s.project)
-		if err != nil {
-			s.log.Error("api: read the controller record to redeem a grant", "error", err)
-			writeFailure(w, http.StatusInternalServerError, "GRANT_UNAVAILABLE", "grant is unavailable")
-			return credential.Grant{}, false
-		}
-		if found && s.refuseIfStaleController(w, r, record) {
-			return credential.Grant{}, false
-		}
 		return grant, true
 	}
-	machine, supervised := s.supervisor.Machine(grant.Claim)
-	if !supervised || !s.grants.StillMatches(grant, machine.Claim()) {
+	machine, holds := s.claimHolds(grant)
+	if !holds {
 		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
 		return credential.Grant{}, false
 	}
-	if s.refuseIfStaleClaimFailure(w, r, machine) {
+	if s.refuseIfStaleClaimFailure(w, r, machine.Claim()) {
 		return credential.Grant{}, false
 	}
 	return grant, true
@@ -189,17 +191,21 @@ func (s *server) redeem(w http.ResponseWriter, r *http.Request, id string) (cred
 
 const grantRevoked = "grant no longer belongs to an authenticated claim"
 
-// claimHolds says whether grant's claim is supervised and still holds the capability that minted it.
-func (s *server) claimHolds(grant credential.Grant) bool {
+// claimHolds says whether grant's claim is supervised and still holds the capability that minted
+// it, and the machine when it does.
+func (s *server) claimHolds(grant credential.Grant) (*supervise.Machine, bool) {
 	machine, supervised := s.supervisor.Machine(grant.Claim)
-	return supervised && s.grants.StillMatches(grant, machine.Claim())
+	if !supervised || !s.grants.StillMatches(grant, machine.Claim()) {
+		return nil, false
+	}
+	return machine, true
 }
 
 // redeemIdentityCheck is readBody's identity check for every grant-bearing route: {grantId}. A
-// grant that still redeems, naming a claim or the controller record whose recorded contract
-// differs, gets the 409 instead of the 400 every other undecodable body gets; an expired,
-// unavailable, or revoked grant, or a current caller's, leaves the body's own decode error
-// standing.
+// claim grant that still redeems, naming a claim whose recorded contract differs, gets the 409
+// instead of the 400 every other undecodable body gets; an expired, unavailable, or revoked
+// grant, a controller grant (redeem consults no controller record for one; see redeem), or a
+// current claim's, leaves the body's own decode error standing.
 func (s *server) redeemIdentityCheck(w http.ResponseWriter, r *http.Request, body []byte) bool {
 	var id struct {
 		GrantID string `json:"grantId"`
@@ -212,19 +218,13 @@ func (s *server) redeemIdentityCheck(w http.ResponseWriter, r *http.Request, bod
 		return false
 	}
 	if grant.Controller {
-		s.controllerMu.Lock()
-		record, found, err := s.controller.Controller(r.Context(), s.project)
-		s.controllerMu.Unlock()
-		if err != nil || !found {
-			return false
-		}
-		return s.refuseIfStaleController(w, r, record)
-	}
-	machine, supervised := s.supervisor.Machine(grant.Claim)
-	if !supervised || !s.grants.StillMatches(grant, machine.Claim()) {
 		return false
 	}
-	return s.refuseIfStaleClaimFailure(w, r, machine)
+	machine, holds := s.claimHolds(grant)
+	if !holds {
+		return false
+	}
+	return s.refuseIfStaleClaimFailure(w, r, machine.Claim())
 }
 
 // appLease is the GitHub App token mint every credential route needs: the token source and
@@ -256,7 +256,7 @@ func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant cre
 	if !ok {
 		return appauth.Lease{}, false
 	}
-	if !s.claimHolds(grant) {
+	if _, holds := s.claimHolds(grant); !holds {
 		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
 		return appauth.Lease{}, false
 	}

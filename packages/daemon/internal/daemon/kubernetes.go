@@ -82,22 +82,30 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 
+// PluginsFromFile and PluginsFromBinary name ResolvedPlugins' source: the file's
+// `runtime.kubernetes.plugins`, or the release binary's linked pair (cmd/legion's
+// piLegionVersion/piEnvoyVersion, applyLinkedPlugins).
+const (
+	PluginsFromFile   = "legion.yaml"
+	PluginsFromBinary = "binary"
+)
+
 // ResolvedPlugins is the plugin pair this Kubernetes daemon installs for a stale-plugin relaunch
 // (LEGION-164), and where it came from: the file's `runtime.kubernetes.plugins` when the file sets
-// one ("legion.yaml"), else the binary's linked pair when main filled cfg.Runtime.Kubernetes.Plugins
-// from it (cmd/legion's piLegionVersion/piEnvoyVersion, PluginsFromBinary true; "binary"), else nil
-// pair and "" source — the daemon knows no plugin versions, and every stale claim is recorded and
-// reported, never relaunched or refused (supervise.Deps.PluginRelaunchable false). Nil under tmux,
-// whose pane always resumes on the plugin installed on the daemon's host. legion start
+// one (PluginsFromFile), else the binary's linked pair when main filled cfg.Runtime.Kubernetes.Plugins
+// from it (cmd/legion's piLegionVersion/piEnvoyVersion, PluginsFromBinary field true; PluginsFromBinary
+// source), else nil pair and "" source — the daemon knows no plugin versions, and every stale claim is
+// recorded and reported, never relaunched or refused (supervise.Deps.PluginRelaunchable false). Nil
+// under tmux, whose pane always resumes on the plugin installed on the daemon's host. legion start
 // --check-config and the boot log both read this.
 func ResolvedPlugins(cfg config.Config) (*runtime.PluginInstall, string) {
 	k := cfg.Runtime.Kubernetes
 	if k == nil || k.Plugins == nil {
 		return nil, ""
 	}
-	source := "legion.yaml"
+	source := PluginsFromFile
 	if k.PluginsFromBinary {
-		source = "binary"
+		source = PluginsFromBinary
 	}
 	return &runtime.PluginInstall{PiLegion: k.Plugins.PiLegion, PiEnvoy: k.Plugins.PiEnvoy, Contract: api.DaemonAPIVersion}, source
 }

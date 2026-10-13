@@ -96,8 +96,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	_, drifted := imageDrift(pod, r.image)
+	installing := l.spec.Plugins != nil
 	replace := s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil ||
-		(drifted && spec.Plugins == nil) ||
+		(drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(ctx, s, pod, l.roles)
@@ -106,7 +107,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		}
 		replace = !bound
 	}
-	if l.spec.Plugins != nil && replace {
+	if installing && replace {
 		// Replaced for some other reason: the fresh pod's image is already current, so nothing is
 		// installed into it.
 		l.spec.Plugins = nil

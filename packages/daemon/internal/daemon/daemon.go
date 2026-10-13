@@ -1141,13 +1141,12 @@ func (s *supervision) start(boot context.Context) error {
 // one Error line per stale claim: the fleet runs on, unrelaunched, until an operator names a plugin
 // source.
 func (s *supervision) refreshStalePlugins() {
-	stalePluginStates := []supervise.ClaimState{supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle}
 	for _, c := range s.claims {
-		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !slices.Contains(stalePluginStates, c.State) {
+		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
 			continue
 		}
 		if !s.plan.pluginRelaunchable {
-			s.log.Error("supervise: the process speaks another plugin contract, and this daemon knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins",
+			s.log.Error(supervise.NoPluginSourceMessage,
 				"claim", c.Token, "incarnation", c.Locator.Incarnation, "pluginContract", c.PluginContract, "daemonApiVersion", api.DaemonAPIVersion)
 			continue
 		}
