@@ -204,7 +204,6 @@ async function deliveryRequest(page: Page, path: string): Promise<unknown> {
 
 test.beforeEach(async () => {
   await resetDatabase();
-  await seedDeliveryReconcileGithub();
 });
 
 test("a merge appears without a reload, and the page issues no delivery GET", async ({
@@ -295,7 +294,6 @@ test("a reconcile-style re-write sends no frame", async ({ browser }) => {
       .filter(
         (frame) => (frame.type === "snapshot" || frame.type === "delta") && frame.sub === sub
       );
-    expect(data.filter((frame) => frame.type === "delta")).toEqual([]);
     expect(data).toEqual([]);
   } finally {
     await context.close();
@@ -433,6 +431,7 @@ test("the freshness row says Live with the last change, and Reconnecting while d
   browser,
 }) => {
   await seedDeliveryFixture();
+  await seedDeliveryReconcileGithub();
   await sql(
     `UPDATE delivery_settings SET last_event_at = now(), last_reconcile_at = now() WHERE singleton`
   );
@@ -460,6 +459,7 @@ test("on a phone the delivery page shows a merge without a reload", async ({
     "the WebKit iPhone project owns the phone path"
   );
   await seedDeliveryFixture();
+  await seedDeliveryReconcileGithub();
   await sql(
     `UPDATE delivery_settings SET last_event_at = now(), last_reconcile_at = now() WHERE singleton`
   );

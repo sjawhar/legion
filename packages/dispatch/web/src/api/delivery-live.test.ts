@@ -132,9 +132,9 @@ afterEach(() => {
   jest.useRealTimers();
 });
 
-/** A live query as the page reads it: queryFn subscribes, the result comes from the cache. */
-function observe(liveView = view, queryKey: readonly unknown[] = key) {
-  const observer = new QueryObserver(queryClient, {
+/** The page's live query options, without subscribing an observer. */
+function liveObserver(liveView = view, queryKey: readonly unknown[] = key) {
+  return new QueryObserver(queryClient, {
     queryKey,
     queryFn: ({ queryKey: k }) => live.subscribe(k, liveView),
     meta: { live: true },
@@ -144,6 +144,11 @@ function observe(liveView = view, queryKey: readonly unknown[] = key) {
     refetchOnReconnect: false,
     retry: false,
   });
+}
+
+/** A live query as the page reads it: queryFn subscribes, the result comes from the cache. */
+function observe(liveView = view, queryKey: readonly unknown[] = key) {
+  const observer = liveObserver(liveView, queryKey);
   const unsubscribe = observer.subscribe(() => {});
   return { observer, unsubscribe };
 }
@@ -216,6 +221,30 @@ test("a snapshot lands in the cache even when the first load was cancelled", asy
     await settle();
     expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
     expect(observer.getCurrentResult().status).toBe("success");
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("a query collected before its observer subscribed still gets its snapshot", async () => {
+  // React builds the page's query while it renders and subscribes its observer in a later effect.
+  // gcTime 0 can collect that first query in between; subscribing then builds a second query under
+  // the same hash, and the first one's own removal notice arrives after the second subscribed.
+  jest.useFakeTimers();
+  const observer = liveObserver();
+  jest.advanceTimersByTime(1);
+  const unsubscribe = observer.subscribe(() => {});
+  try {
+    await settle();
+    const socket = sockets.latest();
+    jest.advanceTimersByTime(1);
+    await settle();
+    expect(socket.closedWith).toBeUndefined();
+    socket.open();
+    socket.receive(snapshot(socket.subscribed("timeline").sub));
+    await settle();
+    expect(observer.getCurrentResult().status).toBe("success");
+    expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
   } finally {
     unsubscribe();
   }

@@ -378,20 +378,3 @@ func (h *deliveryHub) answerLocked(sub *deliverySub) bool {
 	sub.revs = view.body.revs
 	return true
 }
-
-// dropLocked drops conn's sub id, the view it leaves without a sub, and conn once it holds none.
-func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
-	subs := h.conns[conn]
-	sub := subs[id]
-	if sub == nil {
-		return
-	}
-	delete(subs, id)
-	if len(subs) == 0 {
-		delete(h.conns, conn)
-	}
-	delete(sub.view.subs, sub)
-	if len(sub.view.subs) == 0 && h.views[sub.view.spec.key] == sub.view {
-		delete(h.views, sub.view.spec.key)
-	}
-}

@@ -29,6 +29,11 @@ function commitFor(repo: FakeRepo): string {
   return hasher.digest("hex");
 }
 
+/** The permissions an installation reports for a repository, in both installation answers. */
+function permissionsOf(repo: FakeRepo): Record<string, string | undefined> {
+  return { actions: repo.actions, contents: repo.contents, pull_requests: repo.pull_requests };
+}
+
 // "owner/repo" → its installation; a missing repository answers 404 (App not
 // installed).
 let repos = new Map<string, FakeRepo>();
@@ -53,11 +58,7 @@ Bun.serve({
       return Response.json({
         app_slug: "dispatch-e2e",
         id: repo.installation_id,
-        permissions: {
-          actions: repo.actions,
-          contents: repo.contents,
-          pull_requests: repo.pull_requests,
-        },
+        permissions: permissionsOf(repo),
       });
     }
 
@@ -82,11 +83,7 @@ Bun.serve({
           account: { login: "acme" },
           app_slug: "dispatch-e2e",
           id: repo.installation_id,
-          permissions: {
-            actions: repo.actions,
-            contents: repo.contents,
-            pull_requests: repo.pull_requests,
-          },
+          permissions: permissionsOf(repo),
         }))
       );
     }

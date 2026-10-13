@@ -6,9 +6,14 @@
 -- in commit order, and notifies 'delivery_changes', which Postgres delivers at commit. The lock is
 -- global across delivery-table writers and lasts until the writer's transaction ends, so concurrent
 -- intake, job intake and reconcile writes take turns. The hub needs that order: a reader that has
--- seen seq N must never later receive an earlier-committed N-1. This migration locks no existing
--- table: 0101-0106 each add one table's trigger, so each holds one table's lock alone, for
--- milliseconds (0073's reason).
+-- seen seq N must never later receive an earlier-committed N-1. Almost every writer is one
+-- statement, holding the lock from its trigger to its commit; the longest holders are a run's jobs
+-- write (UpsertRunJobs: the run row, then every job in one statement) and a session-group write
+-- (a few statements). A writer that also writes a delivery_runs row writes it before anything that
+-- takes this lock, as a one-statement run write does (row lock, then this lock in its trigger), so
+-- the two never wait on each other in a cycle. This migration locks no existing table: 0101-0106
+-- each add one table's trigger, so each migration holds one table's lock alone, for milliseconds
+-- (0073's reason).
 create table delivery_changes (
   seq      bigserial primary key,
   at       timestamptz not null default clock_timestamp(),

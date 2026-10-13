@@ -299,6 +299,12 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
 
   const stopCache = queryClient.getQueryCache().subscribe((event) => {
     if (event.type !== "observerRemoved" && event.type !== "removed") return;
+    // gcTime 0 can collect the query a render built before its observer subscribes; subscribing
+    // then builds a second query under the same hash, and the first still reports its own removal
+    // afterwards (QueryCache.remove notifies for a query it no longer holds). The subscription
+    // belongs to the query the cache holds now.
+    const held = queryClient.getQueryCache().get(event.query.queryHash);
+    if (held !== undefined && held !== event.query) return;
     if (event.type === "observerRemoved" && event.query.getObserversCount() > 0) return;
     const sub = byHash.get(event.query.queryHash);
     if (sub === undefined) return;

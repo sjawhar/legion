@@ -590,20 +590,53 @@ func ScanJob(row pgx.Row) (DeliveryRunJob, error) {
 // complete is whether this listing came from GitHub after every listed job finished: until a
 // complete listing lands, the backfill keeps listing the run's jobs (ListRunIDsSkippingJobs). A
 // complete listing with a running job is a caller bug and is refused before anything is written.
-// A job is finished when GitHub gives it a completion time or a conclusion; a skipped job may have
-// no completion time.
 // A read never undoes a later one: a finished job is never replaced by an unfinished one, and
 // jobs_complete never goes back to false, so a read taken while the run ran that lands after the
 // run's end changes nothing. Reaching here means ListWorkflowRunJobs just succeeded for this run,
 // so this also clears jobs_unfetchable_at/jobs_unfetchable_reason to null: a successful listing is
 // itself the "it is fetchable after all" signal, the same way a successful UpsertPullRequest
-// clears unfetchable_at/unfetchable_reason. The job rows and the run's bookkeeping commit together.
+// clears unfetchable_at/unfetchable_reason.
+//
+// The run's bookkeeping and its job rows commit together, in one transaction of two statements:
+// the run row first, then every job in one statement. Every other writer of a delivery_runs row is
+// one statement that takes the row's lock and then, in its change trigger, the change log's
+// advisory lock (0100); this transaction takes them in that same order, so a run's own completion
+// written beside its jobs waits for one of them rather than deadlocking with it. The advisory lock
+// is taken by the jobs statement's trigger, or the run statement's when it clears an unfetchable
+// mark, and held from there to the commit: at most the two statements and the commit.
 func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64, jobs []DeliveryRunJob, complete bool) error {
 	if complete {
 		for _, job := range jobs {
-			if job.CompletedAt == nil && job.Conclusion == nil {
+			if jobUnfinished(job) {
 				return fmt.Errorf("complete jobs write for run %d includes running job %q", runID, job.Name)
 			}
+		}
+	}
+	// One statement writes each name once, so a listing that repeats a name is folded here by the
+	// statement's own rule (a finished job is never replaced by an unfinished one), leaving the
+	// stored row as writing each job in turn would.
+	index := make(map[string]int, len(jobs))
+	names := make([]string, 0, len(jobs))
+	started := make([]*time.Time, 0, len(jobs))
+	completed := make([]*time.Time, 0, len(jobs))
+	conclusions := make([]*string, 0, len(jobs))
+	for _, job := range jobs {
+		var conclusion *string
+		if job.Conclusion != nil {
+			c := string(*job.Conclusion)
+			conclusion = &c
+		}
+		i, seen := index[job.Name]
+		if !seen {
+			index[job.Name] = len(names)
+			names = append(names, job.Name)
+			started = append(started, job.StartedAt)
+			completed = append(completed, job.CompletedAt)
+			conclusions = append(conclusions, conclusion)
+			continue
+		}
+		if completed[i] == nil || job.CompletedAt != nil {
+			started[i], completed[i], conclusions[i] = job.StartedAt, job.CompletedAt, conclusion
 		}
 	}
 	tx, err := pool.Begin(ctx)
@@ -611,30 +644,24 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 		return fmt.Errorf("begin jobs write for run %d: %w", runID, err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	for _, job := range jobs {
-		var conclusion *string
-		if job.Conclusion != nil {
-			c := string(*job.Conclusion)
-			conclusion = &c
-		}
-		if _, err := tx.Exec(ctx, `
-			insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
-			values ($1, $2, $3, $4, $5, $6)
-			on conflict (repo, run_id, name) do update set
-				started_at = excluded.started_at,
-				completed_at = excluded.completed_at,
-				conclusion = excluded.conclusion
-			where delivery_run_jobs.completed_at is null or excluded.completed_at is not null
-		`, repo, runID, job.Name, job.StartedAt, job.CompletedAt, conclusion); err != nil {
-			return fmt.Errorf("upsert job %q of run %d: %w", job.Name, runID, err)
-		}
-	}
 	if _, err := tx.Exec(ctx, `
 		update delivery_runs
 		set jobs_unfetchable_at = null, jobs_unfetchable_reason = null, jobs_complete = delivery_runs.jobs_complete or $3
 		where repo = $1 and run_id = $2
 	`, repo, runID, complete); err != nil {
 		return fmt.Errorf("clear jobs-unfetchable mark for run %d: %w", runID, err)
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
+		select $1, $2, job.name, job.started_at, job.completed_at, job.conclusion
+		from unnest($3::text[], $4::timestamptz[], $5::timestamptz[], $6::text[]) as job (name, started_at, completed_at, conclusion)
+		on conflict (repo, run_id, name) do update set
+			started_at = excluded.started_at,
+			completed_at = excluded.completed_at,
+			conclusion = excluded.conclusion
+		where delivery_run_jobs.completed_at is null or excluded.completed_at is not null
+	`, repo, runID, names, started, completed, conclusions); err != nil {
+		return fmt.Errorf("upsert the jobs of run %d: %w", runID, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit jobs write for run %d: %w", runID, err)
@@ -649,11 +676,17 @@ func JobsComplete(jobs []DeliveryRunJob) bool {
 		return false
 	}
 	for _, job := range jobs {
-		if job.CompletedAt == nil && job.Conclusion == nil {
+		if jobUnfinished(job) {
 			return false
 		}
 	}
 	return true
+}
+
+// jobUnfinished reports whether GitHub has given job neither a completion time nor a conclusion; a
+// skipped job may have a conclusion and no completion time.
+func jobUnfinished(job DeliveryRunJob) bool {
+	return job.CompletedAt == nil && job.Conclusion == nil
 }
 
 // RunTracked reports whether repo's run runID is stored: the job consumer reads GitHub only for a

@@ -25,9 +25,10 @@ export async function seedFakeGithub(repos: Record<string, FakeGithubRepo>): Pro
   await putFakeGithubRepos(repos);
 }
 
-/** Makes the local delivery reconcile succeed against an empty acme/widgets history, so it cannot
- * change the freshness verdict while a live-delivery assertion is measuring frames. A deployed
- * server has its own GitHub and is left as it is. */
+/** Makes the local delivery reconcile succeed against an empty acme/widgets history, so a pass that
+ * runs inside a test leaves the freshness row Live rather than red with the reconcile's error. Only
+ * a test that asserts the row says Live needs it. A deployed server has its own GitHub and is left
+ * as it is. */
 export async function seedDeliveryReconcileGithub(): Promise<void> {
   if (process.env.PLAYWRIGHT_BASE_URL) return;
   await putFakeGithubRepos({
