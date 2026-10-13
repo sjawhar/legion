@@ -2,10 +2,26 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-164",
-  "completed": "2026-10-13T00:48:28Z",
+  "completed": "2026-10-13T01:38:32Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
-  "head": "c8626dffc9e5815cbc1ce52bd3ff60ede1068f0e",
+  "head": "94325e57c7af6a66efa513dda981b404517a2cfb",
   "proof": [
+    {
+      "criterion": "4 (the tester's failure): an exact-version source of runtime.kubernetes.plugins, and the pair the release links into the binary, reach `bun add --exact` as @sjawhar/pi-legion@<version> / @sjawhar/pi-envoy@<version> — the production default source installs; a tarball path or URL source reaches bun as written",
+      "surface": "This worker pod (bun 1.3.14, the live npm registry): the exact /bin/sh -c script installScript renders for the version pair, run with a stand-in agent; plus the tester's red tests unmodified",
+      "command": "a throwaway test (deleted) wrote installScript(\"/tmp/l164r2/implementer\", 9, &runtime.PluginInstall{PiLegion: \"9.6.1\", PiEnvoy: \"9.5.1\", Contract: 23}) and the same at Contract 24; each run as /bin/sh -c \"$script\" legion-plugins sh -c 'echo \"AGENT STARTED: $*\"' agent --mode rpc; go test ./internal/runtime/sandbox/ -run 'TestAVersionSourceIsInstalledAsThePackageAtThatVersion|TestATarballOrURLSourceReachesBunVerbatim' -count=1 -v; jj diff --from 2c71f742 --to @ -- packages/daemon/internal/runtime/sandbox/plugins_test.go (empty)",
+      "observed": "The rendered line is `/usr/local/bin/bun add --exact '@sjawhar/pi-legion@9.6.1' '@sjawhar/pi-envoy@9.5.1'`. Contract 23: `installed @sjawhar/pi-legion@9.6.1`, `installed @sjawhar/pi-envoy@9.5.1`, `2 packages installed [12.00ms]`, `AGENT STARTED: --mode rpc`, exit=0. The tester's two red tests PASS with the test file unchanged from the tester's commit (0 lines of diff); `go test ./internal/runtime/sandbox/ ./internal/config/` ok.",
+      "headSha": "851a98a562a3e78a91661f7162086eb3577a798e (Go unchanged at 94325e57c7af6a66efa513dda981b404517a2cfb, which touches only scripts/e2e)",
+      "negativeControl": "The same version pair at Contract 24: both packages installed, then stderr `legion plugins: @sjawhar/pi-legion@9.6.1 declares daemon API contract 23; this daemon requires 24`, exit=1 before exec (no AGENT STARTED). Before the fix the same render was `bun add --exact '9.6.1' '9.5.1'`, which bun refused as package names (the tester's evidence)."
+    },
+    {
+      "criterion": "4(d) stage 4a's `stale-plugin-install` is runnable by the operator: its `plugins` step packs the checkout's plugins without parsing npm's stdout",
+      "surface": "This worker pod: scripts/e2e/lib/pack-plugin.sh run as stage 4a now runs it (with a throwaway jq stand-in on PATH, since the image has no jq; the devbox has jq 1.8.2)",
+      "command": "bash scripts/e2e/lib/pack-plugin.sh pi-envoy /tmp/l164-pk/pi-envoy; bash scripts/e2e/lib/pack-plugin.sh pi-legion /tmp/l164-pk/pi-legion; jj status; tar tzf /tmp/l164-pk/pi-legion/*.tgz | grep -E 'package/(package.json|dist/legion.js)'; bash -n scripts/e2e/stage4a-sandbox-runtime.sh",
+      "observed": "stdout exactly `/tmp/l164-pk/pi-envoy/sjawhar-pi-envoy-9.5.1.tgz` and `/tmp/l164-pk/pi-legion/sjawhar-pi-legion-9.6.1.tgz` (exit 0); the prepack's `Bundled … modules` report on stderr; both committed manifests unchanged afterwards; the tarball holds package/package.json and package/dist/legion.js; the script parses. The scrum master's full stage 4a run on the devbox host (image at 851a98a5's digest, checkout at 94325e57) is in progress; its CHECK block will be posted on dispatch://LEGION-164.",
+      "headSha": "94325e57c7af6a66efa513dda981b404517a2cfb",
+      "negativeControl": "The previous step, `npm pack --pack-destination … --json | jq -r '.[0].filename'`, failed on the devbox with `jq: parse error: Invalid numeric literal at line 1, column 8` because npm 10's stdout began with the prepack's `Bundled 196 modules in 96ms` (the scrum master's reproduction on dispatch://LEGION-164/ask/8f60b4e5-dcb5-4925-8d25-7f478e52df84)."
+    },
     {
       "criterion": "4. Under Kubernetes the pod stays and the plugin comes from npm: the install wrapper the Sandbox runtime hands the launcher installs the exact pair under $XDG_STATE_HOME/legion-plugins/g<generation>/, refuses a pi-legion on another contract before the agent starts, and names the installed copies as the two --extension roots",
       "surface": "This worker pod (the worker image, bun 1.3.14): the exact /bin/sh -c script installArgv (packages/daemon/internal/runtime/sandbox/plugins.go) renders, run with a stand-in agent that prints its argv; then `legion probe-image` on the installed pair through the pod lane",
@@ -73,7 +89,9 @@
     "The five plan departures from the spec (plan §3), all accepted by the architect over Envoy on 2026-10-12T20:29Z before implementation: no-plugin-source degraded mode relaunches nothing; a stale registration is recorded, relaunched, then answered 409; stage 4a reads the installed pi-legion's declared contract; a new Go-daemon `### Contract discipline` subsection; acceptance 7 proves the stale-caller path with the role's next `bash` call plus `read_record`.",
     "Stage 4a's `stale-plugin-install` checkpoint (acceptance 4d) and the production preconditions are operator-run; opened as dispatch://LEGION-164/ask/8f60b4e5-dcb5-4925-8d25-7f478e52df84 and dispatch://LEGION-164/ask/28313726-42fe-49db-a0fa-5df9fa9e97aa. The production boot itself (acceptance 7) is the post-merge production check.",
     "A forward merge with main (#1930 landed mid-implementation) at 210f810a resolved two conflicts (AGENTS.md's `go build` line, kubernetes.go's prepareSandbox doc comment); the fingerprint changed by that one AGENTS.md line only (https://github.com/sjawhar/legion/pull/1932#issuecomment-6135313192).",
-    "CI at the merge head 210f810a failed TestRunPrunesTheSecretFilesOfClaimsWithNoProcess (internal/daemon): it seeds a live claim with no recorded contract through the store and boots the daemon, which now relaunches such a claim first; c8626dff seeds it at api.DaemonAPIVersion, as the unfinished-claim test already does. The pod could not run it (the package's NATS tests need Docker)."
+    "CI at the merge head 210f810a failed TestRunPrunesTheSecretFilesOfClaimsWithNoProcess (internal/daemon): it seeds a live claim with no recorded contract through the store and boots the daemon, which now relaunches such a claim first; c8626dff seeds it at api.DaemonAPIVersion, as the unfinished-claim test already does. The pod could not run it (the package's NATS tests need Docker).",
+    "Round 2 (tester's fail, 2026-10-13T01:12Z): a bare version source never installed (bun read `9.6.1` as a package name). Fixed in internal/runtime/sandbox/plugins.go (bunSpec); the tester's red tests pass unmodified; stage 4a's negative control now names the published pi-legion by exact version so the devbox run proves the mapping live; stage 4a's pack step routed through lib/pack-plugin.sh after the scrum master's devbox run hit npm's polluted stdout.",
+    "The stage 4a entry-point variable is STAGE4A_FROM (the plan and my first ask said LEGION_E2E_FROM), and a STAGE4A_FROM run is a development run the script itself marks as never the proof; the scrum master (Sami: 'Ask the scrum master' on both asks) is running the full stage 4a on the devbox host instead. The precondition ask was answered by the release-speed lane: bun 1.3.14 in all 39 live issue pods; the daemon runs the worker image's own /opt/legion/bin/legion (a devel commit), so the pair reaches it through the worker image's build-args once the release's image is pinned, else runtime.kubernetes.plugins."
   ],
   "openQuestions": [
     "Whether the LEGION deployment's daemon is the release archive's `legion` or the worker image's (ask 28313726): both link the pair; the answer only tells the production check where to read `legion version` from before the restart."
@@ -81,5 +99,6 @@
   "discoveredComplexity": [
     "Simplify pass (ce-simplify-code, three `reviewer` agents): 11 findings applied at 48f3c831 — one correctness fix (above) and shared helpers (`replaceProcess`, `staleContract`, `claimHolds` returning the machine, `controllerSessionRegistered`, `HoldsCapability`, `NoPluginSourceMessage`, `PluginsFromFile`/`PluginsFromBinary`, `staleClaim` over a claim copy); one skipped (streaming decode for routes with no identity check: bodies are already bounded by maxRequestBytes)."
   ],
-  "ci": "Tests run 38328392549 (lint, typecheck, test success) and PR Title run 38328392565 at c8626dffc9e5815cbc1ce52bd3ff60ede1068f0e"
+  "ci": "Round 2: Tests run 38332984930 (lint, typecheck, test success) and PR Title run 38332984989 at 94325e57c7af6a66efa513dda981b404517a2cfb; Tests run 38331911739 green at 851a98a5. Round 1: Tests run 38328392549 at c8626dff.",
+  "round": 2
 }
