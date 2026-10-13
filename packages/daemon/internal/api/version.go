@@ -160,4 +160,9 @@ package api
 // then 21, then 22; LEGION-631 landed at 19, LEGION-668 at 20, LEGION-663 at 21 and LEGION-618 at
 // 22 first, so a daemon at any of them would pass the gate against a plugin whose strict reader
 // lacks the field. Renumbered four times, as the collision note says.)
-const DaemonAPIVersion = 23
+//
+// 24: LEGION-164 -- pluginContract on the claim views (api.ClaimView, api.OperatorClaim) and the
+// controller locator (api.ControllerLocator), always emitted, 0 meaning no contract recorded; the
+// stale-caller refusals (409 naming both contracts). A 23 plugin's strict reader refuses a state
+// whose views carry the field, so the boot gate and legion probe-image refuse the mixed pair.
+const DaemonAPIVersion = 24

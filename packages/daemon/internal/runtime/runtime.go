@@ -157,6 +157,12 @@ func (k Known) Validate() error {
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
 // names the transcript the same agent continues from. WorkspaceRecoveredFrom names the ref a
 // workspace recreated after its volume was lost is recovered from; "" for every other launch.
+// Plugins, set only under Kubernetes (specs.SpawnSpec, LEGION-164), carries the plugin pair a
+// stale-plugin relaunch installs into the kept pod before Oh My Pi starts, in place of the
+// image's own copies; nil for every launch that installs nothing — every tmux launch, and every
+// Kubernetes launch that is not replacing a process on another plugin contract. The tmux runtime
+// ignores it: a pane always resumes on the plugin installed on the daemon's host, which the boot
+// gate already holds to the daemon's contract.
 type SpawnSpec struct {
 	Claim                  claim.Token
 	Project                string
@@ -171,6 +177,18 @@ type SpawnSpec struct {
 	Repository             ghrepo.Repository
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
+	Plugins                *PluginInstall
+}
+
+// PluginInstall is the plugin pair a Kubernetes launch installs before Oh My Pi starts, and the
+// contract the installed pi-legion must declare. Each of PiLegion and PiEnvoy is the daemon's own
+// resolution of `runtime.kubernetes.plugins` (an exact version, an absolute tarball path, or an
+// http(s) URL the pod can read) or, when the file names none, the binary's linked pair — never an
+// npm dist-tag or a range. Contract is this daemon's api.DaemonAPIVersion: the install's own check
+// refuses to start the agent when the installed pi-legion declares another number.
+type PluginInstall struct {
+	PiLegion, PiEnvoy string
+	Contract          int
 }
 
 // PromptParts are the pieces of the agent's system prompt: its role prompt files, the sentence

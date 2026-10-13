@@ -187,6 +187,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Timeouts: supervise.Timeouts{
 			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second,
 		},
+		PluginContract: 24,
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
@@ -332,7 +333,7 @@ func (d *operatorDaemon) ready(token legionclaim.Token) {
 	var registered legionclaim.RegisterResponse
 	d.post("/legion/v1/claims/register", legionclaim.RegisterRequest{
 		BootToken: bootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, &registered)
 	d.post("/legion/v1/claims/ready", legionclaim.ReadyRequest{
 		ClaimToken: token, SessionID: "ses_" + string(token), Secret: registered.Secret, Generation: registered.Generation,
@@ -396,7 +397,7 @@ func TestClaimsSpawnPostsTheClaimWithTheOperatorBearer(t *testing.T) {
 	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Claim != architectClaim {
 		t.Fatalf("spawns = %+v, want one launch of %s", spawns, architectClaim)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -449,7 +450,7 @@ func TestClaimsDeliverPostsTheTask(t *testing.T) {
 	if answered.Pending == nil || answered.Pending.Task != "Review the plan." {
 		t.Fatalf("the daemon answered pending %+v, want the task queued", answered.Pending)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -469,9 +470,9 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 		action, method, want string
 		claim                legionclaim.Token
 	}{
-		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n", architectClaim},
-		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2\n", architectClaim},
-		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1\n", workerClaim},
+		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 24\n", architectClaim},
+		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 24\n", architectClaim},
+		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0\n", workerClaim},
 	} {
 		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(step.claim))...)
 
@@ -504,8 +505,8 @@ func TestClaimsClosePostsToTheClaimsCloseRoute(t *testing.T) {
 	}
 }
 
-// list prints one line per claim — token, role, issue, state, generation — in the daemon's token
-// order, and --json prints the daemon's answer byte for byte.
+// list prints one line per claim — token, role, issue, state, generation, plugin contract — in the
+// daemon's token order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	d := newOperatorDaemon(t)
 	d.succeed(d.spawnArgs()...)
@@ -517,8 +518,8 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out := d.succeed(append([]string{"list"}, d.reach()...)...)
 
 	wantOperatorRequest(t, d.lastOperatorRequest(), http.MethodGet, "/legion/v1/operator/claims")
-	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1\n" +
-		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1\n"
+	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 24\n" +
+		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0\n"
 	if out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}

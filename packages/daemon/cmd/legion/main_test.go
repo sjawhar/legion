@@ -403,6 +403,39 @@ func TestVersionPrintsTheReleaseTheLinkerSets(t *testing.T) {
 	}
 }
 
+// `legion version` prints a second line naming the linked plugin pair (the release workflow links
+// both beside revision and release) only when both are linked: a build with neither stays one
+// line, and one of the two linked alone counts as neither, so a half-linked build is never read as
+// a release that shipped a pair.
+func TestVersionNamesTheLinkedPluginsOnlyWhenBothAreLinked(t *testing.T) {
+	linkedLegion, linkedEnvoy := piLegionVersion, piEnvoyVersion
+	t.Cleanup(func() { piLegionVersion, piEnvoyVersion = linkedLegion, linkedEnvoy })
+
+	for _, tc := range []struct {
+		name            string
+		legion, envoy   string
+		wantPluginsLine bool
+	}{
+		{"neither linked", "", "", false},
+		{"pi-legion alone", "9.7.0", "", false},
+		{"pi-envoy alone", "", "9.6.1", false},
+		{"both linked", "9.7.0", "9.6.1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			piLegionVersion, piEnvoyVersion = tc.legion, tc.envoy
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "version"}, &out, &errb); code != 0 {
+				t.Fatalf("exit %d: %s", code, errb.String())
+			}
+			lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+			hasPlugins := len(lines) == 2 && lines[1] == "plugins @sjawhar/pi-legion "+tc.legion+" @sjawhar/pi-envoy "+tc.envoy
+			if hasPlugins != tc.wantPluginsLine || (!tc.wantPluginsLine && len(lines) != 1) {
+				t.Fatalf("stdout = %q, want a plugins line: %t", out.String(), tc.wantPluginsLine)
+			}
+		})
+	}
+}
+
 // Both commands that read a configured bind dial it the same way: `legion state --config` on a
 // daemon bound to every interface reads loopback, as `legion status` does.
 func TestStateAddressDialsLoopbackForAWildcardBind(t *testing.T) {
@@ -958,6 +991,7 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
       merger: {cpu: 500m, memory: 1Gi}
 `
 	const secretsGap = "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
+	const pluginsGap = "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
 	for _, tc := range []struct{ name, extra, want string }{
 		{"no resources block, no broker: every role at the defaults", "", secretsGap},
 		{"a role with one field set, the other the default", "    resources: {tester: {memory: 12Gi}}\n", secretsGap},
@@ -973,7 +1007,40 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 			var out, errb bytes.Buffer
 			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
 
-			if want := "Config OK: project=DEMO\n" + tc.want; code != 0 || out.String() != want || errb.Len() != 0 {
+			if want := "Config OK: project=DEMO\n" + tc.want + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+			}
+		})
+	}
+}
+
+// --check-config's plugins line names the pair runtime.kubernetes.plugins sets, "from
+// legion.yaml", or, absent that, this binary's linked pair, "from the binary"; absent both, the
+// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap).
+func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
+	legionState(t)
+	for _, tc := range []struct {
+		name, extra, legion, envoy, want string
+	}{
+		{"the file's own pair", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n", "", "",
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)\n"},
+		{"the binary's linked pair, the file setting none", "", "9.7.0", "9.6.1",
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from the binary)\n"},
+		{"the file's pair wins over the binary's", "    plugins: {pi_legion: 9.7.1, pi_envoy: 9.6.2}\n", "9.7.0", "9.6.1",
+			"plugins: @sjawhar/pi-legion 9.7.1 @sjawhar/pi-envoy 9.6.2 (from legion.yaml)\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			linkedLegion, linkedEnvoy := piLegionVersion, piEnvoyVersion
+			t.Cleanup(func() { piLegionVersion, piEnvoyVersion = linkedLegion, linkedEnvoy })
+			piLegionVersion, piEnvoyVersion = tc.legion, tc.envoy
+
+			config := kubernetesCheckConfig(t, tc.extra)
+			var out, errb bytes.Buffer
+			code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+
+			secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
+			want := "Config OK: project=DEMO\n" + secretsGap + tc.want
+			if code != 0 || out.String() != want || errb.Len() != 0 {
 				t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
 			}
 		})

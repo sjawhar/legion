@@ -89,7 +89,7 @@ func recordControllerSession(t *testing.T, cfg config.Config, project, session s
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := st.RegisterController(context.Background(), project, generation, session, []byte("secret"), time.Now()); err != nil || !ok {
+	if ok, err := st.RegisterController(context.Background(), project, generation, session, []byte("secret"), time.Now(), 0); err != nil || !ok {
 		t.Fatalf("register the controller: %v %v", ok, err)
 	}
 }

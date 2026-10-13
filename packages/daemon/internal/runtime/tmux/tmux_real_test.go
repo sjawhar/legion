@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
@@ -477,7 +478,7 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 			r.environ = append(r.environ, entry)
 		}
 	}
-	r.environ = append(r.environ, "TMUX_TMPDIR="+r.tmuxDir)
+	r.environ = append(r.environ, "TMUX_TMPDIR="+r.tmuxDir, "LEGION_STANDIN_PLUGIN_CONTRACT="+strconv.Itoa(api.DaemonAPIVersion))
 	r.project = "t" + randomHex(t, 4)
 	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()

@@ -2,8 +2,10 @@ package supervise
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,37 @@ import (
 )
 
 var liveStates = []ClaimState{StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle}
+
+// NewMachine refuses to build over a Deps whose bounds are not set: every limit, every timeout's
+// interval count, and the daemon's own plugin contract must be at least 1 — 0 is also a claim's
+// "none recorded" value, and a daemon that compared every claim against it would call every one
+// stale.
+func TestNewMachineRefusesADepsWithAnUnsetBound(t *testing.T) {
+	base := func() Deps {
+		h := newBareHarness(t)
+		return h.deps
+	}
+	for _, field := range []string{"Limits.LaunchFailures", "Limits.PromptFailures", "Limits.PromptRetires", "Timeouts.RegistrationIntervals", "PluginContract"} {
+		t.Run(field, func(t *testing.T) {
+			deps := base()
+			switch field {
+			case "Limits.LaunchFailures":
+				deps.Limits.LaunchFailures = 0
+			case "Limits.PromptFailures":
+				deps.Limits.PromptFailures = 0
+			case "Limits.PromptRetires":
+				deps.Limits.PromptRetires = 0
+			case "Timeouts.RegistrationIntervals":
+				deps.Timeouts.RegistrationIntervals = 0
+			case "PluginContract":
+				deps.PluginContract = 0
+			}
+			if _, err := NewMachine(context.Background(), deps, fixture(StateQueued)); err == nil || !strings.Contains(err.Error(), field) {
+				t.Fatalf("new machine over a zero %s = %v, want a refusal naming it", field, err)
+			}
+		})
+	}
+}
 
 func TestSpawnPersistsTheBootTokenHashBeforeItLaunches(t *testing.T) {
 	h := newHarness(t)
@@ -114,7 +147,7 @@ func TestTheRecordedSessionMayRegisterAgain(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 
-			h.must(RequestRegister{Claim: testToken, Generation: 1, Session: session, SessionFile: sessionFile, CapabilityHash: []byte("second")})
+			h.must(RequestRegister{Claim: testToken, Generation: 1, Session: session, SessionFile: sessionFile, CapabilityHash: []byte("second"), PluginContract: h.deps.PluginContract})
 
 			h.wantState(state)
 			if got := string(h.store.load(testToken).CapabilityHash); got != "second" {

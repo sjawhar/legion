@@ -15,13 +15,17 @@
 // dotfiles session-env extension's — both use the omp-attribution-*.toml
 // filename grammar) are stripped before the current overlay is appended, and
 // the overlay is written atomically. Failure to resolve jj or write the
-// overlay is non-fatal and must never block root bootstrap.
-import { execFile } from "node:child_process";
+// overlay is non-fatal and must never block root bootstrap, so the jj call is
+// bounded: a jj that never answers (a PATH wrapper that loops) degrades to no
+// trailer instead of holding the rest of the claim's boot, the Envoy role
+// claim and `claims/ready`, which run after it.
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
+/** The bound on `jj config path --user`, which reads no repository and answers in milliseconds:
+ * well inside the 30 s Oh My Pi gives the session_start handler that awaits it. */
+export const JJ_CONFIG_PATH_TIMEOUT_MS = 10_000;
 const TOP_LEVEL_TRANSCRIPT = new RegExp(`^\\d{4}-\\d{2}-\\d{2}T[\\d-]+Z_(${UUID})\\.jsonl$`);
 const ATTRIBUTION_OVERLAY = /^omp-attribution-.*\.toml$/;
 
@@ -36,9 +40,52 @@ function withoutOverlays(chain: string): string {
     .join(":");
 }
 
-async function userConfigChain(): Promise<string | undefined> {
+export async function userConfigChain(
+  timeoutMs = JJ_CONFIG_PATH_TIMEOUT_MS,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string | undefined> {
   try {
-    const { stdout } = await promisify(execFile)("jj", ["config", "path", "--user"]);
+    const child = Bun.spawn(["jj", "config", "path", "--user"], {
+      detached: true,
+      env,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const killGroup = () => {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch {
+        // The group exited before cleanup reached it.
+      }
+    };
+    // Every descendant belongs to this call's group. Kill it as soon as the leader exits, before
+    // either its output can answer successfully or a non-zero exit can answer unsuccessfully.
+    const exited = child.exited.finally(killGroup);
+    // Include both streams in the deadline: a wrapper can fork a helper that inherits them after
+    // its leader exits, and attribution must never wait for that helper.
+    const completed = Promise.all([
+      exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const stdout = await new Promise<string | undefined>((resolve) => {
+      const timer = setTimeout(() => {
+        killGroup();
+        resolve(undefined);
+      }, timeoutMs);
+      void completed.then(
+        ([code, output]) => {
+          clearTimeout(timer);
+          resolve(code === 0 ? output : undefined);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(undefined);
+        }
+      );
+    });
+    if (stdout === undefined) return undefined;
     const paths = stdout.split("\n").filter(Boolean);
     return paths.length > 0 ? paths.join(":") : undefined;
   } catch {

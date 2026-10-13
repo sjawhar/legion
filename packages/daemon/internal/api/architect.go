@@ -89,8 +89,8 @@ type ChildRequest struct {
 	Issue   string `json:"issue"`
 }
 
-func (s *server) architectGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
-	grant, ok := s.redeem(w, id)
+func (s *server) architectGrant(w http.ResponseWriter, r *http.Request, id string) (credential.Grant, bool) {
+	grant, ok := s.redeem(w, r, id)
 	if !ok {
 		return credential.Grant{}, false
 	}
@@ -101,8 +101,8 @@ func (s *server) architectGrant(w http.ResponseWriter, id string) (credential.Gr
 	return grant, true
 }
 
-func (s *server) phaseWorkerGrant(w http.ResponseWriter, id string) (credential.Grant, bool) {
-	grant, ok := s.redeem(w, id)
+func (s *server) phaseWorkerGrant(w http.ResponseWriter, r *http.Request, id string) (credential.Grant, bool) {
+	grant, ok := s.redeem(w, r, id)
 	if !ok {
 		return credential.Grant{}, false
 	}
@@ -144,7 +144,7 @@ func (s *server) recordedIssue(ctx context.Context, issue string) (*record.Issue
 // architectForIssue authorizes an architect's operation on a recorded issue of its tree, and
 // returns the grant and that record.
 func (s *server) architectForIssue(w http.ResponseWriter, r *http.Request, grantID, issue string) (credential.Grant, record.Issue, bool) {
-	grant, ok := s.architectGrant(w, grantID)
+	grant, ok := s.architectGrant(w, r, grantID)
 	if !ok {
 		return credential.Grant{}, record.Issue{}, false
 	}
@@ -189,7 +189,7 @@ func (s *server) applyFact(w http.ResponseWriter, r *http.Request, eventID strin
 
 func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	var req GateRegisterRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w,
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w,
 		field{"grantId", req.GrantID},
 		field{"issue", req.Issue},
 		field{"artifactId", req.ArtifactID},
@@ -441,10 +441,10 @@ func (s *server) dispatchIssue(w http.ResponseWriter, r *http.Request, key strin
 
 func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 	var req WaveReleaseRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}) {
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}) {
 		return
 	}
-	grant, ok := s.architectGrant(w, req.GrantID)
+	grant, ok := s.architectGrant(w, r, req.GrantID)
 	if !ok {
 		return
 	}
@@ -496,7 +496,7 @@ func (s *server) waveRelease(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 	var req PhaseBackwardRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w,
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w,
 		field{"grantId", req.GrantID},
 		field{"to", string(req.To)},
 		field{"reason", req.Reason},
@@ -507,7 +507,7 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "INVALID_PHASE", "to is not a phase")
 		return
 	}
-	grant, ok := s.phaseWorkerGrant(w, req.GrantID)
+	grant, ok := s.phaseWorkerGrant(w, r, req.GrantID)
 	if !ok {
 		return
 	}
@@ -517,7 +517,7 @@ func (s *server) phaseBackward(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 	var req PhaseRetryRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w,
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w,
 		field{"grantId", req.GrantID},
 		field{"issue", req.Issue},
 		field{"decision", string(req.Decision)},
@@ -542,7 +542,7 @@ func (s *server) phaseRetry(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 	var req SignOffRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
 		return
 	}
 	if !claim.IsIssueKey(req.Issue) {
@@ -561,7 +561,7 @@ func (s *server) signOff(w http.ResponseWriter, r *http.Request) {
 // message.
 func (s *server) closeRoot(w http.ResponseWriter, r *http.Request) {
 	var req RootCloseRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"reason", req.Reason}) {
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}, field{"reason", req.Reason}) {
 		return
 	}
 	if !claim.IsIssueKey(req.Issue) {
@@ -727,7 +727,7 @@ func (s *server) rerunChild(w http.ResponseWriter, r *http.Request) {
 // other than the tree root, which leaves the workflow only with the whole tree.
 func (s *server) childOfTree(w http.ResponseWriter, r *http.Request) (record.Issue, bool) {
 	var req ChildRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"issue", req.Issue}) {
 		return record.Issue{}, false
 	}
 	if !claim.IsIssueKey(req.Issue) {

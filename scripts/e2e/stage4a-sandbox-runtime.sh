@@ -132,7 +132,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl aws curl ss secrets diff docker; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl aws curl ss secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
@@ -204,6 +204,26 @@ if [ -n "$agent_secrets_account" ]; then
   agent_secrets_reminter=$!
   note "[operator] minted a 1h agent-secrets token for $agent_secrets_account (owner-only file, not printed), minted again every 30 minutes"
 fi
+
+begin plugins
+# The stale-plugin-install checkpoint's own pack of this checkout's two plugins, through
+# lib/pack-plugin.sh as every other proof that installs a branch-built plugin packs: it points
+# each manifest at its dist bundle exactly as the release does (scripts/pi-plugin-prepack.sh
+# refuses to pack the committed manifest's own source-path omp.extensions), runs `bun pm pack`
+# with the prepack's build report on stderr, restores the committed manifest on every exit of its
+# own, and prints the tarball's path alone. The checkpoint's negative control names the published
+# pi-legion@9.6.1 by exact version with no pack of its own: the daemon-rendered install script
+# resolves that version to @sjawhar/pi-legion@9.6.1 and bun fetches it from the registry inside
+# the pod. Failing here fails the run before anything is created in the namespace.
+plugins_dir="$work/plugins"
+pi_envoy_version=$(jq -r .version "$root/packages/pi-envoy/package.json") || fail "reading packages/pi-envoy/package.json's version failed"
+pi_legion_version=$(jq -r .version "$root/packages/pi-legion/package.json") || fail "reading packages/pi-legion/package.json's version failed"
+pi_envoy_tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" pi-envoy "$plugins_dir/pi-envoy") ||
+  fail "packing packages/pi-envoy (pi-envoy@$pi_envoy_version) failed"
+pi_legion_tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" pi-legion "$plugins_dir/pi-legion") ||
+  fail "packing packages/pi-legion (pi-legion@$pi_legion_version) failed"
+note "packed pi-envoy@$pi_envoy_version ($pi_envoy_tarball) and pi-legion@$pi_legion_version ($pi_legion_tarball) from the checkout"
+pass
 
 begin snapshot
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
@@ -294,6 +314,10 @@ if env \
   LEGION_E2E_AGENT_SECRETS_TOKEN_FILE="$agent_secrets_token_file" \
   LEGION_E2E_SESSION_DSN_FILE="$work/session-dsn" \
   LEGION_E2E_SESSION_DB_ADDRESS="$host:$session_db_port" \
+  LEGION_E2E_PI_LEGION_TARBALL="$pi_legion_tarball" \
+  LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
+  LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
+  LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
   harness_ok=1
 fi

@@ -60,6 +60,9 @@ type OperatorClaim struct {
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.
 	SuspensionHeld bool `json:"suspensionHeld,omitempty"`
+	// PluginContract is the contract the claim's current registration declared, 0 when none
+	// recorded, always emitted.
+	PluginContract int `json:"pluginContract"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -123,6 +126,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		UncertainStreak: c.UncertainStreak,
 		SuspendedBy:     string(c.SuspendedBy),
 		SuspensionHeld:  c.SuspensionHeld,
+		PluginContract:  c.PluginContract,
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{
@@ -164,7 +168,7 @@ func secureBearerEqual(expected [sha256.Size]byte, given string) bool {
 // then the task, so a claim the machine will not launch is given no task either.
 func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	var req SpawnRequest
-	if !readBody(w, r, &req) || !requireFields(w,
+	if !s.readBody(w, r, &req, nil) || !requireFields(w,
 		field{"tree", req.Tree}, field{"issue", req.Issue}, field{"role", string(req.Role)},
 	) {
 		return
@@ -256,9 +260,9 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 	}
 }
 
-func deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
+func (s *server) deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	var req DeliverRequest
-	if !readBody(w, r, &req) || !requireFields(w, field{"task", req.Task}) {
+	if !s.readBody(w, r, &req, nil) || !requireFields(w, field{"task", req.Task}) {
 		return nil, false
 	}
 	return supervise.RequestDeliver{Claim: c.Token, Task: req.Task}, true

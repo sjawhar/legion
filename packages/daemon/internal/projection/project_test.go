@@ -103,6 +103,27 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	}
 }
 
+// A claim's recorded plugin contract passes through to its view, 0 when nothing was recorded.
+func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
+	const issue = "S2-2"
+	architect := claim.Token("legion-s2-2-architect")
+	implementer := claim.Token("legion-s2-2-implementer")
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
+		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1", PluginContract: 24},
+		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	view := got.Issues[issue]
+	if view.Architect.PluginContract != 24 {
+		t.Fatalf("architect pluginContract = %d, want 24", view.Architect.PluginContract)
+	}
+	if got := view.Workers[claim.RoleImplementer].Claim.PluginContract; got != 0 {
+		t.Fatalf("unregistered implementer pluginContract = %d, want 0", got)
+	}
+}
+
 func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	token := claim.Token("legion-208-architect")
 	store := projectionStore{

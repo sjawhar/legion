@@ -57,6 +57,12 @@ type Options struct {
 	// and a registration registers the controller only from a launch of the controller's claim.
 	// Unset (`controller: operator`), only the operator's capability registers it.
 	ControllerLaunched bool
+	// PluginRelaunchable is supervise.Deps.PluginRelaunchable as the API sees it: whether this
+	// daemon can relaunch a stale process onto a plugin at all. False is Kubernetes's degraded
+	// mode, where a stale registration is recorded and the process is left running: nothing here
+	// refuses it either, since refusing calls with no relaunch under way would stall agents that
+	// work today.
+	PluginRelaunchable bool
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -138,6 +144,8 @@ type server struct {
 	designGate        config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
+	// pluginRelaunchable is Options.PluginRelaunchable.
+	pluginRelaunchable bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
@@ -182,6 +190,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
+		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,
 		githubOwner:        opts.GitHubOwner,
 		githubAPI:          opts.GitHubAPI,
@@ -246,7 +255,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 
 	mux.HandleFunc("POST /legion/v1/operator/claims", s.operator(s.spawn))
 	mux.HandleFunc("GET /legion/v1/operator/claims", s.operator(s.list))
-	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/deliver", s.operator(s.claimRequest("deliver", deliverEvent)))
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/deliver", s.operator(s.claimRequest("deliver", s.deliverEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/suspend", s.operator(s.claimRequest("suspend", suspendEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/resume", s.operator(s.claimRequest("resume", resumeEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/stop", s.operator(s.claimRequest("stop", stopEvent)))

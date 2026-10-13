@@ -63,6 +63,25 @@ type Kubernetes struct {
 	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`);
 	// "" under `session_store: pvc`, the default, where each session is a file on the issue's volume.
 	SessionDSNSecret string
+	// Plugins is `runtime.kubernetes.plugins`: the exact pi-legion/pi-envoy pair a stale-plugin
+	// relaunch installs into a kept pod, when the file names one. Nil when the file sets none and
+	// PluginsFromBinary is false: the daemon then knows no plugin source
+	// (LEGION-164's degraded mode). main fills this from the release's linked pair (cmd/legion's
+	// piLegionVersion/piEnvoyVersion) when the file sets none and the binary links one, and sets
+	// PluginsFromBinary so the daemon reports where the pair came from; the loader itself never
+	// does either.
+	Plugins *PluginsConfig
+	// PluginsFromBinary is whether Plugins was filled from the binary's linked pair rather than
+	// read from the file; false while Plugins holds the file's own setting or is nil.
+	PluginsFromBinary bool
+}
+
+// PluginsConfig is `runtime.kubernetes.plugins`: the pi-legion and pi-envoy sources a
+// stale-plugin relaunch installs, each an exact semver version, an absolute tarball path, or an
+// http(s) URL the pod can read — never an npm dist-tag or a range, since the pair must be one
+// release's exact versions.
+type PluginsConfig struct {
+	PiLegion, PiEnvoy string
 }
 
 // Scheduling is where the pods may run beyond the Legion pool, which the runtime selects itself.
@@ -222,6 +241,71 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	return block, nil
 }
 
+// pluginsKey is `runtime.kubernetes.plugins`'s own key.
+const pluginsKey = kubernetesKey + ".plugins"
+
+// pluginVersion is an exact semver version, optionally with a prerelease or build suffix
+// (9.7.0, 9.7.0-beta.1, 9.7.0+linux): never an npm dist-tag (latest) or a range (^9, 9.x, ~9.6),
+// since the pair a stale-plugin relaunch installs must be one release's exact versions.
+var pluginVersion = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$`)
+
+// readPlugins reads `runtime.kubernetes.plugins`: nil when absent. Both pi_legion and pi_envoy are
+// required once the block is present — a half block is refused naming the missing key, since a
+// relaunch installs the pair together or not at all.
+func readPlugins(value *yaml.Node) (*PluginsConfig, error) {
+	if value == nil {
+		return nil, nil
+	}
+	if value.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", pluginsKey)
+	}
+	fields, err := members(value, pluginsKey, "pi_legion", "pi_envoy")
+	if err != nil {
+		return nil, err
+	}
+	block := &PluginsConfig{}
+	if block.PiLegion, err = readPluginSource(fields["pi_legion"], pluginsKey+".pi_legion"); err != nil {
+		return nil, err
+	}
+	if block.PiEnvoy, err = readPluginSource(fields["pi_envoy"], pluginsKey+".pi_envoy"); err != nil {
+		return nil, err
+	}
+	return block, nil
+}
+
+// readPluginSource is one key of `runtime.kubernetes.plugins`: an exact version, an absolute
+// tarball path, or an http(s) URL the pod can read, returned in the canonical form the install
+// uses — url.Parse lowercases a URL's scheme, so `HTTPS://cache/pi-legion.tgz` is stored as
+// `https://cache/pi-legion.tgz`, the form bunSpec (internal/runtime/sandbox/plugins.go) and the
+// install it renders for agree on. A dist-tag or a range (an npm range such as `latest`, `^9`,
+// `9.x`, `~9.6`) is refused naming the key and that the pair must be one release's exact versions;
+// a source beginning with `//` is refused by the same message an http(s) URL with no host gets
+// (`https:///x.tgz`, `http:/cache/x.tgz` — the one slash u.Parse still calls absolute) — neither
+// names a host bun can fetch a tarball from.
+func readPluginSource(value *yaml.Node, key string) (string, error) {
+	source, err := requiredString(value, key, "")
+	if err != nil {
+		return "", err
+	}
+	noHost := fmt.Errorf("%s names no host bun can fetch a tarball from: got %q", key, source)
+	if strings.HasPrefix(source, "//") {
+		return "", noHost
+	}
+	if path.IsAbs(source) {
+		return source, nil
+	}
+	if u, err := url.Parse(source); err == nil && u.IsAbs() && (u.Scheme == "http" || u.Scheme == "https") {
+		if u.Host == "" {
+			return "", noHost
+		}
+		return u.String(), nil
+	}
+	if !pluginVersion.MatchString(source) {
+		return "", fmt.Errorf("%s must be an exact version (N.N.N), an absolute tarball path, or an http(s) URL — never an npm dist-tag or a range: the pair must be one release's exact versions; got %q", key, source)
+	}
+	return source, nil
+}
+
 // isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
 func isLoopbackHost(host string) bool {
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
@@ -266,7 +350,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	}
 	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
-		"role_profiles", "agent_secrets")
+		"role_profiles", "agent_secrets", "plugins")
 	if err != nil {
 		return nil, err
 	}
@@ -322,6 +406,9 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 		return nil, err
 	}
 	if block.AgentSecrets, err = readAgentSecrets(fields["agent_secrets"]); err != nil {
+		return nil, err
+	}
+	if block.Plugins, err = readPlugins(fields["plugins"]); err != nil {
 		return nil, err
 	}
 	return block, nil

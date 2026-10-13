@@ -201,8 +201,8 @@ func TestMigrateAppliesNothingASecondTime(t *testing.T) {
 // Two branches can each take the next migration number, and they land in either order: a database
 // migrated by a daemon with the higher one first has to take the lower one when it arrives. Migrate
 // applies every embedded migration the database has not recorded, not only those above its highest,
-// so a database at 0001-0006 and 0008 and later takes 0007 — here the controllers table — and ends
-// with every version recorded.
+// so a database at 0001-0040 and 0042 and later takes 0041 — here child_release_retries, a table no
+// later migration alters — and ends with every version recorded.
 func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) {
 	ctx := context.Background()
 	store := emptyStore(t)
@@ -210,7 +210,7 @@ func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read the embedded migrations: %v", err)
 	}
-	const skipped = 7
+	const skipped = 41
 	for _, migration := range all {
 		if migration.Version == skipped {
 			continue
@@ -219,16 +219,16 @@ func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) 
 			t.Fatalf("apply %s: %v", migration.Name, err)
 		}
 	}
-	controllers := func() bool {
+	childReleaseRetries := func() bool {
 		t.Helper()
 		var exists bool
-		if err := store.pool.QueryRow(ctx, "select to_regclass('public.controllers') is not null").Scan(&exists); err != nil {
-			t.Fatalf("look for the controllers table: %v", err)
+		if err := store.pool.QueryRow(ctx, "select to_regclass('public.child_release_retries') is not null").Scan(&exists); err != nil {
+			t.Fatalf("look for the child_release_retries table: %v", err)
 		}
 		return exists
 	}
-	if version, err := store.SchemaVersion(ctx); err != nil || version != all[len(all)-1].Version || controllers() {
-		t.Fatalf("before Migrate: schema version %d (%v), controllers table %t; want the latest, and no table", version, err, controllers())
+	if version, err := store.SchemaVersion(ctx); err != nil || version != all[len(all)-1].Version || childReleaseRetries() {
+		t.Fatalf("before Migrate: schema version %d (%v), child_release_retries table %t; want the latest, and no table", version, err, childReleaseRetries())
 	}
 
 	applied, err := store.Migrate(ctx)
@@ -236,8 +236,8 @@ func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) 
 	if err != nil || applied != 1 {
 		t.Fatalf("migrate = %d, %v; want the one missing migration applied", applied, err)
 	}
-	if !controllers() {
-		t.Error("migration 0007 was recorded as applied, but the controllers table does not exist")
+	if !childReleaseRetries() {
+		t.Error("migration 0041 was recorded as applied, but the child_release_retries table does not exist")
 	}
 	var recorded []int
 	rows, err := store.pool.Query(ctx, "select version from schema_version order by version")

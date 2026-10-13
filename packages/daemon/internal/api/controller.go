@@ -21,7 +21,7 @@ import (
 type ControllerStore interface {
 	MintController(ctx context.Context, project string, capabilityHash []byte) (uint64, error)
 	Controller(ctx context.Context, project string) (controller.Record, bool, error)
-	RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time) (bool, error)
+	RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time, pluginContract int) (bool, error)
 }
 
 // ControllerSecretRequest is `POST /legion/v1/controller/secret`'s body: the daemon API contract
@@ -97,7 +97,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ControllerSecretRequest
-	if !readBody(w, r, &req) {
+	if !s.readBody(w, r, &req, nil) {
 		return
 	}
 	if req.PluginContract != DaemonAPIVersion {
@@ -145,7 +145,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req ControllerCredentialRequest
-	if !readBody(w, r, &req) {
+	if !s.readBody(w, r, &req, nil) {
 		return
 	}
 	if !requireFailureFields(w, field{"secret", req.Secret}) {
@@ -220,7 +220,7 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		return
 	}
 	secret := rand.Text()
-	registered, err := s.controller.RegisterController(ctx, s.project, record.Generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
+	registered, err := s.controller.RegisterController(ctx, s.project, record.Generation, req.SessionID, capabilityHash(secret), time.Now().UTC(), req.PluginContract)
 	if err != nil {
 		s.log.Error("api: record a controller registration", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record it"))
@@ -260,7 +260,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 	defer s.controllerMu.Unlock()
 	if err := m.Handle(ctx, supervise.RequestRegister{
 		Claim: launch.Claim, Generation: launch.Generation, Session: req.SessionID, SessionFile: req.OmpSessionFile,
-		CapabilityHash: capabilityHash(secret),
+		CapabilityHash: capabilityHash(secret), PluginContract: req.PluginContract,
 	}); err != nil {
 		s.claimFailure(w, "register", launch.Claim, err)
 		return
@@ -272,7 +272,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.grants.RevokeControllers()
-	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
+	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC(), req.PluginContract)
 	if err != nil || !registered {
 		s.logFailure("api: record the launched controller's registration", "claim", launch.Claim, "registered", registered, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
@@ -300,12 +300,68 @@ func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, 
 		writeFailure(w, http.StatusInternalServerError, "GRANT_MINT_FAILED", "could not mint grant")
 		return
 	}
-	if !found || !record.Registered() || record.Session != req.SessionID ||
-		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(req.Secret)) != 1 {
+	if !found || !controllerSessionRegistered(record, req.SessionID, req.Secret) {
 		writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
 		return
 	}
+	if s.refuseIfStaleController(w, r, record) {
+		return
+	}
 	s.mintControllerGrant(w)
+}
+
+// controllerSessionRegistered is the one authentication of a controller session against its
+// record: the current capability's registration, naming this session, whose secret hashes to the
+// recorded one. controllerSessionGrant and refuseIfStaleControllerSession both authenticate by it.
+func controllerSessionRegistered(record controller.Record, session, secret string) bool {
+	return record.Registered() && record.Session == session &&
+		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(secret)) == 1
+}
+
+// refuseIfStaleController is the stale-caller refusal for the operator's controller record
+// (LEGION-164). When the deployment launches its own controller (`controller: daemon`), the caller named
+// by this record is a claim: its machine (claim.ControllerToken) carries the contract its own
+// registration recorded, so it is refused by the same rule and sentence (claim.StalePluginContract,
+// staleClaim) any other claim is — no machine recorded means nothing is stale. Otherwise (the
+// operator's own `legion controller start`) the daemon never relaunches the operator's controller,
+// so there is no relaunch to wait for: it is stale, with claim.StaleControllerContract's sentence,
+// whenever its recorded contract differs at all.
+func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request, record controller.Record) bool {
+	if !s.controllerLaunched {
+		if record.PluginContract == DaemonAPIVersion {
+			return false
+		}
+		s.logStaleRefusal(r, "session", record.Session, record.PluginContract)
+		refusal := claim.StaleControllerContract(record.PluginContract, DaemonAPIVersion)
+		writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", refusal.Message)
+		return true
+	}
+	m, found := s.supervisor.Machine(claim.ControllerToken(s.project))
+	if !found {
+		return false
+	}
+	c := m.Claim()
+	got, stale := s.staleClaim(c)
+	if !stale {
+		return false
+	}
+	s.logStaleRefusal(r, "session", record.Session, got)
+	refusal := claim.StalePluginContract(got, DaemonAPIVersion)
+	writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", refusal.Message)
+	return true
+}
+
+// refuseIfStaleControllerSession is readBody's identity check for the grants route's controller
+// form ({sessionId, secret}): the session registered with the current controller capability,
+// authenticated exactly as controllerSessionGrant does.
+func (s *server) refuseIfStaleControllerSession(w http.ResponseWriter, r *http.Request, sessionID, secret string) bool {
+	s.controllerMu.Lock()
+	record, found, err := s.controller.Controller(r.Context(), s.project)
+	s.controllerMu.Unlock()
+	if err != nil || !found || !controllerSessionRegistered(record, sessionID, secret) {
+		return false
+	}
+	return s.refuseIfStaleController(w, r, record)
 }
 
 // mintControllerGrant answers a controller grant for a caller its route has authorised.

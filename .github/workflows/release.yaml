@@ -204,10 +204,13 @@ jobs:
   # this job, and the worker image job below then publishes that commit's sha- tag alone, as it does
   # for any branch.
   legion:
-    needs: changes
+    needs: [changes, pi_envoy, pi_legion]
     if: >-
+      always() &&
       github.ref == 'refs/heads/main' &&
-      (needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch')
+      (needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch') &&
+      (needs.pi_envoy.result == 'success' || needs.pi_envoy.result == 'skipped') &&
+      (needs.pi_legion.result == 'success' || needs.pi_legion.result == 'skipped')
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`gh release create`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
@@ -219,11 +222,42 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       release_tag: ${{ steps.version.outputs.release_tag }}
+      pi_legion_version: ${{ steps.plugin_versions.outputs.pi_legion_version }}
+      pi_envoy_version: ${{ steps.plugin_versions.outputs.pi_envoy_version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
+      - name: Resolve plugin versions for the smoke test and worker image
+        id: plugin_versions
+        env:
+          PI_LEGION_VERSION: ${{ needs.pi_legion.outputs.version }}
+          PI_ENVOY_VERSION: ${{ needs.pi_envoy.outputs.version }}
+        run: |
+          # Non-empty means pi_legion/pi_envoy published this run; otherwise this run's checkout
+          # (at the triggering commit) still holds the manifest's last published version, since the
+          # bump commit a publish makes lands on main only after that job's own push.
+          legion_version="$PI_LEGION_VERSION"
+          if [ -z "$legion_version" ]; then
+            legion_version=$(jq -r '.version // empty' packages/pi-legion/package.json)
+          fi
+          envoy_version="$PI_ENVOY_VERSION"
+          if [ -z "$envoy_version" ]; then
+            envoy_version=$(jq -r '.version // empty' packages/pi-envoy/package.json)
+          fi
+          if [ -z "$legion_version" ]; then
+            echo "::error::Could not resolve @sjawhar/pi-legion version"
+            exit 1
+          fi
+          if [ -z "$envoy_version" ]; then
+            echo "::error::Could not resolve @sjawhar/pi-envoy version"
+            exit 1
+          fi
+          {
+            echo "pi_legion_version=$legion_version"
+            echo "pi_envoy_version=$envoy_version"
+          } >> "$GITHUB_OUTPUT"
       - name: Determine next version
         id: version
         run: |
@@ -285,6 +319,8 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          PI_LEGION_VERSION: ${{ steps.plugin_versions.outputs.pi_legion_version }}
+          PI_ENVOY_VERSION: ${{ steps.plugin_versions.outputs.pi_envoy_version }}
         run: |
           mkdir -p out assets
           for target in $(jq -r '.legion[]' .github/go-release-targets.json); do
@@ -293,7 +329,7 @@ jobs:
             dir="legion-$os-$arch"
             mkdir -p "out/$dir"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/daemon build -buildvcs=false \
-              -ldflags "-X main.revision=$GITHUB_SHA -X main.release=v$VERSION" \
+              -ldflags "-X main.revision=$GITHUB_SHA -X main.release=v$VERSION -X main.piLegionVersion=$PI_LEGION_VERSION -X main.piEnvoyVersion=$PI_ENVOY_VERSION" \
               -o "$GITHUB_WORKSPACE/out/$dir/legion" ./cmd/legion
             (cd packages/daemon && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
               ../../scripts/go-third-party-notices.sh "$GITHUB_WORKSPACE/out/$dir/THIRD_PARTY_NOTICES" ./cmd/legion)
@@ -304,10 +340,15 @@ jobs:
         if: steps.version.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.version.outputs.version }}
+          PI_LEGION_VERSION: ${{ steps.plugin_versions.outputs.pi_legion_version }}
+          PI_ENVOY_VERSION: ${{ steps.plugin_versions.outputs.pi_envoy_version }}
         run: |
           version=$(out/legion-linux-amd64/legion version)
           echo "$version"
-          test "$version" = "legion v$VERSION commit $GITHUB_SHA"
+          lines=$(printf '%s\n' "$version" | wc -l)
+          test "$lines" -eq 2
+          test "$(printf '%s\n' "$version" | sed -n '1p')" = "legion v$VERSION commit $GITHUB_SHA"
+          test "$(printf '%s\n' "$version" | sed -n '2p')" = "plugins @sjawhar/pi-legion $PI_LEGION_VERSION @sjawhar/pi-envoy $PI_ENVOY_VERSION"
       # Build provenance for the archives a mise pin installs, so `gh attestation verify
       # legion-<os>-<arch>.tar.gz --repo sjawhar/legion` checks a downloaded asset against this
       # workflow run rather than against SHA256SUMS, which sits in the same mutable release. The
@@ -365,6 +406,8 @@ jobs:
       attestations: write
     with:
       legion_version: ${{ needs.legion.outputs.version }}
+      pi_legion_version: ${{ needs.legion.outputs.pi_legion_version }}
+      pi_envoy_version: ${{ needs.legion.outputs.pi_envoy_version }}
 
   worker_image_release_note:
     needs: [legion, worker_image]
@@ -510,6 +553,8 @@ jobs:
       always() && (needs.envoy_plugin.result == 'success' || needs.envoy_plugin.result == 'skipped') &&
       (needs.changes.outputs.pi_envoy == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
@@ -658,6 +703,8 @@ jobs:
       always() && (needs.pi_envoy.result == 'success' || needs.pi_envoy.result == 'skipped') &&
       (needs.changes.outputs.pi_legion == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs

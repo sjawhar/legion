@@ -26,7 +26,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
 - `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
   `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
   run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two roots a pod names as Oh
-  My Pi's explicit extensions, the Envoy plugin first, with extension discovery on. Neither is linked
+  My Pi's explicit extensions — a role relaunched onto a newer plugin contract in a kept pod loads
+  the generation directory's copies instead, installed from npm at
+  `$XDG_STATE_HOME/legion-plugins/g<generation>/node_modules/@sjawhar/{pi-envoy,pi-legion}`
+  ("Contract discipline" below) — the Envoy plugin first, with extension discovery on. Neither is linked
   into the OMP profile: a plugin both installed and named by `--extension` loads twice, and the image
   probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
   the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
@@ -98,8 +101,11 @@ alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, lo
 itself: everything the image-time probe proved lives under `HOME` — the CodeGraph plugin's link and the
 lock at `~/.omp/profiles/legion/plugins`, the natives at `~/.omp/natives` — and a volume at `HOME` (an `emptyDir`,
 or a `HOME` volume under `readOnlyRootFilesystem`) shadows all of it silently. It is `linux/amd64` only:
-the OMP fork release has no linux/arm64 build. One commit ⇒ one image: Legion's own plugins come from
-the commit, never from an npm release; what the image does take from npm (the CodeGraph plugin and
+the OMP fork release has no linux/arm64 build. One commit ⇒ one image, with one exception: a
+fresh pod still loads the image's own copies of `@sjawhar/pi-envoy` and `@sjawhar/pi-legion`, from
+the commit, never from an npm release, but a role relaunched onto a newer plugin contract in a
+kept pod loads the release's published pair, installed from npm under the generation directory
+("Contract discipline" below) — what the image does take from npm (the CodeGraph plugin and
 CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
 `worker.Dockerfile`.
 
@@ -882,6 +888,99 @@ already does. The daemon-launched controller's pod is in scope for both the warn
 replacement, which happens only when the controller's process is being started anyway. The boot
 action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and
 trigger nothing.
+
+A route change the plugin calls is a contract bump by `version.go`'s rule, and since LEGION-164 a
+contract bump is brought in place at the daemon's first boot on it, with no pod replacement and
+no runbook step: the boot pass ("Contract discipline" below) relaunches every registered claim
+whose recorded contract differs from the daemon's through the moved-address relaunch path, logging
+`supervise: the process speaks another plugin contract; relaunching it onto the current plugin`
+once per claim, and the relaunched role loads the release's published plugins installed in its
+pod. What the text above keeps is the release that changes what the pod's own `legion` binary
+speaks (the launcher, the shim, `workspace-init`): an install refreshes no binary, so only a new
+image carries that change, and such a release is still pinned only after every tree is drained or
+every issue pod is relaunched onto the new image.
+
+### Contract discipline
+
+`DaemonAPIVersion` (24) is the Go daemon's own contract number; each claim records the contract
+its process registered with as `pluginContract`. A role's `pi-legion` declares the contract it was built against
+(`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass
+(`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path
+(`internal/supervise/plugin.go`) agree on one rule: a registered claim whose recorded contract
+differs from the daemon's own, or is unrecorded — every claim is unrecorded the first time a
+daemon boots on a release that records contracts at all — is relaunched once, uncharged, through
+the moved-address relaunch path (`interrupted` → `launch`; the task of a turn in flight goes back
+to waiting and is delivered again; a claim whose suspension is held for its turn is suspended
+instead of relaunched, and its next resume launches on the current plugin; a claim still launching
+is left to its registration, which decides it the moment it arrives). Each relaunch logs one line, exactly
+`supervise: the process speaks another plugin contract; relaunching it onto the current plugin`,
+naming `claim`, `incarnation`, `pluginContract` (0 when the claim recorded none), `daemonApiVersion`
+and `trigger` (`boot`, `registration`, or `sweep`: a relaunch the tree lifecycle or the store
+refuses leaves the claim live and stale, so the orphan sweep — the one periodic pass that already
+reads every claim — posts it again until one attempt starts).
+
+Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
+replacing it: the role container's shim runs an install script,
+`/bin/sh -c '<install script>' legion-plugins <omp argv…>`, which runs
+`bun add --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a tarball path or
+URL source is handed to `bun add` as written) into a fresh generation directory,
+`$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/home/legion/.local/state/<role>/legion-plugins/g<N>/`),
+checks with a `node -e` snippet that the installed `pi-legion`'s `legion.daemonApiVersion` equals
+the daemon's own (exiting 1 before `exec`, printing
+`legion plugins: @sjawhar/pi-legion@<v> declares daemon API contract <got>; this daemon requires <want>`
+when it does not), and then `exec "$@"`s into Oh My Pi, which starts with
+`--extension <gen dir>/node_modules/@sjawhar/pi-envoy --extension <gen dir>/node_modules/@sjawhar/pi-legion`
+in place of `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`. A pod replaced for any other reason
+in the same relaunch — a suspended Sandbox, a lost launcher binding, a failed init container, a
+moved address — installs nothing: it comes up on the configured image, whose copies the boot gate
+already holds to the daemon's contract; and a relaunch that is not a stale-plugin one (a death, a
+moved address) still replaces a pod on another image as the section above says. An install failure ends the
+child before Oh My Pi starts; the launcher reports it gone, the daemon charges it as a launch
+failure, and the claim is retried until the budget ends it in a `worker-died`.
+
+The pair the install uses is `runtime.kubernetes.plugins: { pi_legion: <exact version | absolute
+tarball path | http(s) URL>, pi_envoy: <same> }` (both keys together; a dist-tag or version range
+is refused), or, when that key is absent, the pair a release build links into the binary — a
+binary that links one prints it as `legion version`'s second line, `plugins @sjawhar/pi-legion <v>
+@sjawhar/pi-envoy <v>` (the worker image's own `legion` links one too). An exact version is pinned
+by npm's own immutable version; a tarball path or URL source carries no integrity pin beyond the
+installed `pi-legion`'s declared-contract check above — it is operator trust in what that path or
+URL serves. `legion start --check-config` prints, under
+`runtime: kubernetes`, after its OK line and its capability lines, either
+`plugins: @sjawhar/pi-legion <v> @sjawhar/pi-envoy <v> (from legion.yaml|from the binary)` or
+`plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none
+relaunches no process on another plugin contract`. The boot logs
+`daemon: stale-plugin relaunches install` (`piLegion`, `piEnvoy`, `source`) when it knows a pair, or
+the Warn `daemon: this daemon knows no plugin versions to relaunch a stale process onto; set
+runtime.kubernetes.plugins or run a release build` when it does not. A Kubernetes daemon that
+knows no pair is in a degraded mode: it still records every claim's contract and still writes one
+Error per stale claim, `supervise: the process speaks another plugin contract, and this daemon
+knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins`, but relaunches
+nothing and refuses nothing. Under `runtime: tmux` a relaunch is always possible regardless: the
+pane resumes on the host's own `pi-legion`, which the boot gate already holds to the daemon's
+contract, so there is no install to source a pair for.
+
+A stale caller's registration is refused 409 with
+`pi-legion speaks daemon API contract <got>; this daemon requires <want>: the daemon is relaunching
+this process onto the current plugin` (or, when it registered no contract at all,
+`pi-legion registered no daemon API contract; this daemon requires <want>: …`). Its other calls get
+the same sentence — a claim route answers `{"error": …}`, a credential or workflow route
+`{"code":"STALE_PLUGIN_CONTRACT","error": …}` — logged
+`api: refused a call from a process on another plugin contract`; the operator's own controller
+instead gets `…: run legion controller start from the release built with this daemon`, since there
+is no pod for the daemon to relaunch it in. Every other undecodable request body is logged
+`api: refused an undecodable request body` naming the route and the decoder's error. A relaunched
+process that registers still on the old contract is charged as a launch failure (the claim
+remembers `PluginRelaunchFor`), ending, like any other exhausted budget, in a `worker-died`. The
+contract shows on every claim view — `GET /legion/v1/state`, `legion state --json`,
+`read_record`'s `pluginContract` field — on `legion claims list`'s line (its last column), and on
+the state's controller locator.
+
+What a contract bump never refreshes is the pod's own `legion` binary: the launcher, the shim and
+`workspace-init` keep running the generation they were started with, so a release that changes the
+launcher's or the shim's own wire to the daemon is a pod replacement as it always was ("Pinning a
+release that drops what a running pod still uses" above), never something the contract relaunch
+fixes in place.
 
 ### Configuration
 
@@ -2556,9 +2655,11 @@ through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, no
 
 For a daemon contract change, first merge the worker image and the two plugin releases, then set
 `runtime.kubernetes.image` to its digest, install both plugin releases (`@sjawhar/pi-envoy`,
-`@sjawhar/pi-legion`) in the Legion profile, restart
-the daemon, and relaunch every live root, worker, and controller. The boot log is the checklist:
-each line naming an older or unrecorded `pi-legion` process identifies one process to relaunch.
+`@sjawhar/pi-legion`) in the Legion profile, and restart the daemon. The Go daemon's own contract
+discipline — which processes a boot pass relaunches, how, and what it logs — is "Contract
+discipline" under "Kubernetes runtime: the Go daemon on Agent Sandbox" above; this runtime does
+none of it.
+
 ### RBAC the daemon needs
 
 For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:

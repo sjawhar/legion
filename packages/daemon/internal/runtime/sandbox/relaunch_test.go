@@ -324,17 +324,20 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 			}
 		}
 	}
+	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 	for name, tc := range map[string]struct {
 		spec     func(*testing.T) runtime.SpawnSpec
 		session  string
 		pinned   string            // the image the restarted daemon is configured with
 		stored   func(*corev1.Pod) // what the stored pod is edited to carry before the restart
+		plugins  *runtime.PluginInstall
 		replaced bool
 	}{
-		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, false},
-		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, true},
-		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, true},
-		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, true},
+		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, nil, false},
+		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, nil, true},
+		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, nil, true},
+		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, nil, true},
+		"an installing Resume keeps a drifted pod":                   {workerSpec, resumeSession, nextImage, nil, plugins, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -349,7 +352,7 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)
 				return connected && state.Child != nil
 			})
-			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", tc.session
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile, spec.Plugins = 2, "boot-g2", tc.session, tc.plugins
 			newLoc, err := r2.Resume(g.ctx, &loc, spec)
 			if err != nil {
 				t.Fatalf("Resume: %v", err)
@@ -360,10 +363,58 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 			if newLoc.Sandbox.Generation != 2 {
 				t.Fatalf("resumed at %+v, want generation 2", newLoc.Sandbox)
 			}
-			if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted {
-				t.Fatalf("the pod the role runs in has a container on image %s, want every container on the configured %s", other, tc.pinned)
+			if tc.replaced {
+				if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted {
+					t.Fatalf("the pod the role runs in has a container on image %s, want every container on the configured %s", other, tc.pinned)
+				}
+			}
+			if tc.plugins != nil && !tc.replaced {
+				var start shimwire.LauncherStart
+				for _, frame := range g.sent(spec.Claim) {
+					if s, ok := frame.(shimwire.LauncherStart); ok {
+						start = s
+					}
+				}
+				i := slices.Index(start.Argv, "--")
+				if i < 0 || i+1 >= len(start.Argv) || start.Argv[i+1] != "/bin/sh" {
+					t.Fatalf("a kept drifted pod's installing Resume argv %q carries no install wrapper", start.Argv)
+				}
 			}
 		})
+	}
+}
+
+// A suspended Sandbox's Resume with Plugins set replaces the pod — it has none to keep — and
+// starts plain: a pod replaced for any reason other than a kept drifted install comes up on the
+// configured image, which the boot gate already holds to the daemon's contract, so nothing here
+// is installed into it.
+func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing.T) {
+	name := SandboxName(workerToken)
+	labels := claimLabels(claim.RoleTester)
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
+	g.launcher(workerToken)
+	spec := workerSpec(t)
+	spec.ResumeSessionFile, spec.Plugins = resumeSession, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
+	loc, err := g.r.Resume(g.ctx, nil, spec)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	expectSteps(t, steps(t, g.writes(), name), "create secret", "run", "record addresses")
+	if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
+		t.Fatalf("locator %+v over sandbox %s", loc, g.sandbox(name).UID)
+	}
+	var start shimwire.LauncherStart
+	for _, frame := range g.sent(workerToken) {
+		if s, ok := frame.(shimwire.LauncherStart); ok {
+			start = s
+		}
+	}
+	i := slices.Index(start.Argv, "--")
+	if i < 0 || i+1 >= len(start.Argv) || start.Argv[i+1] == "/bin/sh" {
+		t.Fatalf("a suspended Sandbox's installing Resume started %q, want a plain agent command", start.Argv)
+	}
+	if !slices.Contains(start.Argv, envoyPlugin) || !slices.Contains(start.Argv, legionPlugin) {
+		t.Fatalf("a replaced pod's Resume argv %q names no image root", start.Argv)
 	}
 }
 
@@ -1104,7 +1155,7 @@ func startSupervisedSandboxRole(
 	}
 	for _, event := range []supervise.Event{
 		supervise.StreamHello{Claim: spec.Claim, Generation: 1},
-		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile},
+		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile, PluginContract: 24},
 		supervise.RequestReady{Claim: spec.Claim, Generation: 1, Session: "ses-tester"},
 	} {
 		if err := machine.Handle(g.ctx, event); err != nil {
@@ -1310,6 +1361,7 @@ func supervisedSandboxMachine(
 		Timeouts: supervise.Timeouts{
 			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour,
 		},
+		PluginContract: 24,
 	}, c)
 	if err != nil {
 		t.Fatalf("new Machine: %v", err)

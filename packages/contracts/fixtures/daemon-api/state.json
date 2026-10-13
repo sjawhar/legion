@@ -33,7 +33,8 @@
             "window": "@4",
             "pane": "%12"
           }
-        }
+        },
+        "pluginContract": 0
       },
       "workers": {
         "implementer": {
@@ -65,7 +66,8 @@
                   "detail": "gh api user: HTTP 401: Bad credentials"
                 }
               ]
-            }
+            },
+            "pluginContract": 0
           },
           "rounds": 2
         },
@@ -84,7 +86,8 @@
                 "container": "planner",
                 "generation": 2
               }
-            }
+            },
+            "pluginContract": 0
           },
           "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
           "rounds": 0
@@ -117,7 +120,8 @@
         "implementer": {
           "claim": {
             "session": "ses_implementer_210",
-            "state": "failed"
+            "state": "failed",
+            "pluginContract": 0
           },
           "rounds": 1
         }
@@ -136,7 +140,8 @@
     "runtime": "kubernetes",
     "external": true,
     "sessionId": "ses_controller",
-    "registeredAt": "2026-09-22T09:16:40Z"
+    "registeredAt": "2026-09-22T09:16:40Z",
+    "pluginContract": 0
   },
   "agentSecretsLogin": {
     "state": "issued"

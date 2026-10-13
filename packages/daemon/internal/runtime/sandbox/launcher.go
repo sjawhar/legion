@@ -382,7 +382,11 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 // which the launcher kills it. A tree role's shim is told --warm-codegraph: once its Oh My Pi has
 // started it builds the CodeGraph index of the workspace LEGION_WORKSPACE names, which
 // launchEnvironment carries for every role but the controller (issuePod.agentEnv, podkind.go),
-// whose pod has no workspace.
+// whose pod has no workspace. For an installing launch (l.spec.Plugins set) the agent's own argv
+// is itself wrapped in the install script (installArgv, LEGION-164): the shim's child is then
+// `/bin/sh -c '<script>' legion-plugins <agent argv…>`, so the shim's own preparation
+// (--pod-safety) has already run and no new shim flag is needed; after the script's `exec` the
+// child is Oh My Pi itself, so the shim's pid is unchanged.
 func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 	dir := generationDir(l.spec.Generation)
 	shim := []string{r.tools.Legion, "worker-shim", connectFlag, r.streamURL, "--boot-token-file", dir + "/" + bootTokenKey, "--pod-safety", "--stop-grace", r.terminationGrace.String()}
@@ -402,9 +406,10 @@ func launcherCommand(l launch, r *Runtime) shimwire.LauncherStart {
 		files = map[string]string{}
 	}
 	files[bootTokenKey] = l.spec.BootToken
+	agentArgv := installArgv(roleStateHome(l.spec.Role), l.spec.Generation, l.spec.Plugins, l.agentArgv(r.agent))
 	return shimwire.LauncherStart{
 		ID: "start-" + fmt.Sprint(l.spec.Generation), Generation: l.spec.Generation,
-		Argv: append(shim, append([]string{"--"}, l.agentArgv(r.agent)...)...), Env: values, Files: files,
+		Argv: append(shim, append([]string{"--"}, agentArgv...)...), Env: values, Files: files,
 		ResumeFile: l.resumeFile,
 	}
 }

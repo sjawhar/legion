@@ -284,7 +284,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register = %d; body %s", status, body)
@@ -424,7 +424,7 @@ func TestRunRelaunchesAClaimWhoseAgentRegisteredAndNeverSaidReady(t *testing.T) 
 		t.Helper()
 		status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 			BootToken: bootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-			AgentID: "agent", PluginContract: 1,
+			AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 		}, false)
 		if status != http.StatusOK {
 			t.Fatalf("register = %d; body %s", status, body)
@@ -489,7 +489,7 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	sh := dialShim(t, record.address, launch.BootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register = %d; body %s", status, body)
@@ -663,9 +663,13 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	bootToken := "interrupted-" + randomSuffix(t)
 	oldSecret := "old-secret"
 	oldCapability := sha256.Sum256([]byte(oldSecret))
+	// A launching claim holds no capability in reality (supervise.HoldsCapability); the hash here stands in
+	// for a process at this daemon's own contract, so the register/ready exchange below exercises
+	// the "previous launch" refusal rather than the stale-plugin one.
 	putClaim(t, cfg, supervise.Claim{
 		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken(bootToken), CapabilityHash: oldCapability[:],
+		PluginContract: api.DaemonAPIVersion,
 	})
 	writePrompt(t, cfg, token)
 	rt := fake.NewRuntime()
@@ -684,7 +688,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 	oldShim := dialShim(t, record.address, bootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
-		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: 1,
+		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
 		t.Fatalf("old shim register while the pane is uncertain = %d %s, want a named 409", status, body)
@@ -816,9 +820,11 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 	project, _ := claim.ProjectToken(cfg.Project)
 	live, _ := claim.NewToken(project, "LEGION-1", claim.RoleArchitect)
 	suspended, _ := claim.NewToken(project, "LEGION-2", claim.RoleArchitect)
+	// The live claim's process speaks this daemon's contract: a boot would otherwise relaunch it
+	// onto the current plugin first (refreshStalePlugins), which is not what this test is about.
 	putClaim(t, cfg, supervise.Claim{
 		Token: live, Project: project, Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect, Generation: 1,
-		State: supervise.StateReady, Session: "ses_live", SessionFile: "/sessions/live.jsonl",
+		State: supervise.StateReady, Session: "ses_live", SessionFile: "/sessions/live.jsonl", PluginContract: api.DaemonAPIVersion,
 		Locator: &runtime.Locator{
 			Runtime: runtime.RuntimeTmux, Claim: live, Incarnation: "4242:1", Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
 		},
@@ -1011,7 +1017,7 @@ func readyClaimReporting(t *testing.T, d *daemon, rt *fake.Runtime, token claim.
 	launch := lastLaunch(t, rt, token)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register %s = %d; body %s", token, status, body)

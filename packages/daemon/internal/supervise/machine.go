@@ -144,6 +144,15 @@ type Claim struct {
 	// store never writes them.
 	SuspensionHeld   bool
 	SuspensionHeldBy SuspendSource
+	// PluginContract is the contract the current registration declared: 0 means no contract has
+	// been recorded, which every claim has at the first boot on this release. It is set whenever a
+	// registration records Session/SessionFile/CapabilityHash (register, reregister).
+	PluginContract int
+	// PluginRelaunchFor is the daemon contract the last stale-plugin relaunch was made for, 0 when
+	// none. It is set at every stale relaunch (refreshPlugin) and cleared when a registration
+	// records the daemon's own contract, so a registration that still differs while it equals the
+	// daemon's contract is the one that is charged rather than relaunched again uncharged.
+	PluginRelaunchFor int
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
@@ -286,6 +295,16 @@ type Deps struct {
 	// the tree commits in its own transaction and can still land between this answer and the
 	// retire. nil closes every tree.
 	TreeClosable func(ctx context.Context, c Claim) (bool, error)
+	// PluginContract is the daemon's own plugin contract number (api.DaemonAPIVersion; supervise
+	// cannot import api), compared against each claim's recorded PluginContract to decide whether a
+	// registration or a restored claim is stale.
+	PluginContract int
+	// PluginRelaunchable is whether this daemon can relaunch a stale process onto a plugin at all:
+	// true under tmux always (the pane resumes on the host's own plugin, which the boot gate holds
+	// to this daemon's contract), and under Kubernetes iff a plugin pair to install is known. False
+	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
+	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
+	PluginRelaunchable bool
 }
 
 func (d Deps) check() error {
@@ -297,6 +316,7 @@ func (d Deps) check() error {
 		{"Limits.PromptFailures", d.Limits.PromptFailures},
 		{"Limits.PromptRetires", d.Limits.PromptRetires},
 		{"Timeouts.RegistrationIntervals", d.Timeouts.RegistrationIntervals},
+		{"PluginContract", d.PluginContract},
 	} {
 		if bound.value < 1 {
 			return fmt.Errorf("supervise: %s must be at least 1, got %d", bound.name, bound.value)
@@ -1114,7 +1134,7 @@ func (m *Machine) forgetSend() {
 // delivery they change, each in one transaction, and every write hands the store the same shape
 // (stored).
 func (m *Machine) persist(ctx context.Context) error {
-	if !holdsCapability(m.claim.State) {
+	if !HoldsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
 	if m.claim.State != StateSuspended {
@@ -1133,7 +1153,7 @@ func (m *Machine) persist(ctx context.Context) error {
 func (m *Machine) stored() Claim {
 	c := m.claim
 	c.Pending = nil
-	if !holdsCapability(c.State) {
+	if !HoldsCapability(c.State) {
 		c.CapabilityHash = nil
 	}
 	if c.State != StateSuspended {
@@ -1142,8 +1162,8 @@ func (m *Machine) stored() Claim {
 	return c
 }
 
-// holdsCapability says whether a claim in state has a registered agent with a running process.
-func holdsCapability(state ClaimState) bool {
+// HoldsCapability says whether a claim in state has a registered agent with a running process.
+func HoldsCapability(state ClaimState) bool {
 	switch state {
 	case StateRegistered, StateReady, StateWorking, StateIdle:
 		return true
@@ -1173,6 +1193,8 @@ func claimOf(ev Event) claim.Token {
 	case Timer:
 		return ev.Claim
 	case IssueVolumeLost:
+		return ev.Claim
+	case StalePlugin:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

@@ -73,6 +73,16 @@ runtime:
     #                                  # and 19Gi at the defaults, its disk limits to 80Gi over 6Gi of requests
     kubeconfig: ./kubeconfig           # the daemon's own identity
     context: legion-daemon
+    # plugins:                         # the exact pi-legion/pi-envoy pair a stale-plugin relaunch installs
+    #   pi_legion: 9.7.0               # into a kept pod from npm (bun add --exact), in place of the pod's
+    #   pi_envoy: 9.6.1                # image's own copies. Each value is an exact version (never a dist-tag
+    #                                  # or a range such as latest, ^9, 9.x), an absolute tarball path, or an
+    #                                  # http(s) URL the pod can read; both keys are required together. Leave
+    #                                  # this unset for a release build: the daemon then uses the pair the
+    #                                  # release workflow linked into its own binary (`legion version`'s
+    #                                  # second line). Set it for a daemon built from an unreleased commit
+    #                                  # (every Stage 4a/4b run), or to pin a different published pair than
+    #                                  # this binary links.
     pod:                               # the model route: deploy/kubernetes/operator-route/pod.yml
       env:
         PI_CONFIG_FILES: /etc/legion-operator/overlay.yml
