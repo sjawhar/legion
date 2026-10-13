@@ -293,12 +293,14 @@ baseline event is the replay's positive control) and fails on any event a rig se
 that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`,
 `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. The
 audit writes nothing. It reads the operator's Dispatch from the envoy.json the operator's shell
-reads (`ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`): its
-`dispatch.serverUrl`, and its `dispatch.token` or, when it is set, `DISPATCH_TOKEN`, which the
-script takes out of its environment at start so nothing the run starts inherits it. A
-`dispatch.token` that starts with `!` is a command, which only a session runs, so the baseline read
-refuses it and asks for `DISPATCH_TOKEN`. The scratch Dispatch runs with `HOME` and
-`XDG_CONFIG_HOME` in the run's work directory, so it reads no envoy.json of the operator's.
+reads (`ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`) and sends to
+its `dispatch.serverUrl` with its `dispatch.token`. When that token is empty or starts with `!` (a
+command, which only a session runs), `DISPATCH_TOKEN` stands in for it, but only while
+`DISPATCH_URL` is unset or names the file's server: the baseline read refuses any other case,
+naming the file and both servers or the variable to set. The script reads `DISPATCH_TOKEN` at
+start and takes it out of its environment, so nothing the run starts inherits it. The scratch
+Dispatch runs with `HOME` and `XDG_CONFIG_HOME` in the run's work directory, so it reads no
+envoy.json of the operator's.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never

@@ -21,11 +21,18 @@ fail() {
   exit 1
 }
 
-# A URL's scheme and host[:port], lowercased: the origin a file's bearer is paired with.
+# A URL's scheme://host[:port], lowercased, without user info or the scheme's default port: the
+# origin the Dispatch client pairs a file's bearer with (`new URL(url).origin`).
 url_origin() {
-  local url="${1,,}"
-  local rest="${url#*://}"
-  printf '%s://%s' "${url%%://*}" "${rest%%[/?#]*}"
+  local url="${1,,}" authority
+  authority="${url#*://}"
+  authority="${authority%%[/?#]*}"
+  authority="${authority##*@}"
+  case "${url%%://*}:${authority}" in
+    http:*:80) authority="${authority%:80}" ;;
+    https:*:443) authority="${authority%:443}" ;;
+  esac
+  printf '%s://%s' "${url%%://*}" "$authority"
 }
 
 # The bearer the installed plugin resolves: DISPATCH_TOKEN_FILE, then DISPATCH_TOKEN, then
