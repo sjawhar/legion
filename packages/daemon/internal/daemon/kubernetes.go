@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -82,24 +83,21 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 
-// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe. The
-// worker stream listens on tcp://<bind>:<worker_stream_port>; openSupervision hands the factory the
-// address every pod dials (shimAddress).
+// prepareSandbox is the runtime over readSandbox's client and Options, and the part of boot its
+// worker pod can refuse (sandboxBootOf). The worker stream listens on tcp://<bind>:<worker_stream_port>;
+// openSupervision hands the factory the address every pod dials (shimAddress).
 func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
-	p.clusterCheck = func(ctx context.Context) error {
-		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
-		defer cancel()
-		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
-			return err
-		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	boot, err := sandboxBootOf(cfg, reads)
+	if err != nil {
+		return err
 	}
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
+	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
 		if err != nil {
@@ -110,18 +108,44 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		}
 		return nil
 	}
-	probe, err := imageProbe(cfg, p.roleReferences)
-	if err != nil {
-		return err
-	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error) {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
 			return bootprobe.ImageReport{}, fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
-		return sandboxed.ProbeImage(ctx, probe)
+		return sandboxed.ProbeImage(ctx, boot.probe)
 	}
 	return nil
+}
+
+// sandboxBoot is the part of a Kubernetes daemon's boot its worker pod can refuse: the cluster's
+// refusals and the image probe. prepareSandbox hands both to the boot plan, and probe-boot
+// (probeBoot) runs them alone, so the two run one check and one probe by construction.
+type sandboxBoot struct {
+	// clusterCheck is the cluster's half of boot's refusals (plan.clusterCheck), each read-only:
+	// Agent Sandbox is installed, and no Sandbox of a layout before this runtime's remains in the
+	// namespace for the project.
+	clusterCheck func(context.Context) error
+	// probe is the image probe the runtime runs (sandbox.ImageProbe), over the references of the
+	// role prompts every worker pod is handed (prompts.RoleReferences).
+	probe sandbox.ImageProbe
+}
+
+// sandboxBootOf is sandboxBoot for the configuration and boot's reads.
+func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
+	probe, err := imageProbe(cfg, prompts.RoleReferences())
+	if err != nil {
+		return sandboxBoot{}, err
+	}
+	clusterCheck := func(ctx context.Context) error {
+		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
+		defer cancel()
+		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+			return err
+		}
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	}
+	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
 }
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts

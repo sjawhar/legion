@@ -516,6 +516,20 @@ export function getArtifactText(id: string, options: ApiOptions = {}): Promise<A
   );
 }
 
+/** The same markdown by the slug route, `GET /api/v1/issues/{key}/artifacts/{slug}/text`. */
+export function getIssueArtifactText(
+  issue: string,
+  slug: string,
+  options: ApiOptions = {}
+): Promise<ArtifactText> {
+  return request<ArtifactText>(
+    `/api/v1/issues/${encodeURIComponent(issue)}/artifacts/${encodeURIComponent(slug)}/text`,
+    "GET",
+    undefined,
+    options
+  );
+}
+
 export function getArtifact(id: string, options: ApiOptions = {}): Promise<Artifact> {
   return request<Artifact>(
     `/api/v1/artifacts/${encodeURIComponent(id)}`,

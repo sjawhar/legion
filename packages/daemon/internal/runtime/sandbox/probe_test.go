@@ -36,15 +36,16 @@ const (
 var sandboxesResource = schema.GroupResource{Group: "agents.x-k8s.io", Resource: "sandboxes"}
 
 // probeRig is a rig whose controller stand-in leaves the pods it creates Pending, with a stand-in
-// for the probe's container finishing (finish, applied once to each probe pod), for the garbage
-// collector (a pod whose owning Sandbox is gone is deleted), and for the pod's log and the API's
-// answers to the probe's own requests.
+// for the probe's container finishing (finish, applied once to each probe pod whose name held does
+// not hold back), for the garbage collector (a probe pod whose owning Sandbox is gone is deleted),
+// and for the pod's log and the API's answers to the probe's own requests.
 type probeRig struct {
 	*rig
 	creates atomic.Int32
 
 	mu          sync.Mutex
 	finish      func(*corev1.Pod)
+	held        func(name string) bool
 	log         string
 	logErr      error
 	createErr   error
@@ -135,26 +136,44 @@ func (g *probeRig) containerAndCollector() {
 			return
 		case <-tick.C:
 		}
-		pod := g.pod(probeSandboxName)
-		if pod == nil {
-			continue
-		}
-		if owner := g.sandbox(probeSandboxName); owner == nil || !ownedBy(pod, owner.UID) {
-			if len(pod.OwnerReferences) > 0 {
-				_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
+		for _, pod := range g.probePods() {
+			if owner := g.sandbox(pod.Name); owner == nil || !ownedBy(&pod, owner.UID) {
+				if len(pod.OwnerReferences) > 0 {
+					_ = g.kube.Tracker().Delete(podsGVR, testNamespace, pod.Name)
+				}
+				continue
 			}
-			continue
-		}
-		g.mu.Lock()
-		finish, done := g.finish, g.finishedUID[pod.UID]
-		if finish != nil && !done {
-			g.finishedUID[pod.UID] = true
-		}
-		g.mu.Unlock()
-		if finish != nil && !done {
-			g.update(pod, finish)
+			g.mu.Lock()
+			finish, done := g.finish, g.finishedUID[pod.UID]
+			ready := finish != nil && !done && (g.held == nil || !g.held(pod.Name))
+			if ready {
+				g.finishedUID[pod.UID] = true
+			}
+			g.mu.Unlock()
+			if ready {
+				g.update(&pod, finish)
+			}
 		}
 	}
+}
+
+// probePods are the namespace's pods carrying the probe label, whoever's probe each is.
+func (g *probeRig) probePods() []corev1.Pod {
+	object, err := g.kube.Tracker().List(podsGVR, corev1.SchemeGroupVersion.WithKind("Pod"), testNamespace)
+	if err != nil {
+		return nil
+	}
+	list, _ := object.(*corev1.PodList)
+	if list == nil {
+		return nil
+	}
+	var pods []corev1.Pod
+	for _, pod := range list.Items {
+		if pod.Labels[labelProbe] != "" {
+			pods = append(pods, pod)
+		}
+	}
+	return pods
 }
 
 // testRoleReferences are role prompts' references, and testRoleReferencesJSON the encoding
@@ -180,9 +199,15 @@ func probeOptions(t *testing.T) ImageProbe {
 // runs out.
 const unfinishedBudget = 300 * time.Millisecond
 
+// probe runs the image probe through the rig's Prober when it has one, else its runtime.
 func (g *probeRig) probe(p ImageProbe) error {
 	g.t.Helper()
-	_, err := g.r.ProbeImage(g.ctx, p)
+	var err error
+	if g.p != nil {
+		_, err = g.p.ProbeImage(g.ctx, p)
+	} else {
+		_, err = g.r.ProbeImage(g.ctx, p)
+	}
 	return err
 }
 
@@ -773,15 +798,22 @@ func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
 	}
 }
 
-// The probe's name is scoped to the project and the image, and fits a DNS label however long the
-// project is.
+// The daemon's probe name is scoped to the project and the image, a Prober's to its run as well, and
+// each fits a DNS label however long the project is, the run's suffix taken from the project's share.
 func TestProbeNameIsTheProjectAndTheImage(t *testing.T) {
-	if got := probeName(testProject, testDigestHex); got != probeSandboxName {
+	if got := probeName(testProject, testDigestHex, ""); got != probeSandboxName {
 		t.Errorf("probeName = %q, want %q", got, probeSandboxName)
 	}
-	long := probeName(strings.Repeat("widgets", 12), testDigestHex)
+	if got, want := probeName(testProject, testDigestHex, "0a1b2c3d"), probeSandboxName+"-0a1b2c3d"; got != want {
+		t.Errorf("probeName with a run = %q, want %q", got, want)
+	}
+	long := probeName(strings.Repeat("widgets", 12), testDigestHex, "")
 	if len(long) > maxNameLength || !strings.HasPrefix(long, "legion-probe-widgetswidgets") || !strings.HasSuffix(long, "-1d10089a0000") {
 		t.Errorf("probeName of a long project = %q (%d characters), want a DNS label ending in the digest", long, len(long))
+	}
+	longRun := probeName(strings.Repeat("widgets", 12), testDigestHex, "0a1b2c3d")
+	if len(longRun) > maxNameLength || !strings.HasPrefix(longRun, "legion-probe-widgetswidgets") || !strings.HasSuffix(longRun, "-1d10089a0000-0a1b2c3d") {
+		t.Errorf("probeName of a long project with a run = %q (%d characters), want a DNS label ending in the digest and the run", longRun, len(longRun))
 	}
 }
 
