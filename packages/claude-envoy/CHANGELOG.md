@@ -27,6 +27,7 @@
 - With Envoy on and no NATS server, or with its NATS seed refused, the channel server serves the Envoy tools with inbound messages off, as pi-envoy does, and says so once on stderr (`Envoy's inbound messages are off: <why>; the Envoy tools still work`, where `<why>` is `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` or the seed's refusal); `envoy_subscribe` is refused naming why. It exited 1.
 - The channel server writes one notice to stderr when a section is off: the missing file, the section's error, or what a checkout's files hold that is not read.
 - `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
+- `envoy-send`, a command, counts `CLAUDE_CONFIG_DIR` only under Claude Code (`CLAUDE_CODE_CHILD_SESSION=1`): run from a plain terminal whose shell exports it, it does not read `$CLAUDE_CONFIG_DIR/envoy.json`. The hook and the channel server read `CLAUDE_CONFIG_DIR` whenever it is set.
 
 ## [1.0.0]
 

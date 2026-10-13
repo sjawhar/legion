@@ -30,6 +30,7 @@ export type EnvoyConfigEnvironment = {
   readonly OMP_PROFILE?: string | undefined;
   readonly PI_CODING_AGENT_DIR?: string | undefined;
   readonly CLAUDE_CONFIG_DIR?: string | undefined;
+  readonly CLAUDE_CODE_CHILD_SESSION?: string | undefined;
   readonly OPENCODE_CONFIG_DIR?: string | undefined;
   readonly DISPATCH_URL?: string | undefined;
 } & Readonly<Record<string, string | undefined>>;
@@ -91,9 +92,14 @@ function namedDirectory(harness: PluginHarness, env: EnvoyConfigEnvironment): st
 
 /** The directory `harness` reads its envoy.json from, refused when relative: a plugin's own
  * (`namedDirectory`), or for a command the first one named of Oh My Pi's, Claude Code's and
- * OpenCode's, in that order. */
+ * OpenCode's, in that order, Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`. */
 function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string | undefined {
   for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
+    // A shell outside Claude Code can export CLAUDE_CONFIG_DIR too; only Claude Code sets
+    // CLAUDE_CODE_CHILD_SESSION=1, in every Bash, hook and status line command it runs.
+    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
+      continue;
+    }
     const directory = namedDirectory(plugin, env);
     if (directory !== undefined) return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
   }
@@ -112,9 +118,10 @@ export function handedConfigPath(env: EnvoyConfigEnvironment): string | undefine
  * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`; OpenCode:
  * `OPENCODE_CONFIG_DIR`) and no other harness's, else the file `ENVOY_CONFIG_FILE` names, else
  * `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script (`command`) reads
- * `ENVOY_CONFIG_FILE` first, then the omp, Claude Code and OpenCode directories in that order, then
- * that same neutral file. Throws when the path it would use is relative: `ENVOY_CONFIG_FILE`, the
- * harness directory, or `XDG_CONFIG_HOME` for the neutral file.
+ * `ENVOY_CONFIG_FILE` first, then the omp, Claude Code and OpenCode directories in that order
+ * (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`), then that same neutral file. Throws
+ * when the path it would use is relative: `ENVOY_CONFIG_FILE`, the harness directory, or
+ * `XDG_CONFIG_HOME` for the neutral file.
  */
 export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string {
   const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;

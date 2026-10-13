@@ -21,8 +21,9 @@ bun scripts/dispatch/ask-census.ts \
 
 The script resolves Dispatch as every command does, with `sessionDispatchSettings`
 (`packages/envoy-client/src/session-settings.ts`) over the envoy.json harness `command` reads: the
-file `ENVOY_CONFIG_FILE` names, else the omp profile's, `CLAUDE_CONFIG_DIR`'s or
-`OPENCODE_CONFIG_DIR`'s, else `~/.config/legion/envoy.json`: the URL from `DISPATCH_URL`, else
+file `ENVOY_CONFIG_FILE` names, else the omp profile's, `CLAUDE_CONFIG_DIR`'s (only under
+`CLAUDE_CODE_CHILD_SESSION=1`, as in a Claude Code shell) or `OPENCODE_CONFIG_DIR`'s, else
+`~/.config/legion/envoy.json`: the URL from `DISPATCH_URL`, else
 `dispatch.serverUrl` with `dispatch.enabled`; the token from `DISPATCH_TOKEN_FILE`, else
 `DISPATCH_TOKEN`, else `dispatch.token`. A checkout's `.opencode/envoy.json`, which is not read, is
 named on stderr with its rename while the checkout has no `.envoy/envoy.json`. With Dispatch off it

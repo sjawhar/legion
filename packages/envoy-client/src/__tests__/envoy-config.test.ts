@@ -144,7 +144,11 @@ describe("envoyConfigPath", () => {
       ],
       ["claude", { CLAUDE_CONFIG_DIR: "~/.claude" }, "CLAUDE_CONFIG_DIR is ~/.claude"],
       ["opencode", { OPENCODE_CONFIG_DIR: "config" }, "OPENCODE_CONFIG_DIR is config"],
-      ["command", { CLAUDE_CONFIG_DIR: "claude" }, "CLAUDE_CONFIG_DIR is claude"],
+      [
+        "command",
+        { CLAUDE_CODE_CHILD_SESSION: "1", CLAUDE_CONFIG_DIR: "claude" },
+        "CLAUDE_CONFIG_DIR is claude",
+      ],
     ];
     for (const [harness, variables, refusal] of cases) {
       expect(() => envoyConfigPath(harness, { HOME: home, ...variables })).toThrow(
@@ -160,6 +164,7 @@ describe("envoyConfigPath", () => {
       })
     ).toBe("/claude/envoy.json");
     expect(envoyConfigPath("omp", { HOME: home, CLAUDE_CONFIG_DIR: "relative" })).toBe(neutral);
+    expect(envoyConfigPath("command", { HOME: home, CLAUDE_CONFIG_DIR: "relative" })).toBe(neutral);
   });
 
   test("a command reads ENVOY_CONFIG_FILE, else the omp, Claude Code and OpenCode rules in turn, else the neutral file", () => {
@@ -167,6 +172,7 @@ describe("envoyConfigPath", () => {
       HOME: home,
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: "/profiles/work/agent",
+      CLAUDE_CODE_CHILD_SESSION: "1",
       CLAUDE_CONFIG_DIR: "/claude",
       OPENCODE_CONFIG_DIR: "/opencode",
     };
@@ -178,13 +184,40 @@ describe("envoyConfigPath", () => {
       "/claude/envoy.json"
     );
     // A script in a Claude Code session's shell, handed no file: the session's CLAUDE_CONFIG_DIR.
-    expect(envoyConfigPath("command", { HOME: home, CLAUDE_CONFIG_DIR: "/claude" })).toBe(
-      "/claude/envoy.json"
-    );
+    expect(
+      envoyConfigPath("command", {
+        HOME: home,
+        CLAUDE_CODE_CHILD_SESSION: "1",
+        CLAUDE_CONFIG_DIR: "/claude",
+      })
+    ).toBe("/claude/envoy.json");
     expect(envoyConfigPath("command", { HOME: home, OPENCODE_CONFIG_DIR: "/opencode" })).toBe(
       "/opencode/envoy.json"
     );
     expect(envoyConfigPath("command", { HOME: home })).toBe(neutral);
+  });
+
+  // A shell outside Claude Code can export CLAUDE_CONFIG_DIR too (Claude Code's docs suggest setting
+  // it in a shell profile); only Claude Code sets CLAUDE_CODE_CHILD_SESSION=1, in every Bash, hook
+  // and status line command it runs.
+  test("a command counts CLAUDE_CONFIG_DIR only when CLAUDE_CODE_CHILD_SESSION is 1", () => {
+    const shell = { HOME: home, CLAUDE_CONFIG_DIR: "/claude" };
+    // A script run by hand from a plain terminal whose shell exports CLAUDE_CONFIG_DIR.
+    expect(envoyConfigPath("command", shell)).toBe(neutral);
+    expect(envoyConfigPath("command", { ...shell, CLAUDE_CODE_CHILD_SESSION: "1" })).toBe(
+      "/claude/envoy.json"
+    );
+    for (const marker of ["0", "", "true"]) {
+      expect(envoyConfigPath("command", { ...shell, CLAUDE_CODE_CHILD_SESSION: marker })).toBe(
+        neutral
+      );
+    }
+    // Passed over, Claude Code's step leaves OpenCode's next.
+    expect(envoyConfigPath("command", { ...shell, OPENCODE_CONFIG_DIR: "/opencode" })).toBe(
+      "/opencode/envoy.json"
+    );
+    // The Claude Code plugin's own rule reads CLAUDE_CONFIG_DIR with no marker.
+    expect(envoyConfigPath("claude", shell)).toBe("/claude/envoy.json");
   });
 });
 

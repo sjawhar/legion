@@ -89,9 +89,11 @@
 
 - `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
   else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a script, harness `command`, tries
-  `ENVOY_CONFIG_FILE` and then each harness's directory first; a relative `ENVOY_CONFIG_FILE`,
-  harness directory or `XDG_CONFIG_HOME` is refused when the rule uses it), `readEnvoyConfig`,
-  which validates both sections strictly, names where JSON stops parsing by line and column alone,
+  `ENVOY_CONFIG_FILE` and then each harness's directory first, Claude Code's only under
+  `CLAUDE_CODE_CHILD_SESSION=1`, so a `CLAUDE_CONFIG_DIR` a plain terminal exports is not read; a
+  relative `ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME` is refused when the rule
+  uses it), `readEnvoyConfig`, which validates both sections strictly, names where JSON stops
+  parsing by line and column alone,
   and runs no command, and `fileValue`, which runs a `token` or `natsSeed` starting with `!` as a
   command (under `/bin/sh -c` in the directory of the envoy.json that names it, never the session's
   working directory, in its own process group for at most 10 s, its exit status deciding,

@@ -62,12 +62,13 @@ OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads th
 `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script
 outside any plugin (harness `command`: `scripts/dispatch/ask-census.ts`, the e2e operator scripts,
 `claude-envoy`'s `envoy-send`) reads `ENVOY_CONFIG_FILE` first, then the Oh My Pi, Claude Code and
-OpenCode directories in that order, then the same neutral file. A relative `ENVOY_CONFIG_FILE`,
-harness directory or `XDG_CONFIG_HOME` is refused, naming it and its value, when the rule would use
-it. Each plugin hands the path it chose to the commands its session runs in `ENVOY_CONFIG_FILE`
-(Oh My Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook appends it to
-`$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook sets it), beside `DISPATCH_HOST`; the innermost
-session's value wins.
+OpenCode directories in that order (Claude Code's only under `CLAUDE_CODE_CHILD_SESSION=1`, which
+Claude Code alone sets, in every Bash it runs), then the same neutral file. A relative
+`ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME` is refused, naming it and its value,
+when the rule would use it. Each plugin hands the path it chose to the commands its session runs in
+`ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load, Claude Code's `SessionStart` hook
+appends it to `$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook sets it), beside `DISPATCH_HOST`; the
+innermost session's value wins.
 
 The `dispatch` command reads the file its session's plugin chose: with `DISPATCH_HOST` set, the
 file `ENVOY_CONFIG_FILE` names, else its host's own rule (`envoyConfigPath(host)`). A Bash that

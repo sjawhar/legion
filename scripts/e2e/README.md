@@ -1781,8 +1781,9 @@ issues updated in the last 24 hours, through a 0600 header file under the caller
 Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or
 the same-server rule: the envoy.json `envoyConfigPath("command")` chooses (`ENVOY_CONFIG_FILE`,
 which the operator's own session sets, then a named omp profile's `PI_CODING_AGENT_DIR`,
-`CLAUDE_CONFIG_DIR` and `OPENCODE_CONFIG_DIR`, then `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`),
-the working directory's `.envoy/envoy.json`, and `dispatchSettings` over the environment as it is at
+`CLAUDE_CONFIG_DIR` only under `CLAUDE_CODE_CHILD_SESSION=1` (a Claude Code shell), and
+`OPENCODE_CONFIG_DIR`, then `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the working
+directory's `.envoy/envoy.json`, and `dispatchSettings` over the environment as it is at
 the call (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`; a file's `dispatch.token` goes
 only with the server written beside it, and a `!` token runs). With Dispatch on it sets the
 envoy.json's path, the URL and the bearer; when nothing configures Dispatch or a file turns it off,
