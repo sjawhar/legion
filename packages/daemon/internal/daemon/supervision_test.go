@@ -820,9 +820,11 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 	project, _ := claim.ProjectToken(cfg.Project)
 	live, _ := claim.NewToken(project, "LEGION-1", claim.RoleArchitect)
 	suspended, _ := claim.NewToken(project, "LEGION-2", claim.RoleArchitect)
+	// The live claim's process speaks this daemon's contract: a boot would otherwise relaunch it
+	// onto the current plugin first (refreshStalePlugins), which is not what this test is about.
 	putClaim(t, cfg, supervise.Claim{
 		Token: live, Project: project, Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect, Generation: 1,
-		State: supervise.StateReady, Session: "ses_live", SessionFile: "/sessions/live.jsonl",
+		State: supervise.StateReady, Session: "ses_live", SessionFile: "/sessions/live.jsonl", PluginContract: api.DaemonAPIVersion,
 		Locator: &runtime.Locator{
 			Runtime: runtime.RuntimeTmux, Claim: live, Incarnation: "4242:1", Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
 		},
