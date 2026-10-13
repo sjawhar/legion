@@ -658,6 +658,91 @@ describe("each section of envoy.json", () => {
     expect(dispatchSettings(env, offEnvoy)).toMatchObject({ enabled: true, token: "user-token" });
     expect(envoySettings(env, offEnvoy)).toMatchObject({ enabled: false, error: null });
   });
+
+  // One rule for both sections: enabled: false is off; otherwise the section's fields apply, and
+  // it is on when its address resolves, from the file or a variable.
+  test("without enabled, a section is on when its address resolves, and its fields apply", () => {
+    const env = { HOME: tempDir() };
+    const addressed = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: { serverUrl: "https://dispatch.example", token: "user-token" },
+      envoy: { url: "http://listener.internal.example:9020", token: "listener-token" },
+    });
+    const fromFile = readEnvoyConfig(addressed, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, fromFile)).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "user-token",
+    });
+    expect(envoySettings(env, fromFile)).toMatchObject({
+      enabled: true,
+      url: "http://listener.internal.example:9020",
+      natsUrls: [],
+      token: "listener-token",
+    });
+    // The same file under a launcher that names the same servers: each section keeps its bearer.
+    const launcher = {
+      HOME: tempDir(),
+      DISPATCH_URL: "https://dispatch.example",
+      ENVOY_URL: "http://listener.internal.example:9020",
+    };
+    const launched = readEnvoyConfig(addressed, launcher, { cwd: tempDir() });
+    expect(dispatchSettings(launcher, launched)).toMatchObject({ token: "user-token" });
+    expect(envoySettings(launcher, launched)).toMatchObject({ token: "listener-token" });
+
+    const nats = writeFile(path.join(tempDir(), "envoy.json"), {
+      envoy: { natsUrls: ["nats://nats.internal.example:4222"] },
+    });
+    expect(envoySettings(env, readEnvoyConfig(nats, env, { cwd: tempDir() }))).toMatchObject({
+      enabled: true,
+      url: "http://127.0.0.1:9020",
+      natsUrls: ["nats://nats.internal.example:4222"],
+    });
+  });
+
+  test("a section whose address resolves nowhere is off; enabled: true names the default", () => {
+    const env = { HOME: tempDir() };
+    const tokensOnly = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: { token: "user-token" },
+      envoy: { token: "listener-token" },
+    });
+    const config = readEnvoyConfig(tokensOnly, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, config)).toEqual({
+      enabled: false,
+      notice: `${tokensOnly} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`,
+      error: null,
+    });
+    expect(envoySettings(env, config)).toEqual({
+      enabled: false,
+      notice: `${tokensOnly} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`,
+      error: null,
+    });
+    // A variable naming the default server is that section's address, and the file's token goes
+    // with it.
+    const defaults = {
+      HOME: tempDir(),
+      DISPATCH_URL: "http://localhost:8766",
+      ENVOY_URL: "http://127.0.0.1:9020",
+    };
+    const named = readEnvoyConfig(tokensOnly, defaults, { cwd: tempDir() });
+    expect(dispatchSettings(defaults, named)).toMatchObject({ token: "user-token" });
+    expect(envoySettings(defaults, named)).toMatchObject({ token: "listener-token" });
+
+    const enabled = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: { enabled: true, token: "user-token" },
+      envoy: { enabled: true, token: "listener-token" },
+    });
+    const on = readEnvoyConfig(enabled, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, on)).toEqual({
+      enabled: true,
+      url: "http://localhost:8766",
+      token: "user-token",
+    });
+    expect(envoySettings(env, on)).toMatchObject({
+      enabled: true,
+      url: "http://127.0.0.1:9020",
+      token: "listener-token",
+    });
+  });
 });
 
 describe("a ! command in envoy.json", () => {
@@ -1132,7 +1217,7 @@ describe("a checkout's .envoy/envoy.json", () => {
     const quiet = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
     expect(dispatchSettings(env, readEnvoyConfig(quiet, env, { cwd }))).toEqual({
       enabled: false,
-      notice: `${quiet} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`,
+      notice: `${quiet} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`,
       error: null,
     });
     const missing = path.join(tempDir(), "envoy.json");

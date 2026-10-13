@@ -922,18 +922,18 @@ describe("the dispatch CLI's envoy.json", () => {
     expect(requests).toEqual([]);
   });
 
-  test("a file with no enabled dispatch section, and no DISPATCH_URL, names the file and exits 2, sending nothing", async () => {
+  test("a file that names no Dispatch server, and no DISPATCH_URL, names the file and exits 2, sending nothing", async () => {
     const dir = join(stateDir, "envoy-only");
     mkdirSync(dir, { recursive: true });
     const file = join(dir, "envoy.json");
     for (const contents of [
       { envoy: { enabled: true, natsUrls: ["nats://nats.internal.example:4222"] } },
-      { dispatch: { serverUrl: "https://dispatch.example", token: "file-token" } },
+      { dispatch: { token: "file-token" } },
     ]) {
       writeFileSync(file, JSON.stringify(contents));
       const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
       expect(stdout).toBe(
-        `dispatch: ${file} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off\n`
+        `dispatch: ${file} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off\n`
       );
       expect(code).toBe(2);
     }

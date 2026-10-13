@@ -46,7 +46,7 @@ describe("Dispatch from a harness's envoy.json", () => {
       )
     ).toEqual({
       enabled: false,
-      notice: `${file} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`,
+      notice: `${file} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`,
       error: null,
     });
   });
@@ -400,7 +400,7 @@ describe("Dispatch from a harness's envoy.json", () => {
       enabled: false,
       notice: null,
       error: `DISPATCH_URL names https://staging.internal.example, but ${user}'s dispatch.token is for https://dispatch.example; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
-    };
+    } as const;
     expect(dispatchFor(env, { ...command, cwd })).toEqual(refusal);
 
     // A checkout's own token goes nowhere DISPATCH_URL names, its own server included.

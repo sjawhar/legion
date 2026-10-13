@@ -194,7 +194,7 @@ describe("envoySettings", () => {
     }
   });
 
-  test("a section that is not enabled lends no value, and a seed with no server to use it is not run", () => {
+  test("a section without enabled lends its values, and a seed with no server to use it is not run", () => {
     const home = tempDir();
     const ran = path.join(home, "ran");
     const notEnabled = configFrom({
@@ -202,7 +202,11 @@ describe("envoySettings", () => {
     });
     expect(
       envoySettings({ ENVOY_NATS_URL: "nats://nats.internal.example:4222" }, notEnabled)
-    ).toMatchObject({ enabled: true, url: "http://127.0.0.1:9020", token: undefined });
+    ).toMatchObject({
+      enabled: true,
+      url: "http://listener.internal.example:9020",
+      token: "file-token",
+    });
     const noServers = configFrom({ envoy: { enabled: true, natsSeed: `!touch ${ran}; echo SU` } });
     expect(envoySettings({ PATH: process.env.PATH }, noServers)).toMatchObject({
       enabled: true,

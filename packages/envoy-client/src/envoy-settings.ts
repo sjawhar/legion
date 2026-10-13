@@ -109,16 +109,18 @@ function natsCredential(
  *
  * Envoy is configured only by the chosen file and the variables: a checkout's file has no say in
  * it, so a cloned repository never chooses where a session's deliveries come from, nor turns off
- * the Envoy the session's environment configured. The chosen file's `envoy.enabled: false` wins.
- * Otherwise each variable overrides its own field of the chosen file's enabled `envoy` section:
+ * the Envoy the session's environment configured. The `enabled` rule is the Dispatch section's
+ * (`dispatchSettings`): `envoy.enabled: false` turns Envoy off whatever the variables say;
+ * otherwise the section's fields apply, and Envoy is on when its address resolves: `envoy.url` or
+ * `ENVOY_URL`, `envoy.natsUrls` or `ENVOY_NATS_URL`, or the default listener `envoy.enabled: true`
+ * names. With none of them, Envoy is off with a notice. Each variable overrides its own field:
  * `ENVOY_URL` the listener (`url`), `ENVOY_NATS_URL` (comma-separated) the NATS servers
  * (`natsUrls`), `ENVOY_TOKEN_FILE` (trimmed file contents, how the Legion daemon delivers it) then
  * `ENVOY_TOKEN` the listener's bearer (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED`
  * the NATS user's seed (`natsSeed`, resolved only when there are NATS servers to use it on). An
  * empty `ENVOY_*` variable counts as unset; an empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is
- * refused, naming it (`natsSeedFromEnvironment`). With no enabled section, `ENVOY_URL` or
- * `ENVOY_NATS_URL` alone names an Envoy; with neither, Envoy is off with a notice. A set pointer
- * that cannot be read is an `error`, never a fallback.
+ * refused, naming it (`natsSeedFromEnvironment`). A set pointer that cannot be read is an `error`,
+ * never a fallback.
  *
  * Same server only: the file's token goes with `ENVOY_URL` only when it names the origin of the
  * listener written in the file (or the default listener when it names none); any other listener
@@ -137,8 +139,8 @@ export function envoySettings(
   options: { readonly nats?: boolean | undefined } = {}
 ): EnvoySettings {
   if (config.kind === "failed") return offWithError(config.error);
-  const own = config.envoy;
-  if (own.enabled === false) {
+  const section = config.envoy;
+  if (section.enabled === false) {
     return offWithNotice(`${config.path} sets envoy.enabled to false: Envoy is off`);
   }
   const namedUrl = nonEmpty(env.ENVOY_URL);
@@ -146,18 +148,22 @@ export function envoySettings(
     .split(",")
     .map((url) => url.trim())
     .filter((url) => url.length > 0);
-  if (own.enabled !== true && namedUrl === undefined && namedNatsUrls.length === 0) {
+  const addressed =
+    namedUrl !== undefined ||
+    namedNatsUrls.length > 0 ||
+    section.url !== undefined ||
+    (section.natsUrls ?? []).length > 0 ||
+    section.enabled === true;
+  if (!addressed) {
     return offWithNotice(
       config.missing === null
-        ? `${config.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`
+        ? `${config.path} names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`
         : missingConfigNotice(config.path, config.missing, "Envoy is off")
     );
   }
   if (namedUrl !== undefined && httpUrl(namedUrl) === undefined) {
     return offWithError("ENVOY_URL must be an http or https URL");
   }
-  // The file's values count only for an enabled section.
-  const section = own.enabled === true ? own : {};
   const natsUrls =
     options.nats === false
       ? []

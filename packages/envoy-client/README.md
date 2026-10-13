@@ -111,11 +111,25 @@ which the start notice and the `dispatch` command say.
 
 Each section is resolved on its own: `dispatchSettings(env, config)` reads the chosen file's
 `dispatch` section and, while `DISPATCH_URL` is unset, the checkout's, and `envoySettings(env,
-config)` reads the chosen file's `envoy` section alone. The chosen file's `enabled: false` turns its
-section off whatever the environment says. `DISPATCH_URL` replaces a checkout's file whole: while it
-is set, the checkout's server, token and `dispatch.enabled: false` are neither used nor refused.
-Otherwise a checkout contributes only its `dispatch.enabled: false`, or a `dispatch.serverUrl` with
-the `dispatch.token` written beside it: its `dispatch.enabled: true` alone turns nothing on, since it
+config)` reads the chosen file's `envoy` section alone. Both follow one rule for `enabled`:
+`enabled: false` turns the section off whatever else is set; otherwise the section's fields apply,
+whether or not it sets `enabled`, and it is on when its address resolves, from the file or a
+variable:
+
+|                                        | Dispatch                                    | Envoy                                               |
+| -------------------------------------- | ------------------------------------------- | --------------------------------------------------- |
+| off whatever else is set               | `dispatch.enabled: false`                   | `envoy.enabled: false`                              |
+| its address, from the file             | `dispatch.serverUrl`                        | `envoy.url`, `envoy.natsUrls`                       |
+| its address, from a variable           | `DISPATCH_URL`                              | `ENVOY_URL`, `ENVOY_NATS_URL`                       |
+| `enabled: true` with no address names  | `http://localhost:8766`                     | the listener `http://127.0.0.1:9020`, no NATS server |
+| off, saying so, when nothing names one | `<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` | `<file> names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` |
+
+So a file `{"envoy": {"url": …, "token": …}}` with no `enabled` is on with its bearer, and so is
+`{"dispatch": {"serverUrl": …, "token": …}}`; a section holding only a token is off until a variable
+names its server. `DISPATCH_URL` replaces a checkout's file whole: while it is set, the checkout's
+server, token and `dispatch.enabled: false` are neither used nor refused. Otherwise a checkout
+contributes only its `dispatch.enabled: false`, or a `dispatch.serverUrl` with the `dispatch.token`
+written beside it, which is an address: its `dispatch.enabled: true` alone turns nothing on, since it
 would name the default server and draw a variable's token to it. A checkout's `dispatch.serverUrl`
 without its own token is refused, and so is its `dispatch.token` without its own
 `dispatch.serverUrl`, unless `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE` replaces it. A checkout's
@@ -139,12 +153,12 @@ is refused.
 `envoySettings` is the Envoy a session uses: `{ enabled: true, url, natsUrls, token, natsSeed,
 heartbeatMs }`, or a `SectionOff`, `{ enabled: false, notice, error }` with exactly one of the two
 set. A `notice` says why nothing is wrong: `<file> sets envoy.enabled to false: Envoy is off`,
-`<file> has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is
-off`, or the missing-file text. An `error` names what could not be read or used. `ENVOY_URL`,
+`<file> names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set:
+Envoy is off`, or the missing-file text. An `error` names what could not be read or used. `ENVOY_URL`,
 `ENVOY_NATS_URL` (comma-separated), `ENVOY_TOKEN_FILE` then `ENVOY_TOKEN`, and
-`NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` each override their own field of an enabled section;
-with no enabled section, `ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy, which is how a
-Legion pane gets the one its daemon names. An empty `ENVOY_*` variable counts as unset; an empty
+`NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` each override their own field of the section; with
+no `envoy` section, `ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy, which is how a Legion
+pane gets the one its daemon names. An empty `ENVOY_*` variable counts as unset; an empty
 `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is refused, naming it. The seed is resolved only when
 there are NATS servers to use it on, and a caller that opens no NATS connection (`{ nats: false }`,
 OpenCode's plugin) gets no NATS servers and resolves no seed. A set `_FILE` pointer that cannot be
@@ -224,10 +238,10 @@ pointer. Triage advice is shown once per issue for the lifetime of the executor 
 `advice` leaves the prior result text and details unchanged.
 
 `dispatchSettings(env, config)` (`dispatch-config.ts`), which `sessionDispatchSettings` runs over
-the envoy.json a caller reads, enables Dispatch only when both its URL and bearer token resolve.
-`DISPATCH_URL` overrides `dispatch.serverUrl`,
-which counts only with `dispatch.enabled: true` and defaults to `http://localhost:8766`, the Go
-server's listen address; an empty `DISPATCH_*` variable counts as unset. The token resolves from
+the envoy.json a caller reads, enables Dispatch only when both its URL and bearer token resolve,
+under the `enabled` rule above. `DISPATCH_URL` overrides `dispatch.serverUrl`, and
+`dispatch.enabled: true` with neither names `http://localhost:8766`, the Go server's listen
+address; an empty `DISPATCH_*` variable counts as unset. The token resolves from
 `DISPATCH_TOKEN_FILE` (a path; the trimmed file contents are the token — how the Legion daemon hands
 the bearer to a pane without putting it on argv), then `DISPATCH_TOKEN`, then the chosen file's
 `dispatch.token`; while `DISPATCH_URL` is unset, a checkout that names its own `dispatch.serverUrl`
@@ -239,7 +253,7 @@ needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`, and is refused with
 DISPATCH_TOKEN_FILE for it`. Invalid configuration, malformed URLs, and empty tokens leave Dispatch
 disabled and name the failing source in `error`; nothing configuring it, or a file turning it off,
 leaves it disabled with a `notice` (`<file> sets dispatch.enabled to false: Dispatch is off`,
-`<file> has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`, or the
+`<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`, or the
 missing-file text).
 
 ### The `dispatch` command

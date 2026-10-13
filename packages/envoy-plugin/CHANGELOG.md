@@ -21,6 +21,7 @@
   checkout's `dispatch.token` needs its own `dispatch.serverUrl` beside it. The serve opens no NATS
   connection, so it never runs an `envoy.natsSeed` command.
 - `DISPATCH_URL` and `ENVOY_URL` take a file's token only for that file's own server.
+- One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
 - One logged notice replaces the `Dispatch disabled` and `Envoy disabled` warnings, and a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `OPENCODE_CONFIG_DIR` no longer stops the plugin loading.
 - Agents reach Dispatch through the `dispatch` command (LEGION-588). The `shell.env` hook puts
   the plugin's `bin/dispatch` first on every shell command's `PATH` and sets `DISPATCH_HOST`,

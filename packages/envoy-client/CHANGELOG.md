@@ -7,8 +7,8 @@
 - **Breaking:** Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
   `resolveDispatchConfig`, `activeDispatchConfig` and `DispatchConfigOptions` are gone. A caller
   reads Dispatch with `sessionDispatchSettings(file, env, { cwd })` over the file
-  `sessionConfigFile(harness, env)` names (`envoyConfigPath`), with the `dispatch` section of the
-  checkout's `.envoy/envoy.json` merged over it, and `activeDispatchSettings` over its result. A missing
+  `sessionConfigFile(harness, env)` names (`envoyConfigPath`) and the checkout's
+  `.envoy/envoy.json` beside it, and `activeDispatchSettings` over its result. A missing
   file contributes nothing, so the variables still configure each section. A checkout's file
   configures Dispatch alone: an `envoy` section there is not read, and the start notice says
   `<checkout>: envoy is not read from a checkout's envoy.json; put it in <chosen file>`; a checkout's
@@ -23,6 +23,15 @@
   refused, and so is its token without its own `dispatch.serverUrl` unless `DISPATCH_TOKEN` or
   `DISPATCH_TOKEN_FILE` replaces it; either refusal turns off Dispatch alone. An empty `DISPATCH_*`
   variable counts as unset.
+- **Breaking:** one rule for `enabled` in both sections. `enabled: false` turns a section off
+  whatever else is set; otherwise the section's fields apply whether or not it sets `enabled`, and
+  it is on when its address resolves, from the file or a variable (Dispatch: `dispatch.serverUrl` or
+  `DISPATCH_URL`; Envoy: `envoy.url` or `ENVOY_URL`, `envoy.natsUrls` or `ENVOY_NATS_URL`), or at
+  the default address `enabled: true` names. An `envoy` section `{url, token}` with no `enabled` is
+  now on with its bearer, where it lent nothing before, and a `dispatch` section `{serverUrl, token}`
+  with no `enabled` is on too. A section that names no address is off with
+  `<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` or
+  `<file> names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`.
 - **Breaking:** the OpenCode-era files are not read. While `~/.config/opencode/envoy.json` is there
   and the chosen file is missing, both sections stay off unless a variable names one, and the
   missing-file notice says the old file is not read and what to do: for
@@ -43,7 +52,7 @@
   `SessionStart` hook writes, host `claude` and Claude Code's rule. With Dispatch off it prints the
   resolver's own notice (`dispatch: no envoy.json at <path>: Dispatch is off`,
   `dispatch: <file> sets dispatch.enabled to false: Dispatch is off`, or
-  `dispatch: <file> has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`),
+  `dispatch: <file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`),
   exiting 2.
 - The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
   Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000

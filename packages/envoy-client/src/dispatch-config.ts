@@ -81,14 +81,16 @@ function writtenToken(
  * Dispatch's URL and bearer token from `config` (`readEnvoyConfig`) and the environment. An empty
  * variable counts as unset.
  *
- * The chosen file's `dispatch.enabled: false` turns Dispatch off whatever the variables say, and its
- * `dispatch.enabled: true` turns it on. A checkout's file is read only while `DISPATCH_URL` is
- * unset: `DISPATCH_URL` replaces its server, its token and its `enabled` together, so a repository
- * can neither turn off the Dispatch the session's environment configured nor send its own token to
- * the server the environment names. A checkout contributes only its `dispatch.enabled: false`, or
- * its own server with its own token; its `dispatch.enabled: true` alone turns nothing on. A
- * checkout's file that cannot be read or is not valid turns Dispatch off with its error, likewise
- * only while `DISPATCH_URL` is unset.
+ * The `enabled` rule is the Envoy section's (`envoySettings`): the chosen file's
+ * `dispatch.enabled: false` turns Dispatch off whatever the variables say; otherwise the section's
+ * fields apply, and Dispatch is on when its server resolves: `DISPATCH_URL`, a checkout's own
+ * server, the chosen file's `dispatch.serverUrl`, or the default that `dispatch.enabled: true`
+ * names. A checkout's file is read only while `DISPATCH_URL` is unset: `DISPATCH_URL` replaces its
+ * server, its token and its `enabled` together, so a repository can neither turn off the Dispatch
+ * the session's environment configured nor send its own token to the server the environment names.
+ * A checkout contributes only its `dispatch.enabled: false`, or its own server with its own token;
+ * its `dispatch.enabled: true` alone turns nothing on. A checkout's file that cannot be read or is
+ * not valid turns Dispatch off with its error, likewise only while `DISPATCH_URL` is unset.
  *
  * The token's source is chosen first: a checkout that names its own `dispatch.serverUrl` gives that
  * server and the `dispatch.token` written beside it, and nothing else; otherwise the token resolves
@@ -124,13 +126,19 @@ export function dispatchSettings(
   if (checkout?.dispatch.enabled === false) {
     return offWithNotice(`${checkout.path} sets dispatch.enabled to false: Dispatch is off`);
   }
-  // A checkout's enabled: true alone would name the default server and draw a variable's token
-  // to it: a checkout turns Dispatch on only by naming its own server.
-  const enabled = own.enabled === true || checkout?.dispatch.serverUrl !== undefined;
-  if (explicitUrl === undefined && !enabled) {
+  // On when its address resolves: DISPATCH_URL, a checkout's own server, the chosen file's server,
+  // or the default its enabled: true names. A checkout's enabled: true alone would name the default
+  // server and draw a variable's token to it, so it names nothing.
+  const checkoutServer = checkout?.dispatch.serverUrl;
+  const addressed =
+    explicitUrl !== undefined ||
+    checkoutServer !== undefined ||
+    own.serverUrl !== undefined ||
+    own.enabled === true;
+  if (!addressed) {
     return offWithNotice(
       config.missing === null
-        ? `${config.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`
+        ? `${config.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`
         : missingConfigNotice(config.path, config.missing, "Dispatch is off")
     );
   }
@@ -140,7 +148,6 @@ export function dispatchSettings(
 
   try {
     // A checkout's server goes only with the token written beside it.
-    const checkoutServer = checkout?.dispatch.serverUrl;
     const source =
       checkout !== null && checkoutServer !== undefined
         ? checkoutPair(checkout, checkoutServer)
