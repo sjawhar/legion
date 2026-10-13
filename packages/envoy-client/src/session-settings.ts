@@ -49,6 +49,7 @@ export interface SessionSettings {
  * command that failed) is said for that section. A file that turns a section off, or holds no
  * section for it, says nothing. What a checkout's file holds that the session does not read is
  * said too: an `envoy` section, and a file that cannot be used while `DISPATCH_URL` replaces it.
+ * So is each input read from a place or shape a later release stops reading (`warnings`).
  */
 function startNotice(
   config: EnvoyConfig,
@@ -77,6 +78,7 @@ function startNotice(
   if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
+  parts.push(...config.warnings);
   return parts.length === 0 ? null : parts.join("; ");
 }
 

@@ -214,34 +214,35 @@ describe("sessionDispatchSettings", () => {
   });
 });
 
-describe("the old OpenCode file", () => {
-  test("is named whenever the neutral file is missing and it is still there, a section on or not", () => {
+describe("the OpenCode-era file", () => {
+  test("is read in place of a missing neutral file, and the start notice says to move it", () => {
     const home = tempDir();
-    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {});
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "old-token" },
+    });
     const neutral = path.join(home, ".config", "legion", "envoy.json");
-    const hint = `${old} is no longer read: move it to ${neutral}`;
+    const warning = `${old} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${old} ${neutral}, then move a top-level natsUrls into envoy.natsUrls`;
     const chosen = { path: neutral, error: null } as const;
-
-    expect(sessionSettings(chosen, { HOME: home }, { cwd: tempDir() }).notice).toBe(
-      `no envoy.json at ${neutral}: Dispatch and Envoy are off; ${hint}`
-    );
-    const envoyOn = { HOME: home, ENVOY_NATS_URL: "nats://nats.internal.example:4222" };
-    expect(sessionSettings(chosen, envoyOn, { cwd: tempDir() }).notice).toBe(
-      `no envoy.json at ${neutral}: Dispatch is off; ${hint}`
-    );
-    const dispatchOn = {
-      HOME: home,
-      DISPATCH_URL: "https://dispatch.example",
-      DISPATCH_TOKEN: "environment-token",
-    };
-    expect(sessionSettings(chosen, dispatchOn, { cwd: tempDir() }).notice).toBe(
-      `no envoy.json at ${neutral}: Envoy is off; ${hint}`
-    );
+    const settings = sessionSettings(chosen, { HOME: home }, { cwd: tempDir() });
+    expect(settings.dispatch).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "old-token",
+    });
+    expect(settings.notice).toBe(warning);
+    // A neutral file that exists is read, and nothing is said about the old one.
+    writeFile(neutral, { dispatch: { enabled: true, token: "new-token" } });
+    expect(sessionSettings(chosen, { HOME: home }, { cwd: tempDir() })).toMatchObject({
+      dispatch: { token: "new-token" },
+      notice: null,
+    });
   });
 
-  test("is not named when XDG_CONFIG_HOME puts the neutral file in another directory", () => {
+  test("is not read when XDG_CONFIG_HOME puts the neutral file in another directory", () => {
     const home = tempDir();
-    writeFile(path.join(home, ".config", "opencode", "envoy.json"), {});
+    writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: { enabled: true, token: "old-token" },
+    });
     // A Legion pane in the default omp profile: the daemon moves XDG_CONFIG_HOME under its state
     // directory and leaves HOME the operator's.
     const pane = { HOME: home, XDG_CONFIG_HOME: "/var/lib/legion/home/.config" };

@@ -183,6 +183,10 @@ export async function runDispatchCli(
   let resolution: DispatchConfigResolution;
   try {
     const envoyConfig = readEnvoyConfig(envoyConfigPath(harness, env), env, { cwd: io.cwd });
+    // An input a later release stops reading is said on every call, until it moves.
+    if (envoyConfig.kind === "read") {
+      for (const warning of envoyConfig.warnings) print(`dispatch: ${warning}`);
+    }
     resolution = dispatchSettings(env, envoyConfig);
   } catch (error) {
     print(`dispatch: ${messageFor(error)}`);

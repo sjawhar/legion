@@ -39063,7 +39063,6 @@ function natsAuthOptions(seed) {
 import {
   chmodSync,
   closeSync,
-  existsSync,
   lstatSync,
   mkdtempSync,
   openSync,
@@ -39132,17 +39131,19 @@ var DispatchSectionSchema = exports_external.strictObject({
   serverUrl: httpUrlSchema.optional(),
   token: exports_external.string().optional()
 });
+var NatsUrlsSchema = exports_external.array(exports_external.string().trim().min(1, "must not be empty"));
 var EnvoySectionSchema = exports_external.strictObject({
   enabled: exports_external.boolean().optional(),
   url: httpUrlSchema.optional(),
-  natsUrls: exports_external.array(exports_external.string().trim().min(1, "must not be empty")).optional(),
+  natsUrls: NatsUrlsSchema.optional(),
   token: exports_external.string().optional(),
   natsSeed: exports_external.string().optional()
 });
 var EnvoyFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
   dispatch: DispatchSectionSchema.optional(),
-  envoy: EnvoySectionSchema.optional()
+  envoy: EnvoySectionSchema.optional(),
+  natsUrls: NatsUrlsSchema.optional()
 });
 var CheckoutFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
@@ -39285,10 +39286,10 @@ function parseFile(filePath, schema, checkout) {
       reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
     };
   }
-  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
+  if (checkout && typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
     return {
       kind: "invalid",
-      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+      reason: `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section`
     };
   }
   const parsed = schema.safeParse(parsedJson);
@@ -39372,46 +39373,83 @@ function checkoutCommandRefusal(checkoutPath, field) {
 }
 function missingConfigNotice(filePath, missing, off) {
   const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
-  const hint = missing.hint === null ? "" : `; ${missing.hint}`;
-  return `no envoy.json at ${filePath}${link}: ${off}${hint}`;
+  return `no envoy.json at ${filePath}${link}: ${off}`;
 }
-function oldFileHint(filePath, env) {
+function openCodeUserFile(filePath, env) {
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath))
     return null;
   const home = nonEmpty(env.HOME) ?? homedir();
   if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
     return null;
-  const old = path.join(home, ".config", "opencode", "envoy.json");
-  if (!existsSync(old))
-    return null;
-  return `${old} is no longer read: move it to ${neutral.path}`;
+  return path.join(home, ".config", "opencode", "envoy.json");
+}
+function chosenSections(filePath, settings, warnings, warn) {
+  const { natsUrls, ...rest } = settings;
+  if (natsUrls === undefined)
+    return { kind: "valid", settings };
+  if (rest.envoy?.natsUrls !== undefined) {
+    return {
+      kind: "invalid",
+      error: `${filePath}: natsUrls and envoy.natsUrls are both set; keep envoy.natsUrls`
+    };
+  }
+  if (warn) {
+    warnings.push(`${filePath}: the top-level natsUrls is read as envoy.natsUrls until it moves (a later release stops reading it): move natsUrls into envoy.natsUrls`);
+  }
+  return { kind: "valid", settings: { ...rest, envoy: { ...rest.envoy, natsUrls } } };
 }
 function readEnvoyConfig(filePath, env, options) {
-  const chosen = parseFile(filePath, EnvoyFileSchema, false);
+  const warnings = [];
+  let readPath = filePath;
+  let chosen = parseFile(filePath, EnvoyFileSchema, false);
+  const openCode = chosen.kind === "absent" ? openCodeUserFile(filePath, env) : null;
+  if (openCode !== null) {
+    const old = parseFile(openCode, EnvoyFileSchema, false);
+    if (old.kind !== "absent") {
+      chosen = old;
+      readPath = openCode;
+      warnings.push(`${openCode} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${openCode} ${filePath}, then move a top-level natsUrls into envoy.natsUrls`);
+    }
+  }
   if (chosen.kind === "invalid")
-    return { kind: "failed", path: filePath, error: chosen.reason };
-  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
-  const own = chosen.kind === "valid" ? chosen.settings : {};
+    return { kind: "failed", path: readPath, error: chosen.reason };
+  const sections = chosen.kind === "valid" ? chosenSections(readPath, chosen.settings, warnings, readPath === filePath) : { kind: "valid", settings: {} };
+  if (sections.kind === "invalid")
+    return { kind: "failed", path: readPath, error: sections.error };
+  const own = sections.settings;
+  const resolvedChosen = path.resolve(filePath);
+  const checkoutFile = (candidate) => candidate === resolvedChosen ? { kind: "absent", link: null } : parseFile(candidate, CheckoutFileSchema, true);
+  let checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  let parsedCheckout = checkoutFile(checkoutPath);
+  if (parsedCheckout.kind === "absent") {
+    const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
+    const old = checkoutFile(oldCheckout);
+    if (old.kind !== "absent") {
+      warnings.push(`${oldCheckout} is read until it moves (a later release stops reading it): mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`);
+      parsedCheckout = old;
+      checkoutPath = oldCheckout;
+    }
+  }
   let checkout = null;
-  if (checkoutFile.kind === "invalid") {
-    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
-  } else if (checkoutFile.kind === "valid") {
+  if (parsedCheckout.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: parsedCheckout.reason };
+  } else if (parsedCheckout.kind === "valid") {
     checkout = {
       kind: "valid",
       path: checkoutPath,
-      dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+      dispatch: parsedCheckout.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(parsedCheckout.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
     };
   }
   return {
     kind: "read",
-    path: filePath,
+    path: readPath,
     dispatch: own.dispatch ?? {},
     envoy: own.envoy ?? {},
     checkout,
-    missing: chosen.kind === "absent" ? { link: chosen.link, hint: oldFileHint(filePath, env) } : null
+    missing: chosen.kind === "absent" ? { link: chosen.link } : null,
+    warnings
   };
 }
 
@@ -39668,6 +39706,7 @@ function startNotice(config2, dispatch, envoy) {
   if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
+  parts.push(...config2.warnings);
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -42664,7 +42703,7 @@ function claudeProjectDirectory(environment, fallback) {
 
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
-import { dirname, join as join2 } from "path";
+import { dirname as dirname2, join as join2 } from "path";
 class SessionIdentity {
   directory;
   #id;
@@ -42689,7 +42728,7 @@ function roleStateFile(stateDirectory, sessionId) {
   return join2(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
 }
 async function writeAtomicStateFile(file2, contents) {
-  await mkdir(dirname(file2), { recursive: true, mode: 448 });
+  await mkdir(dirname2(file2), { recursive: true, mode: 448 });
   const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temporary, contents, { mode: 384 });
   await rename(temporary, file2);
