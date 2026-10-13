@@ -76,9 +76,13 @@ authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
 configured. An unmapped repository without a default is rejected; issues that
 use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
-Otherwise Dispatch loads config in this precedence order: user `envoy.json`,
-repository `envoy.json`, then environment overrides. A present `NATS_URLS`
-overrides merged `natsUrls` before `bus.ConnectOwningStream` and the outbox
+Otherwise Dispatch loads config in this precedence order: the user `envoy.json`
+(`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the checkout's
+`.envoy/envoy.json` in the directory it starts in, then environment overrides.
+A user file still at `~/.config/opencode/envoy.json` with none at the current
+path refuses startup, naming both paths, and a file that still carries a
+top-level `natsUrls` is refused, naming `envoy.natsUrls`. A present `NATS_URLS`
+overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the outbox
 start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
 to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`
 says the run means it (every deployment sets it). A present
@@ -436,7 +440,7 @@ the table says human only.
 
 Document events publish retained envelopes on
 `notifications.dispatch.document.<PROJECT>.<slug>.<type>`. `natstail` reads
-`natsUrls` from `envoy.json` and prints a matching envelope:
+`envoy.natsUrls` from `envoy.json` and prints a matching envelope:
 
 ```sh
 go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1

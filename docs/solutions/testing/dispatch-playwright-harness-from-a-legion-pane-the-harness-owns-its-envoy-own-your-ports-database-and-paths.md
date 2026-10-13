@@ -66,7 +66,7 @@ server's configuration in full: `ENVOY_URL` built from `FAKE_ENVOY_PORT`, fake
 GitHub, fake secrets broker and dashboard origins, and a fresh App key, with no cookie signing key: the server
 generates one for its own process under `DISPATCH_DEV_SIGNIN`. The server runs
 with no caller Home or XDG directory, so
-`~/.config/opencode/envoy.json` and
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and
 `~/.local/share/dispatch/{app.json,signing-key}` cannot participate. The fake
 Envoy is the only Envoy this harness is ever meant to talk to. With `PLAYWRIGHT_BASE_URL` exported,
 which `bun run e2e:deployed` expects and does not set itself, no Dispatch server or fake GitHub

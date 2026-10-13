@@ -34,11 +34,11 @@ function render(settings: Setting[]): string {
   const lines = [
     `Dispatch's server, \`envoy-dispatch\`, and its subcommands take the ${settings.length} Dispatch settings below from the environment. \`envoy-dispatch settings\` prints the same table from the binary you run.`,
     "",
-    "The libraries Dispatch is built on read a few more variables for themselves, outside this table: `HOME` (where the data directory, `~/.local/share/dispatch`, and the user `envoy.json` are), libpq's `PG*` variables (connection parameters `DATABASE_URL` leaves out), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (outbound HTTP), `SSL_CERT_FILE` and `SSL_CERT_DIR` (the certificates Dispatch trusts), and the Go runtime's `GO*` variables and `TZ`.",
+    "The libraries Dispatch is built on read a few more variables for themselves, outside this table: `HOME` (where the data directory, `~/.local/share/dispatch`, is, and the user `envoy.json` when `XDG_CONFIG_HOME` is unset or empty), libpq's `PG*` variables (connection parameters `DATABASE_URL` leaves out), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (outbound HTTP), `SSL_CERT_FILE` and `SSL_CERT_DIR` (the certificates Dispatch trusts), and the Go runtime's `GO*` variables and `TZ`.",
     "",
     "A setting with a file form can name a file that holds its value instead. When Dispatch reads that setting, the file's trimmed contents win over the variable, and a file that cannot be read, or holds nothing, refuses startup.",
     "",
-    "`envoy.json` is read from two files: the user file, `~/.config/opencode/envoy.json`, and the repository file, `.opencode/envoy.json` in the directory Dispatch starts in. Where both set a key, the repository file wins, and `DISPATCH_SERVER_URL` and `NATS_URLS` win over both.",
+    "`envoy.json` is read from two files: the user file, `legion/envoy.json` under `XDG_CONFIG_HOME` (`~/.config` when that is unset or empty), and the checkout's file, `.envoy/envoy.json` in the directory Dispatch starts in. Where both set a key, the checkout's file wins, and `DISPATCH_SERVER_URL` and `NATS_URLS` win over both. A user file still at `~/.config/opencode/envoy.json`, with none at the current path, refuses startup, naming both paths; a file that still carries a top-level `natsUrls` is refused, naming `envoy.natsUrls`.",
     "",
   ];
   for (const setting of settings) {

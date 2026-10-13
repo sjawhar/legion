@@ -856,7 +856,7 @@ Dispatch uses cookie identity through the sign-in pool.
 Document events publish retained envelopes on
 `notifications.dispatch.document.<PROJECT>.<slug>.<type>`. Use
 `go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1`
-to print one matching envelope from the `natsUrls` configured in `envoy.json`.
+to print one matching envelope from the `envoy.natsUrls` configured in `envoy.json`.
 `natstail` owns nothing on the bus - it neither creates nor updates
 `ENVOY_NOTIFICATIONS` - and refuses a NATS server that is not this machine's:
 prefix the command with `ENVOY_ALLOW_REMOTE_NATS=1` where `envoy.json` names a
