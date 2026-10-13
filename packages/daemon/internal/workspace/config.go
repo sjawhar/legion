@@ -22,20 +22,20 @@ import (
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — the shared clone's own clone, a fetch, a jj operation, or a git configuration edit —
-// each bounded independently. The fetch's one clone is the exception, under FetchTimeout instead
+// each bounded independently. The fetch's clone is the exception, under FetchTimeout instead
 // (below).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the outer bound for the fetch's clone: long enough for a large repository's
-// slow but steadily progressing transfer to finish. Every other provisioning command keeps
-// CommandTimeout: this widens the one command whose duration follows the repository's size and
-// the network's speed, not a fixed step in provisioning.
+// FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
+// enough for a large repository's slow but steadily progressing transfer to finish. Every other
+// provisioning command keeps CommandTimeout: this widens the one command whose duration follows
+// the repository's size and the network's speed, not a fixed step in provisioning.
 const FetchTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
-// hold the runner's own slow-command budget (RunChecked), and the fetch's clone holds a wider
-// bound of its own instead (runCheckedTimeout, FetchTimeout) — never a budget shared across the
-// whole provisioning sequence.
+// hold the runner's own slow-command budget (RunChecked), and each attempt of the fetch's clone
+// holds what remains of FetchTimeout instead (Fetch) — never a budget shared across the whole
+// provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string
@@ -466,9 +466,8 @@ func runCommand(ctx context.Context, run Runner, argv []string, env []string, di
 }
 
 // runCommandTimeout is runCommand, but for timeout instead of the runner's own slow-command
-// budget: runCommand itself calls it with run.Timeout(); runCheckedTimeout calls it with an
-// explicit value instead, for the fetch's clone, that path's one caller (see FetchTimeout for why
-// it needs one).
+// budget: runCommand itself calls it with run.Timeout(); Fetch calls it with what remains of
+// FetchTimeout for each attempt of its clone, that path's one caller.
 func runCommandTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
 	if run == nil {
 		return Result{}, errors.New("workspace runner is required")
@@ -507,14 +506,7 @@ func RunCheckedIn(ctx context.Context, run Runner, ws Workspace, argv []string) 
 	return checkedResult(argv, result, err)
 }
 
-// runCheckedTimeout is RunChecked, but for timeout instead of the runner's own slow-command
-// budget (see FetchTimeout).
-func runCheckedTimeout(ctx context.Context, run Runner, argv []string, env []string, dir string, timeout time.Duration) (Result, error) {
-	result, err := runCommandTimeout(ctx, run, argv, env, dir, timeout)
-	return checkedResult(argv, result, err)
-}
-
-// checkedResult is RunChecked's and runCheckedTimeout's shared answer: a process that could not
+// checkedResult is RunChecked's and Fetch's shared answer: a process that could not
 // start, exited non-zero, or outlived its budget is an error naming the command. A clean exit
 // whose I/O draining outlived WaitDelay (exec.ErrWaitDelay) is not this: execRunner.Run already
 // reads that as the process's own true ExitCode, so it passes through the same as any other

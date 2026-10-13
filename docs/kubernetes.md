@@ -1467,8 +1467,9 @@ one Sandbox per issue, shared by every role that works it, owning the issue's vo
 template (`manifest.go`) has two init containers and one container per role (`claim.Roles`:
 architect, planner, implementer, tester, reviewer, merger), named for its role:
 
-1. `workspace-fetch` clones the repository into the pod's feed. It is the only process that holds
-   the provisioning token ([Trust model](#trust-model-the-provisioning-token)).
+1. `workspace-fetch` clones the repository into the pod's feed, cloning again after a transient
+   failure within its 30-minute bound. It is the only process that holds the provisioning token
+   ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the issue's clone and its jj workspace on the issue's own volume from
    the read-only feed, taking no lock and waiting on no other pod: no other pod mounts the volume.
    Its environment is the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME=true` when the volume must
@@ -1961,8 +1962,9 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   `Failed` pod the last 20 log lines of the failing container (the init container when it exited
   non-zero, else the main one) are quoted in the daemon log;
 - `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
-  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s one clone,
-  bounded by its own `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, then
+  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s clone and
+  its retries of a transient failure, all within one `workspace.FetchTimeout` rather than
+  `workspace.CommandTimeout` ([Trust model](#trust-model-the-provisioning-token)), then
   `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; it waits on no other pod
   and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
   and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
@@ -2054,15 +2056,26 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
 
 - **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
   pod's `feed` `emptyDir`, and runs `legion workspace-init fetch --repo <owner>/<repo> --feed
-  /var/run/legion/feed`: one `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
+  /var/run/legion/feed`: a `git clone --bare` of `https://github.com/<owner>/<repo>` into the feed,
   reading no git configuration but its own (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`,
   `GIT_CONFIG_PARAMETERS` unset), with a one-shot credential git asks for `https://github.com` alone.
   It mounts neither the issue's volume nor the config home. Every other provisioning command is
-  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but this one clone's duration follows the
+  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but this clone's duration follows the
   repository's size and the network's speed, not a fixed step in provisioning: it runs under
-  `workspace.FetchTimeout` (30 minutes) instead. The daemon's own registration deadline (above,
-  "Liveness rules") carries a matching bound under Kubernetes, so this wider bound has room to run
-  before the daemon would otherwise retire the pod for an agent that never registered.
+  `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A clone that
+  fails transiently is cloned again: git's fatal exit (128) with a cause that names the network or
+  a status GitHub may not answer again — a request of the transfer that failed with no status
+  (`RPC failed; curl <code>`, the connection broke) or with 408, 429 or a 5xx; a first request that
+  could not connect, resolve `github.com`, or keep its connection or TLS session, or that got one of
+  those statuses; or a pack stream that ended early. Each retry logs the attempt's error on stdout
+  as one line, the token replaced by `***`, removes the attempt's partial clone, and waits 5 s,
+  15 s, 30 s, then a minute each time; each attempt is bounded by what remains of the 30 minutes
+  from the first one's start, and no retry starts past them. Any other failure — a token refused,
+  a repository not found or not granted, a certificate that does not verify — fails the fetch at
+  once (`transientCloneFailure`, `internal/workspace/fetchretry.go`). The daemon's own registration
+  deadline (above, "Liveness rules") carries the same 30 minutes under Kubernetes, so the fetch's
+  retries have room to run before the daemon would otherwise retire the pod for an agent that never
+  registered.
 - **`workspace-init`** mounts the issue's volume, the feed read-only, and the config home — never
   the Secret — and runs `legion workspace-init provision`: the clone's clone and fetch reach
   `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file

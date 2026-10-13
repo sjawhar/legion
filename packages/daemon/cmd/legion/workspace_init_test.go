@@ -117,6 +117,7 @@ func newIssueVolume(t *testing.T) *issueVolume {
 		"WINIT_REMOTE":         filepath.Join(dir, "no-remote.git"),
 		"WINIT_JJ_LOG":         v.jjLog,
 		"WINIT_CREDENTIAL_LOG": v.credentialLog,
+		"WINIT_CLONE_FAILURES": "",
 		"WINIT_TAG":            "",
 		"WINIT_HOLD":           "",
 		"JJ_USER":              "Legion test",
