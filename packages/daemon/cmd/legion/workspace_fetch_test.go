@@ -8,7 +8,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 )
@@ -233,29 +232,16 @@ func cloneAttempts(t *testing.T, attempts string) int {
 // instantClock is the fetch's clock in a test: each wait passes at once, recorded, and moves the
 // clock on by its length.
 type instantClock struct {
-	mu    sync.Mutex
 	now   time.Time
 	waits []time.Duration
 }
 
-func (c *instantClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
+func (c *instantClock) Now() time.Time { return c.now }
 
 func (c *instantClock) Sleep(ctx context.Context, d time.Duration) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.waits = append(c.waits, d)
 	c.now = c.now.Add(d)
 	return ctx.Err()
-}
-
-func (c *instantClock) Waits() []time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return slices.Clone(c.waits)
 }
 
 // useInstantClock makes an instantClock the fetch's clock until the test ends.
@@ -295,7 +281,7 @@ func TestWorkspaceInitFetchRetriesATransientCloneFailure(t *testing.T) {
 	if got := cloneAttempts(t, attempts); got != 3 {
 		t.Fatalf("git cloned %d times, want 3", got)
 	}
-	if waits := clock.Waits(); !slices.Equal(waits, []time.Duration{5 * time.Second, 15 * time.Second}) {
+	if waits := clock.waits; !slices.Equal(waits, []time.Duration{5 * time.Second, 15 * time.Second}) {
 		t.Fatalf("the fetch waited %v, want 5s then 15s", waits)
 	}
 	if main := v.git(t, "--git-dir="+feed, "log", "-1", "--format=%s", "refs/heads/main"); main != "seed" {
@@ -346,7 +332,7 @@ func TestWorkspaceInitFetchFailsAPermanentCloneFailureAtOnce(t *testing.T) {
 			if got := cloneAttempts(t, attempts); got != 1 {
 				t.Fatalf("git cloned %d times, want 1", got)
 			}
-			if waits := clock.Waits(); len(waits) != 0 {
+			if waits := clock.waits; len(waits) != 0 {
 				t.Fatalf("the fetch waited %v, want no wait", waits)
 			}
 		})

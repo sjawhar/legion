@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -112,11 +113,7 @@ func transientStatus(status string) bool {
 	return err == nil && (code == 408 || code == 429 || code >= 500 && code <= 599)
 }
 
+// containsAny is whether text holds any of needles.
 func containsAny(text string, needles []string) bool {
-	for _, needle := range needles {
-		if strings.Contains(text, needle) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(needles, func(needle string) bool { return strings.Contains(text, needle) })
 }

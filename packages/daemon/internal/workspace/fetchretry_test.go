@@ -75,7 +75,6 @@ func fatal(stderr string) Result { return Result{ExitCode: 128, Stderr: stderr} 
 // testClock is the fetch's clock in a test: each wait passes at once and moves it on by its length,
 // as advance does for the time an attempt takes.
 type testClock struct {
-	mu    sync.Mutex
 	now   time.Time
 	waits []time.Duration
 }
@@ -84,25 +83,15 @@ func newTestClock() *testClock {
 	return &testClock{now: time.Date(2026, 10, 13, 17, 49, 23, 0, time.UTC)}
 }
 
-func (c *testClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
+func (c *testClock) Now() time.Time { return c.now }
 
 func (c *testClock) Sleep(ctx context.Context, d time.Duration) error {
 	c.advance(d)
-	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.waits = append(c.waits, d)
 	return ctx.Err()
 }
 
-func (c *testClock) advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
+func (c *testClock) advance(d time.Duration) { c.now = c.now.Add(d) }
 
 // failingClone is a runner whose every clone takes took of clock's time and then fails with
 // result — or, given less time than that, runs to its timeout and is killed there.
