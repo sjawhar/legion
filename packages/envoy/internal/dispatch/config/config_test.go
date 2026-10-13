@@ -47,9 +47,6 @@ func TestLoadMergesUserAndCheckout(t *testing.T) {
 	if cfg.Dispatch.ServerURL != "https://checkout.dispatch.example" {
 		t.Errorf("serverUrl: got %q", cfg.Dispatch.ServerURL)
 	}
-	if !cfg.Dispatch.Enabled {
-		t.Errorf("enabled should remain true (fell through from user config)")
-	}
 	if len(cfg.Envoy.NatsURLs) != 1 || cfg.Envoy.NatsURLs[0] != "nats://user:4222" {
 		t.Errorf("envoy.natsUrls: %+v", cfg.Envoy.NatsURLs)
 	}
@@ -93,7 +90,7 @@ func TestLoadRefusesARelativeXDGConfigHome(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a refusal of a relative XDG_CONFIG_HOME")
 	}
-	if want := "XDG_CONFIG_HOME is relative, which is not an absolute path"; err.Error() != want {
+	if want := `XDG_CONFIG_HOME is "relative", which is not an absolute path`; err.Error() != want {
 		t.Errorf("error: got %q, want %q", err, want)
 	}
 }
@@ -173,14 +170,18 @@ func TestLoadRejectsInvalidEnvironmentOverrides(t *testing.T) {
 }
 
 // The NATS URLs live in the envoy section now, so a file that still carries the top-level key is
-// refused, naming where they go, in either file.
+// refused, in either file: the user file's naming where they go, the checkout's saying it holds
+// only Dispatch.
 func TestLoadRefusesTopLevelNatsURLs(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		path func(home, cwd string) string
+		name  string
+		path  func(home, cwd string) string
+		issue string
 	}{
-		{name: "user file", path: func(home, _ string) string { return userFile(home) }},
-		{name: "checkout file", path: func(_, cwd string) string { return checkoutFile(cwd) }},
+		{name: "user file", path: func(home, _ string) string { return userFile(home) },
+			issue: "natsUrls: no longer read; write it as envoy.natsUrls"},
+		{name: "checkout file", path: func(_, cwd string) string { return checkoutFile(cwd) },
+			issue: "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -192,11 +193,8 @@ func TestLoadRefusesTopLevelNatsURLs(t *testing.T) {
 			if !errors.As(err, &invalid) {
 				t.Fatalf("err = %v, want an *InvalidConfigError", err)
 			}
-			if invalid.Path != path {
-				t.Errorf("path: got %q, want %q", invalid.Path, path)
-			}
-			if !strings.Contains(err.Error(), "envoy.natsUrls") {
-				t.Errorf("error should name envoy.natsUrls, got %q", err.Error())
+			if invalid.Path != path || len(invalid.Issues) != 1 || invalid.Issues[0] != tc.issue {
+				t.Errorf("err = %+v, want %s refused with %q", invalid, path, tc.issue)
 			}
 		})
 	}
@@ -315,6 +313,88 @@ func TestLoadIgnoresTheOldCheckoutFile(t *testing.T) {
 	}
 }
 
+// A repository may hold a regular file named .envoy: no checkout file is there to read.
+func TestLoadReadsNoCheckoutFileThroughARegularFile(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	mustWrite(t, userFile(home), `{"dispatch": {"serverUrl": "https://user.dispatch.example"}}`)
+	mustWrite(t, filepath.Join(cwd, ".envoy"), "not a directory")
+	cfg, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Dispatch == nil || cfg.Dispatch.ServerURL != "https://user.dispatch.example" {
+		t.Errorf("dispatch: got %+v, want the user file's", cfg.Dispatch)
+	}
+}
+
+// The clients read envoy.natsUrls trimmed, so the server does too.
+func TestLoadTrimsNatsURLs(t *testing.T) {
+	home := t.TempDir()
+	mustWrite(t, userFile(home), `{"envoy": {"natsUrls": [" nats://one:4222 ", "nats://two:4222\n"]}}`)
+	cfg, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := strings.Join(cfg.Envoy.NatsURLs, ","); got != "nats://one:4222,nats://two:4222" {
+		t.Errorf("envoy.natsUrls: got %q, want them trimmed", got)
+	}
+}
+
+// A file that is not JSON is refused by its line and column, and the error quotes none of it: the
+// decoder's own message names the character it stopped at, the start of an unquoted token.
+func TestLoadRefusesMalformedJSONWithoutQuotingIt(t *testing.T) {
+	home := t.TempDir()
+	path := userFile(home)
+	mustWrite(t, path, "{\n  \"dispatch\": {\"token\": hunter2secret}\n}")
+	_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+	var invalid *InvalidConfigError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("err = %v, want an *InvalidConfigError", err)
+	}
+	if want := ": invalid JSON at line 2, column 25"; invalid.Path != path || len(invalid.Issues) != 1 || invalid.Issues[0] != want {
+		t.Errorf("err = %+v, want %s refused with %q", invalid, path, want)
+	}
+}
+
+// JSON null is no value for any key of envoy.json, as the clients' schema reads it: a file the
+// server starts on is one every client reads.
+func TestLoadRefusesNull(t *testing.T) {
+	for _, tc := range []struct {
+		contents string
+		issue    string
+	}{
+		{`null`, ": Expected object"},
+		{`[]`, ": Expected object"},
+		{`{"$schema": null}`, "$schema: Expected string"},
+		{`{"dispatch": null}`, "dispatch: Expected object"},
+		{`{"dispatch": {"enabled": null}}`, "dispatch.enabled: Expected boolean"},
+		{`{"dispatch": {"serverUrl": null}}`, "dispatch.serverUrl: Expected string"},
+		{`{"dispatch": {"token": null}}`, "dispatch.token: Expected string"},
+		{`{"envoy": null}`, "envoy: Expected object"},
+		{`{"envoy": {"enabled": null}}`, "envoy.enabled: Expected boolean"},
+		{`{"envoy": {"url": null}}`, "envoy.url: Expected string"},
+		{`{"envoy": {"natsUrls": null}}`, "envoy.natsUrls: Expected string array"},
+		{`{"envoy": {"natsUrls": [null]}}`, "envoy.natsUrls.0: must not be empty"},
+		{`{"envoy": {"token": null}}`, "envoy.token: Expected string"},
+		{`{"envoy": {"natsSeed": null}}`, "envoy.natsSeed: Expected string"},
+	} {
+		t.Run(tc.contents, func(t *testing.T) {
+			home := t.TempDir()
+			path := userFile(home)
+			mustWrite(t, path, tc.contents)
+			_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+			var invalid *InvalidConfigError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("err = %v, want an *InvalidConfigError", err)
+			}
+			if invalid.Path != path || len(invalid.Issues) != 1 || invalid.Issues[0] != tc.issue {
+				t.Errorf("err = %+v, want %s refused with %q", invalid, path, tc.issue)
+			}
+		})
+	}
+}
+
 func TestLoadAcceptsEveryEnvoyKey(t *testing.T) {
 	home := t.TempDir()
 	mustWrite(t, userFile(home), `{
@@ -345,8 +425,14 @@ func TestLoadRejectsAMalformedEnvoySection(t *testing.T) {
 		{name: "unknown key", envoy: `{"natsUrl": "nats://one:4222"}`, issue: "envoy.natsUrl: Unrecognized key"},
 		{name: "enabled", envoy: `{"enabled": "yes"}`, issue: "envoy.enabled: Expected boolean"},
 		{name: "url type", envoy: `{"url": 9020}`, issue: "envoy.url: Expected string"},
-		{name: "url empty", envoy: `{"url": ""}`, issue: "envoy.url: Invalid url"},
+		{name: "url empty", envoy: `{"url": ""}`, issue: "envoy.url: must be an http or https URL"},
+		{name: "url not a URL", envoy: `{"url": "not a url"}`, issue: "envoy.url: must be an http or https URL"},
+		{name: "url relative", envoy: `{"url": "/relative"}`, issue: "envoy.url: must be an http or https URL"},
+		{name: "url without a scheme", envoy: `{"url": "localhost:9020"}`, issue: "envoy.url: must be an http or https URL"},
+		{name: "url of another scheme", envoy: `{"url": "ftp://listener.internal.example"}`, issue: "envoy.url: must be an http or https URL"},
+		{name: "url without a host", envoy: `{"url": "http://"}`, issue: "envoy.url: must be an http or https URL"},
 		{name: "natsUrls", envoy: `{"natsUrls": "nats://one:4222"}`, issue: "envoy.natsUrls: Expected string array"},
+		{name: "natsUrls empty", envoy: `{"natsUrls": ["nats://one:4222", " "]}`, issue: "envoy.natsUrls.1: must not be empty"},
 		{name: "token", envoy: `{"token": 1}`, issue: "envoy.token: Expected string"},
 		{name: "natsSeed", envoy: `{"natsSeed": false}`, issue: "envoy.natsSeed: Expected string"},
 	} {
@@ -395,13 +481,16 @@ func TestLoadRejectsRemovedAppClientIDKey(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidServerURL(t *testing.T) {
-	home := t.TempDir()
-	mustWrite(t, userFile(home), `{
-		"dispatch": {"serverUrl": ""}
-	}`)
-	_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
-	if err == nil {
-		t.Fatalf("expected an error for an invalid serverUrl")
+	for _, serverURL := range []string{"", "not a url", "/relative", "localhost:8766", "mailto:a@b", "http://"} {
+		t.Run(serverURL, func(t *testing.T) {
+			home := t.TempDir()
+			mustWrite(t, userFile(home), `{"dispatch": {"serverUrl": "`+serverURL+`"}}`)
+			_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+			var invalid *InvalidConfigError
+			if !errors.As(err, &invalid) || len(invalid.Issues) != 1 || invalid.Issues[0] != "dispatch.serverUrl: must be an http or https URL" {
+				t.Errorf("err = %v, want dispatch.serverUrl refused as not an http or https URL", err)
+			}
+		})
 	}
 }
 

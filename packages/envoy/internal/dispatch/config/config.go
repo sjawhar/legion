@@ -6,6 +6,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,14 +15,15 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
-// DispatchConfig mirrors the `dispatch` sub-object in envoy.json. Token is the value as written:
-// one starting with `!` is a shell command only the clients run, and the server reads no token.
+// DispatchConfig is what the server reads of the `dispatch` sub-object in envoy.json: its URL.
+// parseDispatch checks every key the section allows (enabled, serverUrl, token); `enabled` and
+// `token` are a session's, which the clients resolve (packages/envoy-client), and the server reads
+// neither.
 type DispatchConfig struct {
-	Enabled   bool   `json:"enabled,omitempty"`
-	ServerURL string `json:"serverUrl,omitempty"`
-	Token     string `json:"token,omitempty"`
+	ServerURL string
 }
 
 // EnvoySection is what the server reads of the `envoy` sub-object in envoy.json: its NATS URLs,
@@ -29,16 +31,14 @@ type DispatchConfig struct {
 // parseEnvoy checks every key the section allows (enabled, url, natsUrls, token, natsSeed), and
 // keeps natsUrls alone.
 type EnvoySection struct {
-	NatsURLs []string `json:"natsUrls,omitempty"`
+	NatsURLs []string
 }
 
-// EnvoyConfig is the top-level envoy.json shape.
+// EnvoyConfig is what the server reads of envoy.json. Other top-level keys are allowed and not
+// read.
 type EnvoyConfig struct {
-	Schema   string          `json:"$schema,omitempty"`
-	Dispatch *DispatchConfig `json:"dispatch,omitempty"`
-	Envoy    EnvoySection    `json:"envoy"`
-	// Extra keys are preserved verbatim so unknown top-level fields round-trip.
-	Extra map[string]json.RawMessage `json:"-"`
+	Dispatch *DispatchConfig
+	Envoy    EnvoySection
 }
 
 // LoadOptions controls where Load looks for config files.
@@ -108,7 +108,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 	case configHome == "":
 		configHome = filepath.Join(home, ".config")
 	case !filepath.IsAbs(configHome):
-		return nil, fmt.Errorf("XDG_CONFIG_HOME is %s, which is not an absolute path", configHome)
+		return nil, fmt.Errorf("XDG_CONFIG_HOME is %q, which is not an absolute path", configHome)
 	}
 
 	merged := &EnvoyConfig{}
@@ -197,13 +197,14 @@ func natsURLs(raw string) ([]string, error) {
 	return values, nil
 }
 
-// readConfigFile reads one envoy.json, or nil when there is none. checkoutOf is empty for the user
-// file; for a checkout's file it is the user file's path, where the envoy section a checkout's file
-// may not hold belongs.
+// readConfigFile reads one envoy.json, or nil when there is none: a missing file, or a path through
+// a regular file (a repository with a file named .envoy). checkoutOf is empty for the user file;
+// for a checkout's file it is the user file's path, where the envoy section a checkout's file may
+// not hold belongs.
 func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
 			return nil, nil
 		}
 		return nil, err
@@ -215,36 +216,57 @@ func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 	return cfg, nil
 }
 
-// parseAndValidate mirrors the TS validator (envoy-client/src/envoy-config.ts): type checks,
-// unknown-key rejection under dispatch and envoy, URL validity, the refusal of the top-level
-// natsUrls, which is envoy.natsUrls, and, for a checkout's file (checkoutOf set), the refusal of
-// any envoy section, naming the user file it belongs in.
+// isNull reports a JSON null, which every key of envoy.json refuses, as the TS schema does.
+func isNull(raw json.RawMessage) bool {
+	return bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+}
+
+// jsonError describes why data is not a JSON object without quoting it: a syntax error by its line
+// and column, since the decoder's message quotes the character it stopped at, which can be the
+// start of an unquoted token or seed.
+func jsonError(data []byte, err error) string {
+	var syntax *json.SyntaxError
+	if !errors.As(err, &syntax) {
+		return ": Expected object"
+	}
+	// Offset counts the byte the decoder stopped at; the position named is that byte's.
+	before := data[:max(0, min(int(syntax.Offset)-1, len(data)))]
+	line := bytes.Count(before, []byte("\n")) + 1
+	column := len(before) - bytes.LastIndexByte(before, '\n')
+	return fmt.Sprintf(": invalid JSON at line %d, column %d", line, column)
+}
+
+// parseAndValidate mirrors the TS validator (envoy-client/src/envoy-config.ts): an object at the
+// top, type checks with null refused, unknown-key rejection under dispatch and envoy, http(s) URLs,
+// non-empty NATS URLs, the refusal of the top-level natsUrls, which is envoy.natsUrls, and, for a
+// checkout's file (checkoutOf set), the refusal of any envoy section, naming the user file it
+// belongs in.
 func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, []string{fmt.Sprintf(": %v", err)}
+		return nil, []string{jsonError(data, err)}
 	}
-	cfg := &EnvoyConfig{Extra: map[string]json.RawMessage{}}
+	if raw == nil {
+		return nil, []string{": Expected object"}
+	}
+	cfg := &EnvoyConfig{}
 	var issues []string
 
 	if v, ok := raw["$schema"]; ok {
 		var s string
-		if err := json.Unmarshal(v, &s); err != nil {
-			issues = append(issues, "$schema: Expected string")
-		} else {
-			cfg.Schema = s
-		}
-		delete(raw, "$schema")
+		issues = append(issues, checkType("$schema", "string", v, &s)...)
 	}
 	if _, ok := raw["natsUrls"]; ok {
-		issues = append(issues, "natsUrls: no longer read; write it as envoy.natsUrls")
-		delete(raw, "natsUrls")
+		if checkoutOf != "" {
+			issues = append(issues, "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section")
+		} else {
+			issues = append(issues, "natsUrls: no longer read; write it as envoy.natsUrls")
+		}
 	}
 	if v, ok := raw["dispatch"]; ok {
 		d, dIssues := parseDispatch(v)
 		issues = append(issues, dIssues...)
 		cfg.Dispatch = d
-		delete(raw, "dispatch")
 	}
 	if v, ok := raw["envoy"]; ok {
 		if checkoutOf != "" {
@@ -254,10 +276,6 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 			issues = append(issues, eIssues...)
 			cfg.Envoy = e
 		}
-		delete(raw, "envoy")
-	}
-	for k, v := range raw {
-		cfg.Extra[k] = v
 	}
 	if len(issues) > 0 {
 		return nil, issues
@@ -276,29 +294,47 @@ func unknownKeys(section string, m map[string]json.RawMessage, known map[string]
 	return issues
 }
 
-// parseURL reads a section's URL value, as the TS validator's url() check reads it.
+// section reads one section's object, refusing anything else (null included).
+func section(name string, raw json.RawMessage) (map[string]json.RawMessage, []string) {
+	var m map[string]json.RawMessage
+	if isNull(raw) || json.Unmarshal(raw, &m) != nil {
+		return nil, []string{name + ": Expected object"}
+	}
+	return m, nil
+}
+
+// checkType refuses a value that is null or does not decode into into.
+func checkType(field, want string, raw json.RawMessage, into any) []string {
+	if isNull(raw) || json.Unmarshal(raw, into) != nil {
+		return []string{field + ": Expected " + want}
+	}
+	return nil
+}
+
+// parseURL reads a section's URL value, as the TS validator reads it: an absolute http or https
+// URL with a host.
 func parseURL(field string, raw json.RawMessage) (string, []string) {
 	var s string
-	if err := json.Unmarshal(raw, &s); err != nil {
-		return "", []string{field + ": Expected string"}
+	if issues := checkType(field, "string", raw, &s); issues != nil {
+		return "", issues
 	}
-	if _, err := url.Parse(s); err != nil || s == "" {
-		return "", []string{field + ": Invalid url"}
+	u, err := url.Parse(s)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", []string{field + ": must be an http or https URL"}
 	}
 	return s, nil
 }
 
 func parseDispatch(raw json.RawMessage) (*DispatchConfig, []string) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return nil, []string{"dispatch: Expected object"}
+	m, issues := section("dispatch", raw)
+	if issues != nil {
+		return nil, issues
 	}
 	out := &DispatchConfig{}
-	issues := unknownKeys("dispatch", m, dispatchKnownKeys)
+	issues = unknownKeys("dispatch", m, dispatchKnownKeys)
 	if v, ok := m["enabled"]; ok {
-		if err := json.Unmarshal(v, &out.Enabled); err != nil {
-			issues = append(issues, "dispatch.enabled: Expected boolean")
-		}
+		var enabled bool
+		issues = append(issues, checkType("dispatch.enabled", "boolean", v, &enabled)...)
 	}
 	if v, ok := m["serverUrl"]; ok {
 		serverURL, urlIssues := parseURL("dispatch.serverUrl", v)
@@ -306,82 +342,53 @@ func parseDispatch(raw json.RawMessage) (*DispatchConfig, []string) {
 		out.ServerURL = serverURL
 	}
 	if v, ok := m["token"]; ok {
-		if err := json.Unmarshal(v, &out.Token); err != nil {
-			issues = append(issues, "dispatch.token: Expected string")
-		}
+		var token string
+		issues = append(issues, checkType("dispatch.token", "string", v, &token)...)
 	}
 	return out, issues
 }
 
 func parseEnvoy(raw json.RawMessage) (EnvoySection, []string) {
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return EnvoySection{}, []string{"envoy: Expected object"}
+	m, issues := section("envoy", raw)
+	if issues != nil {
+		return EnvoySection{}, issues
 	}
 	var out EnvoySection
-	issues := unknownKeys("envoy", m, envoyKnownKeys)
+	issues = unknownKeys("envoy", m, envoyKnownKeys)
 	if v, ok := m["enabled"]; ok {
 		var enabled bool
-		if err := json.Unmarshal(v, &enabled); err != nil {
-			issues = append(issues, "envoy.enabled: Expected boolean")
-		}
+		issues = append(issues, checkType("envoy.enabled", "boolean", v, &enabled)...)
 	}
 	if v, ok := m["url"]; ok {
 		_, urlIssues := parseURL("envoy.url", v)
 		issues = append(issues, urlIssues...)
 	}
 	if v, ok := m["natsUrls"]; ok {
-		if err := json.Unmarshal(v, &out.NatsURLs); err != nil {
-			issues = append(issues, "envoy.natsUrls: Expected string array")
+		var natsURLs []string
+		issues = append(issues, checkType("envoy.natsUrls", "string array", v, &natsURLs)...)
+		for i, natsURL := range natsURLs {
+			natsURLs[i] = strings.TrimSpace(natsURL)
+			if natsURLs[i] == "" {
+				issues = append(issues, fmt.Sprintf("envoy.natsUrls.%d: must not be empty", i))
+			}
 		}
+		out.NatsURLs = natsURLs
 	}
 	for _, key := range []string{"token", "natsSeed"} {
 		if v, ok := m[key]; ok {
 			var s string
-			if err := json.Unmarshal(v, &s); err != nil {
-				issues = append(issues, "envoy."+key+": Expected string")
-			}
+			issues = append(issues, checkType("envoy."+key, "string", v, &s)...)
 		}
 	}
 	return out, issues
 }
 
-// mergeConfig shallow-merges a checkout's file over the user file. The `dispatch` sub-object is
-// also shallow-merged so checkout keys override only matching user keys; a checkout's file holds
-// no envoy section (parseAndValidate), so the user file's stands.
+// mergeConfig overlays a checkout's file on the user file: its dispatch.serverUrl, when it names
+// one. A checkout's file holds no envoy section (parseAndValidate), so the user file's stands.
 func mergeConfig(base, override *EnvoyConfig) *EnvoyConfig {
-	out := &EnvoyConfig{
-		Schema:   base.Schema,
-		Dispatch: base.Dispatch,
-		Envoy:    base.Envoy,
-		Extra:    map[string]json.RawMessage{},
+	out := *base
+	if override.Dispatch != nil && override.Dispatch.ServerURL != "" {
+		out.Dispatch = &DispatchConfig{ServerURL: override.Dispatch.ServerURL}
 	}
-	for k, v := range base.Extra {
-		out.Extra[k] = v
-	}
-	if override.Schema != "" {
-		out.Schema = override.Schema
-	}
-	for k, v := range override.Extra {
-		out.Extra[k] = v
-	}
-	if base.Dispatch != nil || override.Dispatch != nil {
-		merged := &DispatchConfig{}
-		if base.Dispatch != nil {
-			*merged = *base.Dispatch
-		}
-		if override.Dispatch != nil {
-			if override.Dispatch.Enabled {
-				merged.Enabled = true
-			}
-			if override.Dispatch.ServerURL != "" {
-				merged.ServerURL = override.Dispatch.ServerURL
-			}
-			if override.Dispatch.Token != "" {
-				merged.Token = override.Dispatch.Token
-			}
-		}
-		out.Dispatch = merged
-	}
-	return out
+	return &out
 }
