@@ -72,9 +72,16 @@
 #   devbox against the same production cluster. A lane's two ports must be ones the devbox's
 #   security group admits from the Legion nodes (README's port-admission note states the current
 #   allocation and how many lanes it leaves room for); widening that admitted range is a change to
-#   the deployment repository's infrastructure, not this one. LEGION_E2E_PROJECT must already exist
-#   as a Dispatch project: the run creates none, and production Dispatch has no auto-create (any
-#   person or agent session creates one, e.g. `dispatch project --key <KEY> --name <name>`).
+#   the deployment repository's infrastructure, not this one. LEGION_E2E_PROJECT need not already
+#   exist as a Dispatch project: prerequisites creates it before the lock when it is missing
+#   (ensure_project, lib/workflow.sh), a proof-human write like every other, over the agents'
+#   bearer and naming the proof human's session as its actor.
+# - LEGION_E2E_POD_FILE, in a development run stopped at `deployment-pod-block` only, names a JSON
+#   file holding a deployment's own worker pod block (`runtime.kubernetes.pod`: service_account,
+#   env, volumes, volume_mounts), which the run's legion.yaml carries in place of the operator
+#   route's, so that block boots before it ships. The run copies it once at prerequisites and reads
+#   only the copy, whose sha256 it notes. Nothing in it is rewritten, so every object it names (its
+#   ServiceAccount, Secrets, ConfigMaps) must exist in the namespace.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -126,6 +133,10 @@ envoy_token_secret_id=${LEGION_E2E_ENVOY_TOKEN_SECRET_ID:-}
 until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 design_gate=${STAGE4B_DESIGN_GATE:-}
+pod_file=${LEGION_E2E_POD_FILE:-}
+# The run's own copy of that block, taken once at prerequisites (`jq -cS .` of the file), which
+# every later step reads, so a pass ties to the block whose sha256 the run records.
+pod_block=$work/pod-block.json
 # The Dispatch project key (the workflow's). Overridable so two runs can proceed at once (see
 # Inputs, above); defaults to today's single fixed value. run_label, the pods'/claims' token and
 # the namespace's legion.dev/project label, is the daemon's own ProjectToken(project) — project
@@ -280,6 +291,9 @@ controller_session=
 # place: the teardown removes it, best effort.
 negative_config_pod=
 negative_config_workspace=
+# deployment-pod-block's root, once created: the teardown sets it done after the daemon stops, since
+# the live daemon sets back a status an outside session writes on a root it runs.
+block_tree=
 host=
 # The production services' hosts, which scrub keeps out of what the run prints (set in prerequisites).
 service_hosts=()
@@ -1053,11 +1067,9 @@ pod_endpoint_mismatch() {
 # ---- production access ---------------------------------------------------------------------------
 
 read_bearers() {
+  write_dispatch_header &&
   (umask 077 &&
-    tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
     aws secretsmanager get-secret-value --secret-id "$envoy_token_secret_id" --query SecretString --output text >"$work/envoy-token" &&
-    printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
-    cp "$work/dispatch-auth-header" "$work/dispatch-human-header" &&
     printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
     head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
@@ -1123,14 +1135,24 @@ runtime:
     issue_volume: 20Gi
     kubeconfig: $runtime_kubeconfig
     context: $runtime_context
+    plugins:
+      pi_legion: "$pi_legion_version"
+      pi_envoy: "$pi_envoy_version"
 $(resources_block)
     pod:
 EOF
-  # The operator route's pod, its token audience the operator's and its ConfigMap reference pointed
-  # at the run's own copy.
-  render_operator_pod
-  sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
-  grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+  if [ -n "$pod_file" ]; then
+    # A deployment's own worker pod block, as its configuration renders it, given whole: its
+    # ServiceAccount, tokens, ConfigMaps and environment are what is under test, so nothing in it
+    # is rewritten. JSON is YAML, so one compact line is the `pod:` value.
+    printf '      %s\n' "$(cat "$pod_block")" >>"$work/legion.yaml"
+  else
+    # The operator route's pod, its token audience the operator's and its ConfigMap reference pointed
+    # at the run's own copy.
+    render_operator_pod
+    sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
+    grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+  fi
   # The controller's own reservation is resources_block's (controller_cpu set): only `controller:
   # daemon` is appended, since a second `resources:` key under runtime.kubernetes would be refused.
   if [ -n "$controller_cpu" ]; then
@@ -2199,6 +2221,7 @@ cleanup() {
   # full-agent-negative's workspace file, should the run end between its write and its removal.
   [ -z "$negative_config_pod" ] || pod_exec "$negative_config_pod" planner sh -c "rm -f '$negative_config_workspace/.omp/config.yml'" >/dev/null 2>&1
   stop_pid "$daemon_pid"
+  [ -z "$block_tree" ] || set_status "$block_tree" "done"
   collect_transcripts
   stop_tree "$watch_pid"
   stop_tree "$events_pid"
@@ -2472,7 +2495,7 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 # ==== checkpoints ===================================================================================
 
 begin prerequisites
-for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
@@ -2492,6 +2515,26 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
+# The branch-built daemon links no release plugin pair (only a release workflow build does), so a
+# daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
+# `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b
+# relaunches no stale role onto that pair — every claim in this run registers at the branch
+# daemon's own contract, so the boot pass and the registration path post nothing (restart-mid-tree
+# below asserts exactly that negative) — so naming the pair here never exercises the kept-pod
+# install; it only keeps `legion start --check-config` and the boot log off the degraded-mode
+# lines for a run that otherwise has nothing to name, and it must name a source the pod can
+# actually read: the image carries the two plugins already unpacked under /opt/legion, not as
+# tarballs, and their manifests name the monorepo's workspace packages, which `bun add` refuses to
+# install from an unpacked copy. The published npm packages are the only real source a pod's `bun
+# add` can reach, so this resolves the latest exact version of each at run time rather than
+# pinning a literal that would drift. If a future checkpoint ever does drive a stale relaunch in
+# this run, the shim's own `node -e` contract check would refuse to exec into a published
+# pi-legion whose `daemonApiVersion` is not this branch's, visibly, rather than silently running
+# the wrong contract.
+pi_legion_version=$(npm view @sjawhar/pi-legion version 2>/dev/null) &&
+  [ -n "$pi_legion_version" ] || fail "npm view @sjawhar/pi-legion version returned nothing"
+pi_envoy_version=$(npm view @sjawhar/pi-envoy version 2>/dev/null) &&
+  [ -n "$pi_envoy_version" ] || fail "npm view @sjawhar/pi-envoy version returned nothing"
 # The Dispatch bearer's file is named, never read into the transcript: a refusal names the variable
 # and the path, never what the file holds.
 [ -n "$dispatch_token_file" ] ||
@@ -2511,6 +2554,10 @@ esac
 # The gateway's health endpoint is at its origin.
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
+# The run's project is created before the lock when it does not already exist, so a run never
+# takes the host lock for an identity Dispatch then refuses.
+write_dispatch_header
+ensure_project
 require_proof_human
 # The devbox's `gh` on PATH is a dotfiles wrapper acting as the proof human; it refuses an inherited
 # GH_TOKEN rather than passing it on, and in an agent session it replaces GH_CONFIG_DIR with its own
@@ -2562,6 +2609,15 @@ if [ -n "$design_gate" ]; then
   sed -n '1,/^begin spec-posted$/s/^begin //p' "$root/scripts/e2e/stage4b-sandbox-tree.sh" | grep -qxF "$until" ||
     fail "STAGE4B_DESIGN_GATE runs tree 1 alone, so STAGE4B_UNTIL must be spec-posted or a checkpoint before it, not $until"
   note "STAGE4B_DESIGN_GATE=$design_gate: the design gate is armed and tree 1 runs alone"
+fi
+if [ -n "$pod_file" ]; then
+  # The run's every pod carries the deployment's block, and the checkpoints after this one rely on
+  # the operator route's pod (its token audience, its route ConfigMap), so the run stops here.
+  [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"
+  jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
+    fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
+  jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
+  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
 fi
 read_bearers
 pass
@@ -2766,6 +2822,59 @@ kubectl --context "$operator" get events -n "$namespace" --field-selector "invol
   jq -c '[.items[] | {reason, at: (.firstTimestamp // .eventTime), message: (.message | .[0:160])}]' >"$evidence/probe-timeline.json"
 note "the first probe attempt's timeline (scheduling, node launch, image pull): $evidence/probe-timeline.json"
 pass
+
+begin deployment-pod-block
+# A deployment's worker pod block (LEGION_E2E_POD_FILE), before it ships: the daemon boots on it (the
+# boot checkpoint's image probe is built from it), admits one root, and launches the root's issue pod
+# from it. The pod must carry the whole block (lib/deployment-pod-block-verdict.jq): its
+# ServiceAccount, every volume and projected token, every mount in every role container, and every
+# env name and value on the architect's process, where the launcher's start command puts the block's
+# environment (a role container's spec carries only POD_UID). When the block sets KUBECONFIG, kubectl
+# in the pod, on that file, must answer as the block's ServiceAccount, and the run records what that
+# identity may do in the namespace (`auth can-i --list`), for the deployment to judge its own policy.
+# The teardown sets the root done once the daemon has stopped.
+if [ -z "$pod_file" ]; then
+  skipped "no LEGION_E2E_POD_FILE: the run's pod is the operator route's"
+else
+  block_tree=$(new_issue "Pre-merge boot of a deployment's worker pod block ($work)")
+  set_status "$block_tree" todo
+  until_true 300 "the root admitted" sh -c \
+    "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg a '$block_tree' '.admission.active == [\$a]'"
+  state_file admission
+  note "admitted $(jq -c .admission.active "$evidence/admission.json")"
+  wait_for_worker "$block_tree" architect
+  block_pod=$(issue_pod "$block_tree") || fail "no Running pod for $block_tree"
+  op get pod "$block_pod" -o json >"$evidence/pods/deployment-block-$block_pod.json"
+  # Each process of the architect container and the block's env names it holds, values included: the
+  # file stays in the run's work directory, removed at exit, and the verdict prints names alone.
+  block_env_names=$(jq -r '.env // {} | keys | join("|")' "$pod_block")
+  # shellcheck disable=SC2016 # the script runs in the pod, which expands its own variables
+  pod_exec "$block_pod" architect env NAMES="$block_env_names" sh -c \
+    'for d in /proc/[0-9]*; do [ -r "$d/environ" ] || continue; printf "#%s %s\n" "${d#/proc/}" "$(cat "$d/comm" 2>/dev/null)"; [ -z "$NAMES" ] || tr "\0" "\n" <"$d/environ" 2>/dev/null | grep -E "^($NAMES)=" || true; done' \
+    >"$work/block-processes.txt" || fail "could not list the processes of pod $block_pod's architect container"
+  jq -c --slurpfile block "$pod_block" --rawfile processes "$work/block-processes.txt" \
+    -f "$root/scripts/e2e/lib/deployment-pod-block-verdict.jq" "$evidence/pods/deployment-block-$block_pod.json" \
+    >"$evidence/deployment-pod-block.json" || fail "the deployment-pod-block verdict did not run"
+  note "pod $block_pod: $(cat "$evidence/deployment-pod-block.json")"
+  jq -e '(.missing | length) == 0 and (.wrong | length) == 0' "$evidence/deployment-pod-block.json" >/dev/null ||
+    fail "pod $block_pod does not carry the block: missing $(jq -c .missing "$evidence/deployment-pod-block.json"), wrong $(jq -c .wrong "$evidence/deployment-pod-block.json")"
+  block_kubeconfig=$(jq -r '.env.KUBECONFIG // empty' "$pod_block")
+  if [ -z "$block_kubeconfig" ]; then
+    note "the block sets no KUBECONFIG, so the pod's kubectl is not asked"
+  else
+    want="system:serviceaccount:$namespace:$(jq -r '.service_account // "default"' "$pod_block")"
+    whoami=$(pod_exec "$block_pod" architect env KUBECONFIG="$block_kubeconfig" kubectl auth whoami -o jsonpath='{.status.userInfo.username}') ||
+      fail "kubectl auth whoami, on the block's KUBECONFIG, failed in pod $block_pod"
+    note "in pod $block_pod (architect), kubectl auth whoami on the block's KUBECONFIG: $whoami"
+    [ "$whoami" = "$want" ] || fail "the pod's kubectl answered as $whoami, not $want"
+    pod_exec "$block_pod" architect env KUBECONFIG="$block_kubeconfig" kubectl -n "$namespace" auth can-i --list \
+      >"$evidence/deployment-block-can-i.txt" 2>&1 || fail "kubectl auth can-i --list failed in pod $block_pod"
+    # On EKS kubectl prints a warning line above the table (its webhook authorizer cannot list every
+    # rule), so the rows are the lines after the header.
+    note "what $whoami may do in $namespace: $evidence/deployment-block-can-i.txt ($(awk 'seen { n++ } /^Resources/ { seen = 1 } END { print n + 0 }' "$evidence/deployment-block-can-i.txt") rules)"
+  fi
+  pass
+fi
 
 begin admitted-issue-cap
 if [ -n "$design_gate" ]; then

@@ -28,7 +28,8 @@
             "window": "@1",
             "pane": "%1"
           }
-        }
+        },
+        "pluginContract": 0
       },
       "workers": {}
     }

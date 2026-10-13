@@ -55,6 +55,55 @@ func TestRegisterIssuesASecretWhoseHashIsStoredBeforeTheResponse(t *testing.T) {
 	}
 }
 
+// A claim's registration records the plugin contract it declared, shows it on the claim row, and
+// the operator's claim list shows it too; a claim never registered shows pluginContract 0.
+func TestRegisterRecordsThePluginContractAndTheOperatorViewShowsIt(t *testing.T) {
+	h := newHarnessUnrelaunchable(t)
+	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
+
+	if stored := h.stored(token); stored.PluginContract != 0 {
+		t.Fatalf("an unregistered claim's pluginContract = %d, want 0", stored.PluginContract)
+	}
+
+	var registered claim.RegisterResponse
+	recorder := h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: boot, SessionID: "ses_architect", OmpSessionFile: "/sessions/ses_architect.jsonl",
+		AgentID: "agent-ses_architect", PluginContract: 7,
+	}, nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("register = %d; body %s", recorder.Code, recorder.Body)
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &registered); err != nil {
+		t.Fatalf("decode the registration: %v", err)
+	}
+
+	if stored := h.stored(token); stored.PluginContract != 7 {
+		t.Fatalf("stored pluginContract = %d, want 7", stored.PluginContract)
+	}
+
+	list := h.operator(http.MethodGet, "/legion/v1/operator/claims", nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list = %d; body %s", list.Code, list.Body)
+	}
+	var claims OperatorClaims
+	if err := json.Unmarshal(list.Body.Bytes(), &claims); err != nil {
+		t.Fatalf("decode the operator claims: %v", err)
+	}
+	found := false
+	for _, c := range claims.Claims {
+		if c.Token != token {
+			continue
+		}
+		found = true
+		if c.PluginContract != 7 {
+			t.Errorf("operator claim pluginContract = %d, want 7", c.PluginContract)
+		}
+	}
+	if !found {
+		t.Fatalf("the operator claim list does not carry %s", token)
+	}
+}
+
 // A daemon given no task agents answers an empty `promptAgents` list, never null: the plugin's
 // strict reader takes an array, and a role whose prompts dispatch no agent measures none.
 func TestRegisterAnswersAnEmptyPromptAgentsListWhenTheDaemonHasNone(t *testing.T) {
@@ -190,7 +239,7 @@ func TestClaimRoutesRefuseABodyTheyDoNotRead(t *testing.T) {
 		name, route, body, wantFragment string
 	}{
 		{"not JSON", "register", `{"bootToken":`, "invalid request body"},
-		{"an unknown member", "register", `{"bootToken":"b","sessionId":"s","ompSessionFile":"f","agentId":"a","pluginContract":1,"workerSecret":"x"}`, "workerSecret"},
+		{"an unknown member", "ready", `{"claimToken":"c","sessionId":"s","secret":"x","generation":1,"workerSecret":"y"}`, "workerSecret"},
 		{"no session", "register", `{"bootToken":"b","ompSessionFile":"f","agentId":"a","pluginContract":1}`, "sessionId is required"},
 		{"no transcript", "register", `{"bootToken":"b","sessionId":"s","agentId":"a","pluginContract":1}`, "ompSessionFile is required"},
 		{"no secret", "ready", `{"claimToken":"c","sessionId":"s","generation":1}`, "secret is required"},

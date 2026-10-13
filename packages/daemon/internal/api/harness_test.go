@@ -193,6 +193,23 @@ type harness struct {
 }
 
 func newHarness(t *testing.T) *harness {
+	return newHarnessDeps(t, true)
+}
+
+// newHarnessUnrelaunchable is newHarness's negative control for the stale-caller refusals
+// (LEGION-164): its supervise deps can relaunch nothing (Kubernetes's degraded mode, no
+// plugin source known), so the server's own PluginRelaunchable is false too — the claim it names
+// is never refused on this account, whatever contract it is recorded at.
+func newHarnessUnrelaunchable(t *testing.T) *harness {
+	return newHarnessDeps(t, false)
+}
+
+// newHarnessDeps is newHarness with control over whether this daemon can relaunch a stale-plugin
+// claim at all (PluginRelaunchable, wired identically onto supervise.Deps and Options so the two
+// always agree, as daemon.go wires them in production). PluginContract is always this daemon's own
+// (DaemonAPIVersion): the stale-plugin trigger lives in internal/supervise, exercised by its own
+// tests.
+func newHarnessDeps(t *testing.T, relaunchable bool) *harness {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -208,6 +225,8 @@ func newHarness(t *testing.T) *harness {
 			Timeouts: supervise.Timeouts{
 				Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second,
 			},
+			PluginContract:     DaemonAPIVersion,
+			PluginRelaunchable: relaunchable,
 			// The daemon's own wiring: a tree a workflow issue backs does not close here.
 			TreeClosable: func(ctx context.Context, c supervise.Claim) (bool, error) {
 				var issue *record.Issue
@@ -229,7 +248,7 @@ func newHarness(t *testing.T) *harness {
 	reported, reportedContextErr := &[]capabilities.Report{}, &[]error{}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
-		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st,
+		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st, PluginRelaunchable: relaunchable,
 		ClaimReady:   func(c supervise.Claim) { *readied = append(*readied, c) },
 		PromptAgents: testPromptAgents,
 		CapabilityReported: func(ctx context.Context, _ supervise.Claim, report capabilities.Report) {
@@ -382,6 +401,58 @@ func (h *harness) registered(bootToken, session string) claim.RegisterResponse {
 	var response claim.RegisterResponse
 	decodeInto(h.t, recorder, &response)
 	return response
+}
+
+// registerContract registers session on the launch bootToken names, declaring contract as the
+// plugin's. A current contract (DaemonAPIVersion) is accepted, returning what the agent learned,
+// exactly as registered does. A contract that differs is recorded too — register writes
+// PluginContract before supervise.staleRegistration decides anything — but a harness whose
+// supervise deps can relaunch it (relaunchable true) relaunches that claim onto the current
+// contract at once and refuses the registration itself with the 409 pi-legion exits on, so the
+// caller gets no secret for it; a harness built with no relaunch (newHarnessUnrelaunchable)
+// records the stale contract and answers 200 instead, since nothing here relaunches it.
+func (h *harness) registerContract(bootToken, session string, contract int, relaunchable bool) claim.RegisterResponse {
+	h.t.Helper()
+	recorder := h.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: bootToken, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
+		AgentID: "agent-" + session, PluginContract: contract,
+	}, nil)
+	want := http.StatusOK
+	if contract != DaemonAPIVersion && relaunchable {
+		want = http.StatusConflict
+	}
+	if recorder.Code != want {
+		h.t.Fatalf("register %s at contract %d = %d, want %d; body %s", session, contract, recorder.Code, want, recorder.Body)
+	}
+	if want != http.StatusOK {
+		return claim.RegisterResponse{}
+	}
+	var response claim.RegisterResponse
+	decodeInto(h.t, recorder, &response)
+	return response
+}
+
+// makeStale seeds token's claim as the API's stale-caller rule reads it: recorded at contract
+// rather than the daemon's own, live and holding a capability — exactly the window between the
+// daemon finding a process stale (at boot, or at the registration that recorded the mismatch) and
+// its relaunch taking effect (supervise.refreshPlugin, supervise.staleRegistration), before
+// Machine.persist clears the capability a relaunched claim never keeps (supervise.HoldsCapability). The
+// claim is written to the store directly and the machine rebuilt from it (testSupervisor.restart),
+// as a daemon restart re-adopting a claim recorded this way would.
+func (h *harness) makeStale(t *testing.T, token claim.Token, session, secret string, contract int) {
+	t.Helper()
+	machine, ok := h.supervisor.Machine(token)
+	if !ok {
+		t.Fatalf("no machine for %s", token)
+	}
+	c := machine.Claim()
+	c.Session = session
+	c.CapabilityHash = secretHash(secret)
+	c.PluginContract = contract
+	if err := h.store.PutClaim(context.Background(), c); err != nil {
+		t.Fatalf("seed a stale claim for %s: %v", token, err)
+	}
+	h.supervisor.restart(t, token)
 }
 
 func decodeInto(t *testing.T, recorder *httptest.ResponseRecorder, into any) {

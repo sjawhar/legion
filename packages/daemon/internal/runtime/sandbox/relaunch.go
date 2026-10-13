@@ -24,11 +24,14 @@ import (
 // (decision 3a): a relaunch before the agent's first registration — the registration deadline, a
 // death before registration, a retried launch, boot finishing a launch a crash interrupted — is a
 // Spawn over an existing Sandbox. A spec with a ResumeSessionFile is refused: continuing a
-// recorded agent is Resume's.
+// recorded agent is Resume's. spec.Plugins travels with a claim that has registered a session
+// (specs.SpawnSpec), which a Spawn's claim never has yet, and is cleared here anyway, so Spawn
+// always installs nothing and a fresh pod always loads the image's copies.
 func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
+	spec.Plugins = nil
 	return r.relaunch(ctx, nil, spec)
 }
 
@@ -53,17 +56,25 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): its
 // launchers dial a stream other than the one a pod created now is handed, and they never redial, or
 // it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
-// it runs an image other than the one this runtime launches every container with (imageDrift), so
-// its agents call this daemon as the release that launched them. The first role relaunched after
-// any of these replaces it, and its siblings resume into the new pod. Before each start the Sandbox
-// records the addresses the generation is handed (recordAddresses). A new pod is provisioned by its
-// kind (podKind.provision), under nothing but the pod's own launch turn: an issue pod has its
+// it runs an image other than the one this runtime launches every container with (imageDrift) —
+// unless the launch is installing a stale-plugin pair into this pod (spec.Plugins set,
+// LEGION-164): then drift alone is not a reason to replace it, since the install, not a fresh pod on the
+// configured image, is what brings this launch's agent onto the current plugin, and a pod replaced
+// for some other reason in the same sweep still is. The first role relaunched after any of these
+// replaces it, and its siblings resume into the new pod. Before each start the Sandbox records the
+// addresses the generation is handed (recordAddresses). A new pod is provisioned by its kind
+// (podKind.provision), under nothing but the pod's own launch turn: an issue pod has its
 // workspace's provisioning token minted, the controller's pod needs nothing. A workflow claim
 // passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
 // cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
-// not answer in time (stopIssuedChild).
+// not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
+// when spec.Plugins is set and the pod was kept rather than replaced: a pod replaced for any other
+// reason — a suspended Sandbox, a lost launcher binding, a failed init, a moved address — comes up
+// on the configured image, which the boot gate holds to the daemon's contract, so its copies are
+// already right; carrying the install onto a fresh pod would be installing over a pair already
+// current. l.spec.Plugins is cleared in that case before launcherCommand builds its argv.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -85,7 +96,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
 	_, drifted := imageDrift(pod, r.image)
-	replace := s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || drifted ||
+	installing := l.spec.Plugins != nil
+	replace := s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil ||
+		(drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(ctx, s, pod, l.roles)
@@ -93,6 +106,11 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 			return fail("read its pod's launcher bindings", err)
 		}
 		replace = !bound
+	}
+	if installing && replace {
+		// Replaced for some other reason: the fresh pod's image is already current, so nothing is
+		// installed into it.
+		l.spec.Plugins = nil
 	}
 	if replace {
 		if s.mode() != modeSuspended {

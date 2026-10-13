@@ -53,9 +53,10 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 			}
 		}
 		view := api.ClaimView{
-			Session: current.Session,
-			State:   string(current.State),
-			Locator: current.Locator,
+			Session:        current.Session,
+			State:          string(current.State),
+			Locator:        current.Locator,
+			PluginContract: current.PluginContract,
 		}
 		if report, reported := reports[current.Token]; reported {
 			view.Capabilities = api.CapabilityReportViewOf(report)

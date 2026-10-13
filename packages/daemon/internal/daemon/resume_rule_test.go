@@ -400,7 +400,8 @@ func TestReadmissionWaitsForTheOperatorToResumeTheClaimsItSuspended(t *testing.T
 
 // seedWorkflowTree records root as an admitted tree of project in the store at dsn — the issue, its
 // admission slot and its tree's lifecycle, as admission leaves a root it promoted — and each of
-// claims, bound to that lifecycle as the daemon binds a claim it admits.
+// claims, bound to that lifecycle as the daemon binds a claim it admits, its pending delivery
+// written too when it carries one (AdmitClaim alone writes only the claim row).
 func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, claims ...supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -424,6 +425,11 @@ func seedWorkflowTree(t *testing.T, dsn, project string, root record.Issue, clai
 	for _, c := range claims {
 		if _, err := st.AdmitClaim(ctx, c); err != nil {
 			t.Fatalf("put %s: %v", c.Token, err)
+		}
+		if c.Pending != nil {
+			if err := st.PutDelivery(ctx, c.Token, *c.Pending); err != nil {
+				t.Fatalf("put the pending delivery of %s: %v", c.Token, err)
+			}
 		}
 	}
 }

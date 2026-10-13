@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -53,7 +54,7 @@ func registerReady(t *testing.T, d *daemon, spec runtime.SpawnSpec) {
 	session := "ses_" + string(spec.Claim)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: spec.BootToken, SessionID: session, OmpSessionFile: "/sessions/" + string(spec.Claim) + ".jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register %s at generation %d = %d; body %s", spec.Claim, spec.Generation, status, body)
@@ -321,7 +322,7 @@ func TestAPreRestartProcessAdmittedBeforeItsRelaunchNeitherMovesItsClaimNorLocks
 
 	old := dialShim(t, record.address, oldBootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
-		BootToken: oldBootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: 1,
+		BootToken: oldBootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
 		t.Fatalf("the pre-restart process's registration = %d %s, want a named 409", status, body)

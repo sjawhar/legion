@@ -32,7 +32,7 @@ func TestControllerMintRegisterAndRotate(t *testing.T) {
 	}
 
 	at := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
-	registered, err := store.RegisterController(ctx, "demo", 1, "ses_one", []byte("secret-1"), at)
+	registered, err := store.RegisterController(ctx, "demo", 1, "ses_one", []byte("secret-1"), at, 24)
 	if err != nil || !registered {
 		t.Fatalf("register at generation 1 = %v, %v, want it written", registered, err)
 	}
@@ -40,8 +40,8 @@ func TestControllerMintRegisterAndRotate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Controller after the registration: %v", err)
 	}
-	if record.Session != "ses_one" || !bytes.Equal(record.SecretHash, []byte("secret-1")) || !record.RegisteredAt.Equal(at) {
-		t.Fatalf("record after the registration = %+v, want ses_one, its secret hash, and %s", record, at)
+	if record.Session != "ses_one" || !bytes.Equal(record.SecretHash, []byte("secret-1")) || !record.RegisteredAt.Equal(at) || record.PluginContract != 24 {
+		t.Fatalf("record after the registration = %+v, want ses_one, its secret hash, %s, and plugin contract 24", record, at)
 	}
 
 	second, err := store.MintController(ctx, "demo", []byte("capability-2"))
@@ -57,7 +57,7 @@ func TestControllerMintRegisterAndRotate(t *testing.T) {
 		t.Fatalf("record after the second mint = %+v, want generation 2 and the registration cleared", record)
 	}
 
-	registered, err = store.RegisterController(ctx, "demo", 1, "ses_stale", []byte("secret-stale"), at)
+	registered, err = store.RegisterController(ctx, "demo", 1, "ses_stale", []byte("secret-stale"), at, 24)
 	if err != nil || registered {
 		t.Fatalf("register at the replaced generation 1 = %v, %v, want nothing written", registered, err)
 	}

@@ -132,6 +132,18 @@ type overrides struct {
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
 	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
 	strandedReported func()
+	// pluginRelaunchable overrides whether a stale-plugin claim can be relaunched onto a plugin
+	// (supervise.Deps.PluginRelaunchable), bypassing the configuration-derived default: nil keeps
+	// that default, which a kubernetes-runtime test without a real cluster has no other way to
+	// drive, since such a test configures no runtime.kubernetes.plugins and links no plugin pair.
+	pluginRelaunchable *bool
+	// checkLaunch stands in for the store's own CheckLaunch (supervise.Store), wrapping the real
+	// store so every launch's recheck refuses first when this does, then asks the real store
+	// (launchGatedStore, internal/daemon/launchgate.go): a test's way to refuse a relaunch the way
+	// a reserved tree cleanup or a transient store error would, without a lifecycle this pod has
+	// none of to reserve. nil, in production, is nothing: every launch reaches the real store's
+	// own check.
+	checkLaunch func(context.Context, supervise.Claim) error
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -165,6 +177,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		logPlugins(log, plan.plugins, plan.pluginsSource)
 	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "prompts")
@@ -523,12 +538,27 @@ type plan struct {
 	// secretsEnroller is the daemon's agent-secrets token login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
+	// pluginRelaunchable is supervise.Deps.PluginRelaunchable: whether this daemon can relaunch a
+	// stale-plugin claim onto a plugin at all. True under tmux always; under Kubernetes, true iff
+	// a plugin pair to install is known — plugins below, resolved by ResolvedPlugins from the
+	// file's runtime.kubernetes.plugins or the release's linked pair.
+	pluginRelaunchable bool
+	// plugins is this daemon's resolved Kubernetes plugin pair (ResolvedPlugins), with Contract
+	// already api.DaemonAPIVersion: what specs.SpawnSpec installs for a stale-plugin relaunch, and
+	// what the boot log and `legion start --check-config` name. nil under tmux, and under
+	// Kubernetes when the daemon knows no pair (LEGION-164's degraded mode); pluginsSource is
+	// "legion.yaml" or "binary" with a pair, "" without one.
+	plugins       *runtime.PluginInstall
+	pluginsSource string
 	// secretsLogin is the same login's client, read-only, for the state route to show its
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
 	secretsLogin *agentsecrets.Client
 	// strandedReported is overrides.strandedReported; nil runs nothing.
 	strandedReported func()
+	// checkLaunch is overrides.checkLaunch; nil wraps the store with nothing, so every launch
+	// reaches the real store's own CheckLaunch.
+	checkLaunch func(context.Context, supervise.Claim) error
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -582,11 +612,17 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		stop = stopBudget
 	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
+	plugins, pluginsSource := ResolvedPlugins(cfg)
+	pluginRelaunchable := cfg.Runtime.Name == "tmux" || plugins != nil
+	if o.pluginRelaunchable != nil {
+		pluginRelaunchable = *o.pluginRelaunchable
+	}
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
+		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -998,11 +1034,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
+		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
-			mergeRules: cfg.Projects[cfg.Project].Merge,
+			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,
@@ -1023,6 +1059,8 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 		},
+		PluginContract:     api.DaemonAPIVersion,
+		PluginRelaunchable: p.pluginRelaunchable,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
@@ -1040,9 +1078,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
 // leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
 // resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
-// any (relaunchUnfinished). A daemon that leaves the controller to its operator first stops the
-// controller's claim an earlier boot under `controller: daemon` left (stopLaunchedController),
-// which leaves it absent or retired. The only controller claim among the unrecorded launches is a
+// any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted its boot
+// stale-plugin relaunch first (refreshStalePlugins), over every one before any of them is
+// relaunched; a claim a refused attempt leaves stale is retried at the orphan sweep's own cadence
+// from then on (reconcileOrphans), not just at this boot pass. A daemon that leaves the controller
+// to its operator first stops the controller's claim an earlier
+// boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
+// retired. The only controller claim among the unrecorded launches is a
 // launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
 // relaunch it: its ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token
 // is a second guard beside that check, so boot does not report the retired claim as an unrecorded
@@ -1095,10 +1137,41 @@ func (s *supervision) start(boot context.Context) error {
 		defer s.wg.Done()
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
+	s.refreshStalePlugins(s.claims, "boot")
 	if len(unfinished) > 0 {
 		s.relaunchUnfinished(unfinished, reconciled)
 	}
 	return nil
+}
+
+// refreshStalePlugins posts StalePlugin to every live claim whose recorded plugin contract is not
+// this daemon's — an earlier daemon's, or none at all, at the first boot on this release, or one a
+// prior relaunch attempt the tree lifecycle or the store refused left stale (launch returns such a
+// refusal before the claim's state, locator, or contract change). Trigger says which pass is
+// posting: "boot", once over the restored claims before any of them is relaunched
+// (relaunchUnfinished runs after this); "sweep", at every orphan sweep's own cadence, over the
+// claims it already reads each tick, so a relaunch the boot pass could not complete is retried
+// without waiting for the next restart. refreshPlugin's own re-check makes a re-post for a claim a
+// prior attempt already moved on — relaunched, or registered current — a no-op. A claim still
+// launching is left to its own registration, which decides the comparison the moment it arrives,
+// so only the four states whose process has registered are read. A daemon that cannot relaunch
+// onto a plugin (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing;
+// it logs one Error line per stale claim at boot only — a sweep's finding would only repeat a line
+// the boot already wrote, since nothing relaunchable has changed in between.
+func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger string) {
+	for _, c := range claims {
+		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
+			continue
+		}
+		if !s.plan.pluginRelaunchable {
+			if trigger == "boot" {
+				s.log.Error(supervise.NoPluginSourceMessage,
+					"claim", c.Token, "incarnation", c.Locator.Incarnation, "pluginContract", c.PluginContract, "daemonApiVersion", api.DaemonAPIVersion)
+			}
+			continue
+		}
+		s.supervisor.post(c.Token, supervise.StalePlugin{Claim: c.Token, Trigger: trigger})
+	}
 }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
@@ -1231,7 +1304,10 @@ func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) 
 }
 
 // reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
-// the claims the daemon has not retired, once it has idled past the grace.
+// the claims the daemon has not retired, once it has idled past the grace, and re-posts
+// StalePlugin for every live claim whose contract still differs — the retry a relaunch the boot
+// pass (refreshStalePlugins) could not complete needs, riding the sweep because it is the one
+// periodic pass that already reads every claim, rather than running a timer of its own.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -1251,6 +1327,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 		if err := s.runtime.ReconcileOrphans(ctx, knownClaims(claims), orphanGrace); err != nil && ctx.Err() == nil {
 			s.log.Error("reconcile orphans", "error", err)
 		}
+		s.refreshStalePlugins(claims, "sweep")
 	}
 }
 
@@ -1365,6 +1442,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
+		PluginRelaunchable: p.pluginRelaunchable,
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,

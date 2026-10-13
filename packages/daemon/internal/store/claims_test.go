@@ -223,6 +223,28 @@ func TestPutClaimOverwritesTheClaimItNames(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), second)
 }
 
+// A claim's plugin contract and the daemon contract its last stale relaunch was made for are
+// their own columns, round-tripping independently of the locator and budgets LEGION-164 adds no
+// relation to.
+func TestAClaimsPluginContractRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-pluginholder")
+	want.PluginContract = 23
+	want.PluginRelaunchFor = 24
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	want.PluginContract = 24
+	want.PluginRelaunchFor = 0
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim again: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
 // A locator is checked where it is read back: a row nothing could act on is refused by name rather
 // than loaded as a process the daemon believes in.
 func TestClaimsRefusesAStoredLocatorThatDoesNotValidate(t *testing.T) {

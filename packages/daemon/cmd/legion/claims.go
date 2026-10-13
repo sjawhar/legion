@@ -82,7 +82,8 @@ func decodeAnswer(answer []byte, into any) error {
 	return decoder.Decode(into)
 }
 
-// printClaim is the one line a claim prints as: token, role, issue, state, generation.
+// printClaim is the one line a claim prints as: token, role, issue, state, generation, and the
+// plugin contract its registration declared (0 when none is recorded).
 func printClaim(w io.Writer, answer []byte) error {
 	var c api.OperatorClaim
 	if err := decodeAnswer(answer, &c); err != nil {
@@ -104,7 +105,7 @@ func printClaims(w io.Writer, answer []byte) error {
 }
 
 func writeClaimLine(w io.Writer, c api.OperatorClaim) {
-	fmt.Fprintf(w, "%s %s %s %s %d\n", c.Token, c.Role, c.Issue, c.State, c.Generation)
+	fmt.Fprintf(w, "%s %s %s %s %d %d\n", c.Token, c.Role, c.Issue, c.State, c.Generation, c.PluginContract)
 }
 
 // runClaimsSpawn creates the claim on --role of --issue, in the tree --tree roots, and launches

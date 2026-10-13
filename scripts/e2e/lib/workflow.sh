@@ -10,7 +10,8 @@
 #                  says where the daemon answers; dispatch-auth-header, the curl header line
 #                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as; and
 #                  dispatch-human-header, the one the proof human's writes are sent with. Headers
-#                  go by file, so no bearer is ever in a process's argv
+#                  go by file, so no bearer is ever in a process's argv. The caller writes both
+#                  headers itself or has write_dispatch_header write them from dispatch_token_file
 #   evidence       the evidence directory
 #   project        the Dispatch project the run's issues live in; the daemon writes as
 #                  legion-daemon:<project>
@@ -23,12 +24,16 @@
 #                  any outside session's, and a proof takes a tree out with `legion status` instead.
 #                  Empty, the writes carry none and the human header alone says who wrote (a scratch
 #                  Dispatch's X-Dispatch-User), which the workflow reads as a person's move
+#   dispatch_token_file
+#                  the file holding the agents' Dispatch bearer, which write_dispatch_header reads
+#                  (Stage 4b's LEGION_E2E_DISPATCH_TOKEN_FILE); only its caller sets it
 #   pg_container   the container holding the daemon's Postgres database
 #   pr_number      the issue's pull request, once it exists
 #   smoke_file     the one product file that pull request's first implementation changed: the
 #                  spec's one-file change, which every review round's correction appends to
-# and defines note, pass and fail (which exits), plus the runtime seam — the only reads that depend
-# on where an agent runs:
+# and defines note, pass and fail (which exits), and, for a caller of ensure_project, scrub, the
+# filter that hides the run's private hosts in what it prints (ensure_project runs curl's error
+# through it), plus the runtime seam — the only reads that depend on where an agent runs:
 #   assert_claim_endpoints ISSUE ROLE   fails the check when the claim's process could reach a
 #                                       service outside the rig; runs before every instruction
 #   claim_session_text ISSUE ROLE       prints the claim's session file; fails when there is none
@@ -36,6 +41,17 @@
 # drive_gate sets gate_artifact and gate_version.
 
 # ---- Dispatch -------------------------------------------------------------------------------------
+
+# write_dispatch_header writes $work/dispatch-token, dispatch-auth-header and dispatch-human-header
+# from dispatch_token_file alone: the bearer dispatch_get, dispatch_human and ensure_project all
+# send, needed before any of them runs. Stage 4b's prerequisites calls it first, before the lock,
+# so ensure_project can run there; read_bearers calls it again for the run proper.
+write_dispatch_header() {
+  (umask 077 &&
+    tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
+    printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
+    cp "$work/dispatch-auth-header" "$work/dispatch-human-header")
+}
 
 dispatch_url() { printf '%s' "$dispatch_base"; }
 dispatch_get() {
@@ -58,17 +74,51 @@ dispatch_status_is() { dispatch_get "issues/$1" | jq -e --arg status "$2" '.stat
 review_cap_posted() {
   dispatch_events "$1" | jq -e 'any(.[]; .type == "message.created" and (.payload.body | contains("review_round_cap=3")))'
 }
+# proof_human_body BODY prints the JSON object BODY as a proof-human write sends it: with the proof
+# human's session as its actor when dispatch_actor names one (a bearer caller must name one, or
+# Dispatch refuses the write, ACTOR_KIND), and unchanged when dispatch_actor is empty.
+proof_human_body() {
+  if [ -n "$dispatch_actor" ]; then
+    jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 dispatch_human() {
   local method=$1 path=$2 body=${3:-}
-  if [ -n "$body" ] && [ -n "$dispatch_actor" ]; then
-    body=$(jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$body")
-  fi
   if [ -n "$body" ]; then
+    body=$(proof_human_body "$body")
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
       --data "$body" "$(dispatch_url)/api/v1/$path"
   else
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
+}
+# ensure_project creates $project when Dispatch does not already hold it, as a proof-human write
+# like every other (`POST /api/v1/projects` takes any signed-in person or agent session), over the
+# bearer write_dispatch_header already wrote. 201 and 409 PROJECT_EXISTS both leave the project
+# ready for the run; anything else fails loudly, naming the status and the body. Unlike
+# dispatch_human, which only needs the body, this call needs the status to tell a created project
+# from a refusal, so it writes the body to a file and reads %{http_code} off curl's stdout, the
+# pattern every other status-checking call in this proof uses (e.g. stage4b-sandbox-tree.sh's
+# invalid-bearer control). curl's error goes to a file of its own: a failed connection still prints
+# its status, 000, on stdout, and the error is flattened into the one FAIL line.
+ensure_project() {
+  local status body body_file=$work/create-project.json error_file=$work/create-project.err
+  body=$(proof_human_body "$(jq -cn --arg key "$project" --arg name "$project" '{key: $key, name: $name}')")
+  status=$(curl -sS --max-time 20 -o "$body_file" -w '%{http_code}' -X POST \
+    -H "@$work/dispatch-human-header" -H 'content-type: application/json' --data "$body" \
+    "$(dispatch_url)/api/v1/projects" 2>"$error_file") ||
+    fail "Dispatch could not be reached to create $project: $(tr '\n' ' ' <"$error_file" | scrub)"
+  case "$status" in
+    201) note "[dispatch] created project $project" ;;
+    409)
+      jq -e '.code == "PROJECT_EXISTS"' "$body_file" >/dev/null 2>&1 ||
+        fail "Dispatch answered 409 creating $project, not PROJECT_EXISTS: $(cat "$body_file")"
+      note "[dispatch] project $project already exists"
+      ;;
+    *) fail "Dispatch answered $status creating project $project: $(cat "$body_file")" ;;
+  esac
 }
 # new_issue TITLE [PARENT] [SPEC] creates an issue in the run's project and prints its key. A root
 # carries the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and SPEC

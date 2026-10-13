@@ -44,10 +44,10 @@ type HandoffCompleteResponse struct {
 
 func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	var req HandoffCompleteRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}, field{"commit", req.Commit}) {
+	if !s.readBody(w, r, &req, s.redeemIdentityCheck) || !requireFailureFields(w, field{"grantId", req.GrantID}, field{"summary", req.Summary}, field{"commit", req.Commit}) {
 		return
 	}
-	grant, ok := s.redeem(w, req.GrantID)
+	grant, ok := s.redeem(w, r, req.GrantID)
 	if !ok {
 		return
 	}

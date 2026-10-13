@@ -186,7 +186,7 @@ work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
 check=controller check_started=2026-09-30T12:00:00Z daemon_log=${JSON.stringify(join(evidence, "daemon.log"))}
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
 tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none project=LEGSMOKE run_label=x smoke_main_cleaning=
-negative_config_pod= negative_config_workspace=
+negative_config_pod= negative_config_workspace= block_tree=
 operator=production namespace=legion capacity_subject=
 mkdir -p "$work" "$evidence/model-gateway"
 # The controller starved during the checkpoint: a blocked checkpoint's notes, which must not print,
@@ -284,6 +284,27 @@ describe("stage 4b's verdict line", () => {
       "stage 4b e2e: FAIL (check production-audit, in the teardown after check controller)"
     );
     expect(until.stdout).not.toContain("model-gateway-unserved:");
+  });
+
+  test("sets deployment-pod-block's root done once the daemon has stopped, never before", () => {
+    // The live daemon sets back a status an outside session writes on a root it runs, so the
+    // teardown writes it after stop_pid has stopped the daemon.
+    const r = verdictRun(
+      "[]",
+      `stop_pid() { echo "stop_pid \${1:-none}"; }
+set_status() { echo "set_status $*"; }
+daemon_pid=4242 block_tree=LEGSMOKE-9
+pass`
+    );
+    const stopped = r.stdout.indexOf("stop_pid 4242");
+    const closed = r.stdout.indexOf("set_status LEGSMOKE-9 done");
+    expect(stopped).toBeGreaterThanOrEqual(0);
+    expect(closed).toBeGreaterThan(stopped);
+  });
+
+  test("writes no status for a run that never reached deployment-pod-block", () => {
+    const r = verdictRun("[]", `set_status() { echo "set_status $*"; }\npass`);
+    expect(r.stdout).not.toContain("set_status");
   });
 
   const starvedPod = pendingPod("legion-x-t1", "uid-now", "T1", "2026-10-02T10:00:00Z");

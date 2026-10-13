@@ -409,6 +409,10 @@ func newBareHarness(t *testing.T) *harness {
 		Log:      slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Limits:   testLimits(),
 		Timeouts: testTimeouts(),
+		// PluginContract matches the real daemon's (api.DaemonAPIVersion), which the register()
+		// helper below records for every claim it brings up: a test exercising plugin staleness
+		// overrides it (or posts a RequestRegister naming a different one) itself.
+		PluginContract: 24,
 	}
 	return h
 }
@@ -531,6 +535,9 @@ func (h *harness) connect() {
 	h.must(StreamHello{Claim: h.token, Generation: h.generation()})
 }
 
+// register posts a registration naming the harness's own plugin contract, so every claim it brings
+// up is current from the start; a test of plugin staleness posts its own RequestRegister naming a
+// different one instead.
 func (h *harness) register() {
 	h.t.Helper()
 	h.must(RequestRegister{
@@ -539,6 +546,7 @@ func (h *harness) register() {
 		Session:        session,
 		SessionFile:    sessionFile,
 		CapabilityHash: []byte("capability"),
+		PluginContract: h.deps.PluginContract,
 	})
 }
 

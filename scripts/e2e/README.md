@@ -198,7 +198,7 @@ The checks, in order, each printing what it observed (`== <check>` … `ok <chec
 | `suspend-keeps-the-session` | `legion claims suspend`: `suspended`, no locator, the pane gone, the session and its file kept |
 | `resume-on-demand` | `legion claims resume`: `ready` at the next generation in a new pane, same session |
 | `stale-generation-hello-refused` | writes a hello carrying generation 1's boot token to `<state_dir>/worker-stream.sock`: the daemon closes it with nothing written and logs `rejected hello (stale worker generation)` |
-| `unregistered-agent-retired-at-the-deadline` | a second daemon whose `LEGION_OMP_PATH` stub answers the plugin gate and otherwise sleeps, with a 10 s registration deadline (5 s × 2): the claim's shim connects and its process lives, the agent never registers, and at the deadline the process is retired and one launch failure counted |
+| `unregistered-agent-retired-at-the-deadline` | a second daemon whose `LEGION_OMP_PATH` stub answers the plugin gate and the boot's `config get retry.modelFallback --json`, and otherwise sleeps, with a 10 s registration deadline (5 s × 2): the claim's shim connects and its process lives, the agent never registers, and at the deadline the process is retired and one launch failure counted |
 | `restart-readopts-the-live-panes` | SIGTERM, then start again: `boots` +1, both claims keep their generation, incarnation and pane, no pane opens or closes, and a task delivered after the restart runs once — over the connection the shim's reconnect hello opened |
 | `omp-child-environment` | the boot log names the resolved pinned OMP binary for both probes and panes; the pane's process is `/bin/sh -c`; walking first children from it to `argv[0] == omp` finds that exact executable, never the OMP wrapper that remains first on the ordinary daemon PATH; the pane's shell and that OMP carry all four XDG base directories under `<state_dir>/home` and no `DBUS_SESSION_BUS_ADDRESS` (LEGION-206 P1, with the gateway route in place); OMP carries `GEMINI_API_KEY` (length only) that its shim does not, and no `ANTHROPIC_API_KEY`, `GEMINI_API_KEY_TESTS`, `SOPS_AGE_KEY_FILE` or `SECRETSD_CONFIG` |
 | `stray-pane-reaped-after-the-grace` | opens a window marked as the daemon's (`@legion_owner`) holding no recorded pane, and an unmarked one beside it: the periodic orphan sweep (every 60 s, 120 s grace) reaps the marked one no sooner than 120 s after it opened, and keeps the unmarked window and both claims' panes |
@@ -516,12 +516,25 @@ LEGION_E2E_SESSION_DB_PORT=<port> \
 in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
-`diff`, `docker` (the scratch session database), and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
+`diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
+and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
 YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
+
+The `plugins` step packs this checkout's own `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` for
+`stale-plugin-install`'s own Resume through `lib/pack-plugin.sh`, as every proof that installs a
+branch-built plugin does: it rewrites each package's `omp.extensions` to its built `dist` bundle
+exactly as the release workflow does before publishing (`scripts/pi-plugin-prepack.sh` packs no
+other manifest), runs `bun pm pack` with the prepack's build report on stderr, restores the
+committed manifest on every exit of its own, and prints the tarball's path alone (the checkout
+needs `bun install --frozen-lockfile` first, since the bundle resolves `@legion/*` through the
+root's `node_modules`). That checkpoint's negative control packs nothing of its own: it names the
+published `@sjawhar/pi-legion@9.6.1` by exact version, which the daemon-rendered install script
+resolves to `@sjawhar/pi-legion@9.6.1` for `bun add` and bun fetches from the registry inside the
+pod.
 
 Every pod carries the operator route's pod,
 [`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
@@ -631,6 +644,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds that claim and its old locator probes `Gone`; the shared Sandbox stays `Running`, the pod UID and root role stay alive, and the issue's PVC remains `Bound` |
 | `role-container-isolation` | a second role runs then stops in its own fixed container of the root issue pod; the root process remains Alive throughout |
 | `resume` | Resume of the first worker: a new process incarnation and hello generation in the unchanged shared pod; the marker holds exactly the old and new process incarnations |
+| `stale-plugin-install` | a Resume the harness marks as installing a stale-plugin pair (LEGION-164), naming the checkout's own packed `@sjawhar/pi-legion` and `@sjawhar/pi-envoy` tarballs `kubectl cp`'d into the worker's pod: the pod's uid and creation time are unchanged and its Sandbox is `Running`, the installed pair under `legion-plugins/g<generation>` matches the packed versions and the daemon's contract, and the shim's own `/proc/<pid>/cmdline` (the one process of the launch chain the agent's own execs never touch) carries `--extension` for both installed roots in place of the image's. Negative control: naming the published `@sjawhar/pi-legion@9.6.1` by exact version — no tarball of its own, installed from the registry inside the pod, so this proves the version→package mapping (LEGION-164: a bare version reaches `bun add` as `@sjawhar/pi-legion@9.6.1`, never a bare dist-tag) end to end too — a second Resume installs it (contract 23) but the wrapper's own check ends the child before `exec`, the runtime observes it `Gone`, the pod is still the same uid, and the first generation's own install directory is gone, replaced by the second's |
 | `same-agent-negative` | a Resume naming a session file the volume lacks is refused by the role start, observed as gone; the shared pod remains available, then a correct resume writes the second marker and never the refused process |
 | `kill-launcher` | `kubectl exec … -c <role> -- sh -c 'kill 1'` ends one launcher container: the old process is gone, `Resume(prev=dead)` returns a new generation in the same pod, and the root role stays Alive |
 | `stale-incarnation` | across that relaunch, every observation carrying the new process is alive or uncertain, the gone carried the old process, and `Suspend(old)` leaves the Sandbox `Running` on the same pod |
@@ -676,7 +690,12 @@ restricted identity, with `bind: 0.0.0.0`, as a daemon that runs as a pod binds,
 its worker stream at `advertise_host`, the devbox's private address. Tree 1 runs the whole workflow
 to `done`; while its planner holds, the driver files two children under it, each in an issue pod
 and on a volume of its own, closes one as `done` and parks the other in backlog. A third child,
-filed late and left mid-run when tree 1 closes, is handed to Legion as a tree of its own.
+filed late and left mid-run when tree 1 closes, is handed to Legion as a tree of its own. Its
+`legion.yaml` names `runtime.kubernetes.plugins` with the latest published `@sjawhar/pi-legion` and
+`@sjawhar/pi-envoy`, resolved at run time: the branch-built daemon links no release plugin pair, so
+without it the run would boot in the degraded mode (`plugins: none` from `--check-config`) instead
+of the pair a stale-plugin relaunch would install, even though this run's own claims register at
+the branch daemon's own contract and so never go stale enough to trigger that install.
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
@@ -686,8 +705,9 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
+LEGION_E2E_POD_FILE=<block.json> STAGE4B_UNTIL=deployment-pod-block …   # a deployment's own worker pod block, before it ships
 LEGION_E2E_PROJECT=S4B2 LEGION_E2E_DAEMON_PORT=13370 LEGION_E2E_WORKER_STREAM_PORT=13371 \
-  bash scripts/e2e/stage4b-sandbox-tree.sh        # a second lane beside a default-identity run; S4B2 must already exist as a Dispatch project
+  bash scripts/e2e/stage4b-sandbox-tree.sh        # a second lane beside a default-identity run; S4B2 is created if missing
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -789,6 +809,32 @@ one. It keeps the issue's asks as `<issue>-asks.json`, approval events as
 `<issue>-events.json`, each requested version as `<issue>-spec-v<N>.json`, and the verdict as
 `<issue>-gate-verdict.json`.
 
+`LEGION_E2E_POD_FILE` names a JSON file holding a deployment's own worker pod block, the
+`runtime.kubernetes.pod` value its configuration renders (`service_account`, `env`, `volumes`,
+`volume_mounts`, in the shape `packages/daemon/internal/config/kubernetes.go` reads). The run copies
+it once, at prerequisites, as `jq -cS .` into its work directory and records the copy's sha256; every
+later step reads that copy, so a pass ties to one block. The run's `legion.yaml` carries the block
+whole, as one JSON line, in place of the operator fixture's `pod`, so its every pod (the boot
+probe's included) is built from it and nothing in it is rewritten: every object it names, its
+ServiceAccount, Secrets and ConfigMaps, must exist in the namespace. It is refused unless
+`STAGE4B_UNTIL=deployment-pod-block`, since the checkpoints after that one rely on the operator
+fixture's pod, and refused when the file is not a JSON object of that shape. Without it,
+`deployment-pod-block` prints `SKIPPED`.
+
+This is how a deployment proves a change to its pod block (a new projected token, a mounted
+ConfigMap, a variable) on the real daemon before the change ships: the daemon boots on it, admits a
+root, and launches the root's issue pod from it. A pass proves that and no more:
+- Run it from the release tag the deployment pins and with `LEGION_E2E_IMAGE` set to the worker
+  image it pins: the daemon's boot probe, its launch and the pod's shape are that release's.
+- The rest of `runtime.kubernetes` (namespace, pool, scheduling, the controller and the deployment's
+  other keys) is Stage 4b's own, never the deployment's, so pair the run with `legion start
+  --check-config` on the deployment's whole `legion.yaml` at that release.
+- A Secret or ConfigMap volume is compared by its kind and object name, not its `items`.
+- A projected token is checked as carried, with its audience, expiry and path, never as accepted by
+  the service it is for.
+- The pod is an issue pod; the daemon's own controller pod, under `controller: daemon`, is not
+  launched or checked.
+
 Three roots are set todo under `admission_cap: 2`:
 - Tree 1 runs the whole workflow with real agents to `done`, through one changes-requested review
   round in a thread the reviewer opens, lingers, and closes. While its planner holds, the driver
@@ -826,9 +872,10 @@ devbox's admitted range ([Port admission](#port-admission)); the run's daemon ma
 its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a third.
 Left at their defaults, a run collides with another default run exactly as it always has; set all
 three to distinct values and two runs proceed at once, on the same devbox, against the
-same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project: the run
-creates none, and production Dispatch has no auto-create (any person or agent session creates one,
-for example with `dispatch project --key <KEY> --name <name>`).
+same production cluster. `LEGION_E2E_PROJECT` need not already exist as a Dispatch project:
+`prerequisites` creates it before the lock when it is missing (`ensure_project`, `lib/workflow.sh`),
+a proof-human write like every other, over the agents' bearer and naming the proof human's session
+as its actor.
 - The run takes its own lock, derived from the project (above).
 - It owns its identity's shared objects only after four checks pass: that lock, both its ports
   free, no leftover `run_label` object in the namespace, and no `legion-go-<project>-` consumer on
@@ -953,10 +1000,11 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 
 | checkpoint | what it holds |
 | :--- | :--- |
-| `prerequisites` | the tools, the restricted context and the image by digest; the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
+| `prerequisites` | the tools, the restricted context and the image by digest; the run's project exists in production Dispatch, created when missing (201, or 409 `PROJECT_EXISTS` when it already exists; any other answer fails the check); the devbox `gh` acts as the proof human, `sjawhar-agent[bot]`; the lock and the two ports; nothing left in the namespace (Sandboxes, pods, PVCs, ConfigMaps) or on NATS from another run; only then does the run own the shared objects |
 | `preflight` | the runtime identity is the daemon's restricted IAM role and cannot list Secrets; the Sandbox CRD and the `legion` NodePool's instance-cpu floor; the pool's room for the run's four pods at once (tree 1's root and its two children, tree 2's root), counted in pods of an issue pod's six-role reservation under the run's resources (`lib/stage4b-room.jq`): what each Ready, schedulable, undisrupted pool node has free beside every non-terminal pod on it, of any namespace, plus the pods the pool's cpu and memory limits still leave room for, below which the run ends BLOCKED `capacity: …`; whether the NodePool's instance-cpu and instance-memory bounds let two of the run's pods share a node, which decides what `issue-independence` asserts of their nodes; the run's Dispatch bearer reads `whoami` as an agent session, and an invalid bearer is refused 401; LEGSMOKE has no todo root; the stream carries both halves of intake; a throwaway pod on the Legion pool reaches Dispatch, the listener, the gateway and NATS, each within three tries 5 s apart (a fresh node's first outbound connection can fail while it settles), and a service that never answers fails the check with every try's error |
 | `pod-watch` | the namespace snapshot; the pod, node-event and node-memory watches start, and the Secret-value check (`lib/secret-leaks.ts`). The pod and node-event watches last the whole run: kubectl's own watch ends when the API server closes it at its watch timeout, so each lists, watches from that resourceVersion, resumes from the last version it saw when a watch ends, and lists again on 410 Gone, noting each in the transcript. Each watch asks the server to end it within 300 s, so a loop a killed driver left stops within five minutes; a watch that delivered nothing is resumed after a pause, and a line that does not parse ends that watch unrecorded |
 | `boot` | the build's source is the one prerequisites recorded; `legion start --check-config` passes the `runtime: kubernetes` config, whose `pod` is the operator fixture's ([`deploy/kubernetes/operator-route`](../../deploy/kubernetes/operator-route/pod.yml)) with its ConfigMap renamed to the run's copy, whose `issue_volume` is 20Gi, and whose `resources` block overrides the tester's cpu, memory and ephemeral-storage limit (`ephemeral_storage: 30Gi`, its request the default 1Gi), the reviewer's cpu and memory and the merger's cpu alone, the rest the daemon's defaults, so a pod carries a reservation from each path the loader has, the disk bound's included; the operator creates that ConfigMap from the fixture's `models.yml` and `overlay.yml`; the audit window opens and the interest sampler starts; the daemon boots, and the image probe passes (its first attempt's timeline is kept) |
+| `deployment-pod-block` | only with `LEGION_E2E_POD_FILE` (otherwise `SKIPPED`): one root of the run's project admitted, its architect registered, and its issue pod, launched from the run's copy of the deployment's block (its sha256 noted at prerequisites), carrying the whole block ([`lib/deployment-pod-block-verdict.jq`](lib/deployment-pod-block-verdict.jq), tested by `bun test scripts/e2e/lib`): the block's ServiceAccount; every volume, of the block's kind and object name (a Secret's or ConfigMap's `items` are not compared), each projected token's audience, expiry (3600 s when the block names none) and path; every mount, with its `sub_path` and `read_only` (read-only unless the block says `false`), in every role container; and every env name and value on the architect container's process holding the most of them, where the launcher's start command puts the block's environment, since a role container's spec carries only `POD_UID`. The verdict names what is missing or wrong and never prints a value. When the block sets `KUBECONFIG`, kubectl in the pod on that file answers `auth whoami` as `system:serviceaccount:<namespace>:<the block's ServiceAccount>`, and its `auth can-i --list` in the namespace is kept as `deployment-block-can-i.txt`, for the deployment to judge its own policy. A token is checked as carried, never as accepted by its service; the rest of `runtime.kubernetes` is the run's own and the daemon's controller pod is not launched, so a deployment pairs this with `legion start --check-config` on its whole file at the release and image it pins (the paragraph on `LEGION_E2E_POD_FILE` above). The teardown sets the root `done` once the daemon has stopped, since the live daemon sets back a status an outside session writes on a root it runs |
 | `admitted-issue-cap` | the three roots: two admitted and one waiting, in rank order |
 | `spec-posted` | each admitted architect, prompted by nothing but the daemon's `catch-up` notice, posts its spec and registers the gate; with `gates.design: off` the daemon moves the tree to planning |
 | `advertise-host` | the daemon's API and worker-stream listeners hold every interface (`ss -Hltn`); every pod the watch has seen ready has all six role launchers dialing the worker stream at `advertise_host` (a pod-shape rule, so the shape watcher and `pod-shape` hold every later pod to it too); each admitted root's architect registered from such a pod. The daemon's loader refuses the proof's file with `advertise_host` dropped (`bind 0.0.0.0 is not an address a pod can reach`) and with `bind: 127.0.0.1` beside it (`bind 127.0.0.1 is loopback, …`). Negative control: a recorded pod whose role launchers' `--connect` names the bind address departs from the pod shape |
@@ -1745,12 +1793,16 @@ Stage 3 sources it after [`lib/rig.sh`](#librigsh).
 . "$root/scripts/e2e/lib/workflow.sh"     # sourced, never run
 ```
 
-The caller sets `work` (holding `dispatch-token`, `legion.yaml` and `operator-token`),
+The caller sets `work` (holding `legion`, `legion.yaml`, `dispatch-auth-header` and
+`dispatch-human-header`, the last two written by the caller or by `write_dispatch_header`),
 `evidence`, `project` (the Dispatch project; the daemon writes as `legion-daemon:<project>`),
-`repo`, `port_dispatch`, `port_daemon`, `pg_container` (the daemon's Postgres), and, once they
-exist, `pr_number` and `smoke_file` (the one product file the pull request's first implementation
-changed). It defines `note`, `pass` and `fail`, and the runtime seam, the only reads that depend on
-where an agent runs:
+`repo`, `dispatch_base`, `dispatch_actor` (the session every proof-human write names as its actor,
+or empty), `dispatch_token_file` (the file holding the agents' Dispatch bearer, which
+`write_dispatch_header` reads: Stage 4b's `LEGION_E2E_DISPATCH_TOKEN_FILE`), `pg_container` (the
+daemon's Postgres), and, once they exist, `pr_number` and `smoke_file` (the one product file the
+pull request's first implementation changed). It defines `note`, `pass` and `fail`, `scrub` (the
+filter that hides the run's private hosts in what it prints, which only a caller of
+`ensure_project` needs), and the runtime seam, the only reads that depend on where an agent runs:
 
 | seam | the caller's definition |
 | :--- | :--- |
@@ -1762,6 +1814,13 @@ where an agent runs:
 label `legion`, which hands it to the Go daemon (the daemon admits no root without it), and `SPEC`
 as its primary document, `smoke_spec` when `SPEC` is omitted. A child carries neither, since it runs
 under its root's tree.
+
+`write_dispatch_header` writes the two header files from `dispatch_token_file`; Stage 4b's
+`prerequisites` calls it first, before the lock, and `read_bearers` calls it again for the run
+proper. `ensure_project` creates `project` as a proof-human write, naming `dispatch_actor`: 201 and
+409 `PROJECT_EXISTS` both leave it ready, any other status fails the check naming the status and
+the body, and a failed connection fails it in one line naming curl's error.
+`lib/ensure-project.test.ts` drives both against a fake `curl`.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox

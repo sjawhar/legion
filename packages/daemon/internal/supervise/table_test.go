@@ -149,6 +149,7 @@ func samples(t *testing.T) map[string][]Event {
 		"PromptAcked":          {PromptAcked{}},
 		"PromptRefused":        {PromptRefused{}},
 		"IssueVolumeLost":      {IssueVolumeLost{}},
+		"StalePlugin":          {StalePlugin{}},
 		"RequestSpawn":         {RequestSpawn{}},
 		"RequestRegister":      {RequestRegister{}},
 		"RequestReady":         {RequestReady{}},
@@ -287,6 +288,8 @@ func fenced(ev Event, c Claim) Event {
 		return Timer{Claim: c.Token, Kind: ev.Kind, Generation: c.Generation, Seq: 7777, DeliveryID: c.Pending.ID}
 	case IssueVolumeLost:
 		return IssueVolumeLost{Claim: c.Token}
+	case StalePlugin:
+		return StalePlugin{Claim: c.Token}
 	case RequestSpawn:
 		return RequestSpawn{Claim: c.Token}
 	case RequestRegister:

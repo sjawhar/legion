@@ -51,6 +51,15 @@ var revision string
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
 var release string
 
+// piLegionVersion and piEnvoyVersion are the `@sjawhar/pi-legion` and `@sjawhar/pi-envoy`
+// versions this release published, linked in by the release workflow with
+// `-ldflags "-X main.piLegionVersion=<version> -X main.piEnvoyVersion=<version>"` beside
+// revision and release; both empty in every other build. They are this binary's own plugin
+// pair for a stale-plugin relaunch under Kubernetes (LEGION-164) when `legion.yaml` names none
+// (`runtime.kubernetes.plugins`) — `legion version`'s second line, and start's and
+// --check-config's resolution of the pair to install (applyLinkedPlugins, daemon.ResolvedPlugins).
+var piLegionVersion, piEnvoyVersion string
+
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 // commandEntry is one `legion` command: what runs it, and its line in `legion --help`.
@@ -156,9 +165,12 @@ func runVersion(_ context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	if revision != "" {
 		fmt.Fprintf(stdout, "legion %s commit %s\n", version, revision)
-		return 0
+	} else {
+		fmt.Fprintf(stdout, "legion %s\n", version)
 	}
-	fmt.Fprintf(stdout, "legion %s\n", version)
+	if piLegionVersion != "" && piEnvoyVersion != "" {
+		fmt.Fprintf(stdout, "plugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s\n", piLegionVersion, piEnvoyVersion)
+	}
 	return 0
 }
 
@@ -181,6 +193,30 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return start(ctx, *configPath, stderr)
 }
 
+// applyLinkedPlugins fills cfg.Runtime.Kubernetes.Plugins from this binary's linked pair
+// (piLegionVersion, piEnvoyVersion) when the file names none: the file's
+// runtime.kubernetes.plugins wins when it is set, the binary's linked pair otherwise, and neither
+// leaves the daemon knowing no plugin pair at all (LEGION-164). PluginsFromBinary records which,
+// for the boot log and `legion start --check-config` to name. A no-op under tmux, or once the
+// file already named a pair.
+func applyLinkedPlugins(cfg *config.Config) {
+	k := cfg.Runtime.Kubernetes
+	if k == nil || k.Plugins != nil || piLegionVersion == "" || piEnvoyVersion == "" {
+		return
+	}
+	k.Plugins = &config.PluginsConfig{PiLegion: piLegionVersion, PiEnvoy: piEnvoyVersion}
+	k.PluginsFromBinary = true
+}
+
+// pluginsSourceWords is ResolvedPlugins' source (daemon.PluginsFromFile or daemon.PluginsFromBinary)
+// as the `--check-config` line's parenthetical names it.
+func pluginsSourceWords(source string) string {
+	if source == daemon.PluginsFromBinary {
+		return "the binary"
+	}
+	return source
+}
+
 // checkStartConfig is `legion start --check-config`: every refusal the configuration's read at
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
 // secretsd read, then every refusal boot makes from the configuration, the environment and the
@@ -190,8 +226,14 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
+// Under kubernetes, a last plain line names the plugin pair this daemon would install for a
+// stale-plugin relaunch — the file's or the binary's — or, with neither, the gap; it is its own
+// line rather than a capability row, since it would otherwise be open on every unreleased build.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
+	if err == nil {
+		applyLinkedPlugins(&cfg)
+	}
 	paneNatsUser, daemonNatsUser := "", ""
 	if err == nil {
 		paneNatsUser, daemonNatsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
@@ -211,6 +253,13 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	for _, gap := range daemon.Deployment(cfg).OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
 	}
+	if cfg.Runtime.Name == "kubernetes" {
+		if pair, source := daemon.ResolvedPlugins(cfg); pair != nil {
+			fmt.Fprintf(stdout, "plugins: @sjawhar/pi-legion %s @sjawhar/pi-envoy %s (from %s)\n", pair.PiLegion, pair.PiEnvoy, pluginsSourceWords(source))
+		} else {
+			fmt.Fprintln(stdout, "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract")
+		}
+	}
 	return 0
 }
 
@@ -227,6 +276,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
+	applyLinkedPlugins(&cfg)
 	absoluteConfig, err := filepath.Abs(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: resolve %s: %v\n", configPath, err)

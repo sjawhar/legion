@@ -90,6 +90,7 @@ var liveChecks = []liveCheck{
 	{"suspend", (*liveRig).checkSuspend, nil},
 	{"role-container-isolation", (*liveRig).checkRoleContainerIsolation, nil},
 	{"resume", (*liveRig).checkResume, nil},
+	{"stale-plugin-install", (*liveRig).checkStalePluginInstall, stalePluginBlocked},
 	{"same-agent-negative", (*liveRig).checkSameAgentNegative, nil},
 	{"kill-launcher", (*liveRig).checkKillLauncher, nil},
 	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
@@ -225,6 +226,13 @@ type liveEnv struct {
 	// the script also wrote into the providers Secret under liveSessionsSecretKey, and the address it
 	// listens on, which every pod must reach as it reaches the worker stream.
 	sessionDSNFile, sessionDBAddress string
+	// The stale-plugin-install checkpoint's own inputs: the devbox paths of this checkout's packed
+	// pi-legion and pi-envoy and their versions. Its negative control names the published
+	// pi-legion@9.6.1 by exact version — no devbox path of its own — so bun resolves it from the
+	// registry inside the pod. Read with os.Getenv, unlike the rest of liveEnv: unset skips the
+	// checkpoint with a clear message, never a refusal to start, so an older invocation of the
+	// script still runs every checkpoint it knows (stalePluginBlocked).
+	piLegionTarball, piEnvoyTarball, piLegionVersion, piEnvoyVersion string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -260,6 +268,10 @@ func readLiveEnv(t *testing.T) liveEnv {
 		agentSecretsTokenFile: os.Getenv("LEGION_E2E_AGENT_SECRETS_TOKEN_FILE"),
 		sessionDSNFile:        get("LEGION_E2E_SESSION_DSN_FILE"),
 		sessionDBAddress:      get("LEGION_E2E_SESSION_DB_ADDRESS"),
+		piLegionTarball:       os.Getenv("LEGION_E2E_PI_LEGION_TARBALL"),
+		piEnvoyTarball:        os.Getenv("LEGION_E2E_PI_ENVOY_TARBALL"),
+		piLegionVersion:       os.Getenv("LEGION_E2E_PI_LEGION_VERSION"),
+		piEnvoyVersion:        os.Getenv("LEGION_E2E_PI_ENVOY_VERSION"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -1014,6 +1026,23 @@ func (r *liveRig) resume(c *liveClaim, file string) (runtime.Locator, error) {
 	}
 	c.bootToken, c.gen = r.reg.mint(c.token, true)
 	loc, err := r.rt.Resume(r.ctx, c.last, r.spec(c, file))
+	if err != nil {
+		return runtime.Locator{}, err
+	}
+	c.loc, c.last, c.state = &loc, &loc, stateRunning
+	return loc, nil
+}
+
+// resumeWithPlugins is resume with spec.Plugins set, for a launch that installs a stale-plugin
+// pair into a kept pod (stale-plugin-install) rather than loading the image's own copies.
+func (r *liveRig) resumeWithPlugins(c *liveClaim, file string, plugins *runtime.PluginInstall) (runtime.Locator, error) {
+	if err := r.startRuntimeOnce(); err != nil {
+		return runtime.Locator{}, err
+	}
+	c.bootToken, c.gen = r.reg.mint(c.token, true)
+	spec := r.spec(c, file)
+	spec.Plugins = plugins
+	loc, err := r.rt.Resume(r.ctx, c.last, spec)
 	if err != nil {
 		return runtime.Locator{}, err
 	}

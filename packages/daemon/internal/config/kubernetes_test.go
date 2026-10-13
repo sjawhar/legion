@@ -1000,3 +1000,87 @@ func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 		})
 	}
 }
+
+// Both keys of `runtime.kubernetes.plugins` settle when each is an exact version.
+func TestPluginsBlockSettlesBothKeys(t *testing.T) {
+	path := writeConfigFile(t, kubernetesFile+"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: 9.6.1\n")
+	cfg, err := LoadForValidation(path, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Runtime.Kubernetes.Plugins
+	want := &PluginsConfig{PiLegion: "9.7.0", PiEnvoy: "9.6.1"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("plugins = %+v, want %+v", got, want)
+	}
+}
+
+// Absent `runtime.kubernetes.plugins` settles to nil: the daemon then falls back to the binary's
+// linked pair, or knows none.
+func TestPluginsBlockIsAbsentByDefault(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile), noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Runtime.Kubernetes.Plugins != nil {
+		t.Fatalf("plugins = %+v without the block", cfg.Runtime.Kubernetes.Plugins)
+	}
+}
+
+// Each of pi_legion and pi_envoy may instead be an absolute tarball path or an http(s) URL the
+// pod can read.
+func TestPluginsBlockAcceptsAPathAndAURL(t *testing.T) {
+	path := writeConfigFile(t, kubernetesFile+"    plugins:\n      pi_legion: /srv/plugins/pi-legion-9.7.0.tgz\n      pi_envoy: https://cache.internal.example/pi-envoy-9.6.1.tgz\n")
+	cfg, err := LoadForValidation(path, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := cfg.Runtime.Kubernetes.Plugins
+	want := &PluginsConfig{PiLegion: "/srv/plugins/pi-legion-9.7.0.tgz", PiEnvoy: "https://cache.internal.example/pi-envoy-9.6.1.tgz"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("plugins = %+v, want %+v", got, want)
+	}
+}
+
+// An upper-case scheme is accepted — url.Parse lowercases it — and stored in its canonical,
+// lower-case form: the one bunSpec (internal/runtime/sandbox/plugins.go) renders for the install.
+func TestPluginsBlockCanonicalizesAnUppercaseScheme(t *testing.T) {
+	path := writeConfigFile(t, kubernetesFile+"    plugins:\n      pi_legion: HTTPS://cache/pi-legion.tgz\n      pi_envoy: 9.6.1\n")
+	cfg, err := LoadForValidation(path, noEnv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.Runtime.Kubernetes.Plugins.PiLegion; got != "https://cache/pi-legion.tgz" {
+		t.Fatalf("pi_legion = %q, want the canonical lower-case scheme", got)
+	}
+}
+
+// A half block (one key alone), a dist-tag, and a range are each refused naming the missing or
+// offending key; the pair must be one release's exact versions.
+func TestPluginsBlockRefusals(t *testing.T) {
+	for name, tc := range map[string]struct{ block, want string }{
+		"missing pi_envoy":  {"    plugins:\n      pi_legion: 9.7.0\n", "runtime.kubernetes.plugins.pi_envoy is required"},
+		"missing pi_legion": {"    plugins:\n      pi_envoy: 9.6.1\n", "runtime.kubernetes.plugins.pi_legion is required"},
+		"a dist-tag": {"    plugins:\n      pi_legion: latest\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion must be an exact version (N.N.N), an absolute tarball path, or an http(s) URL"},
+		"a caret range": {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: ^9\n",
+			"runtime.kubernetes.plugins.pi_envoy must be an exact version"},
+		"an x-range":    {"    plugins:\n      pi_legion: 9.x\n      pi_envoy: 9.6.1\n", "runtime.kubernetes.plugins.pi_legion must be an exact version"},
+		"a tilde range": {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: ~9.6\n", "runtime.kubernetes.plugins.pi_envoy must be an exact version"},
+		"unknown key":   {"    plugins:\n      pi_legion: 9.7.0\n      pi_envoy: 9.6.1\n      pi_shared: 1.0.0\n", "unknown key runtime.kubernetes.plugins.pi_shared"},
+		"a network-path reference": {"    plugins:\n      pi_legion: //host/x.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
+		"an https URL with no host": {"    plugins:\n      pi_legion: https:///x.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
+		"an http URL with a single slash and no host": {"    plugins:\n      pi_legion: http:/cache/x.tgz\n      pi_envoy: 9.6.1\n",
+			"runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from"},
+		"not a mapping": {"    plugins: yes\n", "runtime.kubernetes.plugins must be a mapping"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+tc.block), noEnv)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err %v, want %q", err, tc.want)
+			}
+		})
+	}
+}

@@ -50,7 +50,8 @@
               "detail": "gh api user: HTTP 401: Bad credentials"
             }
           ]
-        }
+        },
+        "pluginContract": 0
       },
       "workers": {},
       "slot": {
@@ -65,7 +66,8 @@
     "runtime": "kubernetes",
     "external": true,
     "sessionId": "ses_controller",
-    "registeredAt": "2026-10-06T18:01:41Z"
+    "registeredAt": "2026-10-06T18:01:41Z",
+    "pluginContract": 0
   },
   "capabilities": []
 }

@@ -130,6 +130,8 @@ const legionClaimView = z.strictObject({
   state: z.enum(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
   capabilities: legionCapabilityReportView.optional(),
+  /** 0 = no contract recorded. */
+  pluginContract: z.number().int().nonnegative(),
 });
 
 /** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
@@ -241,6 +243,8 @@ const legionControllerLocator = z.strictObject({
   external: z.literal(true),
   sessionId: nonEmptyString,
   registeredAt: timestamp,
+  /** 0 = no contract recorded. */
+  pluginContract: z.number().int().nonnegative(),
 });
 
 /** `api.AgentSecretsLoginView` — the daemon's own agent-secrets token login's current status
@@ -414,6 +418,8 @@ export const LegionOperatorClaimResponse = z.strictObject({
   suspendedBy: z.enum(["unknown", "operator", "daemon", "exit"]).optional(),
   /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
   suspensionHeld: z.literal(true).optional(),
+  /** 0 = no contract recorded. */
+  pluginContract: z.number().int().nonnegative(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;
