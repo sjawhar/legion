@@ -137,8 +137,8 @@ export default defineConfig({
     // Safari uses; only those rows, since the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
-      testMatch: /(agent-view|phone-conversation)\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name/,
+      testMatch: /(agent-view|phone-conversation|delivery-live)\.e2e\.ts/,
+      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page/,
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
