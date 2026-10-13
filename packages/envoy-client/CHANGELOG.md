@@ -18,15 +18,17 @@
   `DISPATCH_URL` is unset. A checkout's server without its own token is refused only when it would
   be used, and a checkout's token without its own `dispatch.serverUrl` unless `DISPATCH_TOKEN` or
   `DISPATCH_TOKEN_FILE` replaces it; either turns off Dispatch alone. An empty `DISPATCH_*` variable
-  counts as unset. To move an existing file:
-  `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move its
-  top-level `natsUrls` into the `envoy` section (`envoy.natsUrls`), and a checkout's
-  `.opencode/envoy.json` to `.envoy/envoy.json`, leaving out any Envoy setting.
-- Until a later release stops reading them, a missing neutral file falls back to
-  `~/.config/opencode/envoy.json`, a checkout without `.envoy/envoy.json` falls back to
-  `.opencode/envoy.json`, and a chosen file's top-level `natsUrls` is read as
-  `envoy.natsUrls`; each fallback prints a warning to move it. A top-level `natsUrls` remains
-  refused in a checkout and beside `envoy.natsUrls`.
+  counts as unset.
+- During the warn-first migration, the old user file is read with a warning only when the harness
+  selects no directory and the neutral file is at the default XDG location
+  `~/.config/legion/envoy.json`; then move it with
+  `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`. A profile
+  whose chosen file is missing gets no Dispatch or Envoy; when the old file exists, its notice names
+  that file and the chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME`
+  never reads or asks to move the old file. A legacy checkout `.opencode/envoy.json` keeps only its
+  `dispatch` section and warns that its top-level `natsUrls` and `envoy` section are ignored; the
+  current `.envoy/envoy.json` still refuses those checkout settings. A top-level `natsUrls` in a
+  user file is read as `envoy.natsUrls` with a warning until it moves.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
 - The `dispatch` command reads the envoy.json its session's plugin chose: with `DISPATCH_HOST` set,

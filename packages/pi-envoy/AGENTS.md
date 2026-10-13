@@ -203,14 +203,19 @@ or error. With Envoy on and no NATS server, inbound messages are off and the too
 Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the file stopped
 configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
 throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
-off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
-Envoy are off`), a section's error, what a checkout's file holds that the session does not read, or
-that inbound messages are off; a file that turns a section off says nothing. It also shows a
-migration warning when the neutral file is missing and `~/.config/opencode/envoy.json` is read, a
-checkout's `.envoy/envoy.json` is missing and `.opencode/envoy.json` is read, or a chosen file's
-top-level `natsUrls` is read as `envoy.natsUrls`. Each warning says to move the input; a later
-release stops reading it. A checkout's top-level `natsUrls` and one set beside
-`envoy.natsUrls` remain refused. A file location that cannot be worked out (a relative
+off for a reason worth saying: the
+missing file's (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`), a section's error,
+what a checkout's file holds that the session does not read, or that inbound messages are off; a
+file that turns a section off says nothing.
+
+During the warn-first migration, the old user file is read with a warning only for a session whose
+harness names no directory and whose neutral file is at the default XDG location. A profile whose
+file is missing gets no Dispatch or Envoy; when the old file exists, the notice says it is not read
+and names the profile file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the
+old file is not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
+its `dispatch` section, ignoring top-level `natsUrls` and `envoy` with a warning. The current
+`.envoy/envoy.json` continues to refuse checkout settings. A top-level `natsUrls` in a user file is
+read as `envoy.natsUrls` with a warning. A file location that cannot be worked out (a relative
 `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`) still loads the extension, with
 both sections off, nothing handed on, and that refusal as the notice.
 

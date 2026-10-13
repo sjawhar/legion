@@ -78,32 +78,28 @@ session's own directory, comes ahead of any `ENVOY_CONFIG_FILE` an outer session
 
 `readEnvoyConfig(path, env, { cwd })` reads that file and a checkout's `<cwd>/.envoy/envoy.json`
 as written, running no command. Each section is strict: an unknown key is refused naming it. A
-chosen file's top-level `natsUrls` is read as `envoy.natsUrls` with a warning to move it; a later
-release stops reading it. Setting it beside `envoy.natsUrls` is refused, naming the latter. JSON
-that does not parse is refused at its line and column, never with the parser's message, which
-quotes the text it stopped at. A missing chosen file contributes nothing and sets `missing`: each
-section is then on only when its variables name it, and a section still off says `no envoy.json at
-<path>: Dispatch is off` (`Envoy is off`, or `Dispatch and Envoy are off` when neither is on), with
-`(a link to <target>, which does not exist)` after the path when it is a dangling link. When that
-file is the neutral one at `$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or
-`$HOME/.config`) and `~/.config/opencode/envoy.json` still exists, it reads that old file with a
-warning to move it to the neutral path; a later release stops reading it. An `XDG_CONFIG_HOME`
-naming another directory, as a Legion pane's does, gets no fallback. A chosen file that cannot be
-read or is not valid is `failed`, naming the file and the key, and both sections are off with that
-error.
+top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a warning until it moves; a
+later release stops reading it. Setting it beside `envoy.natsUrls` is refused, naming the latter.
+JSON that does not parse is refused at its line and column, never with the parser's message, which
+quotes the text it stopped at.
 
-A checkout's file is the repository's, and its failure is its own: one that cannot be read or is
-not valid refuses Dispatch with its error only while `DISPATCH_URL` is unset (a session's start
-notice then says `<error>; not read while DISPATCH_URL is set`), Envoy never reads it, and a `.envoy`
-that is a plain file is no checkout file. It may configure Dispatch alone: its top-level `natsUrls`
-remains refused because a checkout holds only a `dispatch` section, and an `envoy` section,
-whatever it holds, is not read, which the start notice says (`<checkout>: envoy is not read from a
-checkout's envoy.json; put it in <chosen file>`). When `.envoy/envoy.json` is absent, the legacy
-`.opencode/envoy.json` is read under the same checkout rule with a warning to move it; a later
-release stops reading it. So a cloned repository neither chooses where a session's deliveries come
-from or which servers the user's NATS seed signs in to, nor turns off the Envoy the session's
-environment configured. The Go Dispatch server, which reads the same files, refuses to start on a
-checkout's `envoy` section.
+During the warn-first migration, the old user file is read with a warning only for a session whose
+harness names no directory and whose neutral file is at the default XDG location
+`$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or `$HOME/.config`). A profile
+with no file of its own gets no Dispatch or Envoy; if
+`$HOME/.config/opencode/envoy.json` exists, the missing-file notice says it is not read and names
+the chosen file to copy or link it to, or write. A neutral file under a relocated
+`XDG_CONFIG_HOME` never reads the old file and says so without asking to move it.
+
+A checkout's current `.envoy/envoy.json` may configure Dispatch alone: its top-level `natsUrls`
+remains refused, and an `envoy` section is not read by a client (or refuses a Go server start).
+When that file is absent, the legacy `.opencode/envoy.json` keeps only its `dispatch` section; its
+top-level `natsUrls` and any `envoy` section are ignored with a warning. A checkout file that
+cannot be read or is not valid refuses Dispatch with its error only while `DISPATCH_URL` is unset
+(a session's start notice then says `<error>; not read while DISPATCH_URL is set`), Envoy never
+reads it, and a `.envoy` that is a plain file is no checkout file. A cloned repository therefore
+cannot choose where a session's deliveries come from or which servers the user's NATS seed signs in
+to, nor turn off the Envoy the session's environment configured.
 
 Each section is resolved on its own: `dispatchSettings(env, config)` merges the checkout's
 `dispatch` section over the chosen file's, key by key, and `envoySettings(env, config)` reads the

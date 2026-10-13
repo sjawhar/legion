@@ -148,19 +148,20 @@ or seed variable. `DISPATCH_TOKEN_FILE` (a path whose trimmed contents are the t
 Legion daemon delivers it to a pane) never falls back when unreadable. Omitting
 `dispatch.serverUrl` while `dispatch.enabled` is true targets `http://localhost:8766`, the Go
 server's listen address. With Envoy off the session has no Envoy tools and takes no inbound
-messages; with Envoy on and no NATS server it keeps the tools and takes no inbound messages. When
-a section is off for a reason worth saying, the session says so once at its start:
+messages; with Envoy on and no NATS server it keeps the tools and takes no inbound messages. When a
+section is off for a reason worth saying, the session says so once at its start:
 `envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
 checkout's file holds that is not read, or that inbound messages are off. Invalid configuration, an
 invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the error.
 
-Until they move, `~/.config/opencode/envoy.json` is read when the neutral file is missing at
-`~/.config/legion/envoy.json`, a checkout's `.opencode/envoy.json` is read when its
-`.envoy/envoy.json` is absent, and a chosen file's top-level `natsUrls` is read as
-`envoy.natsUrls`; each prints a warning and a later release stops reading it. A checkout's
-top-level `natsUrls` and one set beside `envoy.natsUrls` remain refused. Move the user file with
-`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move
-top-level `natsUrls` into `envoy.natsUrls`.
+During the warn-first migration, the old user file is read with a warning only for a session whose
+harness names no directory and whose neutral file is at the default XDG location
+`~/.config/legion/envoy.json`. A profile with no file gets no Dispatch or Envoy; when the old file
+exists, its start notice says it is not read and names the profile's file to copy or link it to, or
+write. A relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A
+legacy checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and
+`envoy` with a warning; the current `.envoy/envoy.json` continues to refuse checkout settings. A
+top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a warning.
 
 A command that writes to an owner names either an issue (`--issue`, a native `KEY` or an external
 `owner/repo#n` reference) or an unlinked project document (`--project` plus `--artifact`). A Legion
