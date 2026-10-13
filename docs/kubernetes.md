@@ -1478,7 +1478,16 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    the volume was lost, and the XDG base directories (`initEnvironment`, `manifest.go`); nothing
    names a role, a generation, a lock wait or another issue's workspace. The workspace starts at the
    issue's branch, `legion/<KEY>`, which the daemon created on GitHub at `main` before the issue's
-   architect or planner started.
+   architect or planner started. Before any git or jj runs it removes every git lock file
+   (`<file>.lock`) in the clone's git directory and in the issue's own worktree entry of it, and
+   logs each with its path and age (`RemoveStaleGitLocks`, `internal/workspace/stalelock.go`): a
+   git or jj interrupted mid-write leaves its lock, and every later write of that file fails on it,
+   but no process can hold one now, since no role container of the pod has started and no other pod
+   mounts the volume. Another worktree entry of the clone keeps its locks, and a lock it cannot
+   remove fails the container naming it. jj's own locks are `flock(2)` locks, which end with their
+   holder, so it leaves them. Under a running pod nothing removes a lock, since a live git may hold
+   it: the `jj` the shim's working-copy adoption and a `handoff_complete` run name each lock still
+   on disk that they failed on, with its age, in their error, and the pod's next start removes it.
 3. Each role container runs `legion launcher --connect tcp://<advertise_host, or bind with none
    set>:<worker_stream_port> --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1
    of that role, starting and stopping the role's `legion worker-shim` (Oh My Pi) child on the
@@ -1735,9 +1744,11 @@ does (`xargs -0 sh -c 'exec env -i "$@" omp …' agent-env </proc/<pid>/environ`
 refuses: mount the issue's claim in a pod of your own, `issue-<Sandbox>`, i.e.
 `issue-legion-<project>-<issue key lowercased>` (`kubectl -n legion get pvc -l legion.dev/issue=<KEY>`).
 The claim is `ReadWriteOnce`, and the pod carries no affinity, so it lands wherever the pool has
-room and the volume follows it. Delete it before the issue's next pod starts, because that pod
-cannot attach the volume while this one holds it (on another node it waits on the detach, with
-`FailedAttachVolume` or `Multi-Attach` events, until this one is gone):
+room and the volume follows it. Delete it before the issue's next pod starts. `ReadWriteOnce` binds
+the volume to one node, not one pod: on another node that pod waits on the detach, with
+`FailedAttachVolume` or `Multi-Attach` events, until this one is gone, but on the same node it
+mounts the volume beside this one, and its `workspace-init` removes the git locks in the issue's
+clone, one a git still running here holds included:
 
 ```yaml
 apiVersion: v1
@@ -2100,10 +2111,11 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
 - **`workspace-init`** mounts the issue's volume, the feed read-only, and the config home — never
   the Secret — and runs `legion workspace-init provision`: the clone's clone and fetch reach
   `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
-  transport, then the workspace add, `update-stale`, and the configuration writes. It takes no lock
-  and waits on no other pod: the clone is the issue's own, on the issue's own volume, and no other
-  provision shares the repository. What an agent of the issue planted can run there, with nothing
-  to take that the agent does not already hold.
+  transport, then the workspace add, `update-stale`, and the configuration writes, once it has
+  removed the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
+  It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
+  volume, and no other provision shares the repository. What an agent of the issue planted can run
+  there, with nothing to take that the agent does not already hold.
 
 `packages/daemon/internal/runtime/sandbox/boundary_test.go` runs both containers exactly as the
 manifest states them against nine such plants, with every one of provisioning's git and jj pins made

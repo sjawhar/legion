@@ -259,3 +259,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
   `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now
   degrades to no trailer, as it does for any other failure to resolve jj.
+- A `handoff_complete` whose jj fails on a git lock file still on disk — the `index.lock` a git or
+  jj interrupted mid-write leaves, which fails every later jj that snapshots a change into the
+  working copy (LEGION-731) — names each such lock in its error, with how long ago it was last
+  written, and says Legion never removes a lock under a running pod, and that on Kubernetes the
+  issue pod's next start removes it (`src/git-lock.ts`). The lock is left as it is.
