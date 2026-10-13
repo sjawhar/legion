@@ -4,6 +4,12 @@
 
 ### Changed
 
+- The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): `$OPENCODE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else `~/.config/legion/envoy.json`. Move the old file with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move a top-level `natsUrls` into `envoy.natsUrls`.
+- The `shell.env` hook sets `ENVOY_CONFIG_FILE` to that file, so the `dispatch` command reads the same one.
+- With Envoy off the plugin registers no Envoy tool and calls no listener; Dispatch keeps its instruction file and session title.
+- A `token` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json`.
+- `DISPATCH_URL` and `ENVOY_URL` take a file's token only for that file's own server.
+- One logged notice replaces the `Dispatch disabled` and `Envoy disabled` warnings, and a relative `XDG_CONFIG_HOME` no longer stops the plugin loading.
 - Agents reach Dispatch through the `dispatch` command (LEGION-588). The `shell.env` hook puts
   the plugin's `bin/dispatch` first on every shell command's `PATH` and sets `DISPATCH_HOST`,
   `DISPATCH_SESSION_ID` and `DISPATCH_SESSION_TITLE`; the package ships `bin/` and builds the CLI

@@ -16,15 +16,26 @@ This package exposes the Envoy tools:
 Agents reach Dispatch through the `dispatch` command in their shell: `dispatch --help` lists the
 commands, `dispatch <command> --help` each one's flags, and the `dispatch` skill teaches them. The
 plugin's `shell.env` hook puts its `bin/` (the `dispatch` shim, which runs the bundled
-`dist/dispatch.js`) first on every shell command's `PATH`, sets `DISPATCH_HOST=opencode`, and sets
-`DISPATCH_SESSION_ID` and `DISPATCH_SESSION_TITLE` to the session running the command and the
-title the plugin tracks for it (each empty when OpenCode names no session or the session has no
-title yet, so a value inherited from a parent process never stands in). Dispatch is reachable when
-`dispatch.enabled` resolves a server URL and bearer token from envoy.json
-(`~/.config/opencode/envoy.json`, merged with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL`
-and `DISPATCH_TOKEN` environment variables; `dispatch.enabled: true` without `dispatch.serverUrl`
-targets `http://localhost:8766`. With Dispatch configured, every session also carries the
-`dispatch-first` skill as an instruction file.
+`dist/dispatch.js`) first on every shell command's `PATH`, sets `DISPATCH_HOST=opencode`, hands on
+the serve's envoy.json as `ENVOY_CONFIG_FILE`, and sets `DISPATCH_SESSION_ID` and
+`DISPATCH_SESSION_TITLE` to the session running the command and the title the plugin tracks for it
+(each empty when OpenCode names no session or the session has no title yet, so a value inherited
+from a parent process never stands in).
+
+The serve reads one envoy.json: `$OPENCODE_CONFIG_DIR/envoy.json` when `OPENCODE_CONFIG_DIR` is
+set, else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
+with a `<repo>/.envoy/envoy.json` merged over it (its server or listener only with the token beside
+it). Its `dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
+`natsUrls`, `token`, `natsSeed`) are resolved each on its own: `enabled: false` turns one off, a
+missing file turns both off, and a `token` starting with `!` is a command whose trimmed output is
+the value. `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_TOKEN_FILE`
+and `ENVOY_TOKEN` each override their own field; a file's token goes with a variable's server only
+when it is the file's own. `dispatch.enabled: true` without `dispatch.serverUrl` targets
+`http://localhost:8766`. With Dispatch on, every session also carries the `dispatch-first` skill as
+an instruction file; with Envoy off, the plugin registers no Envoy tool and calls no listener. Why
+a section is off is logged once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, or
+the section's error). `~/.config/opencode/envoy.json` is no longer read: move it with
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

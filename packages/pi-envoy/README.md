@@ -106,34 +106,52 @@ The extension registers no Dispatch tool. Agents reach Dispatch through the `dis
 their shell: `dispatch --help` lists its commands, `dispatch <command> --help` each one's flags and
 an example, and the `dispatch` skill teaches when to use each. The package ships `bin/dispatch`, a
 shim that runs the bundled `dist/dispatch.js` (built from `@legion/envoy-client`'s
-`bin/dispatch.ts`) with `bun`. At load the extension puts that `bin/` first on `PATH` and sets
-`DISPATCH_HOST=omp`; each session start, switch and branch sets `DISPATCH_SESSION_ID` to the
-session's id, so a command acts as the session whose shell ran it.
+`bin/dispatch.ts`) with `bun`. At load the extension puts that `bin/` first on `PATH`, sets
+`DISPATCH_HOST=omp` and hands the session's envoy.json on as `ENVOY_CONFIG_FILE`; each session
+start, switch and branch sets `DISPATCH_SESSION_ID` to the session's id, so a command acts as the
+session whose shell ran it and reads the file that session reads.
 
-Configure the shared `envoy.json` with:
+A session reads one envoy.json, with a section for Dispatch and one for Envoy:
 
 ```json
 {
   "dispatch": {
     "enabled": true,
     "serverUrl": "https://dispatch.example",
-    "token": "<agent-bearer-token>"
+    "token": "!secrets get DISPATCH_TOKEN"
+  },
+  "envoy": {
+    "enabled": true,
+    "url": "http://127.0.0.1:9020",
+    "natsUrls": ["nats://nats.internal.example:4222"],
+    "natsSeed": "!secrets get NATS_NKEY_SEED"
   }
 }
 ```
 
-The user file is `~/.config/opencode/envoy.json`; a
-`<cwd>/.opencode/envoy.json` file shallow-merges over it. A repository
-`dispatch.serverUrl` requires `dispatch.token` in that same repository file:
-it never combines with a user-file or process-environment credential. To
-override a repository endpoint for one process, set `DISPATCH_URL` together
-with `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. `DISPATCH_TOKEN_FILE` (a path
-whose trimmed contents are the token — how the Legion daemon delivers it to a
-pane) wins over every other token source and never falls back when unreadable.
-Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
-`http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the
-error, and the extension reports it when the session starts.
+An Oh My Pi profile (`OMP_PROFILE` other than `default`) reads `$PI_CODING_AGENT_DIR/envoy.json`;
+any other session reads the file `ENVOY_CONFIG_FILE` names, else
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. A `<cwd>/.envoy/envoy.json` merges over it, and
+its server or listener is used only with the token written beside it. Each section is resolved on
+its own: `enabled: false` turns it off, and a missing file turns both off. A `token` or `natsSeed`
+starting with `!` is a command whose trimmed output is the value (10 s; never run from a
+checkout's file). `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`,
+`ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, `ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each
+override their own field; a file's token goes with `DISPATCH_URL` or `ENVOY_URL` only when it names
+the file's own server, and a file's seed with `ENVOY_NATS_URL` only when it names the file's NATS
+servers, so another server needs its own token or seed variable. `DISPATCH_TOKEN_FILE` (a path
+whose trimmed contents are the token — how the Legion daemon delivers it to a pane) never falls
+back when unreadable. Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
+`http://localhost:8766`, the Go server's listen address. With Envoy off the session has no Envoy
+tools and takes no inbound messages; with Envoy on and no NATS server it keeps the tools and takes
+no inbound messages. When a section is off for a reason worth saying, the session says so once at
+its start: `envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or
+that inbound messages are off. Invalid configuration, an invalid URL, or an empty token makes every
+`dispatch` command exit 2 naming the source of the error.
+
+`~/.config/opencode/envoy.json` is no longer read; move it with
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, and move a
+top-level `natsUrls` into `envoy.natsUrls`.
 
 A command that writes to an owner names either an issue (`--issue`, a native `KEY` or an external
 `owner/repo#n` reference) or an unlinked project document (`--project` plus `--artifact`). A Legion
