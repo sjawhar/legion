@@ -5077,8 +5077,28 @@ child4_close_held() {
 until_true 300 "tree 1's close to hold $child4's planner's suspension for its turn" child4_close_held
 # One read of the planner's processes can straddle the end of one of the hold's sleeps and the
 # start of the next, and so miss the hold that runs; the hold is judged by any read inside 60 s,
-# more than four of its polls.
+# more than four of its polls. A hold not seen in that time is written to
+# mid-turn-hold-lost.txt in the evidence: the planner container's processes, the claim as
+# `legion claims` shows it, and the last lines of the agent's transcript, which say whether the
+# hold's bash call returned.
+child4_hold_lost() {
+  local view file dump=$evidence/mid-turn-hold-lost.txt
+  view=$(claim_by_token "$child4_planner" 2>&1)
+  file=$(jq -r '.sessionFile // empty' <<<"$view" 2>/dev/null)
+  {
+    echo "== $child4's planner claim"
+    printf '%s\n' "$view"
+    echo "== the planner container's processes in pod $child4_pod"
+    pod_commands "$child4_pod" planner 2>&1 | awk 'NF' | cut -c1-300
+    echo "== the last lines of its transcript (${file:-no session file recorded})"
+    [ -z "$file" ] || pod_exec "$child4_pod" planner tail -n 6 "$file" 2>&1 | cut -c1-1200
+  } | scrub >"$dump"
+  note "the hold was not seen; the planner's processes, claim and transcript tail are in $dump:"
+  sed 's/^/     /' "$dump"
+}
+timeout_hook=child4_hold_lost
 until_true 60 "$child4's planner to still run its hold in pod $child4_pod now tree 1 has closed" pod_runs "$child4_pod" planner "/usr/bin/sleep 13"
+timeout_hook=limit_pending_blocked
 note "tree 1's close holds $child4's planner's suspension for its turn, its hold still running"
 shown=$(dispatch_get "issues/$child4") || fail "Dispatch could not be read for $child4"
 [ "$(jq -r .status <<<"$shown")" = todo ] || fail "Dispatch shows $child4 $(jq -r .status <<<"$shown"), want the todo it was released in"
