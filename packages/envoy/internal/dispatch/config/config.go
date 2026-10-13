@@ -39,7 +39,27 @@ type EnvoySection struct {
 type EnvoyConfig struct {
 	Dispatch *DispatchConfig
 	Envoy    EnvoySection
+	// Warnings names each input read from a place or shape a later release stops reading.
+	Warnings []Warning
+	// topLevelNatsURLs is set when the file's NATS servers came from a top-level natsUrls.
+	topLevelNatsURLs bool
 }
+
+// Warning is one input read until it moves: Message names what was read, as the server logs it,
+// Path the file, and Fix how to move it.
+type Warning struct {
+	Message string
+	Path    string
+	Fix     string
+}
+
+// The messages a Warning carries.
+const (
+	WarnOpenCodeUserFile  = "dispatch: read the OpenCode-era envoy.json"
+	WarnOpenCodeCheckout  = "dispatch: read a checkout's .opencode/envoy.json"
+	WarnTopLevelNatsURLs  = "dispatch: read a top-level natsUrls as envoy.natsUrls"
+	laterReleaseStopsRead = " is read until it moves (a later release stops reading it): "
+)
 
 // LoadOptions controls where Load looks for config files.
 type LoadOptions struct {
@@ -80,12 +100,15 @@ func (e *InvalidConfigError) Error() string {
 // that is not an absolute path is refused. The XDG Base Directory spec says to ignore such a value;
 // os.UserConfigDir refuses it, and so does Load, rather than read a file found from wherever the
 // process started or fall back silently. envoy-dispatch hands Load its settings table's lookup; any
-// other caller names the environment it means. A missing file is not an error, except that while
-// the user file is ~/.config/legion/envoy.json (XDG_CONFIG_HOME unset, empty or ~/.config) and
-// none is there, a user file still at its OpenCode-era path beside it,
-// ~/.config/opencode/envoy.json, is refused, naming both. A file that exists but fails validation
-// (an unrecognized key, a malformed value, an envoy section in the checkout's file) stops the load
-// and returns an *InvalidConfigError naming the file and the key.
+// other caller names the environment it means. A missing file is not an error. A file that exists
+// but fails validation (an unrecognized key, a malformed value, an envoy section in the checkout's
+// file) stops the load and returns an *InvalidConfigError naming the file and the key.
+//
+// Three saved inputs from before this layout are read until they move, each with a Warning: while
+// the user file is ~/.config/legion/envoy.json (XDG_CONFIG_HOME unset, empty or ~/.config) and none
+// is there, ~/.config/opencode/envoy.json in its place; while the checkout has no
+// .envoy/envoy.json, its .opencode/envoy.json, under every checkout rule; and a user file's
+// top-level natsUrls as envoy.natsUrls, refused beside an envoy.natsUrls.
 func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
@@ -117,19 +140,43 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 	if err != nil {
 		return nil, err
 	}
-	switch {
-	case userCfg != nil:
-		merged = userCfg
-	case userPath == filepath.Join(home, ".config", "legion", "envoy.json"):
-		// The old file is the user's only beside its own directory: an XDG_CONFIG_HOME naming another
-		// directory is not where it belongs.
-		if err := refuseOpenCodeUserFile(filepath.Join(home, ".config", "opencode", "envoy.json"), userPath); err != nil {
+	// The old file is the user's only beside its own directory: an XDG_CONFIG_HOME naming another
+	// directory is not where it belongs.
+	if userCfg == nil && userPath == filepath.Join(home, ".config", "legion", "envoy.json") {
+		oldPath := filepath.Join(home, ".config", "opencode", "envoy.json")
+		if userCfg, err = readConfigFile(oldPath, ""); err != nil {
 			return nil, err
 		}
+		if userCfg != nil {
+			// Its own move says to move a top-level natsUrls too.
+			userCfg.Warnings = []Warning{{
+				Message: WarnOpenCodeUserFile,
+				Path:    oldPath,
+				Fix: oldPath + laterReleaseStopsRead + "mkdir -p ~/.config/legion && mv " + oldPath + " " + userPath +
+					", then move a top-level natsUrls into envoy.natsUrls",
+			}}
+		}
 	}
-	checkoutCfg, err := readConfigFile(filepath.Join(cwd, ".envoy", "envoy.json"), userPath)
+	if userCfg != nil {
+		merged = userCfg
+	}
+	checkoutPath := filepath.Join(cwd, ".envoy", "envoy.json")
+	checkoutCfg, err := readConfigFile(checkoutPath, userPath)
 	if err != nil {
 		return nil, err
+	}
+	if checkoutCfg == nil {
+		oldCheckout := filepath.Join(cwd, ".opencode", "envoy.json")
+		if checkoutCfg, err = readConfigFile(oldCheckout, userPath); err != nil {
+			return nil, err
+		}
+		if checkoutCfg != nil {
+			checkoutCfg.Warnings = append(checkoutCfg.Warnings, Warning{
+				Message: WarnOpenCodeCheckout,
+				Path:    oldCheckout,
+				Fix:     oldCheckout + laterReleaseStopsRead + "mkdir -p " + filepath.Dir(checkoutPath) + " && mv " + oldCheckout + " " + checkoutPath,
+			})
+		}
 	}
 	if checkoutCfg != nil {
 		merged = mergeConfig(merged, checkoutCfg)
@@ -138,20 +185,6 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 		return nil, err
 	}
 	return merged, nil
-}
-
-// refuseOpenCodeUserFile refuses a user file still at oldPath, which nothing reads, while none is
-// at userPath.
-func refuseOpenCodeUserFile(oldPath, userPath string) error {
-	_, err := os.Stat(oldPath)
-	switch {
-	case err == nil:
-		return fmt.Errorf("%s is no longer read: move it to %s", oldPath, userPath)
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	default:
-		return fmt.Errorf("check for the no longer read %s: %w", oldPath, err)
-	}
 }
 
 func applyEnvironmentOverrides(cfg *EnvoyConfig, lookup func(string) (string, bool)) error {
@@ -213,6 +246,13 @@ func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 	if len(issues) > 0 {
 		return nil, &InvalidConfigError{Path: path, Issues: issues}
 	}
+	if cfg.topLevelNatsURLs {
+		cfg.Warnings = append(cfg.Warnings, Warning{
+			Message: WarnTopLevelNatsURLs,
+			Path:    path,
+			Fix:     path + ": the top-level natsUrls" + laterReleaseStopsRead + "move natsUrls into envoy.natsUrls",
+		})
+	}
 	return cfg, nil
 }
 
@@ -256,12 +296,19 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 		var s string
 		issues = append(issues, checkType("$schema", "string", v, &s)...)
 	}
-	if _, ok := raw["natsUrls"]; ok {
-		if checkoutOf != "" {
-			issues = append(issues, "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section")
-		} else {
-			issues = append(issues, "natsUrls: no longer read; write it as envoy.natsUrls")
+	if v, ok := raw["natsUrls"]; ok && checkoutOf != "" {
+		issues = append(issues, "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section")
+	} else if ok {
+		var natsURLs []string
+		issues = append(issues, checkType("natsUrls", "string array", v, &natsURLs)...)
+		for i, natsURL := range natsURLs {
+			natsURLs[i] = strings.TrimSpace(natsURL)
+			if natsURLs[i] == "" {
+				issues = append(issues, fmt.Sprintf("natsUrls.%d: must not be empty", i))
+			}
 		}
+		cfg.Envoy.NatsURLs = natsURLs
+		cfg.topLevelNatsURLs = true
 	}
 	if v, ok := raw["dispatch"]; ok {
 		d, dIssues := parseDispatch(v)
@@ -274,7 +321,14 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 		} else {
 			e, eIssues := parseEnvoy(v)
 			issues = append(issues, eIssues...)
-			cfg.Envoy = e
+			if m, _ := section("envoy", v); m != nil && cfg.topLevelNatsURLs {
+				if _, both := m["natsUrls"]; both {
+					issues = append(issues, "natsUrls: set beside envoy.natsUrls; keep envoy.natsUrls")
+				}
+			}
+			if !cfg.topLevelNatsURLs {
+				cfg.Envoy = e
+			}
 		}
 	}
 	if len(issues) > 0 {
@@ -384,11 +438,13 @@ func parseEnvoy(raw json.RawMessage) (EnvoySection, []string) {
 }
 
 // mergeConfig overlays a checkout's file on the user file: its dispatch.serverUrl, when it names
-// one. A checkout's file holds no envoy section (parseAndValidate), so the user file's stands.
+// one, and its warnings. A checkout's file holds no envoy section (parseAndValidate), so the user
+// file's stands.
 func mergeConfig(base, override *EnvoyConfig) *EnvoyConfig {
 	out := *base
 	if override.Dispatch != nil && override.Dispatch.ServerURL != "" {
 		out.Dispatch = &DispatchConfig{ServerURL: override.Dispatch.ServerURL}
 	}
+	out.Warnings = append(append([]Warning{}, base.Warnings...), override.Warnings...)
 	return &out
 }

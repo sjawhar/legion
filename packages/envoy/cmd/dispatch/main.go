@@ -803,7 +803,15 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 // under the XDG_CONFIG_HOME row, overridden by the DISPATCH_SERVER_URL and NATS_URLS rows of the
 // settings table.
 func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
-	return config.Load(env.lookup, options)
+	cfg, err := config.Load(env.lookup, options)
+	if err != nil {
+		return nil, err
+	}
+	// An input a later release stops reading, once at each start, so its log can be counted.
+	for _, warning := range cfg.Warnings {
+		slog.Warn(warning.Message, "path", warning.Path, "fix", warning.Fix)
+	}
+	return cfg, nil
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project

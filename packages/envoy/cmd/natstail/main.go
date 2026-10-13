@@ -49,6 +49,9 @@ func main() {
 		fmt.Fprintf(os.Stderr, "natstail: load envoy config: %v\n", err)
 		os.Exit(1)
 	}
+	for _, warning := range cfg.Warnings {
+		fmt.Fprintf(os.Stderr, "natstail: %s\n", warning.Fix)
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
