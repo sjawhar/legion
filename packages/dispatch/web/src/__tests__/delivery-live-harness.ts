@@ -70,6 +70,11 @@ export class FakeDeliverySocket {
     this.emit("close", Object.assign(new Event("close"), { code }));
   }
 
+  /** The browser reports a connection error before it has delivered a close event. */
+  fail(): void {
+    this.emit("error", new Event("error"));
+  }
+
   /** The subscribe frames sent, in order. */
   subscribes(): DeliveryLiveSubscribe[] {
     return this.sent.filter((frame): frame is DeliveryLiveSubscribe => frame.type === "subscribe");

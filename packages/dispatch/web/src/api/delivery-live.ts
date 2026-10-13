@@ -237,6 +237,12 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     next.addEventListener("message", (event) => {
       if (socket === next) receive(event.data);
     });
+    // WebKit can report a failed opening handshake only as an error, with no close event. Treat it
+    // as the same dropped connection the close path handles, so the first page load retries rather
+    // than remaining pending forever.
+    next.addEventListener("error", () => {
+      if (socket === next) lost(0);
+    });
     next.addEventListener("close", (event) => {
       if (socket === next) lost(event.code);
     });

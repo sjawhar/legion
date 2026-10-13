@@ -267,6 +267,21 @@ test("a drop reconnects with backoff and resumes with seq and revs", async () =>
   }
 });
 
+test("a connection error before open reconnects with backoff", async () => {
+  jest.useFakeTimers();
+  const { unsubscribe } = observe();
+  try {
+    await settle();
+    sockets.latest().fail();
+
+    expect(live.state().state).toBe("reconnecting");
+    jest.advanceTimersByTime(1_200);
+    expect(sockets.sockets).toHaveLength(2);
+  } finally {
+    unsubscribe();
+  }
+});
+
 test("close 1012 reconnects at once", async () => {
   jest.useFakeTimers();
   const { unsubscribe } = observe();
