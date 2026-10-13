@@ -57,7 +57,7 @@ func (s *strandedStore) RoleRuns(_ context.Context, _ pgx.Tx, keys []record.Role
 func (s *strandedStore) roleRun(token claim.Token) record.RoleRun {
 	run := record.RoleRun{Queued: s.queued[token]}
 	if c, ok := s.claims[token]; ok {
-		run.Claim = &record.RoleClaim{State: c.State, LastStartRow: c.LastStartRow}
+		run.Claim = &record.RoleClaim{State: c.State, Tree: c.Tree, LastStartRow: c.LastStartRow}
 	}
 	return run
 }

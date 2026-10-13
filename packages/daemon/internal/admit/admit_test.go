@@ -398,6 +398,9 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		confirmedPending func(generation uint64, p phase.Phase)
 		// otherClaim records a claim on the same issue and role under another daemon's project token.
 		otherClaim func(state string, lastStart int64)
+		// oldTreeClaim records this daemon's claim still in a tree other than the issue's: a carried
+		// child's role whose turn in its old tree has not ended.
+		oldTreeClaim func(state string, serving uint64, lastStart int64)
 	}
 	for _, tc := range []struct {
 		name  string
@@ -469,6 +472,11 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			s.pending(1, phase.Testing)
 		}, want: 1},
 		{name: "another daemon's live claim on the same issue and role", setup: func(s seed) { s.otherClaim("working", 0) }, want: 1},
+		{name: "a live claim still in its old tree, a carried child's turn there not over", setup: func(s seed) { s.oldTreeClaim("working", 1, 7) }, want: 1},
+		{name: "a launch-uncertain claim still in its old tree holding the phase's task", setup: func(s seed) {
+			s.oldTreeClaim("launch_uncertain", 1, 7)
+			s.pending(1, phase.Testing)
+		}, want: 1},
 		{name: "another daemon's claim beside this daemon's, with the close's suspend queued", setup: func(s seed) {
 			s.claim("working", 1, 0)
 			s.otherClaim("working", 0)
@@ -511,12 +519,12 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 				}
 				return id
 			}
-			putClaim := func(token claim.Token, project, state string, serving uint64, lastStart int64) {
+			putClaim := func(token claim.Token, project, tree, state string, serving uint64, lastStart int64) {
 				t.Helper()
 				if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file, state,
 					launch_failures, prompt_failures, prompt_retires, uncertain_streak, serving_generation, last_start_row)
-					values ($1, $2, 'LEGION-208', 'LEGION-209', 'tester', 1, 'ses_tester', '', $3, 0, 0, 0, 0, $4, $5)`,
-					string(token), project, state, int64(serving), lastStart); err != nil {
+					values ($1, $2, $3, 'LEGION-209', 'tester', 1, 'ses_tester', '', $4, 0, 0, 0, 0, $5, $6)`,
+					string(token), project, tree, state, int64(serving), lastStart); err != nil {
 					t.Fatalf("record the %s claim %s: %v", state, token, err)
 				}
 			}
@@ -540,7 +548,7 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 					return enqueueRequest(payload)
 				},
 				claim: func(state string, serving uint64, lastStart int64) {
-					putClaim(token, project, state, serving, lastStart)
+					putClaim(token, project, root.Key, state, serving, lastStart)
 				},
 				pending: func(generation uint64, p phase.Phase) {
 					putPending(generation, p, nil)
@@ -554,7 +562,10 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
-					putClaim(other, "otherlegion", state, 1, lastStart)
+					putClaim(other, "otherlegion", root.Key, state, 1, lastStart)
+				},
+				oldTreeClaim: func(state string, serving uint64, lastStart int64) {
+					putClaim(token, project, "LEGION-207", state, serving, lastStart)
 				},
 			})
 			// resumes counts the starts that carry the phase's task marked as its resume task.

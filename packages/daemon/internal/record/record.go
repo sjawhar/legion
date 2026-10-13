@@ -465,11 +465,12 @@ type QueuedSupervise struct {
 	Request SuperviseRequest
 }
 
-// RoleClaim is a claim as RoleRun reads it: its state, who suspended it while it is suspended, the
-// newest start the outbox ran against it (last_start_row), and the task it holds, nil for none, with
-// the task's generation, phase and confirmation.
+// RoleClaim is a claim as RoleRun reads it: its state, the tree it is in, who suspended it while it
+// is suspended, the newest start the outbox ran against it (last_start_row), and the task it holds,
+// nil for none, with the task's generation, phase and confirmation.
 type RoleClaim struct {
 	State        supervise.ClaimState
+	Tree         string
 	SuspendedBy  supervise.SuspendSource
 	LastStartRow int64
 	Pending      *supervise.Delivery

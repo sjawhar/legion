@@ -115,15 +115,18 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	}); err != nil {
 		t.Fatalf("seed the finished root and its child: %v", err)
 	}
+	// The claims live in the daemon's real store, as in production, so admission's promotion reads
+	// the implementer's stored claim as it stands: working, in the old tree.
+	trees := outboxTreeStore(t, pool, rootKey)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	machineClock := &heldClock{at: start}
-	sup.deps.Clock, sup.deps.Timeouts.Stop = machineClock, stopTimeout
+	sup.deps.Clock, sup.deps.Timeouts.Stop, sup.deps.Store = machineClock, stopTimeout, trees
 	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	var logs bytes.Buffer
 	clock := start
 	runner := &outbox{
-		dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, rootKey),
+		dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: trees,
 		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		githubAPI: newBranchGitHub(t, nil, branchExists).url, notices: &outboxPublisher{},
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo", HandedOver: true, Labels: []string{"legion"}}},
@@ -173,6 +176,18 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 		return err
 	}); err != nil || carried == nil || carried.Tree != childKey || carried.Generation != 2 || carried.Phase != phase.Implementing {
 		t.Fatalf("the carried child = %+v, %v; want its own tree at generation 2 in implementing", carried, err)
+	}
+	// Promotion read the implementer's stored claim working in the old tree, and still queued its
+	// start in the new one: that claim was started by the old tree, not by this run.
+	var state, tree string
+	if err := pool.QueryRow(ctx, `select state, tree from claims where token = $1`, string(implementer)).Scan(&state, &tree); err != nil ||
+		state != string(supervise.StateWorking) || tree != rootKey {
+		t.Fatalf("the implementer's stored claim at the carry = %s in %s, %v; want working in %s", state, tree, err, rootKey)
+	}
+	var starts int
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where issue = $1 and kind = 'supervise' and payload->>'op' = 'start'
+		and payload->>'role' = 'implementer' and payload->>'generation' = '2'`, childKey).Scan(&starts); err != nil || starts != 1 {
+		t.Fatalf("the carry's promotion queued %d starts of the implementer at generation 2, %v; want one", starts, err)
 	}
 
 	run("the carry's rows while the implementer's turn runs")

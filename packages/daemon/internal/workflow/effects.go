@@ -90,14 +90,16 @@ func StopActs(id int64, stop record.SuperviseRequest, lastStart int64, root *rec
 // not when the role is already started for this run: the newest of its operations that will still
 // act is a start. A stop that still acts (StopActs) undoes any older start, which may run first,
 // so past one only a newer queued start for current counts. With none, a queued start for current
-// counts, and so does a claim that may have a process: a live one, or one whose launch is
-// uncertain holding current's task for generation undelivered or unconfirmed (the task its start
-// gave it). No start acts while the tree lingers, and the tree's close queues a suspend of every
-// claim, so such a claim was started since the tree ran again. A failed, retired, suspended or
-// queued claim runs nothing, so promotion starts it whatever task it holds. Whether the start's
-// resume task is delivered is the outbox executor's decision when the start runs: not to a claim
-// that holds a task for the same generation and phase by then (record.SuperviseRequest's
-// ResumeTask).
+// counts, and so does a claim of root's tree that may have a process: a live one, or one whose
+// launch is uncertain holding current's task for generation undelivered or unconfirmed (the task
+// its start gave it). No start acts while the tree lingers, and the tree's close queues a suspend
+// of every claim, so such a claim was started since the tree ran again. A claim still in another
+// tree was not: a carried child's role whose turn in its old tree has not ended is live there, and
+// promotion starts it, a start that waits until the claim has stopped in that tree (the outbox's
+// stopElsewhere) and then resumes it in this one. A failed, retired, suspended or queued claim runs
+// nothing, so promotion starts it whatever task it holds. Whether the start's resume task is
+// delivered is the outbox executor's decision when the start runs: not to a claim that holds a task
+// for the same generation and phase by then (record.SuperviseRequest's ResumeTask).
 //
 // Stranded reads the same rule for a failed claim, and for a suspended one no operator suspended: a
 // claim for which StartFor is true has no queued start that will wake it. A
@@ -121,7 +123,7 @@ func StartFor(run record.RoleRun, root record.Issue, generation uint64, current 
 			return false
 		}
 	}
-	if stop != 0 || held == nil {
+	if stop != 0 || held == nil || held.Tree != root.Key {
 		return true
 	}
 	holds := held.Pending != nil && held.Pending.StillWorked(generation, current, held.State)

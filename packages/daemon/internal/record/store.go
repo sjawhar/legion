@@ -748,7 +748,7 @@ func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (
 		}
 	}
 
-	rows, err := tx.Query(ctx, `select c.token, c.state, c.suspended_by, c.last_start_row, d.claim_token is not null,
+	rows, err := tx.Query(ctx, `select c.token, c.state, c.tree, c.suspended_by, c.last_start_row, d.claim_token is not null,
 		coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
 		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = any($1)`, tokens)
 	if err != nil {
@@ -760,7 +760,7 @@ func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (
 		var pending bool
 		var task supervise.Delivery
 		var confirmed *time.Time
-		if err := rows.Scan(&token, &held.State, &held.SuspendedBy, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed); err != nil {
+		if err := rows.Scan(&token, &held.State, &held.Tree, &held.SuspendedBy, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("read the claims of %d role runs: %w", len(keys), err)
 		}
