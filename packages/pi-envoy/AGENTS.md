@@ -190,7 +190,9 @@ only when its variables name it. A `token` or `natsSeed` starting with `!` is a 
 (`/bin/sh -c` in the envoy.json's directory and its own process group, 10 s, its exit status
 deciding, its trimmed stdout the value), run only when its section uses it; its value is kept for
 the process across every copy of the extension's modules (each `task` subagent loads a fresh one),
-and a failure for 60 s, then it runs again. `DISPATCH_URL`,
+and so is a command that ran out of time, which never runs again in that process (each run blocks
+it for the whole 10 s), while a failure that ended on its own is kept for 60 s, then it runs
+again. `DISPATCH_URL`,
 `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`,
 `ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field, which is
 how a Legion pane gets the Dispatch and Envoy its daemon names. A file's token goes with

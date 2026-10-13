@@ -157,9 +157,12 @@ resolver is about to use the value (the section on, no variable overriding the f
 is kept for the process, shared across module instances (one map on `globalThis` under
 `Symbol.for("legion.envoy-config.commands")`, since Oh My Pi loads each extension instance, a
 `task` subagent's included, as a fresh module), and keyed by the command, its file and its working
-directory; a failure is kept for 60 s, then the command runs again, so a cause that clears (a
-keyring unlocked after the session started) needs no restart. The `dispatch` command is one process
-per call, and each Claude Code hook one per event, so a `!` token runs once for each. A non-zero
+directory. A command that ran out of time is kept as failed for the life of the process: a hanging
+command never runs again in that process, since each run would block it for the whole 10 s. A
+failure that ended on its own (a non-zero exit, empty output, more than one line) is kept for 60 s
+and then the command runs again, so a cause that clears (a keyring unlocked after the session
+started) needs no restart. The `dispatch` command is one process per call, and each Claude Code
+hook one per event, so a `!` token runs once for each. A non-zero
 exit, a timeout or empty output is an error naming the field and the file, never the output. A
 value with whitespace or a control character inside it, written, printed by a command, or given in
 `DISPATCH_TOKEN`, `ENVOY_TOKEN` or a `_FILE` variable's file, is refused without being echoed, since

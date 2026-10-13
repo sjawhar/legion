@@ -306,14 +306,19 @@ function parseFile<Settings>(
   return { kind: "valid", settings: parsed.data };
 }
 
-/** What a `!` command came to: its value, or why it gave none. */
-type CommandOutcome = { readonly value: string } | { readonly failure: string };
+/** What a `!` command came to: its value, or why it gave none, and whether that was its running out
+ * of time rather than ending on its own. */
+type CommandOutcome =
+  | { readonly value: string }
+  | { readonly failure: string; readonly timedOut: boolean };
 
 /** A kept outcome, and when it was kept. */
 type KeptOutcome = CommandOutcome & { readonly at: number };
 
-/** How long a failed `!` command is kept before it runs again: a transient cause (a locked
- * keyring, a loaded machine past the timeout) clears without a restart. */
+/** How long a `!` command's failure that ended on its own is kept before it runs again: a transient
+ * cause (a locked keyring, a file not yet written) clears without a restart. A command that ran out
+ * of time is kept failed for the life of the process instead: each run blocks the process for the
+ * whole timeout, so a hanging command retried once a minute would freeze its session that often. */
 const FAILURE_KEPT_MS = 60_000;
 
 /** The process-wide store of kept outcomes, by command, file and working directory. It lives on
@@ -352,7 +357,7 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
         detached: true,
       });
     } catch (error) {
-      return { failure: `could not start: ${messageFor(error)}` };
+      return { failure: `could not start: ${messageFor(error)}`, timedOut: false };
     } finally {
       closeSync(fd);
     }
@@ -364,15 +369,24 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
       // The group is already gone.
     }
     if (result.exitedDueToTimeout) {
-      return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+      return {
+        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
+        timedOut: true,
+      };
     }
     if (!result.success) {
-      return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
+      return {
+        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
+        timedOut: false,
+      };
     }
     const value = readFileSync(output, "utf-8").trim();
-    if (value.length === 0) return { failure: "printed nothing" };
+    if (value.length === 0) return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
-      return { failure: "printed more than one line, or whitespace inside its value" };
+      return {
+        failure: "printed more than one line, or whitespace inside its value",
+        timedOut: false,
+      };
     }
     return { value };
   } finally {
@@ -386,12 +400,13 @@ function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): 
  * it (never the session's working directory, so a relative command or a directory-configured shim
  * resolves against that file), in its own process group, for at most 10 s. Its value is kept for
  * the process, shared by every copy of this module loaded in it, keyed by the command, its file and
- * its working directory; a failure is kept for 60 s, then the command runs again. Its exit status
- * decides, and the wait is for the shell alone: once it exits or runs out of time, every process of
- * its group still running is killed, then its output is read. A non-zero exit, a timeout or empty
- * output throws naming the field and the file. A value with whitespace or a control character
- * inside it, as written or as printed, throws too, since it cannot be sent as one bearer. No error
- * carries the value or either stream.
+ * its working directory; so is a run out of time, while a failure that ended on its own (a non-zero
+ * exit, empty output, more than one line) is kept for 60 s, then the command runs again. Its exit
+ * status decides, and the wait is for the shell alone: once it exits or runs out of time, every
+ * process of its group still running is killed, then its output is read. A non-zero exit, a
+ * timeout or empty output throws naming the field and the file. A value with whitespace or a
+ * control character inside it, as written or as printed, throws too, since it cannot be sent as one
+ * bearer. No error carries the value or either stream.
  */
 export function fileValue(
   value: string,
@@ -411,7 +426,7 @@ export function fileValue(
   let outcome = commandOutcomes.get(key);
   if (
     outcome === undefined ||
-    ("failure" in outcome && Date.now() - outcome.at >= FAILURE_KEPT_MS)
+    ("failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS)
   ) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);

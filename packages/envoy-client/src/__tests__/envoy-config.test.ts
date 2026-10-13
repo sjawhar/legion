@@ -910,6 +910,76 @@ describe("a ! command in envoy.json", () => {
     }
   });
 
+  // A failure that ended on its own is kept for 60 s and then retried: whatever caused it (a
+  // locked keyring, a file not yet written) may clear without a restart.
+  test("a failure that ended on its own (non-zero exit, empty output, more than one line) is kept 60 s, then runs again", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const late = path.join(home, "late-token");
+    const failing: [failure: string, command: string][] = [
+      ["exited with status 1", `cat ${late}`],
+      ["printed nothing", `cat ${late} 2>/dev/null; true`],
+      [
+        "printed more than one line, or whitespace inside its value",
+        `cat ${late} 2>/dev/null || printf 'a\\nb\\n'`,
+      ],
+    ];
+    const start = Date.now();
+    try {
+      for (const [index, [failure, command]] of failing.entries()) {
+        setSystemTime(new Date(start));
+        rmSync(late, { force: true });
+        const runs = path.join(home, `runs-${index}`);
+        const file = writeFile(path.join(home, `kind-${index}`, "envoy.json"), {
+          dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; ${command}` },
+        });
+        const resolve = () => dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }));
+        expect(resolve()).toEqual({
+          enabled: false,
+          notice: null,
+          error: `${file}: dispatch.token's command ${failure}`,
+        });
+        writeFileSync(late, "late-secret\n");
+        setSystemTime(new Date(start + 59_000));
+        expect(resolve()).toMatchObject({ enabled: false });
+        expect(readFileSync(runs, "utf-8")).toBe("run\n");
+        setSystemTime(new Date(start + 61_000));
+        expect(resolve()).toMatchObject({ enabled: true, token: "late-secret" });
+        expect(readFileSync(runs, "utf-8")).toBe("run\nrun\n");
+      }
+    } finally {
+      setSystemTime();
+    }
+  });
+
+  // Each run of a command that hangs blocks the process for the whole timeout, since it runs
+  // synchronously: retrying it once a minute would freeze the session that often.
+  test("one that ran out of time is kept failed for the life of the process", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; sleep 30` },
+    });
+    const resolve = () => dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }));
+    const start = Date.now();
+    try {
+      const first = resolve();
+      for (const later of [61_000, 24 * 60 * 60_000]) {
+        setSystemTime(new Date(start + later));
+        expect(resolve()).toEqual(first);
+      }
+      expect(readFileSync(runs, "utf-8")).toBe("run\n");
+      expect(first).toEqual({
+        enabled: false,
+        notice: null,
+        error: `${file}: dispatch.token's command did not finish within 10 s, and does not run again in this process`,
+      });
+    } finally {
+      setSystemTime();
+    }
+  }, 45_000);
+
   // Oh My Pi loads each extension instance as a fresh module: a cache held by one module instance
   // would run every command again in each, blocking the parent's event loop at a subagent's start.
   test("is kept for every copy of the module in the process, by command, file and directory", async () => {
@@ -1087,7 +1157,7 @@ describe("a ! command in envoy.json", () => {
     expect(dispatch).toEqual({
       enabled: false,
       notice: null,
-      error: `${file}: dispatch.token's command did not finish within 10 s`,
+      error: `${file}: dispatch.token's command did not finish within 10 s, and does not run again in this process`,
     });
     expect(gone(Number(readFileSync(pidFile, "utf-8").trim()))).toBe(true);
     expect(left).toEqual([]);
