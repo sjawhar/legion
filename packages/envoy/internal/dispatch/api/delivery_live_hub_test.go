@@ -1104,6 +1104,169 @@ func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
 	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
+// acquires is how many connections the shared pool has handed out so far.
+func acquires(database *store.Store) int64 { return database.Pool.Stat().AcquireCount() }
+
+// waitConnected waits for the hub's listener to have connected and caught both logs up, after
+// which the hub reads nothing until something changes.
+func (r *hubRig) waitConnected(t *testing.T) {
+	t.Helper()
+	r.waitFor(t, 0, 5*time.Second, "the listener's connection", func(note deliveryHubNote) bool { return note.what == "connected" })
+}
+
+// freshness is the next frame conn is sent, which must be a freshness frame.
+func (c *fakeLiveConn) freshness(t *testing.T, within time.Duration, what string) DeliveryLiveFreshness {
+	t.Helper()
+	frame := c.next(t, within, what)
+	fresh, ok := frame.(DeliveryLiveFreshness)
+	if !ok {
+		raw, _ := json.Marshal(frame)
+		t.Fatalf("frame = %s, want %s", raw, what)
+	}
+	return fresh
+}
+
+func TestAPresetViewSendsItsOldestPullRequestLeavingWithoutAReadingTheDatabase(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	now := time.Now().UTC()
+	upsertPR(t, rig.database, hubPR(1, now.Add(-28*24*time.Hour+2*time.Second)))
+	upsertPR(t, rig.database, hubPR(2, now.Add(-time.Hour)))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 28, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "p")
+	rig.waitConnected(t)
+	before := acquires(rig.database)
+
+	delta := conn.delta(t, 4*time.Second, "p")
+	if got := acquires(rig.database); got != before {
+		t.Fatalf("the shared pool handed out %d connections while the oldest pull request left, want none", got-before)
+	}
+	if got := delta.Items["prs"].Remove; !slices.Equal(got, []string{"acme/widgets#1"}) {
+		t.Fatalf("the expiry's delta removes %v, want acme/widgets#1", got)
+	}
+	conn.none(t, time.Second, "the expiry's one delta")
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing.T) {
+	clock := &fakeHubClock{}
+	rig := newClockedHubRig(t, clock)
+	seedHubSettings(t, rig.database)
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
+	conn.snapshot(t, 5*time.Second, "p")
+	rig.waitConnected(t)
+	before := acquires(rig.database)
+
+	now := clock.Now()
+	clock.Advance(nextUTCMidnight(now).Sub(now) + time.Second)
+	delta := conn.delta(t, 3*time.Second, "p")
+	if got := acquires(rig.database); got != before {
+		t.Fatalf("the shared pool handed out %d connections at midnight, want none", got-before)
+	}
+	var days []string
+	if err := json.Unmarshal(delta.Set["days"], &days); err != nil {
+		t.Fatalf("decode the delta's days %s: %v", delta.Set["days"], err)
+	}
+	var want struct {
+		Days []string `json:"days"`
+	}
+	if err := json.Unmarshal(getBody(t, rig.handler, "/api/v1/delivery/pipeline?at="+clock.Now().Format(time.RFC3339Nano)), &want); err != nil {
+		t.Fatalf("decode GET /pipeline: %v", err)
+	}
+	if !slices.Equal(days, want.Days) {
+		t.Fatalf("after midnight the delta's days = %v, GET /pipeline answers %v", days, want.Days)
+	}
+}
+
+func TestAPresetRecomputeWhereOnlyTheWindowMovedSendsNothing(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	// A pull request of another repository, merged before the window: no view shows it, but a change
+	// to it is before the timeline's end, so it recomputes the view.
+	old := hubPR(1, time.Now().UTC().Add(-30*24*time.Hour))
+	old.Repo, old.URL = "acme/other", "https://github.com/acme/other/pull/1"
+	upsertPR(t, rig.database, old)
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
+	conn.snapshot(t, 5*time.Second, "p")
+
+	start := rig.mark()
+	old.Title = "feat: a title no view shows"
+	upsertPR(t, rig.database, old)
+	rig.waitFor(t, start, 3*time.Second, "the recompute of the change", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseChange
+	})
+	conn.none(t, time.Second, "a recompute whose window alone moved")
+}
+
+func TestFreshnessIsSentOnlyWhenItsVerdictChanges(t *testing.T) {
+	clock := &fakeHubClock{}
+	rig := newClockedHubRig(t, clock)
+	seedHubSettings(t, rig.database)
+	conn := newFakeLiveConn()
+	// A custom range has no expiry, so the clock's move sends nothing but freshness.
+	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
+	conn.snapshot(t, 5*time.Second, "m")
+	rig.waitConnected(t)
+	pool := rig.database.Pool
+
+	for range 2 {
+		if err := delivery.RecordReconcileSuccess(t.Context(), pool, clock.Now()); err != nil {
+			t.Fatalf("record a reconcile: %v", err)
+		}
+		conn.none(t, time.Second, "a reconcile that changed no verdict")
+	}
+	if err := delivery.RecordReconcileError(t.Context(), pool, "GitHub answered 502"); err != nil {
+		t.Fatalf("record a reconcile error: %v", err)
+	}
+	failed := conn.freshness(t, 3*time.Second, "the freshness frame naming the error")
+	if failed.Freshness.LastError == nil || *failed.Freshness.LastError != "GitHub answered 502" || len(failed.Stale) != 0 {
+		t.Fatalf("the error's freshness frame = %+v, want last_error \"GitHub answered 502\" and nothing stale", failed)
+	}
+	if err := delivery.RecordReconcileSuccess(t.Context(), pool, clock.Now()); err != nil {
+		t.Fatalf("record the next reconcile: %v", err)
+	}
+	cleared := conn.freshness(t, 3*time.Second, "the freshness frame clearing the error")
+	if cleared.Freshness.LastError != nil || len(cleared.Stale) != 0 {
+		t.Fatalf("the clearing freshness frame = %+v, want no last_error and nothing stale", cleared)
+	}
+	conn.none(t, time.Second, "the clearing frame")
+
+	// No reconcile for three intervals.
+	clock.Advance(deliveryStaleAfter + time.Second)
+	stale := conn.freshness(t, 3*time.Second, "the freshness frame naming the stale sources")
+	if !slices.Equal(stale.Stale, []string{"prs", "runs", "ci"}) {
+		t.Fatalf("the stale freshness frame names %v, want [prs runs ci]", stale.Stale)
+	}
+	conn.none(t, time.Second, "the stale frame")
+}
+
+func TestAnUnfetchablePullRequestSendsAFreshnessFrame(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	upsertPR(t, rig.database, hubPR(1, time.Now().UTC().Add(-3*time.Hour)))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "p")
+	rig.waitConnected(t)
+
+	if err := delivery.MarkPullRequestUnfetchable(t.Context(), rig.database.Pool, "acme/widgets", 1, "the pull request is gone"); err != nil {
+		t.Fatalf("mark the pull request unfetchable: %v", err)
+	}
+	delta := conn.delta(t, 3*time.Second, "p")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
+		t.Fatalf("the mark's delta upserts %v, want acme/widgets#1", got)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+	fresh := conn.freshness(t, 3*time.Second, "the freshness frame carrying the unfetchable count")
+	if fresh.Freshness.UnfetchableCount != 1 {
+		t.Fatalf("the freshness frame's unfetchable_count = %d, want 1", fresh.Freshness.UnfetchableCount)
+	}
+	conn.none(t, time.Second, "the mark's delta and freshness frame")
+}
+
 func TestASubscriberGetsTheGETBodyAsItsSnapshot(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
