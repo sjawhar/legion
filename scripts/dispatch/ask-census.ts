@@ -7,13 +7,12 @@ import type {
   DispatchEvent,
   Issue,
 } from "../../packages/contracts/src/dispatch-api";
-import {
-  type ActiveDispatchConfig,
-  dispatchSettings,
-} from "../../packages/envoy-client/src/dispatch-config";
+import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
 import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
-import { readEnvoyConfig } from "../../packages/envoy-client/src/envoy-config";
-import { sessionConfigFile } from "../../packages/envoy-client/src/session-settings";
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+} from "../../packages/envoy-client/src/session-settings";
 
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
 const EVENT_PAGE_SIZE = 200;
@@ -449,14 +448,13 @@ export async function censusIssues(
 }
 
 async function run(options: CensusOptions): Promise<void> {
-  const file = sessionConfigFile("command", process.env);
-  if (file.path === null) throw new Error(`dispatch config: ${file.error}`);
-  const envoyConfig = readEnvoyConfig(file.path, process.env, { cwd: process.cwd() });
+  const { dispatch: resolution, warnings } = sessionDispatchSettings(
+    sessionConfigFile("command", process.env),
+    process.env,
+    { cwd: process.cwd() }
+  );
   // A checkout's OpenCode-era file, which is not read, is said on every run while it is there.
-  if (envoyConfig.kind === "read") {
-    for (const warning of envoyConfig.warnings) console.error(`dispatch: ${warning}`);
-  }
-  const resolution = dispatchSettings(process.env, envoyConfig);
+  for (const warning of warnings) console.error(`dispatch: ${warning}`);
   if (!resolution.enabled) {
     throw new Error(
       resolution.error === null

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 // Every variable an in-process resolver reads that a Legion pane or the caller's own session
-// carries: resolveDispatchConfig (DISPATCH_URL; DISPATCH_TOKEN_FILE ahead of DISPATCH_TOKEN), the
+// carries: sessionDispatchSettings (DISPATCH_URL; DISPATCH_TOKEN_FILE ahead of DISPATCH_TOKEN), the
 // Envoy credentials (ENVOY_TOKEN_FILE ahead of ENVOY_TOKEN), and what picks the envoy.json both read
 // (CLAUDE_CONFIG_DIR, then ENVOY_CONFIG_FILE, then XDG_CONFIG_HOME). A fixture that sets only the
 // plain token would still send the pane's real one, and a file pointer that does not resolve fails

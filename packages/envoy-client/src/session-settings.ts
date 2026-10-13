@@ -1,6 +1,4 @@
 import {
-  type ActiveDispatchConfig,
-  activeDispatchSettings,
   type DispatchConfigResolution,
   type DispatchEnvironment,
   dispatchSettings,
@@ -9,6 +7,8 @@ import {
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
+  handedConfigPath,
+  type MissingConfig,
   missingConfigNotice,
   offWithError,
   readEnvoyConfig,
@@ -16,8 +16,8 @@ import {
 import { type EnvoyEnvironment, type EnvoySettings, envoySettings } from "./envoy-settings";
 import { messageFor } from "./errors";
 
-/** The envoy.json a plugin's session reads (`envoyConfigPath`), or why its location cannot be
- * worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or harness directory). */
+/** The envoy.json a session reads (`envoyConfigPath`), or why its location cannot be worked out (a
+ * relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or harness directory). */
 export type SessionConfigFile =
   | { readonly path: string; readonly error: null }
   | { readonly path: null; readonly error: string };
@@ -27,6 +27,17 @@ export type SessionConfigFile =
 export function sessionConfigFile(harness: EnvoyHarness, env: EnvoyEnvironment): SessionConfigFile {
   try {
     return { path: envoyConfigPath(harness, env), error: null };
+  } catch (error) {
+    return { path: null, error: messageFor(error) };
+  }
+}
+
+/** The file `ENVOY_CONFIG_FILE` names, the one a plugin hands its session's commands, with a
+ * relative path as `error`; null when the variable is unset or empty. */
+export function handedConfigFile(env: EnvoyEnvironment): SessionConfigFile | null {
+  try {
+    const handed = handedConfigPath(env);
+    return handed === undefined ? null : { path: handed, error: null };
   } catch (error) {
     return { path: null, error: messageFor(error) };
   }
@@ -100,40 +111,42 @@ export function sessionSettings(
   return { dispatch, envoy, notice: startNotice(config, dispatch, envoy) };
 }
 
-/** Dispatch from `file` as it reads now, for a caller that resolves Dispatch on every use rather
- * than once at its start. */
+/** Dispatch from a session's envoy.json as it reads now, and what the read says beside it. */
+export interface SessionDispatch {
+  /** Dispatch on, or off saying why (`dispatchSettings`). */
+  readonly dispatch: DispatchConfigResolution;
+  /** Each file the read found and did not read, naming its move (`ReadEnvoyConfig.warnings`). */
+  readonly warnings: readonly string[];
+  /** Set when the chosen file does not exist (`ReadEnvoyConfig.missing`). */
+  readonly missing: MissingConfig | null;
+}
+
+/** Dispatch from `file`, read now: for a command, which resolves it once, and for a plugin that
+ * resolves it on every use rather than once at its start. A file whose location could not be
+ * worked out turns Dispatch off with that error. `activeDispatchSettings` turns its `dispatch` into
+ * the configuration a caller uses, or null, or a throw. */
 export function sessionDispatchSettings(
   file: SessionConfigFile,
   env: DispatchEnvironment,
   options: { readonly cwd: string }
-): DispatchConfigResolution {
+): SessionDispatch {
+  if (file.path === null)
+    return { dispatch: offWithError(file.error), warnings: [], missing: null };
+  const config = readEnvoyConfig(file.path, env, options);
+  return {
+    dispatch: dispatchSettings(env, config),
+    warnings: config.kind === "read" ? config.warnings : [],
+    missing: config.kind === "read" ? config.missing : null,
+  };
+}
+
+/** Envoy from `file` (`envoySettings`), for a command that resolves Envoy alone. A file whose
+ * location could not be worked out turns Envoy off with that error. */
+export function sessionEnvoySettings(
+  file: SessionConfigFile,
+  env: EnvoyEnvironment,
+  options: { readonly cwd: string; readonly nats?: boolean | undefined }
+): EnvoySettings {
   if (file.path === null) return offWithError(file.error);
-  return dispatchSettings(env, readEnvoyConfig(file.path, env, options));
-}
-
-export interface DispatchConfigOptions {
-  /** Where the caller runs, which picks its envoy.json (`envoyConfigPath`). */
-  readonly harness: EnvoyHarness;
-  /** The working directory whose `.envoy/envoy.json` merges over that file; `process.cwd()` by
-   * default. */
-  readonly cwd?: string;
-}
-
-/** Dispatch for a caller running in `options.harness`: `sessionDispatchSettings` over the file
- * that harness's rule chooses (`sessionConfigFile`). */
-export function resolveDispatchConfig(
-  env: DispatchEnvironment,
-  options: DispatchConfigOptions
-): DispatchConfigResolution {
-  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
-    cwd: options.cwd ?? process.cwd(),
-  });
-}
-
-/** The active Dispatch configuration (`resolveDispatchConfig`, then `activeDispatchSettings`). */
-export function activeDispatchConfig(
-  env: DispatchEnvironment,
-  options: DispatchConfigOptions
-): ActiveDispatchConfig | null {
-  return activeDispatchSettings(resolveDispatchConfig(env, options));
+  return envoySettings(env, readEnvoyConfig(file.path, env, options), { nats: options.nats });
 }

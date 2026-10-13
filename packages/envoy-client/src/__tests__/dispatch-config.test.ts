@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { activeDispatchConfig, resolveDispatchConfig } from "../session-settings";
+import { activeDispatchSettings, type DispatchEnvironment } from "../dispatch-config";
+import type { EnvoyHarness } from "../envoy-config";
+import { sessionConfigFile, sessionDispatchSettings } from "../session-settings";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "dispatch-config-"));
@@ -20,7 +22,17 @@ function writeUserConfig(home: string, config: unknown): string {
 
 const command = { harness: "command" } as const;
 
-describe("resolveDispatchConfig", () => {
+/** Dispatch for a caller running in `harness`, from the file that harness's rule chooses. */
+function dispatchFor(
+  env: DispatchEnvironment,
+  options: { readonly harness: EnvoyHarness; readonly cwd: string }
+) {
+  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
+    cwd: options.cwd,
+  }).dispatch;
+}
+
+describe("Dispatch from a harness's envoy.json", () => {
   test("ignores DISPATCH_MCP_URL even when a file token resolves, so no host ever receives it", () => {
     const home = tempDir();
     const file = writeUserConfig(home, {
@@ -28,7 +40,7 @@ describe("resolveDispatchConfig", () => {
     });
 
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: home, DISPATCH_MCP_URL: "http://attacker.test/mcp" },
         { ...command, cwd: tempDir() }
       )
@@ -45,7 +57,7 @@ describe("resolveDispatchConfig", () => {
       dispatch: { enabled: true, serverUrl: "http://dispatch.test/", token: "file-token" },
     });
 
-    expect(resolveDispatchConfig({ HOME: home }, { ...command, cwd: tempDir() })).toEqual({
+    expect(dispatchFor({ HOME: home }, { ...command, cwd: tempDir() })).toEqual({
       enabled: true,
       url: "http://dispatch.test",
       token: "file-token",
@@ -66,12 +78,12 @@ describe("resolveDispatchConfig", () => {
     );
     const env = { HOME: home, OMP_PROFILE: "work", PI_CODING_AGENT_DIR: profile };
 
-    expect(resolveDispatchConfig(env, { harness: "omp", cwd: tempDir() })).toEqual({
+    expect(dispatchFor(env, { harness: "omp", cwd: tempDir() })).toEqual({
       enabled: true,
       url: "https://dispatch.example",
       token: "profile-token",
     });
-    expect(resolveDispatchConfig(env, { harness: "claude", cwd: tempDir() })).toEqual({
+    expect(dispatchFor(env, { harness: "claude", cwd: tempDir() })).toEqual({
       enabled: true,
       url: "https://neutral.internal.example",
       token: "neutral",
@@ -85,7 +97,7 @@ describe("resolveDispatchConfig", () => {
     });
 
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         {
           HOME: home,
           DISPATCH_URL: "http://override.test/",
@@ -103,7 +115,7 @@ describe("resolveDispatchConfig", () => {
     });
 
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: home, DISPATCH_URL: "https://other.internal.example/api" },
         { ...command, cwd: tempDir() }
       )
@@ -115,7 +127,7 @@ describe("resolveDispatchConfig", () => {
     // An origin is scheme, host and port: each differs from the file's server on its own.
     for (const url of ["http://dispatch.example", "https://dispatch.example:8443"]) {
       expect(
-        resolveDispatchConfig({ HOME: home, DISPATCH_URL: url }, { ...command, cwd: tempDir() })
+        dispatchFor({ HOME: home, DISPATCH_URL: url }, { ...command, cwd: tempDir() })
       ).toMatchObject({ enabled: false, error: expect.stringContaining(`DISPATCH_URL names`) });
     }
   });
@@ -124,7 +136,7 @@ describe("resolveDispatchConfig", () => {
     const home = tempDir();
     const file = writeUserConfig(home, { dispatch: { token: "file-token" } });
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: home, DISPATCH_URL: "https://other.internal.example" },
         { ...command, cwd: tempDir() }
       )
@@ -134,7 +146,7 @@ describe("resolveDispatchConfig", () => {
       error: `DISPATCH_URL names https://other.internal.example, but ${file}'s dispatch.token is for http://localhost:8766; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
     });
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: home, DISPATCH_URL: "http://localhost:8766/" },
         { ...command, cwd: tempDir() }
       )
@@ -148,7 +160,7 @@ describe("resolveDispatchConfig", () => {
     });
 
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: home, DISPATCH_URL: "https://dispatch.example/" },
         { ...command, cwd: tempDir() }
       )
@@ -162,7 +174,7 @@ describe("resolveDispatchConfig", () => {
     });
 
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         {
           HOME: home,
           DISPATCH_URL: "https://dispatch.example",
@@ -183,13 +195,13 @@ describe("resolveDispatchConfig", () => {
       dispatch: { enabled: true, serverUrl: "http://dispatch.test" },
     });
 
-    expect(resolveDispatchConfig({ HOME: home }, { ...command, cwd: tempDir() })).toEqual({
+    expect(dispatchFor({ HOME: home }, { ...command, cwd: tempDir() })).toEqual({
       enabled: false,
       notice: null,
       error: `${file}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE`,
     });
     writeUserConfig(home, { dispatch: { enabled: true, token: "" } });
-    expect(resolveDispatchConfig({ HOME: home }, { ...command, cwd: tempDir() })).toEqual({
+    expect(dispatchFor({ HOME: home }, { ...command, cwd: tempDir() })).toEqual({
       enabled: false,
       notice: null,
       error: `dispatch.token in ${file} must be a non-empty bearer token`,
@@ -198,7 +210,7 @@ describe("resolveDispatchConfig", () => {
     const bare = tempDir();
     const bareFile = path.join(bare, ".config", "legion", "envoy.json");
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: bare, DISPATCH_URL: "https://dispatch.example" },
         { ...command, cwd: tempDir() }
       )
@@ -212,7 +224,7 @@ describe("resolveDispatchConfig", () => {
   test("reports malformed and invalid envoy.json rather than silently opting out", () => {
     const invalidHome = tempDir();
     writeUserConfig(invalidHome, { dispatch: { enabled: true, unexpected: true } });
-    const invalid = resolveDispatchConfig({ HOME: invalidHome }, { ...command, cwd: tempDir() });
+    const invalid = dispatchFor({ HOME: invalidHome }, { ...command, cwd: tempDir() });
     expect(invalid).toMatchObject({
       enabled: false,
       error: expect.stringContaining("dispatch.unexpected"),
@@ -220,10 +232,7 @@ describe("resolveDispatchConfig", () => {
 
     const malformedHome = tempDir();
     writeUserConfig(malformedHome, "{");
-    const malformed = resolveDispatchConfig(
-      { HOME: malformedHome },
-      { ...command, cwd: tempDir() }
-    );
+    const malformed = dispatchFor({ HOME: malformedHome }, { ...command, cwd: tempDir() });
     expect(malformed).toMatchObject({
       enabled: false,
       error: expect.stringContaining("invalid JSON"),
@@ -233,7 +242,7 @@ describe("resolveDispatchConfig", () => {
   test("refuses a DISPATCH_URL that is not an http or https URL, and a DISPATCH_TOKEN that cannot be sent", () => {
     for (const url of ["not-a-url", "localhost:8766", "ftp://dispatch.test"]) {
       expect(
-        resolveDispatchConfig(
+        dispatchFor(
           { HOME: tempDir(), DISPATCH_URL: url, DISPATCH_TOKEN: "token" },
           { ...command, cwd: tempDir() }
         )
@@ -244,7 +253,7 @@ describe("resolveDispatchConfig", () => {
       });
     }
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: tempDir(), DISPATCH_URL: "http://dispatch.test", DISPATCH_TOKEN: "S3CRET\nnotes" },
         { ...command, cwd: tempDir() }
       )
@@ -268,7 +277,7 @@ describe("resolveDispatchConfig", () => {
       token: "file-token",
     } as const;
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: home, DISPATCH_URL: "", DISPATCH_TOKEN: "", DISPATCH_TOKEN_FILE: "" },
         { ...command, cwd: tempDir() }
       )
@@ -278,7 +287,7 @@ describe("resolveDispatchConfig", () => {
     mkdirSync(path.join(cwd, ".envoy"));
     const checkout = path.join(cwd, ".envoy", "envoy.json");
     writeFileSync(checkout, JSON.stringify({ dispatch: { enabled: false } }));
-    expect(resolveDispatchConfig({ HOME: home, DISPATCH_URL: "" }, { ...command, cwd })).toEqual({
+    expect(dispatchFor({ HOME: home, DISPATCH_URL: "" }, { ...command, cwd })).toEqual({
       enabled: false,
       notice: `${checkout} sets dispatch.enabled to false: Dispatch is off`,
       error: null,
@@ -294,7 +303,7 @@ describe("resolveDispatchConfig", () => {
     writeFileSync(tokenFile, "pointer-token\n");
 
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         {
           HOME: home,
           DISPATCH_URL: "http://override.test",
@@ -312,7 +321,7 @@ describe("resolveDispatchConfig", () => {
       dispatch: { enabled: true, serverUrl: "http://file.test", token: "file-token" },
     });
     const missing = path.join(tempDir(), "missing");
-    const unreadable = resolveDispatchConfig(
+    const unreadable = dispatchFor(
       { HOME: home, DISPATCH_TOKEN: "environment-token", DISPATCH_TOKEN_FILE: missing },
       { ...command, cwd: tempDir() }
     );
@@ -326,10 +335,7 @@ describe("resolveDispatchConfig", () => {
     const empty = path.join(tempDir(), "empty");
     writeFileSync(empty, "  \n");
     expect(
-      resolveDispatchConfig(
-        { HOME: home, DISPATCH_TOKEN_FILE: empty },
-        { ...command, cwd: tempDir() }
-      )
+      dispatchFor({ HOME: home, DISPATCH_TOKEN_FILE: empty }, { ...command, cwd: tempDir() })
     ).toEqual({
       enabled: false,
       notice: null,
@@ -351,7 +357,7 @@ describe("resolveDispatchConfig", () => {
       JSON.stringify({ dispatch: { enabled: true, serverUrl: "https://collector.attacker.test" } })
     );
 
-    expect(resolveDispatchConfig({ HOME: home }, { ...command, cwd })).toEqual({
+    expect(dispatchFor({ HOME: home }, { ...command, cwd })).toEqual({
       enabled: false,
       notice: null,
       error: `${checkout}: dispatch.serverUrl requires dispatch.token in the same file`,
@@ -373,10 +379,7 @@ describe("resolveDispatchConfig", () => {
     );
 
     expect(
-      resolveDispatchConfig(
-        { HOME: home, DISPATCH_TOKEN: "environment-token" },
-        { ...command, cwd }
-      )
+      dispatchFor({ HOME: home, DISPATCH_TOKEN: "environment-token" }, { ...command, cwd })
     ).toEqual({ enabled: true, url: "https://repo.internal.example", token: "repo-token" });
   });
 
@@ -394,7 +397,7 @@ describe("resolveDispatchConfig", () => {
     );
     const env = { HOME: home, DISPATCH_URL: "https://staging.internal.example" };
 
-    expect(resolveDispatchConfig(env, { ...command, cwd })).toEqual({
+    expect(dispatchFor(env, { ...command, cwd })).toEqual({
       enabled: false,
       notice: null,
       error: `DISPATCH_URL names https://staging.internal.example, but ${user}'s dispatch.token is for https://dispatch.example; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
@@ -407,7 +410,7 @@ describe("resolveDispatchConfig", () => {
         dispatch: { serverUrl: "https://staging.internal.example", token: "repo-token" },
       })
     );
-    expect(resolveDispatchConfig(env, { ...command, cwd })).toEqual({
+    expect(dispatchFor(env, { ...command, cwd })).toEqual({
       enabled: true,
       url: "https://staging.internal.example",
       token: "repo-token",
@@ -416,7 +419,7 @@ describe("resolveDispatchConfig", () => {
 
   test("a relative XDG_CONFIG_HOME refuses nothing when the harness names its own directory", () => {
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         {
           HOME: tempDir(),
           XDG_CONFIG_HOME: "relative/config",
@@ -431,7 +434,7 @@ describe("resolveDispatchConfig", () => {
 
   test("a file location that cannot be worked out is an error", () => {
     expect(
-      resolveDispatchConfig(
+      dispatchFor(
         { HOME: tempDir(), ENVOY_CONFIG_FILE: "envoy.json" },
         { ...command, cwd: tempDir() }
       )
@@ -446,19 +449,23 @@ describe("resolveDispatchConfig", () => {
 // The one "is Dispatch configured" check every host shares: a configuration that resolves is
 // returned with its URL and token, none is null, and a broken file throws rather than reading as
 // unconfigured.
-describe("activeDispatchConfig", () => {
+describe("activeDispatchSettings", () => {
   test("returns the resolved URL and token, null when nothing is configured, and throws on a broken file", () => {
     expect(
-      activeDispatchConfig(
-        { HOME: tempDir(), DISPATCH_URL: "http://dispatch.test/", DISPATCH_TOKEN: "env-token" },
-        { ...command, cwd: tempDir() }
+      activeDispatchSettings(
+        dispatchFor(
+          { HOME: tempDir(), DISPATCH_URL: "http://dispatch.test/", DISPATCH_TOKEN: "env-token" },
+          { ...command, cwd: tempDir() }
+        )
       )
     ).toEqual({ enabled: true, url: "http://dispatch.test", token: "env-token" });
-    expect(activeDispatchConfig({ HOME: tempDir() }, { ...command, cwd: tempDir() })).toBeNull();
+    expect(
+      activeDispatchSettings(dispatchFor({ HOME: tempDir() }, { ...command, cwd: tempDir() }))
+    ).toBeNull();
     const home = tempDir();
     writeUserConfig(home, "{not json");
-    expect(() => activeDispatchConfig({ HOME: home }, { ...command, cwd: tempDir() })).toThrow(
-      /^dispatch config: /
-    );
+    expect(() =>
+      activeDispatchSettings(dispatchFor({ HOME: home }, { ...command, cwd: tempDir() }))
+    ).toThrow(/^dispatch config: /);
   });
 });

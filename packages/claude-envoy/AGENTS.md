@@ -82,7 +82,7 @@ an Envoy input to decide Claude Code permissions. Dispatch asks stay on Dispatch
   registration, then reassert it on each registration heartbeat. The handoff directory
   `sessions/<claude-pid>/` is pruned at startup when its pid is gone — never deleted on shutdown,
   because Claude Code restarts the server inside the same `claude` process.
-- Shared logic remains shared: use `resolveDispatchConfig`, `formatOpenAsksSummary`,
+- Shared logic remains shared: use `sessionDispatchSettings`, `formatOpenAsksSummary`,
   `postDeliveryReply`, `mergeInterestSources`, and `sendConfirmationText`. No Dispatch call goes
   through the MCP server; the `dispatch` command runs the shared executor, and a `dispatch_*` tool
   name is an unknown tool here. Rejected targeted frames answer Dispatch with

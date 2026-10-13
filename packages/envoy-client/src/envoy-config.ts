@@ -99,6 +99,13 @@ function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): s
   return undefined;
 }
 
+/** The file `ENVOY_CONFIG_FILE` names, the one a plugin hands the commands its session runs, or
+ * undefined when it is unset or empty. Throws when it is relative. */
+export function handedConfigPath(env: EnvoyConfigEnvironment): string | undefined {
+  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
+  return handed === undefined ? undefined : path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+}
+
 /**
  * The envoy.json a caller reads. A plugin reads its own harness's directory (omp: a named
  * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`; OpenCode:
@@ -109,13 +116,12 @@ function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): s
  * harness directory, or `XDG_CONFIG_HOME` for the neutral file.
  */
 export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string {
-  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
-  if (harness === "command" && handed !== undefined) {
-    return path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
-  }
+  const handedFirst = harness === "command" ? handedConfigPath(env) : undefined;
+  if (handedFirst !== undefined) return handedFirst;
   const directory = harnessDirectory(harness, env);
   if (directory !== undefined) return path.resolve(directory, "envoy.json");
-  if (handed !== undefined) return path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+  const handed = handedConfigPath(env);
+  if (handed !== undefined) return handed;
   const neutral = neutralConfig(env);
   if ("error" in neutral) throw new Error(neutral.error);
   return neutral.path;
@@ -212,21 +218,11 @@ export type ReadEnvoyConfig = Extract<EnvoyConfig, { readonly kind: "read" }>;
 /** A section that is off: a `notice` says why when nothing is wrong (a file turns it off, or
  * nothing names it), an `error` names what could not be read or used. */
 export type SectionOff =
-  | {
-      readonly enabled: false;
-      readonly notice: string;
-      readonly error: null;
-      readonly oldUserFileNotRead?: true;
-    }
+  | { readonly enabled: false; readonly notice: string; readonly error: null }
   | { readonly enabled: false; readonly notice: null; readonly error: string };
 
-export function offWithNotice(notice: string, oldUserFileNotRead = false): SectionOff {
-  return {
-    enabled: false,
-    notice,
-    error: null,
-    ...(oldUserFileNotRead ? { oldUserFileNotRead: true as const } : {}),
-  };
+export function offWithNotice(notice: string): SectionOff {
+  return { enabled: false, notice, error: null };
 }
 
 export function offWithError(error: string): SectionOff {

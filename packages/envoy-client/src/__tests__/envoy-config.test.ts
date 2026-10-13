@@ -250,7 +250,6 @@ describe("readEnvoyConfig", () => {
       enabled: false,
       notice: `no envoy.json at ${neutral}: Dispatch is off; ${notice}`,
       error: null,
-      oldUserFileNotRead: true,
     });
     expect(envoySettings({ HOME: home }, config)).toMatchObject({ enabled: false, error: null });
     // XDG_CONFIG_HOME set to $HOME/.config is the same file, and says the same.

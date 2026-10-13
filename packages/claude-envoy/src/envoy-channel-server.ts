@@ -13,8 +13,8 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
-  resolveDispatchConfig,
   sessionConfigFile,
+  sessionDispatchSettings,
   sessionSettings,
 } from "@legion/envoy-client/session-settings"
 import {
@@ -188,9 +188,10 @@ function projectDirectory(): string {
   )
 }
 
-function currentDispatchConfig(directory = projectDirectory()) {
-  return resolveDispatchConfig(process.env, { harness: "claude", cwd: directory })
-}
+// The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
+// set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
+// use, so a file that moved its server takes effect without a restart.
+const CONFIG_FILE = sessionConfigFile("claude", process.env)
 
 export function channelToolDefinitions() {
   return envoyToolSpecs.map((spec) => ({
@@ -228,7 +229,9 @@ async function postDispatchReply(
   delivery: DispatchDelivery,
   result: { readonly error: string },
 ): Promise<void> {
-  const config = currentDispatchConfig(identity.directory)
+  const config = sessionDispatchSettings(CONFIG_FILE, process.env, {
+    cwd: identity.directory,
+  }).dispatch
   if (!config.enabled) throw new Error(config.error ?? config.notice)
   await postDeliveryReply(config, identity.id, delivery, result)
 }
@@ -870,12 +873,11 @@ async function serveEnvoyOff(refusal: string): Promise<void> {
   }
 }
 
-/** Start the stdio MCP server Claude Code invokes for this plugin, on the envoy.json Claude Code's
- * rule picks (`$CLAUDE_CONFIG_DIR/envoy.json` when that is set). */
+/** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json
+ * (`CONFIG_FILE`). */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
-  const configFile = sessionConfigFile("claude", process.env)
-  const { envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
+  const { envoy, notice } = sessionSettings(CONFIG_FILE, process.env, { cwd: directory })
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
   if (!envoy.enabled) {

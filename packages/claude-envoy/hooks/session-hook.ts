@@ -33,19 +33,14 @@
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import {
-  type DispatchConfigResolution,
-  dispatchSettings,
-} from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
-import { offWithError, readEnvoyConfig } from "@legion/envoy-client/envoy-config"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
-import { resolveDispatchConfig, sessionConfigFile } from "@legion/envoy-client/session-settings"
+import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -97,34 +92,29 @@ async function openAsks(raw: unknown): Promise<void> {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  let config: DispatchConfigResolution
-  if (chosen.path === null) {
-    config = offWithError(chosen.error)
-  } else {
-    const envoyConfig = readEnvoyConfig(chosen.path, process.env, { cwd: directory })
-    if (envoyConfig.kind === "read") {
-      for (const warning of envoyConfig.warnings) process.stdout.write(`envoy: ${warning}\n`)
-    }
-    config = dispatchSettings(process.env, envoyConfig)
-  }
-  if (config.enabled) {
+  const { dispatch, warnings, missing } = sessionDispatchSettings(chosen, process.env, {
+    cwd: directory,
+  })
+  for (const warning of warnings) process.stdout.write(`envoy: ${warning}\n`)
+  if (dispatch.enabled) {
     try {
       const snapshot = await new DispatchClient(
-        config.url,
-        config.token,
+        dispatch.url,
+        dispatch.token,
         fetch,
         AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
       ).openAsks(input.session_id)
       process.stdout.write(
-        `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, config.url)}\n`,
+        `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, dispatch.url)}\n`,
       )
     } catch (error) {
       process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error)}\n`)
     }
-  } else if (config.error !== null) {
-    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config.error}\n`)
-  } else if (config.oldUserFileNotRead && config.notice !== null) {
-    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config.notice}\n`)
+  } else if (dispatch.error !== null) {
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.error}\n`)
+  } else if (missing?.oldUserFileNotice !== undefined) {
+    // The OpenCode-era file this machine still holds is why Dispatch is off: say so and what to do.
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.notice}\n`)
   }
 }
 
@@ -134,7 +124,8 @@ function dispatchFirst(raw: unknown): void {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  if (!resolveDispatchConfig(process.env, { harness: "claude", cwd: directory }).enabled) return
+  const chosen = sessionConfigFile("claude", process.env)
+  if (!sessionDispatchSettings(chosen, process.env, { cwd: directory }).dispatch.enabled) return
   const pluginRoot = configuredValue(process.env["CLAUDE_PLUGIN_ROOT"])
   if (pluginRoot === undefined) {
     throw new Error("CLAUDE_PLUGIN_ROOT is unset; Claude Code sets it for every plugin hook")

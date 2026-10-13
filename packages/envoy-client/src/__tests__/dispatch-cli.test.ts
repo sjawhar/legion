@@ -726,6 +726,16 @@ describe("the dispatch CLI's envoy.json", () => {
       PI_CODING_AGENT_DIR: brokenConfigDirectory(),
     });
     expect(claudeRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    // An empty ENVOY_CONFIG_FILE is no hand-off: the host's own rule, not an inherited profile's.
+    const emptyHanded = await run(["projects"], {
+      ...fromFile,
+      ...claude,
+      CLAUDE_CONFIG_DIR: claudeDirectory,
+      ENVOY_CONFIG_FILE: "",
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+    });
+    expect(emptyHanded.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
     const own = join(stateDir, "opencode");
     serverConfig(own);

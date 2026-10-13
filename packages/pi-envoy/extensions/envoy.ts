@@ -145,7 +145,7 @@ const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
  */
 function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
   const config = activeDispatchSettings(
-    sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() })
+    sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() }).dispatch
   );
   return config === null
     ? undefined
@@ -423,7 +423,9 @@ export default function envoyExtension(pi: PiApi): void {
   const atStart = sessionSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
   const { envoy } = atStart;
   const currentDispatchConfig = (): ActiveDispatchConfig => {
-    const resolution = sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
+    const resolution = sessionDispatchSettings(CONFIG_FILE, process.env, {
+      cwd: process.cwd(),
+    }).dispatch;
     const config = activeDispatchSettings(resolution);
     if (config === null) {
       throw new Error(

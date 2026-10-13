@@ -5,9 +5,10 @@
 ### Changed
 
 - **Breaking:** Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
-  `resolveDispatchConfig` and `activeDispatchConfig` move from `dispatch-config` to
-  `session-settings`, take `{ harness, cwd }`, and read the file `envoyConfigPath(harness, env)`
-  names, with the `dispatch` section of the checkout's `.envoy/envoy.json` merged over it. A missing
+  `resolveDispatchConfig`, `activeDispatchConfig` and `DispatchConfigOptions` are gone. A caller
+  reads Dispatch with `sessionDispatchSettings(file, env, { cwd })` over the file
+  `sessionConfigFile(harness, env)` names (`envoyConfigPath`), with the `dispatch` section of the
+  checkout's `.envoy/envoy.json` merged over it, and `activeDispatchSettings` over its result. A missing
   file contributes nothing, so the variables still configure each section. A checkout's file
   configures Dispatch alone: an `envoy` section there is not read, and the start notice says
   `<checkout>: envoy is not read from a checkout's envoy.json; put it in <chosen file>`; a checkout's
@@ -80,9 +81,17 @@
   `natsSeed` goes only with the file's `natsUrls` (`ENVOY_NATS_URL` naming other servers needs
   `NATS_NKEY_SEED_FILE`). `nats: false`, for a caller that opens no NATS connection, resolves no
   NATS servers and no seed.
-- `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
-  `activeDispatchConfig` for a caller that has already read its envoy.json.
-- `session-settings`: `sessionConfigFile(harness, env)`, the file a plugin's harness rule chooses with the rule's refusal of a relative path as an `error` instead of a throw; `sessionSettings(file, env, { cwd, nats })`, both sections and the one start notice a plugin shows; `sessionDispatchSettings`, Dispatch re-read from that same file on each use; and `resolveDispatchConfig` and `activeDispatchConfig`.
+- `dispatchSettings(env, config)`, Dispatch from an envoy.json already read, and
+  `activeDispatchSettings(resolution)`, the one adapter that turns a resolution into the
+  configuration a caller uses, null when nothing configures Dispatch, or a `dispatch config:
+  <reason>` throw.
+- `session-settings`: `sessionConfigFile(harness, env)`, the file a harness rule chooses, and
+  `handedConfigFile(env)`, the file `ENVOY_CONFIG_FILE` names, each with a relative path's refusal
+  as an `error` instead of a throw; `sessionSettings(file, env, { cwd, nats })`, both sections and
+  the one start notice a plugin shows; `sessionDispatchSettings(file, env, { cwd })`, Dispatch read
+  now with the read's `warnings` and missing-file record, which every command and plugin resolves
+  Dispatch through; and `sessionEnvoySettings(file, env, { cwd, nats })`, Envoy alone, for a
+  command.
 - `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line
   each in document order, indented under the block holding it: id, type, token, anchored comments
   and asks, and opening words sliced from the live markdown by the block's byte range. Under a
@@ -202,9 +211,9 @@
 - `setRole` takes `soft` and `previousSessionID` and returns `{ claimed: true, interest }` or `{ claimed: false, holder }`, so a caller can recover a role without displacing a live holder.
 - `resolveIssueDocumentId` resolves an issue's document reference (`spec`, or its id, slug or
   filename) to the document's id as the Dispatch tools resolve an issue's `artifact` argument.
-- `activeDispatchConfig` is the one "is Dispatch configured" check every host shares: the resolved
-  URL and token, null when none is configured, and a `dispatch config: <reason>` throw on a broken
-  configuration.
+- `activeDispatchSettings` is the one "is Dispatch configured" check every host shares: the
+  resolved URL and token, null when none is configured, and a `dispatch config: <reason>` throw on
+  a broken configuration.
 - `DispatchClient.acceptMessageDelivery(id, attempt, {actor})` calls
   `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` and returns the accepted attempt with
   the message's stored `body` (`AcceptedMessageDelivery`); a refusal throws a

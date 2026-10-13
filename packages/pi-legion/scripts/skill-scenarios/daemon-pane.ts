@@ -8,8 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LegionRole } from "@legion/contracts";
-import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
-import { DEFAULT_ENVOY_URL, envoySettings } from "@legion/envoy-client/envoy-settings";
+import { DEFAULT_ENVOY_URL } from "@legion/envoy-client/envoy-settings";
+import { sessionConfigFile, sessionEnvoySettings } from "@legion/envoy-client/session-settings";
 
 /** This checkout's daemon module, the one the rig reads unless a run names another checkout's. */
 export const DAEMON_MODULE = path.resolve(import.meta.dir, "../../../daemon");
@@ -132,10 +132,9 @@ export function workerPane(
     OMP_PROFILE: launch.profile,
     PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
   };
-  const envoy = envoySettings(
-    profileEnv,
-    readEnvoyConfig(envoyConfigPath("omp", profileEnv), profileEnv, { cwd: workspace })
-  );
+  const envoy = sessionEnvoySettings(sessionConfigFile("omp", profileEnv), profileEnv, {
+    cwd: workspace,
+  });
   if (!envoy.enabled && envoy.error !== null) throw new Error(`envoy: ${envoy.error}`);
   const request: PaneRequest = {
     ...claim,

@@ -2,7 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { sessionConfigFile, sessionDispatchSettings, sessionSettings } from "../session-settings";
+import {
+  handedConfigFile,
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionEnvoySettings,
+  sessionSettings,
+} from "../session-settings";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "session-settings-"));
@@ -196,12 +202,12 @@ describe("sessionDispatchSettings", () => {
   test("reads the chosen file again on every call", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: dispatchOn });
     const chosen = { path: file, error: null } as const;
-    expect(sessionDispatchSettings(chosen, {}, { cwd: tempDir() })).toMatchObject({
+    expect(sessionDispatchSettings(chosen, {}, { cwd: tempDir() }).dispatch).toMatchObject({
       enabled: true,
       url: "https://dispatch.example",
     });
     writeFile(file, { dispatch: { ...dispatchOn, serverUrl: "https://moved.dispatch.example" } });
-    expect(sessionDispatchSettings(chosen, {}, { cwd: tempDir() })).toMatchObject({
+    expect(sessionDispatchSettings(chosen, {}, { cwd: tempDir() }).dispatch).toMatchObject({
       enabled: true,
       url: "https://moved.dispatch.example",
     });
@@ -209,8 +215,70 @@ describe("sessionDispatchSettings", () => {
 
   test("a location that cannot be worked out is an error", () => {
     expect(sessionDispatchSettings({ path: null, error: "no location" }, {}, { cwd: "/" })).toEqual(
-      { enabled: false, notice: null, error: "no location" }
+      {
+        dispatch: { enabled: false, notice: null, error: "no location" },
+        warnings: [],
+        missing: null,
+      }
     );
+  });
+
+  test("returns what the read found beside Dispatch: the files it did not read, and a missing file", () => {
+    const cwd = tempDir();
+    const old = writeFile(path.join(cwd, ".opencode", "envoy.json"), { dispatch: dispatchOn });
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: dispatchOn });
+    expect(sessionDispatchSettings({ path: file, error: null }, {}, { cwd })).toEqual({
+      dispatch: { enabled: true, url: "https://dispatch.example", token: "file-token" },
+      warnings: [
+        `${old} is not read: mkdir -p ${path.join(cwd, ".envoy")} && mv ${old} ${path.join(cwd, ".envoy", "envoy.json")}`,
+      ],
+      missing: null,
+    });
+    const absent = path.join(tempDir(), "envoy.json");
+    expect(
+      sessionDispatchSettings(
+        { path: absent, error: null },
+        { HOME: tempDir() },
+        { cwd: tempDir() }
+      )
+    ).toEqual({
+      dispatch: {
+        enabled: false,
+        notice: `no envoy.json at ${absent}: Dispatch is off`,
+        error: null,
+      },
+      warnings: [],
+      missing: { link: null },
+    });
+  });
+});
+
+describe("handedConfigFile", () => {
+  test("names the file ENVOY_CONFIG_FILE names, refuses a relative one, and is null when it is unset or empty", () => {
+    expect(handedConfigFile({ ENVOY_CONFIG_FILE: "/handed/envoy.json" })).toEqual({
+      path: "/handed/envoy.json",
+      error: null,
+    });
+    expect(handedConfigFile({ ENVOY_CONFIG_FILE: "envoy.json" })).toEqual({
+      path: null,
+      error: "ENVOY_CONFIG_FILE is envoy.json, which is not an absolute path",
+    });
+    expect(handedConfigFile({})).toBeNull();
+    expect(handedConfigFile({ ENVOY_CONFIG_FILE: "" })).toBeNull();
+  });
+});
+
+describe("sessionEnvoySettings", () => {
+  test("is Envoy from the file, and a location that cannot be worked out is an error", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
+    expect(
+      sessionEnvoySettings({ path: file, error: null }, {}, { cwd: tempDir(), nats: false })
+    ).toMatchObject({ enabled: true, url: envoyOn.url, natsUrls: [] });
+    expect(sessionEnvoySettings({ path: null, error: "no location" }, {}, { cwd: "/" })).toEqual({
+      enabled: false,
+      notice: null,
+      error: "no location",
+    });
   });
 });
 
@@ -234,7 +302,6 @@ describe("the OpenCode-era file", () => {
       enabled: false,
       notice: `no envoy.json at ${neutral}: Dispatch is off; ${move}`,
       error: null,
-      oldUserFileNotRead: true,
     });
     expect(settings.envoy).toMatchObject({ enabled: false, error: null });
     expect(settings.notice).toBe(
@@ -324,7 +391,6 @@ describe("old user file notices", () => {
         enabled: false,
         notice: `no envoy.json at ${chosen.path}: Dispatch is off; ${old} is not read for this profile; copy or link it to ${chosen.path}, or write that file`,
         error: null,
-        oldUserFileNotRead: true,
       });
       expect(settings.envoy).toEqual({
         enabled: false,

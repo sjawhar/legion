@@ -1,9 +1,5 @@
 import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
-import {
-  type ActiveDispatchConfig,
-  type DispatchConfigResolution,
-  dispatchSettings,
-} from "./dispatch-config";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { executeDispatchTool } from "./dispatch-execute";
 import {
@@ -18,8 +14,8 @@ import {
   writePicture,
 } from "./dispatch-session-state";
 import { dispatchFollowNotice } from "./dispatch-subscribe";
-import { type EnvoyHarness, envoyConfigPath, readEnvoyConfig } from "./envoy-config";
 import { messageFor } from "./errors";
+import { handedConfigFile, sessionConfigFile, sessionDispatchSettings } from "./session-settings";
 import { ToolInputError } from "./tool-input-errors";
 
 export interface DispatchCliIo {
@@ -177,21 +173,18 @@ export async function runDispatchCli(
     return OK;
   }
 
-  // `command` reads ENVOY_CONFIG_FILE first: the file the session's plugin handed its shell.
-  const harness: EnvoyHarness =
-    env.DISPATCH_HOST !== undefined && env.ENVOY_CONFIG_FILE !== undefined ? "command" : host;
-  let resolution: DispatchConfigResolution;
-  try {
-    const envoyConfig = readEnvoyConfig(envoyConfigPath(harness, env), env, { cwd: io.cwd });
-    // A checkout's OpenCode-era file, which is not read, is said on every call while it is there.
-    if (envoyConfig.kind === "read") {
-      for (const warning of envoyConfig.warnings) print(`dispatch: ${warning}`);
-    }
-    resolution = dispatchSettings(env, envoyConfig);
-  } catch (error) {
-    print(`dispatch: ${messageFor(error)}`);
+  // The file the session's plugin handed its shell (each plugin sets DISPATCH_HOST and
+  // ENVOY_CONFIG_FILE together), else the host's own rule.
+  const file =
+    (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ??
+    sessionConfigFile(host, env);
+  if (file.path === null) {
+    print(`dispatch: ${file.error}`);
     return USAGE;
   }
+  const { dispatch: resolution, warnings } = sessionDispatchSettings(file, env, { cwd: io.cwd });
+  // A checkout's OpenCode-era file, which is not read, is said on every call while it is there.
+  for (const warning of warnings) print(`dispatch: ${warning}`);
   if (!resolution.enabled) {
     print(
       resolution.error === null

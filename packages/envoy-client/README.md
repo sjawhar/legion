@@ -156,19 +156,24 @@ NATS_NKEY_SEED_FILE for them`. A credential from the variables goes with whateve
 resolves. `natsAuthOptions` takes the resolved seed and names its source when it is not a user
 seed; `natsSeedFromEnvironment` resolves one from the two variables alone.
 
-A plugin resolves its session through `session-settings.ts`. `sessionConfigFile(harness, env)` is
-the file `envoyConfigPath` chooses, with the rule's refusal of a relative path as `error` instead of
-a throw, so a plugin that cannot work out its file still loads, with both sections off.
-`sessionSettings(file, env, { cwd, nats })` reads it once and returns both sections
-(`dispatchSettings`, `envoySettings`) and the one notice the session shows at its start: the
-file's error (`<error>: Dispatch and Envoy are off`), the missing file's notice, the missing-file
-text for a section still off when a variable turned the other on, or a section's own error
-(`Dispatch is off: <error>`, `Envoy is off: <error>`), then what a checkout's files hold that the
-session does not read (its `envoy` section, the file's own error while `DISPATCH_URL` replaces it,
-or its `.opencode/envoy.json`); a file that turns a section off, or holds no section for it, says
-nothing. `sessionDispatchSettings(file, env, { cwd })` re-reads Dispatch from the same file on each
-use, for a plugin whose Dispatch calls follow a file that changes. `resolveDispatchConfig(env, {
-harness, cwd })` and `activeDispatchConfig` resolve Dispatch for a caller from its harness's file.
+Every caller resolves through `session-settings.ts`. `sessionConfigFile(harness, env)` is the file
+`envoyConfigPath` chooses, with the rule's refusal of a relative path as `error` instead of a
+throw, so a plugin that cannot work out its file still loads, with both sections off;
+`handedConfigFile(env)` is the file `ENVOY_CONFIG_FILE` names, the one a plugin hands its
+session's commands, or null when that is unset or empty. `sessionSettings(file, env, { cwd, nats
+})` reads it once and returns both sections (`dispatchSettings`, `envoySettings`) and the one
+notice the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`),
+the missing file's notice, the missing-file text for a section still off when a variable turned
+the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`), then
+what a checkout's files hold that the session does not read (its `envoy` section, the file's own
+error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`); a file that turns a section
+off, or holds no section for it, says nothing. `sessionDispatchSettings(file, env, { cwd })` reads
+Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution beside the files the
+read found and did not read and the missing-file record, for a command, which says the `warnings`
+itself, and for a plugin whose Dispatch calls follow a file that changes. `activeDispatchSettings`
+turns its `dispatch` into the configuration a caller uses, null when nothing configures Dispatch,
+or a `dispatch config: <reason>` throw. `sessionEnvoySettings(file, env, { cwd, nats })` reads
+Envoy alone, for a command such as `envoy-send`.
 
 ## Dispatch
 
@@ -214,9 +219,9 @@ pointer when replying to that ask; a status-setting issue update does not trigge
 pointer. Triage advice is shown once per issue for the lifetime of the executor process; absent
 `advice` leaves the prior result text and details unchanged.
 
-`resolveDispatchConfig(env, { harness, cwd })` (`session-settings.ts`) reads Dispatch from the
-envoy.json that harness reads (`dispatchSettings(env, config)` over one already read) and enables it
-only when both its URL and bearer token resolve. `DISPATCH_URL` overrides `dispatch.serverUrl`,
+`dispatchSettings(env, config)` (`dispatch-config.ts`), which `sessionDispatchSettings` runs over
+the envoy.json a caller reads, enables Dispatch only when both its URL and bearer token resolve.
+`DISPATCH_URL` overrides `dispatch.serverUrl`,
 which counts only with `dispatch.enabled: true` and defaults to `http://localhost:8766`, the Go
 server's listen address; an empty `DISPATCH_*` variable counts as unset. The token resolves from
 `DISPATCH_TOKEN_FILE` (a path; the trimmed file contents are the token — how the Legion daemon hands
