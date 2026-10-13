@@ -335,9 +335,13 @@ func (s *server) readRegisterBody(w http.ResponseWriter, r *http.Request, into *
 // it, and Machine.persist clears the hash the moment it does, so a caller that can still
 // authenticate here is necessarily in that window — after the daemon has found it stale (at
 // boot, or at the registration that recorded the mismatch) and before its relaunch has taken
-// effect. A daemon that can relaunch nothing (PluginRelaunchable false, LEGION-164's degraded
-// Kubernetes mode) never starts that relaunch, so a stale claim there is left running and
-// answered as any other: refusing it would stall agents that work today.
+// effect. A relaunch the launch path refuses (a tree cleanup reserved, a store error) leaves the
+// claim live and stale in that window longer, and the orphan sweep re-posts its relaunch every
+// interval until one starts (refreshStalePlugins in internal/daemon), so the sentence this
+// refusal carries stays true for as long as the caller can authenticate. A daemon that can
+// relaunch nothing (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) never
+// starts that relaunch, so a stale claim there is left running and answered as any other:
+// refusing it would stall agents that work today.
 func (s *server) staleClaim(c supervise.Claim) (int, bool) {
 	return c.PluginContract, s.pluginRelaunchable && c.PluginContract != DaemonAPIVersion
 }
