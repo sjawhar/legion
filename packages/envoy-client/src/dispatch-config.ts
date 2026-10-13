@@ -31,10 +31,10 @@ function parsedDispatchUrl(
 }
 
 type DispatchEnvironment = {
-  readonly DISPATCH_URL?: string;
-  readonly DISPATCH_TOKEN?: string;
-  readonly DISPATCH_TOKEN_FILE?: string;
-  readonly HOME?: string;
+  readonly DISPATCH_URL?: string | undefined;
+  readonly DISPATCH_TOKEN?: string | undefined;
+  readonly DISPATCH_TOKEN_FILE?: string | undefined;
+  readonly HOME?: string | undefined;
 } & Record<string, string | undefined>;
 
 export interface DispatchConfigResolution {

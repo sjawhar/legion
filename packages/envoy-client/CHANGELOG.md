@@ -56,6 +56,7 @@
   servers needs `NATS_NKEY_SEED_FILE`; a checkout's servers need the checkout's own seed).
 - `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
   `activeDispatchConfig` for a caller that has already read its envoy.json.
+- `session-settings`: `sessionConfigFile(harness, env)`, the file a plugin's harness rule chooses with a relative `XDG_CONFIG_HOME` as an `error` instead of a throw; `sessionSettings(file, env, { cwd })`, both sections and the one start notice a plugin shows; and `sessionDispatchSettings`, Dispatch re-read from that same file on each use.
 - `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line
   each in document order, indented under the block holding it: id, type, token, anchored comments
   and asks, and opening words sliced from the live markdown by the block's byte range. Under a
