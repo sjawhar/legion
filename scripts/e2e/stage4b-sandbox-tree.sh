@@ -78,8 +78,9 @@
 # - LEGION_E2E_POD_FILE, in a development run stopped at `deployment-pod-block` only, names a JSON
 #   file holding a deployment's own worker pod block (`runtime.kubernetes.pod`: service_account,
 #   env, volumes, volume_mounts), which the run's legion.yaml carries in place of the operator
-#   route's, so that block boots before it ships. Nothing in it is rewritten, so every object it
-#   names (its ServiceAccount, Secrets, ConfigMaps) must exist in the namespace.
+#   route's, so that block boots before it ships. The run copies it once at prerequisites and reads
+#   only the copy, whose sha256 it notes. Nothing in it is rewritten, so every object it names (its
+#   ServiceAccount, Secrets, ConfigMaps) must exist in the namespace.
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only
@@ -132,6 +133,9 @@ until=${STAGE4B_UNTIL:-}
 skip_controller=${STAGE4B_SKIP_CONTROLLER:-}
 design_gate=${STAGE4B_DESIGN_GATE:-}
 pod_file=${LEGION_E2E_POD_FILE:-}
+# The run's own copy of that block, taken once at prerequisites (`jq -cS .` of the file), which
+# every later step reads, so a pass ties to the block whose sha256 the run records.
+pod_block=$work/pod-block.json
 # The Dispatch project key (the workflow's). Overridable so two runs can proceed at once (see
 # Inputs, above); defaults to today's single fixed value. run_label, the pods'/claims' token and
 # the namespace's legion.dev/project label, is the daemon's own ProjectToken(project) — project
@@ -1127,7 +1131,7 @@ EOF
     # A deployment's own worker pod block, as its configuration renders it, given whole: its
     # ServiceAccount, tokens, ConfigMaps and environment are what is under test, so nothing in it
     # is rewritten. JSON is YAML, so one compact line is the `pod:` value.
-    printf '      %s\n' "$(jq -c . "$pod_file")" >>"$work/legion.yaml"
+    printf '      %s\n' "$(cat "$pod_block")" >>"$work/legion.yaml"
   else
     # The operator route's pod, its token audience the operator's and its ConfigMap reference pointed
     # at the run's own copy.
@@ -2539,7 +2543,8 @@ if [ -n "$pod_file" ]; then
   [ "$until" = deployment-pod-block ] || fail "LEGION_E2E_POD_FILE is for a development run stopped at it: set STAGE4B_UNTIL=deployment-pod-block"
   jq -e 'type == "object" and ((.volumes // []) | type == "array") and ((.volume_mounts // []) | type == "array") and ((.env // {}) | type == "object")' "$pod_file" >/dev/null 2>&1 ||
     fail "LEGION_E2E_POD_FILE=$pod_file is not a JSON object with volumes, volume_mounts and env in runtime.kubernetes.pod's shape"
-  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block (service account $(jq -r '.service_account // "the namespace default"' "$pod_file"), $(jq '.volumes // [] | length' "$pod_file") volumes)"
+  jq -cS . "$pod_file" >"$pod_block" || fail "could not copy LEGION_E2E_POD_FILE=$pod_file into the run"
+  note "LEGION_E2E_POD_FILE=$pod_file: the run's pods carry that block, copied into the run as $pod_block (sha256 $(sha256sum "$pod_block" | cut -d' ' -f1); service account $(jq -r '.service_account // "the namespace default"' "$pod_block"), $(jq '.volumes // [] | length' "$pod_block") volumes)"
 fi
 read_bearers
 pass
@@ -2765,22 +2770,22 @@ else
   op get pod "$block_pod" -o json >"$evidence/pods/deployment-block-$block_pod.json"
   # Each process of the architect container and the block's env names it holds, values included: the
   # file stays in the run's work directory, removed at exit, and the verdict prints names alone.
-  block_env_names=$(jq -r '.env // {} | keys | join("|")' "$pod_file")
+  block_env_names=$(jq -r '.env // {} | keys | join("|")' "$pod_block")
   # shellcheck disable=SC2016 # the script runs in the pod, which expands its own variables
   pod_exec "$block_pod" architect env NAMES="$block_env_names" sh -c \
     'for d in /proc/[0-9]*; do [ -r "$d/environ" ] || continue; printf "#%s %s\n" "${d#/proc/}" "$(cat "$d/comm" 2>/dev/null)"; [ -z "$NAMES" ] || tr "\0" "\n" <"$d/environ" 2>/dev/null | grep -E "^($NAMES)=" || true; done' \
     >"$work/block-processes.txt" || fail "could not list the processes of pod $block_pod's architect container"
-  jq -c --slurpfile block "$pod_file" --rawfile processes "$work/block-processes.txt" \
+  jq -c --slurpfile block "$pod_block" --rawfile processes "$work/block-processes.txt" \
     -f "$root/scripts/e2e/lib/deployment-pod-block-verdict.jq" "$evidence/pods/deployment-block-$block_pod.json" \
     >"$evidence/deployment-pod-block.json" || fail "the deployment-pod-block verdict did not run"
   note "pod $block_pod: $(cat "$evidence/deployment-pod-block.json")"
   jq -e '(.missing | length) == 0 and (.wrong | length) == 0' "$evidence/deployment-pod-block.json" >/dev/null ||
     fail "pod $block_pod does not carry the block: missing $(jq -c .missing "$evidence/deployment-pod-block.json"), wrong $(jq -c .wrong "$evidence/deployment-pod-block.json")"
-  block_kubeconfig=$(jq -r '.env.KUBECONFIG // empty' "$pod_file")
+  block_kubeconfig=$(jq -r '.env.KUBECONFIG // empty' "$pod_block")
   if [ -z "$block_kubeconfig" ]; then
     note "the block sets no KUBECONFIG, so the pod's kubectl is not asked"
   else
-    want="system:serviceaccount:$namespace:$(jq -r '.service_account // "default"' "$pod_file")"
+    want="system:serviceaccount:$namespace:$(jq -r '.service_account // "default"' "$pod_block")"
     whoami=$(pod_exec "$block_pod" architect env KUBECONFIG="$block_kubeconfig" kubectl auth whoami -o jsonpath='{.status.userInfo.username}') ||
       fail "kubectl auth whoami, on the block's KUBECONFIG, failed in pod $block_pod"
     note "in pod $block_pod (architect), kubectl auth whoami on the block's KUBECONFIG: $whoami"

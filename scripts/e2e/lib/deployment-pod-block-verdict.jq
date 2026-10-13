@@ -12,14 +12,16 @@
 # Output: {process, missing, wrong}:
 #   process    {pid, comm} of the process holding the most of the block's env names (the lowest pid
 #              on a tie), or null when no process holds one;
-#   missing    what the block names and the pod lacks: its ServiceAccount, a volume, a projected
-#              source, a mount in a role container, an env name on that process;
-#   wrong      what the pod carries differently: a volume's kind or object, a projected token's
-#              audience, expiry or path, a mount's sub_path or read_only, an env value. A value is
-#              never printed, only its name, so a verdict never carries an env value.
+#   missing    what the block names and the pod lacks: a volume, a projected source, a mount in a
+#              role container, an env name on that process;
+#   wrong      what the pod carries differently: its ServiceAccount, a volume's kind or object, a
+#              projected token's audience, expiry or path, a mount's sub_path or read_only, an env
+#              value. A value is never printed, only its name, so a verdict never carries an env value.
 # Every container of the pod but its init containers is a role container, and each must carry every
 # mount. A projected token with no expiration_seconds expires in 3600 s (the API server's default),
-# and a mount with no read_only is read-only (Legion's loader).
+# and a mount with no read_only is read-only (Legion's loader). A Secret or ConfigMap volume is
+# compared by its kind and object name, not its `items`; a token is checked as carried, never as
+# accepted by the service it is for.
 ($block[0]) as $b
 | . as $pod
 | ($pod.spec.volumes // [] | map({key: .name, value: .}) | from_entries) as $volumes
