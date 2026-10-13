@@ -238,6 +238,20 @@ describe("envoySettings", () => {
 describe("the NATS seed in envoy.json", () => {
   const fileServers = ["nats://one.internal.example:4222", "nats://two.internal.example:4222"];
 
+  test("a lone file's seed goes with its own servers, whitespace and all", () => {
+    const config = configFrom({
+      envoy: {
+        enabled: true,
+        natsUrls: ["nats://one.internal.example:4222 "],
+        natsSeed: "SUFILESEED",
+      },
+    });
+    expect(envoySettings({}, config)).toMatchObject({
+      enabled: true,
+      natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
+    });
+  });
+
   test("goes with ENVOY_NATS_URL only when it names the file's servers, and its command does not run otherwise", () => {
     const home = tempDir();
     const runs = path.join(home, "runs");

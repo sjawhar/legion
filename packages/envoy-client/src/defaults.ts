@@ -211,13 +211,15 @@ export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): Envoy
             : null;
     if (seedFile !== null) {
       const servers = new Set(seedFile.servers.map((server) => server.trim()));
-      const used = new Set(natsUrls);
+      const used = new Set(natsUrls.map((url) => url.trim()));
       const sameServers = used.size === servers.size && [...used].every((url) => servers.has(url));
       if (!sameServers) {
+        // Without ENVOY_NATS_URL the servers come from a file: the checkout's when it writes them.
+        const serversFile = checkout?.envoy.natsUrls !== undefined ? checkout.path : config.path;
         return disabled(
           namedNatsUrls.length > 0
             ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
-            : `${checkout?.path}: envoy.natsUrls requires envoy.natsSeed in the same file`
+            : `${serversFile}: envoy.natsUrls requires envoy.natsSeed in the same file`
         );
       }
       if (seedFile.path !== config.path && seedFile.seed.startsWith("!")) {

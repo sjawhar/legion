@@ -37556,10 +37556,11 @@ function envoySettings(env, config2) {
     } : own.natsSeed !== undefined ? { path: config2.path, seed: own.natsSeed, servers: own.natsUrls ?? [] } : null;
     if (seedFile !== null) {
       const servers = new Set(seedFile.servers.map((server) => server.trim()));
-      const used = new Set(natsUrls);
+      const used = new Set(natsUrls.map((url3) => url3.trim()));
       const sameServers = used.size === servers.size && [...used].every((url3) => servers.has(url3));
       if (!sameServers) {
-        return disabled(namedNatsUrls.length > 0 ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them` : `${checkout?.path}: envoy.natsUrls requires envoy.natsSeed in the same file`);
+        const serversFile = checkout?.envoy.natsUrls !== undefined ? checkout.path : config2.path;
+        return disabled(namedNatsUrls.length > 0 ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them` : `${serversFile}: envoy.natsUrls requires envoy.natsSeed in the same file`);
       }
       if (seedFile.path !== config2.path && seedFile.seed.startsWith("!")) {
         return disabled(checkoutCommandRefusal(seedFile.path, "envoy.natsSeed"));
