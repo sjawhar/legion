@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// Change is one delivery_changes row (migration 0099): what changed, its run's kind when it is a
+// Change is one delivery_changes row (migration 0100): what changed, its run's kind when it is a
 // run or a job, and the time that decides which windows it can touch, before and after (a pull
 // request's merged_at; a run's later head commit or start). The row triggers write one only when a
 // row's content changed, so a reconcile pass that finds nothing new logs none.

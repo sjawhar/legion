@@ -374,8 +374,8 @@ func TestTheListenerPassesEachPayloadUnchanged(t *testing.T) {
 }
 
 // The listener's three channels are the ones Dispatch's own writers notify: a settings write
-// notifies delivery_changes and delivery_freshness (migration 0099) and an event insert
-// dispatch_events (migration 0106).
+// notifies delivery_changes and delivery_freshness (migration 0100) and an event insert
+// dispatch_events (migration 0107).
 func TestTheListenerHearsTheTriggersItListensFor(t *testing.T) {
 	database := storetest.Open(t)
 	probe := newListenerProbe()

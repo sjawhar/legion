@@ -7,7 +7,7 @@ import (
 
 // deliveryRunsChangesVersion is the migration that adds delivery_runs.jobs_complete and the
 // table's change trigger (LEGION-690).
-const deliveryRunsChangesVersion = 101
+const deliveryRunsChangesVersion = 102
 
 // TestARunWrittenAfterTheMigrationStartsIncomplete runs the shipped migration files: a run stored
 // before the migration reads jobs_complete true, since intake and the reconcile read jobs only for

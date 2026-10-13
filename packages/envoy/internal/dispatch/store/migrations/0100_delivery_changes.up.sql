@@ -1,10 +1,10 @@
--- 0099: a log of delivery fact changes, one row per changed row, so Dispatch can tell each open
+-- 0100: a log of delivery fact changes, one row per changed row, so Dispatch can tell each open
 -- Delivery or Pipeline page what changed (LEGION-690). A row is written only when a row's content
 -- changed: the columns every reconcile pass rewrites are ignored, so a pass that finds nothing new
 -- logs nothing. Each row carries the time that decides which windows it can touch and, for a run,
 -- its kind. Each trigger takes one transaction advisory lock before it inserts, so seq is allocated
 -- in commit order, and notifies 'delivery_changes', which Postgres delivers at commit. This
--- migration locks no existing table: 0100-0105 each add one table's trigger, so each holds one
+-- migration locks no existing table: 0101-0106 each add one table's trigger, so each holds one
 -- table's lock alone, for milliseconds (0073's reason).
 create table delivery_changes (
   seq      bigserial primary key,

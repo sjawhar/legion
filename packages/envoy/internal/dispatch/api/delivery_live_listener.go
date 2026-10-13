@@ -12,9 +12,9 @@ import (
 )
 
 // The channels the delivery hub listens on. delivery_changes carries no payload and is notified
-// as a delivery_changes row commits (migration 0099); delivery_freshness carries the settings
-// row's freshness columns as JSON (0099); dispatch_events carries no payload and is notified as an
-// event commits (0106).
+// as a delivery_changes row commits (migration 0100); delivery_freshness carries the settings
+// row's freshness columns as JSON (0100); dispatch_events carries no payload and is notified as an
+// event commits (0107).
 const (
 	deliveryChangesChannel   = "delivery_changes"
 	deliveryFreshnessChannel = "delivery_freshness"

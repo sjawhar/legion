@@ -1137,7 +1137,7 @@ func (h *deliveryHub) dropLocked(conn deliveryLiveConn, id string) {
 }
 
 // applyFreshness applies one delivery_freshness payload, the settings row's freshness columns as
-// migration 0099's trigger writes them, reading nothing.
+// migration 0100's trigger writes them, reading nothing.
 func (h *deliveryHub) applyFreshness(payload string) {
 	var row struct {
 		LastEventAt     *time.Time `json:"last_event_at"`
