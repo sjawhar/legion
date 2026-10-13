@@ -164,33 +164,39 @@ func (c *launcherCredentials) lookup(name string, uid types.UID) (credential lau
 	return launcherCredential{}, false, secret.failedAt.Add(credentialRetry)
 }
 
-// bind holds credential, a binding write's, as name's for the Sandbox with uid, in place of
-// whatever was held.
+// bind holds credential, a binding write's or a binding check's, as name's for the Sandbox with uid,
+// in place of whatever was held. A credential once held is replaced only here, by the launch of a
+// pod of the Sandbox that holds the name now, or dropped with its Sandbox (forget): never by a read,
+// which may be of a Sandbox since deleted (store, fail).
 func (c *launcherCredentials) bind(name string, uid types.UID, credential launcherCredential) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.put(name, launcherSecret{sandboxUID: uid, credential: credential, held: true})
 }
 
-// store holds credential, a read's, as name's for the Sandbox with uid, unless one of that Sandbox
-// is held already: a binding write that completed during the read is newer than it. It is the
-// credential held.
+// store holds credential, a read's, as name's for the Sandbox with uid, unless a credential is held
+// already (bind): one of that Sandbox is a binding write that completed during the read, newer than
+// it, and one of another Sandbox is not the read's to replace. It is the credential the Sandbox with
+// uid holds, or the read's when another Sandbox holds the name.
 func (c *launcherCredentials) store(name string, uid types.UID, credential launcherCredential) launcherCredential {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if held := c.secrets[name]; held.held && held.sandboxUID == uid {
-		return held.credential
+	if held := c.secrets[name]; held.held {
+		if held.sandboxUID == uid {
+			return held.credential
+		}
+		return credential
 	}
 	c.put(name, launcherSecret{sandboxUID: uid, credential: credential, held: true})
 	return credential
 }
 
-// fail records that a read of name for the Sandbox with uid failed at at, unless a credential of
-// that Sandbox is held.
+// fail records that a read of name for the Sandbox with uid failed at at, unless a credential is
+// held (bind), whichever Sandbox's it is.
 func (c *launcherCredentials) fail(name string, uid types.UID, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if held := c.secrets[name]; held.held && held.sandboxUID == uid {
+	if c.secrets[name].held {
 		return
 	}
 	c.put(name, launcherSecret{sandboxUID: uid, failedAt: at})

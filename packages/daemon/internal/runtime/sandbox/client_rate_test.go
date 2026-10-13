@@ -465,6 +465,24 @@ func TestALauncherSecretsHoldOffAndCredentialAreItsSandboxsAlone(t *testing.T) {
 	}
 }
 
+// A read still in flight for a deleted Sandbox never drops the credential its same-name successor's
+// launch bound: neither that read's failure nor its credential replaces it, so a hello of the
+// successor's pod whose read began before the binding finds the binding afterwards, not the
+// unbound Secret it read.
+func TestAReadOfADeletedSandboxNeverEvictsItsSuccessorsBinding(t *testing.T) {
+	const name = "legion-legion-legion-208-tester-boot"
+	var c launcherCredentials
+	c.bind(name, "uid-new", launcherCredential{podUID: "uid-pod-bound"})
+	c.fail(name, "uid-old", rigNow)
+	c.store(name, "uid-old", launcherCredential{podUID: "uid-pod-old"})
+	if got := c.store(name, "uid-new", launcherCredential{podUID: ""}); got.podUID != "uid-pod-bound" {
+		t.Fatalf("the successor's read of its unbound Secret returned pod %q, want the bound %q", got.podUID, "uid-pod-bound")
+	}
+	if got, held, _ := c.lookup(name, "uid-new"); !held || got.podUID != "uid-pod-bound" {
+		t.Fatalf("after the deleted Sandbox's failed and stale reads: held %t, pod %q, want the successor's binding", held, got.podUID)
+	}
+}
+
 // The runtime's two client sets share one limiter at 50 requests a second with a burst of 100,
 // whatever rate the caller's configuration names; the requests' clients bound each request by
 // apiTimeout, and the informers' have no timeout, which would end a watch.
