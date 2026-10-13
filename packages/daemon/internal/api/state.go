@@ -300,18 +300,56 @@ type PendingStatusWrite struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. The state and role are the move that brings it back: a
-// `suspended` architect, the operator's resume (`legion claims resume`), which a catch-up follows;
-// a `suspended` worker, the move its claim's suspendedBy calls for (the operator claim view): the
-// boot's start once it is marked the daemon's when it was suspended before 0038, the operator's
-// resume when an operator suspended it and it kept its task or its phase start waits, otherwise the
-// operator's delivery of its phase's resume task; a `failed` worker, its architect's retry of the
-// held phase, since a failed claim ignores resume and deliver; a `failed` architect, the operator's
-// retry (`legion claims retry`), which relaunches its session with fresh budgets.
+// entry under `issues` carries the rest. Its state and role say the move that brings it back
+// (Move).
 type StrandedClaim struct {
 	Issue string     `json:"issue"`
 	Role  claim.Role `json:"role"`
 	State string     `json:"state"`
+}
+
+// StrandedMove is the move that brings a stranded claim back (StrandedClaim.Move). Its value is the
+// key the boot's `claims nothing will wake` log line lists the claim under.
+type StrandedMove string
+
+const (
+	StrandedResume           StrandedMove = "resume"
+	StrandedSuspendedWorkers StrandedMove = "suspendedWorkers"
+	StrandedRetry            StrandedMove = "retry"
+	StrandedWorkflowStart    StrandedMove = "needsWorkflowStart"
+)
+
+// StrandedMoves is every move, in the order the boot's log line and `legion state` list them.
+func StrandedMoves() []StrandedMove {
+	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedRetry, StrandedWorkflowStart}
+}
+
+// Move is the move that brings c back, the one statement of it that the boot's log line and
+// `legion state` both group by:
+//
+//   - StrandedResume, a suspended architect: the operator's resume (`legion claims resume`), which
+//     a catch-up follows.
+//   - StrandedSuspendedWorkers, a suspended phase worker: the move its claim's suspendedBy calls
+//     for (the operator claim view): the boot's start once it is marked the daemon's when it was
+//     suspended before 0038, the operator's resume when an operator suspended it and it kept its
+//     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
+//   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
+//     relaunches its session with fresh budgets, and a catch-up follows.
+//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
+//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
+//     architect.
+func (c StrandedClaim) Move() StrandedMove {
+	failed := c.State == string(supervise.StateFailed)
+	switch {
+	case failed && c.Role == claim.RoleArchitect:
+		return StrandedRetry
+	case failed:
+		return StrandedWorkflowStart
+	case c.Role == claim.RoleArchitect:
+		return StrandedResume
+	default:
+		return StrandedSuspendedWorkers
+	}
 }
 
 // StrandedClaimsOf is stranded as the state shows it, claim for claim.
@@ -321,6 +359,19 @@ func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
 		claims[i] = StrandedClaim{Issue: c.Issue, Role: c.Role, State: string(c.State)}
 	}
 	return claims
+}
+
+// StrandedByMove is each stranded claim named `<issue> <role>`, grouped by its Move, each group in
+// stranded's order; every move has a group, empty when no claim takes it.
+func StrandedByMove(stranded []StrandedClaim) map[StrandedMove][]string {
+	grouped := make(map[StrandedMove][]string, len(StrandedMoves()))
+	for _, move := range StrandedMoves() {
+		grouped[move] = []string{}
+	}
+	for _, c := range stranded {
+		grouped[c.Move()] = append(grouped[c.Move()], c.Issue+" "+string(c.Role))
+	}
+	return grouped
 }
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route

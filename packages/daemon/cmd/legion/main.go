@@ -22,11 +22,9 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
-	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
-	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const (
@@ -457,44 +455,29 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
 }
 
+// strandedPhrases is how `legion state` names each move that brings a stranded claim back
+// (api.StrandedClaim.Move) before the claims it brings back.
+var strandedPhrases = map[api.StrandedMove]string{
+	api.StrandedResume:           "resume",
+	api.StrandedSuspendedWorkers: "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json)",
+	api.StrandedRetry:            "failed, retry",
+	api.StrandedWorkflowStart:    "failed, needs a workflow start",
+}
+
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
-// and each by issue and role under the move that brings it back. `legion claims resume` brings back
-// a suspended architect, which is sent a catch-up once it is ready; a suspended phase worker's move
-// depends on who suspended it, which `legion claims list --json` shows as its suspendedBy and the
-// troubleshooting page's "A tree does not move after a restart" turns into a move; `legion claims
-// retry` brings back a failed architect on its session, with fresh budgets and a catch-up once it is
-// ready; a failed worker runs again on a workflow start, its architect's retry of the held phase.
+// and each by issue and role under the move that brings it back (api.StrandedClaim.Move, which the
+// boot's log line groups by too). A suspended phase worker's move is the troubleshooting page's "A
+// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows.
 func strandedSummary(stranded []api.StrandedClaim) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"
 	}
-	var resume, workers, retry, workflowStart []string
-	for _, c := range stranded {
-		named := c.Issue + " " + string(c.Role)
-		failed := c.State == string(supervise.StateFailed)
-		switch {
-		case failed && c.Role == legionclaim.RoleArchitect:
-			retry = append(retry, named)
-		case failed:
-			workflowStart = append(workflowStart, named)
-		case c.Role == legionclaim.RoleArchitect:
-			resume = append(resume, named)
-		default:
-			workers = append(workers, named)
-		}
-	}
+	grouped := api.StrandedByMove(stranded)
 	var groups []string
-	if len(resume) > 0 {
-		groups = append(groups, "resume "+strings.Join(resume, ", "))
-	}
-	if len(workers) > 0 {
-		groups = append(groups, "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) "+strings.Join(workers, ", "))
-	}
-	if len(retry) > 0 {
-		groups = append(groups, "failed, retry "+strings.Join(retry, ", "))
-	}
-	if len(workflowStart) > 0 {
-		groups = append(groups, "failed, needs a workflow start "+strings.Join(workflowStart, ", "))
+	for _, move := range api.StrandedMoves() {
+		if named := grouped[move]; len(named) > 0 {
+			groups = append(groups, strandedPhrases[move]+" "+strings.Join(named, ", "))
+		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
 }

@@ -403,6 +403,18 @@ func (h *harness) registered(bootToken, session string) claim.RegisterResponse {
 	return response
 }
 
+// ready registers session on the claim's latest launch and has its agent say it is ready, at the
+// generation that launch carried.
+func (h *harness) ready(token claim.Token, session string, generation uint64) {
+	h.t.Helper()
+	registered := h.registered(h.bootToken(token), session)
+	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: session, Secret: registered.Secret, Generation: generation,
+	}, nil); recorder.Code != http.StatusNoContent {
+		h.t.Fatalf("ready %s at generation %d = %d; body %s", token, generation, recorder.Code, recorder.Body)
+	}
+}
+
 // registerContract registers session on the launch bootToken names, declaring contract as the
 // plugin's. A current contract (DaemonAPIVersion) is accepted, returning what the agent learned,
 // exactly as registered does. A contract that differs is recorded too — register writes

@@ -19,7 +19,7 @@ import (
 
 // claimsCommands is the operator's hand on the daemon's claims, one subcommand per operator route
 // and the one list of them `legion claims --help` names (internal/api/operator.go). retry relaunches
-// a failed claim on its session with fresh budgets. close is the tree's close, through its root
+// a failed architect on its session with fresh budgets. close is the tree's close, through its root
 // claim, for a tree no workflow issue backs: the root, then every other claim of the tree.
 var claimsCommands = map[string]command{
 	"spawn":   runClaimsSpawn,

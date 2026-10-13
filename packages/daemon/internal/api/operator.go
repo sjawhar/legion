@@ -280,8 +280,9 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 	return supervise.RequestStop{Claim: c.Token}, true
 }
 
-// retryEvent is the operator's retry of a failed claim: its session relaunched with fresh budgets.
-// The machine refuses it for a claim in any other state, naming that state.
+// retryEvent is the operator's retry of a failed architect: its session relaunched with fresh
+// budgets. The machine refuses it for a claim in any other state, naming that state, and for a
+// failed claim that is not an architect's, naming who retries it (supervise's operatorRetry).
 func retryEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	return supervise.RequestOperatorRetry{Claim: c.Token}, true
 }

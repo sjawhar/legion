@@ -176,10 +176,10 @@ func keysOf(state map[string]json.RawMessage) []string {
 // failed phase worker (its issue is held from that phase) and a failed tree architect. It names
 // none of the claims something will still start: a worker whose phase is not its own, and the
 // members of a tree that lingers, which re-admission starts again. One error line names them all,
-// the suspended architects under `resume`, which brings one back with a catch-up, the suspended
-// phase workers under `suspendedWorkers`, whose move depends on who suspended each (its
-// suspendedBy), and the failed ones, which resume does not move, under `needsWorkflowStart`; the
-// state carries the same claims, each with its state.
+// each under the key of the move that brings it back (api.StrandedClaim.Move): the suspended
+// architects under `resume`, the suspended phase workers under `suspendedWorkers`, the failed
+// architects under `retry` and the failed phase workers under `needsWorkflowStart`; the state
+// carries the same claims, each with its state.
 func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	key := func(n string) string { return cfg.Project + "-" + n }
@@ -231,10 +231,13 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 	resume := []string{implementing + " architect"}
 	workers := []string{implementing + " implementer", tested + " tester"}
-	workflowStart := []string{reviewing + " reviewer", planning + " architect"}
-	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workers)+len(workflowStart)) ||
-		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("suspendedWorkers"), workers) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
-		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume, %q as suspended workers and %q needing a workflow start", line, cfg.Project, resume, workers, workflowStart)
+	retry := []string{planning + " architect"}
+	workflowStart := []string{reviewing + " reviewer"}
+	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workers)+len(retry)+len(workflowStart)) ||
+		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("suspendedWorkers"), workers) ||
+		!reflect.DeepEqual(listed("retry"), retry) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
+		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume, %q as suspended workers, %q to retry and %q needing a workflow start",
+			line, cfg.Project, resume, workers, retry, workflowStart)
 	}
 	wantWire := []map[string]string{
 		{"issue": implementing, "role": "architect", "state": "suspended"},

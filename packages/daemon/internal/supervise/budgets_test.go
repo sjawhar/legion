@@ -2,7 +2,6 @@ package supervise
 
 import (
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
@@ -408,13 +407,20 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 	}
 }
 
-// A failed claim stays failed until someone decides otherwise; the architect's retry of a held
-// phase is that decision, and so is the operator's retry. Each relaunches the same session with
-// fresh budgets.
+// A failed claim stays failed until someone decides otherwise: the architect's retry of a held
+// phase decides it for a worker, and the operator's retry for an architect, which nothing else
+// relaunches. Each relaunches the same session with fresh budgets.
 func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
-	for _, retry := range []Event{RequestRetry{Claim: testToken}, RequestOperatorRetry{Claim: testToken}} {
-		t.Run(fmt.Sprintf("%T", retry), func(t *testing.T) {
-			h := newHarness(t)
+	for _, tc := range []struct {
+		name  string
+		claim Claim
+		retry Event
+	}{
+		{"the architect's retry of a worker", queuedClaim(), RequestRetry{Claim: testToken}},
+		{"the operator's retry of an architect", rootClaim(), RequestOperatorRetry{Claim: rootToken}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessOf(t, tc.claim)
 			h.reach(StateReady)
 			for range 3 {
 				h.observe(runtime.Gone)
@@ -422,7 +428,7 @@ func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
 			h.wantState(StateFailed)
 			resumes := len(h.calls("Resume"))
 
-			h.must(retry)
+			h.must(tc.retry)
 
 			h.wantState(StateLaunching)
 			h.wantBudgets(Budgets{})
@@ -432,6 +438,46 @@ func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
 			}
 			h.relaunched()
 			h.wantState(StateReady)
+		})
+	}
+}
+
+// The operator's retry is an architect's alone. A failed phase worker is its architect's to retry,
+// and the daemon's controller its keeper's, so the operator's retry of either is refused, naming
+// that retry, and changes nothing.
+func TestTheOperatorsRetryOfAFailedClaimThatIsNotAnArchitectsIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, names string
+		claim       Claim
+	}{
+		{"a phase worker", "its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise", queuedClaim()},
+		{"the controller", "the daemon's controller keeper retries the controller", controllerClaim()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessOf(t, tc.claim)
+			h.reach(StateReady)
+			for range 3 {
+				h.observe(runtime.Gone)
+			}
+			h.wantState(StateFailed)
+			before, calls, puts := h.claim(), len(h.rt.Calls()), len(h.store.history())
+
+			err := h.handle(RequestOperatorRetry{Claim: tc.claim.Token})
+
+			var refused *RefusedError
+			if !errors.As(err, &refused) || !errors.Is(err, ErrRetryArchitectOnly) || refused.State != StateFailed ||
+				!strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("the operator's retry of %s returned %v, want the architect-only refusal naming %q", tc.name, err, tc.names)
+			}
+			if after := h.claim(); after.State != before.State || after.Budgets != before.Budgets || after.Generation != before.Generation {
+				t.Errorf("the refused retry moved the claim: %+v -> %+v", before, after)
+			}
+			if got := h.rt.Calls()[calls:]; len(got) != 0 {
+				t.Errorf("the refused retry asked the runtime %+v", got)
+			}
+			if got := len(h.store.history()); got != puts {
+				t.Errorf("the refused retry wrote the claim %d times", got-puts)
+			}
 		})
 	}
 }

@@ -221,25 +221,27 @@ legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, holdRe
 
 `phase` is `held` and the failed claim's `state` is `failed`. A held phase worker is its
 architect's to retry or escalate; `holdReason: "escalated"` means it went to the controller. An
-architect that failed (`architect.state` is `failed`) leaves its tree with nobody to act inside it.
-Retry it: the daemon relaunches it on the session it kept, with fresh budgets, and sends it a
-catch-up of its tree once it is ready, so the tree carries on at the generation and phase it
-stands at:
+architect that failed (`architect.state` is `failed`) leaves its tree with nobody to act inside it,
+and the controller is woken to re-admit the tree. What brings the architect back depends on where
+its tree stands:
 
-```sh
-legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-<project>-<key, lowercased>-architect
-```
+- **Its root holds its admission slot and does not linger:** `legion state`'s `claims nothing will
+  wake` line names the architect under `failed, retry`. Retry it, as
+  [A tree does not move after a restart](#a-tree-does-not-move-after-a-restart) shows: the daemon
+  relaunches it on the session it kept, with fresh budgets, and the tree carries on at the
+  generation and phase it stands at.
+- **Its root is parked or lingers,** the controller's park for a re-admission included: leave the
+  claim as it is. The tree's re-admission retries it at a new generation; a retry by hand would run
+  it outside the admission cap, and it would be sent no catch-up. To re-admit the tree by hand, park
+  the root and admit it again:
 
-`legion claims retry` relaunches only a failed claim, and refuses one in any other state, naming
-it. It would relaunch a failed phase worker too, but leave that to the worker's architect: its
-retry of the phase also releases the hold. The controller is woken to re-admit a tree whose
-architect failed; parking the root and admitting it again does that by hand, and starts a new
-generation from its architect:
+  ```sh
+  legion status <KEY> backlog --config legion.yaml --operator-token-file operator-token
+  legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
+  ```
 
-```sh
-legion status <KEY> backlog --config legion.yaml --operator-token-file operator-token
-legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
-```
+`legion claims retry` relaunches only a failed architect. It refuses a claim in any other state,
+naming the state, and a failed phase worker or controller, naming who retries it.
 
 To see why the launches failed, read the failed role's container log in the issue's pod:
 
@@ -264,7 +266,7 @@ decision that needs its architect. Once a boot has re-adopted its claims, the da
 such claim in one error line, under the move that brings it back:
 
 ```text
-{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect"],"suspendedWorkers":["WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
+{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":4,"resume":["WIDGETS-12 architect"],"suspendedWorkers":["WIDGETS-12 implementer"],"retry":["WIDGETS-14 architect"],"needsWorkflowStart":["WIDGETS-15 reviewer"]}
 ```
 
 The state names the same claims on every read, after a restart or not, each with its `state`, and
@@ -320,10 +322,9 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
       --task "Continue <title>. Issue: WIDGETS-12. Phase: implementing. Resume the existing phase work."
     ```
 
-- **`needsWorkflowStart`** (`state` is `failed`): a failed claim ignores `legion claims resume` and
-  `legion claims deliver`. A failed worker's issue is held ([An issue is held](#an-issue-is-held)),
-  and its tree's architect retries the phase or escalates it to the controller. Retry a failed
-  architect, which relaunches it on its session with fresh budgets:
+- **`retry`** (a failed architect): retry it. The daemon relaunches it on the session it kept,
+  with fresh budgets, and sends it a catch-up of its tree once it is ready, so the tree carries on
+  at the generation and phase it stands at:
 
   ```sh
   legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-14-architect
@@ -332,12 +333,18 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
   When a tree's architect and its workers failed together, retry the architect first: the held
   workers are its to retry once it runs.
 
+- **`needsWorkflowStart`** (a failed phase worker): its issue is held
+  ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or escalates
+  it to the controller. A failed claim ignores `legion claims resume` and `legion claims deliver`,
+  and `legion claims retry` refuses a phase worker's.
+
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
 comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. Never resume by hand a
-claim of a lingering tree or of an issue parked out of the workflow, nor that waiting architect:
-it would run outside the admission cap, and re-admission or the issue's return to `todo` starts it.
+while every slot was taken waits for admission to start it once one frees. Never resume or retry by
+hand a claim of a lingering tree or of an issue parked out of the workflow, nor that waiting
+architect: it would run outside the admission cap, and re-admission or the issue's return to `todo`
+starts it.
 A claim an operator suspended is listed even when a workflow start is queued for it: that start
 waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
 is queued for it, since the next phase start or re-admission resumes it as before.

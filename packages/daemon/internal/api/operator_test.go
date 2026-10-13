@@ -208,12 +208,7 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 		t.Fatalf("suspend during launch answered %+v, want the operator's suspension held", held)
 	}
 
-	registered := h.registered(h.bootToken(architectToken), "ses_architect")
-	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
-		ClaimToken: architectToken, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
-	}, nil); recorder.Code != http.StatusNoContent {
-		t.Fatalf("ready = %d; body %s", recorder.Code, recorder.Body)
-	}
+	h.ready(architectToken, "ses_architect", 1)
 
 	worker := spawnBody()
 	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
@@ -260,18 +255,6 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 	for _, action := range []string{"deliver", "suspend", "resume", "stop", "retry", "close"} {
 		wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/legion-legion-legion-1-tester/"+action,
 			DeliverRequest{Task: "x"}), http.StatusNotFound, "no claim legion-legion-legion-1-tester")
-	}
-}
-
-// ready registers session on the claim's latest launch and has its agent say it is ready, at the
-// generation that launch carried.
-func (h *harness) ready(token claim.Token, session string, generation uint64) {
-	h.t.Helper()
-	registered := h.registered(h.bootToken(token), session)
-	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
-		ClaimToken: token, SessionID: session, Secret: registered.Secret, Generation: generation,
-	}, nil); recorder.Code != http.StatusNoContent {
-		h.t.Fatalf("ready %s at generation %d = %d; body %s", token, generation, recorder.Code, recorder.Body)
 	}
 }
 
@@ -373,6 +356,40 @@ func TestTheOperatorsRetryOfAClaimThatHasNotFailedIsRefused(t *testing.T) {
 	}
 }
 
+// The operator's retry is an architect's alone: a failed phase worker is retried by its architect's
+// retry_or_escalate while its issue is held, and by the next start of its role otherwise, so the
+// operator's retry of one is refused, naming who retries it, and the worker stays failed.
+func TestTheOperatorsRetryOfAFailedPhaseWorkerIsRefused(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	h.runtime.ScriptSpawn(refused, refused, refused)
+	worker := spawnBody()
+	worker.Issue, worker.Role = "LEGION-209", claim.RoleImplementer
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("spawn of a worker whose every launch the runtime refused = %d, want 500; body %s", recorder.Code, recorder.Body)
+	}
+	workerToken, err := claim.NewToken(testProject, worker.Issue, worker.Role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, calls := h.stored(workerToken), len(h.runtime.Calls())
+	if before.State != supervise.StateFailed {
+		t.Fatalf("the worker is %s, want failed before its retry", before.State)
+	}
+
+	wantRefusal(t, h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(workerToken)+"/retry", nil), http.StatusConflict,
+		"retry refused: the operator's retry relaunches only an architect; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise")
+
+	after := h.stored(workerToken)
+	if after.State != before.State || after.Generation != before.Generation || after.Budgets != before.Budgets {
+		t.Errorf("the refused retry moved the worker: %+v -> %+v", before, after)
+	}
+	if got := h.runtime.Calls()[calls:]; len(got) != 0 {
+		t.Errorf("the refused retry asked the runtime %+v", got)
+	}
+}
+
 // A registered agent holds a secret that authenticates its requests, and no timer runs on it until
 // it is ready; the operator's suspend is what stops the tree's root there, so it is accepted, and
 // the suspension revokes the secret.
@@ -403,12 +420,7 @@ func TestTheOperatorSuspendsARegisteredRootAndRevokesItsSecret(t *testing.T) {
 func TestTheOperatorsSuspendOfAnAgentInATurnWaitsForTheTurnToEnd(t *testing.T) {
 	h := newHarness(t)
 	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
-	registered := h.registered(h.bootToken(architectToken), "ses_architect")
-	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
-		ClaimToken: architectToken, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
-	}, nil); recorder.Code != http.StatusNoContent {
-		t.Fatalf("ready = %d; body %s", recorder.Code, recorder.Body)
-	}
+	h.ready(architectToken, "ses_architect", 1)
 	machine, ok := h.supervisor.Machine(architectToken)
 	if !ok {
 		t.Fatal("no machine for the architect")

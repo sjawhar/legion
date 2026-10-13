@@ -369,6 +369,11 @@ var ErrDeliveryPending = wait.New("a delivery is already pending")
 // where one runs.
 var ErrRootStop = errors.New("the tree's root claim ends only when its tree closes")
 
+// ErrRetryArchitectOnly is the operator's retry of a failed claim that is not an architect's: a
+// phase worker and the daemon's controller each have their own retry (operatorRetry). The refusal
+// adds who retries the claim.
+var ErrRetryArchitectOnly = errors.New("the operator's retry relaunches only an architect")
+
 // ErrHeldByOperator is the daemon's start or task meeting an operator's suspension, which no rule
 // overrides (Claim.RuleHolds): a wait, ended only by the operator's resume. RuleHoldError wraps it
 // for the outbox log.

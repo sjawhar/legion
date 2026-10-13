@@ -406,8 +406,8 @@ Closing the terminal leaves the project without one, and the daemon logs
    architect, retry a failed one (`legion claims retry`, which relaunches its session with fresh
    budgets), and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
-   shows for its `suspendedBy`. Never resume by hand a claim of a lingering tree or of an issue
-   parked out of the workflow: re-admission or the issue's return to `todo` starts it.
+   shows for its `suspendedBy`. Never resume or retry by hand a claim of a lingering tree or of an
+   issue parked out of the workflow: re-admission or the issue's return to `todo` starts it.
 
    **Rolling back across this release.** The earlier daemon boots on this schema but never writes
    `suspendedBy`, so a value this release wrote survives the earlier daemon's own suspends and

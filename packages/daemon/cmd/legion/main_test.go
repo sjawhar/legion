@@ -1162,11 +1162,8 @@ func TestPlainStateSummarizesThePendingStatusWrites(t *testing.T) {
 }
 
 // An operator reading plain `legion state` is told which claims nothing will wake, each by issue
-// and role under the move that brings it back — resume for a suspended architect, which a catch-up
-// brings up to date; for a suspended worker, the move its suspendedBy calls for, which differs by
-// who suspended it; retry for a failed architect (`legion claims retry`); a workflow start for a
-// failed worker, its architect's retry of the held phase — on one line however many there are;
-// with none the line says so.
+// and role under the move that brings it back (api.StrandedClaim.Move), on one line however many
+// there are; with none the line says so.
 func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
 		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
