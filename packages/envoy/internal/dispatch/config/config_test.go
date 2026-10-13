@@ -106,7 +106,6 @@ func TestLoadEnvironmentOverridesMergedConfig(t *testing.T) {
 		"dispatch": {"enabled": true, "serverUrl": "https://user.dispatch.example"}
 	}`)
 	mustWrite(t, checkoutFile(cwd), `{
-		"envoy": {"natsUrls": ["nats://checkout:4222"]},
 		"dispatch": {"serverUrl": "https://checkout.dispatch.example"}
 	}`)
 
@@ -119,7 +118,7 @@ func TestLoadEnvironmentOverridesMergedConfig(t *testing.T) {
 		{
 			name:      "no environment preserves merged config",
 			serverURL: "https://checkout.dispatch.example",
-			natsURLs:  []string{"nats://checkout:4222"},
+			natsURLs:  []string{"nats://user:4222"},
 		},
 		{
 			name: "environment overrides both files",
@@ -203,36 +202,103 @@ func TestLoadRefusesTopLevelNatsURLs(t *testing.T) {
 	}
 }
 
-// The OpenCode-era user file is not read. While it is the only user file, Load refuses, naming
-// both paths and saying to move it; once the new file exists, the old one is ignored.
+// The OpenCode-era user file is not read. While it is the only user file beside the current one's
+// directory, Load refuses, naming both paths and saying to move it, whatever the environment
+// overrides; once the new file exists, the old one is ignored. An XDG_CONFIG_HOME naming another
+// directory is not where the old file belongs, so nothing refuses there.
 func TestLoadRefusesTheOldUserFile(t *testing.T) {
 	home := t.TempDir()
 	oldPath := filepath.Join(home, ".config", "opencode", "envoy.json")
 	mustWrite(t, oldPath, `{"natsUrls": ["nats://old:4222"], "dispatch": {"serverUrl": "https://old.dispatch.example"}}`)
 
-	_, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
-	if err == nil {
-		t.Fatalf("expected a refusal while only the old user file exists")
-	}
-	for _, want := range []string{oldPath, userFile(home), "move"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q should contain %q", err.Error(), want)
-		}
+	for _, tc := range []struct {
+		name   string
+		values map[string]string
+	}{
+		{name: "no environment"},
+		{name: "XDG_CONFIG_HOME is ~/.config", values: map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, ".config") + "/"}},
+		{name: "both overrides set", values: map[string]string{
+			"DISPATCH_SERVER_URL": "https://environment.dispatch.example",
+			"NATS_URLS":           "nats://environment:4222",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(environment(tc.values), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+			if err == nil {
+				t.Fatalf("expected a refusal while only the old user file exists")
+			}
+			want := oldPath + " is no longer read: move it to " + userFile(home)
+			if err.Error() != want {
+				t.Errorf("error: got %q, want %q", err, want)
+			}
+		})
 	}
 
 	configHome := t.TempDir()
-	_, err = Load(environment(map[string]string{"XDG_CONFIG_HOME": configHome}), LoadOptions{CWD: t.TempDir(), HomeDir: home})
-	if err == nil || !strings.Contains(err.Error(), filepath.Join(configHome, "legion", "envoy.json")) {
-		t.Errorf("err = %v, want a refusal naming the file under XDG_CONFIG_HOME", err)
+	cfg, err := Load(environment(map[string]string{"XDG_CONFIG_HOME": configHome}), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+	if err != nil {
+		t.Fatalf("load under another XDG_CONFIG_HOME: %v", err)
+	}
+	if cfg.Dispatch != nil || cfg.Envoy.NatsURLs != nil {
+		t.Errorf("got %+v (dispatch %+v), want nothing from the old file", cfg.Envoy, cfg.Dispatch)
 	}
 
 	mustWrite(t, userFile(home), `{"envoy": {"natsUrls": ["nats://new:4222"]}}`)
-	cfg, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+	cfg, err = Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
 	if err != nil {
 		t.Fatalf("load with both files: %v", err)
 	}
 	if strings.Join(cfg.Envoy.NatsURLs, ",") != "nats://new:4222" || cfg.Dispatch != nil {
 		t.Errorf("got %+v (dispatch %+v), want only the new file's values", cfg.Envoy, cfg.Dispatch)
+	}
+}
+
+// A checkout's file is the repository's: it may configure Dispatch, never the NATS servers the
+// process connects to, so any envoy section in it is refused, naming the user file it goes in,
+// whatever the environment overrides.
+func TestLoadRefusesAnEnvoySectionInTheCheckoutFile(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		envoy  string
+		values map[string]string
+	}{
+		{name: "NATS servers", envoy: `{"natsUrls": ["nats://repo.internal.example:4222"]}`},
+		{name: "NATS servers beside NATS_URLS", envoy: `{"natsUrls": ["nats://repo.internal.example:4222"]}`,
+			values: map[string]string{"NATS_URLS": "nats://environment:4222"}},
+		{name: "off", envoy: `{"enabled": false}`},
+		{name: "an unknown key", envoy: `{"natsUrl": "nats://repo.internal.example:4222"}`},
+		{name: "not an object", envoy: `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			cwd := t.TempDir()
+			mustWrite(t, userFile(home), `{"envoy": {"natsUrls": ["nats://user:4222"]}}`)
+			path := checkoutFile(cwd)
+			mustWrite(t, path, `{"dispatch": {"serverUrl": "https://checkout.dispatch.example"}, "envoy": `+tc.envoy+`}`)
+			_, err := Load(environment(tc.values), LoadOptions{CWD: cwd, HomeDir: home})
+			var invalid *InvalidConfigError
+			if !errors.As(err, &invalid) {
+				t.Fatalf("err = %v, want an *InvalidConfigError", err)
+			}
+			want := "envoy: not read from a checkout's envoy.json; put it in " + userFile(home)
+			if invalid.Path != path || len(invalid.Issues) != 1 || invalid.Issues[0] != want {
+				t.Errorf("err = %+v, want %s refused with %q", invalid, path, want)
+			}
+		})
+	}
+}
+
+// envoy.enabled switches a session's Envoy, not the server's, so the server reads envoy.natsUrls
+// from a section that is off.
+func TestLoadReadsNatsURLsFromAnEnvoySectionThatIsOff(t *testing.T) {
+	home := t.TempDir()
+	mustWrite(t, userFile(home), `{"envoy": {"enabled": false, "natsUrls": ["nats://user:4222"]}}`)
+	cfg, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if got := strings.Join(cfg.Envoy.NatsURLs, ","); got != "nats://user:4222" {
+		t.Errorf("envoy.natsUrls: got %q, want nats://user:4222", got)
 	}
 }
 

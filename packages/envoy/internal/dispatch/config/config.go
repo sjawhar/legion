@@ -1,6 +1,8 @@
 // Package config loads envoy.json, the configuration file the Dispatch and Envoy clients and the
 // Dispatch server share. The user file, ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json, is
-// shallow-merged with the checkout's file, <cwd>/.envoy/envoy.json, the checkout's file winning.
+// shallow-merged with the checkout's file, <cwd>/.envoy/envoy.json, the checkout's dispatch keys
+// winning. A checkout's file may hold no envoy section: a cloned repository does not choose the
+// NATS servers a process connects to.
 package config
 
 import (
@@ -75,11 +77,14 @@ func (e *InvalidConfigError) Error() string {
 // overrides from environment, which answers as os.LookupEnv does: a variable that is set overrides
 // the files, and one set but empty is refused. environment also names XDG_CONFIG_HOME, the
 // directory holding the user file's legion directory: unset or empty, it is ~/.config, and a value
-// that is not an absolute path is refused, as os.UserConfigDir and the XDG spec refuse it.
-// envoy-dispatch hands Load its settings table's lookup; any other caller names the environment
-// it means. A missing file is not an error, except that a user file still at its OpenCode-era
-// path, ~/.config/opencode/envoy.json, with none at the current one is refused, naming both. A
-// file that exists but fails validation (an unrecognized key, a malformed value) stops the load
+// that is not an absolute path is refused. The XDG Base Directory spec says to ignore such a value;
+// os.UserConfigDir refuses it, and so does Load, rather than read a file found from wherever the
+// process started or fall back silently. envoy-dispatch hands Load its settings table's lookup; any
+// other caller names the environment it means. A missing file is not an error, except that while
+// the user file is ~/.config/legion/envoy.json (XDG_CONFIG_HOME unset, empty or ~/.config) and
+// none is there, a user file still at its OpenCode-era path beside it,
+// ~/.config/opencode/envoy.json, is refused, naming both. A file that exists but fails validation
+// (an unrecognized key, a malformed value, an envoy section in the checkout's file) stops the load
 // and returns an *InvalidConfigError naming the file and the key.
 func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
@@ -108,18 +113,21 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 
 	merged := &EnvoyConfig{}
 	userPath := filepath.Join(configHome, "legion", "envoy.json")
-	userCfg, err := readConfigFile(userPath)
+	userCfg, err := readConfigFile(userPath, "")
 	if err != nil {
 		return nil, err
 	}
-	if userCfg == nil {
+	switch {
+	case userCfg != nil:
+		merged = userCfg
+	case userPath == filepath.Join(home, ".config", "legion", "envoy.json"):
+		// The old file is the user's only beside its own directory: an XDG_CONFIG_HOME naming another
+		// directory is not where it belongs.
 		if err := refuseOpenCodeUserFile(filepath.Join(home, ".config", "opencode", "envoy.json"), userPath); err != nil {
 			return nil, err
 		}
-	} else {
-		merged = mergeConfig(merged, userCfg)
 	}
-	checkoutCfg, err := readConfigFile(filepath.Join(cwd, ".envoy", "envoy.json"))
+	checkoutCfg, err := readConfigFile(filepath.Join(cwd, ".envoy", "envoy.json"), userPath)
 	if err != nil {
 		return nil, err
 	}
@@ -189,7 +197,10 @@ func natsURLs(raw string) ([]string, error) {
 	return values, nil
 }
 
-func readConfigFile(path string) (*EnvoyConfig, error) {
+// readConfigFile reads one envoy.json, or nil when there is none. checkoutOf is empty for the user
+// file; for a checkout's file it is the user file's path, where the envoy section a checkout's file
+// may not hold belongs.
+func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
@@ -197,17 +208,18 @@ func readConfigFile(path string) (*EnvoyConfig, error) {
 		}
 		return nil, err
 	}
-	cfg, issues := parseAndValidate(data)
+	cfg, issues := parseAndValidate(data, checkoutOf)
 	if len(issues) > 0 {
 		return nil, &InvalidConfigError{Path: path, Issues: issues}
 	}
 	return cfg, nil
 }
 
-// parseAndValidate mirrors the TS validator (envoy-client/src/dispatch-config.ts):
-// type checks, unknown-key rejection under dispatch and envoy, URL validity, and the refusal of
-// the top-level natsUrls, which is envoy.natsUrls.
-func parseAndValidate(data []byte) (*EnvoyConfig, []string) {
+// parseAndValidate mirrors the TS validator (envoy-client/src/envoy-config.ts): type checks,
+// unknown-key rejection under dispatch and envoy, URL validity, the refusal of the top-level
+// natsUrls, which is envoy.natsUrls, and, for a checkout's file (checkoutOf set), the refusal of
+// any envoy section, naming the user file it belongs in.
+func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, []string{fmt.Sprintf(": %v", err)}
@@ -235,9 +247,13 @@ func parseAndValidate(data []byte) (*EnvoyConfig, []string) {
 		delete(raw, "dispatch")
 	}
 	if v, ok := raw["envoy"]; ok {
-		e, eIssues := parseEnvoy(v)
-		issues = append(issues, eIssues...)
-		cfg.Envoy = e
+		if checkoutOf != "" {
+			issues = append(issues, "envoy: not read from a checkout's envoy.json; put it in "+checkoutOf)
+		} else {
+			e, eIssues := parseEnvoy(v)
+			issues = append(issues, eIssues...)
+			cfg.Envoy = e
+		}
 		delete(raw, "envoy")
 	}
 	for k, v := range raw {
@@ -330,8 +346,9 @@ func parseEnvoy(raw json.RawMessage) (EnvoySection, []string) {
 	return out, issues
 }
 
-// mergeConfig shallow-merges base + override. The `dispatch` and `envoy` sub-objects are also
-// shallow-merged so checkout keys override only matching user keys.
+// mergeConfig shallow-merges a checkout's file over the user file. The `dispatch` sub-object is
+// also shallow-merged so checkout keys override only matching user keys; a checkout's file holds
+// no envoy section (parseAndValidate), so the user file's stands.
 func mergeConfig(base, override *EnvoyConfig) *EnvoyConfig {
 	out := &EnvoyConfig{
 		Schema:   base.Schema,
@@ -344,9 +361,6 @@ func mergeConfig(base, override *EnvoyConfig) *EnvoyConfig {
 	}
 	if override.Schema != "" {
 		out.Schema = override.Schema
-	}
-	if override.Envoy.NatsURLs != nil {
-		out.Envoy.NatsURLs = override.Envoy.NatsURLs
 	}
 	for k, v := range override.Extra {
 		out.Extra[k] = v
