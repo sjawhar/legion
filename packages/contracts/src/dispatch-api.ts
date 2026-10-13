@@ -668,12 +668,20 @@ export interface Version {
 export type AskKind = "question" | "approval";
 
 /** The document and version an approval ask names. `requested_version` is the version the agent
- *  last handed to the human; a lower value means the agent is revising the moved request. */
+ *  last handed to the human; a lower value means the agent is revising the moved request.
+ *  `approved_version`, `approved_at` and `approved_by` name the document's newest approval when the
+ *  request was opened - the version a human approved, when (RFC 3339 UTC, the review's
+ *  `created_at`) and who - so a request to approve again says which approval it follows; all
+ *  three are absent on a request for a document nobody has approved. A version move re-encodes
+ *  the whole approval, so they survive it unchanged. */
 export interface AskApproval {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: number;
   readonly requested_version: number;
+  readonly approved_version?: number;
+  readonly approved_at?: string;
+  readonly approved_by?: Actor;
 }
 
 export interface Ask extends AnchorPosition {

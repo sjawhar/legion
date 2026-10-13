@@ -1,0 +1,99 @@
+package docs
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
+)
+
+// An approval ask's fixed options: the labels a human's answer is matched against, and the ones
+// the approval request route offers.
+const (
+	ApprovalOptionApprove        = "Approve"
+	ApprovalOptionRequestChanges = "Request changes"
+)
+
+// ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
+const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at`
+
+// ScanReview decodes one ReviewColumns row.
+func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
+	var review model.ArtifactReview
+	var actor []byte
+	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &actor, &review.Reason, &review.AskID, &review.CreatedAt); err != nil {
+		return model.ArtifactReview{}, err
+	}
+	if err := json.Unmarshal(actor, &review.Actor); err != nil {
+		return model.ArtifactReview{}, fmt.Errorf("decode review actor: %w", err)
+	}
+	return review, nil
+}
+
+// WriteReview records a review of artifact pinned to version and appends its event,
+// artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
+// belongs to one, else the document itself. askID is the approval ask the review answers, nil
+// when it was given from the document header with no request open. The caller owns the
+// transaction and publishes the event.
+func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
+	actorJSON, err := json.Marshal(actor)
+	if err != nil {
+		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("encode review actor: %w", err)
+	}
+	review, err := ScanReview(tx.QueryRow(ctx, `
+		insert into artifact_reviews (artifact_id, version, state, actor, reason, ask_id)
+		values ($1, $2, $3, $4, $5, $6)
+		returning `+ReviewColumns, artifact.ID, version, state, actorJSON, reason, askID))
+	if err != nil {
+		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("insert artifact review: %w", err)
+	}
+	eventType := "artifact.approved"
+	if state == "changes_requested" {
+		eventType = "artifact.changes_requested"
+	}
+	event := model.Event{
+		Type: eventType, Actor: actor,
+		Payload: model.ArtifactReviewEventPayload{
+			ArtifactID: artifact.ID,
+			Name:       artifact.Name,
+			Version:    version,
+			Actor:      actor,
+			Reason:     reason,
+			AskID:      askID,
+		},
+	}
+	if artifact.IssueKey != nil {
+		event.IssueKey = new(*artifact.IssueKey)
+	} else {
+		event.ArtifactID = new(artifact.ID)
+	}
+	event, err = broker.Append(ctx, tx, event)
+	if err != nil {
+		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("append %s: %w", eventType, err)
+	}
+	return review, event, nil
+}
+
+// LatestApprovedReview is the newest approval of artifactID, whoever gave it, or nil when nobody
+// has approved the document at any version.
+func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
+	review, err := ScanReview(q.QueryRow(ctx, `
+		select `+ReviewColumns+`
+		from artifact_reviews
+		where artifact_id = $1 and state = 'approved'
+		order by created_at desc, id desc
+		limit 1
+	`, artifactID))
+	if err == nil {
+		return &review, nil
+	}
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("read latest approved review: %w", err)
+}
