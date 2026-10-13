@@ -129,7 +129,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 
 	merged := &EnvoyConfig{}
 	userPath := filepath.Join(configHome, "legion", "envoy.json")
-	userCfg, err := readConfigFile(userPath, "")
+	userCfg, err := readConfigFile(userPath, userKind, userPath)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 		}
 	}
 	checkoutPath := filepath.Join(cwd, ".envoy", "envoy.json")
-	checkoutCfg, err := readConfigFile(checkoutPath, userPath)
+	checkoutCfg, err := readConfigFile(checkoutPath, checkoutKind, userPath)
 	if err != nil {
 		return nil, err
 	}
@@ -226,11 +226,20 @@ func natsURLs(raw string) ([]string, error) {
 	return values, nil
 }
 
+// fileKind says which envoy.json a read is for.
+type fileKind int
+
+const (
+	// userKind is the user's own envoy.json, which may hold both sections.
+	userKind fileKind = iota
+	// checkoutKind is a checkout's .envoy/envoy.json, which may hold a dispatch section alone.
+	checkoutKind
+)
+
 // readConfigFile reads one envoy.json, or nil when there is none: a missing file, or a path through
-// a regular file (a repository with a file named .envoy). checkoutOf is empty for the user file;
-// for a checkout's file it is the user file's path, where the envoy section a checkout's file may
-// not hold belongs.
-func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
+// a regular file (a repository with a file named .envoy). A checkout's file names userPath, the user
+// file, where the envoy section it may not hold belongs.
+func readConfigFile(path string, kind fileKind, userPath string) (*EnvoyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
@@ -238,7 +247,7 @@ func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 		}
 		return nil, err
 	}
-	cfg, issues := parseAndValidate(data, checkoutOf)
+	cfg, issues := parseAndValidate(data, kind, userPath)
 	if len(issues) > 0 {
 		return nil, &InvalidConfigError{Path: path, Issues: issues}
 	}
@@ -268,9 +277,8 @@ func jsonError(data []byte, err error) string {
 // parseAndValidate mirrors the TS validator (envoy-client/src/envoy-config.ts): an object at the
 // top, type checks with null refused, unknown-key rejection under dispatch and envoy, http(s) URLs,
 // non-empty NATS URLs, the refusal of the top-level natsUrls, which is envoy.natsUrls, and, for a
-// checkout's file (checkoutOf set), the refusal of any envoy section, naming the user file it
-// belongs in.
-func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
+// checkout's file, the refusal of any envoy section, naming userPath, the user file it belongs in.
+func parseAndValidate(data []byte, kind fileKind, userPath string) (*EnvoyConfig, []string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, []string{jsonError(data, err)}
@@ -286,7 +294,7 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 		issues = append(issues, checkType("$schema", "string", v, &s)...)
 	}
 	if _, ok := raw["natsUrls"]; ok {
-		if checkoutOf != "" {
+		if kind == checkoutKind {
 			issues = append(issues, "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section")
 		} else {
 			issues = append(issues, "natsUrls: no longer read; write it as envoy.natsUrls")
@@ -298,8 +306,8 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 		cfg.Dispatch = d
 	}
 	if v, ok := raw["envoy"]; ok {
-		if checkoutOf != "" {
-			issues = append(issues, "envoy: not read from a checkout's envoy.json; put it in "+checkoutOf)
+		if kind == checkoutKind {
+			issues = append(issues, "envoy: not read from a checkout's envoy.json; put it in "+userPath)
 		} else {
 			e, eIssues := parseEnvoy(v)
 			issues = append(issues, eIssues...)
