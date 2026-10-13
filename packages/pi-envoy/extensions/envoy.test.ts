@@ -8091,6 +8091,57 @@ describe("envoy OMP extension", () => {
     });
   }
 
+  // The daemon sends a role's every task and notice to its role topic, which reaches a session only
+  // over NATS: a claim with inbound off would hold the role and report ready while every delivery
+  // to it goes nowhere. It refuses before any listener call, so nothing is registered or claimed.
+  for (const { slug, name, configure } of [
+    {
+      slug: "seed-refused",
+      name: "its NATS seed refused (NATS_NKEY_SEED_FILE names a missing file)",
+      configure: () => {
+        const missing = join(configDirectory, "missing-seed");
+        process.env.NATS_NKEY_SEED_FILE = missing;
+        return `NATS_NKEY_SEED_FILE names ${missing}, which could not be read: ENOENT: no such file or directory, open '${missing}'`;
+      },
+    },
+    {
+      slug: "no-nats",
+      name: "no NATS server",
+      configure: () => {
+        delete process.env.ENVOY_NATS_URL;
+        return "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+      },
+    },
+  ]) {
+    test(`with ${name}, the Legion claim refuses naming why, before any listener call`, async () => {
+      const why = configure();
+      const requests: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const { pathname } = new URL(input.toString());
+        requests.push(pathname);
+        if (pathname !== "/v1/roles/set") return responseWithRegistration(input, init, {});
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly role?: string };
+        return response({
+          session_id: "ses_claim_inbound_off",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${body.role ?? ""}`],
+        });
+      };
+      const { default: envoyExtension } = await import(`./envoy.ts?claim-inbound-off-${slug}`);
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionContext("ses_claim_inbound_off");
+      await fixture.handlers.get("session_start")?.({}, context);
+
+      await expect(
+        claimEnvoyRole("ses_claim_inbound_off", "legion-omp-repo-1-implementer", context)
+      ).rejects.toThrow(`inbound messages are off for this session: ${why}`);
+      expect(requests).toEqual([]);
+      expect(natsState.connects).toEqual([]);
+    });
+  }
+
   test("retries NATS in the background when the initial connection fails", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     natsState.failConnects = 1;

@@ -437,7 +437,7 @@ export default function envoyExtension(pi: PiApi): void {
   // Inbound messages arrive over NATS: an Envoy with no NATS server, or whose seed was refused,
   // takes none, and its tools, which call the listener, still work. The start notice says so
   // (`sessionSettings`), with why a section is off, once, and `envoy_subscribe` and the Legion
-  // interface's `subscribe` refuse naming why (`ensureConnection`).
+  // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
   const inbound = envoy.enabled && envoy.natsUrls.length > 0;
   const startNotice = atStart.notice ?? "";
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
@@ -695,16 +695,23 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
   registerEnvoyMessageRenderer(pi);
 
-  // Refuses, saying why inbound messages are off, when Envoy has no NATS server: nats.js dials
-  // 127.0.0.1:4222 when handed none, which would attach this session to whatever NATS runs there.
-  const ensureConnection = async (): Promise<NatsConnection> => {
-    if (connection?.isClosed() === false) return connection;
+  // Refuses, saying why inbound messages are off, when Envoy has no NATS server or refused its
+  // seed. A subscription and a Legion claim both ask it first: nats.js dials 127.0.0.1:4222 when
+  // handed no server, which would attach this session to whatever NATS runs there, and a role's
+  // every task and notice reaches its holder only over NATS.
+  const requireInbound = (): NonNullable<typeof active>["settings"] => {
     const { settings } = requireEnvoy();
     if (settings.natsUrls.length === 0) {
       throw new Error(
         `inbound messages are off for this session: ${settings.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)"}`
       );
     }
+    return settings;
+  };
+
+  const ensureConnection = async (): Promise<NatsConnection> => {
+    if (connection?.isClosed() === false) return connection;
+    const settings = requireInbound();
     connection = await connect({
       servers: [...settings.natsUrls],
       name: `omp-${sessionID || "unknown"}`,
@@ -1689,6 +1696,10 @@ export default function envoyExtension(pi: PiApi): void {
     // Recorded before the claim runs: a claim that fails midway leaves the session just as
     // Legion-driven as one that succeeds.
     markLegionManagedSession(targetSessionID);
+    // The role's every task and notice reaches its holder over NATS: with inbound messages off,
+    // a held role would take them all and deliver none, so the claim refuses before any listener
+    // call registers the session or sets the role.
+    requireInbound();
     if (sessionID !== targetSessionID) await establishSession(context);
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
