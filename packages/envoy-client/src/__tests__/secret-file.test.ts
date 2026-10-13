@@ -24,4 +24,22 @@ describe("readSecretFile", () => {
       `DISPATCH_TOKEN_FILE names ${empty}, which is empty`
     );
   });
+
+  // A multi-line secret cannot be one bearer, and fetch's refusal of the header would quote it.
+  test("throws naming the variable and path, never the secret, for one with whitespace inside", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "secret-file-"));
+    for (const contents of ["S3CRET\nnotes\n", "S3CRET TOKEN", "S3CRET\u0000"]) {
+      const file = path.join(dir, "token");
+      writeFileSync(file, contents);
+      let message = "";
+      try {
+        readSecretFile("ENVOY_TOKEN_FILE", file);
+      } catch (error) {
+        message = error instanceof Error ? error.message : String(error);
+      }
+      expect(message).toBe(
+        `ENVOY_TOKEN_FILE names ${file}, which holds whitespace or a control character`
+      );
+    }
+  });
 });

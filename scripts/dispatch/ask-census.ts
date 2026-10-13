@@ -7,11 +7,9 @@ import type {
   DispatchEvent,
   Issue,
 } from "../../packages/contracts/src/dispatch-api";
-import {
-  type ActiveDispatchConfig,
-  activeDispatchConfig,
-} from "../../packages/envoy-client/src/dispatch-config";
+import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
 import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
+import { resolveDispatchConfig } from "../../packages/envoy-client/src/session-settings";
 
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
 const EVENT_PAGE_SIZE = 200;
@@ -447,12 +445,15 @@ export async function censusIssues(
 }
 
 async function run(options: CensusOptions): Promise<void> {
-  const config = activeDispatchConfig(process.env, { harness: "command" });
-  if (config === null) {
+  const resolution = resolveDispatchConfig(process.env, { harness: "command" });
+  if (!resolution.enabled) {
     throw new Error(
-      "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in the envoy.json a command reads (ENVOY_CONFIG_FILE, or ~/.config/legion/envoy.json)"
+      resolution.error === null
+        ? `Dispatch is not configured: ${resolution.notice}`
+        : `dispatch config: ${resolution.error}`
     );
   }
+  const config = resolution;
   const codes =
     options.codesPath === undefined ? {} : parseCodes(await readFile(options.codesPath, "utf8"));
   // Without limit or offset the issues route answers every matching issue in one array, so this

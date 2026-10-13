@@ -5,7 +5,9 @@ import { messageFor } from "./errors";
  * daemon hands every pane secret over this way (a 0600 file under its state directory) instead of
  * as a `-e KEY=VALUE` tmux argv, which is world-readable via `/proc`. A set pointer is a claim the
  * daemon made, so a missing, unreadable, or blank file throws naming the variable and the path —
- * callers never fall back to the plain variable or a config file. */
+ * callers never fall back to the plain variable or a config file. So does a secret with
+ * whitespace or a control character inside it, which cannot be sent as one bearer and would reach
+ * a `fetch` error quoting it; no error carries the secret. */
 export function readSecretFile(variable: string, filePath: string): string {
   let contents: string;
   try {
@@ -15,5 +17,8 @@ export function readSecretFile(variable: string, filePath: string): string {
   }
   const value = contents.trim();
   if (value.length === 0) throw new Error(`${variable} names ${filePath}, which is empty`);
+  if (/[\s\p{Cc}]/u.test(value)) {
+    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
+  }
   return value;
 }

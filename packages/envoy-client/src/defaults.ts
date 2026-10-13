@@ -1,8 +1,15 @@
 import {
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
+  type EnvoyFileSettings,
   fileValue,
-  sectionSwitch,
+  httpUrl,
+  missingConfigNotice,
+  nonEmpty,
+  offWithError,
+  offWithNotice,
+  type SectionOff,
+  unsendableRefusal,
 } from "./envoy-config";
 import { messageFor } from "./errors";
 import { readSecretFile } from "./secret-file";
@@ -66,143 +73,146 @@ export interface EnabledEnvoySettings {
   readonly heartbeatMs: number;
 }
 
-/** No Envoy: `notice` says why, or `error` names what could not be read or used. */
-export interface DisabledEnvoySettings {
-  readonly enabled: false;
-  readonly notice: string | null;
-  readonly error: string | null;
-}
+/** No Envoy: a `notice` says why, or an `error` names what could not be read or used. */
+export type DisabledEnvoySettings = SectionOff;
 
 export type EnvoySettings = EnabledEnvoySettings | DisabledEnvoySettings;
 
-function disabled(error: string): DisabledEnvoySettings {
-  return { enabled: false, notice: null, error };
+/** The listener's bearer: `ENVOY_TOKEN_FILE`, then `ENVOY_TOKEN`, then the section's `token`,
+ * which goes with `ENVOY_URL` only when that names the origin of the section's own listener.
+ * Throws naming what could not be read or used. */
+function listenerToken(
+  env: EnvoyEnvironment,
+  section: EnvoyFileSettings,
+  namedUrl: string | undefined,
+  filePath: string
+): string | undefined {
+  const pointer = nonEmpty(env.ENVOY_TOKEN_FILE);
+  if (pointer !== undefined) return readSecretFile("ENVOY_TOKEN_FILE", pointer);
+  const plain = nonEmpty(env.ENVOY_TOKEN);
+  if (plain !== undefined) {
+    const refusal = unsendableRefusal("ENVOY_TOKEN", plain);
+    if (refusal !== null) throw new Error(refusal);
+    return plain;
+  }
+  if (section.token === undefined) return undefined;
+  if (namedUrl !== undefined) {
+    const named = httpUrl(namedUrl)?.origin;
+    const listener = httpUrl(section.url ?? DEFAULT_ENVOY_URL)?.origin;
+    if (named !== listener) {
+      throw new Error(
+        `ENVOY_URL names ${named}, but ${filePath}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
+      );
+    }
+  }
+  return fileValue(section.token, "envoy.token", filePath, env);
+}
+
+/** The NATS user's seed: `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the section's
+ * `natsSeed`, which goes only with the section's own servers: `ENVOY_NATS_URL`, the only way to
+ * name others, must name exactly them (as a set). Throws naming what could not be read or used. */
+function natsCredential(
+  env: EnvoyEnvironment,
+  section: EnvoyFileSettings,
+  namedNatsUrls: readonly string[],
+  filePath: string
+): NatsSeed | undefined {
+  const fromEnvironment = natsSeedFromEnvironment(env);
+  if (fromEnvironment !== undefined || section.natsSeed === undefined) return fromEnvironment;
+  if (namedNatsUrls.length > 0) {
+    const servers = new Set(section.natsUrls ?? []);
+    const named = new Set(namedNatsUrls);
+    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
+      throw new Error(
+        `ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
+      );
+    }
+  }
+  return {
+    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
+    source: `envoy.natsSeed in ${filePath}`,
+  };
 }
 
 /**
  * The Envoy a session uses, from `config` (`readEnvoyConfig`) and the environment.
  *
- * Envoy is configured only by the chosen file and the variables: a checkout's `envoy` section
- * (`checkout.envoyError`) turns Envoy off with that error, so a cloned repository never chooses
- * where a session's deliveries come from. A file that turns Envoy off (`sectionSwitch`) wins.
+ * Envoy is configured only by the chosen file and the variables: a checkout's file has no say in
+ * it, so a cloned repository never chooses where a session's deliveries come from, nor turns off
+ * the Envoy the session's environment configured. The chosen file's `envoy.enabled: false` wins.
  * Otherwise each variable overrides its own field of the chosen file's enabled `envoy` section:
  * `ENVOY_URL` the listener (`url`), `ENVOY_NATS_URL` (comma-separated) the NATS servers
  * (`natsUrls`), `ENVOY_TOKEN_FILE` (trimmed file contents, how the Legion daemon delivers it) then
  * `ENVOY_TOKEN` the listener's bearer (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED`
  * the NATS user's seed (`natsSeed`, resolved only when there are NATS servers to use it on). An
- * empty variable counts as unset. With no enabled section, `ENVOY_URL` or `ENVOY_NATS_URL` alone
- * names an Envoy; with neither, Envoy is off. A set pointer that cannot be read is an `error`,
- * never a fallback.
+ * empty `ENVOY_*` variable counts as unset; an empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is
+ * refused, naming it (`natsSeedFromEnvironment`). With no enabled section, `ENVOY_URL` or
+ * `ENVOY_NATS_URL` alone names an Envoy; with neither, Envoy is off with a notice. A set pointer
+ * that cannot be read is an `error`, never a fallback.
  *
- * The file's token goes with `ENVOY_URL` only when it names the origin of the listener written in
- * the file; any other listener needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. The file's seed goes
- * only with the servers written in the file: nkey sign-in sends no seed, but a server that is not
- * the real one can relay the real server's nonce and replay the signature. So `ENVOY_NATS_URL`
- * gets the file's seed only when it names the file's servers (as a set); a seed from the variables
- * goes with whatever servers resolve. The file's `!` token and seed run here, only when Envoy uses
- * them.
+ * Same server only: the file's token goes with `ENVOY_URL` only when it names the origin of the
+ * listener written in the file (or the default listener when it names none); any other listener
+ * needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. The file's seed goes only with the servers written in
+ * the file: nkey sign-in sends no seed, but a server that is not the real one can relay the real
+ * server's nonce and replay the signature. So `ENVOY_NATS_URL` gets the file's seed only when it
+ * names the file's servers (as a set); a seed from the variables goes with whatever servers
+ * resolve. The file's `!` token and seed run here, only when Envoy uses them.
+ *
+ * A caller that opens no NATS connection (`nats: false`, OpenCode's plugin) gets no NATS servers
+ * and resolves no seed, so a seed it would never send can neither run a command nor turn it off.
  */
-export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): EnvoySettings {
-  if (config.error !== null) return disabled(config.error);
-  if (config.checkout !== null && config.checkout.envoyError !== null) {
-    return disabled(config.checkout.envoyError);
+export function envoySettings(
+  env: EnvoyEnvironment,
+  config: EnvoyConfig,
+  options: { readonly nats?: boolean | undefined } = {}
+): EnvoySettings {
+  if (config.kind === "failed") return offWithError(config.error);
+  const own = config.envoy;
+  if (own.enabled === false) {
+    return offWithNotice(`${config.path} sets envoy.enabled to false: Envoy is off`);
   }
-  const state = sectionSwitch(config, "envoy", env);
-  if (state.offBy !== null) {
-    return {
-      enabled: false,
-      notice: `${state.offBy} sets envoy.enabled to false: Envoy is off`,
-      error: null,
-    };
-  }
-  const namedUrl = env.ENVOY_URL === "" ? undefined : env.ENVOY_URL;
+  const namedUrl = nonEmpty(env.ENVOY_URL);
   const namedNatsUrls = (env.ENVOY_NATS_URL ?? "")
     .split(",")
     .map((url) => url.trim())
     .filter((url) => url.length > 0);
-  if (!state.enabled && namedUrl === undefined && namedNatsUrls.length === 0) {
-    return {
-      enabled: false,
-      notice:
-        config.notice ??
-        `${config.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`,
-      error: null,
-    };
+  if (own.enabled !== true && namedUrl === undefined && namedNatsUrls.length === 0) {
+    return offWithNotice(
+      config.missing === null
+        ? `${config.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`
+        : missingConfigNotice(config.path, config.missing, "Envoy is off")
+    );
+  }
+  if (namedUrl !== undefined && httpUrl(namedUrl) === undefined) {
+    return offWithError("ENVOY_URL must be an http or https URL");
   }
   // The file's values count only for an enabled section.
-  const own = state.enabled ? config.envoy : {};
-
-  const url = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
-  let token: string | undefined;
-  const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
-  if (tokenPointer !== undefined) {
-    try {
-      token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
-    } catch (error) {
-      return disabled(messageFor(error));
-    }
-  } else if (env.ENVOY_TOKEN) {
-    token = env.ENVOY_TOKEN;
-  } else if (own.token !== undefined) {
-    if (namedUrl !== undefined) {
-      let named: string;
-      try {
-        named = new URL(namedUrl).origin;
-      } catch {
-        return disabled("ENVOY_URL must be a valid URL");
-      }
-      const listener = new URL(own.url ?? DEFAULT_ENVOY_URL).origin;
-      if (named !== listener) {
-        return disabled(
-          `ENVOY_URL names ${named}, but ${config.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
-        );
-      }
-    }
-    try {
-      token = fileValue(own.token, "envoy.token", config.path, env);
-    } catch (error) {
-      return disabled(messageFor(error));
-    }
+  const section = own.enabled === true ? own : {};
+  const natsUrls =
+    options.nats === false
+      ? []
+      : namedNatsUrls.length > 0
+        ? namedNatsUrls
+        : (section.natsUrls ?? []);
+  try {
+    const token = listenerToken(env, section, namedUrl, config.path);
+    const natsSeed =
+      natsUrls.length > 0 ? natsCredential(env, section, namedNatsUrls, config.path) : undefined;
+    const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+    return {
+      enabled: true,
+      url: normalizeEnvoyUrl(namedUrl ?? section.url ?? DEFAULT_ENVOY_URL),
+      natsUrls,
+      token,
+      natsSeed,
+      heartbeatMs:
+        Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
+          ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
+          : DEFAULT_HEARTBEAT_MS,
+    };
+  } catch (error) {
+    return offWithError(messageFor(error));
   }
-
-  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : (own.natsUrls ?? []);
-  let natsSeed: NatsSeed | undefined;
-  if (natsUrls.length > 0) {
-    try {
-      natsSeed = natsSeedFromEnvironment(env);
-    } catch (error) {
-      return disabled(messageFor(error));
-    }
-    if (natsSeed === undefined && own.natsSeed !== undefined) {
-      // Without ENVOY_NATS_URL the servers are the file's own, so only it can name others.
-      const servers = new Set((own.natsUrls ?? []).map((server) => server.trim()));
-      const used = new Set(natsUrls.map((server) => server.trim()));
-      if (used.size !== servers.size || ![...used].every((server) => servers.has(server))) {
-        return disabled(
-          `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
-        );
-      }
-      try {
-        const value = fileValue(own.natsSeed, "envoy.natsSeed", config.path, env);
-        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config.path}` };
-      } catch (error) {
-        return disabled(messageFor(error));
-      }
-    }
-  }
-
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
-  return {
-    enabled: true,
-    url: normalizeEnvoyUrl(url),
-    natsUrls,
-    token,
-    natsSeed,
-    heartbeatMs:
-      Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
-        ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
-        : DEFAULT_HEARTBEAT_MS,
-  };
 }
 
 export function normalizeEnvoyUrl(value: string): string {

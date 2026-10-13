@@ -668,54 +668,64 @@ describe("the dispatch CLI's envoy.json", () => {
     return dir;
   }
 
-  test("omp reads its named profile's envoy.json, ahead of ENVOY_CONFIG_FILE and every other harness's directory", async () => {
+  // Each plugin sets DISPATCH_HOST and ENVOY_CONFIG_FILE together in its session's shell: that pair
+  // is the session's own hand-off, read over whatever harness variables the shell also inherited.
+  test("with DISPATCH_HOST set, reads the file ENVOY_CONFIG_FILE names, whatever the harness variables name", async () => {
+    const handed = serverConfig(join(stateDir, "handed"));
+    // An omp session on the default profile started from a named profile's shell: omp leaves the
+    // parent's OMP_PROFILE and PI_CODING_AGENT_DIR in its shell, and its plugin read the neutral file.
+    const nestedDefault = await run(["projects"], {
+      ...fromFile,
+      OMP_PROFILE: "other",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+      ENVOY_CONFIG_FILE: handed,
+    });
+    expect(nestedDefault.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    expect(nestedDefault.code).toBe(0);
+    // A named Claude Code profile whose shell's rc file exported another CLAUDE_CONFIG_DIR over
+    // the profile's: the hook handed the profile's file.
+    const namedClaude = await run(["projects"], {
+      ...fromFile,
+      DISPATCH_HOST: "claude",
+      CLAUDE_CODE_SESSION_ID: "ses-1",
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+      ENVOY_CONFIG_FILE: handed,
+    });
+    expect(namedClaude.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    // OpenCode likewise.
+    const opencode = await run(["projects"], {
+      ...fromFile,
+      DISPATCH_HOST: "opencode",
+      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
+      ENVOY_CONFIG_FILE: handed,
+    });
+    expect(opencode.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+  });
+
+  test("with DISPATCH_HOST set and no ENVOY_CONFIG_FILE, each host takes its own harness's directory and no other's, else the neutral file", async () => {
+    const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
+    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
     const profile = join(stateDir, "profile");
     serverConfig(profile);
-    const { code, stdout } = await run(["projects"], {
+    const ompRun = await run(["projects"], {
       ...fromFile,
       OMP_PROFILE: "work",
       PI_CODING_AGENT_DIR: profile,
-      ENVOY_CONFIG_FILE: join(brokenConfigDirectory(), "envoy.json"),
       CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
       OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
     });
-    expect(stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-    expect(code).toBe(0);
-  });
+    expect(ompRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
-  test("each host reads its own harness's directory and no other's, else ENVOY_CONFIG_FILE, else the neutral file", async () => {
-    const file = serverConfig(join(stateDir, "handed"));
-    const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
-    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
-    const others = {
-      omp: {
-        CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-        OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
-      },
-      claude: {
-        OMP_PROFILE: "work",
-        PI_CODING_AGENT_DIR: brokenConfigDirectory(),
-        OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
-      },
-      opencode: {
-        OMP_PROFILE: "work",
-        PI_CODING_AGENT_DIR: brokenConfigDirectory(),
-        CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
-      },
-    };
-    for (const [host, environment] of [
-      [fromFile, others.omp],
-      [claude, others.claude],
-      [opencode, others.opencode],
-    ] as const) {
-      const handed = await run(["projects"], {
-        ...fromFile,
-        ...host,
-        ...environment,
-        ENVOY_CONFIG_FILE: file,
-      });
-      expect(handed.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
-    }
+    const claudeDirectory = join(stateDir, "claude-own");
+    serverConfig(claudeDirectory);
+    const claudeRun = await run(["projects"], {
+      ...fromFile,
+      ...claude,
+      CLAUDE_CONFIG_DIR: claudeDirectory,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+    });
+    expect(claudeRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
     const own = join(stateDir, "opencode");
     serverConfig(own);
@@ -723,13 +733,36 @@ describe("the dispatch CLI's envoy.json", () => {
       ...fromFile,
       ...opencode,
       OPENCODE_CONFIG_DIR: own,
-      ENVOY_CONFIG_FILE: join(brokenConfigDirectory(), "envoy.json"),
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
     });
     expect(ownRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
 
     serverConfig(join(stateDir, ".config", "legion"));
-    const neutral = await run(["projects"], { ...fromFile, ...others.omp });
+    const neutral = await run(["projects"], {
+      ...fromFile,
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
+    });
     expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+  });
+
+  // An omp session started from a Claude Code Bash inherits CLAUDE_CODE_CHILD_SESSION=1, and its
+  // plugin sets DISPATCH_HOST=omp: the command acts as the omp session on omp's file.
+  test("DISPATCH_HOST wins over CLAUDE_CODE_CHILD_SESSION=1", async () => {
+    const profile = join(stateDir, "profile");
+    serverConfig(profile);
+    const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "hello"], {
+      ...fromFile,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: profile,
+      CLAUDE_CODE_CHILD_SESSION: "1",
+      CLAUDE_CODE_SESSION_ID: "claude-ses",
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(stdout).not.toStartWith("dispatch: ");
+    expect(code).toBe(0);
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/messages");
+    expect(posted?.body).toMatchObject({ actor: { id: "ses-1" } });
   });
 
   // Claude Code sets CLAUDE_CODE_CHILD_SESSION=1 in every Bash it runs, and a subagent's Bash gets
@@ -771,10 +804,22 @@ describe("the dispatch CLI's envoy.json", () => {
     expect(requests).toEqual([]);
   });
 
+  test("a file location that cannot be worked out is refused naming it, exit 2, sending nothing", async () => {
+    for (const [variables, refusal] of [
+      [{ XDG_CONFIG_HOME: "rel" }, "XDG_CONFIG_HOME is rel"],
+      [{ ENVOY_CONFIG_FILE: "envoy.json" }, "ENVOY_CONFIG_FILE is envoy.json"],
+    ] as const) {
+      const { code, stdout } = await run(["projects"], { ...fromFile, ...variables });
+      expect(stdout).toBe(`dispatch: ${refusal}, which is not an absolute path\n`);
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
+
   test("a missing file prints the notice and exits 2, sending nothing", async () => {
     const { code, stdout } = await run(["projects"], fromFile);
     expect(stdout).toBe(
-      `dispatch: no envoy.json at ${join(stateDir, ".config", "legion", "envoy.json")}: Dispatch and Envoy are off\n`
+      `dispatch: no envoy.json at ${join(stateDir, ".config", "legion", "envoy.json")}: Dispatch is off\n`
     );
     expect(code).toBe(2);
     expect(requests).toEqual([]);
@@ -786,7 +831,7 @@ describe("the dispatch CLI's envoy.json", () => {
     const file = join(dir, "envoy.json");
     writeFileSync(file, JSON.stringify({ dispatch: { enabled: false } }));
     const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
-    expect(stdout).toBe(`dispatch: ${file} turns Dispatch off (dispatch.enabled is false)\n`);
+    expect(stdout).toBe(`dispatch: ${file} sets dispatch.enabled to false: Dispatch is off\n`);
     expect(code).toBe(2);
     expect(requests).toEqual([]);
   });
@@ -802,7 +847,7 @@ describe("the dispatch CLI's envoy.json", () => {
       writeFileSync(file, JSON.stringify(contents));
       const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
       expect(stdout).toBe(
-        `dispatch: ${file} has no enabled dispatch section, and DISPATCH_URL is not set\n`
+        `dispatch: ${file} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off\n`
       );
       expect(code).toBe(2);
     }

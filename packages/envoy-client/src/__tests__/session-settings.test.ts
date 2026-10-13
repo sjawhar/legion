@@ -50,14 +50,34 @@ describe("sessionSettings", () => {
   test("a missing file turns both sections off with its notice", () => {
     const file = path.join(tempDir(), "envoy.json");
     expect(sessionSettings({ path: file, error: null }, {}, { cwd: tempDir() })).toEqual({
-      dispatch: { enabled: false, url: null, token: null, error: null },
+      dispatch: {
+        enabled: false,
+        notice: `no envoy.json at ${file}: Dispatch is off`,
+        error: null,
+      },
       envoy: {
         enabled: false,
-        notice: `no envoy.json at ${file}: Dispatch and Envoy are off`,
+        notice: `no envoy.json at ${file}: Envoy is off`,
         error: null,
       },
       notice: `no envoy.json at ${file}: Dispatch and Envoy are off`,
     });
+  });
+
+  // A checkout's file with its own server and token configures Dispatch for a user who has none.
+  test("a missing file beside a checkout that enables Dispatch: Dispatch on, Envoy off", () => {
+    const cwd = tempDir();
+    writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      dispatch: { enabled: true, serverUrl: "https://repo.internal.example", token: "repo-token" },
+    });
+    const missing = path.join(tempDir(), "envoy.json");
+    const settings = sessionSettings({ path: missing, error: null }, { HOME: tempDir() }, { cwd });
+    expect(settings.dispatch).toEqual({
+      enabled: true,
+      url: "https://repo.internal.example",
+      token: "repo-token",
+    });
+    expect(settings.notice).toBe(`no envoy.json at ${missing}: Envoy is off`);
   });
 
   test("with a missing file and a variable that turns Envoy on, the notice names Dispatch alone", () => {
@@ -83,7 +103,7 @@ describe("sessionSettings", () => {
       { cwd: tempDir() }
     );
     expect(settings.notice).toBe(
-      "Dispatch is off: dispatch.token must be a non-empty bearer token"
+      `Dispatch is off: DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${file}`
     );
 
     const envoyError = sessionSettings(
@@ -98,7 +118,7 @@ describe("sessionSettings", () => {
     expect(envoyError.notice).toStartWith("Envoy is off: ENVOY_TOKEN_FILE");
   });
 
-  test("a checkout's envoy section is said for Envoy alone, and Dispatch stays on", () => {
+  test("a checkout's envoy section is said, and neither section is touched by it", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), {
       dispatch: dispatchOn,
       envoy: envoyOn,
@@ -109,9 +129,31 @@ describe("sessionSettings", () => {
     });
     const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
     expect(settings.dispatch).toMatchObject({ enabled: true, url: "https://dispatch.example" });
-    expect(settings.envoy.enabled).toBe(false);
+    expect(settings.envoy).toMatchObject({ enabled: true, natsUrls: envoyOn.natsUrls });
     expect(settings.notice).toBe(
-      `Envoy is off: ${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`
+      `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`
+    );
+  });
+
+  test("a checkout's file that cannot be used is Dispatch's error, or said as not read while DISPATCH_URL replaces it", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: envoyOn,
+    });
+    const cwd = tempDir();
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), "{");
+    const quiet = sessionSettings({ path: file, error: null }, {}, { cwd });
+    expect(quiet.envoy.enabled).toBe(true);
+    expect(quiet.notice).toBe(`Dispatch is off: ${checkout}: invalid JSON at line 1, column 2`);
+
+    const pane = sessionSettings(
+      { path: file, error: null },
+      { DISPATCH_URL: "https://dispatch.example" },
+      { cwd }
+    );
+    expect(pane.dispatch).toMatchObject({ enabled: true, url: "https://dispatch.example" });
+    expect(pane.notice).toBe(
+      `${checkout}: invalid JSON at line 1, column 2; not read while DISPATCH_URL is set`
     );
   });
 
@@ -132,16 +174,18 @@ describe("sessionSettings", () => {
   test("a file that cannot be read turns both off with one error", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), "{");
     const settings = sessionSettings({ path: file, error: null }, {}, { cwd: tempDir() });
-    expect(settings.dispatch.enabled).toBe(false);
-    expect(settings.envoy.enabled).toBe(false);
-    expect(settings.dispatch.error).not.toBeNull();
-    expect(settings.notice).toBe(`${settings.dispatch.error}: Dispatch and Envoy are off`);
+    const error = `${file}: invalid JSON at line 1, column 2`;
+    expect(settings).toEqual({
+      dispatch: { enabled: false, notice: null, error },
+      envoy: { enabled: false, notice: null, error },
+      notice: `${error}: Dispatch and Envoy are off`,
+    });
   });
 
   test("a location that cannot be worked out turns both off with that error", () => {
     const error = "XDG_CONFIG_HOME is rel, which is not an absolute path";
     expect(sessionSettings({ path: null, error }, {}, { cwd: tempDir() })).toEqual({
-      dispatch: { enabled: false, url: null, token: null, error },
+      dispatch: { enabled: false, notice: null, error },
       envoy: { enabled: false, notice: null, error },
       notice: `${error}: Dispatch and Envoy are off`,
     });
@@ -165,12 +209,7 @@ describe("sessionDispatchSettings", () => {
 
   test("a location that cannot be worked out is an error", () => {
     expect(sessionDispatchSettings({ path: null, error: "no location" }, {}, { cwd: "/" })).toEqual(
-      {
-        enabled: false,
-        url: null,
-        token: null,
-        error: "no location",
-      }
+      { enabled: false, notice: null, error: "no location" }
     );
   });
 });
