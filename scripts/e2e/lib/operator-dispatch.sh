@@ -10,8 +10,10 @@
 # operator_dispatch_file to the envoy.json that rule chose, and operator_dispatch_url and
 # operator_dispatch_token to Dispatch's URL and bearer; when nothing configures Dispatch or a file
 # turns it off, both are empty and operator_dispatch_notice says why. A file, a URL or a token that
-# prevents Dispatch fails the call through the caller's `fail`, naming it. The bearer stays in this
-# shell's unexported variable: it reaches no argv and no process's environment.
+# prevents Dispatch fails the call through the caller's `fail`, naming it. The bearer crosses from
+# the TypeScript through a 0600 file in a private directory this function makes and removes, never
+# stdout, and stays in this shell's unexported variable: it reaches no argv and no process's
+# environment.
 #
 # A run that must not hand the operator's bearer to anything it starts (the Stage 3 scripts) calls
 # operator_dispatch_hold_token once at start, and production_baseline reads its audit baseline from
@@ -19,16 +21,18 @@
 operator_dispatch_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
 
 operator_dispatch() {
-  local resolved reason status=0
+  local resolved reason held status=0
   operator_dispatch_file='' operator_dispatch_url='' operator_dispatch_token='' operator_dispatch_notice=''
-  resolved=$(bun "$operator_dispatch_lib/operator-dispatch.ts") || status=$?
+  held=$(mktemp -d) || fail "the operator's Dispatch: could not make a private directory for its bearer"
+  resolved=$(bun "$operator_dispatch_lib/operator-dispatch.ts" "$held/bearer") || status=$?
+  if [ -f "$held/bearer" ]; then operator_dispatch_token=$(<"$held/bearer"); fi
+  rm -rf "$held"
   if [ "$status" -ne 0 ]; then
     reason=$(jq -r '.error // empty' <<<"$resolved" 2>/dev/null) || reason=''
     fail "the operator's Dispatch: ${reason:-lib/operator-dispatch.ts exited $status}"
   fi
   operator_dispatch_file=$(jq -r '.file' <<<"$resolved")
   operator_dispatch_url=$(jq -r '.url // empty' <<<"$resolved")
-  operator_dispatch_token=$(jq -r '.token // empty' <<<"$resolved")
   operator_dispatch_notice=$(jq -r '.notice // empty' <<<"$resolved")
 }
 

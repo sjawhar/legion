@@ -1777,8 +1777,8 @@ it resolves the operator's Dispatch with the held bearer and reads the newest ev
 issues updated in the last 24 hours, through a 0600 header file under the caller's `$work`
 (`prod_header_file`).
 
-`operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts`, which resolves Dispatch with
-`@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or
+`operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts <bearer file>`, which resolves
+Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or
 the same-server rule: the envoy.json `envoyConfigPath("command")` chooses (`ENVOY_CONFIG_FILE`,
 which the operator's own session sets, then a named omp profile's `PI_CODING_AGENT_DIR`,
 `CLAUDE_CONFIG_DIR` and `OPENCODE_CONFIG_DIR`, then `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`),
@@ -1790,7 +1790,11 @@ the URL and bearer are empty and `operator_dispatch_notice` says why. A relative
 use, a file that cannot be read, or a URL or token that does not resolve fails the call through the
 caller's `fail`, naming it and never the token. A checkout's `.opencode/envoy.json`, which is not
 read, is named on stderr with its rename while the working directory has no `.envoy/envoy.json`.
-The bearer stays in the caller's unexported variable, so it reaches no argv and no process's
+The TypeScript entry never prints the bearer, so an agent that runs it directly puts none in its
+transcript: it prints `{"file","url"}` and writes the bearer to `<bearer file>`, which it creates
+owner-only (0600) and never over a file already there, and `operator_dispatch` passes a path in a
+private directory it makes with `mktemp -d`, reads the bearer from there and removes the directory.
+The bearer then stays in the caller's unexported variable, so it reaches no argv and no process's
 environment. The entry imports the checkout's `packages/envoy-client`, so the checkout's
 dependencies must be installed (`bun install`).
 

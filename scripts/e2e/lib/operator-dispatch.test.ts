@@ -1,5 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { operatorDispatch } from "./operator-dispatch";
@@ -60,6 +68,59 @@ describe("operatorDispatch", () => {
       file: join(dir, "empty-home", ".config", "legion", "envoy.json"),
       notice: `no envoy.json at ${join(dir, "empty-home", ".config", "legion", "envoy.json")}: Dispatch is off`,
     });
+  });
+});
+
+// The bearer never reaches stdout, where an agent running the command would put it in its
+// transcript: it goes to a 0600 file whose path the caller passes, and lib/operator-dispatch.sh
+// reads it from there.
+describe("bun lib/operator-dispatch.ts <bearer file>", () => {
+  const cli = (args: readonly string[], env: Record<string, string>) =>
+    Bun.spawnSync(["bun", join(import.meta.dir, "operator-dispatch.ts"), ...args], {
+      cwd,
+      env: { PATH: process.env.PATH ?? "", ...env },
+    });
+
+  test("writes the bearer to the file, owner-only, and prints the file and the URL alone", () => {
+    const held = mkdtempSync(join(dir, "held."));
+    const bearer = join(held, "bearer");
+    const run = cli([bearer], { HOME: home });
+    expect(run.exitCode).toBe(0);
+    expect(JSON.parse(run.stdout.toString())).toEqual({
+      file: join(home, ".config", "legion", "envoy.json"),
+      url: "https://dispatch.internal.example",
+    });
+    expect(run.stdout.toString()).not.toContain("neutral-1");
+    expect(readFileSync(bearer, "utf-8")).toBe("neutral-1");
+    expect(statSync(bearer).mode & 0o777).toBe(0o600);
+  });
+
+  test("writes no file when Dispatch is off or refused, and never over one that is there", () => {
+    const held = mkdtempSync(join(dir, "held."));
+    const off = cli([join(held, "off")], { HOME: join(dir, "empty-home") });
+    expect(off.exitCode).toBe(0);
+    expect(JSON.parse(off.stdout.toString())).toMatchObject({ notice: expect.any(String) });
+    const refused = cli([join(held, "refused")], {
+      HOME: home,
+      DISPATCH_URL: "https://other.internal.example",
+    });
+    expect(refused.exitCode).toBe(1);
+    expect(refused.stdout.toString()).not.toContain("neutral-1");
+    expect(readdirSync(held)).toEqual([]);
+
+    const planted = join(held, "planted");
+    writeFileSync(planted, "", { mode: 0o644 });
+    const over = cli([planted], { HOME: home });
+    expect(over.exitCode).toBe(1);
+    expect(JSON.parse(over.stdout.toString()).error).toContain(planted);
+    expect(readFileSync(planted, "utf-8")).toBe("");
+  });
+
+  test("refuses to run without the file's path", () => {
+    const run = cli([], { HOME: home });
+    expect(run.exitCode).toBe(2);
+    expect(run.stdout.toString()).toBe("");
+    expect(run.stderr.toString()).toContain("usage: bun scripts/e2e/lib/operator-dispatch.ts");
   });
 });
 
