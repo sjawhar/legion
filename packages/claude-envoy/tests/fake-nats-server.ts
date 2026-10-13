@@ -39,6 +39,8 @@ export class FakeNatsServer {
   readonly unsubscribed: string[] = []
   /** PUB frames from clients, in arrival order. */
   readonly published: PublishedFrame[] = []
+  /** Each client's CONNECT options, in arrival order: an nkey sign-in carries `nkey` and `sig`. */
+  readonly connects: Record<string, unknown>[] = []
   /** Client connections accepted so far. */
   connections = 0
   private readonly clients = new Set<Socket<Client>>()
@@ -47,7 +49,8 @@ export class FakeNatsServer {
   /** Connections accepted while `holdNext()` is in force, with their INFO frames withheld. */
   private held: Socket<Client>[] | null = null
 
-  constructor() {
+  /** `nonce`, when given, goes in INFO, as a server that asks for nkey sign-in sends one. */
+  constructor(private readonly options: { readonly nonce?: string } = {}) {
     this.listener = Bun.listen<Client>({
       hostname: "127.0.0.1",
       port: 0,
@@ -122,6 +125,7 @@ export class FakeNatsServer {
       proto: 1,
       client_id: this.connections,
       client_ip: "127.0.0.1",
+      ...(this.options.nonce === undefined ? {} : { nonce: this.options.nonce }),
     }
     socket.write(`INFO ${JSON.stringify(info)}\r\n`)
   }
@@ -177,7 +181,12 @@ export class FakeNatsServer {
       socket.write("PONG\r\n")
       return
     }
-    if (line === "PONG" || line.startsWith("CONNECT ")) return
+    if (line === "PONG") return
+    if (line.startsWith("CONNECT ")) {
+      this.connects.push(JSON.parse(line.slice("CONNECT ".length)) as Record<string, unknown>)
+      this.notify()
+      return
+    }
     const sub = SUB.exec(line)
     if (sub?.[1] !== undefined && sub[2] !== undefined) {
       socket.data.subscriptions.set(sub[2], sub[1])

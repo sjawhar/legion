@@ -168,11 +168,11 @@ var require_nuid = __commonJS((exports) => {
 var require_core = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -188,7 +188,7 @@ var require_core = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -391,11 +391,11 @@ var require_core = __commonJS((exports) => {
 var require_util = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -411,7 +411,7 @@ var require_util = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -425,14 +425,14 @@ var require_util = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -491,9 +491,9 @@ var require_util = __commonJS((exports) => {
   }
   function delay(ms = 0) {
     let methods;
-    const p = new Promise((resolve2) => {
+    const p = new Promise((resolve) => {
       const timer = setTimeout(() => {
-        resolve2();
+        resolve();
       }, ms);
       const cancel = () => {
         if (timer) {
@@ -512,18 +512,18 @@ var require_util = __commonJS((exports) => {
   }
   function deferred() {
     let methods = {};
-    const p = new Promise((resolve2, reject) => {
-      methods = { resolve: resolve2, reject };
+    const p = new Promise((resolve, reject) => {
+      methods = { resolve, reject };
     });
     return Object.assign(p, methods);
   }
   function debugDeferred() {
     let methods = {};
-    const p = new Promise((resolve2, reject) => {
+    const p = new Promise((resolve, reject) => {
       methods = {
         resolve: (v) => {
           console.trace("resolve", v);
-          resolve2(v);
+          resolve(v);
         },
         reject: (err) => {
           console.trace("reject");
@@ -1005,11 +1005,11 @@ var require_ipparser = __commonJS((exports) => {
 var require_servers = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -1025,7 +1025,7 @@ var require_servers = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -6434,11 +6434,11 @@ var require_options = __commonJS((exports) => {
 var require_protocol = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -6454,7 +6454,7 @@ var require_protocol = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -6468,14 +6468,14 @@ var require_protocol = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -6886,12 +6886,12 @@ var require_protocol = __commonJS((exports) => {
     }
     _doDial(srv) {
       return __awaiter(this, undefined, undefined, function* () {
-        const { resolve: resolve2 } = this.options;
+        const { resolve } = this.options;
         const alts = yield srv.resolve({
           fn: (0, transport_1.getResolveFn)(),
           debug: this.options.debug,
           randomize: !this.options.noRandomize,
-          resolve: resolve2
+          resolve
         });
         let lastErr = null;
         for (const a of alts) {
@@ -7639,11 +7639,11 @@ var require_jsutil = __commonJS((exports) => {
 var require_jsbaseclient_api = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -7659,7 +7659,7 @@ var require_jsbaseclient_api = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -7767,11 +7767,11 @@ var require_jsbaseclient_api = __commonJS((exports) => {
 var require_jslister = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -7787,7 +7787,7 @@ var require_jslister = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -8264,11 +8264,11 @@ var require_types2 = __commonJS((exports) => {
 var require_jsmconsumer_api = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -8284,7 +8284,7 @@ var require_jsmconsumer_api = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -8533,11 +8533,11 @@ var require_mod2 = __commonJS((exports) => {
 var require_jsmsg = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -8553,7 +8553,7 @@ var require_jsmsg = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -8726,11 +8726,11 @@ var require_jsmsg = __commonJS((exports) => {
 var require_typedsub = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -8746,7 +8746,7 @@ var require_typedsub = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -9469,11 +9469,11 @@ var require_sha_digest_parser = __commonJS((exports) => {
 var require_objectstore = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -9489,7 +9489,7 @@ var require_objectstore = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -9503,14 +9503,14 @@ var require_objectstore = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -10277,11 +10277,11 @@ var require_idleheartbeat_monitor = __commonJS((exports) => {
 var require_jsclient = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -10297,7 +10297,7 @@ var require_jsclient = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -11021,11 +11021,11 @@ var require_jsclient = __commonJS((exports) => {
 var require_kv = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -11041,7 +11041,7 @@ var require_kv = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -11055,14 +11055,14 @@ var require_kv = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -12003,11 +12003,11 @@ var require_kv = __commonJS((exports) => {
 var require_consumer = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -12023,7 +12023,7 @@ var require_consumer = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -12037,14 +12037,14 @@ var require_consumer = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -12896,11 +12896,11 @@ var require_consumer = __commonJS((exports) => {
 var require_jsmstream_api = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -12916,7 +12916,7 @@ var require_jsmstream_api = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -13367,11 +13367,11 @@ var require_jsmstream_api = __commonJS((exports) => {
 var require_jsm = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -13387,7 +13387,7 @@ var require_jsm = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -13401,14 +13401,14 @@ var require_jsm = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -13598,11 +13598,11 @@ var require_jsm = __commonJS((exports) => {
 var require_service = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -13618,7 +13618,7 @@ var require_service = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14086,11 +14086,11 @@ var require_service = __commonJS((exports) => {
 var require_serviceclient = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -14106,7 +14106,7 @@ var require_serviceclient = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14120,14 +14120,14 @@ var require_serviceclient = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -14208,11 +14208,11 @@ var require_serviceclient = __commonJS((exports) => {
 var require_nats = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -14228,7 +14228,7 @@ var require_nats = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14242,14 +14242,14 @@ var require_nats = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -14277,7 +14277,7 @@ var require_nats = __commonJS((exports) => {
       this.listeners = [];
     }
     static connect(opts = {}) {
-      return new Promise((resolve2, reject) => {
+      return new Promise((resolve, reject) => {
         const nc = new NatsConnectionImpl(opts);
         protocol_1.ProtocolHandler.connect(nc.options, nc).then((ph) => {
           nc.protocol = ph;
@@ -14306,7 +14306,7 @@ var require_nats = __commonJS((exports) => {
               }
             });
           })();
-          resolve2(nc);
+          resolve(nc);
         }).catch((err) => {
           reject(err);
         });
@@ -14697,11 +14697,11 @@ ${errCtx.stack}`;
 var require_bench = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve2) {
-        resolve2(value);
+      return value instanceof P ? value : new P(function(resolve) {
+        resolve(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve2, reject) {
+    return new (P || (P = Promise))(function(resolve, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -14717,7 +14717,7 @@ var require_bench = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -14731,14 +14731,14 @@ var require_bench = __commonJS((exports) => {
     }, i);
     function verb(n) {
       i[n] = o[n] && function(v) {
-        return new Promise(function(resolve2, reject) {
-          v = o[n](v), settle(resolve2, reject, v.done, v.value);
+        return new Promise(function(resolve, reject) {
+          v = o[n](v), settle(resolve, reject, v.done, v.value);
         });
       };
     }
-    function settle(resolve2, reject, d, v) {
+    function settle(resolve, reject, d, v) {
       Promise.resolve(v).then(function(v2) {
-        resolve2({ value: v2, done: d });
+        resolve({ value: v2, done: d });
       }, reject);
     }
   };
@@ -15489,11 +15489,11 @@ var require_nats_base_client = __commonJS((exports) => {
 var require_node_transport = __commonJS((exports) => {
   var __awaiter = exports && exports.__awaiter || function(thisArg, _arguments, P, generator) {
     function adopt(value) {
-      return value instanceof P ? value : new P(function(resolve3) {
-        resolve3(value);
+      return value instanceof P ? value : new P(function(resolve2) {
+        resolve2(value);
       });
     }
-    return new (P || (P = Promise))(function(resolve3, reject) {
+    return new (P || (P = Promise))(function(resolve2, reject) {
       function fulfilled(value) {
         try {
           step(generator.next(value));
@@ -15509,7 +15509,7 @@ var require_node_transport = __commonJS((exports) => {
         }
       }
       function step(result) {
-        result.done ? resolve3(result.value) : adopt(result.value).then(fulfilled, rejected);
+        result.done ? resolve2(result.value) : adopt(result.value).then(fulfilled, rejected);
       }
       step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
@@ -15568,8 +15568,8 @@ var require_node_transport = __commonJS((exports) => {
   var net_1 = __require("net");
   var util_1 = require_util();
   var tls_1 = __require("tls");
-  var { resolve: resolve2 } = __require("path");
-  var { readFile, existsSync: existsSync2 } = __require("fs");
+  var { resolve } = __require("path");
+  var { readFile, existsSync } = __require("fs");
   var dns = __require("dns");
   var VERSION = "2.29.3";
   var LANG = "nats.js";
@@ -15684,8 +15684,8 @@ var require_node_transport = __commonJS((exports) => {
       }
       const d = (0, nats_base_client_1.deferred)();
       try {
-        fn = resolve2(fn);
-        if (!existsSync2(fn)) {
+        fn = resolve(fn);
+        if (!existsSync(fn)) {
           d.reject(new Error(`${fn} doesn't exist`));
         }
         readFile(fn, (err, data) => {
@@ -38981,345 +38981,6 @@ function renderInbound(raw, sessionID, subject2) {
   };
 }
 
-// ../envoy-client/src/envoy-config.ts
-import { existsSync, readFileSync } from "fs";
-import { homedir } from "os";
-import * as path from "path";
-var COMMAND_TIMEOUT_MS = 1e4;
-function setValue(value) {
-  return value === undefined || value === "" ? undefined : value;
-}
-function neutralConfig(env) {
-  const xdgConfigHome = setValue(env.XDG_CONFIG_HOME);
-  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
-    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
-  }
-  const configHome = xdgConfigHome ?? path.join(setValue(env.HOME) ?? homedir(), ".config");
-  return { path: path.resolve(configHome, "legion", "envoy.json") };
-}
-function ompProfileDirectory(env) {
-  const profile = setValue(env.OMP_PROFILE);
-  return profile === undefined || profile === "default" ? undefined : setValue(env.PI_CODING_AGENT_DIR);
-}
-function harnessDirectory(harness, env) {
-  switch (harness) {
-    case "omp":
-      return ompProfileDirectory(env);
-    case "claude":
-      return setValue(env.CLAUDE_CONFIG_DIR);
-    case "opencode":
-      return setValue(env.OPENCODE_CONFIG_DIR);
-    case "command":
-      return ompProfileDirectory(env) ?? setValue(env.CLAUDE_CONFIG_DIR) ?? setValue(env.OPENCODE_CONFIG_DIR);
-  }
-}
-function envoyConfigPath(harness, env) {
-  const handed = setValue(env.ENVOY_CONFIG_FILE);
-  if (harness === "command" && handed !== undefined)
-    return path.resolve(handed);
-  const directory = harnessDirectory(harness, env);
-  if (directory !== undefined)
-    return path.resolve(directory, "envoy.json");
-  if (handed !== undefined)
-    return path.resolve(handed);
-  const neutral = neutralConfig(env);
-  if ("error" in neutral)
-    throw new Error(neutral.error);
-  return neutral.path;
-}
-var DispatchSectionSchema = exports_external.strictObject({
-  enabled: exports_external.boolean().optional(),
-  serverUrl: exports_external.url().optional(),
-  token: exports_external.string().optional()
-});
-var EnvoySectionSchema = exports_external.strictObject({
-  enabled: exports_external.boolean().optional(),
-  url: exports_external.url().optional(),
-  natsUrls: exports_external.array(exports_external.string()).optional(),
-  token: exports_external.string().optional(),
-  natsSeed: exports_external.string().optional()
-});
-var EnvoyFileSchema = exports_external.looseObject({
-  $schema: exports_external.string().optional(),
-  dispatch: DispatchSectionSchema.optional(),
-  envoy: EnvoySectionSchema.optional()
-});
-var CheckoutFileSchema = exports_external.looseObject({
-  $schema: exports_external.string().optional(),
-  dispatch: DispatchSectionSchema.optional()
-});
-function sectionSwitch(config2, section, env) {
-  const own = config2[section].enabled;
-  if (own === false)
-    return { offBy: config2.path };
-  const checkout = section === "dispatch" ? config2.checkout : null;
-  const theirs = checkout?.dispatch.enabled;
-  if (checkout === null || theirs === undefined)
-    return { offBy: null, enabled: own === true };
-  if (theirs)
-    return { offBy: null, enabled: true };
-  return env.DISPATCH_URL !== undefined ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
-}
-function describeSchemaIssue(filePath, error48) {
-  const issue2 = error48.issues[0];
-  if (!issue2)
-    return `${filePath}: invalid envoy.json`;
-  if (issue2.code === "unrecognized_keys") {
-    const section = issue2.path.join(".");
-    const keys = issue2.keys.map((key) => `${section}.${key}`).join(", ");
-    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
-  }
-  return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
-}
-function parseFile(filePath, schema) {
-  let raw;
-  try {
-    raw = readFileSync(filePath, "utf-8");
-  } catch (error48) {
-    if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR"))
-      return { kind: "absent" };
-    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error48)})` };
-  }
-  let parsedJson;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch (error48) {
-    return { kind: "invalid", reason: `${filePath}: invalid JSON (${messageFor(error48)})` };
-  }
-  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
-    return {
-      kind: "invalid",
-      reason: `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
-    };
-  }
-  const parsed = schema.safeParse(parsedJson);
-  if (!parsed.success) {
-    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
-  }
-  return { kind: "valid", settings: parsed.data };
-}
-var commandOutcomes = new Map;
-function runCommand(command, env) {
-  const childEnv = {};
-  for (const [name, variable] of Object.entries(env)) {
-    if (variable !== undefined)
-      childEnv[name] = variable;
-  }
-  let result;
-  try {
-    result = Bun.spawnSync(["/bin/sh", "-c", command], {
-      env: childEnv,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: COMMAND_TIMEOUT_MS
-    });
-  } catch (error48) {
-    return { failure: `could not start: ${messageFor(error48)}` };
-  }
-  if (result.exitedDueToTimeout) {
-    return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
-  }
-  if (!result.success) {
-    return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
-  }
-  const value = result.stdout.toString().trim();
-  return value.length === 0 ? { failure: "printed nothing" } : { value };
-}
-function fileValue(value, field, filePath, env) {
-  if (!value.startsWith("!"))
-    return value;
-  const command = value.slice(1);
-  let outcome = commandOutcomes.get(command);
-  if (outcome === undefined) {
-    outcome = runCommand(command, env);
-    commandOutcomes.set(command, outcome);
-  }
-  if ("failure" in outcome)
-    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
-  return outcome.value;
-}
-function checkoutCommandRefusal(checkoutPath, field) {
-  return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
-}
-function failed(filePath, error48) {
-  return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error: error48 };
-}
-function missingConfigNotice(filePath, env, off) {
-  const notice = `no envoy.json at ${filePath}: ${off}`;
-  const neutral = neutralConfig(env);
-  if ("error" in neutral || neutral.path !== path.resolve(filePath))
-    return notice;
-  const home = setValue(env.HOME) ?? homedir();
-  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
-    return notice;
-  const old = path.join(home, ".config", "opencode", "envoy.json");
-  if (!existsSync(old))
-    return notice;
-  return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
-}
-function readEnvoyConfig(filePath, env, options) {
-  const chosen = parseFile(filePath, EnvoyFileSchema);
-  if (chosen.kind === "invalid")
-    return failed(filePath, chosen.reason);
-  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent" } : parseFile(checkoutPath, CheckoutFileSchema);
-  if (checkoutFile.kind === "invalid")
-    return failed(filePath, checkoutFile.reason);
-  const own = chosen.kind === "valid" ? chosen.settings : {};
-  return {
-    path: filePath,
-    dispatch: own.dispatch ?? {},
-    envoy: own.envoy ?? {},
-    checkout: checkoutFile.kind === "valid" ? {
-      path: checkoutPath,
-      dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
-    } : null,
-    notice: chosen.kind === "absent" ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off") : null,
-    error: null
-  };
-}
-
-// ../envoy-client/src/secret-file.ts
-import { readFileSync as readFileSync2 } from "fs";
-function readSecretFile(variable, filePath) {
-  let contents;
-  try {
-    contents = readFileSync2(filePath, "utf8");
-  } catch (error48) {
-    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
-  }
-  const value = contents.trim();
-  if (value.length === 0)
-    throw new Error(`${variable} names ${filePath}, which is empty`);
-  return value;
-}
-
-// ../envoy-client/src/dispatch-config.ts
-var DEFAULT_SERVER_URL = "http://localhost:8766";
-function normalizeDispatchUrl(url2) {
-  return url2.replace(/\/+$/, "");
-}
-function parsedDispatchUrl(value, source) {
-  const url2 = normalizeDispatchUrl(value);
-  try {
-    new URL(url2);
-    return { url: url2, error: null };
-  } catch {
-    return { url: null, error: `${source} must be a valid URL` };
-  }
-}
-function dispatchSettings(env, config2) {
-  if (config2.error !== null) {
-    return { enabled: false, url: null, token: null, error: config2.error };
-  }
-  const state = sectionSwitch(config2, "dispatch", env);
-  if (state.offBy !== null)
-    return { enabled: false, url: null, token: null, error: null };
-  const own = config2.dispatch;
-  const checkout = config2.checkout;
-  const explicitUrl = env.DISPATCH_URL;
-  if (explicitUrl === undefined && state.enabled && checkout?.dispatch.serverUrl !== undefined) {
-    const source = `dispatch.serverUrl in ${checkout.path}`;
-    const url3 = parsedDispatchUrl(checkout.dispatch.serverUrl, source);
-    if (url3.error !== null)
-      return { enabled: false, url: null, token: null, error: url3.error };
-    const token2 = checkout.dispatch.token;
-    if (!token2) {
-      const error48 = `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`;
-      return { enabled: false, url: null, token: null, error: error48 };
-    }
-    if (token2.startsWith("!")) {
-      const error48 = checkoutCommandRefusal(checkout.path, "dispatch.token");
-      return { enabled: false, url: null, token: null, error: error48 };
-    }
-    return { enabled: true, url: url3.url, token: token2, error: null };
-  }
-  const rawUrl = explicitUrl !== undefined ? { value: explicitUrl, source: "DISPATCH_URL" } : state.enabled ? { value: own.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" } : null;
-  const url2 = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
-  let token;
-  let tokenSource;
-  let tokenFile = null;
-  if (env.DISPATCH_TOKEN_FILE !== undefined) {
-    tokenSource = "DISPATCH_TOKEN_FILE";
-    try {
-      token = readSecretFile(tokenSource, env.DISPATCH_TOKEN_FILE);
-    } catch (error48) {
-      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
-    }
-  } else if (env.DISPATCH_TOKEN !== undefined) {
-    tokenSource = "DISPATCH_TOKEN";
-    token = env.DISPATCH_TOKEN;
-  } else if (checkout?.dispatch.token !== undefined) {
-    tokenSource = "dispatch.token";
-    token = checkout.dispatch.token;
-    const serverUrl = checkout.dispatch.serverUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL;
-    tokenFile = { path: checkout.path, serverUrl };
-  } else {
-    tokenSource = "dispatch.token";
-    token = own.token ?? null;
-    if (token !== null) {
-      tokenFile = { path: config2.path, serverUrl: own.serverUrl ?? DEFAULT_SERVER_URL };
-    }
-  }
-  const shownToken = tokenFile !== null && token?.startsWith("!") ? null : token;
-  if (url2.error !== null)
-    return { enabled: false, url: null, token: shownToken, error: url2.error };
-  if (url2.url === null)
-    return { enabled: false, url: null, token: shownToken, error: null };
-  if (explicitUrl !== undefined && tokenFile !== null) {
-    const named = new URL(url2.url).origin;
-    const paired = new URL(tokenFile.serverUrl).origin;
-    if (named !== paired) {
-      return {
-        enabled: false,
-        url: null,
-        token: null,
-        error: `DISPATCH_URL names ${named}, but ${tokenFile.path}'s dispatch.token is for ${paired}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`
-      };
-    }
-  }
-  if (tokenFile !== null && token?.startsWith("!")) {
-    if (tokenFile.path !== config2.path) {
-      const error48 = checkoutCommandRefusal(tokenFile.path, "dispatch.token");
-      return { enabled: false, url: null, token: null, error: error48 };
-    }
-    try {
-      token = fileValue(token, "dispatch.token", config2.path, env);
-    } catch (error48) {
-      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
-    }
-  }
-  if (!token) {
-    return {
-      enabled: false,
-      url: url2.url,
-      token,
-      error: `${tokenSource} must be a non-empty bearer token`
-    };
-  }
-  return { enabled: true, url: url2.url, token, error: null };
-}
-function resolveDispatchConfig(env, options) {
-  let filePath;
-  try {
-    filePath = envoyConfigPath(options.harness, env);
-  } catch (error48) {
-    return { enabled: false, url: null, token: null, error: messageFor(error48) };
-  }
-  const config2 = readEnvoyConfig(filePath, env, { cwd: options.cwd ?? process.cwd() });
-  return dispatchSettings(env, config2);
-}
-function activeDispatchSettings(resolution) {
-  if (resolution.error !== null)
-    throw new Error(`dispatch config: ${resolution.error}`);
-  const { url: url2, token } = resolution;
-  if (!resolution.enabled || url2 === null || token === null)
-    return null;
-  return { ...resolution, url: url2, token };
-}
-
 // ../envoy-client/src/dispatch-subscribe.ts
 function dispatchFollowNotice(details) {
   if (typeof details !== "object" || details === null)
@@ -39398,6 +39059,360 @@ function natsAuthOptions(seed) {
   return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
+// ../envoy-client/src/envoy-config.ts
+import { existsSync, lstatSync, readFileSync, readlinkSync } from "fs";
+import { homedir } from "os";
+import * as path from "path";
+var COMMAND_TIMEOUT_MS = 1e4;
+function nonEmpty(value) {
+  return value === undefined || value === "" ? undefined : value;
+}
+function absolute(name, value) {
+  if (value !== undefined && !path.isAbsolute(value)) {
+    throw new Error(`${name} is ${value}, which is not an absolute path`);
+  }
+  return value;
+}
+function neutralConfig(env) {
+  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
+  if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
+    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
+  }
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
+  return { path: path.resolve(configHome, "legion", "envoy.json") };
+}
+function ompProfileDirectory(env) {
+  const profile = nonEmpty(env.OMP_PROFILE);
+  return profile === undefined || profile === "default" ? undefined : absolute("PI_CODING_AGENT_DIR", nonEmpty(env.PI_CODING_AGENT_DIR));
+}
+function harnessDirectory(harness, env) {
+  switch (harness) {
+    case "omp":
+      return ompProfileDirectory(env);
+    case "claude":
+      return absolute("CLAUDE_CONFIG_DIR", nonEmpty(env.CLAUDE_CONFIG_DIR));
+    case "opencode":
+      return absolute("OPENCODE_CONFIG_DIR", nonEmpty(env.OPENCODE_CONFIG_DIR));
+    case "command":
+      return ompProfileDirectory(env) ?? absolute("CLAUDE_CONFIG_DIR", nonEmpty(env.CLAUDE_CONFIG_DIR)) ?? absolute("OPENCODE_CONFIG_DIR", nonEmpty(env.OPENCODE_CONFIG_DIR));
+    default: {
+      const unknown2 = harness;
+      throw new Error(`unknown harness ${String(unknown2)}`);
+    }
+  }
+}
+function envoyConfigPath(harness, env) {
+  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
+  if (harness === "command" && handed !== undefined) {
+    return path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+  }
+  const directory = harnessDirectory(harness, env);
+  if (directory !== undefined)
+    return path.resolve(directory, "envoy.json");
+  if (handed !== undefined)
+    return path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+  const neutral = neutralConfig(env);
+  if ("error" in neutral)
+    throw new Error(neutral.error);
+  return neutral.path;
+}
+var httpUrlSchema = exports_external.url({ protocol: /^https?$/, error: "must be an http or https URL" });
+var DispatchSectionSchema = exports_external.strictObject({
+  enabled: exports_external.boolean().optional(),
+  serverUrl: httpUrlSchema.optional(),
+  token: exports_external.string().optional()
+});
+var EnvoySectionSchema = exports_external.strictObject({
+  enabled: exports_external.boolean().optional(),
+  url: httpUrlSchema.optional(),
+  natsUrls: exports_external.array(exports_external.string().trim().min(1, "must not be empty")).optional(),
+  token: exports_external.string().optional(),
+  natsSeed: exports_external.string().optional()
+});
+var EnvoyFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  dispatch: DispatchSectionSchema.optional(),
+  envoy: EnvoySectionSchema.optional()
+});
+var CheckoutFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  dispatch: DispatchSectionSchema.optional()
+});
+function offWithNotice(notice) {
+  return { enabled: false, notice, error: null };
+}
+function offWithError(error48) {
+  return { enabled: false, notice: null, error: error48 };
+}
+function httpUrl2(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return;
+  }
+  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
+}
+function describeSchemaIssue(filePath, error48) {
+  const issue2 = error48.issues[0];
+  if (!issue2)
+    return `${filePath}: invalid envoy.json`;
+  if (issue2.code === "unrecognized_keys") {
+    const section = issue2.path.join(".");
+    const keys = issue2.keys.map((key) => `${section}.${key}`).join(", ");
+    return `${filePath}: unrecognized ${section} key(s): ${keys}`;
+  }
+  return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
+}
+function jsonErrorPosition(text) {
+  let at = 0;
+  const fail = () => {
+    throw new RangeError("not JSON");
+  };
+  const space = () => {
+    while (at < text.length && ` 	
+\r`.includes(text.charAt(at)))
+      at += 1;
+  };
+  const expect = (char) => {
+    if (text.charAt(at) !== char)
+      fail();
+    at += 1;
+  };
+  const string4 = () => {
+    expect('"');
+    while (at < text.length) {
+      const char = text.charAt(at);
+      if (char === '"') {
+        at += 1;
+        return;
+      }
+      if (char < " ")
+        fail();
+      at += char === "\\" ? 2 : 1;
+    }
+    fail();
+  };
+  const value = () => {
+    space();
+    const char = text.charAt(at);
+    if (char === "{" || char === "[") {
+      const close = char === "{" ? "}" : "]";
+      at += 1;
+      space();
+      if (text.charAt(at) === close) {
+        at += 1;
+        return;
+      }
+      for (;; ) {
+        if (close === "}") {
+          space();
+          string4();
+          space();
+          expect(":");
+        }
+        value();
+        space();
+        if (text.charAt(at) === ",") {
+          at += 1;
+          continue;
+        }
+        expect(close);
+        return;
+      }
+    }
+    if (char === '"') {
+      string4();
+      return;
+    }
+    for (const word of ["true", "false", "null"]) {
+      if (text.startsWith(word, at)) {
+        at += word.length;
+        return;
+      }
+    }
+    const number4 = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
+    if (number4 === null)
+      fail();
+    at += number4?.[0].length ?? 0;
+  };
+  try {
+    value();
+    space();
+    if (at < text.length)
+      fail();
+    return;
+  } catch {
+    const before = text.slice(0, at).split(`
+`);
+    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
+  }
+}
+function danglingLink(filePath) {
+  try {
+    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+function parseFile(filePath, schema, checkout) {
+  let raw;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
+      return { kind: "absent", link: danglingLink(filePath) };
+    }
+    return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error48)})` };
+  }
+  let parsedJson;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    const position = jsonErrorPosition(raw);
+    return {
+      kind: "invalid",
+      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
+    };
+  }
+  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
+    return {
+      kind: "invalid",
+      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+    };
+  }
+  const parsed = schema.safeParse(parsedJson);
+  if (!parsed.success) {
+    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
+  }
+  return { kind: "valid", settings: parsed.data };
+}
+var commandOutcomes = new Map;
+function sendable(value) {
+  return !/[\s\p{Cc}]/u.test(value);
+}
+function runCommand(command, env) {
+  const childEnv = {};
+  for (const [name, variable] of Object.entries(env)) {
+    if (variable !== undefined)
+      childEnv[name] = variable;
+  }
+  let result;
+  try {
+    result = Bun.spawnSync(["/bin/sh", "-c", command], {
+      env: childEnv,
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      timeout: COMMAND_TIMEOUT_MS,
+      detached: true
+    });
+  } catch (error48) {
+    return { failure: `could not start: ${messageFor(error48)}` };
+  }
+  if (result.success) {
+    const value = result.stdout.toString().trim();
+    if (value.length === 0)
+      return { failure: "printed nothing" };
+    if (!sendable(value)) {
+      return { failure: "printed more than one line, or whitespace inside its value" };
+    }
+    return { value };
+  }
+  if (result.exitedDueToTimeout) {
+    try {
+      process.kill(-result.pid, "SIGKILL");
+    } catch {}
+    return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+  }
+  return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
+}
+function fileValue(value, field, filePath, env) {
+  if (!value.startsWith("!")) {
+    if (!sendable(value)) {
+      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
+    }
+    return value;
+  }
+  const command = value.slice(1);
+  let outcome = commandOutcomes.get(command);
+  if (outcome === undefined) {
+    outcome = runCommand(command, env);
+    commandOutcomes.set(command, outcome);
+  }
+  if ("failure" in outcome)
+    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
+  return outcome.value;
+}
+function unsendableRefusal(source, value) {
+  return sendable(value) ? null : `${source} holds whitespace or a control character`;
+}
+function checkoutCommandRefusal(checkoutPath, field) {
+  return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
+}
+function missingConfigNotice(filePath, missing, off) {
+  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
+  const hint = missing.hint === null ? "" : `; ${missing.hint}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${hint}`;
+}
+function oldFileHint(filePath, env) {
+  const neutral = neutralConfig(env);
+  if ("error" in neutral || neutral.path !== path.resolve(filePath))
+    return null;
+  const home = nonEmpty(env.HOME) ?? homedir();
+  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
+    return null;
+  const old = path.join(home, ".config", "opencode", "envoy.json");
+  if (!existsSync(old))
+    return null;
+  return `${old} is no longer read: move it to ${neutral.path}`;
+}
+function readEnvoyConfig(filePath, env, options) {
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
+  if (chosen.kind === "invalid")
+    return { kind: "failed", path: filePath, error: chosen.reason };
+  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
+  const own = chosen.kind === "valid" ? chosen.settings : {};
+  let checkout = null;
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
+    checkout = {
+      kind: "valid",
+      path: checkoutPath,
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+    };
+  }
+  return {
+    kind: "read",
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout,
+    missing: chosen.kind === "absent" ? { link: chosen.link, hint: oldFileHint(filePath, env) } : null
+  };
+}
+
+// ../envoy-client/src/secret-file.ts
+import { readFileSync as readFileSync2 } from "fs";
+function readSecretFile(variable, filePath) {
+  let contents;
+  try {
+    contents = readFileSync2(filePath, "utf8");
+  } catch (error48) {
+    throw new Error(`${variable} names ${filePath}, which could not be read: ${messageFor(error48)}`);
+  }
+  const value = contents.trim();
+  if (value.length === 0)
+    throw new Error(`${variable} names ${filePath}, which is empty`);
+  if (/[\s\p{Cc}]/u.test(value)) {
+    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
+  }
+  return value;
+}
+
 // ../envoy-client/src/defaults.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 var DEFAULT_HEARTBEAT_MS = 120000;
@@ -39419,97 +39434,184 @@ function natsSeedFromEnvironment(env) {
     throw new Error("NATS_NKEY_SEED is set but empty");
   return { value, source: "NATS_NKEY_SEED" };
 }
-function disabled(error48) {
-  return { enabled: false, notice: null, error: error48 };
+function listenerToken(env, section, namedUrl, filePath) {
+  const pointer = nonEmpty(env.ENVOY_TOKEN_FILE);
+  if (pointer !== undefined)
+    return readSecretFile("ENVOY_TOKEN_FILE", pointer);
+  const plain = nonEmpty(env.ENVOY_TOKEN);
+  if (plain !== undefined) {
+    const refusal = unsendableRefusal("ENVOY_TOKEN", plain);
+    if (refusal !== null)
+      throw new Error(refusal);
+    return plain;
+  }
+  if (section.token === undefined)
+    return;
+  if (namedUrl !== undefined) {
+    const named = httpUrl2(namedUrl)?.origin;
+    const listener = httpUrl2(section.url ?? DEFAULT_ENVOY_URL)?.origin;
+    if (named !== listener) {
+      throw new Error(`ENVOY_URL names ${named}, but ${filePath}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
+    }
+  }
+  return fileValue(section.token, "envoy.token", filePath, env);
 }
-function envoySettings(env, config2) {
-  if (config2.error !== null)
-    return disabled(config2.error);
-  if (config2.checkout !== null && config2.checkout.envoyError !== null) {
-    return disabled(config2.checkout.envoyError);
-  }
-  const state = sectionSwitch(config2, "envoy", env);
-  if (state.offBy !== null) {
-    return {
-      enabled: false,
-      notice: `${state.offBy} sets envoy.enabled to false: Envoy is off`,
-      error: null
-    };
-  }
-  const namedUrl = env.ENVOY_URL === "" ? undefined : env.ENVOY_URL;
-  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url3) => url3.trim()).filter((url3) => url3.length > 0);
-  if (!state.enabled && namedUrl === undefined && namedNatsUrls.length === 0) {
-    return {
-      enabled: false,
-      notice: config2.notice ?? `${config2.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`,
-      error: null
-    };
-  }
-  const own = state.enabled ? config2.envoy : {};
-  const url2 = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
-  let token;
-  const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
-  if (tokenPointer !== undefined) {
-    try {
-      token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
-    } catch (error48) {
-      return disabled(messageFor(error48));
-    }
-  } else if (env.ENVOY_TOKEN) {
-    token = env.ENVOY_TOKEN;
-  } else if (own.token !== undefined) {
-    if (namedUrl !== undefined) {
-      let named;
-      try {
-        named = new URL(namedUrl).origin;
-      } catch {
-        return disabled("ENVOY_URL must be a valid URL");
-      }
-      const listener = new URL(own.url ?? DEFAULT_ENVOY_URL).origin;
-      if (named !== listener) {
-        return disabled(`ENVOY_URL names ${named}, but ${config2.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
-      }
-    }
-    try {
-      token = fileValue(own.token, "envoy.token", config2.path, env);
-    } catch (error48) {
-      return disabled(messageFor(error48));
+function natsCredential(env, section, namedNatsUrls, filePath) {
+  const fromEnvironment = natsSeedFromEnvironment(env);
+  if (fromEnvironment !== undefined || section.natsSeed === undefined)
+    return fromEnvironment;
+  if (namedNatsUrls.length > 0) {
+    const servers = new Set(section.natsUrls ?? []);
+    const named = new Set(namedNatsUrls);
+    if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
+      throw new Error(`ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
     }
   }
-  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : own.natsUrls ?? [];
-  let natsSeed;
-  if (natsUrls.length > 0) {
-    try {
-      natsSeed = natsSeedFromEnvironment(env);
-    } catch (error48) {
-      return disabled(messageFor(error48));
-    }
-    if (natsSeed === undefined && own.natsSeed !== undefined) {
-      const servers = new Set((own.natsUrls ?? []).map((server) => server.trim()));
-      const used = new Set(natsUrls.map((server) => server.trim()));
-      if (used.size !== servers.size || ![...used].every((server) => servers.has(server))) {
-        return disabled(`ENVOY_NATS_URL names other servers than ${config2.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
-      }
-      try {
-        const value = fileValue(own.natsSeed, "envoy.natsSeed", config2.path, env);
-        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config2.path}` };
-      } catch (error48) {
-        return disabled(messageFor(error48));
-      }
-    }
-  }
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
   return {
-    enabled: true,
-    url: normalizeEnvoyUrl(url2),
-    natsUrls,
-    token,
-    natsSeed,
-    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+    value: fileValue(section.natsSeed, "envoy.natsSeed", filePath, env),
+    source: `envoy.natsSeed in ${filePath}`
   };
+}
+function envoySettings(env, config2, options = {}) {
+  if (config2.kind === "failed")
+    return offWithError(config2.error);
+  const own = config2.envoy;
+  if (own.enabled === false) {
+    return offWithNotice(`${config2.path} sets envoy.enabled to false: Envoy is off`);
+  }
+  const namedUrl = nonEmpty(env.ENVOY_URL);
+  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url2) => url2.trim()).filter((url2) => url2.length > 0);
+  if (own.enabled !== true && namedUrl === undefined && namedNatsUrls.length === 0) {
+    return offWithNotice(config2.missing === null ? `${config2.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off` : missingConfigNotice(config2.path, config2.missing, "Envoy is off"));
+  }
+  if (namedUrl !== undefined && httpUrl2(namedUrl) === undefined) {
+    return offWithError("ENVOY_URL must be an http or https URL");
+  }
+  const section = own.enabled === true ? own : {};
+  const natsUrls = options.nats === false ? [] : namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  try {
+    const token = listenerToken(env, section, namedUrl, config2.path);
+    const natsSeed = natsUrls.length > 0 ? natsCredential(env, section, namedNatsUrls, config2.path) : undefined;
+    const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+    return {
+      enabled: true,
+      url: normalizeEnvoyUrl(namedUrl ?? section.url ?? DEFAULT_ENVOY_URL),
+      natsUrls,
+      token,
+      natsSeed,
+      heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+    };
+  } catch (error48) {
+    return offWithError(messageFor(error48));
+  }
 }
 function normalizeEnvoyUrl(value) {
   return value.replace(/\/+$/, "");
+}
+
+// ../envoy-client/src/dispatch-config.ts
+var DEFAULT_SERVER_URL = "http://localhost:8766";
+function normalizeDispatchUrl(url2) {
+  return url2.replace(/\/+$/, "");
+}
+function tokenSource(env, config2, checkout) {
+  const pointer = nonEmpty(env.DISPATCH_TOKEN_FILE);
+  if (pointer !== undefined) {
+    try {
+      return { kind: "variable", token: readSecretFile("DISPATCH_TOKEN_FILE", pointer) };
+    } catch (error48) {
+      return { error: messageFor(error48) };
+    }
+  }
+  const plain = nonEmpty(env.DISPATCH_TOKEN);
+  if (plain !== undefined) {
+    const refusal = unsendableRefusal("DISPATCH_TOKEN", plain);
+    return refusal === null ? { kind: "variable", token: plain } : { error: refusal };
+  }
+  if (checkout?.token !== undefined) {
+    if (checkout.serverUrl === undefined) {
+      return {
+        error: `${checkout.path}: dispatch.token requires dispatch.serverUrl in the same file`
+      };
+    }
+    const { path: path2, serverUrl, token } = checkout;
+    return { kind: "file", token, path: path2, serverUrl, checkout: true };
+  }
+  const own = config2.dispatch;
+  if (own.token === undefined)
+    return { kind: "none" };
+  return {
+    kind: "file",
+    token: own.token,
+    path: config2.path,
+    serverUrl: own.serverUrl ?? DEFAULT_SERVER_URL,
+    checkout: false
+  };
+}
+function dispatchSettings(env, config2) {
+  if (config2.kind === "failed")
+    return offWithError(config2.error);
+  const explicitUrl = nonEmpty(env.DISPATCH_URL);
+  if (config2.checkout?.kind === "invalid" && explicitUrl === undefined) {
+    return offWithError(config2.checkout.error);
+  }
+  const checkout = config2.checkout?.kind === "valid" ? config2.checkout : null;
+  const own = config2.dispatch;
+  if (own.enabled === false) {
+    return offWithNotice(`${config2.path} sets dispatch.enabled to false: Dispatch is off`);
+  }
+  if (checkout?.dispatch.enabled === false && explicitUrl === undefined) {
+    return offWithNotice(`${checkout.path} sets dispatch.enabled to false: Dispatch is off`);
+  }
+  const enabled = checkout?.dispatch.enabled === true || own.enabled === true;
+  if (explicitUrl === undefined && !enabled) {
+    return offWithNotice(config2.missing === null ? `${config2.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, config2.missing, "Dispatch is off"));
+  }
+  if (explicitUrl === undefined && checkout?.dispatch.serverUrl !== undefined) {
+    const token = checkout.dispatch.token;
+    if (!token) {
+      return offWithError(`${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`);
+    }
+    if (token.startsWith("!")) {
+      return offWithError(checkoutCommandRefusal(checkout.path, "dispatch.token"));
+    }
+    const refusal = unsendableRefusal(`dispatch.token in ${checkout.path}`, token);
+    if (refusal !== null)
+      return offWithError(refusal);
+    return { enabled: true, url: normalizeDispatchUrl(checkout.dispatch.serverUrl), token };
+  }
+  if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
+    return offWithError("DISPATCH_URL must be an http or https URL");
+  }
+  const url2 = normalizeDispatchUrl(explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL);
+  const source = tokenSource(env, config2, checkout === null ? null : { path: checkout.path, ...checkout.dispatch });
+  if ("error" in source)
+    return offWithError(source.error);
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config2.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config2.path}`);
+  }
+  if (source.kind === "variable")
+    return { enabled: true, url: url2, token: source.token };
+  const named = httpUrl2(url2)?.origin;
+  const paired = httpUrl2(source.serverUrl)?.origin;
+  if (explicitUrl !== undefined && named !== paired) {
+    return offWithError(`DISPATCH_URL names ${named}, but ${source.path}'s dispatch.token is for ${paired}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`);
+  }
+  if (source.checkout && source.token.startsWith("!")) {
+    return offWithError(checkoutCommandRefusal(source.path, "dispatch.token"));
+  }
+  if (source.token === "") {
+    return offWithError(`dispatch.token in ${source.path} must be a non-empty bearer token`);
+  }
+  try {
+    return {
+      enabled: true,
+      url: url2,
+      token: fileValue(source.token, "dispatch.token", source.path, env)
+    };
+  } catch (error48) {
+    return offWithError(messageFor(error48));
+  }
 }
 
 // ../envoy-client/src/session-settings.ts
@@ -39520,37 +39622,53 @@ function sessionConfigFile(harness, env) {
     return { path: null, error: messageFor(error48) };
   }
 }
-function startNotice(config2, env, dispatch, envoy) {
-  if (config2.error !== null)
+function startNotice(config2, dispatch, envoy) {
+  if (config2.kind === "failed")
     return `${config2.error}: Dispatch and Envoy are off`;
-  const missing = config2.notice !== null;
-  const dispatchOff = !dispatch.enabled && dispatch.error === null;
-  const envoyOff = !envoy.enabled && envoy.error === null;
-  if (missing && dispatchOff && envoyOff)
-    return config2.notice;
+  const { missing, checkout } = config2;
+  const dispatchQuiet = !dispatch.enabled && dispatch.error === null;
+  const envoyQuiet = !envoy.enabled && envoy.error === null;
   const parts = [];
-  if (dispatch.error !== null)
-    parts.push(`Dispatch is off: ${dispatch.error}`);
-  else if (dispatchOff && missing)
-    parts.push(missingConfigNotice(config2.path, env, "Dispatch is off"));
-  if (!envoy.enabled && envoy.error !== null)
-    parts.push(`Envoy is off: ${envoy.error}`);
-  else if (envoyOff && missing)
-    parts.push(missingConfigNotice(config2.path, env, "Envoy is off"));
+  if (missing !== null && dispatchQuiet && envoyQuiet) {
+    parts.push(missingConfigNotice(config2.path, missing, "Dispatch and Envoy are off"));
+  } else {
+    if (!dispatch.enabled && dispatch.error !== null)
+      parts.push(`Dispatch is off: ${dispatch.error}`);
+    else if (dispatchQuiet && missing !== null) {
+      parts.push(missingConfigNotice(config2.path, missing, "Dispatch is off"));
+    }
+    if (!envoy.enabled && envoy.error !== null)
+      parts.push(`Envoy is off: ${envoy.error}`);
+    else if (envoyQuiet && missing !== null) {
+      parts.push(missingConfigNotice(config2.path, missing, "Envoy is off"));
+    }
+  }
+  if (checkout?.kind === "valid" && checkout.envoyError !== null)
+    parts.push(checkout.envoyError);
+  if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
+    parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
   if (file2.path === null) {
-    return {
-      dispatch: { enabled: false, url: null, token: null, error: file2.error },
-      envoy: { enabled: false, notice: null, error: file2.error },
-      notice: `${file2.error}: Dispatch and Envoy are off`
-    };
+    const off = offWithError(file2.error);
+    return { dispatch: off, envoy: off, notice: `${file2.error}: Dispatch and Envoy are off` };
   }
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
-  const envoy = envoySettings(env, config2);
-  return { dispatch, envoy, notice: startNotice(config2, env, dispatch, envoy) };
+  const envoy = envoySettings(env, config2, { nats: options.nats });
+  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy) };
+}
+function sessionDispatchSettings(file2, env, options) {
+  if (file2.path === null)
+    return offWithError(file2.error);
+  return dispatchSettings(env, readEnvoyConfig(file2.path, env, options));
+}
+function resolveDispatchConfig(env, options) {
+  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
+    cwd: options.cwd ?? process.cwd()
+  });
 }
 
 // ../envoy-client/src/tool-input-errors.ts
@@ -42664,10 +42782,9 @@ function sanitizeChannelMetadata(metadata) {
 }
 async function postDispatchReply(identity, delivery, result) {
   const config2 = currentDispatchConfig(identity.directory);
-  if (!config2.enabled || config2.url === null || config2.token === null) {
-    throw new Error(config2.error ?? "Dispatch is not configured");
-  }
-  await postDeliveryReply({ url: config2.url, token: config2.token }, identity.id, delivery, result);
+  if (!config2.enabled)
+    throw new Error(config2.error ?? config2.notice);
+  await postDeliveryReply(config2, identity.id, delivery, result);
 }
 function createChannelDelivery(input) {
   const inbox = [];
@@ -43128,7 +43245,7 @@ async function runEnvoyChannelServer() {
     process.stderr.write(`envoy-channel: ${notice}
 `);
   if (!envoy.enabled) {
-    await serveEnvoyOff(`Envoy is off for this session (${configFile.path ?? configFile.error})`);
+    await serveEnvoyOff(`Envoy is off for this session: ${envoy.error ?? envoy.notice}`);
     return;
   }
   if (envoy.natsUrls.length === 0) {

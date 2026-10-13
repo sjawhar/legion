@@ -30,15 +30,18 @@
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
-import { messageFor } from "@legion/envoy-client/errors"
-import { sessionConfigFile } from "@legion/envoy-client/session-settings"
+import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
+import {
+  resolveDispatchConfig,
+  sessionConfigFile,
+  sessionDispatchSettings,
+} from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -58,7 +61,7 @@ function appendOnce(envFile: string, line: string): void {
   try {
     written = readFileSync(envFile, "utf8")
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    if (!hasErrnoCode(error, "ENOENT")) throw error
   }
   if (written.split("\n").includes(line)) return
   const separator = written === "" || written.endsWith("\n") ? "" : "\n"
@@ -68,11 +71,11 @@ function appendOnce(envFile: string, line: string): void {
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
   const envFile = process.env["CLAUDE_ENV_FILE"]
+  // A file location that cannot be worked out hands nothing on: the open-asks summary below says
+  // why Dispatch is unavailable.
+  const chosen = sessionConfigFile("claude", process.env)
   if (envFile) {
     appendOnce(envFile, DISPATCH_HOST_LINE)
-    // A file location that cannot be worked out hands nothing on: the open-asks summary below says
-    // why Dispatch is unavailable.
-    const chosen = sessionConfigFile("claude", process.env)
     if (chosen.path !== null) {
       appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`)
     }
@@ -90,8 +93,8 @@ async function openAsks(raw: unknown): Promise<void> {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  const config = resolveDispatchConfig(process.env, { harness: "claude", cwd: directory })
-  if (config.enabled && config.url !== null && config.token !== null) {
+  const config = sessionDispatchSettings(chosen, process.env, { cwd: directory })
+  if (config.enabled) {
     try {
       const snapshot = await new DispatchClient(
         config.url,

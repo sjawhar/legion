@@ -8,12 +8,15 @@ import {
   postDeliveryReply,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
-import { sessionConfigFile, sessionSettings } from "@legion/envoy-client/session-settings"
+import {
+  resolveDispatchConfig,
+  sessionConfigFile,
+  sessionSettings,
+} from "@legion/envoy-client/session-settings"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -226,11 +229,8 @@ async function postDispatchReply(
   result: { readonly error: string },
 ): Promise<void> {
   const config = currentDispatchConfig(identity.directory)
-  // An enabled resolution always carries both; the token clause only tells the compiler so.
-  if (!config.enabled || config.url === null || config.token === null) {
-    throw new Error(config.error ?? "Dispatch is not configured")
-  }
-  await postDeliveryReply({ url: config.url, token: config.token }, identity.id, delivery, result)
+  if (!config.enabled) throw new Error(config.error ?? config.notice)
+  await postDeliveryReply(config, identity.id, delivery, result)
 }
 
 /**
@@ -879,7 +879,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
   if (!envoy.enabled) {
-    await serveEnvoyOff(`Envoy is off for this session (${configFile.path ?? configFile.error})`)
+    await serveEnvoyOff(`Envoy is off for this session: ${envoy.error ?? envoy.notice}`)
     return
   }
   if (envoy.natsUrls.length === 0) {

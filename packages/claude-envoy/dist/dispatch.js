@@ -15010,60 +15010,72 @@ function commandsHelp() {
 }
 
 // ../envoy-client/src/envoy-config.ts
-import { existsSync, readFileSync } from "fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync } from "fs";
 import { homedir } from "os";
 import * as path from "path";
 var COMMAND_TIMEOUT_MS = 1e4;
-function setValue(value) {
+function nonEmpty(value) {
   return value === undefined || value === "" ? undefined : value;
 }
+function absolute(name, value) {
+  if (value !== undefined && !path.isAbsolute(value)) {
+    throw new Error(`${name} is ${value}, which is not an absolute path`);
+  }
+  return value;
+}
 function neutralConfig(env) {
-  const xdgConfigHome = setValue(env.XDG_CONFIG_HOME);
+  const xdgConfigHome = nonEmpty(env.XDG_CONFIG_HOME);
   if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
     return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
   }
-  const configHome = xdgConfigHome ?? path.join(setValue(env.HOME) ?? homedir(), ".config");
+  const configHome = xdgConfigHome ?? path.join(nonEmpty(env.HOME) ?? homedir(), ".config");
   return { path: path.resolve(configHome, "legion", "envoy.json") };
 }
 function ompProfileDirectory(env) {
-  const profile = setValue(env.OMP_PROFILE);
-  return profile === undefined || profile === "default" ? undefined : setValue(env.PI_CODING_AGENT_DIR);
+  const profile = nonEmpty(env.OMP_PROFILE);
+  return profile === undefined || profile === "default" ? undefined : absolute("PI_CODING_AGENT_DIR", nonEmpty(env.PI_CODING_AGENT_DIR));
 }
 function harnessDirectory(harness, env) {
   switch (harness) {
     case "omp":
       return ompProfileDirectory(env);
     case "claude":
-      return setValue(env.CLAUDE_CONFIG_DIR);
+      return absolute("CLAUDE_CONFIG_DIR", nonEmpty(env.CLAUDE_CONFIG_DIR));
     case "opencode":
-      return setValue(env.OPENCODE_CONFIG_DIR);
+      return absolute("OPENCODE_CONFIG_DIR", nonEmpty(env.OPENCODE_CONFIG_DIR));
     case "command":
-      return ompProfileDirectory(env) ?? setValue(env.CLAUDE_CONFIG_DIR) ?? setValue(env.OPENCODE_CONFIG_DIR);
+      return ompProfileDirectory(env) ?? absolute("CLAUDE_CONFIG_DIR", nonEmpty(env.CLAUDE_CONFIG_DIR)) ?? absolute("OPENCODE_CONFIG_DIR", nonEmpty(env.OPENCODE_CONFIG_DIR));
+    default: {
+      const unknown2 = harness;
+      throw new Error(`unknown harness ${String(unknown2)}`);
+    }
   }
 }
 function envoyConfigPath(harness, env) {
-  const handed = setValue(env.ENVOY_CONFIG_FILE);
-  if (harness === "command" && handed !== undefined)
-    return path.resolve(handed);
+  const handed = nonEmpty(env.ENVOY_CONFIG_FILE);
+  if (harness === "command" && handed !== undefined) {
+    return path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
+  }
   const directory = harnessDirectory(harness, env);
   if (directory !== undefined)
     return path.resolve(directory, "envoy.json");
   if (handed !== undefined)
-    return path.resolve(handed);
+    return path.resolve(absolute("ENVOY_CONFIG_FILE", handed));
   const neutral = neutralConfig(env);
   if ("error" in neutral)
     throw new Error(neutral.error);
   return neutral.path;
 }
+var httpUrlSchema = exports_external.url({ protocol: /^https?$/, error: "must be an http or https URL" });
 var DispatchSectionSchema = exports_external.strictObject({
   enabled: exports_external.boolean().optional(),
-  serverUrl: exports_external.url().optional(),
+  serverUrl: httpUrlSchema.optional(),
   token: exports_external.string().optional()
 });
 var EnvoySectionSchema = exports_external.strictObject({
   enabled: exports_external.boolean().optional(),
-  url: exports_external.url().optional(),
-  natsUrls: exports_external.array(exports_external.string()).optional(),
+  url: httpUrlSchema.optional(),
+  natsUrls: exports_external.array(exports_external.string().trim().min(1, "must not be empty")).optional(),
   token: exports_external.string().optional(),
   natsSeed: exports_external.string().optional()
 });
@@ -15076,17 +15088,20 @@ var CheckoutFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
   dispatch: DispatchSectionSchema.optional()
 });
-function sectionSwitch(config2, section, env) {
-  const own = config2[section].enabled;
-  if (own === false)
-    return { offBy: config2.path };
-  const checkout = section === "dispatch" ? config2.checkout : null;
-  const theirs = checkout?.dispatch.enabled;
-  if (checkout === null || theirs === undefined)
-    return { offBy: null, enabled: own === true };
-  if (theirs)
-    return { offBy: null, enabled: true };
-  return env.DISPATCH_URL !== undefined ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
+function offWithNotice(notice) {
+  return { enabled: false, notice, error: null };
+}
+function offWithError(error48) {
+  return { enabled: false, notice: null, error: error48 };
+}
+function httpUrl2(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return;
+  }
+  return url2.protocol === "http:" || url2.protocol === "https:" ? url2 : undefined;
 }
 function describeSchemaIssue(filePath, error48) {
   const issue2 = error48.issues[0];
@@ -15099,25 +15114,121 @@ function describeSchemaIssue(filePath, error48) {
   }
   return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
 }
-function parseFile(filePath, schema) {
+function jsonErrorPosition(text) {
+  let at = 0;
+  const fail = () => {
+    throw new RangeError("not JSON");
+  };
+  const space = () => {
+    while (at < text.length && ` 	
+\r`.includes(text.charAt(at)))
+      at += 1;
+  };
+  const expect = (char) => {
+    if (text.charAt(at) !== char)
+      fail();
+    at += 1;
+  };
+  const string4 = () => {
+    expect('"');
+    while (at < text.length) {
+      const char = text.charAt(at);
+      if (char === '"') {
+        at += 1;
+        return;
+      }
+      if (char < " ")
+        fail();
+      at += char === "\\" ? 2 : 1;
+    }
+    fail();
+  };
+  const value = () => {
+    space();
+    const char = text.charAt(at);
+    if (char === "{" || char === "[") {
+      const close = char === "{" ? "}" : "]";
+      at += 1;
+      space();
+      if (text.charAt(at) === close) {
+        at += 1;
+        return;
+      }
+      for (;; ) {
+        if (close === "}") {
+          space();
+          string4();
+          space();
+          expect(":");
+        }
+        value();
+        space();
+        if (text.charAt(at) === ",") {
+          at += 1;
+          continue;
+        }
+        expect(close);
+        return;
+      }
+    }
+    if (char === '"') {
+      string4();
+      return;
+    }
+    for (const word of ["true", "false", "null"]) {
+      if (text.startsWith(word, at)) {
+        at += word.length;
+        return;
+      }
+    }
+    const number4 = /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/.exec(text.slice(at));
+    if (number4 === null)
+      fail();
+    at += number4?.[0].length ?? 0;
+  };
+  try {
+    value();
+    space();
+    if (at < text.length)
+      fail();
+    return;
+  } catch {
+    const before = text.slice(0, at).split(`
+`);
+    return `line ${before.length}, column ${(before.at(-1)?.length ?? 0) + 1}`;
+  }
+}
+function danglingLink(filePath) {
+  try {
+    return lstatSync(filePath).isSymbolicLink() ? readlinkSync(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+function parseFile(filePath, schema, checkout) {
   let raw;
   try {
     raw = readFileSync(filePath, "utf-8");
   } catch (error48) {
-    if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR"))
-      return { kind: "absent" };
+    if (hasErrnoCode(error48, "ENOENT") || hasErrnoCode(error48, "ENOTDIR")) {
+      return { kind: "absent", link: danglingLink(filePath) };
+    }
     return { kind: "invalid", reason: `${filePath}: could not be read (${messageFor(error48)})` };
   }
   let parsedJson;
   try {
     parsedJson = JSON.parse(raw);
-  } catch (error48) {
-    return { kind: "invalid", reason: `${filePath}: invalid JSON (${messageFor(error48)})` };
+  } catch {
+    const position = jsonErrorPosition(raw);
+    return {
+      kind: "invalid",
+      reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
+    };
   }
   if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
     return {
       kind: "invalid",
-      reason: `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
     };
   }
   const parsed = schema.safeParse(parsedJson);
@@ -15127,6 +15238,9 @@ function parseFile(filePath, schema) {
   return { kind: "valid", settings: parsed.data };
 }
 var commandOutcomes = new Map;
+function sendable(value) {
+  return !/[\s\p{Cc}]/u.test(value);
+}
 function runCommand(command, env) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -15140,23 +15254,36 @@ function runCommand(command, env) {
       stdin: "ignore",
       stdout: "pipe",
       stderr: "pipe",
-      timeout: COMMAND_TIMEOUT_MS
+      timeout: COMMAND_TIMEOUT_MS,
+      detached: true
     });
   } catch (error48) {
     return { failure: `could not start: ${messageFor(error48)}` };
   }
+  if (result.success) {
+    const value = result.stdout.toString().trim();
+    if (value.length === 0)
+      return { failure: "printed nothing" };
+    if (!sendable(value)) {
+      return { failure: "printed more than one line, or whitespace inside its value" };
+    }
+    return { value };
+  }
   if (result.exitedDueToTimeout) {
+    try {
+      process.kill(-result.pid, "SIGKILL");
+    } catch {}
     return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
   }
-  if (!result.success) {
-    return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
-  }
-  const value = result.stdout.toString().trim();
-  return value.length === 0 ? { failure: "printed nothing" } : { value };
+  return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
 }
 function fileValue(value, field, filePath, env) {
-  if (!value.startsWith("!"))
+  if (!value.startsWith("!")) {
+    if (!sendable(value)) {
+      throw new Error(`${filePath}: ${field} holds whitespace or a control character`);
+    }
     return value;
+  }
   const command = value.slice(1);
   let outcome = commandOutcomes.get(command);
   if (outcome === undefined) {
@@ -15167,45 +15294,54 @@ function fileValue(value, field, filePath, env) {
     throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
   return outcome.value;
 }
+function unsendableRefusal(source, value) {
+  return sendable(value) ? null : `${source} holds whitespace or a control character`;
+}
 function checkoutCommandRefusal(checkoutPath, field) {
   return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
-function failed(filePath, error48) {
-  return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error: error48 };
+function missingConfigNotice(filePath, missing, off) {
+  const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
+  const hint = missing.hint === null ? "" : `; ${missing.hint}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${hint}`;
 }
-function missingConfigNotice(filePath, env, off) {
-  const notice = `no envoy.json at ${filePath}: ${off}`;
+function oldFileHint(filePath, env) {
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath))
-    return notice;
-  const home = setValue(env.HOME) ?? homedir();
+    return null;
+  const home = nonEmpty(env.HOME) ?? homedir();
   if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
-    return notice;
+    return null;
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
-    return notice;
-  return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
+    return null;
+  return `${old} is no longer read: move it to ${neutral.path}`;
 }
 function readEnvoyConfig(filePath, env, options) {
-  const chosen = parseFile(filePath, EnvoyFileSchema);
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
   if (chosen.kind === "invalid")
-    return failed(filePath, chosen.reason);
+    return { kind: "failed", path: filePath, error: chosen.reason };
   const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent" } : parseFile(checkoutPath, CheckoutFileSchema);
-  if (checkoutFile.kind === "invalid")
-    return failed(filePath, checkoutFile.reason);
+  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
   const own = chosen.kind === "valid" ? chosen.settings : {};
-  return {
-    path: filePath,
-    dispatch: own.dispatch ?? {},
-    envoy: own.envoy ?? {},
-    checkout: checkoutFile.kind === "valid" ? {
+  let checkout = null;
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
+    checkout = {
+      kind: "valid",
       path: checkoutPath,
       dispatch: checkoutFile.settings.dispatch ?? {},
       envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
-    } : null,
-    notice: chosen.kind === "absent" ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off") : null,
-    error: null
+    };
+  }
+  return {
+    kind: "read",
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout,
+    missing: chosen.kind === "absent" ? { link: chosen.link, hint: oldFileHint(filePath, env) } : null
   };
 }
 
@@ -15221,6 +15357,9 @@ function readSecretFile(variable, filePath) {
   const value = contents.trim();
   if (value.length === 0)
     throw new Error(`${variable} names ${filePath}, which is empty`);
+  if (/[\s\p{Cc}]/u.test(value)) {
+    throw new Error(`${variable} names ${filePath}, which holds whitespace or a control character`);
+  }
   return value;
 }
 
@@ -15229,123 +15368,104 @@ var DEFAULT_SERVER_URL = "http://localhost:8766";
 function normalizeDispatchUrl(url2) {
   return url2.replace(/\/+$/, "");
 }
-function parsedDispatchUrl(value, source) {
-  const url2 = normalizeDispatchUrl(value);
-  try {
-    new URL(url2);
-    return { url: url2, error: null };
-  } catch {
-    return { url: null, error: `${source} must be a valid URL` };
-  }
-}
-function dispatchSettings(env, config2) {
-  if (config2.error !== null) {
-    return { enabled: false, url: null, token: null, error: config2.error };
-  }
-  const state = sectionSwitch(config2, "dispatch", env);
-  if (state.offBy !== null)
-    return { enabled: false, url: null, token: null, error: null };
-  const own = config2.dispatch;
-  const checkout = config2.checkout;
-  const explicitUrl = env.DISPATCH_URL;
-  if (explicitUrl === undefined && state.enabled && checkout?.dispatch.serverUrl !== undefined) {
-    const source = `dispatch.serverUrl in ${checkout.path}`;
-    const url3 = parsedDispatchUrl(checkout.dispatch.serverUrl, source);
-    if (url3.error !== null)
-      return { enabled: false, url: null, token: null, error: url3.error };
-    const token2 = checkout.dispatch.token;
-    if (!token2) {
-      const error48 = `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`;
-      return { enabled: false, url: null, token: null, error: error48 };
-    }
-    if (token2.startsWith("!")) {
-      const error48 = checkoutCommandRefusal(checkout.path, "dispatch.token");
-      return { enabled: false, url: null, token: null, error: error48 };
-    }
-    return { enabled: true, url: url3.url, token: token2, error: null };
-  }
-  const rawUrl = explicitUrl !== undefined ? { value: explicitUrl, source: "DISPATCH_URL" } : state.enabled ? { value: own.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" } : null;
-  const url2 = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
-  let token;
-  let tokenSource;
-  let tokenFile = null;
-  if (env.DISPATCH_TOKEN_FILE !== undefined) {
-    tokenSource = "DISPATCH_TOKEN_FILE";
+function tokenSource(env, config2, checkout) {
+  const pointer = nonEmpty(env.DISPATCH_TOKEN_FILE);
+  if (pointer !== undefined) {
     try {
-      token = readSecretFile(tokenSource, env.DISPATCH_TOKEN_FILE);
+      return { kind: "variable", token: readSecretFile("DISPATCH_TOKEN_FILE", pointer) };
     } catch (error48) {
-      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
-    }
-  } else if (env.DISPATCH_TOKEN !== undefined) {
-    tokenSource = "DISPATCH_TOKEN";
-    token = env.DISPATCH_TOKEN;
-  } else if (checkout?.dispatch.token !== undefined) {
-    tokenSource = "dispatch.token";
-    token = checkout.dispatch.token;
-    const serverUrl = checkout.dispatch.serverUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL;
-    tokenFile = { path: checkout.path, serverUrl };
-  } else {
-    tokenSource = "dispatch.token";
-    token = own.token ?? null;
-    if (token !== null) {
-      tokenFile = { path: config2.path, serverUrl: own.serverUrl ?? DEFAULT_SERVER_URL };
+      return { error: messageFor(error48) };
     }
   }
-  const shownToken = tokenFile !== null && token?.startsWith("!") ? null : token;
-  if (url2.error !== null)
-    return { enabled: false, url: null, token: shownToken, error: url2.error };
-  if (url2.url === null)
-    return { enabled: false, url: null, token: shownToken, error: null };
-  if (explicitUrl !== undefined && tokenFile !== null) {
-    const named = new URL(url2.url).origin;
-    const paired = new URL(tokenFile.serverUrl).origin;
-    if (named !== paired) {
+  const plain = nonEmpty(env.DISPATCH_TOKEN);
+  if (plain !== undefined) {
+    const refusal = unsendableRefusal("DISPATCH_TOKEN", plain);
+    return refusal === null ? { kind: "variable", token: plain } : { error: refusal };
+  }
+  if (checkout?.token !== undefined) {
+    if (checkout.serverUrl === undefined) {
       return {
-        enabled: false,
-        url: null,
-        token: null,
-        error: `DISPATCH_URL names ${named}, but ${tokenFile.path}'s dispatch.token is for ${paired}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`
+        error: `${checkout.path}: dispatch.token requires dispatch.serverUrl in the same file`
       };
     }
+    const { path: path2, serverUrl, token } = checkout;
+    return { kind: "file", token, path: path2, serverUrl, checkout: true };
   }
-  if (tokenFile !== null && token?.startsWith("!")) {
-    if (tokenFile.path !== config2.path) {
-      const error48 = checkoutCommandRefusal(tokenFile.path, "dispatch.token");
-      return { enabled: false, url: null, token: null, error: error48 };
-    }
-    try {
-      token = fileValue(token, "dispatch.token", config2.path, env);
-    } catch (error48) {
-      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
-    }
-  }
-  if (!token) {
-    return {
-      enabled: false,
-      url: url2.url,
-      token,
-      error: `${tokenSource} must be a non-empty bearer token`
-    };
-  }
-  return { enabled: true, url: url2.url, token, error: null };
+  const own = config2.dispatch;
+  if (own.token === undefined)
+    return { kind: "none" };
+  return {
+    kind: "file",
+    token: own.token,
+    path: config2.path,
+    serverUrl: own.serverUrl ?? DEFAULT_SERVER_URL,
+    checkout: false
+  };
 }
-function resolveDispatchConfig(env, options) {
-  let filePath;
+function dispatchSettings(env, config2) {
+  if (config2.kind === "failed")
+    return offWithError(config2.error);
+  const explicitUrl = nonEmpty(env.DISPATCH_URL);
+  if (config2.checkout?.kind === "invalid" && explicitUrl === undefined) {
+    return offWithError(config2.checkout.error);
+  }
+  const checkout = config2.checkout?.kind === "valid" ? config2.checkout : null;
+  const own = config2.dispatch;
+  if (own.enabled === false) {
+    return offWithNotice(`${config2.path} sets dispatch.enabled to false: Dispatch is off`);
+  }
+  if (checkout?.dispatch.enabled === false && explicitUrl === undefined) {
+    return offWithNotice(`${checkout.path} sets dispatch.enabled to false: Dispatch is off`);
+  }
+  const enabled = checkout?.dispatch.enabled === true || own.enabled === true;
+  if (explicitUrl === undefined && !enabled) {
+    return offWithNotice(config2.missing === null ? `${config2.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, config2.missing, "Dispatch is off"));
+  }
+  if (explicitUrl === undefined && checkout?.dispatch.serverUrl !== undefined) {
+    const token = checkout.dispatch.token;
+    if (!token) {
+      return offWithError(`${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`);
+    }
+    if (token.startsWith("!")) {
+      return offWithError(checkoutCommandRefusal(checkout.path, "dispatch.token"));
+    }
+    const refusal = unsendableRefusal(`dispatch.token in ${checkout.path}`, token);
+    if (refusal !== null)
+      return offWithError(refusal);
+    return { enabled: true, url: normalizeDispatchUrl(checkout.dispatch.serverUrl), token };
+  }
+  if (explicitUrl !== undefined && httpUrl2(explicitUrl) === undefined) {
+    return offWithError("DISPATCH_URL must be an http or https URL");
+  }
+  const url2 = normalizeDispatchUrl(explicitUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL);
+  const source = tokenSource(env, config2, checkout === null ? null : { path: checkout.path, ...checkout.dispatch });
+  if ("error" in source)
+    return offWithError(source.error);
+  if (source.kind === "none") {
+    return offWithError(explicitUrl === undefined ? `${config2.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE` : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config2.path}`);
+  }
+  if (source.kind === "variable")
+    return { enabled: true, url: url2, token: source.token };
+  const named = httpUrl2(url2)?.origin;
+  const paired = httpUrl2(source.serverUrl)?.origin;
+  if (explicitUrl !== undefined && named !== paired) {
+    return offWithError(`DISPATCH_URL names ${named}, but ${source.path}'s dispatch.token is for ${paired}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`);
+  }
+  if (source.checkout && source.token.startsWith("!")) {
+    return offWithError(checkoutCommandRefusal(source.path, "dispatch.token"));
+  }
+  if (source.token === "") {
+    return offWithError(`dispatch.token in ${source.path} must be a non-empty bearer token`);
+  }
   try {
-    filePath = envoyConfigPath(options.harness, env);
+    return {
+      enabled: true,
+      url: url2,
+      token: fileValue(source.token, "dispatch.token", source.path, env)
+    };
   } catch (error48) {
-    return { enabled: false, url: null, token: null, error: messageFor(error48) };
+    return offWithError(messageFor(error48));
   }
-  const config2 = readEnvoyConfig(filePath, env, { cwd: options.cwd ?? process.cwd() });
-  return dispatchSettings(env, config2);
-}
-function activeDispatchSettings(resolution) {
-  if (resolution.error !== null)
-    throw new Error(`dispatch config: ${resolution.error}`);
-  const { url: url2, token } = resolution;
-  if (!resolution.enabled || url2 === null || token === null)
-    return null;
-  return { ...resolution, url: url2, token };
 }
 
 // ../envoy-client/src/dispatch-execute.ts
@@ -16212,8 +16332,8 @@ async function localPictures(images, cwd, problems) {
 async function localPicture(path2, cwd) {
   if (typeof path2 !== "string" || path2 === "")
     return;
-  const absolute = resolvePath(cwd, path2);
-  const file2 = Bun.file(absolute);
+  const absolute2 = resolvePath(cwd, path2);
+  const file2 = Bun.file(absolute2);
   let size;
   let head;
   try {
@@ -16232,7 +16352,7 @@ async function localPicture(path2, cwd) {
   if (type === undefined) {
     return `images: ${path2} is not ${PICTURE_TYPE_NAMES} picture (judged by its bytes, not its name)`;
   }
-  return { path: path2, name: basename(absolute), file: Bun.file(absolute, { type }) };
+  return { path: path2, name: basename(absolute2), file: Bun.file(absolute2, { type }) };
 }
 function uploadSlug(name) {
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -17717,11 +17837,7 @@ function withAccount(error48, account) {
   return new Error(told, { cause: error48 });
 }
 async function executeDispatchTool(input) {
-  const configUrl = input.config.url;
-  const configToken = input.config.token;
-  if (!input.config.enabled || !configUrl || !configToken) {
-    throw new Error("Dispatch is disabled; resolve both DISPATCH_URL and DISPATCH_TOKEN");
-  }
+  const { url: configUrl, token: configToken } = input.config;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(async (...args2) => {
     try {
@@ -18879,7 +18995,7 @@ function subscriptionRemovedTopics(raw, sessionID) {
 var OK = 0;
 var REFUSED = 1;
 var USAGE = 2;
-var HOSTS = { omp: "omp", claude: "claude", opencode: "opencode" };
+var HOSTS = ["omp", "claude", "opencode"];
 var CLAUDE_OUTPUT_MAX = 25000;
 var STATE_WRITE_FAILED = "dispatch: Dispatch took the call, but this session's state";
 function stateWriteFailed(problem) {
@@ -18948,7 +19064,7 @@ async function runDispatchCli(argv, rawEnv, io) {
     return REFUSED;
   }
   const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
-  const host = hostName === undefined ? undefined : HOSTS[hostName];
+  const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
     print(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`);
     return USAGE;
@@ -18970,21 +19086,20 @@ async function runDispatchCli(argv, rawEnv, io) {
     print(JSON.stringify(parsed.args, null, 2));
     return OK;
   }
-  let config2;
-  let unconfigured;
+  const harness = env.DISPATCH_HOST !== undefined && env.ENVOY_CONFIG_FILE !== undefined ? "command" : host;
+  let resolution;
   try {
-    const envoyConfig = readEnvoyConfig(envoyConfigPath(host, env), env, { cwd: io.cwd });
-    const offBy = sectionSwitch(envoyConfig, "dispatch", env).offBy;
-    unconfigured = offBy !== null ? `${offBy} turns Dispatch off (dispatch.enabled is false)` : envoyConfig.notice ?? `${envoyConfig.path} has no enabled dispatch section, and DISPATCH_URL is not set`;
-    config2 = activeDispatchSettings(dispatchSettings(env, envoyConfig));
+    const envoyConfig = readEnvoyConfig(envoyConfigPath(harness, env), env, { cwd: io.cwd });
+    resolution = dispatchSettings(env, envoyConfig);
   } catch (error48) {
     print(`dispatch: ${messageFor(error48)}`);
     return USAGE;
   }
-  if (config2 === null) {
-    print(`dispatch: ${unconfigured}`);
+  if (!resolution.enabled) {
+    print(resolution.error === null ? `dispatch: ${resolution.notice}` : `dispatch: dispatch config: ${resolution.error}`);
     return USAGE;
   }
+  const config2 = resolution;
   let follows;
   try {
     pruneSessions(sessionStateRoot(env), Date.now());

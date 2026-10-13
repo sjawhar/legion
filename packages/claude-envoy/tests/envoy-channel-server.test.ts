@@ -2,6 +2,7 @@ import { expect, test } from "bun:test"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
+import { nkeys } from "nats"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
@@ -669,7 +670,9 @@ test("with CLAUDE_CONFIG_DIR holding no envoy.json the server lists no tool, ref
 
     expect(responses.get(2)?.["result"]).toEqual({ tools: [] })
     expect(responses.get(3)?.["error"]).toMatchObject({
-      message: expect.stringContaining(`Envoy is off for this session (${file})`),
+      message: expect.stringContaining(
+        `Envoy is off for this session: no envoy.json at ${file}: Envoy is off`,
+      ),
     })
     expect(stderr).toContain(`envoy-channel: no envoy.json at ${file}: Dispatch and Envoy are off`)
     expect(exitCode).toBe(0)
@@ -712,6 +715,108 @@ test("an envoy.json that turns Envoy off opens no NATS connection and calls no l
   } finally {
     listener.stop(true)
     await broker.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+// The listener's bearer and the NATS seed are resolved once and handed to the client and the
+// connection: a server that dropped either would leave the session unregistered or signed out.
+test("the server calls the listener with the file's envoy.token and signs in to NATS with its seed", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-credentials-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  const broker = new FakeNatsServer({ nonce: "fake-nonce" })
+  const user = nkeys.createUser()
+  const auth: Array<string | null> = []
+  const registered = Promise.withResolvers<void>()
+  const listener = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      auth.push(request.headers.get("Authorization"))
+      const url = new URL(request.url)
+      if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
+        const body = (await request.json()) as { session_id: string; topics: string[] }
+        registered.resolve()
+        return Response.json({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: body.topics,
+        })
+      }
+      if (request.method === "DELETE") return new Response(null, { status: 200 })
+      return Response.json({ error: "not found" }, { status: 404 })
+    },
+  })
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({
+      envoy: {
+        enabled: true,
+        url: `http://127.0.0.1:${listener.port}`,
+        natsUrls: [broker.url],
+        token: "file-token",
+        natsSeed: new TextDecoder().decode(user.getSeed()),
+      },
+    }),
+  )
+  const server = Bun.spawn(["bun", channelEntry], {
+    cwd: home,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_credentials",
+      CLAUDE_PLUGIN_DATA: home,
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  try {
+    await Promise.all([registered.promise, broker.until(() => broker.connects.length > 0)])
+    expect(broker.connects[0]).toMatchObject({ nkey: user.getPublicKey() })
+    expect(new Set(auth)).toEqual(new Set(["Bearer file-token"]))
+    server.kill("SIGTERM")
+    expect(await server.exited).toBe(0)
+  } finally {
+    server.kill("SIGKILL")
+    listener.stop(true)
+    await broker.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+// A misconfiguration fails loudly: an Envoy that is on has nowhere to take its deliveries from.
+test("with Envoy on and no NATS server the server exits 1 naming where one goes", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-no-nats-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({ envoy: { enabled: true, url: "http://127.0.0.1:1" } }),
+  )
+  const server = Bun.spawn(["bun", channelEntry], {
+    cwd: home,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_no_nats",
+      CLAUDE_PLUGIN_DATA: home,
+    },
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "pipe",
+  })
+  try {
+    const [code, stderr] = await Promise.all([server.exited, new Response(server.stderr).text()])
+    expect(code).toBe(1)
+    expect(stderr).toContain(
+      "the Envoy Claude channel server needs a NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+    )
+  } finally {
+    server.kill("SIGKILL")
     await rm(home, { recursive: true, force: true })
   }
 }, 20_000)

@@ -1,17 +1,20 @@
 import { expect, test } from "bun:test"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
 const hookEntry = resolve(import.meta.dir, "..", "hooks", "session-hook.ts")
 
+/** Runs the hook as Claude Code does, with `env` as its whole environment. The session's cwd is
+ * the test's scratch HOME unless the input names one: the hook reads `<cwd>/.envoy/envoy.json`, so a
+ * shared directory's file would become every test's checkout. */
 async function runHook(
-  input: unknown,
-  env: Record<string, string>,
+  input: Record<string, unknown>,
+  env: Record<string, string> & { readonly HOME: string },
 ): Promise<{ readonly exitCode: number; readonly stdout: string; readonly stderr: string }> {
   const run = Bun.spawn(["bun", hookEntry, "open-asks"], {
     env: { PATH: process.env["PATH"] ?? "", ...env },
-    stdin: new TextEncoder().encode(JSON.stringify(input)),
+    stdin: new TextEncoder().encode(JSON.stringify({ cwd: env.HOME, ...input })),
     stdout: "pipe",
     stderr: "pipe",
   })
@@ -26,7 +29,6 @@ async function runHook(
 const hookInput = {
   session_id: "s-1",
   source: "startup",
-  cwd: "/tmp",
   hook_event_name: "SessionStart",
 }
 
@@ -198,6 +200,65 @@ test("hands on the CLAUDE_CONFIG_DIR envoy.json, single-quoted so the shell read
   }
 })
 
+// Swap the hook's harness for the `command` rule, or omp's, and it would hand on, and read open
+// asks from, a file an outer session or launcher left in the environment.
+test("reads and hands on Claude Code's own envoy.json, never the ENVOY_CONFIG_FILE or omp profile it inherited", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-harness-"))
+  const requests: string[] = []
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      const url = new URL(request.url)
+      requests.push(`${request.headers.get("authorization")} ${url.pathname}?${url.searchParams}`)
+      return Response.json({
+        session_id: "s-1",
+        as_of: "2026-09-14T00:00:00Z",
+        opened_since: false,
+        count: 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      })
+    },
+  })
+  const configDirectory = join(scratch, "claude-config")
+  await mkdir(configDirectory)
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: `http://127.0.0.1:${server.port}`,
+        token: "claude-token",
+      },
+    }),
+  )
+  const decoy = join(scratch, "decoy")
+  await mkdir(decoy)
+  await writeFile(join(decoy, "envoy.json"), "{not json")
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      ENVOY_CONFIG_FILE: join(decoy, "envoy.json"),
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: decoy,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(requests).toEqual(["Bearer claude-token /api/v1/asks/open?author_session=s-1"])
+    expect(await readFile(envFile, "utf8")).toContain(
+      `export ENVOY_CONFIG_FILE='${join(configDirectory, "envoy.json")}'`,
+    )
+  } finally {
+    server.stop(true)
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 test("with a relative XDG_CONFIG_HOME, hands on no envoy.json, says why Dispatch is unavailable, and still exits 0", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-xdg-"))
   const envFile = join(scratch, "session-env.sh")
@@ -245,7 +306,7 @@ test("writes the host and envoy.json lines once however many SessionStarts write
   }
 })
 
-test("leaves an env file alone when Claude Code names none", async () => {
+test("writes no environment line anywhere when Claude Code names no env file", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-no-env-"))
   const envFile = join(scratch, "session-env.sh")
   await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
@@ -256,7 +317,13 @@ test("leaves an env file alone when Claude Code names none", async () => {
     })
 
     expect(result.exitCode).toBe(0)
+    expect(result.stdout).not.toContain("DISPATCH_HOST")
+    expect(result.stdout).not.toContain("ENVOY_CONFIG_FILE")
     expect(await readFile(envFile, "utf8")).toBe("export FROM_ANOTHER_HOOK=1\n")
+    // Only the session record the hook keeps for its Claude process is written (beside the cache
+    // Bun itself keeps under HOME).
+    const written = (await readdir(scratch)).filter((entry) => entry !== ".bun").sort()
+    expect(written).toEqual(["plugin-data", "session-env.sh"])
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
