@@ -81,13 +81,11 @@ func TestAProberBuildsTheProbeSandboxTheDaemonBuilds(t *testing.T) {
 	}
 	opts := goldenOptions()
 	opts.Tokens, opts.GitHubCredential, opts.Store, opts.Conns, opts.StreamURL = nil, nil, nil, nil, ""
-	first := kubeClients{dyn: newDynamic(t), kube: kubefake.NewClientset()}
-	prober, err := newProber(ctx, first, first, opts)
+	prober, err := newProber(ctx, sameClients(kubeClients{dyn: newDynamic(t), kube: kubefake.NewClientset()}), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second := kubeClients{dyn: newDynamic(t), kube: kubefake.NewClientset()}
-	another, err := newProber(ctx, second, second, opts)
+	another, err := newProber(ctx, sameClients(kubeClients{dyn: newDynamic(t), kube: kubefake.NewClientset()}), opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +150,7 @@ func TestAProberAndABootingDaemonEachKeepTheirOwnProbeSandbox(t *testing.T) {
 		name := map[bool]string{true: "the daemon's probe in flight", false: "the prober's probe in flight"}[daemonFirst]
 		t.Run(name, func(t *testing.T) {
 			g := newProbeRig(t, nil).succeeds(okLine(3))
-			prober, err := newProber(g.ctx, g.clients(), g.clients(), g.opts)
+			prober, err := newProber(g.ctx, g.clients, g.opts)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -213,7 +211,7 @@ func TestAProberRunsNoRefresherPastARefreshTick(t *testing.T) {
 	tick := 5 * time.Millisecond
 	defer func(was time.Duration) { gitHubRefreshInterval = was }(gitHubRefreshInterval)
 	gitHubRefreshInterval = tick
-	prober, err := newProber(g.ctx, g.clients(), g.clients(), g.opts)
+	prober, err := newProber(g.ctx, g.clients, g.opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +234,7 @@ func TestAProberRunsNoRefresherPastARefreshTick(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := control.start(g.ctx, g.clients(), g.clients()); err != nil {
+	if err := control.start(g.ctx, g.clients); err != nil {
 		t.Fatal(err)
 	}
 	g.eventually("the control's refresher to read the issue pod's role Secrets", func() bool { return secretReads(g.rig) > 0 })

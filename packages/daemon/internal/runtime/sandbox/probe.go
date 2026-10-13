@@ -164,18 +164,18 @@ type Prober struct{ r *Runtime }
 
 // NewProber builds a Prober over rc's clients (clients, newProber).
 func NewProber(ctx context.Context, rc *rest.Config, opts Options) (*Prober, error) {
-	informers, requests, err := clients(rc)
+	c, err := clients(rc)
 	if err != nil {
 		return nil, err
 	}
-	return newProber(ctx, informers, requests, opts)
+	return newProber(ctx, c, opts)
 }
 
 // newProber builds a Prober from opts, which need none of what only supervision reads
 // (configureProber), draws its probe run, and starts its Sandbox and pod informers for ctx's
 // lifetime as New does, and nothing else: no refresher of the roles' gh files, since it writes no
 // role's Secret.
-func newProber(ctx context.Context, informers, requests kubeClients, opts Options) (*Prober, error) {
+func newProber(ctx context.Context, c runtimeClients, opts Options) (*Prober, error) {
 	r, err := configureProber(opts)
 	if err != nil {
 		return nil, err
@@ -185,7 +185,7 @@ func newProber(ctx context.Context, informers, requests kubeClients, opts Option
 		return nil, fmt.Errorf("sandbox runtime: draw the probe run: %w", err)
 	}
 	r.probeRun = fmt.Sprintf("%x", run)
-	if err := r.startInformers(ctx, informers, requests); err != nil {
+	if err := r.startInformers(ctx, c); err != nil {
 		return nil, err
 	}
 	return &Prober{r: r}, nil
@@ -222,6 +222,10 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		return outcome, bootprobe.ImageReport{}
 	}
 	defer func() {
+		// Detached from ctx, which may be what ended the probe, so nothing but this bound ends the
+		// delete; it covers the wait on the client's limiter too. A delete it cuts short leaves a
+		// Sandbox the next probe replaces (createProbe), and the Sandbox's shutdown time ends it
+		// before then.
 		deleting, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiTimeout)
 		defer cancel()
 		background := metav1.DeletePropagationBackground
@@ -509,8 +513,10 @@ func probeWaiting(pod *corev1.Pod) string {
 
 // probeLog is the probe container's last log lines.
 func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
+	reading, cancel := call(ctx)
+	defer cancel()
 	lines := int64(probeLogLines)
-	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(name, &corev1.PodLogOptions{Container: probeContainer, TailLines: &lines}).Stream(ctx)
+	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(name, &corev1.PodLogOptions{Container: probeContainer, TailLines: &lines}).Stream(reading)
 	if err != nil {
 		return "", err
 	}

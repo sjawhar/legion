@@ -241,10 +241,12 @@ func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 }
 
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never
-// changes its verdict.
+// changes its verdict, so the read is bounded whole (call).
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
+	reading, cancel := call(ctx)
+	defer cancel()
 	lines := int64(logTailLines)
-	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(ctx)
+	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}

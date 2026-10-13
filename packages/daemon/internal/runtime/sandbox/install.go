@@ -24,18 +24,14 @@ var crdGVR = schema.GroupVersionResource{Group: "apiextensions.k8s.io", Version:
 // serve the version this runtime speaks, and the controller's Deployment must have an available
 // replica. Each piece is checked, and every one missing is named, whether the API answered 404,
 // 403 — under a resourceNames grant a piece that does not exist is forbidden, not absent — or
-// the Deployment has no available replica. Its clients are the runtime's requests' (clientConfigs).
+// the Deployment has no available replica. Its clients pace themselves and bound each request as
+// the runtime's requests do (requestConfig).
 func CheckInstalled(ctx context.Context, rc *rest.Config, ref InstallRef) error {
-	_, requests := clientConfigs(rc)
-	dyn, err := dynamic.NewForConfig(requests)
+	c, err := clientsOf(requestConfig(rc))
 	if err != nil {
-		return fmt.Errorf("agent sandbox check: dynamic client: %w", err)
+		return err
 	}
-	kube, err := kubernetes.NewForConfig(requests)
-	if err != nil {
-		return fmt.Errorf("agent sandbox check: kubernetes client: %w", err)
-	}
-	return checkInstalled(ctx, dyn, kube, ref)
+	return checkInstalled(ctx, c.dyn, c.kube, ref)
 }
 
 func checkInstalled(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface, ref InstallRef) error {
@@ -86,11 +82,10 @@ func servesVersion(crd *unstructured.Unstructured, version string) bool {
 // runs it before the store opens, so before any schema write, image probe or reconcile: a Sandbox
 // this runtime did not build must never be adopted, suspended or deleted as though it were one of
 // its pods, and nothing may change what an older binary needs to clean it up. Image probes are
-// explicit non-issue Sandboxes and are excluded. Its client is the runtime's requests'
-// (clientConfigs).
+// explicit non-issue Sandboxes and are excluded. Its client paces itself and bounds each request as
+// the runtime's requests do (requestConfig).
 func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace, project string) error {
-	_, requests := clientConfigs(rc)
-	dyn, err := dynamic.NewForConfig(requests)
+	dyn, err := dynamic.NewForConfig(requestConfig(rc))
 	if err != nil {
 		return fmt.Errorf("sandbox runtime: dynamic client: %w", err)
 	}

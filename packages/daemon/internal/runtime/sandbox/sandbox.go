@@ -44,7 +44,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -54,24 +53,10 @@ import (
 
 var _ runtime.Runtime = (*Runtime)(nil)
 
-// apiTimeout bounds one API call the runtime makes outside a relaunch's own budget: a log or
-// event read for an observation's detail, a patch, a delete. The runtime's Kubernetes clients bound
-// each of their requests by it from the moment their rate limiter lets the request go
-// (clientConfigs); call bounds any other call, such as a GitHub App token mint.
+// apiTimeout bounds one call the runtime makes: each request of its requests' Kubernetes client,
+// from the moment the client's rate limiter lets it go (requestConfig), and any call its clients do
+// not bound whole (call).
 const apiTimeout = 30 * time.Second
-
-// clientQPS and clientBurst are the rate the runtime's Kubernetes requests are paced at, one
-// limiter for all of them (clientConfigs), sized for a few hundred roles. A daemon restart has
-// every live role's launcher say hello again, each costing a read of its role's launcher Secret
-// (launcherCredential), while a launch makes about eight requests into a running pod and about
-// thirty when it replaces the pod. At 50 a second with a burst of 100 three hundred launchers'
-// reads clear in 4 s, where client-go's default of 5 with a burst of 10 per client
-// (rest.DefaultQPS, rest.DefaultBurst) needs about 29 s for 154 (LEGION-723). A watch is never
-// paced (client-go's Request.Watch).
-const (
-	clientQPS   = 50
-	clientBurst = 100
-)
 
 // recheckInterval is how often a wait re-reads what it waits on even when no informer event
 // arrived, since a wait's condition can include an API read that no event announces.
@@ -113,8 +98,8 @@ type Runtime struct {
 	now                            func() time.Time
 	log                            *slog.Logger
 
-	// lifetime is the informers' context, startInformers': a read no single caller waits for to
-	// its end, a launcher credential's (readLauncherCredential), ends with it.
+	// lifetime is the informers' context; a read no single caller waits for
+	// (readLauncherCredential) ends with it.
 	lifetime  context.Context
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
@@ -146,62 +131,14 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	informers, requests, err := clients(rc)
+	c, err := clients(rc)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.start(ctx, informers, requests); err != nil {
+	if err := r.start(ctx, c); err != nil {
 		return nil, err
 	}
 	return r, nil
-}
-
-// kubeClients are a dynamic and a typed client of one client configuration.
-type kubeClients struct {
-	dyn  dynamic.Interface
-	kube kubernetes.Interface
-}
-
-// clients are the runtime's Kubernetes clients of rc: informers for its informers' lists and
-// watches, requests for every other request, both paced by one limiter at clientQPS and
-// clientBurst (clientConfigs).
-func clients(rc *rest.Config) (informers, requests kubeClients, err error) {
-	informerConfig, requestConfig := clientConfigs(rc)
-	if informers, err = clientsOf(informerConfig); err != nil {
-		return kubeClients{}, kubeClients{}, err
-	}
-	if requests, err = clientsOf(requestConfig); err != nil {
-		return kubeClients{}, kubeClients{}, err
-	}
-	return informers, requests, nil
-}
-
-// clientConfigs are rc paced by one rate limiter at clientQPS and clientBurst, the informers'
-// with no timeout and the requests' bounding each request by apiTimeout. client-go waits on a
-// client's limiter before it starts that client's timeout (rest/request.go, Request.request), so
-// a request's wait to be let go is bounded by its caller's context alone, a launch's own deadline,
-// and a launch the limiter holds back waits its turn rather than failing; the 30 s bound is the
-// request's own. A watch must have no timeout, which would end it, so the informers' client has
-// none.
-func clientConfigs(rc *rest.Config) (informers, requests *rest.Config) {
-	informers = rest.CopyConfig(rc)
-	informers.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(clientQPS, clientBurst)
-	informers.Timeout = 0
-	requests = rest.CopyConfig(informers)
-	requests.Timeout = apiTimeout
-	return informers, requests
-}
-
-func clientsOf(rc *rest.Config) (kubeClients, error) {
-	dyn, err := dynamic.NewForConfig(rc)
-	if err != nil {
-		return kubeClients{}, fmt.Errorf("sandbox runtime: dynamic client: %w", err)
-	}
-	kube, err := kubernetes.NewForConfig(rc)
-	if err != nil {
-		return kubeClients{}, fmt.Errorf("sandbox runtime: kubernetes client: %w", err)
-	}
-	return kubeClients{dyn: dyn, kube: kube}, nil
 }
 
 // configure checks opts and fills their defaults, touching no cluster: everything the runtime reads
@@ -376,30 +313,30 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 // start runs both informers (startInformers) and then the GitHub credential refresher
 // (refreshGitHubCredentials) on ctx, the informers' lifetime, so it stops with the informers whose
 // pod store it walks.
-func (r *Runtime) start(ctx context.Context, informers, requests kubeClients) error {
-	if err := r.startInformers(ctx, informers, requests); err != nil {
+func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
+	if err := r.startInformers(ctx, c); err != nil {
 		return err
 	}
 	go r.refreshGitHubCredentialsEvery(ctx, gitHubRefreshInterval)
 	return nil
 }
 
-// startInformers runs both informers over the informers' clients, selected on the project label,
+// startInformers runs both informers over c's informers' clients, selected on the project label,
 // until ctx ends, and waits for both stores to sync; every other request of the runtime goes
-// through requests.
-func (r *Runtime) startInformers(ctx context.Context, informers, requests kubeClients) error {
-	r.dyn, r.kube, r.lifetime = requests.dyn, requests.kube, ctx
-	sandboxes := informers.dyn.Resource(sandboxGVR).Namespace(r.namespace)
-	pods := informers.kube.CoreV1().Pods(r.namespace)
+// through c's requests' clients.
+func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
+	r.dyn, r.kube, r.lifetime = c.requests.dyn, c.requests.kube, ctx
+	sandboxes := c.informers.dyn.Resource(sandboxGVR).Namespace(r.namespace)
+	pods := c.informers.kube.CoreV1().Pods(r.namespace)
 	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
-	r.sandboxes = r.informer(&r.sandboxFeed, informers.dyn, &unstructured.Unstructured{},
+	r.sandboxes = r.informer(&r.sandboxFeed, c.informers.dyn, &unstructured.Unstructured{},
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
 			return sandboxes.List(ctx, o)
 		},
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
 			return sandboxes.Watch(ctx, o)
 		})
-	r.pods = r.informer(&r.podFeed, informers.kube, &corev1.Pod{},
+	r.pods = r.informer(&r.podFeed, c.informers.kube, &corev1.Pod{},
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
 	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
@@ -500,8 +437,10 @@ func (f *feed) check() error {
 		f.resource, f.since.UTC().Format(time.RFC3339), f.failed)
 }
 
-// call is ctx bounded for one call no client of the runtime bounds itself, such as a GitHub App
-// token mint: the runtime's Kubernetes clients bound their own requests (clientConfigs).
+// call is ctx bounded for one call no client of the runtime bounds whole: a GitHub App token mint,
+// and a pod log Stream, which client-go bounds by the client's timeout per attempt and not across
+// its Retry-After retries (rest/request.go, Request.Stream), so a log read fails fast rather than
+// hold its caller.
 func call(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }

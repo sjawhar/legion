@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,7 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
-	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -91,8 +91,8 @@ func (l *fakeLimiter) Stop()           {}
 func (l *fakeLimiter) QPS() float32    { return float32(l.qps) }
 
 // withClientLimiter puts limit in front of the requests a launch and a launcher's hello make
-// through the runtime's clients, a watch excepted, as client-go's REST client puts its configured
-// limiter in front of each request it sends (limited).
+// through the runtime's requests' clients, as client-go's REST client puts its configured limiter
+// in front of each request it sends (limited).
 func withClientLimiter(limit flowcontrol.RateLimiter) rigOption {
 	return func(g *rig, _ *Options) { g.limit = limit }
 }
@@ -108,27 +108,26 @@ func limited(ctx context.Context, limit flowcontrol.RateLimiter) error {
 	return err
 }
 
-// limitedKube is the typed fake behind limit. It embeds the fake itself, as hookedDynamic does, so
-// the informers still see the fake's IsWatchListSemanticsUnSupported. Each Secret read is counted
-// in g before limit sees it: what the runtime asked for, whether or not the limiter let it through.
+// limitedKube is a typed client behind limit. Each Secret get is told to asked before limit sees
+// it: what the runtime asked for, whether or not the limiter let it through.
 type limitedKube struct {
-	*kubefake.Clientset
+	kubernetes.Interface
 	limit flowcontrol.RateLimiter
-	g     *rig
+	asked func(name string)
 }
 
 func (k limitedKube) CoreV1() corev1client.CoreV1Interface {
-	return limitedCore{k.Clientset.CoreV1(), k.limit, k.g}
+	return limitedCore{k.Interface.CoreV1(), k.limit, k.asked}
 }
 
 type limitedCore struct {
 	corev1client.CoreV1Interface
 	limit flowcontrol.RateLimiter
-	g     *rig
+	asked func(name string)
 }
 
 func (c limitedCore) Secrets(namespace string) corev1client.SecretInterface {
-	return limitedSecrets{c.CoreV1Interface.Secrets(namespace), c.limit, c.g}
+	return limitedSecrets{c.CoreV1Interface.Secrets(namespace), c.limit, c.asked}
 }
 
 func (c limitedCore) Pods(namespace string) corev1client.PodInterface {
@@ -138,16 +137,11 @@ func (c limitedCore) Pods(namespace string) corev1client.PodInterface {
 type limitedSecrets struct {
 	corev1client.SecretInterface
 	limit flowcontrol.RateLimiter
-	g     *rig
+	asked func(name string)
 }
 
 func (s limitedSecrets) Get(ctx context.Context, name string, opts metav1.GetOptions) (*corev1.Secret, error) {
-	s.g.mu.Lock()
-	if s.g.secretReads == nil {
-		s.g.secretReads = map[string]int{}
-	}
-	s.g.secretReads[name]++
-	s.g.mu.Unlock()
+	s.asked(name)
 	if err := limited(ctx, s.limit); err != nil {
 		return nil, err
 	}
@@ -194,17 +188,17 @@ func (p limitedPods) List(ctx context.Context, opts metav1.ListOptions) (*corev1
 	return p.PodInterface.List(ctx, opts)
 }
 
-// limitedDynamic is the dynamic fake behind limit, for the Sandboxes the runtime reads and writes.
+// limitedDynamic is a dynamic client behind limit, for the Sandboxes the runtime reads and writes.
 type limitedDynamic struct {
-	*dynamicfake.FakeDynamicClient
+	dynamic.Interface
 	limit flowcontrol.RateLimiter
 }
 
 func (d limitedDynamic) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
 	if gvr != sandboxGVR {
-		return d.FakeDynamicClient.Resource(gvr)
+		return d.Interface.Resource(gvr)
 	}
-	return limitedResource{d.FakeDynamicClient.Resource(gvr), d.limit}
+	return limitedResource{d.Interface.Resource(gvr), d.limit}
 }
 
 type limitedResource struct {
@@ -256,9 +250,9 @@ func (s limitedSandboxes) Delete(ctx context.Context, name string, opts metav1.D
 	return s.ResourceInterface.Delete(ctx, name, opts, subresources...)
 }
 
-// reconnectingPods are pods running issue pods of their own, one per issue from LEGION-300 on,
-// each role's launcher Secret bound to its pod, as a daemon restart finds every live tree's pod;
-// the hellos are each role launcher's, with its own token.
+// reconnectingPods are what a daemon restart finds of pods live issues, LEGION-300 on: each issue's
+// Running Sandbox, its running pod and every role's launcher Secret bound to that pod; and the
+// hello of each role's launcher, with its own token.
 func reconnectingPods(t *testing.T, pods int) ([]k8sruntime.Object, []shimwire.LauncherHello) {
 	t.Helper()
 	var objects []k8sruntime.Object
@@ -357,7 +351,7 @@ func TestLaunchesInFlightAtARestartOutwaitTheReconnectingLaunchersReads(t *testi
 	defer g.mu.Unlock()
 	for _, hello := range hellos {
 		name := roleSecretName(hello.Sandbox, claim.Role(hello.Role))
-		if reads := g.secretReads[name]; reads != 1 {
+		if reads := g.secretGetsAsked[name]; reads != 1 {
 			t.Errorf("%s was read %d times over %d hellos of %d launchers, want once", name, reads, sent.Load(), len(hellos))
 		}
 	}
@@ -411,9 +405,69 @@ func TestAFailedLauncherCredentialReadHoldsOffTheNextForTheRetryInterval(t *test
 	}
 }
 
-// The runtime's clients share one limiter at 50 requests a second with a burst of 100, whatever
-// rate the caller's configuration names; the requests' client bounds each request by apiTimeout,
-// and the informers' has no timeout, which would end a watch.
+// A launch into a kept pod reads its roles' Secrets to check their binding (launcherBound) and holds
+// each bound one, so the launcher it waits for is accepted at once, inside the hold-off its own
+// failed read set.
+func TestAKeptPodsBindingCheckLiftsItsLaunchersHoldOff(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	name := roleSecretName(loc.Sandbox.Name, claim.RoleTester)
+	hello := shimwire.LauncherHello{
+		Token: string(g.secret(name).Data[LauncherTokenFile]), Sandbox: loc.Sandbox.Name, Role: string(claim.RoleTester),
+		PodUID: loc.Sandbox.PodUID, LauncherID: "l-1",
+	}
+	var failing atomic.Bool
+	failing.Store(true)
+	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() == name && failing.Load() {
+			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+		}
+		return false, nil, nil
+	})
+	r2 := secondRuntime(t, g, func(*Options) {})()
+	accept := r2.LauncherResolver()
+	if handler, _ := accept(hello); handler != nil {
+		t.Fatal("the launcher was accepted while its Secret could not be read")
+	}
+	failing.Store(false)
+	s, err := r2.storedSandbox(loc.Sandbox.Name)
+	if err != nil || s == nil {
+		t.Fatalf("the restarted runtime's store holds Sandbox %v (%v)", s, err)
+	}
+	if bound, err := r2.launcherBound(g.ctx, s, r2.storedPod(loc.Sandbox.Name), []claim.Role{claim.RoleTester}); err != nil || !bound {
+		t.Fatalf("launcherBound = %t, %v, want the kept pod bound", bound, err)
+	}
+	if handler, reason := accept(hello); handler == nil {
+		t.Fatalf("the kept pod's launcher was refused after its binding was read: %s", reason)
+	}
+}
+
+// What the runtime holds of a launcher Secret is its Sandbox's alone: a failed read's hold-off does
+// not keep a later Sandbox of the same name from reading at once, and neither a failed read nor a
+// read's credential undoes the credential a binding write of the same Sandbox holds.
+func TestALauncherSecretsHoldOffAndCredentialAreItsSandboxsAlone(t *testing.T) {
+	const name = "legion-legion-legion-208-tester-boot"
+	var c launcherCredentials
+	c.fail(name, "uid-old", rigNow)
+	if _, held, readFrom := c.lookup(name, "uid-new"); held || !readFrom.IsZero() {
+		t.Fatalf("a later Sandbox's lookup: held %t, read from %s, want nothing held and a read at once", held, readFrom)
+	}
+	if _, _, readFrom := c.lookup(name, "uid-old"); !readFrom.Equal(rigNow.Add(credentialRetry)) {
+		t.Fatalf("the failed Sandbox's lookup reads from %s, want %s", readFrom, rigNow.Add(credentialRetry))
+	}
+	c.bind(name, "uid-new", launcherCredential{podUID: "uid-pod-bound"})
+	c.fail(name, "uid-new", rigNow)
+	if got := c.store(name, "uid-new", launcherCredential{podUID: "uid-pod-stale"}); got.podUID != "uid-pod-bound" {
+		t.Fatalf("a read stored over the binding: holds pod %q, want %q", got.podUID, "uid-pod-bound")
+	}
+	if got, held, _ := c.lookup(name, "uid-new"); !held || got.podUID != "uid-pod-bound" {
+		t.Fatalf("after a failed read and a read: held %t, pod %q, want the bound credential", held, got.podUID)
+	}
+}
+
+// The runtime's two client sets share one limiter at 50 requests a second with a burst of 100,
+// whatever rate the caller's configuration names; the requests' clients bound each request by
+// apiTimeout, and the informers' have no timeout, which would end a watch.
 func TestTheRuntimesClientsShareOneLimiterAtTheDaemonsRate(t *testing.T) {
 	rc := &rest.Config{Host: "https://192.0.2.1", QPS: 5, Burst: 10, Timeout: time.Minute}
 	informers, requests := clientConfigs(rc)
@@ -434,6 +488,68 @@ func TestTheRuntimesClientsShareOneLimiterAtTheDaemonsRate(t *testing.T) {
 	if rc.RateLimiter != nil || rc.Timeout != time.Minute {
 		t.Errorf("the caller's configuration was changed: %+v", rc)
 	}
+	c, err := clients(rc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	timeout := func(set kubeClients) time.Duration {
+		return set.kube.CoreV1().RESTClient().(*rest.RESTClient).Client.Timeout
+	}
+	if got, want := timeout(c.informers), time.Duration(0); got != want {
+		t.Errorf("the informers' client times out after %s, want %s", got, want)
+	}
+	if got := timeout(c.requests); got != apiTimeout {
+		t.Errorf("the requests' client times out after %s, want %s", got, apiTimeout)
+	}
+}
+
+// The informers list and watch on the informers' clients, and every other request goes through the
+// requests' clients: here a launch's read and create of its Sandbox (ensureSandbox). Swapped, every
+// watch would end at the requests' timeout and no other request would have one.
+func TestTheInformersWatchOnTheirClientsAndALaunchsRequestsGoThroughTheRequests(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	informerDyn, informerKube := newDynamic(t), kubefake.NewClientset()
+	requestDyn, requestKube := newDynamic(t), kubefake.NewClientset()
+	r, err := configure(testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.start(ctx, runtimeClients{
+		informers: kubeClients{dyn: informerDyn, kube: informerKube},
+		requests:  kubeClients{dyn: requestDyn, kube: requestKube},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	l, err := r.prepare(workerSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.ensureSandbox(ctx, l); err != nil {
+		t.Fatal(err)
+	}
+	verbs := func(client *k8stesting.Fake) []string {
+		var got []string
+		for _, a := range client.Actions() {
+			got = append(got, a.GetVerb()+" "+a.GetResource().Resource)
+		}
+		slices.Sort(got)
+		return slices.Compact(got)
+	}
+	for _, c := range []struct {
+		name   string
+		client *k8stesting.Fake
+		want   []string
+	}{
+		{"the informers' dynamic client", &informerDyn.Fake, []string{"list sandboxes", "watch sandboxes"}},
+		{"the informers' typed client", &informerKube.Fake, []string{"list pods", "watch pods"}},
+		{"the requests' dynamic client", &requestDyn.Fake, []string{"create sandboxes", "get sandboxes"}},
+		{"the requests' typed client", &requestKube.Fake, nil},
+	} {
+		if got := verbs(c.client); !slices.Equal(got, c.want) {
+			t.Errorf("%s was sent %v, want %v", c.name, got, c.want)
+		}
+	}
 }
 
 // A request's own timeout starts once the client's limiter lets it go (client-go's
@@ -445,7 +561,7 @@ func TestARequestsTimeoutStartsOnceTheClientsLimiterLetsItGo(t *testing.T) {
 		_, _ = io.WriteString(w, `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"held","namespace":"legion"}}`)
 	}))
 	t.Cleanup(server.Close)
-	_, requests := clientConfigs(&rest.Config{Host: server.URL})
+	requests := requestConfig(&rest.Config{Host: server.URL})
 	limit := newFakeLimiter(5, 1)
 	if err := limit.Wait(context.Background()); err != nil {
 		t.Fatal(err)
@@ -462,4 +578,18 @@ func TestARequestsTimeoutStartsOnceTheClientsLimiterLetsItGo(t *testing.T) {
 	if waited := time.Since(started); waited < 150*time.Millisecond {
 		t.Fatalf("the request went after %s, want it held about 200ms by the limiter", waited)
 	}
+}
+
+// sameClients is c as both of a runtime's client sets, for a test whose fakes need not tell the
+// informers' requests from the others.
+func sameClients(c kubeClients) runtimeClients { return runtimeClients{informers: c, requests: c} }
+
+// askedSecret counts a Secret get the runtime asked for (secretGetsAsked).
+func (g *rig) askedSecret(name string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.secretGetsAsked == nil {
+		g.secretGetsAsked = map[string]int{}
+	}
+	g.secretGetsAsked[name]++
 }
