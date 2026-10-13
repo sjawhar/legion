@@ -5,7 +5,8 @@ import type { SyncSubprocess } from "bun";
 import { z } from "zod";
 import { hasErrnoCode, messageFor } from "./errors";
 
-/** Where a caller runs: one of the three plugins, or a command outside any of them. */
+/** Where a caller runs: one of the three plugins (and the `dispatch` command, which takes its host
+ * plugin's rule), or a script outside any of them (`command`). */
 export type EnvoyHarness = "omp" | "claude" | "opencode" | "command";
 
 /** The variables a read consults, by name, over whatever else the environment holds. */
@@ -18,8 +19,6 @@ export type EnvoyConfigEnvironment = {
   readonly CLAUDE_CONFIG_DIR?: string | undefined;
   readonly OPENCODE_CONFIG_DIR?: string | undefined;
   readonly DISPATCH_URL?: string | undefined;
-  readonly ENVOY_URL?: string | undefined;
-  readonly ENVOY_NATS_URL?: string | undefined;
 } & Readonly<Record<string, string | undefined>>;
 
 /** How long a `!` command may run before its field is an error. */
@@ -70,12 +69,13 @@ function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): s
 }
 
 /**
- * The envoy.json a caller reads. A plugin reads its own harness's directory (omp: a named
- * profile's `PI_CODING_AGENT_DIR`; Claude Code: `CLAUDE_CONFIG_DIR`; OpenCode:
- * `OPENCODE_CONFIG_DIR`) and no other harness's, else the file `ENVOY_CONFIG_FILE` names, else
- * `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A command reads `ENVOY_CONFIG_FILE` first,
- * then the omp, Claude Code and OpenCode directories in that order, then that same neutral file.
- * Throws when the neutral file is the answer and `XDG_CONFIG_HOME` is set to a relative path.
+ * The envoy.json a caller reads. A plugin, and the `dispatch` command its session runs, reads its
+ * own harness's directory (omp: a named profile's `PI_CODING_AGENT_DIR`; Claude Code:
+ * `CLAUDE_CONFIG_DIR`; OpenCode: `OPENCODE_CONFIG_DIR`) and no other harness's, else the file
+ * `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A script
+ * (`command`) reads `ENVOY_CONFIG_FILE` first, then the omp, Claude Code and OpenCode directories
+ * in that order, then that same neutral file. Throws when the neutral file is the answer and
+ * `XDG_CONFIG_HOME` is set to a relative path.
  */
 export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string {
   const handed = setValue(env.ENVOY_CONFIG_FILE);
@@ -110,6 +110,13 @@ const EnvoyFileSchema = z.looseObject({
   envoy: EnvoySectionSchema.optional(),
 });
 
+// A checkout's file is the repository's: it may configure Dispatch and no Envoy. Its `envoy` key
+// passes this schema unchecked, and `readEnvoyConfig` refuses it for Envoy alone.
+const CheckoutFileSchema = z.looseObject({
+  $schema: z.string().optional(),
+  dispatch: DispatchSectionSchema.optional(),
+});
+
 type EnvoyFile = z.infer<typeof EnvoyFileSchema>;
 
 export interface DispatchFileSettings {
@@ -126,11 +133,13 @@ export interface EnvoyFileSettings {
   readonly natsSeed?: string | undefined;
 }
 
-/** A checkout's own `.envoy/envoy.json`, as written. */
+/** A checkout's own `.envoy/envoy.json`, as written. It holds no Envoy settings: an `envoy`
+ * section there is `envoyError`, and Envoy is off with it. */
 export interface CheckoutEnvoyConfig {
   readonly path: string;
   readonly dispatch: DispatchFileSettings;
-  readonly envoy: EnvoyFileSettings;
+  /** Set when the file holds an `envoy` section, which a checkout cannot write. */
+  readonly envoyError: string | null;
 }
 
 /**
@@ -153,16 +162,16 @@ export interface EnvoyConfig {
 }
 
 /** Whether a section's file settings count: a file that turns it off, else whether
- * `enabled: true` stands once the checkout merges over the chosen file. */
+ * `enabled: true` stands once the checkout's `dispatch` merges over the chosen file's. */
 export type SectionSwitch =
   | { readonly offBy: string }
   | { readonly offBy: null; readonly enabled: boolean };
 
 /**
  * A section's switch. The chosen file's `enabled: false` turns the section off whatever the
- * variables say. A checkout's `enabled: false` does only while no variable names that section's
- * address (`DISPATCH_URL`; `ENVOY_URL` or `ENVOY_NATS_URL`), so a repository cannot turn off what
- * the session's environment configured.
+ * variables say. A checkout's `dispatch.enabled: false` does only while `DISPATCH_URL` is unset,
+ * so a repository cannot turn off the Dispatch the session's environment configured. A checkout
+ * has no say in Envoy's switch.
  */
 export function sectionSwitch(
   config: EnvoyConfig,
@@ -171,21 +180,19 @@ export function sectionSwitch(
 ): SectionSwitch {
   const own = config[section].enabled;
   if (own === false) return { offBy: config.path };
-  const checkout = config.checkout;
-  const theirs = checkout?.[section].enabled;
+  const checkout = section === "dispatch" ? config.checkout : null;
+  const theirs = checkout?.dispatch.enabled;
   if (checkout === null || theirs === undefined) return { offBy: null, enabled: own === true };
   if (theirs) return { offBy: null, enabled: true };
-  const addressNamed =
-    section === "dispatch"
-      ? env.DISPATCH_URL !== undefined
-      : setValue(env.ENVOY_URL) !== undefined || setValue(env.ENVOY_NATS_URL) !== undefined;
-  return addressNamed ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
+  return env.DISPATCH_URL !== undefined
+    ? { offBy: null, enabled: own === true }
+    : { offBy: checkout.path };
 }
 
-type ParsedFile =
+type ParsedFile<Settings> =
   | { readonly kind: "absent" }
   | { readonly kind: "invalid"; readonly reason: string }
-  | { readonly kind: "valid"; readonly settings: EnvoyFile };
+  | { readonly kind: "valid"; readonly settings: Settings };
 
 /** Describe the first schema-validation issue, naming the file and offending key. */
 function describeSchemaIssue(filePath: string, error: z.ZodError): string {
@@ -199,7 +206,7 @@ function describeSchemaIssue(filePath: string, error: z.ZodError): string {
   return `${filePath}: ${issue.path.join(".")}: ${issue.message}`;
 }
 
-function parseFile(filePath: string): ParsedFile {
+function parseFile<Settings>(filePath: string, schema: z.ZodType<Settings>): ParsedFile<Settings> {
   let raw: string;
   try {
     raw = readFileSync(filePath, "utf-8");
@@ -219,7 +226,7 @@ function parseFile(filePath: string): ParsedFile {
       reason: `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`,
     };
   }
-  const parsed = EnvoyFileSchema.safeParse(parsedJson);
+  const parsed = schema.safeParse(parsedJson);
   if (!parsed.success) {
     return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
   }
@@ -292,8 +299,10 @@ function failed(filePath: string, error: string): EnvoyConfig {
 }
 
 /** The notice for a chosen file that does not exist, saying what is `off` for want of it. When that
- * file is the neutral one and the old OpenCode file is still there, it names both and says to move
- * it. */
+ * file is the neutral one at `$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or
+ * `$HOME/.config`) and the old OpenCode file is still there, it names both and says to move it. An
+ * `XDG_CONFIG_HOME` that names another directory, such as the one a Legion pane is given under the
+ * daemon's state directory, gets no such hint: the user's file does not belong there. */
 export function missingConfigNotice(
   filePath: string,
   env: EnvoyConfigEnvironment,
@@ -302,27 +311,32 @@ export function missingConfigNotice(
   const notice = `no envoy.json at ${filePath}: ${off}`;
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath)) return notice;
-  const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
+  const home = setValue(env.HOME) ?? homedir();
+  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json")) return notice;
+  const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old)) return notice;
   return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
 }
 
 /**
  * Read the envoy.json at `filePath` (`envoyConfigPath`) and the checkout's `.envoy/envoy.json`
- * under `cwd`, which its section's resolver merges over it. Runs no command. A missing chosen file
- * sets `notice`; a file that cannot be read or is not valid sets `error`, naming the file and the
- * key.
+ * under `cwd`, whose `dispatch` section Dispatch's resolver merges over the chosen file's. A
+ * checkout's `envoy` section is not read: it sets `checkout.envoyError`, which turns Envoy off and
+ * leaves Dispatch as it is. Runs no command. A missing chosen file sets `notice`; a file that
+ * cannot be read or is not valid sets `error`, naming the file and the key.
  */
 export function readEnvoyConfig(
   filePath: string,
   env: EnvoyConfigEnvironment,
   options: { readonly cwd: string }
 ): EnvoyConfig {
-  const chosen = parseFile(filePath);
+  const chosen = parseFile(filePath, EnvoyFileSchema);
   if (chosen.kind === "invalid") return failed(filePath, chosen.reason);
   const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
   const checkoutFile =
-    checkoutPath === path.resolve(filePath) ? { kind: "absent" as const } : parseFile(checkoutPath);
+    checkoutPath === path.resolve(filePath)
+      ? { kind: "absent" as const }
+      : parseFile(checkoutPath, CheckoutFileSchema);
   if (checkoutFile.kind === "invalid") return failed(filePath, checkoutFile.reason);
   const own: EnvoyFile = chosen.kind === "valid" ? chosen.settings : {};
   return {
@@ -334,7 +348,9 @@ export function readEnvoyConfig(
         ? {
             path: checkoutPath,
             dispatch: checkoutFile.settings.dispatch ?? {},
-            envoy: checkoutFile.settings.envoy ?? {},
+            envoyError: Object.hasOwn(checkoutFile.settings, "envoy")
+              ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
+              : null,
           }
         : null,
     notice:

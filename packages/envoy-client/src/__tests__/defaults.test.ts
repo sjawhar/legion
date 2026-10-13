@@ -182,53 +182,34 @@ describe("envoySettings", () => {
     });
   });
 
-  test("a checkout's listener goes only with the checkout's own token, never ENVOY_TOKEN", () => {
+  test("a checkout's listener and token are refused, ENVOY_TOKEN or not, and Dispatch is unaffected", () => {
     const user = path.join(tempDir(), "envoy.json");
-    writeFileSync(user, JSON.stringify({ envoy: listener }));
-    const cwd = tempDir();
-    mkdirSync(path.join(cwd, ".envoy"));
     writeFileSync(
-      path.join(cwd, ".envoy", "envoy.json"),
-      JSON.stringify({ envoy: { url: "http://repo.internal.example:9020", token: "repo-token" } })
+      user,
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
+        envoy: listener,
+      })
     );
-    const config = readEnvoyConfig(user, { HOME: tempDir() }, { cwd });
-    expect(envoySettings({ ENVOY_TOKEN: "environment-token" }, config)).toMatchObject({
-      enabled: true,
-      url: "http://repo.internal.example:9020",
-      token: "repo-token",
-    });
-  });
-
-  test("compares ENVOY_URL with the listener of the file the token comes from, never a checkout's listener beside another file's token", () => {
-    const user = path.join(tempDir(), "envoy.json");
-    writeFileSync(user, JSON.stringify({ envoy: listener }));
     const cwd = tempDir();
     mkdirSync(path.join(cwd, ".envoy"));
     const checkout = path.join(cwd, ".envoy", "envoy.json");
     writeFileSync(
       checkout,
-      JSON.stringify({ envoy: { url: "http://staging.internal.example:9020" } })
+      JSON.stringify({ envoy: { url: "http://repo.internal.example:9020", token: "repo-token" } })
     );
-    const env = { ENVOY_URL: "http://staging.internal.example:9020" };
-
-    expect(envoySettings(env, readEnvoyConfig(user, { HOME: tempDir() }, { cwd }))).toEqual({
-      enabled: false,
-      notice: null,
-      error: `ENVOY_URL names http://staging.internal.example:9020, but ${user}'s envoy.token is for http://listener.internal.example:9020; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`,
-    });
-
-    // The checkout's own token goes with the checkout's own listener.
-    writeFileSync(
-      checkout,
-      JSON.stringify({
-        envoy: { url: "http://staging.internal.example:9020", token: "repo-token" },
-      })
-    );
-    expect(envoySettings(env, readEnvoyConfig(user, { HOME: tempDir() }, { cwd }))).toMatchObject({
-      enabled: true,
-      url: "http://staging.internal.example:9020",
-      token: "repo-token",
-    });
+    for (const env of [{}, { ENVOY_TOKEN: "environment-token" }]) {
+      const config = readEnvoyConfig(user, { HOME: tempDir() }, { cwd });
+      expect(envoySettings(env, config)).toEqual({
+        enabled: false,
+        notice: null,
+        error: `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${user}`,
+      });
+      expect(dispatchSettings(env, config)).toMatchObject({
+        enabled: true,
+        url: "https://dispatch.example",
+      });
+    }
   });
 });
 
@@ -304,13 +285,13 @@ describe("the NATS seed in envoy.json", () => {
     });
   });
 
-  test("a checkout's servers need the checkout's own seed, for Envoy only", () => {
+  test("a checkout's servers beside a seed in the variables are refused, the seed unused, for Envoy only", () => {
     const user = path.join(tempDir(), "envoy.json");
     writeFileSync(
       user,
       JSON.stringify({
         dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
-        envoy: { enabled: true, natsUrls: fileServers, natsSeed: "SUFILESEED" },
+        envoy: { enabled: true, natsUrls: fileServers },
       })
     );
     const cwd = tempDir();
@@ -320,30 +301,25 @@ describe("the NATS seed in envoy.json", () => {
       checkout,
       JSON.stringify({ envoy: { natsUrls: ["nats://repo.internal.example:4222"] } })
     );
-    const env = { HOME: tempDir() };
-    const withoutSeed = readEnvoyConfig(user, env, { cwd });
-    expect(envoySettings(env, withoutSeed)).toEqual({
-      enabled: false,
-      notice: null,
-      error: `${checkout}: envoy.natsUrls requires envoy.natsSeed in the same file`,
-    });
-    expect(dispatchSettings(env, withoutSeed)).toEqual({
-      enabled: true,
-      url: "https://dispatch.example",
-      token: "user-token",
-      error: null,
-    });
-
-    writeFileSync(
-      checkout,
-      JSON.stringify({
-        envoy: { natsUrls: ["nats://repo.internal.example:4222"], natsSeed: "SUREPOSEED" },
-      })
-    );
-    expect(envoySettings(env, readEnvoyConfig(user, env, { cwd }))).toMatchObject({
-      enabled: true,
-      natsUrls: ["nats://repo.internal.example:4222"],
-      natsSeed: { value: "SUREPOSEED", source: `envoy.natsSeed in ${checkout}` },
-    });
+    // A seed pointer that cannot be read would be the error, were the seed resolved at all.
+    const missingSeedFile = path.join(tempDir(), "missing-seed");
+    for (const seed of [
+      { NATS_NKEY_SEED: "SUENVSEED" },
+      { NATS_NKEY_SEED_FILE: missingSeedFile },
+    ]) {
+      const env = { HOME: tempDir(), ...seed };
+      const config = readEnvoyConfig(user, env, { cwd });
+      expect(envoySettings(env, config)).toEqual({
+        enabled: false,
+        notice: null,
+        error: `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${user}`,
+      });
+      expect(dispatchSettings(env, config)).toEqual({
+        enabled: true,
+        url: "https://dispatch.example",
+        token: "user-token",
+        error: null,
+      });
+    }
   });
 });

@@ -1,5 +1,4 @@
 import {
-  checkoutCommandRefusal,
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
   fileValue,
@@ -19,6 +18,8 @@ const MIN_HEARTBEAT_MS = 25;
 
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
+  readonly ENVOY_URL?: string | undefined;
+  readonly ENVOY_NATS_URL?: string | undefined;
   readonly ENVOY_TOKEN?: string | undefined;
   readonly ENVOY_TOKEN_FILE?: string | undefined;
   readonly NATS_NKEY_SEED?: string | undefined;
@@ -81,27 +82,31 @@ function disabled(error: string): DisabledEnvoySettings {
 /**
  * The Envoy a session uses, from `config` (`readEnvoyConfig`) and the environment.
  *
- * A file that turns Envoy off (`sectionSwitch`) wins. Otherwise each variable overrides its own
- * field of an enabled `envoy` section, the checkout's merged over the chosen file's: `ENVOY_URL`
- * the listener (`url`), `ENVOY_NATS_URL` (comma-separated) the NATS servers (`natsUrls`),
- * `ENVOY_TOKEN_FILE` (trimmed file contents, how the Legion daemon delivers it) then `ENVOY_TOKEN`
- * the listener's bearer (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` the NATS user's
- * seed (`natsSeed`, resolved only when there are NATS servers to use it on). An empty variable
- * counts as unset. With no enabled section, `ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy;
- * with neither, Envoy is off. A set pointer that cannot be read is an `error`, never a fallback.
+ * Envoy is configured only by the chosen file and the variables: a checkout's `envoy` section
+ * (`checkout.envoyError`) turns Envoy off with that error, so a cloned repository never chooses
+ * where a session's deliveries come from. A file that turns Envoy off (`sectionSwitch`) wins.
+ * Otherwise each variable overrides its own field of the chosen file's enabled `envoy` section:
+ * `ENVOY_URL` the listener (`url`), `ENVOY_NATS_URL` (comma-separated) the NATS servers
+ * (`natsUrls`), `ENVOY_TOKEN_FILE` (trimmed file contents, how the Legion daemon delivers it) then
+ * `ENVOY_TOKEN` the listener's bearer (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED`
+ * the NATS user's seed (`natsSeed`, resolved only when there are NATS servers to use it on). An
+ * empty variable counts as unset. With no enabled section, `ENVOY_URL` or `ENVOY_NATS_URL` alone
+ * names an Envoy; with neither, Envoy is off. A set pointer that cannot be read is an `error`,
+ * never a fallback.
  *
- * A file's token goes with `ENVOY_URL` only when it names the origin of the listener written in the
- * file the token comes from; any other listener needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. A
- * checkout's `envoy.url` is used only with the `envoy.token` written beside it. A file's seed goes
- * only with the servers written in that same file: nkey sign-in sends no seed, but a server that is
- * not the real one can relay the real server's nonce and replay the signature. So `ENVOY_NATS_URL`
- * gets a file's seed only when it names that file's servers (as a set), and a checkout's servers
- * get only the checkout's own seed; a seed from the variables goes with whatever servers resolve.
- * The chosen file's `!` token and seed run here, only when Envoy uses them; a checkout's are
- * refused.
+ * The file's token goes with `ENVOY_URL` only when it names the origin of the listener written in
+ * the file; any other listener needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. The file's seed goes
+ * only with the servers written in the file: nkey sign-in sends no seed, but a server that is not
+ * the real one can relay the real server's nonce and replay the signature. So `ENVOY_NATS_URL`
+ * gets the file's seed only when it names the file's servers (as a set); a seed from the variables
+ * goes with whatever servers resolve. The file's `!` token and seed run here, only when Envoy uses
+ * them.
  */
 export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): EnvoySettings {
   if (config.error !== null) return disabled(config.error);
+  if (config.checkout !== null && config.checkout.envoyError !== null) {
+    return disabled(config.checkout.envoyError);
+  }
   const state = sectionSwitch(config, "envoy", env);
   if (state.offBy !== null) {
     return {
@@ -124,71 +129,43 @@ export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): Envoy
       error: null,
     };
   }
-  // The files' values count only for an enabled section.
+  // The file's values count only for an enabled section.
   const own = state.enabled ? config.envoy : {};
-  const checkout = state.enabled ? config.checkout : null;
 
-  let url: string;
+  const url = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
   let token: string | undefined;
-  if (namedUrl === undefined && checkout?.envoy.url !== undefined) {
-    // A repository may name its own listener only with its own bearer, never the user's.
-    if (!checkout.envoy.token) {
-      return disabled(`${checkout.path}: envoy.url requires envoy.token in the same file`);
+  const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
+  if (tokenPointer !== undefined) {
+    try {
+      token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
+    } catch (error) {
+      return disabled(messageFor(error));
     }
-    if (checkout.envoy.token.startsWith("!")) {
-      return disabled(checkoutCommandRefusal(checkout.path, "envoy.token"));
-    }
-    url = checkout.envoy.url;
-    token = checkout.envoy.token;
-  } else {
-    url = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
-    // When a file supplies the token: that file and the listener it is written for.
-    let tokenFile: { readonly path: string; readonly url: string } | null = null;
-    const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
-    if (tokenPointer !== undefined) {
-      try {
-        token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
-      } catch (error) {
-        return disabled(messageFor(error));
-      }
-    } else if (env.ENVOY_TOKEN) {
-      token = env.ENVOY_TOKEN;
-    } else if (checkout?.envoy.token !== undefined) {
-      token = checkout.envoy.token;
-      const listener = checkout.envoy.url ?? own.url ?? DEFAULT_ENVOY_URL;
-      tokenFile = { path: checkout.path, url: listener };
-    } else if (own.token !== undefined) {
-      token = own.token;
-      tokenFile = { path: config.path, url: own.url ?? DEFAULT_ENVOY_URL };
-    }
-    if (namedUrl !== undefined && tokenFile !== null) {
+  } else if (env.ENVOY_TOKEN) {
+    token = env.ENVOY_TOKEN;
+  } else if (own.token !== undefined) {
+    if (namedUrl !== undefined) {
       let named: string;
       try {
         named = new URL(namedUrl).origin;
       } catch {
         return disabled("ENVOY_URL must be a valid URL");
       }
-      const listener = new URL(tokenFile.url).origin;
+      const listener = new URL(own.url ?? DEFAULT_ENVOY_URL).origin;
       if (named !== listener) {
         return disabled(
-          `ENVOY_URL names ${named}, but ${tokenFile.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
+          `ENVOY_URL names ${named}, but ${config.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
         );
       }
     }
-    if (tokenFile !== null && token?.startsWith("!")) {
-      if (tokenFile.path !== config.path) {
-        return disabled(checkoutCommandRefusal(tokenFile.path, "envoy.token"));
-      }
-      try {
-        token = fileValue(token, "envoy.token", config.path, env);
-      } catch (error) {
-        return disabled(messageFor(error));
-      }
+    try {
+      token = fileValue(own.token, "envoy.token", config.path, env);
+    } catch (error) {
+      return disabled(messageFor(error));
     }
   }
 
-  const natsUrls =
-    namedNatsUrls.length > 0 ? namedNatsUrls : (checkout?.envoy.natsUrls ?? own.natsUrls ?? []);
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : (own.natsUrls ?? []);
   let natsSeed: NatsSeed | undefined;
   if (natsUrls.length > 0) {
     try {
@@ -196,38 +173,18 @@ export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): Envoy
     } catch (error) {
       return disabled(messageFor(error));
     }
-    // With no seed from the variables: the file whose seed it would be, and its servers.
-    const seedFile =
-      natsSeed !== undefined
-        ? null
-        : checkout?.envoy.natsSeed !== undefined
-          ? {
-              path: checkout.path,
-              seed: checkout.envoy.natsSeed,
-              servers: checkout.envoy.natsUrls ?? own.natsUrls ?? [],
-            }
-          : own.natsSeed !== undefined
-            ? { path: config.path, seed: own.natsSeed, servers: own.natsUrls ?? [] }
-            : null;
-    if (seedFile !== null) {
-      const servers = new Set(seedFile.servers.map((server) => server.trim()));
-      const used = new Set(natsUrls.map((url) => url.trim()));
-      const sameServers = used.size === servers.size && [...used].every((url) => servers.has(url));
-      if (!sameServers) {
-        // Without ENVOY_NATS_URL the servers come from a file: the checkout's when it writes them.
-        const serversFile = checkout?.envoy.natsUrls !== undefined ? checkout.path : config.path;
+    if (natsSeed === undefined && own.natsSeed !== undefined) {
+      // Without ENVOY_NATS_URL the servers are the file's own, so only it can name others.
+      const servers = new Set((own.natsUrls ?? []).map((server) => server.trim()));
+      const used = new Set(natsUrls.map((server) => server.trim()));
+      if (used.size !== servers.size || ![...used].every((server) => servers.has(server))) {
         return disabled(
-          namedNatsUrls.length > 0
-            ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
-            : `${serversFile}: envoy.natsUrls requires envoy.natsSeed in the same file`
+          `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
         );
       }
-      if (seedFile.path !== config.path && seedFile.seed.startsWith("!")) {
-        return disabled(checkoutCommandRefusal(seedFile.path, "envoy.natsSeed"));
-      }
       try {
-        const value = fileValue(seedFile.seed, "envoy.natsSeed", config.path, env);
-        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${seedFile.path}` };
+        const value = fileValue(own.natsSeed, "envoy.natsSeed", config.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config.path}` };
       } catch (error) {
         return disabled(messageFor(error));
       }

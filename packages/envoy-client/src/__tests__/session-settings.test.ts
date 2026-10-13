@@ -98,6 +98,23 @@ describe("sessionSettings", () => {
     expect(envoyError.notice).toStartWith("Envoy is off: ENVOY_TOKEN_FILE");
   });
 
+  test("a checkout's envoy section is said for Envoy alone, and Dispatch stays on", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: envoyOn,
+    });
+    const cwd = tempDir();
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      envoy: { natsUrls: ["nats://repo.internal.example:4222"] },
+    });
+    const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
+    expect(settings.dispatch).toMatchObject({ enabled: true, url: "https://dispatch.example" });
+    expect(settings.envoy.enabled).toBe(false);
+    expect(settings.notice).toBe(
+      `Envoy is off: ${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`
+    );
+  });
+
   test("a file that turns a section off, or holds none for it, says nothing", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), {
       dispatch: { enabled: false },
@@ -180,6 +197,19 @@ describe("the old OpenCode file", () => {
     };
     expect(sessionSettings(chosen, dispatchOn, { cwd: tempDir() }).notice).toBe(
       `no envoy.json at ${neutral}: Envoy is off; ${hint}`
+    );
+  });
+
+  test("is not named when XDG_CONFIG_HOME puts the neutral file in another directory", () => {
+    const home = tempDir();
+    writeFile(path.join(home, ".config", "opencode", "envoy.json"), {});
+    // A Legion pane in the default omp profile: the daemon moves XDG_CONFIG_HOME under its state
+    // directory and leaves HOME the operator's.
+    const pane = { HOME: home, XDG_CONFIG_HOME: "/var/lib/legion/home/.config" };
+    const chosen = sessionConfigFile("omp", pane);
+    expect(chosen).toEqual({ path: "/var/lib/legion/home/.config/legion/envoy.json", error: null });
+    expect(sessionSettings(chosen, pane, { cwd: tempDir() }).notice).toBe(
+      "no envoy.json at /var/lib/legion/home/.config/legion/envoy.json: Dispatch and Envoy are off"
     );
   });
 });
