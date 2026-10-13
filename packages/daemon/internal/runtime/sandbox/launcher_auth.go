@@ -96,13 +96,12 @@ func (r *Runtime) LauncherResolver() stream.LauncherResolver {
 // read again for credentialRetry.
 func (r *Runtime) launcherCredential(ctx context.Context, s *sandbox, role claim.Role) (launcherCredential, error) {
 	name := roleSecretName(s.Name, role)
-	r.launcherAuth.mu.Lock()
-	value, found := r.launcherAuth.values[name]
-	failedAt, failed := r.launcherAuth.failed[name]
-	r.launcherAuth.mu.Unlock()
-	if found && value.sandboxUID == s.UID {
+	if value, found := r.launcherAuth.cached(name, s.UID); found {
 		return value, nil
 	}
+	r.launcherAuth.mu.Lock()
+	failedAt, failed := r.launcherAuth.failed[name]
+	r.launcherAuth.mu.Unlock()
 	if retry := failedAt.Add(credentialRetry); failed && r.now().Before(retry) {
 		return launcherCredential{}, fmt.Errorf("launcher Secret %s: its last read failed; it is read again from %s", name, retry.UTC().Format(time.RFC3339))
 	}
@@ -118,15 +117,20 @@ func (r *Runtime) launcherCredential(ctx context.Context, s *sandbox, role claim
 	}
 }
 
+// cached is the credential cached as name's for the Sandbox with uid, if there is one.
+func (c *launcherCredentials) cached(name string, uid types.UID) (launcherCredential, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	value, found := c.values[name]
+	return value, found && value.sandboxUID == uid
+}
+
 // readLauncherCredential reads the launcher Secret name of s into the cache, or records when its
 // read failed. It runs for the runtime's lifetime rather than any one hello's, so its wait on the
 // client's rate limiter is bounded by nothing but its turn; the request itself is bounded by
 // apiTimeout (clientConfigs).
 func (r *Runtime) readLauncherCredential(s *sandbox, name string) (launcherCredential, error) {
-	r.launcherAuth.mu.Lock()
-	value, found := r.launcherAuth.values[name]
-	r.launcherAuth.mu.Unlock()
-	if found && value.sandboxUID == s.UID {
+	if value, found := r.launcherAuth.cached(name, s.UID); found {
 		return value, nil
 	}
 	secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(r.lifetime, name, metav1.GetOptions{})

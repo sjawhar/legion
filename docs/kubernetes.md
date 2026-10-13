@@ -2157,14 +2157,12 @@ on its way to github.com.
 
 The daemon paces its Kubernetes requests on one client-side rate limiter: 50 a second with a
 burst of 100 (`clientQPS`, `clientBurst` in `internal/runtime/sandbox/sandbox.go`), shared by every
-Sandbox, pod, event and Secret request; a watch is never paced. client-go's own default, 5 a second
-with a burst of 10 per client, does not survive a restart. Every live role's launcher says hello
-again, and each hello reads its role's `-boot` Secret: in LEGION-723, 154 reconnecting launchers'
-reads alone needed (154 − 10) / 5 ≈ 29 s of that limiter, so the three launches in flight behind
-them could not get a request through inside 30 s, and each spent its launch budget on the limiter.
-At 50 a second three hundred launchers' reads clear in about 4 s, and a launch, about eight
-requests into a running pod and about thirty when it replaces the pod, waits a fraction of a second
-more for each launch ahead of it.
+Sandbox, pod, event and Secret request; a watch is never paced. The rate is sized for a few hundred
+roles. A restart has every live role's launcher say hello again, and each hello reads its role's
+`-boot` Secret: at 50 a second three hundred launchers' reads clear in about 4 s, where client-go's
+own default, 5 a second with a burst of 10 per client, needs (154 − 10) / 5 ≈ 29 s for 154
+(LEGION-723). A launch, about eight requests into a running pod and about thirty when it replaces
+the pod, waits a fraction of a second more for each launch ahead of it.
 
 A request waits on the limiter as long as its caller allows, a launch as long as the launch's own
 deadlines allow, and only then does its own 30 s bound start: client-go starts a client's timeout

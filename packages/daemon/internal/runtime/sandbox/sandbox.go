@@ -64,11 +64,10 @@ const apiTimeout = 30 * time.Second
 // limiter for all of them (clientConfigs), sized for a few hundred roles. A daemon restart has
 // every live role's launcher say hello again, each costing a read of its role's launcher Secret
 // (launcherCredential), while a launch makes about eight requests into a running pod and about
-// thirty when it replaces the pod. client-go's default of 5 a second with a burst of 10 per client
-// (rest.DefaultQPS, rest.DefaultBurst) queued 154 reconnecting launchers' reads for about 29 s,
-// past which the launches behind them could not wait inside their 30 s (LEGION-723); at 50 with a
-// burst of 100, three hundred launchers' reads clear in 4 s. A watch is never paced (client-go's
-// Request.Watch).
+// thirty when it replaces the pod. At 50 a second with a burst of 100 three hundred launchers'
+// reads clear in 4 s, where client-go's default of 5 with a burst of 10 per client
+// (rest.DefaultQPS, rest.DefaultBurst) needs about 29 s for 154 (LEGION-723). A watch is never
+// paced (client-go's Request.Watch).
 const (
 	clientQPS   = 50
 	clientBurst = 100
@@ -167,11 +166,11 @@ type kubeClients struct {
 // watches, requests for every other request, both paced by one limiter at clientQPS and
 // clientBurst (clientConfigs).
 func clients(rc *rest.Config) (informers, requests kubeClients, err error) {
-	watching, bounded := clientConfigs(rc)
-	if informers, err = clientsOf(watching); err != nil {
+	informerConfig, requestConfig := clientConfigs(rc)
+	if informers, err = clientsOf(informerConfig); err != nil {
 		return kubeClients{}, kubeClients{}, err
 	}
-	if requests, err = clientsOf(bounded); err != nil {
+	if requests, err = clientsOf(requestConfig); err != nil {
 		return kubeClients{}, kubeClients{}, err
 	}
 	return informers, requests, nil
@@ -186,7 +185,6 @@ func clients(rc *rest.Config) (informers, requests kubeClients, err error) {
 // none.
 func clientConfigs(rc *rest.Config) (informers, requests *rest.Config) {
 	informers = rest.CopyConfig(rc)
-	informers.QPS, informers.Burst = clientQPS, clientBurst
 	informers.RateLimiter = flowcontrol.NewTokenBucketRateLimiter(clientQPS, clientBurst)
 	informers.Timeout = 0
 	requests = rest.CopyConfig(informers)
