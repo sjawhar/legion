@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "LEGION-164",
+  "completed": "2026-10-13T01:12:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
+  "head": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9 (code head c8626dffc9e5815cbc1ce52bd3ff60ede1068f0e; the tester's red test is 2c71f742c87ec6f7f1f18f369a208b72fc925e0a)",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Drove the same surfaces independently in this worker pod (bun 1.3.14, real npm, an embedded Postgres 16.4 of my own at 127.0.0.1:54351, UTF8). The install wrapper re-rendered through installArgv and run with a stand-in agent against this checkout's freshly packed tarballs (sjawhar-pi-legion-9.6.1.tgz declaring 24, sjawhar-pi-envoy-9.5.1.tgz): `2 packages installed`, the agent started with the two generation-directory --extension roots, `installed pi-legion 9.6.1 contract 24 | pi-envoy 9.5.1`, and `legion probe-image` on that installed pair printed `probe-image: OK … daemon-api-version=24`; the published pi-legion 9.6.1 (contract 23) by registry URL was refused `declares daemon API contract 23; this daemon requires 24` before exec. The daemon lanes the implementer named re-ran green here: `internal/api -run 'Stale|Undecodable|OperatorBearer|WrongSecret'`, `CGO_ENABLED=0 internal/supervise -run 'StalePlugin|Plugin|Stale'`, the eight `internal/daemon` tests plus TestRunPrunesTheSecretFilesOfClaimsWithNoProcess (which the implementer's pod could not run), `internal/store`, `internal/projection`, `cmd/legion`. `legion version` (one line plain, two lines linked) and `legion start --check-config` (none / from the binary / from legion.yaml, and every refusal) reproduced as recorded. The proof holds for what it exercised; it never exercised an exact-version source — the documented form and the release-linked pair — which is where the change breaks (failures[0])."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "4. Under Kubernetes the pod stays and the plugin comes from npm: Oh My Pi loads pi-legion and pi-envoy at the exact versions the daemon named — and the Errors row 'The install fails … charged as a launch failure … The launch budget ends a lasting failure in a worker-died'",
+      "evidence": "An exact-version source never installs. `runtime.kubernetes.plugins: {pi_legion: 9.6.1, pi_envoy: 9.5.1}` is accepted by the loader (`legion start --check-config` → `plugins: @sjawhar/pi-legion 9.6.1 @sjawhar/pi-envoy 9.5.1 (from legion.yaml)`, exit 0), and a binary built with `-X main.piLegionVersion=9.6.1 -X main.piEnvoyVersion=9.5.1` — the shape release.yaml links (`$PI_LEGION_VERSION` is the bare published version) — prints the same pair `(from the binary)`; ResolvedPlugins hands both to specs.SpawnSpec unchanged, and installScript (internal/runtime/sandbox/plugins.go) renders `/usr/local/bin/bun add --exact '9.6.1' '9.5.1'`. Run in this pod with a stand-in agent, bun answers `error: Package \"9.6.1\" with tag \"latest\" not found, but package exists` / `error: 9.6.1@ failed to resolve` (and the same for 9.5.1), the wrapper prints `legion plugins: installing 9.6.1 and 9.5.1 failed` and exits 1 before `exec` — no `AGENT STARTED`. A bare version is a package name to `bun add`; only `@sjawhar/pi-legion@9.6.1` names the package at a version. Tarball paths and http(s) URLs (what the implementer's proof and stage 4a's checkpoint use) work, so neither caught it. Consequence under production's default source, the release-linked pair: at the first boot every live claim is relaunched, every install fails before Oh My Pi starts, the launcher reports the child gone, each death is charged, and the launch budget ends every live role in `worker-died` — the fleet-wide stall this change exists to prevent. Red test: `cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestAVersionSourceIsInstalledAsThePackageAtThatVersion|TestATarballOrURLSourceReachesBunVerbatim' -count=1 -v` → `plugins_test.go:158: bun add was asked for [\"add\" \"--exact\" \"9.7.0\" \"9.6.1\"], want @sjawhar/pi-legion@9.7.0 and @sjawhar/pi-envoy@9.6.1` (FAIL); the companion test holds a tarball path and a URL verbatim (PASS, and must stay so after the fix). Both run the rendered script under sh with a stand-in bun at the script's own bun path and read the words bun receives. After the fix, docs/kubernetes.md's `bun add --exact <pi-legion source> <pi-envoy source>` sentence (Contract discipline) and the stage 4a checkpoint, which installs tarballs only, should say/exercise the version form too (pi-envoy 9.5.1 by version would do until a pi-legion at contract 24 is published)."
+    },
+    {
+      "criterion": "4(d). Stage 4a's live checkpoint `stale-plugin-install` on the production cluster (the pod's uid unchanged, nothing provisioned again, the installed pi-legion declaring 24, the shim's cmdline naming the generation roots; the published 9.6.1 refused)",
+      "evidence": "Not reached from this pod: it needs the devbox with the production kubeconfig, which an issue pod has no credential for (plan D12). The implementer's operator ask is open at dispatch://LEGION-164/ask/8f60b4e5-dcb5-4925-8d25-7f478e52df84; its `CHECK stale-plugin-install: PASS` block is outstanding. As written the checkpoint names both sources as tarball paths, so it would pass today without exercising failures[0]'s path. Recorded so the reviewer's `Not proven / risk` carries it until the operator's run is quoted on the pull request."
+    }
+  ],
+  "verified": [
+    {
+      "criterion": "1. The contract is recorded and shown, and survives a restart",
+      "surface": "The real daemon (tmux config, fake runtime) on my embedded Postgres, driven with curl and the built legion CLI",
+      "command": "curl POST /legion/v1/claims/register {pluginContract: 24}; curl GET /legion/v1/state | jq; /tmp/l164/legion state --json --port <p>; /tmp/l164/legion claims list --port <p> --operator-token-file <f>; stop; restart on the same store; the same three reads",
+      "observed": "register 200; every claim view carries pluginContract 24; `legion claims list` prints `<token> architect LEGION-1 registered 1 24`; after the restart the same claim reads `registered 1 24`, its secret still mints a grant (200), no Resume and no relaunch line names it; the controller locator carries pluginContract (24, then 23 after the store edit).",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    },
+    {
+      "criterion": "2. A stale process is relaunched at boot, uncharged, one line per claim; a claim at the daemon's contract is left alone",
+      "surface": "The same real daemon restarted over a claim seeded ready at pluginContract 0 with a session file, beside two claims at 24",
+      "command": "putClaim(ready, pluginContract 0, session ses_e) then restart; read the fake runtime's calls and the JSON log",
+      "observed": "Resume calls = [<e>@g2], Spawn calls = 0; one line `supervise: the process speaks another plugin contract; relaunching it onto the current plugin` with claim=<e> incarnation=4242:1 pluginContract=0 daemonApiVersion=24 trigger=boot; `legion claims list` shows `<e> implementer LEGION-3 launching 2 0` with launchFailures 0, and the two claims at 24 untouched (`registered 1 24`, `registered 3 24`). The held-suspension and still-launching cases were verified through the implementer's `internal/daemon` tests re-run here.",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    },
+    {
+      "criterion": "3. A process that registers stale is relaunched at once and refused; a registration after that relaunch that still differs is charged",
+      "surface": "The same real daemon over curl",
+      "command": "register at contract 1 (gen 1); register the relaunched gen 2 at 1 again; register gen 3 at 24",
+      "observed": "gen 1 → 409 `pi-legion speaks daemon API contract 1; this daemon requires 24: the daemon is relaunching this process onto the current plugin`, claim `launching 2 1`, launchFailures 0, deaths 0, one Resume; gen 2 → the same 409, generation 3, launchFailures 1 (charged), two Resumes; gen 3 at 24 → 200, `registered 3 24`. The worker-died end of the budget and the daemon-launched controller were verified through the implementer's tests re-run here.",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    },
+    {
+      "criterion": "4. The kept pod and the install (the parts reachable from this pod): the wrapper installs the exact pair, checks the contract, names the generation roots; a second stale role of the same pod is kept; a death relaunch in that pod replaces it",
+      "surface": "The rendered wrapper run in this pod against freshly packed tarballs and registry URLs; `legion probe-image` on the installed pair; the sandbox package's fake-cluster rig for the two-role and death cases",
+      "command": "/bin/sh -c \"$script\" legion-plugins <stand-in agent> …; legion probe-image --plugin-root <g7>/node_modules/@sjawhar/pi-legion --envoy-plugin-root <g7>/node_modules/@sjawhar/pi-envoy --skip-agent-models --daemon-api-version 24; a throwaway rig test: two roles of one pod under a daemon pinning another image, each Resumed with Plugins, then one Resumed without",
+      "observed": "tarballs: `2 packages installed`, `AGENT STARTED with: --extension …/g7/node_modules/@sjawhar/pi-envoy --extension …/g7/node_modules/@sjawhar/pi-legion --mode rpc`, `installed pi-legion 9.6.1 contract 24 | pi-envoy 9.5.1`; probe-image OK `daemon-api-version=24`; URL sources install; a quoted/newlined/`$HOME`/backtick argv reaches the agent intact; 0 bytes on stdout before exec; g7 removed when g8 installs. Rig: both stale roles relaunched in `uid-pod-9` (same=true, gen 2, wrapped=true), the pod still drifted after both; the later death relaunch (no Plugins) → `uid-pod-10` (same=false, wrapped=false, drifted-after=false).",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    },
+    {
+      "criterion": "5. A stale caller is refused in words; an undecodable body naming a stale caller gets the same; any other undecodable body gets a logged 400",
+      "surface": "The real daemon over curl (the operator's controller form, stale across a restart) and the implementer's `internal/api` tests re-run here for the claim forms (ready, grants, handoff/complete)",
+      "command": "curl POST /legion/v1/grants {sessionId, secret} / {…, push: true} / wrong secret / non-string sessionId / two JSON values / non-JSON",
+      "observed": "stale controller: 409 `{\"code\":\"STALE_PLUGIN_CONTRACT\",\"error\":\"pi-legion speaks daemon API contract 23; this daemon requires 24: run legion controller start from the release built with this daemon\"}` for both the decodable and the `push: true` body, each logged `api: refused a call from a process on another plugin contract` {route, session, pluginContract 23, daemonApiVersion 24}; wrong secret + push → 400 `unknown field \"push\"` (the identity is authenticated before any contract is named), wrong secret alone → 403 INVALID_SESSION_SECRET; a current claim's push body → 400; non-string identity → 400 `cannot unmarshal number into … sessionId`; two values → 400 `more than one JSON value`; non-JSON → 400; every 400 logged `api: refused an undecodable request body` with the route and the decoder's error, no body and no secret.",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    },
+    {
+      "criterion": "6. The runbook says so",
+      "surface": "grep over docs/kubernetes.md",
+      "command": "grep -c for each of the two removed sentences, the relaunch line, `legion-plugins/g`, the controller remedy",
+      "observed": "0, 0, 2, 2, 1: the two sentences are gone, the relaunch line is quoted in both passages, the generation directory is named in the opening note and Contract discipline. (The Contract discipline sentence `bun add --exact <pi-legion source> <pi-envoy source>` describes the failing rendering of failures[0] and changes with the fix.)",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    },
+    {
+      "criterion": "runtime.kubernetes.plugins, the linked pair, `legion version`, `legion start --check-config` (plan D9/D11)",
+      "surface": "The built binaries against the shipped legion.yaml.example (plus its stub files)",
+      "command": "go build; go build -ldflags '-X main.piLegionVersion=9.6.1 -X main.piEnvoyVersion=9.5.1'; legion version; legion start --check-config --config … with and without a plugins block, and with each refused value",
+      "observed": "`legion (devel)` (one line) vs `legion v0.0.0-l164t commit l164t` + `plugins @sjawhar/pi-legion 9.6.1 @sjawhar/pi-envoy 9.5.1`; check-config: `plugins: none — set runtime.kubernetes.plugins or run a release build; …` / `(from the binary)` / `(from legion.yaml)` (the file wins); `latest`, `^9`, `9.x`, `v9.6.1`, `./x.tgz`, `file:///…`, `@sjawhar/pi-legion@9.6.1` → the exact-version refusal naming the key, exit 1; a half block → `pi_envoy is required`; `\"\"` → `must not be empty`; `9.6.1-beta.1+build.7`, an absolute path and an https URL accepted.",
+      "headSha": "b4e1ff51282c65a477d37748f4f7039bd37c9ff9"
+    }
+  ],
+  "notReached": [
+    "7. Production: the post-merge production check (the implementer's, plan §6); its preconditions are the operator ask dispatch://LEGION-164/ask/28313726-42fe-49db-a0fa-5df9fa9e97aa. Not a tester surface before the merge."
+  ],
+  "observations": [
+    "Self-healing extra round-trip: a pod whose image is still the old one (the operator restarted the daemon on the new release before pinning the new image) loads the image's old plugin at every launch that carries no Plugins — a death relaunch after the role registered at 24, or a fresh claim's first launch — so such a launch registers stale once, is answered 409 and relaunched uncharged with the install, then registers at 24. Each converges in two launches; noted for the reviewer, not a defect against the spec.",
+    "Stage 4b's `write_legion_config` sets `plugins: {pi_legion: \"$pi_legion_version\", …}` from `npm view` — the bare-version form of failures[0]; 4b never installs (every claim registers at the branch daemon's contract), so it passes today without exercising it."
+  ],
+  "ci": "Tests run 38328392549 and PR Title run 38328392565 at c8626dffc9e5815cbc1ce52bd3ff60ede1068f0e (the implementer's code head; b4e1ff51 is its handoff-only push). The tester's red-test push starts a new run; its sandbox test job fails by design until the implementer's fix.",
+  "localLanes": "Embedded Postgres 16.4 (zonky jar, LEGION-668 recipe) at 127.0.0.1:54351 with UTF8; `go test` lanes named in implementerProof.how; `internal/runtime/sandbox` full package: only the new red test fails."
+}
