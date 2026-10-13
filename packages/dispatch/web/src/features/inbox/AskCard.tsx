@@ -61,6 +61,7 @@ import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnLabel } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
+import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
@@ -516,6 +517,12 @@ export function AskCard({
             <MarkdownBody markdown={displayedAsk.question} />
           </div>
         )}
+        {/* A request to approve again names the approval it follows, under the question (the
+            spec's own placement), with the diff from that version behind Show diff; a first
+            request carries no earlier approval and renders neither. */}
+        {isApproval && displayedAsk.approval?.approved_version !== undefined ? (
+          <EarlierApproval approval={displayedAsk.approval} />
+        ) : null}
         {/* One provenance line under the question, in the spec's decided conversation grammar:
             whose turn it is (the only part a reader acts on), who asked, when, and the ask's
             own reference. The session's own handles - its ID, its title, its tmux target - are
