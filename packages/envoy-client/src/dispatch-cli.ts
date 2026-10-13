@@ -101,8 +101,12 @@ export function fitOutput(
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
  * the host session the environment names, and prints what the model reads. The host plugin sets
  * `DISPATCH_HOST` and the session's id in the agent's shell (`CLAUDE_CODE_SESSION_ID` under
- * Claude Code, `DISPATCH_SESSION_ID` elsewhere); an empty variable counts as unset. Memory a
- * long-lived host kept across calls lives in the session's state directory.
+ * Claude Code, `DISPATCH_SESSION_ID` elsewhere); an empty variable counts as unset. With
+ * `DISPATCH_HOST` unset, `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code sets in every Bash and
+ * hook process it runs, is host `claude`: a Claude Code subagent's Bash gets nothing the bridge's
+ * `SessionStart` hook writes to `CLAUDE_ENV_FILE` (anthropics/claude-code#46696). The command reads
+ * the envoy.json its host's plugin reads (`envoyConfigPath(host)`), from the same variables that
+ * plugin read. Memory a long-lived host kept across calls lives in the session's state directory.
  */
 export async function runDispatchCli(
   argv: readonly string[],
@@ -135,7 +139,8 @@ export async function runDispatchCli(
     return REFUSED;
   }
 
-  const hostName = env.DISPATCH_HOST;
+  const hostName =
+    env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = hostName === undefined ? undefined : HOSTS[hostName];
   if (host === undefined) {
     print(
@@ -169,13 +174,13 @@ export async function runDispatchCli(
   let config: ActiveDispatchConfig | null;
   let unconfigured: string;
   try {
-    const envoyConfig = readEnvoyConfig(envoyConfigPath("command", env), env, { cwd: io.cwd });
+    const envoyConfig = readEnvoyConfig(envoyConfigPath(host, env), env, { cwd: io.cwd });
     const offBy = sectionSwitch(envoyConfig, "dispatch", env).offBy;
     unconfigured =
       offBy !== null
         ? `${offBy} turns Dispatch off (dispatch.enabled is false)`
         : (envoyConfig.notice ??
-          "Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)");
+          `${envoyConfig.path} has no enabled dispatch section, and DISPATCH_URL is not set`);
     config = activeDispatchSettings(dispatchSettings(env, envoyConfig));
   } catch (error) {
     print(`dispatch: ${messageFor(error)}`);
