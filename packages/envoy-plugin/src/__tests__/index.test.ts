@@ -1,35 +1,23 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { logger } from "../log";
+import { isolateEnvoyConfig } from "./isolated-config";
 
+// Each test's scratch HOME, holding the empty envoy.json ENVOY_CONFIG_FILE names.
+const configDirectory = isolateEnvoyConfig();
 // Suppress console.error during tests
 const originalError = console.error;
 const originalDispatchToken = process.env.DISPATCH_TOKEN;
-// What picks the envoy.json the plugin reads: each test starts with none of them but
-// ENVOY_CONFIG_FILE naming a file that holds no section, so Dispatch and Envoy come from the
-// variables the test sets and never from the caller's own envoy.json or OpenCode directory.
-const configVariables = ["ENVOY_CONFIG_FILE", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"] as const;
-const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
-let configDirectory = "";
 beforeEach(() => {
   console.error = mock(() => {});
   process.env.DISPATCH_TOKEN ??= "test-token";
-  for (const name of configVariables) delete process.env[name];
-  configDirectory = mkdtempSync(path.join(os.tmpdir(), "envoy-plugin-config-"));
-  process.env.ENVOY_CONFIG_FILE = path.join(configDirectory, "envoy.json");
-  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
 });
 afterEach(() => {
   console.error = originalError;
   if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;
   else process.env.DISPATCH_TOKEN = originalDispatchToken;
-  for (const [name, value] of originalConfigVariables) {
-    if (value === undefined) delete process.env[name];
-    else process.env[name] = value;
-  }
-  rmSync(configDirectory, { recursive: true, force: true });
 });
 
 /** The plugin's hooks for a serve at a port nothing answers on. */
@@ -52,7 +40,7 @@ async function shellEnvironment(hooks: {
 
 describe("the serve's envoy.json", () => {
   it("with OPENCODE_CONFIG_DIR holding no envoy.json, registers no tool and hands that file to every shell", async () => {
-    const opencodeDirectory = path.join(configDirectory, "opencode");
+    const opencodeDirectory = path.join(configDirectory(), "opencode");
     mkdirSync(opencodeDirectory);
     process.env.OPENCODE_CONFIG_DIR = opencodeDirectory;
     const previous = { ...process.env };
@@ -210,7 +198,7 @@ describe("envoy plugin init", () => {
 describe("Dispatch configuration", () => {
   it("keeps Envoy available and logs once when no envoy.json configures Dispatch", async () => {
     const previous = { ...process.env };
-    const missing = path.join(configDirectory, "missing", "envoy.json");
+    const missing = path.join(configDirectory(), "missing", "envoy.json");
     process.env.ENVOY_CONFIG_FILE = missing;
     process.env.ENVOY_URL = "http://127.0.0.1:59999";
     delete process.env.DISPATCH_URL;
