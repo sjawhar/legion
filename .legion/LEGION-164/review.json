@@ -2,44 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-164",
-  "completed": "2026-10-13T03:45:59Z",
-  "round": 2,
+  "completed": "2026-10-13T04:47:28Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
-  "reviewedHead": "690bf7fbcf65114e25274c97be0875ffe9d1bd74 (code head 36a4d40c2fc571665df0aecdfc2f588b1eef296b; the round's fix 4b806e7e)",
-  "verdict": "changes_requested",
+  "reviewedHead": "fb02156be52eb581bd9fc4385b4fda760d672b39 (code head 049e9bed76932a445af2becdedd1ebfa3297a484; the round's fix)",
+  "verdict": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 3,
-  "ci": "Required set (lint, typecheck, test, pr-title) green at the code head 36a4d40c: Tests run 38339833162, PR Title run 38339833064; the handoff heads carry the skip-checks trailer and the verdict is carried.",
-  "threads": "All seven round-1 threads answered by the implementer and resolved; each verified fixed at the head (the sweep retry at daemon.go:1330; staleClaim's comment; hasSchemeFold; readPluginSource's `//` refusal and u.String(); docs 'every other'; Deps.check PluginContract; per-family undecodable-body tests). My own reply posted on each. The round-1 Important (a refused boot relaunch left the claim permanently 409'd) is fixed: the orphan sweep re-posts StalePlugin for every live stale claim; proven by TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep and the tester's real-store reproduction (cleanup reserved in tree_lifecycles).",
-  "census": "The PR body's `## Contract change census` (11 entries) re-run at the head: every listed hit checks out; the hits the commands return that the body had not listed (entries 3, 5, 6, 8, 11) are non-consumers (comments, the `pi-legion version` substring, direct test callers, the config field and resolver, jq scripts selecting other msg values) and the implementer added a disposition for each on request (body edit, no commit).",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality run once at 690bf7fb over the round-2 delta (ThermoDeep164R2, ThermoQuality164R2): the sweep retry cannot relaunch a claim that should stay (every state has a row; post only queues; refreshPlugin re-checks against the machine's claim), the launch-gate seam is nil-identity in production, u.String() alters no valid URL, Deps.check's bound is set by the one production Deps, the new api tests hit the right families and shapes, the harness change passes nothing for a changed reason. Both found the one residue below; the rest is wording and cleanup.",
+  "ci": "Required set (lint, typecheck, test, pr-title) green at the code head 049e9bed: Tests run 38344594722; the handoff heads carry the skip-checks trailer and the verdict is carried to them.",
+  "threads": "All eleven threads (seven from round 1, four from round 2) answered by the implementer, resolved, each fix read at the head and accepted with my reply; no bot thread exists. Round 2's Important — side effects before the launch gate — is fixed in 049e9bed: refreshPlugin runs checkLaunch before the Warn, the PluginRelaunchFor mark and interrupted when no suspension is held; TestAStalePluginRefusedByTheLaunchPathChangesNothing and the reworked daemon sweep test assert the mark, the pending delivery and the absence of a relaunching line on the refusal path, and the tester reproduced it on the real store (cleanup reserved) at round 4.",
+  "census": "Present (11 entries); every search command re-run at the head in round 2 with every hit dispositioned; the round-3 delta adds no contract change (the host-less URL refusal widens entry 3's existing refusal and shares its message).",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality run once at fb02156b over the round-3 delta (ThermoDeep164R3, ThermoQuality164R3): the gate placement is correct on every entry path (boot, sweep, registration; the held arm goes to endHeld which launches nothing); the double checkLaunch reads only fields interrupted never touches; Handle's settle writes nothing for the refused case; seedWorkflowTree's PutDelivery branch is guarded; the docs sentences are accurate. Residue: the u.Host predicate admits a port-only URL; the held arm's Warn; the removed Budgets assertion; comment nits — all Minor, on the Fast-follow.",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/daemon/internal/supervise/plugin.go:43-47",
-      "description": "A refused relaunch attempt is not side-effect-free, so the retry's stated invariant ('leaves the claim exactly as stale as it found it', plugin.go:29-32, table.go:113-117, daemon.go:1148-1150, api/claims.go:338-343) is false: refreshPlugin writes the 'relaunching' Warn and sets PluginRelaunchFor = deps.PluginContract, and replaceProcess interrupts the pending task (repoint.go:38), all before launch's checkLaunch (machine.go:829-832) can refuse. Observed in my round-1 throwaway (relaunchFor=24 after the refused attempt). Consequences, each bounded: a later stale registration (a pod-replacing relaunch into an old-image pod) is charged one launch failure for a relaunch that never ran (staleRegistration → relaunchAfterFailure); the still-running stale process is re-prompted with its own task as 'interrupted' when its turn ends; one false 'relaunching' line per sweep per stuck claim. Fix: check the gate first in refreshPlugin when no suspension is held (the convention relaunchAfterFailure already follows, budgets.go:47-53), so a refused attempt changes nothing; have the sweep test assert PluginRelaunchFor and the pending delivery unchanged after the refusal."
+      "severity": "minor",
+      "file": "packages/daemon/internal/config/kubernetes.go:298",
+      "description": "`u.Host == \"\"` carries the port, so `http://:8080/x.tgz` (Hostname empty) still passes --check-config and reaches bun unfetchable; `u.Hostname() == \"\"` is the predicate the `names no host` message means. Fails loudly at the first stale relaunch into the spec's own `worker-died` row (as an unpublished version does), so a validation nicety, not a correctness defect. Fast-follow with a port table case."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/config/kubernetes.go:295",
-      "description": "The URL branch accepts host-less shapes — `https:///x.tgz` and `http:/cache/x.tgz` parse with scheme http(s), empty Host and IsAbs true — which bun cannot fetch; same invariant as the resolved `//` thread. Require u.Host != \"\" on the URL branch with one named refusal."
+      "file": "packages/daemon/internal/supervise/plugin.go:50-54",
+      "description": "The held-suspension arm logs `relaunching it onto the current plugin` before endHeld suspends the claim instead (the moved-address twin logs the same way); docs/kubernetes.md's 'each relaunch logs one line' over-counts by such a claim. Fast-follow: log the suspension on that arm, pinned in the held test."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/daemon/daemon.go:1306-1310; internal/supervise/table.go:113-114; internal/daemon/plugin_test.go:148",
-      "description": "The justification 'the same cadence the moved-address twin (StaleAddress) already gets from this same sweep' is wrong: StaleAddress is produced by the runtime's own Observe loop at Timeouts.Probe (sandbox/watch.go, tmux/observe.go), not by reconcileOrphans. Say the sweep is the one periodic pass that already reads every claim."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/daemon/launchgate.go:9-13; internal/daemon/daemon.go:140-146",
-      "description": "The doc says CheckLaunch 'answers check instead when it is non-nil, falling through to the real store otherwise'; the code is a pre-check in series (a nil from check still runs the real store's CheckLaunch). Describe it as the pre-check it is."
+      "file": "packages/daemon/internal/supervise/plugin_test.go:159-185; internal/daemon/plugin_test.go:201-231",
+      "description": "The refusal-path tests assert state, mark, pending, Resume count and log but no longer `Budgets{}`; the `//host/x.tgz` input now gets the `names no host` message though it names a host-like segment; 'a true no-op' overstates a re-post that still logs `an event failed` once per sweep; `u.Parse` for url.Parse; 'nothing else re-tried'. Fast-follow wording and one-line assertions."
     }
   ],
-  "fastFollow": "Add to the batched cleanup: a typed trigger with three constants (the string is compared literally at daemon.go:1167 to gate the degraded Error); hasSchemeFold is redundant once the loader canonicalises (keep one definition of 'what counts as a URL'); `PluginContract: 24` literals in internal/daemon, sandbox and supervise tests should be api.DaemonAPIVersion or one named test constant (they drift at the next bump); the three undecodable-body tests and TestNewMachineRefusesADepsWithAnUnsetBound could be tables; the `//` refusal message also meets a Linux-legal `//opt/...` path.",
+  "fastFollow": "Add to the batched cleanup (one child issue the architect files after the merge): `u.Hostname()` on the URL branch with a port table case; the held arm's log line; `h.wantBudgets(Budgets{})` on the refusal path; the `//` message naming the missing scheme; the comment nits; plus the round-1/2 items (typed trigger; hasSchemeFold redundancy; `24` literals → api.DaemonAPIVersion; test tables; shadow identity read; boot-pass filter in the table; specs.runtimeName; stale_plugin.go; PluginsFromBinary; controllerSecret's sentence; stage 4b's npm view).",
   "observations": [
-    "While a relaunch stays refused (a reserved tree cleanup), each sweep costs one CheckLaunch transaction under the global fact serializer and one Error line per stuck claim per minute; bounded by the cleanup's own lifetime and the same as the StaleAddress twin's re-report. No alert or script consumes the lines (grep over scripts/e2e, deploy, docs).",
-    "A URL or tarball plugin source is fetched with no integrity pin beyond the declared contract check (operator configuration, not outside input): hardening, noted in the Security line.",
-    "Round-1 observations stand: an old-image pod converges in two launches; a pod-replacing relaunch after the boot's stale relaunch charges one failure that ready resets."
+    "A reservation committing between refreshPlugin's gate and launch's own re-check (microseconds apart) would still mark, interrupt and log once; benign and narrow, recorded so the comments' unconditional 'changed nothing' is read with it.",
+    "While a relaunch stays refused, each sweep logs one Error `supervise: an event failed` per stuck claim per minute and no Warn; bounded by the tree's close. The exact-version pair is pinned by npm's immutable version, a URL or tarball source by operator trust (docs now say so).",
+    "Rounds 1–3's observations stand: an old-image pod converges in two launches; a pod-replacing relaunch after the boot's stale relaunch charges one failure that ready resets; production (acceptance 7) is the post-merge check."
   ]
 }
