@@ -85,11 +85,12 @@ quotes the text it stopped at.
 
 During the warn-first migration, the old user file is read with a warning only for a session whose
 harness names no directory and whose neutral file is at the default XDG location
-`$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or `$HOME/.config`). A profile
-with no file of its own gets no Dispatch or Envoy; if
-`$HOME/.config/opencode/envoy.json` exists, the missing-file notice says it is not read and names
-the chosen file to copy or link it to, or write. A neutral file under a relocated
-`XDG_CONFIG_HOME` never reads the old file and says so without asking to move it.
+`$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or `$HOME/.config`). A harness
+directory that is the default config directory follows the default-file rule. A profile with no
+file of its own gets no Dispatch or Envoy; if `$HOME/.config/opencode/envoy.json` exists, the
+missing-file notice says it is not read and names the chosen file to copy or link it to, or write.
+A neutral file under a relocated `XDG_CONFIG_HOME` never reads the old file and says so without
+asking to move it.
 
 A checkout's current `.envoy/envoy.json` may configure Dispatch alone: its top-level `natsUrls`
 remains refused, and an `envoy` section is not read by a client (or refuses a Go server start).

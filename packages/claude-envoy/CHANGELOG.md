@@ -8,9 +8,10 @@
   `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. During the warn-first migration, the old user file is read with a
   warning only when no harness directory is selected and that neutral file is at the default XDG
-  location. A profile with no file gets no Dispatch or Envoy; its notice names the existing old file
-  and the chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old
-  file is not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
+  location. A harness directory that is the default config directory follows the default-file rule.
+  A profile with no file gets no Dispatch or Envoy; its notice names the existing old file and the
+  chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old file is
+  not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
   `dispatch`, ignoring top-level `natsUrls` and `envoy` with a warning; the current
   `.envoy/envoy.json` keeps refusing checkout settings. A top-level `natsUrls` in a user file is
   read as `envoy.natsUrls` with a warning.

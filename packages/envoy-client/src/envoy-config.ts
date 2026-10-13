@@ -498,6 +498,9 @@ export function checkoutCommandRefusal(checkoutPath: string, field: string): str
 
 /** What a missing chosen file says about the OpenCode-era user file without reading it. */
 function oldUserFileNotice(filePath: string, env: EnvoyConfigEnvironment): string | undefined {
+  // A harness directory can be the default config directory. The fallback and this notice must
+  // make that path decision together: it follows the default-file rule, not the profile rule.
+  if (openCodeUserFile(filePath, env) !== null) return undefined;
   const home = nonEmpty(env.HOME) ?? homedir();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old)) return undefined;

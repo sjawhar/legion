@@ -339,6 +339,44 @@ describe("readEnvoyConfig", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
+  test("a harness directory at the default config directory reads the OpenCode-era file by the default rule", () => {
+    const home = tempDir();
+    const directory = path.join(home, ".config", "legion");
+    const old = path.join(home, ".config", "opencode", "envoy.json");
+    const profiles = [
+      ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: directory }],
+      ["claude", { CLAUDE_CONFIG_DIR: directory }],
+      ["opencode", { OPENCODE_CONFIG_DIR: directory }],
+    ] as const;
+
+    for (const [harness, profile] of profiles) {
+      const marker = path.join(home, `${harness}-old-token-ran`);
+      writeFile(old, {
+        dispatch: {
+          enabled: true,
+          serverUrl: "https://old.dispatch.example",
+          token: `!touch ${marker}; echo old-token`,
+        },
+      });
+      const env = { HOME: home, ...profile };
+      const chosen = envoyConfigPath(harness, env);
+      const config = readEnvoyConfig(chosen, env, { cwd: tempDir() });
+
+      expect(config).toMatchObject({
+        path: old,
+        missing: null,
+        warnings: [
+          `${old} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${old} ${chosen}, then move a top-level natsUrls into envoy.natsUrls`,
+        ],
+      });
+      expect(dispatchSettings(env, config)).toMatchObject({
+        enabled: true,
+        token: "old-token",
+      });
+      expect(existsSync(marker)).toBe(true);
+    }
+  });
+
   test("the OpenCode-era file that is not valid is refused, naming it", () => {
     const home = tempDir();
     const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {

@@ -21,7 +21,8 @@
   counts as unset.
 - During the warn-first migration, the old user file is read with a warning only when the harness
   selects no directory and the neutral file is at the default XDG location
-  `~/.config/legion/envoy.json`; then move it with
+  `~/.config/legion/envoy.json`; a harness directory that is that default directory follows the
+  default-file rule. Move it with
   `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`. A profile
   whose chosen file is missing gets no Dispatch or Envoy; when the old file exists, its notice names
   that file and the chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME`

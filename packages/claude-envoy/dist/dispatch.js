@@ -15328,6 +15328,8 @@ function checkoutCommandRefusal(checkoutPath, field) {
   return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 function oldUserFileNotice(filePath, env) {
+  if (openCodeUserFile(filePath, env) !== null)
+    return;
   const home = nonEmpty(env.HOME) ?? homedir();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))

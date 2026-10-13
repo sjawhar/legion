@@ -111,10 +111,11 @@ func (e *InvalidConfigError) Error() string {
 // Three saved inputs from before this layout are read until they move, each with a Warning: while
 // the user file is the default ~/.config/legion/envoy.json and none is there,
 // ~/.config/opencode/envoy.json in its place; while the checkout has no .envoy/envoy.json, its
-// .opencode/envoy.json; and a user file's top-level natsUrls as envoy.natsUrls. A profile or
-// relocated XDG_CONFIG_HOME never reads the old user file. A legacy checkout ignores its top-level
-// natsUrls and envoy keys with a warning, while the current checkout refuses them. Setting the
-// top-level key beside envoy.natsUrls remains refused.
+// .opencode/envoy.json; and a user file's top-level natsUrls as envoy.natsUrls. A harness directory
+// at the default config directory follows that default-file rule; another profile or relocated
+// XDG_CONFIG_HOME never reads the old user file. A legacy checkout ignores its top-level natsUrls
+// and envoy keys with a warning, while the current checkout refuses them. Setting the top-level key
+// beside envoy.natsUrls remains refused.
 func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {

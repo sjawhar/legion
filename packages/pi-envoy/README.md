@@ -156,12 +156,13 @@ invalid URL, or an empty token makes every `dispatch` command exit 2 naming the 
 
 During the warn-first migration, the old user file is read with a warning only for a session whose
 harness names no directory and whose neutral file is at the default XDG location
-`~/.config/legion/envoy.json`. A profile with no file gets no Dispatch or Envoy; when the old file
-exists, its start notice says it is not read and names the profile's file to copy or link it to, or
-write. A relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A
-legacy checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and
-`envoy` with a warning; the current `.envoy/envoy.json` continues to refuse checkout settings. A
-top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a warning.
+`~/.config/legion/envoy.json`. A harness directory that is the default config directory follows the
+default-file rule. A profile with no file gets no Dispatch or Envoy; when the old file exists, its
+start notice says it is not read and names the profile's file to copy or link it to, or write. A
+relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A legacy
+checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and `envoy`
+with a warning; the current `.envoy/envoy.json` continues to refuse checkout settings. A top-level
+`natsUrls` in a user file is read as `envoy.natsUrls` with a warning.
 
 A command that writes to an owner names either an issue (`--issue`, a native `KEY` or an external
 `owner/repo#n` reference) or an unlinked project document (`--project` plus `--artifact`). A Legion

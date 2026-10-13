@@ -82,13 +82,14 @@ section of the checkout's `.envoy/envoy.json` in the directory it starts in, the
 overrides. A `.envoy` that is a plain file counts as no checkout file.
 
 During the warn-first migration, the old user file is read with a WARN only when a session's harness
-names no directory and the neutral file is at the default XDG location. A profile with no file gets
-no Dispatch or Envoy; its notice names the existing old file and the profile file to copy or link
-it to, or write. A relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move
-it. A legacy checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls`
-and `envoy` with a WARN. A top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a
-WARN until it moves. The current `.envoy/envoy.json` still refuses its top-level `natsUrls` and
-`envoy` section, naming the user file that an Envoy section belongs in.
+names no directory and the neutral file is at the default XDG location. A harness directory that is
+the default config directory follows the default-file rule. A profile with no file gets no Dispatch
+or Envoy; its notice names the existing old file and the profile file to copy or link it to, or
+write. A relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A
+legacy checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and
+`envoy` with a WARN. A top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a WARN
+until it moves. The current `.envoy/envoy.json` still refuses its top-level `natsUrls` and `envoy`
+section, naming the user file that an Envoy section belongs in.
 
 Each other refusal below stops startup whether or not NATS is disabled, naming the file: an
 `XDG_CONFIG_HOME` that is not absolute; a JSON `null` at the top level, as a section or as any

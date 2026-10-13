@@ -209,10 +209,11 @@ what a checkout's file holds that the session does not read, or that inbound mes
 file that turns a section off says nothing.
 
 During the warn-first migration, the old user file is read with a warning only for a session whose
-harness names no directory and whose neutral file is at the default XDG location. A profile whose
-file is missing gets no Dispatch or Envoy; when the old file exists, the notice says it is not read
-and names the profile file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the
-old file is not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
+harness names no directory and whose neutral file is at the default XDG location. A harness
+directory that is the default config directory follows the default-file rule. A profile whose file
+is missing gets no Dispatch or Envoy; when the old file exists, the notice says it is not read and
+names the profile file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old
+file is not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
 its `dispatch` section, ignoring top-level `natsUrls` and `envoy` with a warning. The current
 `.envoy/envoy.json` continues to refuse checkout settings. A top-level `natsUrls` in a user file is
 read as `envoy.natsUrls` with a warning. A file location that cannot be worked out (a relative

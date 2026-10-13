@@ -268,8 +268,9 @@
   startup, so a cloned repository does not choose the NATS servers the process connects to.
 
   During the warn-first migration, the old user file is read with a warning only when the neutral
-  file is at the default XDG location and no harness directory is selected. A profile with no file
-  gets no Dispatch or Envoy; its notice names the existing old file and the profile file to copy or
+  file is at the default XDG location and no harness directory is selected. A harness directory
+  that is the default config directory follows the default-file rule. A profile with no file gets
+  no Dispatch or Envoy; its notice names the existing old file and the profile file to copy or
   link it to, or write. A relocated `XDG_CONFIG_HOME` says the old file is not read without asking
   to move it. A legacy checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level
   `natsUrls` and `envoy` with a WARN. A top-level `natsUrls` in a user file is read as
