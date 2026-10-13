@@ -12,15 +12,26 @@ readonly session_timeout=60
 readonly answer_timeout=90
 readonly teardown_timeout=15
 readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-envoy/package.json"
-readonly envoy_config="${HOME}/.config/opencode/envoy.json"
+# The envoy.json this shell's commands read: ENVOY_CONFIG_FILE, which a session's plugin sets, else
+# ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json.
+readonly envoy_config="${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/legion/envoy.json}"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
 }
 
+# A URL's scheme and host[:port], lowercased: the origin a file's bearer is paired with.
+url_origin() {
+  local url="${1,,}"
+  local rest="${url#*://}"
+  printf '%s://%s' "${url%%://*}" "${rest%%[/?#]*}"
+}
+
 # The bearer the installed plugin resolves: DISPATCH_TOKEN_FILE, then DISPATCH_TOKEN, then
-# dispatch.token in ~/.config/opencode/envoy.json.
+# dispatch.token in that envoy.json, which goes only to the server written beside it (its
+# dispatch.serverUrl, http://localhost:8766 when it names none). A dispatch.token starting with `!`
+# is a command, which only a session runs, so the script asks for DISPATCH_TOKEN instead.
 resolve_dispatch_bearer() {
   if [[ -n "${DISPATCH_TOKEN_FILE:-}" ]]; then
     local token
@@ -36,8 +47,15 @@ resolve_dispatch_bearer() {
   fi
   [[ -f "$envoy_config" ]] ||
     fail "no Dispatch credential: set DISPATCH_AUTH_HEADER, DISPATCH_TOKEN(_FILE), or dispatch.token in ${envoy_config}"
-  jq -er '.dispatch.token // empty' "$envoy_config" 2>/dev/null ||
+  local token server
+  token="$(jq -er '.dispatch.token // empty' "$envoy_config" 2>/dev/null)" ||
     fail "${envoy_config} has no dispatch.token; set DISPATCH_AUTH_HEADER or DISPATCH_TOKEN(_FILE)"
+  [[ "$token" != '!'* ]] ||
+    fail "${envoy_config}'s dispatch.token is a command, which only a session runs; set DISPATCH_TOKEN to the bearer it prints"
+  server="$(jq -r '.dispatch.serverUrl // "http://localhost:8766"' "$envoy_config")"
+  [[ "$(url_origin "$dispatch_url")" == "$(url_origin "$server")" ]] ||
+    fail "${envoy_config}'s dispatch.token is for $(url_origin "$server"), not $(url_origin "$dispatch_url") (DISPATCH_URL); set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it"
+  printf '%s' "$token"
 }
 
 write_dispatch_header_file() {
@@ -178,8 +196,9 @@ printf 'starting isolated OMP session %s in %s; watch it with: tmux -S %s attach
 # The target must answer on the same Dispatch this script asks. The new tmux server takes this
 # shell's exported environment, which does not hold these coordinates, so they go in with -e: the
 # URL as is, the bearer through a 0600 file (never as argv, which /proc exposes). Human-header
-# mode has no bearer to forward; the spawned session then relies on its own configured
-# dispatch.token.
+# mode has no bearer to forward; the spawned session then uses the dispatch.token of the envoy.json
+# its plugin reads, which goes with DISPATCH_URL only when that file's dispatch.serverUrl names the
+# same server.
 launch_env=(-e "DISPATCH_URL=${dispatch_url}")
 if [[ -n "$bearer" ]]; then
   token_file="${workdir}/dispatch-token"

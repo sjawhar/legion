@@ -292,7 +292,13 @@ the end, a read-only audit replays production Dispatch events from a baseline re
 baseline event is the replay's positive control) and fails on any event a rig session authored or
 that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`,
 `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. The
-audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and writes nothing.
+audit writes nothing. It reads the operator's Dispatch from the envoy.json the operator's shell
+reads (`ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`): its
+`dispatch.serverUrl`, and its `dispatch.token` or, when it is set, `DISPATCH_TOKEN`, which the
+script takes out of its environment at start so nothing the run starts inherits it. A
+`dispatch.token` that starts with `!` is a command, which only a session runs, so the baseline read
+refuses it and asks for `DISPATCH_TOKEN`. The scratch Dispatch runs with `HOME` and
+`XDG_CONFIG_HOME` in the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
@@ -723,7 +729,7 @@ ServiceAccount token. The run puts it in place of the placeholder in its copy of
 `LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (no group or other permission
 bits) holding a bearer of the Dispatch agents' client: the one an agent session's own Dispatch
 configuration resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
-`~/.config/opencode/envoy.json` (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
+the envoy.json the session reads (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
 that bearer as an agent session, the actor its HTTP routes and its document websocket require.
 `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` is the Secrets Manager id of the production Envoy listener's API
 token, which `prerequisites` reads with the devbox admin role. Both bearers land in 0600 files under

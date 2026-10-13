@@ -75,6 +75,10 @@ gate_artifact=
 gate_version=
 prod_baseline=
 prod_dispatch_url=
+# The audit's bearer for the operator's Dispatch when DISPATCH_TOKEN gives it, taken out of the
+# environment here, so nothing the run starts inherits it (production_baseline).
+prod_token=${DISPATCH_TOKEN:-}
+unset DISPATCH_TOKEN
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 
@@ -182,8 +186,11 @@ start_dispatch() {
   for attempt in 1 2 3 4 5; do
     [ -n "$keep" ] || pick_port port_dispatch
     offset=$(log_size dispatch)
+    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+    # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME.
     DATABASE_URL="postgres://legion:$pg_password@127.0.0.1:$port_pg/dispatch?sslmode=disable" \
       DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
+      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
       DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
@@ -403,17 +410,28 @@ every_launch_checked() {
 no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
 report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
 
+# The operator's Dispatch is the one in the envoy.json this shell's commands read: ENVOY_CONFIG_FILE,
+# which the operator's own session sets, else ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json.
+operator_envoy_config=${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json}
 prod_header_file() {
   local header=$work/production-dispatch-auth
-  (umask 077 && jq -r '"Authorization: Bearer " + .dispatch.token' "$HOME/.config/opencode/envoy.json" >"$header")
+  (umask 077 && printf 'Authorization: Bearer %s\n' "$prod_token" >"$header")
   printf '%s\n' "$header"
 }
 # production_baseline reads a recent production Dispatch event id so the post-run audit replays
-# only this run's window. It is a read-only query with the operator's existing Dispatch token.
+# only this run's window. It is a read-only query with the operator's existing Dispatch token: the
+# file's dispatch.token, or DISPATCH_TOKEN when it is set. A dispatch.token starting with `!` is a
+# command, which only a session runs (packages/envoy-client/src/envoy-config.ts), so it is refused
+# here and DISPATCH_TOKEN asked for.
 production_baseline() {
   local header since keys key id max=0
-  prod_dispatch_url=$(jq -r '.dispatch.serverUrl // empty' "$HOME/.config/opencode/envoy.json" 2>/dev/null || true)
+  prod_dispatch_url=$(jq -r '.dispatch.serverUrl // empty' "$operator_envoy_config" 2>/dev/null || true)
   [ -n "$prod_dispatch_url" ] || { prod_baseline=none; return 0; }
+  [ -n "$prod_token" ] || prod_token=$(jq -r '.dispatch.token // empty' "$operator_envoy_config")
+  case $prod_token in
+    '') fail "$operator_envoy_config has no dispatch.token for its dispatch.serverUrl; set DISPATCH_TOKEN to that server's bearer" ;;
+    '!'*) fail "$operator_envoy_config's dispatch.token is a command, which only a session runs; set DISPATCH_TOKEN to the bearer it prints" ;;
+  esac
   header=$(prod_header_file)
   since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
   keys=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues?updated_since=$since" | jq -r '.[:50][].key')

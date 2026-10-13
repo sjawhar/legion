@@ -218,7 +218,7 @@ nats_url="nats://127.0.0.1:$(docker port "$nats_container" 4222/tcp | head -1 | 
   od -An -N24 -tx1 /dev/urandom | tr -d ' \n' >"$work/dispatch-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header")
 # Neither service inherits this shell: an operator's ENVOY_NATS_URL names production NATS, and a
-# HOME holding ~/.config/opencode/envoy.json would hand Dispatch a production configuration.
+# HOME or XDG_CONFIG_HOME holding legion/envoy.json would hand Dispatch a production configuration.
 env -i PATH="$PATH" HOME=/nonexistent ENVOY_API_TOKEN="$(cat "$work/envoy-token")" PORT="$envoy_port" \
   ENVOY_LISTEN_HOST=127.0.0.1 ENVOY_MACHINE_ID="legion-e2e-user-turns-$$" NATS_URLS="$nats_url" \
   "$work/envoy-listener" >"$evidence/logs/listener.log" 2>&1 &

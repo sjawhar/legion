@@ -69,11 +69,17 @@ issue that will receive the smoke card.
 
 Who asks: by default the script is an agent. It authenticates with the same Dispatch bearer the
 installed plugin resolves (`DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
-`~/.config/opencode/envoy.json`) and names itself in the message's `actor` as `SMOKE_ACTOR_SESSION`
-(default `smoke-btw-<hex>`; pass your own Envoy session id when you run it from a session), so the
-card on the issue is visibly agent-authored. Set `DISPATCH_AUTH_HEADER` to one human-authenticated
-HTTP header (the current Dispatch cookie or a trusted identity header) to ask as a human instead,
-exactly as the dashboard would; `actor` is then omitted.
+the envoy.json this shell's commands read: `ENVOY_CONFIG_FILE`, else
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`) and names itself in the message's `actor` as
+`SMOKE_ACTOR_SESSION` (default `smoke-btw-<hex>`; pass your own Envoy session id when you run it
+from a session), so the card on the issue is visibly agent-authored. The file's token goes only to
+the server written beside it: when `DISPATCH_URL` (or its default) has another origin than that
+file's `dispatch.serverUrl` (`http://localhost:8766` when it names none), the script refuses, naming
+both, until `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE` gives the bearer. It refuses a
+`dispatch.token` that starts with `!` too: that is a command, which only a session runs, so it asks
+for `DISPATCH_TOKEN`. Set `DISPATCH_AUTH_HEADER` to one human-authenticated HTTP header (the current
+Dispatch cookie or a trusted identity header) to ask as a human instead, exactly as the dashboard
+would; `actor` is then omitted.
 
 The script requires live Envoy, Dispatch, and model credentials; it is never a fake-listener test or
 a CI step. A 404 from the targeted message path prints `SKIP` and exits zero, meaning the server does
