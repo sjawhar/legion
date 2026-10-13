@@ -493,7 +493,14 @@ export interface Artifact {
 
 export type ArtifactReviewState = "approved" | "changes_requested";
 
-/** One human review of a document, pinned to the version it was given on. */
+/** One human review of a document, pinned to the version it was given on. A review is given one
+ *  of three ways: by answering an approval request (`ask_id` names the request), from the
+ *  document header (`ask_id` null unless a request was open, which the header answers), or
+ *  carried by Dispatch to the version a human's answer to a decision block writes, when that
+ *  answer is the whole change since the version he approved. A carried review is `approved` in
+ *  his name, its `reason` names the carry (`Carried forward from the approval of version <N>: the
+ *  answer to a decision block was the whole change since it.`), and its `ask_id` is null unless
+ *  a request was open at the carry, which it answers `Approve` in his name. */
 export interface ArtifactReview {
   readonly id: string;
   readonly artifact_id: string;
@@ -1545,7 +1552,11 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
  *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
  *  approval ask the review answered, null when given from the document header with no
- *  approval ask open at that version. */
+ *  approval ask open at that version. A third provenance is the carry: Dispatch records an
+ *  `artifact.approved` in a human's name at the version his answer to a decision block writes,
+ *  when that answer is the whole change since the version he approved; its `reason` names the
+ *  carry and the version it follows, and its `ask_id` is null unless a request was open at the
+ *  carry, which it answers (see `ArtifactReview`). */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;

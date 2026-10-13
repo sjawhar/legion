@@ -4,6 +4,13 @@
 
 ### Added
 
+- `ArtifactReview` and `ArtifactReviewEventPayload` document a third provenance, the carried
+  review: an `approved` review Dispatch records in a human's name at the version his answer to a
+  decision block writes, when that answer is the whole change since the version he approved, with
+  a `reason` naming the carry and the version it follows and an `ask_id` that is null unless a
+  request was open at the carry, which it answers. `AskApproval.approved_version`, `approved_at`
+  and `approved_by` name the document's newest approval when a request opens; all three are absent
+  on a first request (LEGION-573).
 - `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
   returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
   (LEGION-687).

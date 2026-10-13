@@ -4,6 +4,24 @@
 
 ### Added
 
+- A human's answer to a decision block carries his approval forward (LEGION-573). When the
+  version his answer writes differs from the version he approved only in its ask blocks, and
+  every block it holds that the approved version did not is one he answered, Dispatch records an
+  `approved` review in his name pinned to that version and appends `artifact.approved`, in the
+  transaction that writes the version (`docs.carryApproval`, from `writeVersionTx` after the open
+  request's move), rather than leaving his approval stale and asking him to approve again what he
+  just decided. The carried review's `reason` is `Carried forward from the approval of version
+  <N>: the answer to a decision block was the whole change since it.`; an approval request open
+  at the carry is answered `Approve` in his name (`ask.answered`) and the review's `ask_id` names
+  it, null otherwise. The comparison is `docs.CutDecisionBlocks`, the markdown rendered again with
+  every ask block left out wherever it stands, on both sides. An edit outside the blocks, a block
+  he did not answer (open, resolved, or answered by someone else), a block of the approved version
+  the agent removed, two people's answers in one version, an approval by someone else only, his own
+  later request for changes or anyone's newer one, and a copy's document when its source is
+  answered carry nothing, as before. An approval request on a document a human approved earlier
+  names that approval in `ask.approval` (`approved_version`, `approved_at`, `approved_by`), so the
+  human reads what he is approving since the version he approved; a first request carries none of
+  the three.
 - Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
   comment thread, an issue message thread - where someone else has written since they last read
   it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact
