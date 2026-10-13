@@ -50,6 +50,34 @@ func TestASuspensionArrivingMidTurnWaitsForTheTurnToEnd(t *testing.T) {
 	h.wantCalls("Suspend", 1)
 }
 
+// A stop the runtime refuses at the turn's end stays held and is retried at the probe interval. A
+// deadline asked for later than that retry — a carried child's new tree stopping the role at the old
+// root's linger expiry — moves the held deadline but does not push the retry back: the retry still
+// fires at the probe interval, in the next turn the claim started meanwhile.
+func TestALaterDeadlineDoesNotPushBackARefusedStopsRetry(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the tree of LEGION-208 lingers", By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
+	}
+	h.rt.FailSuspend(errBoom)
+	if err := h.handle(StreamTurnEnd{Claim: testToken}); !errors.Is(err, errBoom) {
+		t.Fatalf("turn end with a refused stop returned %v, want the runtime's error", err)
+	}
+	h.wantCalls("Suspend", 1)
+	h.rt.FailSuspend(nil)
+	h.must(StreamTurnStart{Claim: testToken})
+	h.wantState(StateWorking)
+	later := RequestSuspend{Claim: testToken, Reason: "LEGION-209 moved from tree LEGION-208 to tree LEGION-209", By: SuspendedByDaemon,
+		Deadline: h.clock.Now().Add(testProbe + 15*time.Second)}
+	if err := h.handle(later); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the suspend with a later deadline returned %v, want ErrSuspendHeld", err)
+	}
+	h.advance(testProbe)
+	h.wantCalls("Suspend", 2)
+	h.wantState(StateSuspended)
+}
+
 // An operator's suspension whose turn never ends does not hold for ever: the process is stopped
 // once the stop timeout has run from the first request, and a request repeated meanwhile does not
 // start the wait over.

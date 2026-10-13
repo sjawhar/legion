@@ -420,10 +420,13 @@ type sending struct {
 	generation uint64
 }
 
+// armed is one scheduled timer: its arming's sequence and delivery, how to cancel it, and when it
+// fires (due), so a later arming can tell whether it would fire sooner.
 type armed struct {
 	seq        uint64
 	deliveryID string
 	cancel     Cancel
+	due        time.Time
 }
 
 // NewMachine builds the machine for one claim: a new one the spawn route just stored, or one the
@@ -1082,7 +1085,7 @@ func (m *Machine) arm(kind TimerKind, after time.Duration, deliveryID string) {
 			m.log.Error("supervise: timer", "timer", string(kind), "error", err)
 		}
 	})
-	m.timers[kind] = armed{seq: m.seq, deliveryID: deliveryID, cancel: cancel}
+	m.timers[kind] = armed{seq: m.seq, deliveryID: deliveryID, cancel: cancel, due: m.deps.Clock.Now().Add(after)}
 }
 
 func (m *Machine) disarm(kind TimerKind) {

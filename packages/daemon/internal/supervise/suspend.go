@@ -82,10 +82,15 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 		m.log.Info("supervise: the operator's suspension takes the held suspension over", "reason", request.Reason, "held", m.held.Reason)
 		m.held.By, m.held.Reason = request.By, request.Reason
 	}
+	// The held deadline only moves earlier, and the timer is re-armed only when that deadline comes
+	// before the one already armed: a stop the runtime refused is retried at the probe interval
+	// (suspendHeld), and a deadline later than that retry must not push it back.
 	if !deadline.IsZero() && (m.held.Deadline.IsZero() || deadline.Before(m.held.Deadline)) {
 		m.held.Deadline = deadline
-		m.arm(TimerSuspend, max(0, deadline.Sub(m.deps.Clock.Now())), "")
-		m.log.Info("supervise: the held suspension stops the agent at its deadline if its turn has not ended", "deadline", deadline, "by", m.held.By)
+		if a, ok := m.timers[TimerSuspend]; !ok || deadline.Before(a.due) {
+			m.arm(TimerSuspend, max(0, deadline.Sub(m.deps.Clock.Now())), "")
+			m.log.Info("supervise: the held suspension stops the agent at its deadline if its turn has not ended", "deadline", deadline, "by", m.held.By)
+		}
 	}
 	return ErrSuspendHeld
 }
