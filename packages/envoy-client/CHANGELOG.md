@@ -86,13 +86,19 @@
   once per process with its value or failure kept, never from a checkout's file, a value with
   whitespace inside refused, its output never in an error) when that section's resolver uses it.
 - `envoySettings(env, config, { nats })`: the Envoy a session uses, `{ enabled: true, url,
-  natsUrls, token, natsSeed, heartbeatMs }` or a `SectionOff`, `{ enabled: false, notice, error }`
-  with exactly one of the two set, each variable overriding its own field of the chosen file's
-  section; `ENVOY_URL` with the file's token at another origin than the file's listener is refused,
-  as is an empty `envoy.token`, with the same messages as `dispatch.token`'s, and the file's
-  `natsSeed` goes only with the file's `natsUrls` (`ENVOY_NATS_URL` naming other servers needs
-  `NATS_NKEY_SEED_FILE`). `nats: false`, for a caller that opens no NATS connection, resolves no
-  NATS servers and no seed.
+  natsUrls, token, natsSeed, inboundError, heartbeatMs }` or a `SectionOff`, `{ enabled: false,
+  notice, error }` with exactly one of the two set, each variable overriding its own field of the
+  chosen file's section; `ENVOY_URL` with the file's token at another origin than the file's
+  listener is refused, as is an empty `envoy.token`, with the same messages as `dispatch.token`'s,
+  and the file's `natsSeed` goes only with the file's `natsUrls`, compared as normalised URLs
+  (scheme and host lower-cased, a trailing `/` dropped, the default port 4222 written), so
+  `ENVOY_NATS_URL` naming other servers needs `NATS_NKEY_SEED_FILE`. A refused seed (that pairing, a
+  failing `natsSeed` command, or a seed variable that cannot be read) turns off inbound messages
+  alone: Envoy stays on with its listener and bearer, `natsUrls` is empty, and `inboundError` names
+  the refusal, which `sessionSettings`'s start notice says (`Envoy's inbound messages are off:
+  <refusal>; the Envoy tools still work`), as it says an Envoy with no NATS server takes no inbound
+  messages. `nats: false`, for a caller that opens no NATS connection, resolves no NATS servers and
+  no seed, and its start notice says nothing of inbound messages.
 - `dispatchSettings(env, config)`, Dispatch from an envoy.json already read, and
   `activeDispatchSettings(resolution)`, the one adapter that turns a resolution into the
   configuration a caller uses, null when nothing configures Dispatch, or a `dispatch config:

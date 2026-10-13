@@ -787,7 +787,8 @@ describe("a ! command in envoy.json", () => {
     expect(readFileSync(failures, "utf-8")).toBe("run\n");
   });
 
-  test("that fails or prints nothing turns off only its own section, naming the field and the file, never its output", () => {
+  // A failing natsSeed command turns off only inbound messages: the seed is for NATS alone.
+  test("that fails or prints nothing turns off only what it is for, naming the field and the file, never its output", () => {
     const home = tempDir();
     const env = commandEnvironment(home);
     const canary = `canary-${path.basename(home)}`;
@@ -803,25 +804,36 @@ describe("a ! command in envoy.json", () => {
     expect(dispatch.error).not.toContain("canary");
     expect(envoySettings(env, brokenDispatch)).toMatchObject({ enabled: true });
 
-    for (const [field, value] of [
-      ["natsSeed", `!echo ${canary} >&2; echo ${canary}; false`],
-      ["token", `!printf '  \\n' # ${home}`],
-    ] as const) {
-      const envoyFails = writeFile(path.join(tempDir(), "envoy.json"), {
-        dispatch: dispatchOn,
-        envoy: { ...envoyOn, [field]: value },
-      });
-      const brokenEnvoy = readEnvoyConfig(envoyFails, env, { cwd: tempDir() });
-      const envoy = envoySettings(env, brokenEnvoy);
-      if (envoy.enabled) throw new Error(`envoy.${field}'s failing command was accepted`);
-      expect(envoy.error).toContain(`${envoyFails}: envoy.${field}'s command`);
-      expect(envoy.error).not.toContain("canary");
-      expect(dispatchSettings(env, brokenEnvoy)).toEqual({
-        enabled: true,
-        url: "https://dispatch.example",
-        token: "user-token",
-      });
-    }
+    const tokenFails = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: { ...envoyOn, token: `!printf '  \\n' # ${home}` },
+    });
+    const brokenToken = readEnvoyConfig(tokenFails, env, { cwd: tempDir() });
+    const envoy = envoySettings(env, brokenToken);
+    if (envoy.enabled) throw new Error("envoy.token's failing command was accepted");
+    expect(envoy.error).toContain(`${tokenFails}: envoy.token's command`);
+    expect(dispatchSettings(env, brokenToken)).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "user-token",
+    });
+
+    const seedFails = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: { ...envoyOn, natsSeed: `!echo ${canary} >&2; echo ${canary}; false` },
+    });
+    const brokenSeed = readEnvoyConfig(seedFails, env, { cwd: tempDir() });
+    const inboundOff = envoySettings(env, brokenSeed);
+    if (!inboundOff.enabled) throw new Error(`a failing natsSeed turned Envoy off`);
+    expect(inboundOff).toMatchObject({
+      url: "http://listener.internal.example:9020",
+      token: "listener-token",
+      natsUrls: [],
+      natsSeed: undefined,
+    });
+    expect(inboundOff.inboundError).toContain(`${seedFails}: envoy.natsSeed's command exited with`);
+    expect(inboundOff.inboundError).not.toContain("canary");
+    expect(dispatchSettings(env, brokenSeed)).toMatchObject({ enabled: true });
   });
 
   // A multi-line bearer reaches fetch, whose refusal of the header quotes it whole.

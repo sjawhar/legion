@@ -434,19 +434,11 @@ export default function envoyExtension(pi: PiApi): void {
     }
     return config;
   };
-  // Inbound messages arrive over NATS: an Envoy with no NATS server takes none, and its tools,
-  // which call the listener, still work.
+  // Inbound messages arrive over NATS: an Envoy with no NATS server, or whose seed was refused,
+  // takes none, and its tools, which call the listener, still work. The start notice says so
+  // (`sessionSettings`), with why a section is off, once.
   const inbound = envoy.enabled && envoy.natsUrls.length > 0;
-  // What a top-level session start says, once: why a section is off (`sessionSettings`), and that
-  // inbound messages are off for an Envoy with no NATS server.
-  const startNotice = [
-    atStart.notice,
-    envoy.enabled && envoy.natsUrls.length === 0
-      ? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work"
-      : null,
-  ]
-    .filter((part) => part !== null)
-    .join("; ");
+  const startNotice = atStart.notice ?? "";
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
   // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,

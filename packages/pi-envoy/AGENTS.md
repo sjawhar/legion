@@ -199,7 +199,8 @@ otherwise the section is off with an error naming the variable to set.
 With Envoy off the extension builds no listener client, registers no Envoy tool and no `/whoami`,
 and opens no NATS connection; the Legion claim bridge and every other listener call go through one
 accessor (`requireEnvoy`) that throws `Envoy is off for this session: <why>`, the section's notice
-or error. With Envoy on and no NATS server, inbound messages are off and the tools still work.
+or error. With Envoy on and no NATS server, or with its NATS seed refused (`inboundError`), inbound
+messages are off and the tools, `/whoami` and the Legion claim still work.
 Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the file stopped
 configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
 throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is

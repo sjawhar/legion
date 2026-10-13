@@ -21,6 +21,7 @@
   `dispatch.token` needs its own `dispatch.serverUrl` beside it.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server; another server needs its own token or seed variable.
 - One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- A refused NATS seed (one that pairs with other servers than the file's, compared as normalised URLs, a failing `natsSeed` command, or a seed variable that cannot be read) turns off inbound messages alone: the tools, `/whoami` and the Legion role claim stay, and the start notice says `Envoy's inbound messages are off: <refusal>; the Envoy tools still work`. It turned all of Envoy off.
 - One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, what a checkout's files hold that is not read, or that inbound messages are off.
 - A relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR` no longer stops the extension loading: both sections are off and the notice says why.
 

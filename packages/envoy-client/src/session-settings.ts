@@ -60,12 +60,15 @@ export interface SessionSettings {
  * does not resolve, a command that failed) is said for that section. A file that turns a section
  * off, or holds no section for it, says nothing. What a checkout's files hold that the session does
  * not read is said too: an `envoy` section, a file that cannot be used while `DISPATCH_URL`
- * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`).
+ * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a session that
+ * opens a NATS connection (`nats` not false), an Envoy that is on with no NATS server is said to
+ * take no inbound messages, naming why when its seed was refused (`inboundError`).
  */
 function startNotice(
   config: EnvoyConfig,
   dispatch: DispatchConfigResolution,
-  envoy: EnvoySettings
+  envoy: EnvoySettings,
+  nats: boolean
 ): string | null {
   if (config.kind === "failed") return `${config.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config;
@@ -90,12 +93,22 @@ function startNotice(
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
   parts.push(...config.warnings);
+  if (envoy.enabled && nats && envoy.inboundError !== null) {
+    parts.push(
+      `Envoy's inbound messages are off: ${envoy.inboundError}; the Envoy tools still work`
+    );
+  } else if (envoy.enabled && nats && envoy.natsUrls.length === 0) {
+    parts.push(
+      "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work"
+    );
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 
 /** Both sections from `file` (`dispatchSettings`, `envoySettings`), each resolved on its own, and
  * the session's start notice. A file whose location could not be worked out turns both off with
- * that error. `nats: false` is for a session that opens no NATS connection (`envoySettings`). */
+ * that error. `nats: false` is for a session that opens no NATS connection (`envoySettings`), whose
+ * notice says nothing of inbound messages. */
 export function sessionSettings(
   file: SessionConfigFile,
   env: EnvoyEnvironment,
@@ -108,7 +121,7 @@ export function sessionSettings(
   const config = readEnvoyConfig(file.path, env, options);
   const dispatch = dispatchSettings(env, config);
   const envoy = envoySettings(env, config, { nats: options.nats });
-  return { dispatch, envoy, notice: startNotice(config, dispatch, envoy) };
+  return { dispatch, envoy, notice: startNotice(config, dispatch, envoy, options.nats !== false) };
 }
 
 /** Dispatch from a session's envoy.json as it reads now, and what the read says beside it. */

@@ -46,6 +46,7 @@ describe("envoySettings", () => {
       natsUrls: ["nats://nats.internal.example:4222"],
       token: "file-token",
       natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
+      inboundError: null,
       heartbeatMs: 120_000,
     });
   });
@@ -69,6 +70,7 @@ describe("envoySettings", () => {
       natsUrls: ["nats://one.internal.example:4222", "nats://two.internal.example:4222"],
       token: "environment-token",
       natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
+      inboundError: null,
       heartbeatMs: 25,
     });
 
@@ -121,6 +123,7 @@ describe("envoySettings", () => {
       natsUrls: ["nats://nats.internal.example:4222"],
       token: undefined,
       natsSeed: undefined,
+      inboundError: null,
       heartbeatMs: 120_000,
     });
   });
@@ -147,10 +150,12 @@ describe("envoySettings", () => {
   });
 
   // An empty variable reads as unset everywhere, as a launcher that writes `X=` means; the two
-  // seed variables alone refuse it, since a set seed is authoritative.
-  test("an empty ENVOY_* variable reads as unset; an empty seed variable is refused", () => {
+  // seed variables alone refuse it, since a set seed is authoritative. A seed is for NATS alone, so
+  // its refusal turns off inbound messages and leaves the listener on.
+  test("an empty ENVOY_* variable reads as unset; an empty seed variable is refused, inbound alone", () => {
     const config = configFrom({ envoy: listener });
     const fromFile = envoySettings({}, config);
+    if (!fromFile.enabled) throw new Error(`the file's Envoy is off: ${fromFile.error}`);
     expect(
       envoySettings(
         { ENVOY_URL: "", ENVOY_NATS_URL: "", ENVOY_TOKEN: "", ENVOY_TOKEN_FILE: "" },
@@ -161,7 +166,12 @@ describe("envoySettings", () => {
       [{ NATS_NKEY_SEED_FILE: "" }, "NATS_NKEY_SEED_FILE is set but empty"],
       [{ NATS_NKEY_SEED: "" }, "NATS_NKEY_SEED is set but empty"],
     ] as const) {
-      expect(envoySettings(env, config)).toEqual({ enabled: false, notice: null, error: refusal });
+      expect(envoySettings(env, config)).toEqual({
+        ...fromFile,
+        natsUrls: [],
+        natsSeed: undefined,
+        inboundError: refusal,
+      });
     }
   });
 
@@ -235,13 +245,14 @@ describe("envoySettings", () => {
         natsUrls: [],
         token: "file-token",
         natsSeed: undefined,
+        inboundError: null,
         heartbeatMs: 120_000,
       });
     }
     expect(existsSync(ran)).toBe(false);
   });
 
-  test("an unusable ENVOY_TOKEN_FILE or seed pointer is an error naming it, never a fallback", () => {
+  test("an unusable ENVOY_TOKEN_FILE is an error naming it, never a fallback", () => {
     const config = configFrom({ envoy: listener });
     const dir = tempDir();
     const missing = path.join(dir, "missing");
@@ -252,11 +263,6 @@ describe("envoySettings", () => {
         `ENVOY_TOKEN_FILE names ${missing}, which could not be read: ENOENT`,
       ],
       [{ ENVOY_TOKEN_FILE: blank }, `ENVOY_TOKEN_FILE names ${blank}, which is empty`],
-      [
-        { NATS_NKEY_SEED_FILE: missing, NATS_NKEY_SEED: "SUENVSEED" },
-        `NATS_NKEY_SEED_FILE names ${missing}, which could not be read`,
-      ],
-      [{ NATS_NKEY_SEED: "  " }, "NATS_NKEY_SEED is set but empty"],
     ];
     for (const [env, message] of cases) {
       const settings = envoySettings(env, config);
@@ -264,6 +270,30 @@ describe("envoySettings", () => {
       if (settings.enabled) throw new Error(`accepted ${JSON.stringify(env)}`);
       expect(settings.error).toContain(message);
       expect(settings.error).not.toContain("plain-token");
+    }
+  });
+
+  test("an unusable seed pointer turns off inbound messages alone, naming it, never a fallback", () => {
+    const config = configFrom({ envoy: listener });
+    const missing = path.join(tempDir(), "missing");
+    for (const [env, message] of [
+      [
+        { NATS_NKEY_SEED_FILE: missing, NATS_NKEY_SEED: "SUENVSEED" },
+        `NATS_NKEY_SEED_FILE names ${missing}, which could not be read`,
+      ],
+      [{ NATS_NKEY_SEED: "  " }, "NATS_NKEY_SEED is set but empty"],
+    ] as const) {
+      const settings = envoySettings(env, config);
+      expect(settings).toMatchObject({
+        enabled: true,
+        url: "http://listener.internal.example:9020",
+        token: "file-token",
+        natsUrls: [],
+        natsSeed: undefined,
+      });
+      if (!settings.enabled) throw new Error(`refused ${JSON.stringify(env)}`);
+      expect(settings.inboundError).toContain(message);
+      expect(settings.inboundError).not.toContain("SUENVSEED");
     }
   });
 
@@ -326,12 +356,15 @@ describe("the NATS seed in envoy.json", () => {
     });
   });
 
+  // A refused seed turns off inbound messages alone: the listener, its bearer and its tools stay.
   test("goes with ENVOY_NATS_URL only when it names the file's servers, and its command does not run otherwise", () => {
     const home = tempDir();
     const runs = path.join(home, "runs");
     const config = configFrom({
       envoy: {
         enabled: true,
+        url: "http://listener.internal.example:9020",
+        token: "file-token",
         natsUrls: fileServers,
         natsSeed: `!echo run >> ${runs}; echo SUSEED`,
       },
@@ -341,9 +374,13 @@ describe("the NATS seed in envoy.json", () => {
       ENVOY_NATS_URL: "nats://elsewhere.internal.example:4222",
     };
     expect(envoySettings(other, config)).toEqual({
-      enabled: false,
-      notice: null,
-      error: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+      enabled: true,
+      url: "http://listener.internal.example:9020",
+      natsUrls: [],
+      token: "file-token",
+      natsSeed: undefined,
+      inboundError: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+      heartbeatMs: 120_000,
     });
     expect(existsSync(runs)).toBe(false);
     // A set holding one other server is other servers too, whether it replaces one of the file's
@@ -354,7 +391,7 @@ describe("the NATS seed in envoy.json", () => {
     ]) {
       expect(
         envoySettings({ PATH: process.env.PATH, ENVOY_NATS_URL: mixed }, config)
-      ).toMatchObject({ enabled: false });
+      ).toMatchObject({ enabled: true, natsUrls: [], inboundError: expect.any(String) });
     }
     expect(existsSync(runs)).toBe(false);
 
@@ -366,7 +403,35 @@ describe("the NATS seed in envoy.json", () => {
     expect(envoySettings(same, config)).toMatchObject({
       enabled: true,
       natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${config.path}` },
+      inboundError: null,
     });
+  });
+
+  // Two spellings of one server pair: scheme and host lower-cased, a trailing `/` dropped, and the
+  // default port 4222 written when none is.
+  test("compares ENVOY_NATS_URL with the file's servers normalised", () => {
+    const config = configFrom({
+      envoy: { natsUrls: ["nats://one.internal.example:4222"], natsSeed: "SUFILESEED" },
+    });
+    for (const named of [
+      "nats://one.internal.example:4222/",
+      "NATS://One.Internal.Example:4222",
+      "nats://one.internal.example",
+    ]) {
+      expect(envoySettings({ ENVOY_NATS_URL: named }, config)).toMatchObject({
+        enabled: true,
+        natsUrls: [named],
+        natsSeed: { value: "SUFILESEED" },
+        inboundError: null,
+      });
+    }
+    for (const other of ["nats://one.internal.example:4223", "tls://one.internal.example:4222"]) {
+      expect(envoySettings({ ENVOY_NATS_URL: other }, config)).toMatchObject({
+        enabled: true,
+        natsUrls: [],
+        inboundError: expect.stringContaining("ENVOY_NATS_URL names other servers"),
+      });
+    }
   });
 
   test("a seed from the variables goes with whatever servers ENVOY_NATS_URL names", () => {

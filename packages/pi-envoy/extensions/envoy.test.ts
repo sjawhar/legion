@@ -7975,6 +7975,33 @@ describe("envoy OMP extension", () => {
     expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
   });
 
+  // A seed is for NATS alone: its refusal leaves the listener, its tools and /whoami.
+  test("a refused NATS seed turns off inbound messages alone, saying why once, and keeps the tools and /whoami", async () => {
+    const missing = join(configDirectory, "missing-seed");
+    process.env.NATS_NKEY_SEED_FILE = missing;
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_seed_refused" },
+      setInterval: (callback) => intervals.push(callback),
+      ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?seed-refused");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    expect(notifications).toEqual([
+      `envoy: Envoy's inbound messages are off: NATS_NKEY_SEED_FILE names ${missing}, which could not be read: ENOENT: no such file or directory, open '${missing}'; the Envoy tools still work`,
+    ]);
+    expect(natsState.connectedNames.length).toBe(0);
+    expect(intervals.length).toBe(0);
+    expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
+    expect(fixture.commands.map((command) => command.name)).toContain("whoami");
+  });
+
   test("retries NATS in the background when the initial connection fails", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     natsState.failConnects = 1;

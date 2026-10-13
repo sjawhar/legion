@@ -188,6 +188,46 @@ describe("sessionSettings", () => {
     });
   });
 
+  test("an Envoy with no NATS server says inbound messages are off, unless the caller opens no NATS connection", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: { url: envoyOn.url },
+    });
+    const settings = sessionSettings({ path: file, error: null }, {}, { cwd: tempDir() });
+    expect(settings.envoy).toMatchObject({ enabled: true, natsUrls: [] });
+    expect(settings.notice).toBe(
+      "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work"
+    );
+    const noNats = sessionSettings(
+      { path: file, error: null },
+      {},
+      { cwd: tempDir(), nats: false }
+    );
+    expect(noNats.notice).toBeNull();
+  });
+
+  // A seed is for NATS alone: its refusal leaves the listener on and turns off inbound messages.
+  test("a refused NATS seed turns off inbound messages alone, and the notice says why", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: { ...envoyOn, token: "listener-token", natsSeed: "SUFILESEED" },
+    });
+    const settings = sessionSettings(
+      { path: file, error: null },
+      { ENVOY_NATS_URL: "nats://elsewhere.internal.example:4222" },
+      { cwd: tempDir() }
+    );
+    expect(settings.envoy).toMatchObject({
+      enabled: true,
+      url: envoyOn.url,
+      token: "listener-token",
+      natsUrls: [],
+    });
+    expect(settings.notice).toBe(
+      `Envoy's inbound messages are off: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them; the Envoy tools still work`
+    );
+  });
+
   test("a location that cannot be worked out turns both off with that error", () => {
     const error = "XDG_CONFIG_HOME is rel, which is not an absolute path";
     expect(sessionSettings({ path: null, error }, {}, { cwd: tempDir() })).toEqual({

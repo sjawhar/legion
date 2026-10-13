@@ -65,11 +65,16 @@ export function natsSeedFromEnvironment(env: EnvoyEnvironment): NatsSeed | undef
 export interface EnabledEnvoySettings {
   readonly enabled: true;
   readonly url: string;
+  /** The NATS servers inbound messages arrive over: none when nothing names one, or when
+   * `inboundError` refused the seed for them. */
   readonly natsUrls: readonly string[];
   /** The listener's bearer; none for a loopback listener that asks for none. */
   readonly token: string | undefined;
   /** The NATS user's nkey seed; none for a server that asks for no credential. */
   readonly natsSeed: NatsSeed | undefined;
+  /** Why inbound messages are off though NATS servers are named: their seed could not be read or
+   * used. The listener and its bearer stand. Null otherwise. */
+  readonly inboundError: string | null;
   readonly heartbeatMs: number;
 }
 
@@ -78,9 +83,22 @@ export type DisabledEnvoySettings = SectionOff;
 
 export type EnvoySettings = EnabledEnvoySettings | DisabledEnvoySettings;
 
+/** A NATS server URL as two spellings of one server compare: scheme and host lower-cased, the
+ * default port 4222 written when none is, a trailing `/` dropped. Anything that is not a
+ * `scheme://host` URL compares as written. */
+function natsServerKey(url: string): string {
+  const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(
+    url
+  );
+  if (match === null) return url;
+  const [, scheme = "", userinfo = "", host = "", port = "4222", rest = ""] = match;
+  return `${scheme.toLowerCase()}://${userinfo}${host.toLowerCase()}:${port}${rest.replace(/\/+$/, "")}`;
+}
+
 /** The NATS user's seed: `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the section's
  * `natsSeed`, which goes only with the section's own servers: `ENVOY_NATS_URL`, the only way to
- * name others, must name exactly them (as a set). Throws naming what could not be read or used. */
+ * name others, must name exactly them (as a set, each compared by `natsServerKey`). Throws naming
+ * what could not be read or used. */
 function natsCredential(
   env: EnvoyEnvironment,
   section: EnvoyFileSettings,
@@ -90,8 +108,8 @@ function natsCredential(
   const fromEnvironment = natsSeedFromEnvironment(env);
   if (fromEnvironment !== undefined || section.natsSeed === undefined) return fromEnvironment;
   if (namedNatsUrls.length > 0) {
-    const servers = new Set(section.natsUrls ?? []);
-    const named = new Set(namedNatsUrls);
+    const servers = new Set((section.natsUrls ?? []).map(natsServerKey));
+    const named = new Set(namedNatsUrls.map(natsServerKey));
     if (named.size !== servers.size || ![...named].every((server) => servers.has(server))) {
       throw new Error(
         `ENVOY_NATS_URL names other servers than ${filePath}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
@@ -119,16 +137,19 @@ function natsCredential(
  * `ENVOY_TOKEN` the listener's bearer (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED`
  * the NATS user's seed (`natsSeed`, resolved only when there are NATS servers to use it on). An
  * empty `ENVOY_*` variable counts as unset; an empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is
- * refused, naming it (`natsSeedFromEnvironment`). A set pointer that cannot be read is an `error`,
- * never a fallback.
+ * refused, naming it (`natsSeedFromEnvironment`). A set pointer that cannot be read is refused,
+ * never a fallback: `ENVOY_TOKEN_FILE`'s turns Envoy off with that `error`, and a seed's turns off
+ * inbound messages alone (`inboundError`, no NATS servers), since the seed is for NATS only.
  *
  * Same server only: the file's token goes with `ENVOY_URL` only when it names the origin of the
  * listener written in the file (or the default listener when it names none); any other listener
  * needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. The file's seed goes only with the servers written in
  * the file: nkey sign-in sends no seed, but a server that is not the real one can relay the real
  * server's nonce and replay the signature. So `ENVOY_NATS_URL` gets the file's seed only when it
- * names the file's servers (as a set); a seed from the variables goes with whatever servers
- * resolve. The file's `!` token and seed run here, only when Envoy uses them.
+ * names the file's servers (as a set, compared normalised: `natsServerKey`), and is otherwise
+ * refused, turning off inbound messages alone; a seed from the variables goes with whatever servers
+ * resolve. The file's `!` token and seed run here, only when Envoy uses them, and a seed's failing
+ * command, too, turns off inbound messages alone.
  *
  * A caller that opens no NATS connection (`nats: false`, OpenCode's plugin) gets no NATS servers
  * and resolves no seed, so a seed it would never send can neither run a command nor turn it off.
@@ -164,14 +185,9 @@ export function envoySettings(
   if (namedUrl !== undefined && httpUrl(namedUrl) === undefined) {
     return offWithError("ENVOY_URL must be an http or https URL");
   }
-  const natsUrls =
-    options.nats === false
-      ? []
-      : namedNatsUrls.length > 0
-        ? namedNatsUrls
-        : (section.natsUrls ?? []);
   const listener = section.url ?? DEFAULT_ENVOY_URL;
   const url = namedUrl ?? listener;
+  let token: string | undefined;
   try {
     const source = bearerSource(env, "ENVOY", () =>
       section.token === undefined
@@ -184,29 +200,44 @@ export function envoySettings(
             checkout: false,
           }
     );
-    const token =
+    token =
       source.kind === "none"
         ? undefined
         : source.kind === "variable"
           ? source.token
           : fileBearer(source, url, "ENVOY", env);
-    const natsSeed =
-      natsUrls.length > 0 ? natsCredential(env, section, namedNatsUrls, config.path) : undefined;
-    const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
-    return {
-      enabled: true,
-      url: normalizeEnvoyUrl(url),
-      natsUrls,
-      token,
-      natsSeed,
-      heartbeatMs:
-        Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
-          ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
-          : DEFAULT_HEARTBEAT_MS,
-    };
   } catch (error) {
     return offWithError(messageFor(error));
   }
+  let natsUrls =
+    options.nats === false
+      ? []
+      : namedNatsUrls.length > 0
+        ? namedNatsUrls
+        : (section.natsUrls ?? []);
+  let natsSeed: NatsSeed | undefined;
+  let inboundError: string | null = null;
+  if (natsUrls.length > 0) {
+    try {
+      natsSeed = natsCredential(env, section, namedNatsUrls, config.path);
+    } catch (error) {
+      natsUrls = [];
+      inboundError = messageFor(error);
+    }
+  }
+  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  return {
+    enabled: true,
+    url: normalizeEnvoyUrl(url),
+    natsUrls,
+    token,
+    natsSeed,
+    inboundError,
+    heartbeatMs:
+      Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
+        ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
+        : DEFAULT_HEARTBEAT_MS,
+  };
 }
 
 export function normalizeEnvoyUrl(value: string): string {
