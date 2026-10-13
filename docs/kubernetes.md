@@ -738,19 +738,22 @@ and the orphan sweep keeps a Sandbox while its home is the tree it is labelled w
 ends when its issue can no longer be admitted into that tree. For a tree admission has not opened,
 a child set to `backlog`, `icebox` or `done` leaves the waiting line and lingers like any root, so
 its Sandbox stays until its linger expires; one whose label is taken off leaves the line with no
-linger, so its Sandbox goes at the next sweep. Either way, once the child is `todo` with the label
-again it is admitted, and its run continues on a new volume, from the issue's branch: under
-`session_store: postgres` its roles' sessions continue from the table, and under `pvc` they went
-with the volume and start fresh ([Volume retention](#volume-retention)). A hand-over fence counts
-only while the child's record still names the tree the fence was written for, and a hand-over
-Dispatch refuses permanently drops its fence with its row (`finishRefused`,
+linger, so its Sandbox goes at the next sweep. Taken out by its label, once it is `todo` with the
+label again it waits in the line and is admitted into the phase it stood in, continuing its run on a
+new volume from the issue's branch if the sweep has taken the old one: under `session_store:
+postgres` its roles' sessions continue from the table, and under `pvc` they went with the volume and
+start fresh ([Volume retention](#volume-retention)). Taken out by a status, it comes back as any
+root does after its linger: a new generation at `admitted`, its design gate, handoffs and pending
+READY cleared (`ClearTreeGeneration`), its architect starting over from the issue's branch. A
+hand-over fence counts only while the child's record still names the tree the fence was written
+for, and a hand-over Dispatch refuses permanently drops its fence with its row (`finishRefused`,
 `internal/daemon/outbox.go`). Past that the Sandbox is an orphan, which the sweep deletes with its
-volume, fenced and logged. Only a child
-re-admitted after its old tree's cleanup, one that had left the workflow before the close (a parked
-child the close does not hand over), finds its Sandbox and volume gone; its re-pointed claim still
-names its session (`Retree`, `internal/supervise/lifecycle.go`, keeps it: the supervisor knows
-nothing of Sandboxes, and a check there would race the cleanup). The launch then expects the volume
-to hold the clone (`LEGION_EXPECT_ISSUE_VOLUME`), `workspace-init` exits 3 on the fresh volume, the
+volume, fenced and logged. Only a child re-admitted after its old tree's cleanup, one that had left
+the workflow before the close (a parked child the close does not hand over), finds its Sandbox and
+volume gone; its re-pointed claim still names its session (`Retree`,
+`internal/supervise/lifecycle.go`, keeps it: the supervisor knows nothing of Sandboxes, and a check
+there would race the cleanup). The launch then expects the volume to hold the clone
+(`LEGION_EXPECT_ISSUE_VOLUME`), `workspace-init` exits 3 on the fresh volume, the
 daemon logs `the issue's volume was lost` once and relaunches the role as a fresh session on the new
 volume ([Volume retention](#volume-retention)): the re-admission runs, from the issue's branch, with
 the old sessions gone — the same path a root re-admitted after its own tree's close takes.
