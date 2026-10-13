@@ -50,9 +50,14 @@ func newClockedHubRig(t *testing.T, clock *fakeHubClock) *hubRig {
 
 // fakeHubClock is the real clock moved forward by Advance: Now is the wall clock plus every
 // advance so far, and a timer fires once the wall clock plus the advance reaches its moment, so a
-// test moves the hub past a threshold or a midnight without waiting for it.
+// test moves the hub past a threshold or a midnight without waiting for it. A clock from
+// newStillHubClock stands still between advances instead: Now is its start plus the advances. Its
+// timers still fire on the wall clock as well, but the hub's one timer only wakes its worker, which
+// compares each view's due moment with Now (deliveryHub.work, runDue), so how long the test's own
+// writes take decides nothing.
 type fakeHubClock struct {
 	mu     sync.Mutex
+	still  time.Time
 	offset time.Duration
 	timers []*fakeHubTimer
 }
@@ -65,16 +70,26 @@ type fakeHubTimer struct {
 	done  atomic.Bool
 }
 
+// newStillHubClock is a fakeHubClock standing still at the present until Advance moves it.
+func newStillHubClock() *fakeHubClock { return &fakeHubClock{still: time.Now().UTC()} }
+
+func (c *fakeHubClock) nowLocked() time.Time {
+	if c.still.IsZero() {
+		return time.Now().UTC().Add(c.offset)
+	}
+	return c.still.Add(c.offset)
+}
+
 func (c *fakeHubClock) Now() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return time.Now().UTC().Add(c.offset)
+	return c.nowLocked()
 }
 
 func (c *fakeHubClock) AfterFunc(d time.Duration, f func()) hubTimer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	timer := &fakeHubTimer{clock: c, at: time.Now().UTC().Add(c.offset).Add(d), f: f}
+	timer := &fakeHubTimer{clock: c, at: c.nowLocked().Add(d), f: f}
 	timer.real = time.AfterFunc(d, timer.fire)
 	c.timers = append(c.timers, timer)
 	return timer
@@ -95,7 +110,7 @@ func (t *fakeHubTimer) Stop() bool {
 func (c *fakeHubClock) Advance(d time.Duration) {
 	c.mu.Lock()
 	c.offset += d
-	now := time.Now().UTC().Add(c.offset)
+	now := c.nowLocked()
 	var due []*fakeHubTimer
 	kept := c.timers[:0]
 	for _, timer := range c.timers {
@@ -1399,22 +1414,29 @@ func TestIdenticalViewsShareOneRecompute(t *testing.T) {
 	}
 }
 
+// TestABurstCoalescesIntoOneRecompute writes 50 merges on a clock that stands still, so the burst
+// is one instant to the hub however long the writes take: nothing is due until the clock moves
+// viewQuiet past the last mark, and then one recompute sends all 50 in one delta.
 func TestABurstCoalescesIntoOneRecompute(t *testing.T) {
-	rig := newHubRig(t, nil)
+	clock := newStillHubClock()
+	rig := newClockedHubRig(t, clock)
 	seedHubSettings(t, rig.database)
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
 	conn.snapshot(t, 5*time.Second, "p")
 
 	start := rig.mark()
-	now := time.Now().UTC()
-	began := time.Now()
+	now := clock.Now()
 	for n := 1; n <= 50; n++ {
 		upsertPR(t, rig.database, hubPR(n, now.Add(-time.Duration(n)*time.Minute)))
 	}
-	if took := time.Since(began); took > 2*time.Second {
-		t.Skipf("50 upserts took %s, longer than the coalescing's two seconds; the machine is too slow to judge it", took)
+	rig.hub.catchUpNow()
+	conn.none(t, 2*viewQuiet, "a burst the clock has not moved past")
+	if n := rig.count(start, recomputeBegin(deliveryCauseChange)); n != 0 {
+		t.Fatalf("recomputes before the burst's quiet passed = %d, want 0", n)
 	}
+
+	clock.Advance(viewQuiet)
 	delta := conn.delta(t, 5*time.Second, "p")
 	if got := len(liveUpsertIDs(t, delta, "prs")); got != 50 {
 		t.Fatalf("the burst's delta upserts %d pull requests, want all 50", got)
