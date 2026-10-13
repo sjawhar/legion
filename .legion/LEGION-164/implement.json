@@ -2,16 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-164",
-  "completed": "2026-10-13T03:12:04Z",
+  "completed": "2026-10-13T04:26:02Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
-  "head": "36a4d40c2fc571665df0aecdfc2f588b1eef296b",
+  "head": "049e9bed76932a445af2becdedd1ebfa3297a484",
   "proof": [
     {
       "criterion": "Review finding 1: a stale-plugin relaunch the launch path refuses (a reserved tree cleanup, a store error) is retried, so the 409's sentence 'the daemon is relaunching this process' stays true",
       "surface": "The real daemon booted on a real Postgres (embedded Postgres 16.4 at 127.0.0.1:54341) over a store-seeded stale live claim and a current one, on the fake runtime, with a store gate (overrides.checkLaunch) refusing every launch with treelifecycle.ErrCleanupReserved until cleared, orphan sweep 20ms",
       "command": "cd packages/daemon && LEGION_TEST_PG_DSN=… go test ./internal/daemon -run TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep -count=3 -v",
-      "observed": "PASS ×3: after the boot's refused attempt (a relaunch line with trigger=boot) the claim is still ready at generation 1 with no Resume and zero budgets; once the gate clears, exactly one Resume at generation 2 with the session file, budgets zero, and a relaunch line with trigger=sweep; the current claim beside it gets no Resume across the sweeps.",
-      "headSha": "4b806e7e55d0a7ebc9fe6729519c3e621e41b04e",
+      "observed": "PASS ×3 (round 4): while the gate refuses, the stale claim stays working at generation 1 with PluginRelaunchFor 0, its confirmed pending delivery untouched, no Resume, zero budgets and no relaunching log line; once the gate clears, exactly one Resume at generation 2 with the session file, PluginRelaunchFor 24, the delivery taken back (unconfirmed, interrupted), and a relaunch line with trigger=sweep; the current claim beside it gets no Resume across the sweeps.",
+      "headSha": "049e9bed76932a445af2becdedd1ebfa3297a484",
       "negativeControl": "Before the fix the same scenario left the claim ready/stale with no retry for the daemon's life (the reviewer's throwaway reproduction: state=ready hashLen=10 pluginContract=0 Resume=0); the current claim's zero Resumes across every sweep shows the re-post selects only a differing contract."
     },
     {
@@ -100,7 +100,8 @@
     "CI at the merge head 210f810a failed TestRunPrunesTheSecretFilesOfClaimsWithNoProcess (internal/daemon): it seeds a live claim with no recorded contract through the store and boots the daemon, which now relaunches such a claim first; c8626dff seeds it at api.DaemonAPIVersion, as the unfinished-claim test already does. The pod could not run it (the package's NATS tests need Docker).",
     "Round 2 (tester's fail, 2026-10-13T01:12Z): a bare version source never installed (bun read `9.6.1` as a package name). Fixed in internal/runtime/sandbox/plugins.go (bunSpec); the tester's red tests pass unmodified; stage 4a's negative control now names the published pi-legion by exact version so the devbox run proves the mapping live; stage 4a's pack step routed through lib/pack-plugin.sh after the scrum master's devbox run hit npm's polluted stdout.",
     "The stage 4a entry-point variable is STAGE4A_FROM (the plan and my first ask said LEGION_E2E_FROM), and a STAGE4A_FROM run is a development run the script itself marks as never the proof; the scrum master (Sami: 'Ask the scrum master' on both asks) is running the full stage 4a on the devbox host instead. The precondition ask was answered by the release-speed lane: bun 1.3.14 in all 39 live issue pods; the daemon runs the worker image's own /opt/legion/bin/legion (a devel commit), so the pair reaches it through the worker image's build-args once the release's image is pinned, else runtime.kubernetes.plugins.",
-    "Round 3 (review round 1, REQUEST_CHANGES): 7 threads fixed and resolved at 36a4d40c2fc571665df0aecdfc2f588b1eef296b; the census section added to the PR body; a docs sentence corrected; the reviewer's batched cleanup recorded on the Fast-follow line, not applied (iterating per push is what that line exists to avoid)."
+    "Round 3 (review round 1, REQUEST_CHANGES): 7 threads fixed and resolved at 36a4d40c2fc571665df0aecdfc2f588b1eef296b; the census section added to the PR body; a docs sentence corrected; the reviewer's batched cleanup recorded on the Fast-follow line, not applied (iterating per push is what that line exists to avoid).",
+    "Round 4 (review round 2, REQUEST_CHANGES): the round-3 fix's residue closed — a refused relaunch attempt had still written the Warn, set PluginRelaunchFor and interrupted the turn before checkLaunch could refuse; checkLaunch now runs first (relaunchAfterFailure's convention). Four threads fixed and resolved at 049e9bed76932a445af2becdedd1ebfa3297a484; the folded hardening sentence added to the docs."
   ],
   "openQuestions": [
     "Whether the LEGION deployment's daemon is the release archive's `legion` or the worker image's (ask 28313726): both link the pair; the answer only tells the production check where to read `legion version` from before the restart."
@@ -108,8 +109,8 @@
   "discoveredComplexity": [
     "Simplify pass (ce-simplify-code, three `reviewer` agents): 11 findings applied at 48f3c831 — one correctness fix (above) and shared helpers (`replaceProcess`, `staleContract`, `claimHolds` returning the machine, `controllerSessionRegistered`, `HoldsCapability`, `NoPluginSourceMessage`, `PluginsFromFile`/`PluginsFromBinary`, `staleClaim` over a claim copy); one skipped (streaming decode for routes with no identity check: bodies are already bounded by maxRequestBytes)."
   ],
-  "ci": "Round 3: Tests run 38339833162 (lint, typecheck, test success) and PR Title run 38339833064 at 36a4d40c2fc571665df0aecdfc2f588b1eef296b. Round 2: Tests run 38332984930 at 94325e57. Round 1: Tests run 38328392549 at c8626dff.",
-  "round": 3,
+  "ci": "Round 4: Tests run 38344594722 (lint, typecheck, test success) and PR Title run 38344594745 at 049e9bed76932a445af2becdedd1ebfa3297a484. Round 3: Tests run 38339833162 at 36a4d40c. Round 2: Tests run 38332984930 at 94325e57. Round 1: Tests run 38328392549 at c8626dff.",
+  "round": 4,
   "reviewRound1": {
     "threads": [
       {
@@ -150,5 +151,31 @@
     ],
     "census": "PR body section '## Contract change census' (11 entries, each with its search command, hits and rollout), written at 4b806e7e",
     "fastFollow": "the reviewer's batched cleanup list is recorded on the PR body's Fast-follow line for the architect to file as a child issue after the merge"
+  },
+  "reviewRound2": {
+    "threads": [
+      {
+        "id": "PRRT_kwDORFy7ds6rs5-P",
+        "disposition": "fixed in 049e9bed76932a445af2becdedd1ebfa3297a484: refreshPlugin checks the launch path before its Warn, its PluginRelaunchFor mark and the turn's interruption when no suspension is held, so a refused attempt changes nothing; the sweep test seeds a confirmed pending delivery and asserts PluginRelaunchFor 0 and the delivery untouched during the refusal, then the Resume, the mark and the interruption once it clears; TestAStalePluginRefusedByTheLaunchPathChangesNothing at the supervise level",
+        "resolvedAt": "049e9bed76932a445af2becdedd1ebfa3297a484"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rs5-T",
+        "disposition": "fixed in 049e9bed76932a445af2becdedd1ebfa3297a484: a host-less http(s) URL (https:///x.tgz, http:/cache/x.tgz) is refused with the // guard's message; tests per shape",
+        "resolvedAt": "049e9bed76932a445af2becdedd1ebfa3297a484"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rs5-W",
+        "disposition": "fixed in 049e9bed76932a445af2becdedd1ebfa3297a484: the sweep described as the one periodic pass reading every claim, not as StaleAddress's cadence (daemon.go, table.go, plugin_test.go, docs/kubernetes.md)",
+        "resolvedAt": "049e9bed76932a445af2becdedd1ebfa3297a484"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rs5-Z",
+        "disposition": "fixed in 049e9bed76932a445af2becdedd1ebfa3297a484: the launch gate's docs say it refuses first, then asks the real store",
+        "resolvedAt": "049e9bed76932a445af2becdedd1ebfa3297a484"
+      }
+    ],
+    "hardening": "docs/kubernetes.md Contract discipline: an exact version is pinned by npm's immutable version; a tarball/URL source has no integrity pin beyond the declared-contract check (operator trust)",
+    "fastFollow": "round 2's additions recorded on the PR body's Fast-follow line (typed trigger, one URL classifier, PluginContract literals in tests, table-driven tests, the // refusal vs a Linux-legal //opt path)"
   }
 }
