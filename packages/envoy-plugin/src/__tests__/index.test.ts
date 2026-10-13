@@ -231,11 +231,47 @@ describe("Dispatch configuration", () => {
       expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
       expect(hooks.tool.envoy_list).toBeDefined();
       expect(warn.mock.calls).toEqual([
-        ["envoy: Dispatch is off: dispatch.token must be a non-empty bearer token"],
+        [
+          `envoy: Dispatch is off: DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${process.env.ENVOY_CONFIG_FILE}`,
+        ],
       ]);
       hooks.dispose();
     } finally {
       warn.mockRestore();
+      process.env = previous;
+    }
+  });
+});
+
+// The listener's bearer is resolved once and handed to the client: a plugin that dropped it would
+// leave every pane's Envoy tools refused by the listener.
+describe("the listener's bearer", () => {
+  it("every listener call carries the bearer ENVOY_TOKEN_FILE names", async () => {
+    const previous = { ...process.env };
+    const originalFetch = globalThis.fetch;
+    const tokenFile = path.join(configDirectory(), "envoy-token");
+    writeFileSync(tokenFile, "pane-token\n");
+    process.env.ENVOY_URL = "http://listener.test";
+    process.env.ENVOY_TOKEN_FILE = tokenFile;
+    const auth: (string | null)[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (new URL(input.toString()).host === "listener.test") {
+        auth.push(new Headers(init?.headers).get("Authorization"));
+      }
+      return Response.json([]);
+    }) as typeof fetch;
+    try {
+      const hooks = await loadPlugin();
+      await hooks.tool.envoy_sessions.execute({}, {
+        sessionID: "ses_test",
+        directory: "/tmp",
+        metadata: () => {},
+      } as never);
+      expect(auth.length).toBeGreaterThan(0);
+      expect(new Set(auth)).toEqual(new Set(["Bearer pane-token"]));
+      hooks.dispose();
+    } finally {
+      globalThis.fetch = originalFetch;
       process.env = previous;
     }
   });

@@ -3,10 +3,11 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-// Every variable that picks the envoy.json a plugin or a `dispatch` command reads, and HOME, under
-// which the neutral file lives. A shell an Oh My Pi or Claude Code session runs carries
-// ENVOY_CONFIG_FILE naming the developer's own file, which the plugin would read (and whose `!`
-// commands it would run) ahead of HOME.
+// Every variable that picks the envoy.json a plugin or a `dispatch` command reads, HOME, under
+// which the neutral file lives, and the credential pointers a Legion pane carries beside them. A
+// shell an Oh My Pi or Claude Code session runs carries ENVOY_CONFIG_FILE naming the developer's
+// own file, which the plugin would read (and whose `!` commands it would run) ahead of HOME; a
+// pane's pointer to a file that has gone away would fail tests that never asked for it.
 const configVariables = [
   "ENVOY_CONFIG_FILE",
   "OPENCODE_CONFIG_DIR",
@@ -15,6 +16,11 @@ const configVariables = [
   "PI_CODING_AGENT_DIR",
   "XDG_CONFIG_HOME",
   "HOME",
+  "ENVOY_TOKEN",
+  "ENVOY_TOKEN_FILE",
+  "NATS_NKEY_SEED",
+  "NATS_NKEY_SEED_FILE",
+  "DISPATCH_TOKEN_FILE",
 ] as const;
 
 /**
