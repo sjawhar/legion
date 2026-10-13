@@ -28,8 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -247,6 +249,10 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
+	// limit, when set, is the client-side rate limiter the runtime's requests wait on
+	// (withClientLimiter); secretReads counts each Secret read the runtime asked for, by name.
+	limit       flowcontrol.RateLimiter
+	secretReads map[string]int
 	// prober builds the runtime with newProber, the probe's configuration and the informers alone
 	// (asProber); p is that Prober, whose runtime r also is.
 	prober bool
@@ -349,11 +355,15 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	g.store, _ = opts.Store.(*fakeStore)
 	g.opts = opts
 	var dyn dynamic.Interface = g.dyn
+	var kube kubernetes.Interface = g.kube
 	if g.hooks != nil {
 		dyn = hookedDynamic{g.dyn, g.hooks}
 	}
+	if g.limit != nil {
+		dyn, kube = limitedDynamic{g.dyn, g.limit}, limitedKube{g.kube, g.limit, g}
+	}
 	if g.prober {
-		p, err := newProber(ctx, dyn, g.kube, opts)
+		p, err := newProber(ctx, dyn, kube, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +373,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := r.start(ctx, dyn, g.kube); err != nil {
+		if err := r.start(ctx, dyn, kube); err != nil {
 			t.Fatal(err)
 		}
 		g.r = r
