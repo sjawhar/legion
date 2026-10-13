@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-164",
-  "completed": "2026-10-13T01:38:32Z",
+  "completed": "2026-10-13T03:12:04Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
-  "head": "94325e57c7af6a66efa513dda981b404517a2cfb",
+  "head": "36a4d40c2fc571665df0aecdfc2f588b1eef296b",
   "proof": [
+    {
+      "criterion": "Review finding 1: a stale-plugin relaunch the launch path refuses (a reserved tree cleanup, a store error) is retried, so the 409's sentence 'the daemon is relaunching this process' stays true",
+      "surface": "The real daemon booted on a real Postgres (embedded Postgres 16.4 at 127.0.0.1:54341) over a store-seeded stale live claim and a current one, on the fake runtime, with a store gate (overrides.checkLaunch) refusing every launch with treelifecycle.ErrCleanupReserved until cleared, orphan sweep 20ms",
+      "command": "cd packages/daemon && LEGION_TEST_PG_DSN=… go test ./internal/daemon -run TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep -count=3 -v",
+      "observed": "PASS ×3: after the boot's refused attempt (a relaunch line with trigger=boot) the claim is still ready at generation 1 with no Resume and zero budgets; once the gate clears, exactly one Resume at generation 2 with the session file, budgets zero, and a relaunch line with trigger=sweep; the current claim beside it gets no Resume across the sweeps.",
+      "headSha": "4b806e7e55d0a7ebc9fe6729519c3e621e41b04e",
+      "negativeControl": "Before the fix the same scenario left the claim ready/stale with no retry for the daemon's life (the reviewer's throwaway reproduction: state=ready hashLen=10 pluginContract=0 Resume=0); the current claim's zero Resumes across every sweep shows the re-post selects only a differing contract."
+    },
     {
       "criterion": "4 (the tester's failure): an exact-version source of runtime.kubernetes.plugins, and the pair the release links into the binary, reach `bun add --exact` as @sjawhar/pi-legion@<version> / @sjawhar/pi-envoy@<version> — the production default source installs; a tarball path or URL source reaches bun as written",
       "surface": "This worker pod (bun 1.3.14, the live npm registry): the exact /bin/sh -c script installScript renders for the version pair, run with a stand-in agent; plus the tester's red tests unmodified",
@@ -91,7 +99,8 @@
     "A forward merge with main (#1930 landed mid-implementation) at 210f810a resolved two conflicts (AGENTS.md's `go build` line, kubernetes.go's prepareSandbox doc comment); the fingerprint changed by that one AGENTS.md line only (https://github.com/sjawhar/legion/pull/1932#issuecomment-6135313192).",
     "CI at the merge head 210f810a failed TestRunPrunesTheSecretFilesOfClaimsWithNoProcess (internal/daemon): it seeds a live claim with no recorded contract through the store and boots the daemon, which now relaunches such a claim first; c8626dff seeds it at api.DaemonAPIVersion, as the unfinished-claim test already does. The pod could not run it (the package's NATS tests need Docker).",
     "Round 2 (tester's fail, 2026-10-13T01:12Z): a bare version source never installed (bun read `9.6.1` as a package name). Fixed in internal/runtime/sandbox/plugins.go (bunSpec); the tester's red tests pass unmodified; stage 4a's negative control now names the published pi-legion by exact version so the devbox run proves the mapping live; stage 4a's pack step routed through lib/pack-plugin.sh after the scrum master's devbox run hit npm's polluted stdout.",
-    "The stage 4a entry-point variable is STAGE4A_FROM (the plan and my first ask said LEGION_E2E_FROM), and a STAGE4A_FROM run is a development run the script itself marks as never the proof; the scrum master (Sami: 'Ask the scrum master' on both asks) is running the full stage 4a on the devbox host instead. The precondition ask was answered by the release-speed lane: bun 1.3.14 in all 39 live issue pods; the daemon runs the worker image's own /opt/legion/bin/legion (a devel commit), so the pair reaches it through the worker image's build-args once the release's image is pinned, else runtime.kubernetes.plugins."
+    "The stage 4a entry-point variable is STAGE4A_FROM (the plan and my first ask said LEGION_E2E_FROM), and a STAGE4A_FROM run is a development run the script itself marks as never the proof; the scrum master (Sami: 'Ask the scrum master' on both asks) is running the full stage 4a on the devbox host instead. The precondition ask was answered by the release-speed lane: bun 1.3.14 in all 39 live issue pods; the daemon runs the worker image's own /opt/legion/bin/legion (a devel commit), so the pair reaches it through the worker image's build-args once the release's image is pinned, else runtime.kubernetes.plugins.",
+    "Round 3 (review round 1, REQUEST_CHANGES): 7 threads fixed and resolved at 36a4d40c2fc571665df0aecdfc2f588b1eef296b; the census section added to the PR body; a docs sentence corrected; the reviewer's batched cleanup recorded on the Fast-follow line, not applied (iterating per push is what that line exists to avoid)."
   ],
   "openQuestions": [
     "Whether the LEGION deployment's daemon is the release archive's `legion` or the worker image's (ask 28313726): both link the pair; the answer only tells the production check where to read `legion version` from before the restart."
@@ -99,6 +108,47 @@
   "discoveredComplexity": [
     "Simplify pass (ce-simplify-code, three `reviewer` agents): 11 findings applied at 48f3c831 — one correctness fix (above) and shared helpers (`replaceProcess`, `staleContract`, `claimHolds` returning the machine, `controllerSessionRegistered`, `HoldsCapability`, `NoPluginSourceMessage`, `PluginsFromFile`/`PluginsFromBinary`, `staleClaim` over a claim copy); one skipped (streaming decode for routes with no identity check: bodies are already bounded by maxRequestBytes)."
   ],
-  "ci": "Round 2: Tests run 38332984930 (lint, typecheck, test success) and PR Title run 38332984989 at 94325e57c7af6a66efa513dda981b404517a2cfb; Tests run 38331911739 green at 851a98a5. Round 1: Tests run 38328392549 at c8626dff.",
-  "round": 2
+  "ci": "Round 3: Tests run 38339833162 (lint, typecheck, test success) and PR Title run 38339833064 at 36a4d40c2fc571665df0aecdfc2f588b1eef296b. Round 2: Tests run 38332984930 at 94325e57. Round 1: Tests run 38328392549 at c8626dff.",
+  "round": 3,
+  "reviewRound1": {
+    "threads": [
+      {
+        "id": "PRRT_kwDORFy7ds6rr5fz",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e: the orphan sweep re-posts StalePlugin (Trigger boot/sweep) for a live claim whose contract still differs, so a relaunch checkLaunch refuses is retried until it starts; TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep via overrides.checkLaunch",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rr5f4",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e and 36a4d40c2fc571665df0aecdfc2f588b1eef296b (staleClaim's comment): the refusal's sentence stays true because the relaunch is retried every sweep",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rr5f7",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e: bunSpec compares the scheme case-insensitively; TestAnUppercaseSchemeReachesBunVerbatim",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rr5gB",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e: readPluginSource stores a URL as u.String() and refuses a // source; TestPluginsBlockCanonicalizesAnUppercaseScheme and a refusal row",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rr5gE",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e: docs and PR body say 'every other undecodable request body'",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rr5gF",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e: Deps.check requires PluginContract >= 1; TestNewMachineRefusesADepsWithAnUnsetBound",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      },
+      {
+        "id": "PRRT_kwDORFy7ds6rr5gI",
+        "disposition": "fixed in 4b806e7e55d0a7ebc9fe6729519c3e621e41b04e: undecodable-body 409 proven for claims/ready and handoff/complete",
+        "resolvedAt": "36a4d40c2fc571665df0aecdfc2f588b1eef296b"
+      }
+    ],
+    "census": "PR body section '## Contract change census' (11 entries, each with its search command, hits and rollout), written at 4b806e7e",
+    "fastFollow": "the reviewer's batched cleanup list is recorded on the PR body's Fast-follow line for the architect to file as a child issue after the merge"
+  }
 }
