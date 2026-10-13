@@ -38,7 +38,7 @@ function render(settings: Setting[]): string {
     "",
     "A setting with a file form can name a file that holds its value instead. When Dispatch reads that setting, the file's trimmed contents win over the variable, and a file that cannot be read, or holds nothing, refuses startup.",
     "",
-    "`envoy.json` is read from two files: the user file, `legion/envoy.json` under `XDG_CONFIG_HOME` (`~/.config` when that is unset or empty), and the checkout's file, `.envoy/envoy.json` in the directory Dispatch starts in. Where both set a key, the checkout's file wins, and `DISPATCH_SERVER_URL` and `NATS_URLS` win over both. A user file still at `~/.config/opencode/envoy.json`, with none at the current path, refuses startup, naming both paths; a file that still carries a top-level `natsUrls` is refused, naming `envoy.natsUrls`.",
+    "`envoy.json` is read from two files: the user file, `legion/envoy.json` under `XDG_CONFIG_HOME` (`~/.config` when that is unset or empty; a path that is not absolute refuses startup), and the checkout's file, `.envoy/envoy.json` in the directory Dispatch starts in. Where both set a key, the checkout's file wins, and `DISPATCH_SERVER_URL` and `NATS_URLS` win over both. Dispatch reads `envoy.natsUrls` whatever `envoy.enabled` says, since `enabled` switches a session's Envoy, not the server's. A user file still at `~/.config/opencode/envoy.json`, with none at the current path, refuses startup, naming both paths; a file that still carries a top-level `natsUrls` is refused, naming `envoy.natsUrls`.",
     "",
   ];
   for (const setting of settings) {

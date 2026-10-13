@@ -80,8 +80,11 @@ Otherwise Dispatch loads config in this precedence order: the user `envoy.json`
 (`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the checkout's
 `.envoy/envoy.json` in the directory it starts in, then environment overrides.
 A user file still at `~/.config/opencode/envoy.json` with none at the current
-path refuses startup, naming both paths, and a file that still carries a
-top-level `natsUrls` is refused, naming `envoy.natsUrls`. A present `NATS_URLS`
+path refuses startup, naming both paths; so does an `XDG_CONFIG_HOME` that is
+not an absolute path, naming it; and a file that still carries a top-level
+`natsUrls` is refused, naming `envoy.natsUrls`. The server reads
+`envoy.natsUrls` whatever `envoy.enabled` says: `enabled` switches a session's
+Envoy, not the server's. A present `NATS_URLS`
 overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the outbox
 start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
 to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`

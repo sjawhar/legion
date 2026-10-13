@@ -703,6 +703,9 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("%s: %+v, %v; want ~/.config/legion/envoy.json's", name, cfg, err)
 				}
 			}
+			if _, err := envoyJSON(t, map[string]string{"XDG_CONFIG_HOME": "relative"}); err == nil || err.Error() != "XDG_CONFIG_HOME is relative, which is not an absolute path" {
+				t.Errorf("relative: err = %v, want a refusal naming XDG_CONFIG_HOME and its value", err)
+			}
 		},
 		"ENVOY_ALLOW_REMOTE_NATS": func(t *testing.T) {
 			const remote = "nats://nats.example:4222"

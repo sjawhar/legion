@@ -28,7 +28,7 @@ These are the settings most deployments need, not all of them. The full list, ge
 server, is in [Configuration](/legion/dispatch/reference/configuration/).
 When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads the NATS address
 from `envoy.natsUrls` in `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, the file agents use,
-so set one of them explicitly.
+whatever that file's `envoy.enabled` says, so set one of them explicitly.
 
 People sign in with Google Workspace through the sign-in pool by default, and Dispatch names each
 person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request

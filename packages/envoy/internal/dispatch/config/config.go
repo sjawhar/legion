@@ -22,7 +22,8 @@ type DispatchConfig struct {
 	Token     string `json:"token,omitempty"`
 }
 
-// EnvoySection is what the server reads of the `envoy` sub-object in envoy.json: its NATS URLs.
+// EnvoySection is what the server reads of the `envoy` sub-object in envoy.json: its NATS URLs,
+// whatever `enabled` says, since `enabled` switches a session's Envoy and not the server's.
 // parseEnvoy checks every key the section allows (enabled, url, natsUrls, token, natsSeed), and
 // keeps natsUrls alone.
 type EnvoySection struct {
@@ -73,7 +74,8 @@ func (e *InvalidConfigError) Error() string {
 // Load reads the user and checkout files and applies the DISPATCH_SERVER_URL and NATS_URLS
 // overrides from environment, which answers as os.LookupEnv does: a variable that is set overrides
 // the files, and one set but empty is refused. environment also names XDG_CONFIG_HOME, the
-// directory holding the user file's legion directory; unset or empty, it is ~/.config.
+// directory holding the user file's legion directory: unset or empty, it is ~/.config, and a value
+// that is not an absolute path is refused, as os.UserConfigDir and the XDG spec refuse it.
 // envoy-dispatch hands Load its settings table's lookup; any other caller names the environment
 // it means. A missing file is not an error, except that a user file still at its OpenCode-era
 // path, ~/.config/opencode/envoy.json, with none at the current one is refused, naming both. A
@@ -97,8 +99,11 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 		}
 	}
 	configHome, _ := environment("XDG_CONFIG_HOME")
-	if configHome == "" {
+	switch {
+	case configHome == "":
 		configHome = filepath.Join(home, ".config")
+	case !filepath.IsAbs(configHome):
+		return nil, fmt.Errorf("XDG_CONFIG_HOME is %s, which is not an absolute path", configHome)
 	}
 
 	merged := &EnvoyConfig{}

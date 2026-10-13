@@ -267,9 +267,11 @@
   `.opencode/envoy.json` are not read: while the old user file is the only one, startup refuses,
   naming both paths and saying to move it, and a file that still carries a top-level `natsUrls` is
   refused, naming `envoy.natsUrls`. The `envoy` section takes `enabled`, `url`, `natsUrls`,
-  `token` and `natsSeed` and refuses any other key. `XDG_CONFIG_HOME` is a row of the settings
-  table; `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files. A deployment that sets
-  both variables, as `deploy/compose/dispatch.compose.yml` does, needs no change.
+  `token` and `natsSeed` and refuses any other key; the server reads `envoy.natsUrls` whatever
+  `envoy.enabled` says, since `enabled` switches a session's Envoy. `XDG_CONFIG_HOME` is a row of
+  the settings table, and one set to a path that is not absolute refuses startup, naming it.
+  `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files. A deployment that sets both
+  variables, as `deploy/compose/dispatch.compose.yml` does, needs no change.
 - **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's
   `default` service account (`system:serviceaccount:<namespace>:default`), naming the entry: every
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's

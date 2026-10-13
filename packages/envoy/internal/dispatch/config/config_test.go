@@ -82,6 +82,22 @@ func TestLoadReadsTheUserFileUnderXDGConfigHome(t *testing.T) {
 	}
 }
 
+// A relative XDG_CONFIG_HOME names no directory the XDG spec lets anything use, so Load refuses it
+// rather than read a user file found from wherever the process started, even when that file is
+// there to read.
+func TestLoadRefusesARelativeXDGConfigHome(t *testing.T) {
+	cwd := t.TempDir()
+	mustWrite(t, filepath.Join(cwd, "relative", "legion", "envoy.json"), `{"envoy": {"natsUrls": ["nats://relative:4222"]}}`)
+	t.Chdir(cwd)
+	_, err := Load(environment(map[string]string{"XDG_CONFIG_HOME": "relative"}), LoadOptions{CWD: cwd, HomeDir: t.TempDir()})
+	if err == nil {
+		t.Fatal("expected a refusal of a relative XDG_CONFIG_HOME")
+	}
+	if want := "XDG_CONFIG_HOME is relative, which is not an absolute path"; err.Error() != want {
+		t.Errorf("error: got %q, want %q", err, want)
+	}
+}
+
 func TestLoadEnvironmentOverridesMergedConfig(t *testing.T) {
 	home := t.TempDir()
 	cwd := t.TempDir()
