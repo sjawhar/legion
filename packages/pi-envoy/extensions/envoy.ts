@@ -422,11 +422,12 @@ export default function envoyExtension(pi: PiApi): void {
   const atStart = sessionSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
   const { envoy } = atStart;
   const currentDispatchConfig = (): ActiveDispatchConfig => {
-    const config = activeDispatchSettings(
-      sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() })
-    );
+    const resolution = sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
+    const config = activeDispatchSettings(resolution);
     if (config === null) {
-      throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
+      throw new Error(
+        `Dispatch is no longer configured: ${resolution.enabled ? "" : resolution.notice}`
+      );
     }
     return config;
   };
@@ -443,18 +444,22 @@ export default function envoyExtension(pi: PiApi): void {
   ]
     .filter((part) => part !== null)
     .join("; ");
-  // The listener client exists only while Envoy is on. Every listener call and the NATS
-  // connection go through `activeEnvoy`, which refuses while Envoy is off, so this session reaches
-  // no listener and no NATS server its configuration does not name.
+  // The listener client exists only while Envoy is on. The listener calls and the NATS connection
+  // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
+  // reaches no listener and no NATS server its configuration does not name. Tools, `/whoami`,
+  // inbound messages and the heartbeat exist only with Envoy on, so only the Legion interface's
+  // `claim` and `subscribe` can meet that refusal.
   const active = envoy.enabled
     ? {
         settings: envoy,
         client: createEnvoyClient({ baseUrl: envoy.url, fetch, token: envoy.token }),
       }
     : undefined;
-  const activeEnvoy = (): NonNullable<typeof active> => {
+  const requireEnvoy = (): NonNullable<typeof active> => {
     if (active === undefined) {
-      throw new Error(`Envoy is off for this session (${CONFIG_FILE.path ?? CONFIG_FILE.error})`);
+      throw new Error(
+        `Envoy is off for this session: ${envoy.enabled ? "" : (envoy.error ?? envoy.notice)}`
+      );
     }
     return active;
   };
@@ -696,7 +701,7 @@ export default function envoyExtension(pi: PiApi): void {
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
-    const { settings } = activeEnvoy();
+    const { settings } = requireEnvoy();
     connection = await connect({
       servers: [...settings.natsUrls],
       name: `omp-${sessionID || "unknown"}`,
@@ -1322,7 +1327,7 @@ export default function envoyExtension(pi: PiApi): void {
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
   // stays out of them.
   const registerSession = () =>
-    activeEnvoy().client.subscribe({
+    requireEnvoy().client.subscribe({
       sessionID,
       directory: sessionDirectory,
       topics: [
@@ -1365,27 +1370,24 @@ export default function envoyExtension(pi: PiApi): void {
     // racing this tick changes them mid-flight, and that call is the truth.
     const id = sessionID;
     const role = topic.slice(ROLE_TOPIC_PREFIX.length);
-    const holder = await activeEnvoy()
-      .client.getRole(role)
-      .then(
-        (info) => info.holder,
-        (error: unknown) => {
-          // 404 is the listener's answer for "no live holder", not a failure.
-          if (error instanceof EnvoyApiError && error.details.status === 404) return undefined;
-          throw error;
-        }
-      );
+    const { client } = requireEnvoy();
+    const holder = await client.getRole(role).then(
+      (info) => info.holder,
+      (error: unknown) => {
+        // 404 is the listener's answer for "no live holder", not a failure.
+        if (error instanceof EnvoyApiError && error.details.status === 404) return undefined;
+        throw error;
+      }
+    );
     let reason: RoleRegainReason;
     if (holder === id) {
       if (!afterOutage) return;
       reason = "reregistered";
     } else {
-      const result = await activeEnvoy().client.setRole({ sessionID: id, role, soft: true });
+      const result = await client.setRole({ sessionID: id, role, soft: true });
       if (claimedRoleTopic !== topic || sessionID !== id) {
         // Superseded while in flight, so a claim that landed here is handed straight back.
-        if (result.claimed) {
-          await activeEnvoy().client.unsubscribe({ sessionID: id, topics: [topic] });
-        }
+        if (result.claimed) await client.unsubscribe({ sessionID: id, topics: [topic] });
         return;
       }
       if (!result.claimed) {
@@ -1478,7 +1480,7 @@ export default function envoyExtension(pi: PiApi): void {
         .finally(() => {
           healing = false;
         });
-    }, activeEnvoy().settings.heartbeatMs);
+    }, requireEnvoy().settings.heartbeatMs);
     heartbeatRegistered = true;
   };
 
@@ -1491,9 +1493,8 @@ export default function envoyExtension(pi: PiApi): void {
     // entry, and a listener outage must not fail session start.
     // Role topics are not subscriptions (role deliveries arrive on the agent
     // subject); they are re-claimed by reclaimHeldRoles once registered.
-    const registry = await activeEnvoy()
-      .client.getInterest(sessionID)
-      .catch(() => undefined);
+    const { client } = requireEnvoy();
+    const registry = await client.getInterest(sessionID).catch(() => undefined);
     if (registry === undefined) return;
     for (const topic of registry.topics) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
@@ -1516,7 +1517,8 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<boolean> => {
     const topic = ROLE_TOPIC_PREFIX + role;
     const previousTopic = claimedRoleTopic;
-    const result = await activeEnvoy().client.setRole({
+    const { client } = requireEnvoy();
+    const result = await client.setRole({
       sessionID,
       role,
       soft: options.soft,
@@ -1542,7 +1544,7 @@ export default function envoyExtension(pi: PiApi): void {
     pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
     if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     if (previousTopic !== undefined && previousTopic !== topic) {
-      await activeEnvoy().client.unsubscribe({ sessionID, topics: [previousTopic] });
+      await client.unsubscribe({ sessionID, topics: [previousTopic] });
     }
     return true;
   };
@@ -1596,10 +1598,9 @@ export default function envoyExtension(pi: PiApi): void {
     }
     let role = remembered ?? claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
     if (role === undefined) {
+      const { client } = requireEnvoy();
       for (const source of roleSources(previousSessionID, carryPreviousSessionRole)) {
-        const registry = await activeEnvoy()
-          .client.getInterest(source)
-          .catch(() => undefined);
+        const registry = await client.getInterest(source).catch(() => undefined);
         const topic = registry?.topics.find((candidate) => candidate.startsWith(ROLE_TOPIC_PREFIX));
         if (topic !== undefined) {
           role = topic.slice(ROLE_TOPIC_PREFIX.length);
@@ -1873,11 +1874,9 @@ export default function envoyExtension(pi: PiApi): void {
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
       const deregistration =
-        sessionID === "" || !envoy.enabled
+        sessionID === "" || active === undefined
           ? Promise.resolve()
-          : activeEnvoy()
-              .client.unregisterSession(sessionID)
-              .catch(() => undefined);
+          : active.client.unregisterSession(sessionID).catch(() => undefined);
       const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
       await Promise.race([
         Promise.allSettled([deregistration, draining]).then(() => undefined),
@@ -2256,6 +2255,7 @@ export default function envoyExtension(pi: PiApi): void {
       // The host hands raw arguments through (lenientArgValidation); this is the one
       // refusal, naming every problem, before anything reaches the listener.
       const parameters: Record<string, unknown> = parseEnvoyToolArguments(operation, rawParameters);
+      const { client } = requireEnvoy();
       switch (operation) {
         case EnvoyToolOperation.subscribe: {
           const added: string[] = [];
@@ -2299,8 +2299,8 @@ export default function envoyExtension(pi: PiApi): void {
           const registrationError =
             registryRemoved.length === 0
               ? undefined
-              : await activeEnvoy()
-                  .client.unsubscribe({ sessionID, topics: registryRemoved })
+              : await client
+                  .unsubscribe({ sessionID, topics: registryRemoved })
                   .then(registerSession)
                   .then(() => undefined, messageFor);
           return toolSuccess(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
@@ -2309,7 +2309,7 @@ export default function envoyExtension(pi: PiApi): void {
           });
         }
         case EnvoyToolOperation.listInterests: {
-          const registry = await activeEnvoy().client.getInterest(sessionID);
+          const registry = await client.getInterest(sessionID);
           const interests = mergeInterestSources(registry.topics, [...subscriptions.keys()]);
           return toolSuccess(
             JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2),
@@ -2322,7 +2322,7 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(JSON.stringify(inbox, null, 2), { count: inbox.length });
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
-          const result = await activeEnvoy().client.send({
+          const result = await client.send({
             sourceSessionID: await replyAddress(context),
             targetSessionID,
             message: stringFor(parameters, "message"),
@@ -2338,7 +2338,7 @@ export default function envoyExtension(pi: PiApi): void {
           const topic = stringFor(parameters, "topic");
           const inSubagent = await isSubagent(context);
           const source = await replyAddress(context, "", inSubagent);
-          const result = await activeEnvoy().client.publish({
+          const result = await client.publish({
             sourceSessionID: source,
             topic,
             message: stringFor(parameters, "message"),
@@ -2374,7 +2374,7 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.getRole: {
-          const role = await activeEnvoy().client.getRole(stringFor(parameters, "role"));
+          const role = await client.getRole(stringFor(parameters, "role"));
           return toolSuccess(JSON.stringify(role, null, 2), role);
         }
         case EnvoyToolOperation.whoami: {
@@ -2416,7 +2416,7 @@ export default function envoyExtension(pi: PiApi): void {
           const machine = optionalStringFor(parameters, "machine");
           const directory = optionalStringFor(parameters, "dir");
           const title = optionalStringFor(parameters, "title");
-          const sessions = await activeEnvoy().client.listSessions({ directory, title });
+          const sessions = await client.listSessions({ directory, title });
           const result =
             machine === undefined
               ? sessions
