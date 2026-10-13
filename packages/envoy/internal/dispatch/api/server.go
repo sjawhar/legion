@@ -232,6 +232,9 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
+	// with no Lifetime (register).
+	deliveryHub *deliveryHub
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job, so a read that judges a run again does not warn about it
 	// again. Nothing evicts an entry: the map holds one per (repo, run, configured job name) it has
@@ -267,8 +270,21 @@ type queryer interface {
 // Every route refuses a path or query parameter holding U+0000 or a byte that is not UTF-8 before
 // its handler runs (refuseUnstorableParameters), as decodeJSON refuses a U+0000 in a body, and the
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
+//
+// With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
+// the first subscription and runs them until Lifetime ends; a server without one (a test's) has no
+// hub, so nothing outlives the test.
 func Register(mux *http.ServeMux, deps Deps) {
+	register(mux, deps)
+}
+
+// register is Register, answering the server it mounted, whose delivery hub a test waits out
+// before its database closes.
+func register(mux *http.ServeMux, deps Deps) *server {
 	s := &server{deps: deps}
+	if deps.Lifetime != nil {
+		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
+	}
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
@@ -280,6 +296,7 @@ func Register(mux *http.ServeMux, deps Deps) {
 		const pattern = "/ws/doc/{room}"
 		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
 	}
+	return s
 }
 
 func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
