@@ -461,17 +461,21 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 // and each by issue and role under the move that brings it back. `legion claims resume` brings back
 // a suspended architect, which is sent a catch-up once it is ready; a suspended phase worker's move
 // depends on who suspended it, which `legion claims list --json` shows as its suspendedBy and the
-// troubleshooting page's "A tree does not move after a restart" turns into a move; a failed one
-// ignores resume and deliver, and runs again only on a workflow start.
+// troubleshooting page's "A tree does not move after a restart" turns into a move; `legion claims
+// retry` brings back a failed architect on its session, with fresh budgets and a catch-up once it is
+// ready; a failed worker runs again on a workflow start, its architect's retry of the held phase.
 func strandedSummary(stranded []api.StrandedClaim) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"
 	}
-	var resume, workers, workflowStart []string
+	var resume, workers, retry, workflowStart []string
 	for _, c := range stranded {
 		named := c.Issue + " " + string(c.Role)
+		failed := c.State == string(supervise.StateFailed)
 		switch {
-		case c.State == string(supervise.StateFailed):
+		case failed && c.Role == legionclaim.RoleArchitect:
+			retry = append(retry, named)
+		case failed:
 			workflowStart = append(workflowStart, named)
 		case c.Role == legionclaim.RoleArchitect:
 			resume = append(resume, named)
@@ -485,6 +489,9 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 	}
 	if len(workers) > 0 {
 		groups = append(groups, "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) "+strings.Join(workers, ", "))
+	}
+	if len(retry) > 0 {
+		groups = append(groups, "failed, retry "+strings.Join(retry, ", "))
 	}
 	if len(workflowStart) > 0 {
 		groups = append(groups, "failed, needs a workflow start "+strings.Join(workflowStart, ", "))

@@ -191,8 +191,8 @@ const legionPendingStatusWrite = z.strictObject({
  * `suspendedBy` calls for (`LegionOperatorClaimResponse`): the boot's start once it is marked the daemon's
  * when it was suspended before 0038, the operator's resume when an operator suspended it and it kept
  * its task or its phase start waits, otherwise the operator's delivery of its phase's resume task;
- * `failed`, a workflow start, since a failed claim ignores resume and deliver (its architect's retry
- * for a worker, its tree's re-admission for an architect). */
+ * a `failed` worker, its architect's retry of the held phase, since a failed claim ignores resume and
+ * deliver; a `failed` architect, the operator's retry, which relaunches its session with fresh budgets. */
 const legionStrandedClaim = z.strictObject({
   issue: issueKey,
   role: z.enum(LEGION_ROLES),
@@ -393,7 +393,7 @@ const legionDeliveryView = z.strictObject({
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
- * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|close`): the claim as its
+ * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|close`): the claim as its
  * supervisor holds it, but its hashes. */
 export const LegionOperatorClaimResponse = z.strictObject({
   token: nonEmptyString,

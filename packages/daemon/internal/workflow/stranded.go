@@ -42,8 +42,8 @@ const strandedRoleRunBatchSize = 200
 // an unconfirmed phase task stays through the suspension (supervise's settle).
 //
 // The operator's resume (`legion claims resume`) brings back a suspended one. A failed one ignores
-// resume and deliver: only a workflow start retries it, its architect's retry of the held phase for
-// a worker and its tree's re-admission for an architect.
+// resume and deliver: its architect's retry of the held phase starts a failed worker again, and the
+// operator's retry (`legion claims retry`) relaunches a failed architect on its session.
 //
 // It names no other claim: a worker whose phase is not its own is started again when its phase
 // comes, and a tree whose root holds no slot runs nothing yet. That is a lingering tree — a root

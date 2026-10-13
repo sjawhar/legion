@@ -29,9 +29,9 @@ const strandedReportTimeout = 5 * time.Second
 // claims list --json`, and the troubleshooting page's "A tree does not move after a restart"): one
 // suspended before 0038 is marked the daemon's for the boot to start, one an operator suspended
 // that kept its task or whose phase start waits is resumed, and any other is delivered its phase's
-// resume task; `needsWorkflowStart` lists the failed ones, which
-// ignore resume and deliver and run again only on a workflow start: their architect's retry of the
-// held phase for a worker, their tree's re-admission for an architect. A fleet a restart did not
+// resume task; `needsWorkflowStart` lists the failed ones, which ignore resume and deliver: a
+// worker runs again on its architect's retry of the held phase, and an architect on the operator's
+// `legion claims retry`, which relaunches its session with fresh budgets. A fleet a restart did not
 // bring back otherwise looks healthy — its controller registers, the state shows its trees active,
 // and nothing else is logged. A boot with none logs nothing. The state route judges the same rule on
 // every read (strandedClaims). A failed read is logged and stops nothing: the report is the boot's

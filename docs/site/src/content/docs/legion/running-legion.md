@@ -403,7 +403,8 @@ Closing the terminal leaves the project without one, and the daemon logs
    the new daemon is up: that records the suspension as yours. Act only on the claims the state
    names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
    `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
-   architect, and bring a suspended phase worker back as
+   architect, retry a failed one (`legion claims retry`, which relaunches its session with fresh
+   budgets), and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
    shows for its `suspendedBy`. Never resume by hand a claim of a lingering tree or of an issue
    parked out of the workflow: re-admission or the issue's return to `todo` starts it.

@@ -221,9 +221,20 @@ legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, holdRe
 
 `phase` is `held` and the failed claim's `state` is `failed`. A held phase worker is its
 architect's to retry or escalate; `holdReason: "escalated"` means it went to the controller. An
-architect that failed (`architect.state` is `failed`) leaves its tree with nobody to act inside it,
-so the controller is woken to re-admit it. To do that by hand, park the root and admit it again,
-which starts a new generation from its architect:
+architect that failed (`architect.state` is `failed`) leaves its tree with nobody to act inside it.
+Retry it: the daemon relaunches it on the session it kept, with fresh budgets, and sends it a
+catch-up of its tree once it is ready, so the tree carries on at the generation and phase it
+stands at:
+
+```sh
+legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-<project>-<key, lowercased>-architect
+```
+
+`legion claims retry` relaunches only a failed claim, and refuses one in any other state, naming
+it. It would relaunch a failed phase worker too, but leave that to the worker's architect: its
+retry of the phase also releases the hold. The controller is woken to re-admit a tree whose
+architect failed; parking the root and admitting it again does that by hand, and starts a new
+generation from its architect:
 
 ```sh
 legion status <KEY> backlog --config legion.yaml --operator-token-file operator-token
@@ -310,10 +321,16 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
     ```
 
 - **`needsWorkflowStart`** (`state` is `failed`): a failed claim ignores `legion claims resume` and
-  `legion claims deliver`, and runs again only when the workflow starts it. A failed worker's issue
-  is held ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or
-  escalates it to the controller. A failed architect waits for its tree's re-admission, as
-  [An issue is held](#an-issue-is-held) shows.
+  `legion claims deliver`. A failed worker's issue is held ([An issue is held](#an-issue-is-held)),
+  and its tree's architect retries the phase or escalates it to the controller. Retry a failed
+  architect, which relaunches it on its session with fresh budgets:
+
+  ```sh
+  legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-14-architect
+  ```
+
+  When a tree's architect and its workers failed together, retry the architect first: the held
+  workers are its to retry once it runs.
 
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase

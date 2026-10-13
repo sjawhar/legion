@@ -305,9 +305,9 @@ type PendingStatusWrite struct {
 // a `suspended` worker, the move its claim's suspendedBy calls for (the operator claim view): the
 // boot's start once it is marked the daemon's when it was suspended before 0038, the operator's
 // resume when an operator suspended it and it kept its task or its phase start waits, otherwise the
-// operator's delivery of its phase's resume task; `failed`, a workflow start, since a failed claim
-// ignores resume and deliver — its architect's retry of the held phase for a worker, its tree's
-// re-admission for an architect.
+// operator's delivery of its phase's resume task; a `failed` worker, its architect's retry of the
+// held phase, since a failed claim ignores resume and deliver; a `failed` architect, the operator's
+// retry (`legion claims retry`), which relaunches its session with fresh budgets.
 type StrandedClaim struct {
 	Issue string     `json:"issue"`
 	Role  claim.Role `json:"role"`
