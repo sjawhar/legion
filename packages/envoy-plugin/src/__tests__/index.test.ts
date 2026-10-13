@@ -1,18 +1,150 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
+import path from "node:path";
 import { logger } from "../log";
 
 // Suppress console.error during tests
 const originalError = console.error;
 const originalDispatchToken = process.env.DISPATCH_TOKEN;
+// What picks the envoy.json the plugin reads: each test starts with none of them but
+// ENVOY_CONFIG_FILE naming a file that holds no section, so Dispatch and Envoy come from the
+// variables the test sets and never from the caller's own envoy.json or OpenCode directory.
+const configVariables = ["ENVOY_CONFIG_FILE", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"] as const;
+const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
+let configDirectory = "";
 beforeEach(() => {
   console.error = mock(() => {});
   process.env.DISPATCH_TOKEN ??= "test-token";
+  for (const name of configVariables) delete process.env[name];
+  configDirectory = mkdtempSync(path.join(os.tmpdir(), "envoy-plugin-config-"));
+  process.env.ENVOY_CONFIG_FILE = path.join(configDirectory, "envoy.json");
+  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
 });
 afterEach(() => {
   console.error = originalError;
   if (originalDispatchToken === undefined) delete process.env.DISPATCH_TOKEN;
   else process.env.DISPATCH_TOKEN = originalDispatchToken;
+  for (const [name, value] of originalConfigVariables) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  rmSync(configDirectory, { recursive: true, force: true });
+});
+
+/** The plugin's hooks for a serve at a port nothing answers on. */
+async function loadPlugin() {
+  const pluginModule = await import("../server");
+  return pluginModule.default({ serverUrl: new URL("http://127.0.0.1:13381/") } as never);
+}
+
+/** What the plugin's `shell.env` hook puts in a shell command's environment. */
+async function shellEnvironment(hooks: {
+  readonly "shell.env": (
+    input: { cwd: string; sessionID?: string },
+    output: { env: Record<string, string> }
+  ) => Promise<void>;
+}): Promise<Record<string, string>> {
+  const output = { env: { PATH: "/usr/bin" } as Record<string, string> };
+  await hooks["shell.env"]({ cwd: "/tmp", sessionID: "ses_shell" }, output);
+  return output.env;
+}
+
+describe("the serve's envoy.json", () => {
+  it("with OPENCODE_CONFIG_DIR holding no envoy.json, registers no tool and hands that file to every shell", async () => {
+    const opencodeDirectory = path.join(configDirectory, "opencode");
+    mkdirSync(opencodeDirectory);
+    process.env.OPENCODE_CONFIG_DIR = opencodeDirectory;
+    const previous = { ...process.env };
+    delete process.env.ENVOY_URL;
+    delete process.env.ENVOY_NATS_URL;
+    delete process.env.DISPATCH_URL;
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    const originalFetch = globalThis.fetch;
+    const requests: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      requests.push(String(input));
+      return new Response("no request belongs here", { status: 500 });
+    }) as typeof fetch;
+    try {
+      const hooks = await loadPlugin();
+      await hooks.event({
+        event: {
+          type: "session.status",
+          properties: { sessionID: "ses_off", status: { type: "busy" } },
+        },
+      });
+      await hooks.event({
+        event: { type: "session.deleted", properties: { sessionID: "ses_off" } },
+      });
+      const file = path.join(opencodeDirectory, "envoy.json");
+
+      expect(Object.keys(hooks.tool)).toEqual([]);
+      expect((await shellEnvironment(hooks)).ENVOY_CONFIG_FILE).toBe(file);
+      expect(warn.mock.calls).toEqual([
+        [`envoy: no envoy.json at ${file}: Dispatch and Envoy are off`],
+      ]);
+      // The busy session's title is the serve's to look up; no listener is called.
+      expect(requests.filter((url) => !url.startsWith("http://127.0.0.1:13381/"))).toEqual([]);
+      hooks.dispose();
+    } finally {
+      globalThis.fetch = originalFetch;
+      warn.mockRestore();
+      process.env = previous;
+    }
+  });
+
+  it("with Envoy off and Dispatch on, registers no Envoy tool and still carries dispatch-first", async () => {
+    const file = process.env.ENVOY_CONFIG_FILE ?? "";
+    writeFileSync(
+      file,
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "file-token" },
+      })
+    );
+    const previous = { ...process.env };
+    delete process.env.ENVOY_URL;
+    delete process.env.ENVOY_NATS_URL;
+    delete process.env.DISPATCH_URL;
+    delete process.env.DISPATCH_TOKEN;
+    try {
+      const hooks = await loadPlugin();
+      const config: { instructions?: string[] } = {};
+      hooks.config(config);
+
+      expect(Object.keys(hooks.tool)).toEqual([]);
+      expect(
+        config.instructions?.some((instruction) => instruction.endsWith("dispatch-first/SKILL.md"))
+      ).toBe(true);
+      expect((await shellEnvironment(hooks)).ENVOY_CONFIG_FILE).toBe(file);
+      hooks.dispose();
+    } finally {
+      process.env = previous;
+    }
+  });
+
+  it("with a relative XDG_CONFIG_HOME, still loads with both sections off and says why once", async () => {
+    const previous = { ...process.env };
+    delete process.env.ENVOY_CONFIG_FILE;
+    process.env.XDG_CONFIG_HOME = "relative/config";
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
+    const warn = spyOn(logger, "warn").mockImplementation(() => {});
+    try {
+      const hooks = await loadPlugin();
+
+      expect(Object.keys(hooks.tool)).toEqual([]);
+      expect((await shellEnvironment(hooks)).ENVOY_CONFIG_FILE).toBeUndefined();
+      expect(warn.mock.calls).toEqual([
+        [
+          "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+        ],
+      ]);
+      hooks.dispose();
+    } finally {
+      warn.mockRestore();
+      process.env = previous;
+    }
+  });
 });
 
 describe("envoy plugin init", () => {
@@ -76,23 +208,21 @@ describe("envoy plugin init", () => {
 });
 
 describe("Dispatch configuration", () => {
-  it("keeps Envoy available and logs once when Dispatch is unconfigured", async () => {
+  it("keeps Envoy available and logs once when no envoy.json configures Dispatch", async () => {
     const previous = { ...process.env };
+    const missing = path.join(configDirectory, "missing", "envoy.json");
+    process.env.ENVOY_CONFIG_FILE = missing;
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
     delete process.env.DISPATCH_URL;
     delete process.env.DISPATCH_TOKEN;
-    process.env.HOME = "/nonexistent-home-for-dispatch-gating";
     const warn = spyOn(logger, "warn").mockImplementation(() => {});
 
     try {
-      const pluginModule = await import("../server");
-      const hooks = await pluginModule.default({
-        serverUrl: new URL("http://127.0.0.1:13381"),
-      } as never);
+      const hooks = await loadPlugin();
 
       expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
       expect(hooks.tool.envoy_list).toBeDefined();
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith("envoy: Dispatch disabled — no Dispatch URL configured");
+      expect(warn.mock.calls).toEqual([[`envoy: no envoy.json at ${missing}: Dispatch is off`]]);
       hooks.dispose();
     } finally {
       warn.mockRestore();
@@ -103,22 +233,18 @@ describe("Dispatch configuration", () => {
   it("keeps Envoy available and logs the missing bearer token once", async () => {
     const previous = { ...process.env };
     process.env.DISPATCH_URL = "http://127.0.0.1:8766";
+    process.env.ENVOY_URL = "http://127.0.0.1:59999";
     delete process.env.DISPATCH_TOKEN;
-    process.env.HOME = "/nonexistent-home-for-dispatch-gating";
     const warn = spyOn(logger, "warn").mockImplementation(() => {});
 
     try {
-      const pluginModule = await import("../server");
-      const hooks = await pluginModule.default({
-        serverUrl: new URL("http://127.0.0.1:13381"),
-      } as never);
+      const hooks = await loadPlugin();
 
       expect(Object.keys(hooks.tool).filter((name) => name.startsWith("dispatch_"))).toEqual([]);
       expect(hooks.tool.envoy_list).toBeDefined();
-      expect(warn).toHaveBeenCalledTimes(1);
-      expect(warn).toHaveBeenCalledWith(
-        "envoy: Dispatch disabled — dispatch.token must be a non-empty bearer token"
-      );
+      expect(warn.mock.calls).toEqual([
+        ["envoy: Dispatch is off: dispatch.token must be a non-empty bearer token"],
+      ]);
       hooks.dispose();
     } finally {
       warn.mockRestore();
