@@ -18506,6 +18506,9 @@ function namedDirectory(harness, env) {
 }
 function harnessDirectory(harness, env) {
   for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
+    if (harness === "command" && plugin === "claude" && env.CLAUDE_CODE_CHILD_SESSION !== "1") {
+      continue;
+    }
     const directory = namedDirectory(plugin, env);
     if (directory !== undefined)
       return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
