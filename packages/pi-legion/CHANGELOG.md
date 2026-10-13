@@ -234,3 +234,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the role prompts alone say who edits what, and the operation-log rule (`jj undo`, `jj abandon`,
   `jj op restore|revert|abandon|undo` refused in every tree pane and its `task` subagents) stays.
   `legion.daemonApiVersion` is unchanged.
+
+### Fixed
+
+- Session attribution's `jj config path --user` gives up after 10 s. Root bootstrap awaits it, so a
+  `jj` that never answered (a PATH wrapper that loops) held the `session_start` handler past Oh My
+  Pi's 30 s and the claim never reached `ready`; attribution now degrades to no trailer, as it does
+  for any other failure to resolve jj.
