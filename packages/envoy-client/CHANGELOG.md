@@ -54,7 +54,8 @@
   out (a relative `ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME`) arrives as that
   caller's Envoy-off refusal: `envoy-send` says `Envoy is off: <refusal>`,
   `scripts/e2e/lib/operator-nats-seed.ts` says `the NATS seed for <label> …: <refusal>`, and the
-  skill scenarios' `daemon-pane.ts` says `envoy: <refusal>`.
+  skill scenarios' `daemon-pane.ts` says `envoy: <refusal>`; those two refuse a refused NATS seed
+  (`inboundError`) the same way.
 - The `dispatch` command reads the envoy.json its session's plugin chose: with `DISPATCH_HOST` set,
   the file `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host plugin's
   rule (`omp`, `claude` or `opencode`); with `DISPATCH_HOST` unset and

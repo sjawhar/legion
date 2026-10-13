@@ -108,7 +108,8 @@ export interface PaneSource {
  * `legion` from bash; and, with `systemPrompt`, the system prompt argument. An inherited
  * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the caller's own GitHub
  * variables are dropped first. The profile's agent directory, and so its envoy.json, is under the
- * inherited `HOME`. */
+ * inherited `HOME`. Throws `envoy: <why>` when that Envoy is off with an error or on with its NATS
+ * seed refused (`inboundError`). */
 export function workerPane(
   launch: WorkerLaunch,
   inherited: NodeJS.ProcessEnv,
@@ -136,6 +137,7 @@ export function workerPane(
     cwd: workspace,
   });
   if (!envoy.enabled && envoy.error !== null) throw new Error(`envoy: ${envoy.error}`);
+  if (envoy.enabled && envoy.inboundError !== null) throw new Error(`envoy: ${envoy.inboundError}`);
   const request: PaneRequest = {
     ...claim,
     stateDir,

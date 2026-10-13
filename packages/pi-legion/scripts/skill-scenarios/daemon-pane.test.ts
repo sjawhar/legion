@@ -102,3 +102,33 @@ test("names the listener and NATS servers the profile's envoy.json writes", () =
     ENVOY_NATS_URL: "nats://rig-nats.internal.example:4222",
   });
 }, 600_000);
+
+// A seed the profile's envoy.json pairs with other servers than ENVOY_NATS_URL leaves Envoy on with
+// inbound messages off, which the pane's own extension would meet; the rig refuses it, as it refuses
+// an Envoy that is off with an error, rather than ask the daemon for a pane with no NATS server.
+test("refuses a profile envoy.json whose NATS seed Envoy refuses", () => {
+  const agent = path.join(home, ".omp", "profiles", "rig-seed-profile", "agent");
+  mkdirSync(agent, { recursive: true });
+  const file = path.join(agent, "envoy.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      envoy: {
+        url: "http://rig-listener.internal.example:9020",
+        natsUrls: ["nats://rig-nats.internal.example:4222"],
+        natsSeed: "rig-seed-placeholder",
+      },
+    })
+  );
+
+  expect(() =>
+    workerPane(
+      { rig, port: 13399, profile: "rig-seed-profile" },
+      { ...inherited, ENVOY_NATS_URL: "nats://other-nats.internal.example:4222" },
+      { project: "skillsrig", issue: "LWEVAL-1", role: "tester" },
+      { daemonModule: DAEMON_MODULE }
+    )
+  ).toThrow(
+    `envoy: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
+  );
+}, 600_000);
