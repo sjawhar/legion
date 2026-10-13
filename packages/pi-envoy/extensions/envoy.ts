@@ -403,7 +403,8 @@ process.env.DISPATCH_HOST = "omp";
 // The session's envoy.json, by Oh My Pi's rule: a named profile's `$PI_CODING_AGENT_DIR/envoy.json`,
 // else the file `ENVOY_CONFIG_FILE` names, else the neutral file. The commands the session runs
 // are handed the same file, so a `dispatch` command reads what this session reads. A location that
-// cannot be worked out (a relative `XDG_CONFIG_HOME`) hands nothing on and turns both sections off.
+// cannot be worked out (a relative XDG_CONFIG_HOME, ENVOY_CONFIG_FILE or PI_CODING_AGENT_DIR) hands
+// nothing on and turns both sections off.
 const CONFIG_FILE = sessionConfigFile("omp", process.env);
 if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
 

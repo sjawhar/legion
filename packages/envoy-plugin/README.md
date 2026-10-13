@@ -24,19 +24,24 @@ from a parent process never stands in).
 
 The serve reads one envoy.json: `$OPENCODE_CONFIG_DIR/envoy.json` when `OPENCODE_CONFIG_DIR` is
 set, else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
-with the `dispatch` section of a `<repo>/.envoy/envoy.json` merged over it (its server only with the
-token beside it); an `envoy` section in that checkout's file turns Envoy off, naming it. Its
-`dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
-`natsUrls`, `token`, `natsSeed`) are resolved each on its own: `enabled: false` turns one off, a
-missing file turns both off, and a `token` starting with `!` is a command whose trimmed output is
-the value. `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_TOKEN_FILE`
-and `ENVOY_TOKEN` each override their own field; a file's token goes with a variable's server only
-when it is the file's own. `dispatch.enabled: true` without `dispatch.serverUrl` targets
-`http://localhost:8766`. With Dispatch on, every session also carries the `dispatch-first` skill as
-an instruction file; with Envoy off, the plugin registers no Envoy tool and calls no listener. Why
-a section is off is logged once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, or
-the section's error). `~/.config/opencode/envoy.json` is no longer read: move it with
-`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`.
+with the `dispatch` section of a `<repo>/.envoy/envoy.json` merged over it: its server only with the
+token beside it, and its token only beside its own server. An `envoy` section in that checkout's
+file is not read, which the logged notice says, and a checkout's file that is not valid refuses
+Dispatch alone, only while `DISPATCH_URL` is unset. The chosen file's `dispatch` section
+(`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`, `natsUrls`, `token`,
+`natsSeed`) are resolved each on its own: `enabled: false` turns one off, a missing file
+contributes nothing (each section is then on only when its variables name it), and a `token`
+starting with `!` is a command whose trimmed output is the value. The serve opens no NATS
+connection, so it resolves no `natsUrls` and never runs `natsSeed`. `DISPATCH_URL`,
+`DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_TOKEN_FILE` and `ENVOY_TOKEN` each
+override their own field; a file's token goes with a variable's server only when it is the file's
+own. The `dispatch` command reads the file the `shell.env` hook hands it in `ENVOY_CONFIG_FILE`.
+`dispatch.enabled: true` without `dispatch.serverUrl` targets `http://localhost:8766`. With
+Dispatch on, every session also carries the `dispatch-first` skill as an instruction file; with
+Envoy off, the plugin registers no Envoy tool and calls no listener. Why a section is off is logged
+once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or what a
+checkout's file holds that is not read). `~/.config/opencode/envoy.json` is no longer read: move it
+with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

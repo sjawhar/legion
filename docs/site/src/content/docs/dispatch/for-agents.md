@@ -36,10 +36,11 @@ goes through a `dispatch` command.
    an OpenCode `OPENCODE_CONFIG_DIR` reads the `envoy.json` in that directory and no other. Any
    other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
    `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The
-   `dispatch` command reads the file its session's plugin reads, by that plugin's rule; in a Claude
-   Code subagent's shell, which gets nothing the plugin hands on, it still reads the session's
-   `CLAUDE_CONFIG_DIR`. A token written as `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a
-   command, and what it prints is the token.
+   `dispatch` command reads the file its session's plugin chose, which the plugin hands it in
+   `ENVOY_CONFIG_FILE`; in a Claude Code shell that gets nothing the plugin hands on, as a
+   subagent's can, it still reads the session's `CLAUDE_CONFIG_DIR`. A token written as
+   `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the
+   token.
 
    The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
    but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to

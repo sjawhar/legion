@@ -131,24 +131,28 @@ A session reads one envoy.json, with a section for Dispatch and one for Envoy:
 
 An Oh My Pi profile (`OMP_PROFILE` other than `default`) reads `$PI_CODING_AGENT_DIR/envoy.json`;
 any other session reads the file `ENVOY_CONFIG_FILE` names, else
-`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The `dispatch` section of a
-`<cwd>/.envoy/envoy.json` merges over it, and its server is used only with the token written beside
-it; an `envoy` section there turns Envoy off, naming it. Each section is resolved on
-its own: `enabled: false` turns it off, and a missing file turns both off. A `token` or `natsSeed`
-starting with `!` is a command whose trimmed output is the value (10 s; never run from a
-checkout's file). `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`,
-`ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, `ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each
-override their own field; a file's token goes with `DISPATCH_URL` or `ENVOY_URL` only when it names
-the file's own server, and a file's seed with `ENVOY_NATS_URL` only when it names the file's NATS
-servers, so another server needs its own token or seed variable. `DISPATCH_TOKEN_FILE` (a path
-whose trimmed contents are the token — how the Legion daemon delivers it to a pane) never falls
-back when unreadable. Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
-`http://localhost:8766`, the Go server's listen address. With Envoy off the session has no Envoy
-tools and takes no inbound messages; with Envoy on and no NATS server it keeps the tools and takes
-no inbound messages. When a section is off for a reason worth saying, the session says so once at
-its start: `envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or
-that inbound messages are off. Invalid configuration, an invalid URL, or an empty token makes every
-`dispatch` command exit 2 naming the source of the error.
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The session's `dispatch` command reads the file
+the session chose, which the extension hands it in `ENVOY_CONFIG_FILE`. The `dispatch` section of a
+`<cwd>/.envoy/envoy.json` merges over it: its server is used only with the token written beside it,
+and its token only beside its own server. An `envoy` section there is not read, which the start
+notice says, and a checkout's file that is not valid refuses Dispatch alone, and only while
+`DISPATCH_URL` is unset. Each section is resolved on its own: `enabled: false` turns it off, and a
+missing file contributes nothing, so each section is then on only when its variables name it. A
+`token` or `natsSeed` starting with `!` is a command whose trimmed output is the value (10 s, its
+exit status deciding; never run from a checkout's file). `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`,
+`DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, `ENVOY_TOKEN`,
+`NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field; a file's token goes with
+`DISPATCH_URL` or `ENVOY_URL` only when it names the file's own server, and a file's seed with
+`ENVOY_NATS_URL` only when it names the file's NATS servers, so another server needs its own token
+or seed variable. `DISPATCH_TOKEN_FILE` (a path whose trimmed contents are the token — how the
+Legion daemon delivers it to a pane) never falls back when unreadable. Omitting
+`dispatch.serverUrl` while `dispatch.enabled` is true targets `http://localhost:8766`, the Go
+server's listen address. With Envoy off the session has no Envoy tools and takes no inbound
+messages; with Envoy on and no NATS server it keeps the tools and takes no inbound messages. When
+a section is off for a reason worth saying, the session says so once at its start:
+`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
+checkout's file holds that is not read, or that inbound messages are off. Invalid configuration, an
+invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the error.
 
 `~/.config/opencode/envoy.json` is no longer read; move it with
 `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, and move a

@@ -5,11 +5,11 @@
 ### Changed
 
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else `~/.config/legion/envoy.json`. Move the old file with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move a top-level `natsUrls` into `envoy.natsUrls`.
-- The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE`, so the session's `dispatch` command reads the same file. A subagent's Bash, which gets nothing that hook writes, runs `dispatch` as host `claude` (`CLAUDE_CODE_CHILD_SESSION=1` with `DISPATCH_HOST` unset) on `CLAUDE_CONFIG_DIR`'s file, where it was refused for want of `DISPATCH_HOST`.
-- With Envoy off the channel server lists no tool, refuses each call with `Envoy is off for this session (<path>)`, and exits 0 when stdin ends, instead of failing on `ENVOY_NATS_URL is required`.
-- A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json`, holds only a `dispatch` section, and turns Envoy off when it holds an `envoy` one.
+- The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE` beside `DISPATCH_HOST`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the session's own file. A Bash that lacks what that hook writes, as a subagent's can, runs `dispatch` as host `claude` (`CLAUDE_CODE_CHILD_SESSION=1` with `DISPATCH_HOST` unset) on `CLAUDE_CONFIG_DIR`'s file, where it was refused for want of `DISPATCH_HOST`.
+- With Envoy off the channel server lists no tool, refuses each call with `Envoy is off for this session: <why>`, and exits 0 when stdin ends, instead of failing on `ENVOY_NATS_URL is required`.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json` and configures Dispatch alone: an `envoy` section there is not read, which the channel server's notice says, a checkout's file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset, and a checkout's `dispatch.token` needs its own `dispatch.serverUrl` beside it.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server.
-- The channel server writes one notice to stderr when a section is off: the missing file or the section's error.
+- The channel server writes one notice to stderr when a section is off: the missing file, the section's error, or what a checkout's file holds that is not read.
 - `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
 
 ## [1.0.0]

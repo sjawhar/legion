@@ -7,10 +7,11 @@
 //    append `export DISPATCH_HOST=claude` and `export ENVOY_CONFIG_FILE='<path>'` (the file
 //    Claude Code's rule picks, `$CLAUDE_CONFIG_DIR/envoy.json` when that is set) to
 //    `CLAUDE_ENV_FILE`, which Claude Code sources into every later Bash command of the session,
-//    each unless an earlier SessionStart already wrote that line there. A subagent's Bash takes
-//    nothing from that file (anthropics/claude-code#46696); the `dispatch` command it runs takes
-//    host `claude` from `CLAUDE_CODE_CHILD_SESSION=1` and reads `CLAUDE_CONFIG_DIR` itself. The
-//    path is single-quoted, the one form Claude Code's PowerShell
+//    each unless an earlier SessionStart already wrote that line there. The `dispatch` command
+//    reads the file ENVOY_CONFIG_FILE names whenever DISPATCH_HOST is set. A subagent's Bash can
+//    lack what that file holds (anthropics/claude-code#46696); the `dispatch` command it runs then
+//    takes host `claude` from `CLAUDE_CODE_CHILD_SESSION=1` and reads `CLAUDE_CONFIG_DIR` itself.
+//    The path is single-quoted, the one form Claude Code's PowerShell
 //    bridge also reads. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
 //    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
 // 2. Record the CURRENT session id for this Claude process so the channel

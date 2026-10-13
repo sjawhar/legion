@@ -42,13 +42,13 @@ export interface SessionSettings {
 
 /**
  * The start notice. A chosen file that cannot be read turns both sections off with its one error.
- * A missing file turns both off with its own notice (`missingConfigNotice`, which names a dangling
- * link's target and the old OpenCode file while it is still there); when a variable turned a
- * section on, each section still off is said with the same missing-file text. A section's own
- * error (a token that does not resolve, a command that failed) is said for that section. A file
- * that turns a section off, or holds no section for it, says nothing. What a checkout's file holds
- * that the session does not read is said too: an `envoy` section, and a file that cannot be used
- * while `DISPATCH_URL` replaces it.
+ * A missing file configures neither section: with no variable naming either, its one notice says
+ * both are off (`missingConfigNotice`, which names a dangling link's target and the old OpenCode
+ * file while it is still there); when a variable turned a section on, each section still off is
+ * said with the same missing-file text. A section's own error (a token that does not resolve, a
+ * command that failed) is said for that section. A file that turns a section off, or holds no
+ * section for it, says nothing. What a checkout's file holds that the session does not read is
+ * said too: an `envoy` section, and a file that cannot be used while `DISPATCH_URL` replaces it.
  */
 function startNotice(
   config: EnvoyConfig,

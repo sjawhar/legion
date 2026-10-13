@@ -765,8 +765,8 @@ describe("the dispatch CLI's envoy.json", () => {
     expect(posted?.body).toMatchObject({ actor: { id: "ses-1" } });
   });
 
-  // Claude Code sets CLAUDE_CODE_CHILD_SESSION=1 in every Bash it runs, and a subagent's Bash gets
-  // none of what the bridge's SessionStart hook writes: no DISPATCH_HOST, and whatever
+  // Claude Code sets CLAUDE_CODE_CHILD_SESSION=1 in every Bash it runs, and a subagent's Bash can
+  // get none of what the bridge's SessionStart hook writes: no DISPATCH_HOST, and whatever
   // ENVOY_CONFIG_FILE an outer omp session exported.
   test("a Claude Code shell with no DISPATCH_HOST is host claude, reading CLAUDE_CONFIG_DIR's file ahead of an inherited ENVOY_CONFIG_FILE", async () => {
     const claude = join(stateDir, "claude");

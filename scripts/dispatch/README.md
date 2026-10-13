@@ -19,14 +19,15 @@ bun scripts/dispatch/ask-census.ts \
 
 `--project` is required and repeats: name each Dispatch project the census reads.
 
-The script resolves Dispatch with `activeDispatchConfig`
-(`packages/envoy-client/src/dispatch-config.ts`) under harness `command`, from the envoy.json that
+The script resolves Dispatch with `resolveDispatchConfig`
+(`packages/envoy-client/src/session-settings.ts`) under harness `command`, from the envoy.json that
 `ENVOY_CONFIG_FILE` names, else the omp profile's, `CLAUDE_CONFIG_DIR`'s or `OPENCODE_CONFIG_DIR`'s,
 else `~/.config/legion/envoy.json`: the URL from `DISPATCH_URL`, else `dispatch.serverUrl` with
 `dispatch.enabled`; the token from `DISPATCH_TOKEN_FILE`, else `DISPATCH_TOKEN`, else
-`dispatch.token`. It prints total asks, decision blocks, standalone question asks, approval
-requests, per-issue counts, approval rounds, every standalone question with a blank `code` column,
-and a per-session table.
+`dispatch.token`. With Dispatch off it stops with `Dispatch is not configured: <notice>`, the
+notice saying which file and why, or `dispatch config: <error>`. It prints total asks, decision
+blocks, standalone question asks, approval requests, per-issue counts, approval rounds, every
+standalone question with a blank `code` column, and a per-session table.
 
 A session still running an old plugin can be removed from the measurement with a repeated
 `--exclude-session <id>`. The summary prints how many asks were excluded.

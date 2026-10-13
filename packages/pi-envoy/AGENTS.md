@@ -176,16 +176,19 @@ chosen at module load by Oh My Pi's rule: with `OMP_PROFILE` naming a profile ot
 `default`, `$PI_CODING_AGENT_DIR/envoy.json`; otherwise the file `ENVOY_CONFIG_FILE` names, else
 `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The module sets `ENVOY_CONFIG_FILE` to that
 path beside `PATH` and `DISPATCH_HOST` (below), so the `dispatch` command a shell command runs,
-which reads its file by the same Oh My Pi rule (`DISPATCH_HOST=omp`), reads the same file, and so
-does `@sjawhar/pi-legion` in the same process. The `dispatch` section of a checkout's
-`<cwd>/.envoy/envoy.json` merges over it; its server is used only with the token written beside
-it, and a `!` value in it is refused. An `envoy` section in the checkout's file turns Envoy off,
-naming it, and leaves Dispatch as it is. The file holds a `dispatch` section
-(`enabled`, `serverUrl`, `token`) and an `envoy` section (`enabled`, `url`, `natsUrls`, `token`,
-`natsSeed`), each strict and each resolved on its own: one section's failure leaves the other as
-it is, `enabled: false` turns a section off whatever the variables say, and a missing file turns
-both off. A `token` or `natsSeed` starting with `!` is a command (`/bin/sh -c`, 10 s, its trimmed
-stdout the value), run once per process and only when its section uses it. `DISPATCH_URL`,
+which reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, reads the same file,
+and so does `@sjawhar/pi-legion` in the same process, by the same Oh My Pi rule. The `dispatch`
+section of a checkout's `<cwd>/.envoy/envoy.json` merges over it: its server is used only with the
+token written beside it, its token only beside its own server, and a `!` value in it is refused. An
+`envoy` section in the checkout's file is not read, which the start notice says, and a checkout's
+file that cannot be read or is not valid refuses Dispatch alone, only while `DISPATCH_URL` is unset.
+The file holds a `dispatch` section (`enabled`, `serverUrl`, `token`) and an `envoy` section
+(`enabled`, `url`, `natsUrls`, `token`, `natsSeed`), each strict and each resolved on its own: a
+chosen file that is not valid turns both sections off, `enabled: false` turns a section off
+whatever the variables say, and a missing file contributes nothing, so each section is then on
+only when its variables name it. A `token` or `natsSeed` starting with `!` is a command
+(`/bin/sh -c` in its own process group, 10 s, its exit status deciding, its trimmed stdout the
+value), run once per process and only when its section uses it. `DISPATCH_URL`,
 `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`,
 `ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field, which is
 how a Legion pane gets the Dispatch and Envoy its daemon names. A file's token goes with
@@ -195,14 +198,17 @@ otherwise the section is off with an error naming the variable to set.
 
 With Envoy off the extension builds no listener client, registers no Envoy tool and no `/whoami`,
 and opens no NATS connection; the Legion claim bridge and every other listener call go through one
-accessor (`activeEnvoy`) that throws `Envoy is off for this session (<path>)`. With Envoy on and no
-NATS server, inbound messages are off and the tools still work. Dispatch on at load adds the
-`dispatch-first` context. A top-level `session_start` shows one notice when a section is off for a
-reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and Envoy are
-off`, which also names `~/.config/opencode/envoy.json` while that old file is still there), a
-section's error, or that inbound messages are off; a file that turns a section off says nothing. A
-file location that cannot be worked out (a relative `XDG_CONFIG_HOME`) still loads the extension,
-with both sections off, nothing handed on, and that refusal as the notice.
+accessor (`requireEnvoy`) that throws `Envoy is off for this session: <why>`, the section's notice
+or error. With Envoy on and no NATS server, inbound messages are off and the tools still work.
+Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the file stopped
+configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
+throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
+off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
+Envoy are off`, which also names `~/.config/opencode/envoy.json` while that old file is still
+there), a section's error, what a checkout's file holds that the session does not read, or that
+inbound messages are off; a file that turns a section off says nothing. A file location that cannot
+be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`) still
+loads the extension, with both sections off, nothing handed on, and that refusal as the notice.
 
 ## The `dispatch` command
 

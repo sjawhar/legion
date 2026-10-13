@@ -26,10 +26,11 @@ events and sends them to the current Claude Code session as supported
   each, which Claude Code sources into every later Bash command of the session, records the current
   session id for the channel server, and puts the session's open Dispatch asks into the model's
   context (`Dispatch authored-ask summary:`; `unavailable: <reason>` when Dispatch cannot be
-  reached; nothing when Dispatch is not configured). A subagent's Bash does not take what the hook
-  writes there (anthropics/claude-code#46696); its `dispatch` command, finding no `DISPATCH_HOST`,
-  takes host `claude` from the `CLAUDE_CODE_CHILD_SESSION=1` Claude Code sets in every Bash, and
-  reads `CLAUDE_CONFIG_DIR` itself. With Dispatch configured,
+  reached; nothing when Dispatch is not configured). The `dispatch` command reads the file
+  `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the
+  hook writes there (anthropics/claude-code#46696); its `dispatch` command, finding no
+  `DISPATCH_HOST`, then takes host `claude` from the `CLAUDE_CODE_CHILD_SESSION=1` Claude Code sets
+  in every Bash, and reads `CLAUDE_CONFIG_DIR` itself. With Dispatch configured,
   `dist/session-hook.js dispatch-first` puts the `dispatch-first` skill into the context of every
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
@@ -195,19 +196,27 @@ skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy 
 
 The plugin reads one envoy.json: `$CLAUDE_CONFIG_DIR/envoy.json` when `CLAUDE_CONFIG_DIR` is set,
 else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
-with the `dispatch` section of a `<cwd>/.envoy/envoy.json` merged over it (its server only with the
-token beside it); an `envoy` section in that checkout's file turns Envoy off, naming it. Its
-`dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
-`natsUrls`, `token`, `natsSeed`) are resolved each on its own; `enabled: false` turns one off, a
-missing file turns both off, and a `token` or `natsSeed` starting with `!` is a command whose
-trimmed output is the value. `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`,
-`ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, `ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED`
-each override their own field; a file's token or seed goes with a variable's server only when it is
-the file's own. With Envoy off the channel server lists no tool, refuses every call with
-`Envoy is off for this session (<path>)`, subscribes nothing, and exits 0 when stdin ends; with
-Envoy on it needs a NATS server (`envoy.natsUrls` or `ENVOY_NATS_URL`). Why a section is off is
-written once to its stderr (`envoy-channel: no envoy.json at <path>: Dispatch and Envoy are off`,
-or the section's error). The variables are inherited from the environment that launched `claude`
+with the `dispatch` section of a `<cwd>/.envoy/envoy.json` merged over it: its server only with the
+token beside it, and its token only beside its own server. An `envoy` section in that checkout's
+file is not read, which the channel server's notice says, and a checkout's file that is not valid
+refuses Dispatch alone, only while `DISPATCH_URL` is unset. The chosen file's `dispatch` section
+(`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`, `natsUrls`, `token`,
+`natsSeed`) are resolved each on its own; `enabled: false` turns one off, a missing file
+contributes nothing (each section is then on only when its variables name it), and a `token` or
+`natsSeed` starting with `!` is a command whose trimmed output is the value. `DISPATCH_URL`,
+`DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`,
+`ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field; a file's
+token or seed goes with a variable's server only when it is the file's own. The `open-asks` hook
+hands the file on to the session's Bash as `ENVOY_CONFIG_FILE` beside `DISPATCH_HOST=claude`, and
+the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set; a
+Bash with neither, as a subagent's can be, has `CLAUDE_CODE_CHILD_SESSION=1` and takes this plugin's
+rule. With Envoy off the channel server lists no tool, refuses every call with
+`Envoy is off for this session: <why>` (the section's notice or error), subscribes nothing, and
+exits 0 when stdin ends; with Envoy on it needs a NATS server (`envoy.natsUrls` or
+`ENVOY_NATS_URL`). Why a section is off is written once to its stderr
+(`envoy-channel: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or what
+a checkout's file holds that is not read). The variables are inherited from the environment that
+launched `claude`
 — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because an unset `${VAR}` in `.mcp.json`
 is substituted as the literal text, which used to register a session as the literal id
 `${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
