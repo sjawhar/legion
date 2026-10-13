@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   symlinkSync,
   writeFileSync,
@@ -10,7 +11,7 @@ import {
 import * as os from "node:os";
 import * as path from "node:path";
 import { envoySettings } from "../defaults";
-import { dispatchSettings } from "../dispatch-config";
+import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import {
   type EnvoyConfig,
   type EnvoyHarness,
@@ -585,36 +586,87 @@ describe("a ! command in envoy.json", () => {
     }
   });
 
-  test("that exits 0 is its value, even when a process it started holds its stdout past 10 s", () => {
+  /** Runs `body` with TMPDIR a scratch directory, where a `!` command keeps its output, and
+   * returns what is left in it afterwards. */
+  function inScratchTmp(body: () => void): string[] {
+    const scratch = tempDir();
+    const original = process.env.TMPDIR;
+    process.env.TMPDIR = scratch;
+    try {
+      body();
+    } finally {
+      if (original === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = original;
+    }
+    return readdirSync(scratch);
+  }
+
+  /** Whether the process with this pid is gone within a second: a killed orphan is a zombie until
+   * the process it was reparented to reaps it, and `kill(pid, 0)` still answers for a zombie. */
+  function gone(pid: number): boolean {
+    for (const deadline = Date.now() + 1_000; Date.now() < deadline; Bun.sleepSync(20)) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  test("that exits 0 is its value at once, and a process it left running is killed", () => {
     const home = tempDir();
     const env = commandEnvironment(home);
+    const pidFile = path.join(home, "child.pid");
     const file = writeFile(path.join(home, "envoy.json"), {
-      dispatch: { ...dispatchOn, token: `!sleep 12 & echo lingering-secret # ${home}` },
+      dispatch: { ...dispatchOn, token: `!sleep 30 & echo $! > ${pidFile}; echo lingering-secret` },
     });
-    expect(dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }))).toEqual({
+    const cwd = tempDir();
+    let dispatch: DispatchConfigResolution | undefined;
+    let elapsed = 0;
+    const left = inScratchTmp(() => {
+      const started = Date.now();
+      dispatch = dispatchSettings(env, readEnvoyConfig(file, env, { cwd }));
+      elapsed = Date.now() - started;
+    });
+    expect(dispatch).toEqual({
       enabled: true,
       url: "https://dispatch.example",
       token: "lingering-secret",
     });
+    expect(elapsed).toBeLessThan(2_000);
+    const child = Number(readFileSync(pidFile, "utf-8").trim());
+    expect(child).toBeGreaterThan(0);
+    expect(gone(child)).toBe(true);
+    expect(left).toEqual([]);
   }, 20_000);
 
   test("still running after 10 s is an error naming the field and the file, and every process it started is killed", () => {
     const home = tempDir();
     const env = commandEnvironment(home);
-    // A duration no other process on the machine sleeps for, so pgrep finds only this one.
-    const nap = `29.${Date.now() % 1_000_000}`;
+    const pidFile = path.join(home, "child.pid");
     const file = writeFile(path.join(home, "envoy.json"), {
-      dispatch: { ...dispatchOn, token: `!echo canary; sleep ${nap} & sleep 30 # ${home}` },
+      dispatch: {
+        ...dispatchOn,
+        token: `!echo canary; sleep 40 & echo $! > ${pidFile}; sleep 30 # ${home}`,
+      },
     });
-    const started = Date.now();
-    const dispatch = dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() }));
-    expect(Date.now() - started).toBeLessThan(15_000);
+    const cwd = tempDir();
+    let dispatch: DispatchConfigResolution | undefined;
+    let elapsed = 0;
+    const left = inScratchTmp(() => {
+      const started = Date.now();
+      dispatch = dispatchSettings(env, readEnvoyConfig(file, env, { cwd }));
+      elapsed = Date.now() - started;
+    });
+    expect(elapsed).toBeLessThan(15_000);
     expect(dispatch).toEqual({
       enabled: false,
       notice: null,
       error: `${file}: dispatch.token's command did not finish within 10 s`,
     });
-    expect(Bun.spawnSync(["pgrep", "-f", `sleep ${nap}`]).exitCode).toBe(1);
+    expect(gone(Number(readFileSync(pidFile, "utf-8").trim()))).toBe(true);
+    expect(left).toEqual([]);
   }, 20_000);
 
   test("whose field a variable overrides, or whose section is off, is not run", () => {

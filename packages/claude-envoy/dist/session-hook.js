@@ -18349,8 +18349,18 @@ function readDispatchFirstContext(skillFile) {
 }
 
 // ../envoy-client/src/envoy-config.ts
-import { existsSync, lstatSync, readFileSync as readFileSync2, readlinkSync } from "fs";
-import { homedir } from "os";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync as readFileSync2,
+  readlinkSync,
+  rmSync
+} from "fs";
+import { homedir, tmpdir } from "os";
 import * as path from "path";
 var COMMAND_TIMEOUT_MS = 1e4;
 function nonEmpty(value) {
@@ -18586,35 +18596,45 @@ function runCommand(command, env) {
     if (variable !== undefined)
       childEnv[name] = variable;
   }
-  let result;
+  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
   try {
-    result = Bun.spawnSync(["/bin/sh", "-c", command], {
-      env: childEnv,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: COMMAND_TIMEOUT_MS,
-      detached: true
-    });
-  } catch (error48) {
-    return { failure: `could not start: ${messageFor(error48)}` };
-  }
-  if (result.success) {
-    const value = result.stdout.toString().trim();
+    chmodSync(directory, 448);
+    const output = path.join(directory, "stdout");
+    const fd = openSync(output, "wx", 384);
+    let result;
+    try {
+      result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        env: childEnv,
+        stdin: "ignore",
+        stdout: fd,
+        stderr: "ignore",
+        timeout: COMMAND_TIMEOUT_MS,
+        detached: true
+      });
+    } catch (error48) {
+      return { failure: `could not start: ${messageFor(error48)}` };
+    } finally {
+      closeSync(fd);
+    }
+    try {
+      process.kill(-result.pid, "SIGKILL");
+    } catch {}
+    if (result.exitedDueToTimeout) {
+      return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+    }
+    if (!result.success) {
+      return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
+    }
+    const value = readFileSync2(output, "utf-8").trim();
     if (value.length === 0)
       return { failure: "printed nothing" };
     if (!sendable(value)) {
       return { failure: "printed more than one line, or whitespace inside its value" };
     }
     return { value };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
-  if (result.exitedDueToTimeout) {
-    try {
-      process.kill(-result.pid, "SIGKILL");
-    } catch {}
-    return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
-  }
-  return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
 }
 function fileValue(value, field, filePath, env) {
   if (!value.startsWith("!")) {

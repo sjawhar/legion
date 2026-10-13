@@ -1,5 +1,15 @@
-import { existsSync, lstatSync, readFileSync, readlinkSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  lstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import type { SyncSubprocess } from "bun";
 import { z } from "zod";
@@ -376,50 +386,62 @@ function runCommand(command: string, env: EnvoyConfigEnvironment): CommandOutcom
   for (const [name, variable] of Object.entries(env)) {
     if (variable !== undefined) childEnv[name] = variable;
   }
-  let result: SyncSubprocess<"pipe", "pipe">;
+  // stdout goes to a file in a private directory, so the wait is for the shell alone: a pipe would
+  // be held open by any process the command left running, until the timeout.
+  const directory = mkdtempSync(path.join(tmpdir(), "envoy-command-"));
   try {
-    // Its own process group, so a command that runs out of time is killed with every process it
-    // started.
-    result = Bun.spawnSync(["/bin/sh", "-c", command], {
-      env: childEnv,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      timeout: COMMAND_TIMEOUT_MS,
-      detached: true,
-    });
-  } catch (error) {
-    return { failure: `could not start: ${messageFor(error)}` };
-  }
-  // A command that exited 0 by itself has printed its value, even when a process it left running
-  // held its stdout open until the timeout.
-  if (result.success) {
-    const value = result.stdout.toString().trim();
-    if (value.length === 0) return { failure: "printed nothing" };
-    if (!sendable(value)) {
-      return { failure: "printed more than one line, or whitespace inside its value" };
+    chmodSync(directory, 0o700);
+    const output = path.join(directory, "stdout");
+    const fd = openSync(output, "wx", 0o600);
+    let result: SyncSubprocess<number, "ignore">;
+    try {
+      // Its own process group, so every process the command started is killed with it.
+      result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        env: childEnv,
+        stdin: "ignore",
+        stdout: fd,
+        stderr: "ignore",
+        timeout: COMMAND_TIMEOUT_MS,
+        detached: true,
+      });
+    } catch (error) {
+      return { failure: `could not start: ${messageFor(error)}` };
+    } finally {
+      closeSync(fd);
     }
-    return { value };
-  }
-  if (result.exitedDueToTimeout) {
+    // Whatever the outcome, nothing the command started outlives it, and so nothing it left
+    // running can change the value read below.
     try {
       process.kill(-result.pid, "SIGKILL");
     } catch {
       // The group is already gone.
     }
-    return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+    if (result.exitedDueToTimeout) {
+      return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+    }
+    if (!result.success) {
+      return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
+    }
+    const value = readFileSync(output, "utf-8").trim();
+    if (value.length === 0) return { failure: "printed nothing" };
+    if (!sendable(value)) {
+      return { failure: "printed more than one line, or whitespace inside its value" };
+    }
+    return { value };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
   }
-  return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
 }
 
 /**
  * A value from the chosen file: as written, or, for one starting with `!`, its command's trimmed
  * stdout. The command runs under `/bin/sh -c` with `env`, in its own process group, for at most
  * 10 s, once per process: its outcome, value or failure, is kept by command. Its exit status
- * decides: a non-zero exit, a timeout (which kills the group) or empty output throws naming the
- * field and the file. A value with whitespace or a control character inside it, as written or as
- * printed, throws too, since it cannot be sent as one bearer. No error carries the value or
- * either stream.
+ * decides, and the wait is for the shell alone: once it exits or runs out of time, every process
+ * of its group still running is killed, then its output is read. A non-zero exit, a timeout or
+ * empty output throws naming the field and the file. A value with whitespace or a control
+ * character inside it, as written or as printed, throws too, since it cannot be sent as one
+ * bearer. No error carries the value or either stream.
  */
 export function fileValue(
   value: string,
