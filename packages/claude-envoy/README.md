@@ -21,7 +21,10 @@ events and sends them to the current Claude Code session as supported
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
-  resume, clear, compact, fork). It writes `export DISPATCH_HOST=claude` and
+  resume, clear, compact, fork). Each of its hooks has a 20 s `timeout` (Claude Code's field is in
+  seconds): every hook resolves Dispatch first, and a `!` `dispatch.token` may run for up to 10 s in
+  the hook's own process after Bun starts, so the hook outlasts it and says why rather than being
+  killed silently. It writes `export DISPATCH_HOST=claude` and
   `export ENVOY_CONFIG_FILE='<path>'` (the session's envoy.json, below) to `CLAUDE_ENV_FILE` once
   each, which Claude Code sources into every later Bash command of the session, records the current
   session id for the channel server, and puts the session's open Dispatch asks into the model's
