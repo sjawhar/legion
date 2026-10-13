@@ -4,6 +4,16 @@
 
 ### Changed
 
+- Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
+  `resolveDispatchConfig` and `activeDispatchConfig` take `{ harness, cwd }` and read the file
+  `envoyConfigPath(harness, env)` names, with the checkout's `.envoy/envoy.json` merged over it.
+  `DISPATCH_URL` with the file's token at another origin than the file's `dispatch.serverUrl` is
+  refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`, and `dispatch.enabled: false` is off
+  whatever the variables say.
+- `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
+  `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
+- The `dispatch` command resolves its envoy.json with harness `command`; a missing file prints
+  `dispatch: no envoy.json at <path>: Dispatch and Envoy are off` and exits 2.
 - The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
   Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000
   characters: past it the result text and picture lines are written whole to a file the output
@@ -22,9 +32,24 @@
 ### Removed
 
 - `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
+- `envoyDefaultsFromEnvironment`, replaced by `envoySettings`.
+- `~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read; a missing
+  file's notice names the first when it is still there. A top-level `natsUrls` is refused, naming
+  `envoy.natsUrls`.
 
 ### Added
 
+- `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
+  else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a command tries `ENVOY_CONFIG_FILE`
+  and then each harness's directory first; a relative `XDG_CONFIG_HOME` is refused) and
+  `readEnvoyConfig`, which validates both sections strictly and runs a `token` or `natsSeed`
+  starting with `!` as a command (10 s, once per process, never in a checkout's file, its output
+  never in an error).
+- `envoySettings(env, config)`: the Envoy a session uses, `{ enabled: true, url, natsUrls, token,
+  natsSeed, heartbeatMs }` or `{ enabled: false, notice, error }`, each variable overriding its own
+  field; `ENVOY_URL` with the file's token at another origin is refused.
+- `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
+  `activeDispatchConfig` for a caller that has already read its envoy.json.
 - `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line
   each in document order, indented under the block holding it: id, type, token, anchored comments
   and asks, and opening words sliced from the live markdown by the block's byte range. Under a

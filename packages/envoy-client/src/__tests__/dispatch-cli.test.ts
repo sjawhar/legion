@@ -640,6 +640,78 @@ describe("the dispatch CLI", () => {
   });
 });
 
+describe("the dispatch CLI's envoy.json", () => {
+  /** No Dispatch in the environment: the command reads it from a file. */
+  const fromFile = { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined };
+
+  /** Writes an envoy.json naming the test server into `dir`, returning its path. */
+  function serverConfig(dir: string): string {
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "envoy.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: "test-token",
+        },
+      })
+    );
+    return file;
+  }
+
+  /** A directory whose envoy.json is not JSON, so a command that reads it exits 2. */
+  function brokenConfigDirectory(): string {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-cli-broken-"));
+    writeFileSync(join(dir, "envoy.json"), "{not json");
+    return dir;
+  }
+
+  test("reads the file ENVOY_CONFIG_FILE names ahead of every harness directory", async () => {
+    const file = serverConfig(join(stateDir, "handed"));
+    const { code, stdout } = await run(["projects"], {
+      ...fromFile,
+      ENVOY_CONFIG_FILE: file,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    expect(code).toBe(0);
+  });
+
+  test("without ENVOY_CONFIG_FILE, reads the omp profile, then CLAUDE_CONFIG_DIR, then the neutral file", async () => {
+    const profile = join(stateDir, "profile");
+    serverConfig(profile);
+    const profileRun = await run(["projects"], {
+      ...fromFile,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: profile,
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(profileRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+
+    const claude = join(stateDir, "claude");
+    serverConfig(claude);
+    const subagent = await run(["projects"], { ...fromFile, CLAUDE_CONFIG_DIR: claude });
+    expect(subagent.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+
+    serverConfig(join(stateDir, ".config", "legion"));
+    const neutral = await run(["projects"], fromFile);
+    expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+  });
+
+  test("a missing file prints the notice and exits 2, sending nothing", async () => {
+    const { code, stdout } = await run(["projects"], fromFile);
+    expect(stdout).toBe(
+      `dispatch: no envoy.json at ${join(stateDir, ".config", "legion", "envoy.json")}: Dispatch and Envoy are off\n`
+    );
+    expect(code).toBe(2);
+    expect(requests).toEqual([]);
+  });
+});
+
 describe("fitOutput", () => {
   const write = (text: string): string => `/state/out/${text.length}.md`;
 

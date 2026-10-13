@@ -1,5 +1,9 @@
 import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
-import { type ActiveDispatchConfig, activeDispatchConfig } from "./dispatch-config";
+import {
+  type ActiveDispatchConfig,
+  activeDispatchSettings,
+  dispatchSettings,
+} from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { executeDispatchTool } from "./dispatch-execute";
 import {
@@ -14,6 +18,7 @@ import {
   writePicture,
 } from "./dispatch-session-state";
 import { dispatchFollowNotice } from "./dispatch-subscribe";
+import { envoyConfigPath, readEnvoyConfig } from "./envoy-config";
 import { messageFor } from "./errors";
 import { ToolInputError } from "./tool-input-errors";
 
@@ -162,15 +167,20 @@ export async function runDispatchCli(
   }
 
   let config: ActiveDispatchConfig | null;
+  let notice: string | null;
   try {
-    config = activeDispatchConfig(env, { cwd: io.cwd });
+    const envoyConfig = readEnvoyConfig(envoyConfigPath("command", env), env, { cwd: io.cwd });
+    notice = envoyConfig.notice;
+    config = activeDispatchSettings(dispatchSettings(env, envoyConfig));
   } catch (error) {
     print(`dispatch: ${messageFor(error)}`);
     return USAGE;
   }
   if (config === null) {
     print(
-      "dispatch: Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)"
+      notice !== null
+        ? `dispatch: ${notice}`
+        : "dispatch: Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)"
     );
     return USAGE;
   }
