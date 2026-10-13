@@ -2787,7 +2787,9 @@ else
     [ "$whoami" = "$want" ] || fail "the pod's kubectl answered as $whoami, not $want"
     pod_exec "$block_pod" architect env KUBECONFIG="$block_kubeconfig" kubectl -n "$namespace" auth can-i --list \
       >"$evidence/deployment-block-can-i.txt" 2>&1 || fail "kubectl auth can-i --list failed in pod $block_pod"
-    note "what $whoami may do in $namespace: $evidence/deployment-block-can-i.txt ($(($(wc -l <"$evidence/deployment-block-can-i.txt") - 1)) rules)"
+    # On EKS kubectl prints a warning line above the table (its webhook authorizer cannot list every
+    # rule), so the rows are the lines after the header.
+    note "what $whoami may do in $namespace: $evidence/deployment-block-can-i.txt ($(awk 'seen { n++ } /^Resources/ { seen = 1 } END { print n + 0 }' "$evidence/deployment-block-can-i.txt") rules)"
   fi
   pass
 fi
