@@ -15,6 +15,7 @@ import {
   parseInboxSearch,
   parseIssuePath,
   parseProjectPath,
+  pictureReference,
   referenceRouteFromHref,
   referenceTargetKind,
   routeHasMargin,
@@ -362,6 +363,46 @@ test("an artifact of an agent's conversation is referenced under its session", (
   expect(buildDispatchReference(documentRoute(picture, 3))).toBe(
     "dispatch://agent/ses-1/artifact/shot-png@v3"
   );
+});
+
+test("a picture is a Dispatch reference only when its source parses as one, captioned by its alt or the artifact's slug", () => {
+  // Another website, a `dispatch://` string the grammar refuses, and a picture with no source at
+  // all are no reference: the caller draws them as it draws any picture.
+  expect(
+    pictureReference({ alt: "shot.png", src: "https://example.test/shot.png" })
+  ).toBeUndefined();
+  expect(pictureReference({ src: "dispatch://not a reference" })).toBeUndefined();
+  expect(pictureReference({})).toBeUndefined();
+
+  // A reference to something other than an artifact names no artifact; one to an artifact without
+  // a version names it unpinned. Both keep the source as written.
+  expect(pictureReference({ src: "dispatch://CORE-1/ask/a1" })).toEqual({
+    caption: "",
+    named: undefined,
+    route: { id: "a1", key: "CORE-1", kind: "ask" },
+    source: "dispatch://CORE-1/ask/a1",
+  });
+  expect(pictureReference({ src: "dispatch://CORE-1/artifact/notes-md" })).toEqual({
+    caption: "notes-md",
+    named: { owner: { issue: "CORE-1" }, slug: "notes-md", version: undefined },
+    route: { key: "CORE-1", kind: "artifact", slug: "notes-md" },
+    source: "dispatch://CORE-1/artifact/notes-md",
+  });
+
+  // The caption is the trimmed alt, or the slug when the alt is blank.
+  const pinned = {
+    named: { owner: { issue: "CORE-1" }, slug: "shot-png", version: 1 },
+    route: { key: "CORE-1", kind: "artifact" as const, slug: "shot-png", version: 1 },
+    source: "dispatch://CORE-1/artifact/shot-png@v1",
+  };
+  expect(pictureReference({ alt: "shot.png", src: pinned.source })).toEqual({
+    ...pinned,
+    caption: "shot.png",
+  });
+  expect(pictureReference({ alt: "  ", src: pinned.source })).toEqual({
+    ...pinned,
+    caption: "shot-png",
+  });
 });
 
 test("a dashed key is never a project route and a bare project is never an issue route", () => {

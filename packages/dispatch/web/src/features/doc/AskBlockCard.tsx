@@ -134,6 +134,7 @@ export function AskBlockCard({
           <AskCard
             ask={ask}
             frame="block"
+            markRead
             onAnswered={onAnswered}
             owner={owner}
             thread="collapsed"

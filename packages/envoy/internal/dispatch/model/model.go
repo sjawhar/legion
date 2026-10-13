@@ -906,6 +906,39 @@ type MyAnswersResponse struct {
 	Offset int           `json:"offset"`
 }
 
+// MyReplyReply is the newest write someone else made in a thread on the Replies page: a reply (a
+// comment or a message), or the ask's answer, whose ID is the ask's, whose author is the answerer
+// and whose first line is the answer's options and text.
+type MyReplyReply struct {
+	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
+	Author    Actor     `json:"author"`
+	FirstLine string    `json:"first_line"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// MyReplyRow is one thread the caller wrote in where someone else has written since the caller
+// last read it: an ask's thread, a comment thread by its root, or an issue message thread by its
+// root. Ref is the SPA route of the thread's root, never the reply's.
+type MyReplyRow struct {
+	ThreadID string           `json:"thread_id"`
+	Kind     string           `json:"kind"`
+	Ref      string           `json:"ref"`
+	Issue    *OpenAskIssue    `json:"issue,omitempty"`
+	Document *OpenAskDocument `json:"document,omitempty"`
+	Subject  string           `json:"subject"`
+	Reply    MyReplyReply     `json:"reply"`
+}
+
+// MyRepliesResponse is a page of the caller's unread threads, newest reply first, and how many
+// there are in all.
+type MyRepliesResponse struct {
+	Rows   []MyReplyRow `json:"rows"`
+	Total  int          `json:"total"`
+	Limit  int          `json:"limit"`
+	Offset int          `json:"offset"`
+}
+
 // AskResolution records why a question no longer needs a human answer.
 type AskResolution struct {
 	Kind   string    `json:"kind"`
@@ -1156,6 +1189,14 @@ type MessageEventPayload struct {
 type UserAgentStateEventPayload struct {
 	Login     string `json:"login"`
 	SessionID string `json:"session_id"`
+}
+
+// UserThreadStateEventPayload is `user_thread_state.updated`: one viewer's read mark on one thread
+// of the Replies page moved. It names the viewer so their other open tabs and devices drop the row;
+// it is owned by the thread's project, like `user_state.updated`, and never notifies.
+type UserThreadStateEventPayload struct {
+	Login    string `json:"login"`
+	ThreadID string `json:"thread_id"`
 }
 
 // MessageDeliveryEventPayload is the user-visible result of one target delivery attempt.

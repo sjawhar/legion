@@ -26,8 +26,10 @@ import {
   buildProjectPath,
   parseIssuePath,
   parseProjectPath,
+  REPLIES_PATH,
   routeIsInbox,
 } from "../refs/routes";
+import { useRepliesCount } from "../replies/useRepliesCount";
 
 /** One rail entry: a key, its title, and the open-ask count when there is one. */
 function RailRow({
@@ -91,6 +93,7 @@ export function Sidebar({
   const projects = useQuery(projectsQuery());
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
+  const unreadThreads = useRepliesCount();
   const currentIssue = parseIssuePath(location.pathname)?.key;
   const currentProject = parseProjectPath(location.pathname)?.project;
 
@@ -171,6 +174,29 @@ export function Sidebar({
                 className={`rounded-full px-1.5 py-0.5 text-xs ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
               >
                 {unreadRepliesLabel(unreadReplies)}
+              </span>
+            )}
+          </Link>
+        </section>
+        {/* Listed at 0 too, so the page is always one click away; the count shows only above 0,
+            and the link then reads `Replies N`, as the compact header's does. */}
+        <section>
+          <Link
+            aria-current={location.pathname === REPLIES_PATH ? "page" : undefined}
+            className={
+              location.pathname === REPLIES_PATH
+                ? `mt-1 flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railActiveBg} ${railAccentText}`
+                : `mt-1 flex items-baseline gap-2 rounded px-2 py-1.5 text-sm font-medium ${railSecondaryText} ${railHoverBg} ${railHoverText}`
+            }
+            onClick={onNavigate}
+            to={REPLIES_PATH}
+          >
+            <span>Replies</span>
+            {unreadThreads === 0 ? null : (
+              <span
+                className={`rounded-full px-1.5 py-0.5 text-xs ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+              >
+                {unreadThreads}
               </span>
             )}
           </Link>

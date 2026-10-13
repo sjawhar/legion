@@ -1,5 +1,5 @@
-import { type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { type QueryClient, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
 
 import { api } from "../../api/client";
 import { userAgentStateQuery } from "../../api/queries";
@@ -11,6 +11,7 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { compareTimestamps } from "../../lib/timestamps";
+import { useSendMarkOnce } from "../../lib/useSendMarkOnce";
 
 /** The badge an unread count wears wherever it shows: the navigation, the compact header, and
  *  the agent's row. */
@@ -91,24 +92,12 @@ export function storeAgentState(
   }));
 }
 
-/** One read mark a view sent: the key it was sent for and the body that carried it. */
-interface SentMark {
-  body: UserAgentStateInput;
-  key: string;
-}
-
 /**
  * The write both read hooks make: `input(value)` for `sessionId`, once per `dedupeKey(value)`,
  * whenever the server counts one of the session's replies unread, with the answer put into the
- * shared agent-state query. The key, not the value, decides when to write: the effect reruns when
- * the key or the unread count changes, never on a value a caller rebuilds on every
- * render. A failed write is retried twice with backoff; if it still fails while it is the view's
- * latest write, its key is forgotten, so it is sent again when the unread count or the key next
- * changes or the view is reopened, rather than the badge staying up until the session replies
- * once more. Rerunning on the value would instead resend on every render after a failure, for as
- * long as the server kept refusing. A write that a newer key replaced while it was retrying
- * forgets nothing when it fails: the newer write stands for the view, and forgetting its key would
- * send it once more at the next change in the count.
+ * shared agent-state query. The send-once rule, its retries and what a final failure forgets are
+ * `useSendMarkOnce`'s; a change in the unread count wakes it, so a mark that failed for good is
+ * sent again then, rather than the badge staying up until the session replies once more.
  */
 function useSendReadMark<V>(
   sessionId: string,
@@ -118,29 +107,13 @@ function useSendReadMark<V>(
 ): void {
   const queryClient = useQueryClient();
   const unread = useQuery(userAgentStateQuery()).data?.[sessionId]?.unread_replies ?? 0;
-  // The mark this view last sent, so a re-render does not send its key again.
-  const sent = useRef<SentMark | undefined>(undefined);
-  const { mutate } = useMutation({
-    mutationFn: (mark: SentMark) => api.putAgentState(sessionId, mark.body),
-    onError: (_error, mark) => {
-      if (sent.current === mark) sent.current = undefined;
-    },
+  useSendMarkOnce({
+    mark: value === undefined ? undefined : { key: dedupeKey(value), value: input(value) },
     onSuccess: (next) => storeAgentState(queryClient, sessionId, next),
-    retry: 2,
+    send: (body: UserAgentStateInput) => api.putAgentState(sessionId, body),
+    shouldSend: unread !== 0,
+    wake: unread,
   });
-  const key = value === undefined ? undefined : dedupeKey(value);
-  // This render's value, which the effect reads when the key calls for a write.
-  const latest = useRef(value);
-  latest.current = value;
-  useEffect(() => {
-    const current = latest.current;
-    if (unread === 0 || current === undefined || key === undefined || sent.current?.key === key) {
-      return;
-    }
-    const mark = { body: input(current), key };
-    sent.current = mark;
-    mutate(mark);
-  }, [input, key, mutate, unread]);
 }
 
 const ownString = (value: string): string => value;

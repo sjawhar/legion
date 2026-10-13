@@ -569,6 +569,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
 		{name: "architecture source", event: model.Event{Type: "settings.architecture_source.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
+		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := broker.Notify(test.event); got != test.want {

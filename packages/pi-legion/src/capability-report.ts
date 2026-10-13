@@ -496,7 +496,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   ],
   [
     new RegExp(
-      String.raw`((?:api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \ufffe\uffff]*[:=][ \ufffe\uffff]*\\?["']?)(?:[A-Za-z0-9._~+/=*-]|${HELD_SEQUENCE})+`,
+      String.raw`((?:api-key|application-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \ufffe\uffff]*[:=][ \ufffe\uffff]*\\?["']?)(?:[A-Za-z0-9._~+/=*-]|${HELD_SEQUENCE})+`,
       "gi"
     ),
     "$1***",
@@ -525,7 +525,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   ],
   [
     new RegExp(
-      String.raw`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){20,}`,
+      String.raw`\b(sk-|dsp_|ddsat_|ddpat_|ddapp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){20,}`,
       "g"
     ),
     "$1***",

@@ -45,6 +45,28 @@ export const userAgentStateQuery = () =>
     queryFn: () => api.getMyAgentState(),
   });
 
+/** The prefix every Replies query shares: the page, its count, and each owner's unread set. One
+ *  invalidation of it refreshes them all. */
+export const myRepliesKey = ["me", "replies"] as const;
+
+/** The viewer's count of unread threads, from the one-row page's `total`: the header's and the
+ *  sidebar's `Replies N`. */
+export const myRepliesCountQuery = () =>
+  queryOptions({
+    queryKey: [...myRepliesKey, "count"],
+    queryFn: async () => (await api.listMyReplies({ limit: 1 })).total,
+  });
+
+/** One owner's unread threads, which every thread mounted on that owner's page reads to learn
+ *  whether it is unread: one request however many threads the page shows. */
+export const myRepliesOwnerQuery = (
+  owner: { readonly issue: string } | { readonly artifact: string }
+) =>
+  queryOptions({
+    queryKey: [...myRepliesKey, owner],
+    queryFn: () => api.listMyReplies({ ...owner, limit: 200 }),
+  });
+
 /** One session's stored conversations: the direct messages and issue messages sent to it, with
  *  their replies. The Agents page row and the live view read this one key. */
 export const agentMessagesQuery = (sessionId: string) =>

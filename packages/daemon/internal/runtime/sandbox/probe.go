@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,9 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
@@ -116,7 +120,7 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 		return bootprobe.ImageReport{}, fmt.Errorf("image probe: image %q is not pinned by a sha256 digest", r.image)
 	}
 	digest := "sha256:" + hex
-	name := probeName(r.project, hex)
+	name := probeName(r.project, hex, r.probeRun)
 	// The report is the passing attempt's: a transient attempt reports nothing, and a refusal ends
 	// the run. The capacity waits are the run's own count.
 	var report bootprobe.ImageReport
@@ -138,13 +142,61 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 	return report, nil
 }
 
-// probeName is `legion-probe-<project>-<first 12 hex of the digest>`: one per project and image,
-// so a crashed boot's leftover is found by name and replaced rather than accumulating, and two
-// projects probing one image in a namespace never contend for one Sandbox. The project is slugged
-// to fit a DNS label (probePodName, worker-image-probe.ts:108-116).
-func probeName(project, hex string) string {
-	prefix := "legion-probe-"
-	return prefix + dnsName(project, maxNameLength-len(prefix)-1-12) + "-" + hex[:12]
+// probeName is `legion-probe-<project>-<first 12 hex of the digest>`, with `-<run>` after it when
+// run is set. The daemon's runtime sets no run: its probe is one per project and image, so a
+// crashed boot's leftover is found by name and replaced rather than accumulating, and two projects
+// probing one image in a namespace never contend for one Sandbox. A Prober sets a run of its own
+// (newProber), so its Sandbox is never a booting daemon's or another probe-boot's, and neither
+// takes the other's for a leftover (createProbe); a probe-boot leftover ends at its shutdownTime.
+// The project is slugged to fit a DNS label (probePodName, worker-image-probe.ts:108-116), shorter
+// by what the run takes.
+func probeName(project, hex, run string) string {
+	prefix, suffix := "legion-probe-", "-"+hex[:12]
+	if run != "" {
+		suffix += "-" + run
+	}
+	return prefix + dnsName(project, maxNameLength-len(prefix)-len(suffix)) + suffix
+}
+
+// Prober is the runtime for the image probe alone: `legion probe-boot` builds it to run the probe a
+// booting daemon runs (ProbeImage) from the daemon's own configuration, under the caller's
+// credentials, with no workflow behind it. Its probe Sandbox is named for its own run (probeName),
+// so it may run while that project's daemon boots, or beside another probe-boot.
+type Prober struct{ r *Runtime }
+
+// NewProber builds a Prober over rc's clients (newProber).
+func NewProber(ctx context.Context, rc *rest.Config, opts Options) (*Prober, error) {
+	dyn, kube, err := clients(rc)
+	if err != nil {
+		return nil, err
+	}
+	return newProber(ctx, dyn, kube, opts)
+}
+
+// newProber builds a Prober from opts, which need none of what only supervision reads
+// (configureProber), draws its probe run, and starts its Sandbox and pod informers for ctx's
+// lifetime as New does, and nothing else: no refresher of the roles' gh files, since it writes no
+// role's Secret.
+func newProber(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface, opts Options) (*Prober, error) {
+	r, err := configureProber(opts)
+	if err != nil {
+		return nil, err
+	}
+	run := make([]byte, 4)
+	if _, err := rand.Read(run); err != nil {
+		return nil, fmt.Errorf("sandbox runtime: draw the probe run: %w", err)
+	}
+	r.probeRun = fmt.Sprintf("%x", run)
+	if err := r.startInformers(ctx, dyn, kube); err != nil {
+		return nil, err
+	}
+	return &Prober{r: r}, nil
+}
+
+// ProbeImage is Runtime.ProbeImage: the same probe Sandbox, under the Prober's own name, judged the
+// same way.
+func (p *Prober) ProbeImage(ctx context.Context, probe ImageProbe) (bootprobe.ImageReport, error) {
+	return p.r.ProbeImage(ctx, probe)
 }
 
 // probeAttempt is one run of the probe Sandbox: create it (replacing this project's leftover),
@@ -288,9 +340,11 @@ func unlessStopped(ctx context.Context, err error, detail string) bootprobe.Outc
 }
 
 // createProbe creates the probe Sandbox and answers its uid. A Sandbox already holding the name is
-// this daemon's leftover only when it carries this project's label — the name is project-scoped,
-// so anything else is another deployment's object, not this daemon's to delete — in which case it
-// is deleted, its pod waited out, and the create repeated (worker-image-probe.ts:369-408).
+// a leftover of this runtime's own probe only when it carries this project's label — the name is
+// project-scoped, so anything else is another deployment's object, not this runtime's to delete —
+// in which case it is deleted, its pod waited out, and the create repeated
+// (worker-image-probe.ts:369-408). The name is the daemon's for every boot of the project and image,
+// and a Prober's for its run alone (probeName), so neither ever meets the other's Sandbox here.
 func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest func() (*unstructured.Unstructured, error), budget time.Duration) (types.UID, bootprobe.Outcome, bool) {
 	create := func() (types.UID, error) {
 		object, err := manifest()

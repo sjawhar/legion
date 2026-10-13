@@ -63,32 +63,37 @@ const recheckInterval = 500 * time.Millisecond
 // Runtime is the Agent Sandbox runtime. Build one with New.
 type Runtime struct {
 	namespace, project, image, storageClass string
-	volumeSize                              resource.Quantity
-	scheduling                              Scheduling
-	resources                               map[claim.Role]corev1.ResourceRequirements
-	streamURL, daemonURL, envoyURL          string
-	dispatchURL, dispatchToken              string
-	natsURLs                                []string
-	tools                                   Tools
-	pod                                     Pod
-	providerKeys                            map[string]string
-	providersSecrets                        []string
-	natsUser                                string
-	sessionDSNKey                           string
-	agentSecrets                            *AgentSecrets
-	agent                                   []string
-	bootTimeout                             time.Duration
-	terminationGrace                        time.Duration
-	probeInterval                           time.Duration
-	adoptTimeout                            time.Duration
-	tokens                                  ProvisionTokens
-	gitHubCredential                        runtime.GitHubCredential
-	store                                   Store
-	conns                                   runtime.Conns
-	launchers                               *launchers
-	launcherAuth                            launcherCredentials
-	now                                     func() time.Time
-	log                                     *slog.Logger
+	// probeRun tells this runtime's image probe Sandbox from every other creator's (probeName): ""
+	// for the daemon's runtime, whose probe is one per project and image, and a suffix drawn for
+	// each run by a Prober (newProber), so a probe-boot and a booting daemon never take each other's
+	// probe for a leftover of their own.
+	probeRun                       string
+	volumeSize                     resource.Quantity
+	scheduling                     Scheduling
+	resources                      map[claim.Role]corev1.ResourceRequirements
+	streamURL, daemonURL, envoyURL string
+	dispatchURL, dispatchToken     string
+	natsURLs                       []string
+	tools                          Tools
+	pod                            Pod
+	providerKeys                   map[string]string
+	providersSecrets               []string
+	natsUser                       string
+	sessionDSNKey                  string
+	agentSecrets                   *AgentSecrets
+	agent                          []string
+	bootTimeout                    time.Duration
+	terminationGrace               time.Duration
+	probeInterval                  time.Duration
+	adoptTimeout                   time.Duration
+	tokens                         ProvisionTokens
+	gitHubCredential               runtime.GitHubCredential
+	store                          Store
+	conns                          runtime.Conns
+	launchers                      *launchers
+	launcherAuth                   launcherCredentials
+	now                            func() time.Time
+	log                            *slog.Logger
 
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
@@ -120,13 +125,9 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	dyn, err := dynamic.NewForConfig(rc)
+	dyn, kube, err := clients(rc)
 	if err != nil {
-		return nil, fmt.Errorf("sandbox runtime: dynamic client: %w", err)
-	}
-	kube, err := kubernetes.NewForConfig(rc)
-	if err != nil {
-		return nil, fmt.Errorf("sandbox runtime: kubernetes client: %w", err)
+		return nil, err
 	}
 	if err := r.start(ctx, dyn, kube); err != nil {
 		return nil, err
@@ -134,116 +135,59 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	return r, nil
 }
 
-// CensusLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. Daemon boot
-// runs it before the store opens, so before any schema write, image probe or reconcile: a Sandbox
-// this runtime did not build must never be adopted, suspended or deleted as though it were one of
-// its pods, and nothing may change what an older binary needs to clean it up. Image probes are
-// explicit non-issue Sandboxes and are excluded.
-func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace, project string) error {
+// clients are the dynamic and typed clients of rc.
+func clients(rc *rest.Config) (dynamic.Interface, kubernetes.Interface, error) {
 	dyn, err := dynamic.NewForConfig(rc)
 	if err != nil {
-		return fmt.Errorf("sandbox runtime: dynamic client: %w", err)
+		return nil, nil, fmt.Errorf("sandbox runtime: dynamic client: %w", err)
 	}
-	return rejectLegacyIssueSandboxes(ctx, dyn.Resource(sandboxGVR).Namespace(namespace), project)
-}
-
-// rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
-// builds: its containers must be exactly the launcher roles of the kind its labels name
-// (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
-// controller's, and it must own a volume of its own, the one claim template every Sandbox made now
-// carries (issueVolume). So a per-claim Sandbox of the layout before issue pods (one worker
-// container), the controller Sandbox a daemon before issue pods made (role=controller, one worker
-// container), a pod missing a launcher, one with a container more, a Sandbox whose labels name no
-// kind, and a Sandbox of the tree-volume layout before per-issue volumes (treeVolumeLayout: no
-// claim template, or the tree root's `tree` template, the controller's of that layout included) are
-// each refused. The refusal names every one of them, each with its reason, and how many there are,
-// so an operator removes them all before the next boot rather than one per refused boot.
-func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
-	reading, cancel := call(ctx)
-	defer cancel()
-	list, err := sandboxes.List(reading, metav1.ListOptions{LabelSelector: labelProject + "=" + project})
+	kube, err := kubernetes.NewForConfig(rc)
 	if err != nil {
-		return fmt.Errorf("sandbox runtime: census existing issue Sandboxes before layout migration: %w", err)
+		return nil, nil, fmt.Errorf("sandbox runtime: kubernetes client: %w", err)
 	}
-	var refused []string
-	for _, object := range list.Items {
-		if object.GetLabels()[labelProbe] != "" {
-			continue
-		}
-		if reason := legacyIssueSandbox(object); reason != "" {
-			refused = append(refused, "legacy issue Sandbox "+object.GetName()+reason)
-		} else if reason := treeVolumeLayout(object); reason != "" {
-			refused = append(refused, "Sandbox "+object.GetName()+reason)
-		}
-	}
-	if len(refused) == 0 {
-		return nil
-	}
-	return fmt.Errorf("sandbox runtime: %d of project %s's Sandboxes are not pods this runtime builds; migrate or remove each before enabling issue pods: %s",
-		len(refused), project, strings.Join(refused, "; "))
+	return dyn, kube, nil
 }
 
-// treeVolumeLayout is why object is a Sandbox of the tree-volume layout before per-issue volumes,
-// following its name in the census's refusal, or "" when it owns a volume of its own: every
-// Sandbox this runtime makes carries one claim template named issueVolume, where that layout gave
-// only the tree root's Sandbox a template, named `tree`, which every child of the tree mounted, and
-// its controller's Sandbox a `tree` template of its own. Such a Sandbox is never adopted: a child's
-// would fit no launch and be made again empty, and a root's volume holds every clone and workspace
-// of its tree, which only the drained cutover docs/kubernetes.md describes may take apart.
-func treeVolumeLayout(object unstructured.Unstructured) string {
-	const upgrade = "; it is of the tree-volume layout before per-issue volumes, so drain and remove it as docs/kubernetes.md's \"Upgrading a deployment with running trees\" says"
-	templates, found, err := unstructured.NestedSlice(object.Object, "spec", "volumeClaimTemplates")
-	if err != nil || !found || len(templates) == 0 {
-		return " owns no volume" + upgrade
-	}
-	for _, raw := range templates {
-		template, ok := raw.(map[string]any)
-		if !ok {
-			return " has an unreadable volume claim template" + upgrade
-		}
-		name, _, _ := unstructured.NestedString(template, "metadata", "name")
-		if name != issueVolume {
-			return fmt.Sprintf(" owns a volume claim template named %q, not %q", name, issueVolume) + upgrade
-		}
-	}
-	return ""
-}
-
-// legacyIssueSandbox is why object is not a pod this runtime builds, following its name in the
-// census's refusal, or "" when it is one.
-func legacyIssueSandbox(object unstructured.Unstructured) string {
-	kind, err := podKindOf(object.GetLabels())
-	if err != nil {
-		return ": " + err.Error()
-	}
-	containers, found, err := unstructured.NestedSlice(object.Object, "spec", "podTemplate", "spec", "containers")
-	if err != nil || !found {
-		return " has no issue-pod container shape"
-	}
-	var names []string
-	for _, raw := range containers {
-		container, ok := raw.(map[string]any)
-		if !ok {
-			return " has an unreadable container shape"
-		}
-		name, _ := container["name"].(string)
-		names = append(names, name)
-	}
-	roles := kind.roles()
-	want := make([]string, 0, len(roles))
-	for _, role := range roles {
-		want = append(want, string(role))
-	}
-	slices.Sort(names)
-	slices.Sort(want)
-	if !slices.Equal(names, want) {
-		return fmt.Sprintf(" runs containers %v, not exactly the launchers its labels name %v", names, want)
-	}
-	return ""
-}
-
-// configure checks opts and fills their defaults, touching no cluster.
+// configure checks opts and fills their defaults, touching no cluster: everything the runtime reads
+// for any work (configureProber), then supervision's own requirements (checkSupervision).
 func configure(opts Options) (*Runtime, error) {
+	r, err := configureProber(opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkSupervision(opts); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// checkSupervision refuses opts that lack what only supervision reads — launching, relaunching,
+// adopting and sweeping a claim's pod: the provisioning token source, the roles' gh-files
+// function, the store, the connection directory, and a worker stream address a pod can dial. A
+// runtime that runs the image probe alone (newProber) reads none of them.
+func checkSupervision(opts Options) error {
+	refuse := func(format string, args ...any) error { return fmt.Errorf("sandbox runtime: "+format, args...) }
+	switch {
+	case opts.Tokens == nil:
+		return refuse("no provisioning token source")
+	case opts.GitHubCredential == nil:
+		return refuse("no github credential function for the roles' gh files")
+	case opts.Store == nil:
+		return refuse("no store")
+	case opts.Conns == nil:
+		return refuse("no connection directory")
+	}
+	host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
+	if _, _, err := net.SplitHostPort(host); !ok || err != nil {
+		return refuse("stream URL %q is not tcp://host:port, which a pod can dial", opts.StreamURL)
+	}
+	return nil
+}
+
+// configureProber checks what every runtime reads, the image probe's own included, and fills the
+// defaults, touching no cluster. A runtime it builds alone runs the image probe and nothing else
+// (newProber); configure adds supervision's requirements to it.
+func configureProber(opts Options) (*Runtime, error) {
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}
@@ -261,14 +205,6 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
-	case opts.Tokens == nil:
-		return refuse("no provisioning token source")
-	case opts.GitHubCredential == nil:
-		return refuse("no github credential function for the roles' gh files")
-	case opts.Store == nil:
-		return refuse("no store")
-	case opts.Conns == nil:
-		return refuse("no connection directory")
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
 			opts.DispatchURL, opts.DispatchToken != "")
@@ -278,10 +214,6 @@ func configure(opts Options) (*Runtime, error) {
 	}
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
-	}
-	host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
-	if _, _, err := net.SplitHostPort(host); !ok || err != nil {
-		return refuse("stream URL %q is not tcp://host:port, which a pod can dial", opts.StreamURL)
 	}
 	for _, tool := range []struct{ name, path string }{
 		{"gh", opts.Tools.GH}, {"git", opts.Tools.Git}, {"jj", opts.Tools.JJ}, {"legion", opts.Tools.Legion},
@@ -385,10 +317,20 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 	return nil
 }
 
-// start runs both informers, selected on the project label, until ctx ends, waits for both stores
-// to sync, and then runs the GitHub credential refresher (refreshGitHubCredentials) on the same
-// lifetime, so it stops with the informers whose pod store it walks.
+// start runs both informers (startInformers) and then the GitHub credential refresher
+// (refreshGitHubCredentials) on ctx, the informers' lifetime, so it stops with the informers whose
+// pod store it walks.
 func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
+	if err := r.startInformers(ctx, dyn, kube); err != nil {
+		return err
+	}
+	go r.refreshGitHubCredentialsEvery(ctx, gitHubRefreshInterval)
+	return nil
+}
+
+// startInformers runs both informers, selected on the project label, until ctx ends, and waits for
+// both stores to sync.
+func (r *Runtime) startInformers(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
 	r.dyn, r.kube = dyn, kube
 	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
 	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
@@ -435,7 +377,6 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 		}
 	}
 	context.AfterFunc(ctx, stop)
-	go r.refreshGitHubCredentialsEvery(running, gitHubRefreshInterval)
 	return nil
 }
 

@@ -38,6 +38,7 @@ import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { buildIssuePath, buildProjectPath, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { isBareReferenceBody, Unfurl } from "../refs/Unfurl";
+import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { useMargin } from "./margin-context";
 import type { CommentActionFailure } from "./useCommentActionQueue";
 import {
@@ -256,6 +257,14 @@ export function ThreadCard({
       : rootSuggestion?.accepted === false
         ? "Rejected"
         : "Resolved";
+  // The Replies page's read mark: an open thread is read once its newest reply has been on screen.
+  const newestReply = thread.replies.at(-1);
+  const markRead = useMarkThreadRead({
+    enabled: expanded,
+    newestShownAt: newestReply?.created_at,
+    owner: owner.kind === "issue" ? { issue: owner.key } : { artifact: owner.artifactId },
+    threadId: root.id,
+  });
   // An edit whose save is out, or was refused, is the held-send store's: its editor stays open on
   // its comment until the save lands or the reader drops it, whatever closed the card meanwhile.
   const heldEdits = useHeldSendsUnder(COMMENT_EDIT_SEND_KEY);
@@ -417,6 +426,7 @@ export function ThreadCard({
                   <li
                     className={`rounded-lg p-2 ${card}`}
                     key={reply.id}
+                    ref={reply === newestReply ? markRead : undefined}
                     style={{ marginLeft: "0px" }}
                   >
                     {editing(reply) ? (

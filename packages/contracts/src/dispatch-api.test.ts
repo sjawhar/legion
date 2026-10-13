@@ -30,7 +30,9 @@ import {
   type MessageDeliveryMode,
   MessageEventPayloadSchema,
   type MyAnswersResponse,
+  type MyRepliesResponse,
   serviceSubjectLabel,
+  type UserThreadStateUpdatedEventPayload,
 } from "./dispatch-api";
 
 test("delivery modes are exactly the closed capability list", () => {
@@ -209,6 +211,78 @@ test("models answer changes, ask answer history, and the answers page", () => {
     thread.answers,
     page.rows[0]?.current,
   ]).toEqual([answer.at, ["Hold"], [answer], [], true]);
+});
+
+test("models the Replies page and the read mark's event", () => {
+  const page = {
+    rows: [
+      {
+        thread_id: "comment-1",
+        kind: "comment",
+        ref: "/issues/CORE-1/comments/comment-1",
+        issue: { key: "CORE-1", title: "Release" },
+        subject: "Ship it on Friday?",
+        reply: {
+          id: "comment-2",
+          kind: "reply",
+          author: { kind: "session", id: "session-1" },
+          first_line: "Friday works.",
+          created_at: "2026-10-12T00:00:00Z",
+        },
+      },
+      {
+        thread_id: "ask-1",
+        kind: "ask",
+        ref: "/issues/CORE-1/asks/ask-1",
+        issue: { key: "CORE-1", title: "Release" },
+        subject: "Which region?",
+        reply: {
+          id: "ask-1",
+          kind: "answer",
+          author: { kind: "user", id: "bob" },
+          first_line: "eu-west-1 - closest to the users",
+          created_at: "2026-10-12T00:00:30Z",
+        },
+      },
+      {
+        thread_id: "comment-3",
+        kind: "comment",
+        ref: "/projects/CORE/documents/runbook?comment=comment-3",
+        document: { project: "CORE", slug: "runbook", name: "Runbook" },
+        subject: "Is step one current?",
+        reply: {
+          id: "comment-4",
+          kind: "reply",
+          author: { kind: "session", id: "session-1" },
+          first_line: "Yes.",
+          created_at: "2026-10-12T00:01:00Z",
+        },
+      },
+    ],
+    total: 3,
+    limit: 50,
+    offset: 0,
+  } satisfies MyRepliesResponse;
+  const read = {
+    login: "alice",
+    thread_id: "comment-1",
+  } satisfies UserThreadStateUpdatedEventPayload;
+  const event = {
+    id: 1,
+    issue_key: null,
+    project: "CORE",
+    seq: 3,
+    actor: { kind: "user", id: "alice" },
+    notify: false,
+    created_at: "2026-10-12T00:02:00Z",
+    type: "user_thread_state.updated",
+    payload: read,
+  } satisfies DispatchEvent;
+
+  expect([
+    page.rows.map((row) => `${row.kind}:${row.reply.kind}`),
+    event.payload.thread_id,
+  ]).toEqual([["comment:reply", "ask:answer", "comment:reply"], "comment-1"]);
 });
 
 test("preserves block-pinned and legacy anchors in ask event payloads", () => {

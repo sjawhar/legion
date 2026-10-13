@@ -4,6 +4,9 @@
 
 ### Added
 
+- `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
+  returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
+  (LEGION-687).
 - `ArtifactBlock.table` (`BlockTable`, `BlockTableRow`, `BlockTableCell`): a table block's rows and
   cells in `GET /api/v1/artifacts/{id}/blocks`, by the indexes `delete_row` and `delete_column`
   take; optional, since a Dispatch older than the listing omits it. `dispatch_doc_read` takes

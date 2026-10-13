@@ -475,6 +475,29 @@ transaction, so an issue write waits behind it while an issue read does not, and
 view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too. It touches no row; its
 census answers `0`.
 
+Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the
+table behind the Replies page (`packages/envoy/AGENTS.md`). `0095` creates the table, its partial
+index `user_threads_unread` and its `(thread_id)` index, the functions `user_threads_login`,
+`user_threads_record`, `user_threads_comment` and `user_threads_message`, and the trigger on
+`comments`; `0096` adds the trigger on `asks` (`insert or update of answer`); `0097` attaches
+`user_threads_message` to `messages`. Each trigger is its own migration, so its transaction holds
+that one table's `SHARE ROW EXCLUSIVE` alone: a write to it waits behind the migration and a read
+does not. `0098` seeds a row for every person and thread they wrote in, under `ACCESS SHARE` on
+`comments`, `asks`, `messages`, `issues` and `artifacts`, writing only `user_threads`; every row
+starts read, its read mark moved to the newest reply already stored, so the deploy turns no stored
+reply into an unread one. The triggers are live by then, so a write that lands while it runs on a
+thread whose participant already has a row is caught by the trigger, and the seed merges with it
+by taking the later of each time. A participant the seed is still inserting has no row the
+trigger's update can see, and the seed's snapshot cannot see that write, so `0099` reads the same
+writes under `ACCESS SHARE` on `comments`, `asks` and `messages` and moves each row to any write by
+someone else newer than its `replied_at`, which makes it unread past its read mark; it moves
+nothing backwards, and a write the seed saw stays read. On a copy of the 2026-10-12 production
+dump (11,497 comments, 3,882 asks, 14,289 messages) the seed wrote 3,819 rows for three logins,
+all of them read, in 0.93 s, and `0099` ran in 0.11 s under the server's own runner and moved no
+row, taking `ACCESS SHARE` on the three tables it reads and `ROW EXCLUSIVE` on `user_threads`
+alone. All five censuses answer `0`: `0095`-`0097` create functions and triggers and refuse or
+rewrite no row, and `0098` and `0099` write only the table `0095` creates.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -766,6 +789,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
+| `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
+| `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |

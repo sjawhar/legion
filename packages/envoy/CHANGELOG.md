@@ -4,6 +4,19 @@
 
 ### Added
 
+- Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
+  comment thread, an issue message thread - where someone else has written since they last read
+  it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact
+  header. A reply, a message, or an answer someone else gives to an ask counts; the row names who
+  wrote it, and an answer reads as `answered` with its chosen options and text. Reading the thread
+  on screen, replying in it, or **Mark read** clears the row, and a later write brings it back; an
+  open ask the Inbox lists stays off the page, and the Inbox is unchanged. Migrations 0095-0099
+  add `user_threads`, kept by triggers on `comments`, `asks` and `messages`, seed it from history
+  with every thread read, so the deploy marks nothing unread, and catch up any write that landed
+  while the seed ran. `GET /api/v1/me/replies` lists the threads and
+  `PUT /api/v1/me/threads/{id}/read` moves one forward, appending `user_thread_state.updated`,
+  which never notifies. Opening a link to a comment (`/issues/<KEY>/comments/<id>`) now opens its
+  thread.
 - A table's entry in `GET /api/v1/artifacts/{id}/blocks` (and the issue- and project-slug forms)
   lists its rows and cells as `table.rows`: each row's block id and index (the index `delete_row`
   takes, 0 the header) and each cell's block id, row, column (its index in its row, the index
@@ -625,6 +638,15 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
+  line a pasted picture is written as, now shows in the document editor and in a past version,
+  drawn from the version's bytes route; before, the editor's `<img>` carried the `dispatch://`
+  address as its source, which no browser fetches, so the line showed nothing. A version the
+  browser cannot draw (a markdown document, another file, a missing version), or a source that
+  pins no version, shows a link to what it names instead, its text the reference's short form
+  (`CORE-1 notes-md`). A picture from another website is drawn as before (LEGION-695).
+
 - A listener's shutdown drain no longer waits out 5 s of its 10 s budget when its NATS connection
   closes while nats.go drains it. nats.go v1.50.0 marks a connection closed during its drain as
   draining again and waits 5 s for a reply on the socket it closed, and the drain read the

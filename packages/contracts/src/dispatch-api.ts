@@ -840,6 +840,41 @@ export interface MyAnswersResponse {
   readonly offset: number;
 }
 
+/** The newest write someone else made in a thread on `GET /api/v1/me/replies`: a reply (a comment
+ *  or a message), or the ask's answer, whose `id` is the ask's, whose `author` is the person who
+ *  answered and whose `first_line` is the chosen options and the answer's text. */
+export interface MyReplyReply {
+  readonly id: string;
+  readonly kind: "reply" | "answer";
+  readonly author: Actor;
+  /** The reply's or the answer's first non-empty line, at most 160 characters. */
+  readonly first_line: string;
+  readonly created_at: string;
+}
+
+/** One thread the caller wrote in where someone else has written since the caller last read it:
+ *  an ask's thread, a comment thread by its root, or an issue message thread by its root. */
+export interface MyReplyRow {
+  /** The ask's id, or the comment or message thread's root id: what
+   *  `PUT /api/v1/me/threads/{id}/read` marks. */
+  readonly thread_id: string;
+  readonly kind: "ask" | "comment" | "message";
+  /** Relative Dispatch deep link to the thread's root, never to the reply. */
+  readonly ref: string;
+  readonly issue?: Pick<Issue, "key" | "title">;
+  readonly document?: InboxDocument;
+  /** The ask's question, or the root's first line, at most 160 characters. */
+  readonly subject: string;
+  readonly reply: MyReplyReply;
+}
+
+export interface MyRepliesResponse {
+  readonly rows: MyReplyRow[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
 export interface AskOption {
   readonly label: string;
   readonly description?: string;
@@ -1603,6 +1638,13 @@ export interface UserAgentStateUpdatedEventPayload {
   readonly session_id: string;
 }
 
+/** `user_thread_state.updated`: one viewer's read mark on one thread of the Replies page moved.
+ *  It carries no state; the viewer's other tabs and devices refetch their replies. */
+export interface UserThreadStateUpdatedEventPayload {
+  readonly login: string;
+  readonly thread_id: string;
+}
+
 /**
  * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
  * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
@@ -1663,6 +1705,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_agent_state.updated";
       readonly payload: UserAgentStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "user_thread_state.updated";
+      readonly payload: UserThreadStateUpdatedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })

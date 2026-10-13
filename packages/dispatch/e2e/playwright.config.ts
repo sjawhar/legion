@@ -142,12 +142,14 @@ export default defineConfig({
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // the issue picker's keyboard-step rule rests on the engine's select dispatch, and offline
-    // document recovery owns browser storage. Those specs, and the whole deep-links spec, run in
-    // Firefox too.
+    // the issue picker's keyboard-step rule rests on the engine's select dispatch, offline
+    // document recovery owns browser storage, and a click on a link inside the editor meets the
+    // engine's focus rule (Firefox focuses the editing host, not the link). Those specs, and the
+    // whole deep-links spec, run in Firefox too.
     {
       name: "firefox",
-      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits)\.e2e\.ts/,
+      testMatch:
+        /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits|picture-link-click)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
     {

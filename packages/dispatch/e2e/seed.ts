@@ -17,6 +17,7 @@ const tables = [
   "user_agent_state",
   "user_agent_read",
   "user_agent_reply_read",
+  "user_threads",
   "events",
   "refs",
   "messages",

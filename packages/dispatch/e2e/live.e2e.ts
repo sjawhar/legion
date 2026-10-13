@@ -471,7 +471,7 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   const since = new URL(streamRequest ?? "").searchParams.get("since");
   expect(since).toBeNull();
 
-  // Exactly 16 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
+  // Exactly 17 on desktop (chromium): whoami, the project sidebar's Inbox, Pinned,
   // and Projects queries, me/state, issue detail, the shared inbox query for the
   // margin's open-ask count, the stream connection, two active-sessions/Conversation
   // event reads, the primary artifact's comments, the margin's own issue-asks list,
@@ -482,13 +482,17 @@ test("live: a fresh page load opens the stream at the current head and stays wit
   // opens, never on load), me/agents/state, whose unread replies the Agents badge
   // counts on every page (the sidebar's on desktop, the compact header's on phone), and
   // the credential requests waiting on the viewer, which the Needs-you badge counts beside
-  // the inbox on every page.
+  // the inbox on every page, and `me/replies?limit=1`, whose total the Replies badge counts on
+  // every page (the sidebar's on desktop, the compact header's on phone).
   // The header's assignee picker reads who has signed in only once the reader
   // reaches for it, so it is not in this count. The phone project (iphone) does not
-  // fetch the sidebar while its drawer is closed, so it uses 14. Asserted exactly (not
+  // fetch the sidebar while its drawer is closed, so it uses 15. Asserted exactly (not
   // a ceiling) so a panel that starts eagerly fetching before its tab is ever opened
   // trips this immediately instead of only breaking some looser upper bound.
-  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 14 : 16);
+  expect(apiRequestUrls.length).toBe(testInfo.project.name === "iphone" ? 15 : 17);
+  expect(apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/replies?limit=1"))).toHaveLength(
+    1
+  );
   expect(apiRequestUrls.filter((url) => url.endsWith("/api/v1/me/agents/state"))).toHaveLength(1);
   expect(
     apiRequestUrls.filter((url) => url.endsWith("/api/v1/credential-requests?approver=me"))
