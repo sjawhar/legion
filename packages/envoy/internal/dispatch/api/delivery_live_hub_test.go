@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -27,6 +28,7 @@ type hubRig struct {
 
 	mu    sync.Mutex
 	notes []deliveryHubNote
+	stop  func()
 }
 
 // newHubRig starts a hub on a new test server; configure, when given, sets the hub's seams before
@@ -51,11 +53,19 @@ func hubOn(t *testing.T, handler http.Handler, database *store.Store, deps Deps,
 	if configure != nil {
 		configure(rig.hub)
 	}
-	t.Cleanup(func() {
+	rig.stop = sync.OnceFunc(func() {
 		cancel()
 		rig.hub.wait()
 	})
+	t.Cleanup(rig.stop)
 	return rig
+}
+
+// cursors is where the hub stands in the delivery change log and the event log.
+func (r *hubRig) cursors() (changeSeq, eventCursor int64) {
+	r.hub.mu.Lock()
+	defer r.hub.mu.Unlock()
+	return r.hub.changeSeq, r.hub.eventCursor
 }
 
 // mark is how many notes the hub has made, for counting the ones after it.
@@ -298,17 +308,334 @@ func requireSameBody(t *testing.T, what string, got, want json.RawMessage) {
 
 // requireLandsOnGET applies delta to the body held as a page applies it and requires the GET route's
 // body for the delta's window.
-func requireLandsOnGET(t *testing.T, handler http.Handler, kind string, held json.RawMessage, delta DeliveryLiveDelta, query string) {
+func requireLandsOnGET(t *testing.T, handler http.Handler, kind string, held json.RawMessage, delta DeliveryLiveDelta, query string) json.RawMessage {
 	t.Helper()
-	encoded := mustEncodeLive(t, kind, held)
-	applied := liveApply(t, encoded, delta)
+	applied := applyLiveDelta(t, kind, held, delta)
+	want := mustEncodeLive(t, kind, getBody(t, handler, windowTarget(t, kind, applied, query)))
+	if got, wantBody := liveComparable(t, mustEncodeLive(t, kind, applied)), liveComparable(t, want); !reflect.DeepEqual(got, wantBody) {
+		t.Fatalf("the delta does not land on the GET route's body:\napplied: %v\nGET:     %v", got, wantBody)
+	}
+	return applied
+}
+
+// applyLiveDelta is the body held with delta applied, as a page applies it.
+func applyLiveDelta(t *testing.T, kind string, held json.RawMessage, delta DeliveryLiveDelta) json.RawMessage {
+	t.Helper()
+	applied := liveApply(t, mustEncodeLive(t, kind, held), delta)
 	raw, err := json.Marshal(applied.body)
 	if err != nil {
 		t.Fatalf("encode the applied body: %v", err)
 	}
-	want := mustEncodeLive(t, kind, getBody(t, handler, windowTarget(t, kind, raw, query)))
-	if got, wantBody := liveComparable(t, applied), liveComparable(t, want); !reflect.DeepEqual(got, wantBody) {
-		t.Fatalf("the delta does not land on the GET route's body:\napplied: %v\nGET:     %v", got, wantBody)
+	return raw
+}
+
+// truncateChanges empties the delivery change log and restarts its numbering, as e2e/seed.ts:150's
+// reset does.
+func truncateChanges(t *testing.T, database *store.Store) {
+	t.Helper()
+	if _, err := database.Pool.Exec(context.Background(), `truncate delivery_changes restart identity`); err != nil {
+		t.Fatalf("truncate delivery_changes: %v", err)
+	}
+}
+
+// latestChange is the newest delivery change's seq.
+func latestChange(t *testing.T, database *store.Store) int64 {
+	t.Helper()
+	seq, err := delivery.LatestChangeSeq(context.Background(), database.Pool)
+	if err != nil {
+		t.Fatalf("read the newest change: %v", err)
+	}
+	return seq
+}
+
+func TestAProductionJobFlipsTheWaitingPullRequestsItShips(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	now := time.Now().UTC()
+	for n := 1; n <= 3; n++ {
+		upsertPR(t, rig.database, hubPR(n, now.Add(-time.Duration(10-n)*time.Hour)))
+	}
+	// The deploy run is in progress: its production job has not finished.
+	head, started := now.Add(-5*time.Hour), now.Add(-4*time.Hour)
+	if err := delivery.UpsertRun(t.Context(), rig.database.Pool, delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 300, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha300",
+		HeadCommitAt: head, StartedAt: started, URL: "https://github.com/acme/widgets/actions/runs/300",
+		HeadBranch: new("main"), Event: new("push"),
+	}); err != nil {
+		t.Fatalf("upsert the running deploy: %v", err)
+	}
+	if err := delivery.UpsertRunJobs(t.Context(), rig.database.Pool, "acme/widgets", 300, []delivery.DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 300, Name: "release / release", StartedAt: &started},
+	}, false); err != nil {
+		t.Fatalf("upsert the running production job: %v", err)
+	}
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", presetView(deliveryLiveTimeline, 7, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "p")
+
+	// The production job finishes: every pull request the run's head holds ships.
+	done := now.Add(-3 * time.Hour)
+	success := delivery.DeliveryJobConclusionSuccess
+	if err := delivery.UpsertRunJobs(t.Context(), rig.database.Pool, "acme/widgets", 300, []delivery.DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 300, Name: "release / release", StartedAt: &started, CompletedAt: &done, Conclusion: &success},
+	}, false); err != nil {
+		t.Fatalf("finish the production job: %v", err)
+	}
+	delta := conn.delta(t, 3*time.Second, "p")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1", "acme/widgets#2", "acme/widgets#3"}) {
+		t.Fatalf("the job's delta upserts %v, want the three pull requests run 300 ships", got)
+	}
+	if got := liveUpsertIDs(t, delta, "runs"); !slices.Equal(got, []string{"300"}) {
+		t.Fatalf("the job's delta upserts runs %v, want run 300", got)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+func TestAPRChecksRunMarksOnlyPipelineViews(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
+	for range 3 {
+		if _, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
+			t.Fatal("want a snapshot for each view")
+		}
+	}
+
+	start := rig.mark()
+	now := time.Now().UTC()
+	started, done := now.Add(-time.Hour), now.Add(-50*time.Minute)
+	success := delivery.DeliveryRunConclusionSuccess
+	if err := delivery.UpsertRun(t.Context(), rig.database.Pool, delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 400, Kind: delivery.DeliveryRunKindPRChecks, HeadSHA: "sha400",
+		HeadCommitAt: started, StartedAt: started, CompletedAt: &done, Conclusion: &success,
+		URL: "https://github.com/acme/widgets/actions/runs/400", HeadBranch: new("feature"), Event: new("pull_request"),
+	}); err != nil {
+		t.Fatalf("upsert the PR-checks run: %v", err)
+	}
+	if delta := conn.delta(t, 3*time.Second, "p"); len(delta.Set) == 0 {
+		t.Fatalf("the pipeline delta sets nothing: %+v", delta)
+	}
+	conn.none(t, time.Second, "the pipeline's delta")
+	if n := rig.count(start, func(note deliveryHubNote) bool {
+		return note.what == "recompute begin" && !strings.HasPrefix(note.view, deliveryLivePipeline)
+	}); n != 0 {
+		t.Fatalf("a PR-checks run recomputed %d timeline or measures views, want only the pipeline view", n)
+	}
+}
+
+func TestASessionGroupEditReachesEveryView(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	pr := hubPR(1, time.Now().UTC().Add(-3*time.Hour))
+	pr.Sessions = []string{"s-1"}
+	upsertPR(t, rig.database, pr)
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
+	for range 3 {
+		if _, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
+			t.Fatal("want a snapshot for each view")
+		}
+	}
+
+	start := rig.mark()
+	if response := dispatchRequest(t, rig.handler, http.MethodPost, "/api/v1/delivery/session-groups", map[string]any{
+		"name": "Night shift", "sessions": []string{"s-1"},
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create the session group: status = %d, body = %s", response.Code, response.Body.String())
+	}
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveUpsertIDs(t, delta, "session_groups"); len(got) != 1 {
+		t.Fatalf("the timeline's delta upserts session groups %v, want the new group", got)
+	}
+	rig.waitFor(t, start, 3*time.Second, "the measures view's recompute", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && strings.HasPrefix(note.view, deliveryLiveMeasures)
+	})
+	rig.waitFor(t, start, 3*time.Second, "the pipeline view's recompute", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && strings.HasPrefix(note.view, deliveryLivePipeline)
+	})
+}
+
+func TestAResetChangeLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	now := time.Now().UTC()
+	for n := 1; n <= 40; n++ {
+		upsertPR(t, rig.database, hubPR(n, now.Add(-time.Duration(100+n)*time.Hour)))
+	}
+	if seq := latestChange(t, rig.database); seq < 40 {
+		t.Fatalf("changes before the reset reach seq %d, want at least 40", seq)
+	}
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
+	var timeline json.RawMessage
+	for range 2 {
+		if snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
+			t.Fatal("want a snapshot for each view")
+		} else if snapshot.Sub == "t" {
+			timeline = snapshot.Body
+		}
+	}
+
+	// The log restarts at seq 1: one merge, below the hub's cursor.
+	truncateChanges(t, rig.database)
+	start := rig.mark()
+	upsertPR(t, rig.database, hubPR(41, time.Now().UTC().Add(-time.Hour)))
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Contains(got, "acme/widgets#41") {
+		t.Fatalf("after the reset the delta upserts %v, want acme/widgets#41", got)
+	}
+	timeline = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, timeline, delta, "")
+	rig.waitFor(t, start, 3*time.Second, "the measures view's recompute", func(note deliveryHubNote) bool {
+		return note.what == "recompute begin" && strings.HasPrefix(note.view, deliveryLiveMeasures)
+	})
+	if seq, _ := rig.cursors(); seq != 1 {
+		t.Fatalf("the hub's change cursor after the reset = %d, want 1", seq)
+	}
+
+	// Again: the hub's cursor moves to 2, then the log restarts and three merges (seq 1-3) commit
+	// together before the hub reads. The log holds a row at the cursor, written at another time than
+	// the hub read for it, so that is a reset too.
+	upsertPR(t, rig.database, hubPR(42, time.Now().UTC().Add(-50*time.Minute)))
+	timeline = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, timeline, conn.delta(t, 3*time.Second, "t"), "")
+	if seq, _ := rig.cursors(); seq != 2 {
+		t.Fatalf("the hub's change cursor = %d, want 2", seq)
+	}
+	truncateChanges(t, rig.database)
+	start = rig.mark()
+	merged := time.Now().UTC().Add(-30 * time.Minute)
+	if _, err := rig.database.Pool.Exec(t.Context(), `
+		insert into delivery_pull_requests (repo, number, title, url, author, created_at, merged_at)
+		select 'acme/widgets', n, 'feat: change ' || n, 'https://github.com/acme/widgets/pull/' || n, 'octocat', $1::timestamptz, $1::timestamptz
+		from generate_series(43, 45) n
+	`, merged); err != nil {
+		t.Fatalf("merge three pull requests in one commit: %v", err)
+	}
+	delta = conn.delta(t, 3*time.Second, "t")
+	if got := slices.Sorted(slices.Values(liveUpsertIDs(t, delta, "prs"))); !slices.Equal(got, []string{"acme/widgets#43", "acme/widgets#44", "acme/widgets#45"}) {
+		t.Fatalf("after the second reset the delta upserts %v, want the three merges", got)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, timeline, delta, "")
+	rig.waitFor(t, start, 3*time.Second, "the measures view's recompute after the second reset", func(note deliveryHubNote) bool {
+		return note.what == "recompute begin" && strings.HasPrefix(note.view, deliveryLiveMeasures)
+	})
+	if seq, _ := rig.cursors(); seq != 3 {
+		t.Fatalf("the hub's change cursor after the second reset = %d, want 3", seq)
+	}
+}
+
+func TestResumeWithRevsGetsOnlyWhatChanged(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	seedHubSettings(t, database)
+	now := time.Now().UTC()
+	for n := 1; n <= 4; n++ {
+		upsertPR(t, database, hubPR(n, now.Add(-time.Duration(10*n)*time.Hour)))
+	}
+	first := hubOn(t, handler, database, deps, deliveryHubClock{}, nil)
+	conn := newFakeLiveConn()
+	view := timelineRange(now.Add(-7*24*time.Hour), now, "")
+	first.hub.Subscribe(conn, subscribeFrame("t", view))
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	// The task the page was on stops; two pull requests change before the page reaches another.
+	first.stop()
+	changed := hubPR(2, now.Add(-20*time.Hour))
+	changed.Title = "feat: a title the page has not seen"
+	upsertPR(t, database, changed)
+	upsertPR(t, database, hubPR(5, now.Add(-time.Hour)))
+
+	second := hubOn(t, handler, database, deps, deliveryHubClock{}, nil)
+	resumed := newFakeLiveConn()
+	frame := subscribeFrame("t", view)
+	frame.Resume = &DeliveryLiveResume{Seq: snapshot.Seq, Revs: snapshot.Revs}
+	second.hub.Subscribe(resumed, frame)
+	delta := resumed.delta(t, 5*time.Second, "t")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#2", "acme/widgets#5"}) {
+		t.Fatalf("the resume's delta upserts %v, want the two pull requests that changed", got)
+	}
+	requireLandsOnGET(t, handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+func TestResumeFromBeforeTheKeptDayGetsASnapshot(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	now := time.Now().UTC()
+	for n := 1; n <= 3; n++ {
+		upsertPR(t, rig.database, hubPR(n, now.Add(-time.Duration(n)*time.Hour)))
+	}
+	// The change log keeps a day: rows older than that are pruned, so the oldest kept is past seq 2.
+	if _, err := rig.database.Pool.Exec(t.Context(), `update delivery_changes set at = now() - interval '2 days' where seq <= 2`); err != nil {
+		t.Fatalf("age the first changes: %v", err)
+	}
+	if _, err := delivery.PruneChanges(t.Context(), rig.database.Pool, time.Now()); err != nil {
+		t.Fatalf("prune the change log: %v", err)
+	}
+	conn := newFakeLiveConn()
+	frame := subscribeFrame("t", presetView(deliveryLiveTimeline, 7, ""))
+	frame.Resume = &DeliveryLiveResume{Seq: "1", Revs: DeliveryLiveRevs{
+		Items: map[string]map[string]string{}, Maps: map[string]map[string]string{},
+		Counts: map[string]map[string]map[string]string{}, Fields: map[string]string{},
+	}}
+	rig.hub.Subscribe(conn, frame)
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	requireSameBody(t, "a resume from before the kept day", snapshot.Body, getBody(t, rig.handler, windowTarget(t, deliveryLiveTimeline, snapshot.Body, "")))
+
+	// A resume from a kept change answers the delta.
+	kept := newFakeLiveConn()
+	frame.Sub, frame.Resume = "u", &DeliveryLiveResume{Seq: snapshot.Seq, Revs: snapshot.Revs}
+	rig.hub.Subscribe(kept, frame)
+	kept.none(t, time.Second, "a resume from the change the view's body reflects")
+}
+
+func TestAReconnectCatchesUpWhatTheListenerMissed(t *testing.T) {
+	var blind atomic.Bool
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		dial := hub.dial
+		hub.dial = func(ctx context.Context) (deliveryListenerConn, error) {
+			if blind.Load() {
+				return nil, context.DeadlineExceeded
+			}
+			return dial(ctx)
+		}
+		hub.backoff = func(int) time.Duration { return 50 * time.Millisecond }
+	})
+	seedHubSettings(t, rig.database)
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+	rig.waitFor(t, 0, 5*time.Second, "the listener's first connection", func(note deliveryHubNote) bool { return note.what == "connected" })
+	start := rig.mark()
+
+	// The listener loses its connection and cannot dial again; a merge commits while it is blind.
+	blind.Store(true)
+	terminateListener(t, rig.database)
+	upsertPR(t, rig.database, hubPR(1, time.Now().UTC().Add(-time.Hour)))
+	conn.none(t, viewMaxWait+time.Second, "a merge the listener could not hear")
+	blind.Store(false)
+	rig.waitFor(t, start, 5*time.Second, "the listener's reconnection", func(note deliveryHubNote) bool { return note.what == "connected" })
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
+		t.Fatalf("after the reconnection the delta upserts %v, want the merge it missed", got)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+// terminateListener ends every backend of this test's database that holds a LISTEN, whose last
+// statement was the listener's LISTEN or its idle ping.
+func terminateListener(t *testing.T, database *store.Store) {
+	t.Helper()
+	var ended int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*) from (
+			select pg_terminate_backend(pid) from pg_stat_activity
+			where datname = current_database() and (query like 'listen %' or query = '-- ping') and pid <> pg_backend_pid()
+		) ended
+	`).Scan(&ended); err != nil || ended == 0 {
+		t.Fatalf("terminate the listener's backend: ended %d, err %v", ended, err)
 	}
 }
 
