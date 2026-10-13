@@ -67,12 +67,12 @@ func encodeDeliveryBody(kind string, body any) (deliveryLiveEncoded, error) {
 		items:  make(map[string][]deliveryLiveItem, len(classes.lists)),
 		maps:   make(map[string]map[string]deliveryLiveValue, len(classes.maps)),
 		counts: make(map[string]map[string]map[string]int, len(classes.counts)),
-		fields: make(map[string]deliveryLiveValue, len(classes.whole)+len(classes.rides)),
+		fields: make(map[string]deliveryLiveValue, len(classes.whole)+len(classes.withChanges)),
 		revs: DeliveryLiveRevs{
 			Items:  make(map[string]map[string]string, len(classes.lists)),
 			Maps:   make(map[string]map[string]string, len(classes.maps)),
 			Counts: make(map[string]map[string]map[string]string, len(classes.counts)),
-			Fields: make(map[string]string, len(classes.whole)+len(classes.rides)),
+			Fields: make(map[string]string, len(classes.whole)+len(classes.withChanges)),
 		},
 	}
 
@@ -156,7 +156,7 @@ func encodeDeliveryBody(kind string, body any) (deliveryLiveEncoded, error) {
 		encoded.fields[name] = deliveryLiveValue{raw: value, rev: rev}
 		encoded.revs.Fields[name] = rev
 	}
-	for _, name := range classes.rides {
+	for _, name := range classes.withChanges {
 		value, err := field(name)
 		if err != nil {
 			return deliveryLiveEncoded{}, err
@@ -231,8 +231,9 @@ var deliveryLiveNull = json.RawMessage("null")
 // diffDeliveryBody is what a subscriber holding held is sent so that it holds next: every list item
 // whose revision differs (whole, in the body's order) or that left (by id), every map entry and
 // count that differs (null for one that left), and every whole field that differs. The bool is
-// false when none of those differs, and the delta is then not sent; a ride (the window) never
-// makes a delta alone, and joins one whenever it moved. Sub, Seq and ChangedAt are the caller's.
+// false when none of those differs, and the delta is then not sent; a field sent only with changes
+// (the window) never makes a delta by itself, and is included whenever it moved. Sub, Seq and
+// ChangedAt are the caller's.
 // After a delta is sent, the subscriber holds next.revs.
 func diffDeliveryBody(next deliveryLiveEncoded, held DeliveryLiveRevs) (DeliveryLiveDelta, bool) {
 	classes := deliveryLiveKinds[next.kind]
@@ -365,7 +366,7 @@ func diffDeliveryBody(next deliveryLiveEncoded, held DeliveryLiveRevs) (Delivery
 	if !changed {
 		return DeliveryLiveDelta{}, false
 	}
-	for _, name := range classes.rides {
+	for _, name := range classes.withChanges {
 		value := next.fields[name]
 		if held.Fields[name] == value.rev {
 			continue

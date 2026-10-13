@@ -3,9 +3,12 @@
 -- changed: the columns every reconcile pass rewrites are ignored, so a pass that finds nothing new
 -- logs nothing. Each row carries the time that decides which windows it can touch and, for a run,
 -- its kind. Each trigger takes one transaction advisory lock before it inserts, so seq is allocated
--- in commit order, and notifies 'delivery_changes', which Postgres delivers at commit. This
--- migration locks no existing table: 0101-0106 each add one table's trigger, so each holds one
--- table's lock alone, for milliseconds (0073's reason).
+-- in commit order, and notifies 'delivery_changes', which Postgres delivers at commit. The lock is
+-- global across delivery-table writers and lasts until the writer's transaction ends, so concurrent
+-- intake, job intake and reconcile writes take turns. The hub needs that order: a reader that has
+-- seen seq N must never later receive an earlier-committed N-1. This migration locks no existing
+-- table: 0101-0106 each add one table's trigger, so each holds one table's lock alone, for
+-- milliseconds (0073's reason).
 create table delivery_changes (
   seq      bigserial primary key,
   at       timestamptz not null default clock_timestamp(),

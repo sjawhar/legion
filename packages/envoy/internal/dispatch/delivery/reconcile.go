@@ -721,7 +721,8 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 		}
 		return fmt.Errorf("list jobs: %w", err)
 	}
-	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, RunJobs(repoFull, run.RunID, fetchedJobs), run.CompletedAt != nil)
+	jobs := RunJobs(repoFull, run.RunID, fetchedJobs)
+	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, jobs, JobsComplete(jobs))
 }
 
 // mapRunConclusionPtr adapts mapRunConclusion (which intake.go calls with the envelope's raw

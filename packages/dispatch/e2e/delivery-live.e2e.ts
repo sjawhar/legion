@@ -1,5 +1,6 @@
 import { expect, type Page, type TestInfo, test, type WebSocketRoute } from "@playwright/test";
 import { PIPELINE_AT, seedDeliveryFixture, seedPipelineFixture } from "./delivery-seed";
+import { seedDeliveryReconcileGithub } from "./fake-github-helpers";
 import { sql } from "./psql";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -170,6 +171,15 @@ function deltaMapValue(frame: LiveFrame, map: string, key: string, value: string
   );
 }
 
+/** The subscription a snapshot answered, so a test can tell its data frames from a freshness
+ * frame, which every page receives without a subscription id. */
+function snapshotSubscription(frame: LiveFrame): string {
+  if (frame.type !== "snapshot" || typeof frame.sub !== "string") {
+    throw new Error("Delivery socket sent a snapshot without its subscription id");
+  }
+  return frame.sub;
+}
+
 function insertMergedPR(
   number: number,
   title: string,
@@ -194,6 +204,7 @@ async function deliveryRequest(page: Page, path: string): Promise<unknown> {
 
 test.beforeEach(async () => {
   await resetDatabase();
+  await seedDeliveryReconcileGithub();
 });
 
 test("a merge appears without a reload, and the page issues no delivery GET", async ({
@@ -271,13 +282,21 @@ test("a reconcile-style re-write sends no frame", async ({ browser }) => {
 
   try {
     const live = await openLiveDelivery(page);
+    const snapshot = await waitForFrame(live.frames, (frame) => frame.type === "snapshot");
+    const sub = snapshotSubscription(snapshot);
     await page.waitForTimeout(100);
     const before = live.frames.length;
     await sql(
       `UPDATE delivery_pull_requests SET updated_at = now() WHERE repo = 'acme/widgets' AND number = 1`
     );
     await page.waitForTimeout(5_000);
-    expect(live.frames).toHaveLength(before);
+    const data = live.frames
+      .slice(before)
+      .filter(
+        (frame) => (frame.type === "snapshot" || frame.type === "delta") && frame.sub === sub
+      );
+    expect(data.filter((frame) => frame.type === "delta")).toEqual([]);
+    expect(data).toEqual([]);
   } finally {
     await context.close();
   }

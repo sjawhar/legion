@@ -151,14 +151,24 @@ func readJobsComplete(t *testing.T, ctx context.Context, pool *store.Pool, runID
 
 // TestAJobOfATrackedDeployRunRecordsItsJobsWhileItRuns drives the consumer end to end: a job event
 // for run 500, which Dispatch tracks and which has not ended, makes one read of its jobs once the
-// burst goes quiet. The production job is stored finished, the run's jobs stay incomplete, and the
-// change log holds a run_job change.
+// burst goes quiet. The production job is stored finished, another job in that same listing is
+// still running, so the run's jobs stay incomplete, and the change log holds a run_job change.
 func TestAJobOfATrackedDeployRunRecordsItsJobsWhileItRuns(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
 	seedRunningDeployRun(t, ctx, pool)
 	before := latestChange(t, ctx, pool)
 	fake := newJobsFake(t)
+	fake.mu.Lock()
+	fake.answer = func(w http.ResponseWriter, _ *http.Request) bool {
+		mustEncode(t, w, map[string]any{"total_count": 3, "jobs": []map[string]any{
+			{"name": "build", "started_at": "2026-09-03T12:00:00Z", "completed_at": "2026-09-03T12:04:00Z", "conclusion": "success"},
+			{"name": "widgets-release / widgets-release", "started_at": "2026-09-03T12:05:00Z", "completed_at": "2026-09-03T12:09:00Z", "conclusion": "success"},
+			{"name": "post-release", "started_at": "2026-09-03T12:10:00Z", "completed_at": nil, "conclusion": nil},
+		}})
+		return true
+	}
+	fake.mu.Unlock()
 	clock := newFakeJobClock()
 	natsClient := intakeTestClient(t)
 	jobs := newJobIntake(natsClient, pool, fake.newTestClient(), clock)
@@ -274,6 +284,63 @@ func TestABurstThatKeepsComingStillReadsWithinTenSeconds(t *testing.T) {
 	clock.Advance(jobQuiet)
 	if calls := fake.calls.Load(); calls != 2 {
 		t.Fatalf("reads once the burst ended = %d, want 2", calls)
+	}
+}
+
+// TestAStaleJobsReadStaysForTheBackfill: the job listing can see the production job running while
+// the run's completed workflow event reaches Dispatch between that listing and the jobs write. The
+// stale listing is the first job-row write, so it must leave the run available for the completion
+// listing rather than permanently mark it complete.
+func TestAStaleJobsReadStaysForTheBackfill(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedRunningDeployRun(t, ctx, pool)
+	fake := newJobsFake(t)
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	ended := started.Add(15 * time.Minute)
+	success := DeliveryRunConclusionSuccess
+	run := changeTestRun(500, DeliveryRunKindDeploy, started.Add(-time.Minute), started)
+	run.CompletedAt, run.Conclusion = &ended, &success
+	completed := make(chan error, 1)
+	fake.mu.Lock()
+	fake.production = map[string]any{
+		"name": "widgets-release / widgets-release", "started_at": "2026-09-03T12:05:00Z",
+		"completed_at": nil, "conclusion": nil,
+	}
+	fake.answer = func(_ http.ResponseWriter, _ *http.Request) bool {
+		completed <- UpsertRun(ctx, pool, run)
+		return false
+	}
+	fake.mu.Unlock()
+
+	jobs := newJobIntake(nil, pool, fake.newTestClient(), newFakeJobClock())
+	jobs.read(ctx, runKey{repo: "acme/widgets", runID: 500})
+	if err := <-completed; err != nil {
+		t.Fatalf("store the run completion: %v", err)
+	}
+	skip, err := ListRunIDsSkippingJobs(ctx, pool, "acme/widgets", []int64{500})
+	if err != nil {
+		t.Fatalf("ListRunIDsSkippingJobs after stale read: %v", err)
+	}
+	if skip[500] {
+		t.Fatal("a stale jobs read marked the run complete, so the backfill cannot finish its production job")
+	}
+
+	finished := started.Add(9 * time.Minute)
+	jobSuccess := DeliveryJobConclusionSuccess
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 500, []DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 500, Name: "build", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobSuccess},
+		{Repo: "acme/widgets", RunID: 500, Name: "widgets-release / widgets-release", StartedAt: &started, CompletedAt: &finished, Conclusion: &jobSuccess},
+	}, true); err != nil {
+		t.Fatalf("store the completion listing: %v", err)
+	}
+	stored, err := ListRunJobs(ctx, pool, "acme/widgets", 500)
+	if err != nil {
+		t.Fatalf("ListRunJobs after completion listing: %v", err)
+	}
+	for _, job := range stored {
+		if job.CompletedAt == nil || !job.CompletedAt.Equal(finished) {
+			t.Fatalf("job %q after the completion listing = %+v, want completed at %v", job.Name, job, finished)
+		}
 	}
 }
 

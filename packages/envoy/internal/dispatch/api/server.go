@@ -286,9 +286,20 @@ type queryer interface {
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
 // the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
-// nothing outlives the test.
-func Register(mux *http.ServeMux, deps Deps) {
-	register(mux, deps)
+// nothing outlives the test. The returned wait blocks until the hub and every delivery socket have
+// ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+func Register(mux *http.ServeMux, deps Deps) func() {
+	s := register(mux, deps)
+	return s.waitDelivery
+}
+
+// waitDelivery waits for every delivery socket, then for the hub's goroutines.
+func (s *server) waitDelivery() {
+	if s.deliveryHub == nil {
+		return
+	}
+	s.deliverySockets.wait()
+	s.deliveryHub.wait()
 }
 
 // register is Register, answering the server it mounted, whose delivery hub a test waits out

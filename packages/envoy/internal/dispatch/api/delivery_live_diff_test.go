@@ -65,7 +65,7 @@ func TestEveryResponseFieldHasOneClass(t *testing.T) {
 		note("maps", classes.maps)
 		note("counts", classes.counts)
 		note("whole", slices.Collect(maps.Keys(classes.whole)))
-		note("rides", classes.rides)
+		note("withChanges", classes.withChanges)
 		note("out", classes.out)
 
 		fields := map[string]reflect.Type{}
@@ -259,11 +259,12 @@ func liveDiff(t *testing.T, held, next deliveryLiveEncoded) (DeliveryLiveDelta, 
 	t.Helper()
 	delta, ok := diffDeliveryBody(next, held.revs)
 	if !ok {
-		// A ride (the window) never makes a delta alone, so the bodies agree but for it.
+		// A field sent only with changes (the window) never makes a delta by itself, so the bodies
+		// agree but for it.
 		got, want := liveComparable(t, held), liveComparable(t, next)
-		for _, ride := range deliveryLiveKinds[next.kind].rides {
-			delete(got, ride)
-			delete(want, ride)
+		for _, field := range deliveryLiveKinds[next.kind].withChanges {
+			delete(got, field)
+			delete(want, field)
 		}
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("no delta, but the bodies differ:\nheld: %v\nnext: %v", got, want)
@@ -754,7 +755,7 @@ func TestAWindowThatMovedAloneSendsNothing(t *testing.T) {
 		t.Fatalf("a measures window that moved alone sent %+v", delta)
 	}
 
-	// With a change beside it, the window rides along.
+	// With a change beside it, the window is included.
 	retitled := slices.Clone(prs)
 	retitled[1].Title = "feat: renamed"
 	next := mustEncodeLive(t, deliveryLiveTimeline, liveTimelineOf(nextTo, retitled, []delivery.DeliveryWaitingPRView{}, []delivery.DeliveryRunView{}))
@@ -763,7 +764,7 @@ func TestAWindowThatMovedAloneSendsNothing(t *testing.T) {
 		t.Fatal("a retitled pull request sent no delta")
 	}
 	if set, _, _, _ := liveSections(delta); !slices.Equal(set, []string{"window"}) {
-		t.Errorf("set = %v, want the window riding along", set)
+		t.Errorf("set = %v, want the window included with the change", set)
 	}
 	var got delivery.DeliveryWindowView
 	if err := json.Unmarshal(delta.Set["window"], &got); err != nil || !got.To.Equal(nextTo) {
@@ -774,7 +775,7 @@ func TestAWindowThatMovedAloneSendsNothing(t *testing.T) {
 	if !ok {
 		t.Fatal("a retitled pull request sent no delta to a page holding the moved window")
 	}
-	if _, rides := afterMove.Set["window"]; rides {
+	if _, included := afterMove.Set["window"]; included {
 		t.Error("set.window was sent to a page that already holds it")
 	}
 }

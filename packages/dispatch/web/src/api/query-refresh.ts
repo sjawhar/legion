@@ -1,4 +1,9 @@
-import type { QueryClient } from "@tanstack/react-query";
+import type { Query, QueryClient } from "@tanstack/react-query";
+
+/** Whether a query is owned by Dispatch's live delivery socket rather than refreshed by events. */
+export function isLiveQuery(query: Pick<Query, "meta">): boolean {
+  return query.meta?.live === true;
+}
 
 /**
  * How a stream event refreshes the query cache: which of a batch's keys are worth invalidating,
@@ -111,7 +116,7 @@ function cancelFirstLoads(
     const loads = cache.findAll({
       fetchStatus: "fetching",
       predicate: (query) =>
-        query.state.data === undefined && !query.isStatic() && query.meta?.live !== true,
+        query.state.data === undefined && !query.isStatic() && !isLiveQuery(query),
       queryKey,
       type: "active",
     });
@@ -142,7 +147,7 @@ export function refreshQueries(
   // request the first one just started.
   cancelFirstLoads(queryClient, queryKeys);
   if (queryKeys === undefined) {
-    queryClient.invalidateQueries({ predicate: (query) => query.meta?.live !== true });
+    queryClient.invalidateQueries({ predicate: (query) => !isLiveQuery(query) });
     return;
   }
   for (const queryKey of queryKeys) {

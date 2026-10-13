@@ -877,7 +877,8 @@ subscription from an earlier row cannot match a recycled issue key; the fake hol
 fixture state in one object that the reset replaces whole, so a field added to it is reset with the
 rest. These Envoy fixture helpers run
 for local and deployed targets. The fake GitHub's `seedFakeGithub` remains unavailable to a deployed
-target and skips the test that calls it. A fixture call follows `resetDatabase()` rather than running
+target and skips the test that calls it; locally, `resetDatabase()` clears its repositories with the
+other fake fixtures. A fixture call follows `resetDatabase()` rather than running
 beside it in a `Promise.all`: the reset empties whatever lands before it finishes, and a reset left
 running would overlap the next test's. It also holds the Agents page the keyboard specs share: `seedAgents`
 (the Planner and Reviewer sessions, both listed, and two open issues for the picker) and

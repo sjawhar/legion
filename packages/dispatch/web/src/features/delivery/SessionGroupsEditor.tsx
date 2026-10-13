@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
+import { isLiveQuery } from "../../api/query-refresh";
 import type { DeliverySessionGroup } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
@@ -137,7 +138,7 @@ export function SessionGroupsEditor({
       setSelected([]);
       void queryClient.invalidateQueries({
         queryKey: ["delivery"],
-        predicate: (query) => query.meta?.live !== true,
+        predicate: (query) => !isLiveQuery(query),
       });
     },
   });

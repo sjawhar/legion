@@ -155,7 +155,7 @@ func newSignInRig(t *testing.T, serverURL string) *signInRig {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	rig.handler = New(rig.ctx)
+	rig.handler, _ = New(rig.ctx)
 	return rig
 }
 
@@ -394,7 +394,8 @@ func newTestRouter(t *testing.T) (http.Handler, *AppContext) {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	return New(ctx), ctx
+	handler, _ := New(ctx)
+	return handler, ctx
 }
 
 func TestWhoamiUsesHeaderIdentity(t *testing.T) {
@@ -998,7 +999,8 @@ func cookieRouter(t *testing.T, serverURL string) (http.Handler, *http.Cookie, *
 	if err != nil {
 		t.Fatalf("parse session cookie: %v", err)
 	}
-	return New(ctx), cookie, people
+	handler, _ := New(ctx)
+	return handler, cookie, people
 }
 
 func TestLogoutRevokesCopiedSessionCookieAndForgetsTheRefreshToken(t *testing.T) {

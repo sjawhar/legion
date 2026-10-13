@@ -587,22 +587,37 @@ func ScanJob(row pgx.Row) (DeliveryRunJob, error) {
 // UpsertRunJobs writes every job of one run, keyed on (repo, run_id, name): a job's own identity
 // is its name, since GitHub does not number jobs and a run never repeats one within the attempt
 // intake and reconcile keep. The run row itself must already exist (delivery_runs' foreign key).
-// complete is whether the run had ended when its jobs were read: until a read after the end lands,
-// the backfill keeps listing the run's jobs (ListRunIDsSkippingJobs). A read never undoes a later
-// one: a finished job is never replaced by an unfinished one, and jobs_complete never goes back to
-// false, so a read taken while the run ran that lands after the run's end changes nothing.
-// Reaching here means ListWorkflowRunJobs just succeeded for this run, so this also clears
-// jobs_unfetchable_at/jobs_unfetchable_reason to null: a successful listing is itself the "it is
-// fetchable after all" signal, the same way a successful UpsertPullRequest clears
-// unfetchable_at/unfetchable_reason.
+// complete is whether this listing came from GitHub after every listed job finished: until a
+// complete listing lands, the backfill keeps listing the run's jobs (ListRunIDsSkippingJobs). A
+// complete listing with a running job is a caller bug and is refused before anything is written.
+// A job is finished when GitHub gives it a completion time or a conclusion; a skipped job may have
+// no completion time.
+// A read never undoes a later one: a finished job is never replaced by an unfinished one, and
+// jobs_complete never goes back to false, so a read taken while the run ran that lands after the
+// run's end changes nothing. Reaching here means ListWorkflowRunJobs just succeeded for this run,
+// so this also clears jobs_unfetchable_at/jobs_unfetchable_reason to null: a successful listing is
+// itself the "it is fetchable after all" signal, the same way a successful UpsertPullRequest
+// clears unfetchable_at/unfetchable_reason. The job rows and the run's bookkeeping commit together.
 func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64, jobs []DeliveryRunJob, complete bool) error {
+	if complete {
+		for _, job := range jobs {
+			if job.CompletedAt == nil && job.Conclusion == nil {
+				return fmt.Errorf("complete jobs write for run %d includes running job %q", runID, job.Name)
+			}
+		}
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin jobs write for run %d: %w", runID, err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	for _, job := range jobs {
 		var conclusion *string
 		if job.Conclusion != nil {
 			c := string(*job.Conclusion)
 			conclusion = &c
 		}
-		if _, err := pool.Exec(ctx, `
+		if _, err := tx.Exec(ctx, `
 			insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
 			values ($1, $2, $3, $4, $5, $6)
 			on conflict (repo, run_id, name) do update set
@@ -614,29 +629,31 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 			return fmt.Errorf("upsert job %q of run %d: %w", job.Name, runID, err)
 		}
 	}
-	if _, err := pool.Exec(ctx, `
+	if _, err := tx.Exec(ctx, `
 		update delivery_runs
 		set jobs_unfetchable_at = null, jobs_unfetchable_reason = null, jobs_complete = delivery_runs.jobs_complete or $3
 		where repo = $1 and run_id = $2
 	`, repo, runID, complete); err != nil {
 		return fmt.Errorf("clear jobs-unfetchable mark for run %d: %w", runID, err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit jobs write for run %d: %w", runID, err)
+	}
 	return nil
 }
 
-// RunCompletedAt reads the stored run's completed_at, and whether the run is stored at all: the
-// job consumer reads it after its GitHub read of the run's jobs, so a run whose end landed while
-// that read was in flight stores those jobs as read after the end (UpsertRunJobs' complete).
-func RunCompletedAt(ctx context.Context, q Querier, repo string, runID int64) (*time.Time, bool, error) {
-	var completedAt *time.Time
-	err := q.QueryRow(ctx, `select completed_at from delivery_runs where repo = $1 and run_id = $2`, repo, runID).Scan(&completedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, nil
+// JobsComplete reports whether one GitHub jobs listing proves that every listed job has finished.
+// An empty listing proves nothing: GitHub may not have created a running run's jobs yet.
+func JobsComplete(jobs []DeliveryRunJob) bool {
+	if len(jobs) == 0 {
+		return false
 	}
-	if err != nil {
-		return nil, false, err
+	for _, job := range jobs {
+		if job.CompletedAt == nil && job.Conclusion == nil {
+			return false
+		}
 	}
-	return completedAt, true, nil
+	return true
 }
 
 // RunTracked reports whether repo's run runID is stored: the job consumer reads GitHub only for a

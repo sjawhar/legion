@@ -22,7 +22,9 @@
   other fields whole), a `freshness` frame when the freshness verdict changes, and a `heartbeat`
   every 15 s, the only frame on a quiet window. Nothing re-reads on a timer, a preset's end stays
   at the present, and a reconnecting page resumes with its last change and revisions and is sent
-  what changed since. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
+  what changed since. A jobs read marks a run complete only when that same GitHub listing has every
+  job finished, and Dispatch shutdown waits for delivery sockets and the live hub before it closes
+  its database pool. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
   closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
   a bearer, one JSON line per frame, and compares what it applied with the GET routes.
 

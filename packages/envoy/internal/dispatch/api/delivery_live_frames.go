@@ -158,8 +158,8 @@ type deliveryLiveClasses struct {
 	// whole fields are sent whole when their revision changes; each names the subfields its
 	// revision leaves out (they are still sent, with the rest, when the field is).
 	whole map[string][]string
-	// rides are sent with a delta whenever they moved, and never make a delta alone.
-	rides []string
+	// withChanges are sent with any delta when they moved, but never make a delta by themselves.
+	withChanges []string
 	// out are never in a delta: computed_at moves on every compute, and freshness goes out as
 	// its own frame.
 	out []string
@@ -170,19 +170,19 @@ type deliveryLiveClasses struct {
 // own computed_at, window and freshness.
 var deliveryLiveKinds = map[string]deliveryLiveClasses{
 	deliveryLiveTimeline: {
-		body:   reflect.TypeFor[deliveryTimelineWithMeasures](),
-		lists:  []string{"prs", "runs", "session_groups"},
-		maps:   []string{"issue_titles", "session_titles", "session_pr_counts", "components"},
-		counts: []string{"facet_counts", "color_counts"},
-		whole:  map[string][]string{"waiting": nil, "measures": {"computed_at", "window", "freshness"}},
-		rides:  []string{"window"},
-		out:    []string{"freshness"},
+		body:        reflect.TypeFor[deliveryTimelineWithMeasures](),
+		lists:       []string{"prs", "runs", "session_groups"},
+		maps:        []string{"issue_titles", "session_titles", "session_pr_counts", "components"},
+		counts:      []string{"facet_counts", "color_counts"},
+		whole:       map[string][]string{"waiting": nil, "measures": {"computed_at", "window", "freshness"}},
+		withChanges: []string{"window"},
+		out:         []string{"freshness"},
 	},
 	deliveryLiveMeasures: {
-		body:  reflect.TypeFor[deliveryMeasuresResponse](),
-		whole: map[string][]string{"measures": nil, "flags_source": nil, "unowned_p0": nil, "targets": nil, "status": nil},
-		rides: []string{"window"},
-		out:   []string{"computed_at", "freshness"},
+		body:        reflect.TypeFor[deliveryMeasuresResponse](),
+		whole:       map[string][]string{"measures": nil, "flags_source": nil, "unowned_p0": nil, "targets": nil, "status": nil},
+		withChanges: []string{"window"},
+		out:         []string{"computed_at", "freshness"},
 	},
 	deliveryLivePipeline: {
 		body: reflect.TypeFor[deliveryPipelineResponse](),

@@ -64,14 +64,14 @@ function mergeEntries<V>(
   return next;
 }
 
-/** `counts` with each facet's counts merged by `mergeEntries`. */
-function mergeCounts<V>(
-  counts: Readonly<Record<string, Readonly<Record<string, V>>>>,
+/** A two-level map with each first-level entry merged by `mergeEntries`. */
+function mergeNestedEntries<V>(
+  entries: Readonly<Record<string, Readonly<Record<string, V>>>>,
   changes: Readonly<Record<string, Readonly<Record<string, V | null>>>>
 ): Record<string, Readonly<Record<string, V>>> {
-  const next = { ...counts };
-  for (const [facet, values] of Object.entries(changes)) {
-    next[facet] = mergeEntries(counts[facet] ?? {}, values);
+  const next = { ...entries };
+  for (const [key, values] of Object.entries(changes)) {
+    next[key] = mergeEntries(entries[key] ?? {}, values);
   }
   return next;
 }
@@ -86,11 +86,16 @@ export function applyDelta<B extends DeliveryLiveBody>(body: B, delta: DeliveryL
   const set = Object.entries(delta.set);
   if (lists.length + maps.length + counts.length + set.length === 0) return body;
 
+  // DeliveryLiveBody is a union of response bodies with no shared field shape. The delta names
+  // fields by the server's field classes, so this generic merge reads and writes the body by name.
   const held = body as unknown as Record<string, unknown>;
   const next: Record<string, unknown> = { ...held };
   for (const [list, changes] of lists) {
     if (changes === undefined) continue;
-    const order = ORDERS[list as keyof typeof ORDERS] as (a: Item, b: Item) => number;
+    const order = Object.hasOwn(ORDERS, list)
+      ? (ORDERS[list as keyof typeof ORDERS] as (a: Item, b: Item) => number)
+      : undefined;
+    if (order === undefined) throw new Error(`Delivery live list ${list} has no client order`);
     next[list] = mergeList(
       held[list] as readonly Item[],
       changes.upsert as readonly Item[],
@@ -104,12 +109,13 @@ export function applyDelta<B extends DeliveryLiveBody>(body: B, delta: DeliveryL
   }
   for (const [name, changes] of counts) {
     if (changes === undefined) continue;
-    next[name] = mergeCounts(
+    next[name] = mergeNestedEntries(
       held[name] as Readonly<Record<string, Readonly<Record<string, number>>>>,
       changes
     );
   }
   for (const [field, value] of set) next[field] = value;
+  // Every field the delta could name has been replaced with the same JSON shape the server sent.
   return next as unknown as B;
 }
 
@@ -124,11 +130,11 @@ export function applyRevs(
   };
   for (const [name, facets] of Object.entries(changes.counts ?? {})) {
     if (facets === undefined) continue;
-    counts[name] = mergeCounts(counts[name] ?? {}, facets);
+    counts[name] = mergeNestedEntries(counts[name] ?? {}, facets);
   }
   return {
-    items: mergeCounts(revs.items, changes.items ?? {}),
-    maps: mergeCounts(revs.maps, changes.maps ?? {}),
+    items: mergeNestedEntries(revs.items, changes.items ?? {}),
+    maps: mergeNestedEntries(revs.maps, changes.maps ?? {}),
     counts,
     fields: { ...revs.fields, ...changes.fields },
   };

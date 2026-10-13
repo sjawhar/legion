@@ -138,39 +138,9 @@ func jobConsumerConfig() natsgo.ConsumerConfig {
 	}
 }
 
-// bind creates (on first run) or resumes the durable and subscribes to it, as Intake.bind does,
-// updating an existing durable's filter and flow control in place when they differ.
+// bind creates (on first run) or resumes the durable and subscribes to it.
 func (j *JobIntake) bind() (*natsgo.Subscription, bool) {
-	js := j.nats.JS()
-	wanted := jobConsumerConfig()
-	info, err := js.ConsumerInfo(bus.Stream, jobConsumerName)
-	switch {
-	case errors.Is(err, natsgo.ErrConsumerNotFound):
-		if _, err := js.AddConsumer(bus.Stream, &wanted); err != nil {
-			slog.Error("dispatch delivery: create NATS consumer", "name", jobConsumerName, "subject", jobSubject, "error", err)
-			return nil, false
-		}
-	case err != nil:
-		slog.Error("dispatch delivery: look up NATS consumer", "name", jobConsumerName, "error", err)
-		return nil, false
-	case info.Config.FilterSubject != wanted.FilterSubject ||
-		info.Config.AckWait != wanted.AckWait ||
-		info.Config.MaxAckPending != wanted.MaxAckPending:
-		config := info.Config
-		config.FilterSubject = wanted.FilterSubject
-		config.AckWait = wanted.AckWait
-		config.MaxAckPending = wanted.MaxAckPending
-		if _, err := js.UpdateConsumer(bus.Stream, &config); err != nil {
-			slog.Error("dispatch delivery: update NATS consumer policy", "name", jobConsumerName, "error", err)
-			return nil, false
-		}
-	}
-	sub, err := j.nats.Subscribe(jobSubject, j.deliver, natsgo.Bind(bus.Stream, jobConsumerName), natsgo.ManualAck())
-	if err != nil {
-		slog.Error("dispatch delivery: bind NATS consumer", "name", jobConsumerName, "subject", jobSubject, "error", err)
-		return nil, false
-	}
-	return sub, true
+	return bindDurableConsumer(j.nats, jobConsumerConfig(), j.deliver)
 }
 
 // deliver acks a job message on receipt, then hands its payload to receive. Acking first is safe:
@@ -263,9 +233,9 @@ func (j *JobIntake) fire(key runKey, run *pendingRun) {
 	j.read(ctx, key)
 }
 
-// read lists the run's jobs from GitHub, then reads whether the run has ended, then stores the jobs.
-// The end is read after the GitHub read, so a run whose end landed while the read was in flight
-// stores jobs read after it ended as complete; one read before it never marks them so.
+// read lists the run's jobs from GitHub and stores that listing. It marks the run's jobs complete
+// only when the same listing shows every job finished, so a listing taken before the run ended
+// never marks the run complete because another consumer recorded its end meanwhile.
 func (j *JobIntake) read(ctx context.Context, key runKey) {
 	owner, repo, err := splitRepo(key.repo)
 	if err != nil {
@@ -277,15 +247,8 @@ func (j *JobIntake) read(ctx context.Context, key runKey) {
 		slog.Warn("dispatch delivery: read the jobs of a running deploy run; its end reads them again", "repo", key.repo, "run_id", key.runID, "error", err)
 		return
 	}
-	completedAt, stored, err := RunCompletedAt(ctx, j.pool, key.repo, key.runID)
-	if err != nil {
-		slog.Error("dispatch delivery: read a job run's end", "repo", key.repo, "run_id", key.runID, "error", err)
-		return
-	}
-	if !stored {
-		return
-	}
-	if err := UpsertRunJobs(ctx, j.pool, key.repo, key.runID, RunJobs(key.repo, key.runID, fetched), completedAt != nil); err != nil {
+	jobs := RunJobs(key.repo, key.runID, fetched)
+	if err := UpsertRunJobs(ctx, j.pool, key.repo, key.runID, jobs, JobsComplete(jobs)); err != nil {
 		slog.Error("dispatch delivery: store the jobs of a running deploy run", "repo", key.repo, "run_id", key.runID, "error", err)
 	}
 }

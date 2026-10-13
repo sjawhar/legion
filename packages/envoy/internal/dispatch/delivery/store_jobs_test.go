@@ -2,6 +2,7 @@ package delivery
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -19,6 +20,13 @@ func TestJobsReadBeforeARunEndsLeaveItForTheBackfill(t *testing.T) {
 	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 800, []DeliveryRunJob{build}, false); err != nil {
 		t.Fatalf("UpsertRunJobs while running: %v", err)
 	}
+	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 800)
+	if err != nil {
+		t.Fatalf("ListRunJobs while running: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].CompletedAt != nil {
+		t.Fatalf("jobs while running = %+v, want build without completed_at", jobs)
+	}
 	skip, err := ListRunIDsSkippingJobs(ctx, pool, "acme/widgets", []int64{800})
 	if err != nil {
 		t.Fatalf("ListRunIDsSkippingJobs: %v", err)
@@ -26,8 +34,18 @@ func TestJobsReadBeforeARunEndsLeaveItForTheBackfill(t *testing.T) {
 	if skip[800] {
 		t.Fatal("a run whose jobs were read while it ran is skipped, want it listed")
 	}
+	finished := started.Add(4 * time.Minute)
+	success := DeliveryJobConclusionSuccess
+	build.CompletedAt, build.Conclusion = &finished, &success
 	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 800, []DeliveryRunJob{build}, true); err != nil {
 		t.Fatalf("UpsertRunJobs once ended: %v", err)
+	}
+	jobs, err = ListRunJobs(ctx, pool, "acme/widgets", 800)
+	if err != nil {
+		t.Fatalf("ListRunJobs once ended: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].CompletedAt == nil || !jobs[0].CompletedAt.Equal(finished) {
+		t.Fatalf("jobs once ended = %+v, want build completed at %v", jobs, finished)
 	}
 	skip, err = ListRunIDsSkippingJobs(ctx, pool, "acme/widgets", []int64{800})
 	if err != nil {
@@ -35,6 +53,30 @@ func TestJobsReadBeforeARunEndsLeaveItForTheBackfill(t *testing.T) {
 	}
 	if !skip[800] {
 		t.Fatal("a run whose jobs were read after it ended is listed, want it skipped")
+	}
+}
+
+// TestACompleteJobsWriteRefusesARunningJob: complete is the monotonic run-level flag, so a caller
+// cannot set it from a list that still holds a job without its completion.
+func TestACompleteJobsWriteRefusesARunningJob(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	if err := UpsertRun(ctx, pool, changeTestRun(802, DeliveryRunKindDeploy, started, started)); err != nil {
+		t.Fatalf("UpsertRun: %v", err)
+	}
+	err := UpsertRunJobs(ctx, pool, "acme/widgets", 802, []DeliveryRunJob{
+		{Repo: "acme/widgets", RunID: 802, Name: "widgets-release / widgets-release", StartedAt: &started},
+	}, true)
+	if err == nil || !strings.Contains(err.Error(), "widgets-release / widgets-release") {
+		t.Fatalf("UpsertRunJobs complete with a running job = %v, want an error naming the job", err)
+	}
+	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 802)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("jobs after refused complete write = %+v, %v; want none", jobs, err)
+	}
+	skip, err := ListRunIDsSkippingJobs(ctx, pool, "acme/widgets", []int64{802})
+	if err != nil || skip[802] {
+		t.Fatalf("backfill skips run after refused complete write (%v), want it listed", err)
 	}
 }
 

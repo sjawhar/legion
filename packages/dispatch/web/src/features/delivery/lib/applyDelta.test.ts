@@ -135,6 +135,23 @@ test("a remove drops the item", () => {
   expect(next.runs).toEqual([]);
 });
 
+test("removing an id the page never held changes nothing", () => {
+  const next = applyDelta(body, {
+    ...noChange,
+    items: { prs: { upsert: [], remove: ["acme/widgets#999"] } },
+  });
+  expect(next.prs).toEqual(body.prs);
+  expect(next.prs[0]).toBe(body.prs[0]);
+});
+
+test("a list with no order is refused by name", () => {
+  const unknownList = {
+    ...noChange,
+    items: { unknown_list: { upsert: [], remove: [] } },
+  } as unknown as DeliveryLiveDelta;
+  expect(() => applyDelta(body, unknownList)).toThrow("unknown_list");
+});
+
 test("a map entry is set, and a null entry is deleted", () => {
   const next = applyDelta(body, {
     ...noChange,

@@ -3,6 +3,7 @@ import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { deliverySettingsQuery } from "../../api/queries";
+import { isLiveQuery } from "../../api/query-refresh";
 import type { DeliverySettings, DeliverySettingsInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -150,7 +151,7 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
       // had none (DELIVERY_NOT_CONFIGURED) is answered once a configuration exists.
       void queryClient.invalidateQueries({
         queryKey: ["delivery"],
-        predicate: (query) => query.meta?.live !== true,
+        predicate: (query) => !isLiveQuery(query),
       });
     },
   });
