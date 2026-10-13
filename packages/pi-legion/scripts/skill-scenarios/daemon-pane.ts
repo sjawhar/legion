@@ -98,9 +98,10 @@ export interface PaneSource {
  * the daemon tells the pane comes from the daemon's own functions in `source`'s module
  * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
  * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment and
- * the profile's envoy.json, with the workspace's `.envoy/envoy.json` over it, `envoySettings`; the
- * default listener and no NATS when that Envoy is off), `GH_CONFIG_DIR` naming the claim's gh
- * files, which hold `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty,
+ * the profile's envoy.json, `envoySettings`, which reads no Envoy from the workspace's
+ * `.envoy/envoy.json`; the default listener and no NATS when that Envoy is off), `GH_CONFIG_DIR`
+ * naming the claim's gh files, which hold `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and
+ * `GH_HOST` set empty,
  * `PI_SHELL_PREFIX`, the four XDG base directories, the boot token pointer
  * (`<state>/secrets/boot`, the file the stand-in checks), and PATH with the launcher directory
  * first; no grant file, since the `legion` tool mints its grants in-process and no agent runs

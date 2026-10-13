@@ -7,7 +7,8 @@
 - A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else `~/.config/legion/envoy.json`. Move the old file with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move a top-level `natsUrls` into `envoy.natsUrls`.
 - The extension hands the file it read to every shell command as `ENVOY_CONFIG_FILE`, so the `dispatch` command reads the same one.
 - Each section turns on and off on its own; a missing file turns both off, and with Envoy off the session has no Envoy tools, no `/whoami` and no NATS connection.
-- A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json` and cannot run one.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json`, cannot run one, holds only a `dispatch` section, and turns Envoy off when it holds an `envoy` one.
+- The start notice names `~/.config/opencode/envoy.json` only while the neutral file is `~/.config/legion/envoy.json`, so a Legion pane, whose `XDG_CONFIG_HOME` is under the daemon's state directory, is not told to move the user's file there.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server; another server needs its own token or seed variable.
 - One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, or that inbound messages are off.
 - A relative `XDG_CONFIG_HOME` no longer stops the extension loading: both sections are off and the notice says why.

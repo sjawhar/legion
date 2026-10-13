@@ -5,9 +5,9 @@
 ### Changed
 
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else `~/.config/legion/envoy.json`. Move the old file with `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move a top-level `natsUrls` into `envoy.natsUrls`.
-- The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE`, so the session's `dispatch` command reads the same file.
+- The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE`, so the session's `dispatch` command reads the same file. A subagent's Bash, which gets nothing that hook writes, runs `dispatch` as host `claude` (`CLAUDE_CODE_CHILD_SESSION=1` with `DISPATCH_HOST` unset) on `CLAUDE_CONFIG_DIR`'s file, where it was refused for want of `DISPATCH_HOST`.
 - With Envoy off the channel server lists no tool, refuses each call with `Envoy is off for this session (<path>)`, and exits 0 when stdin ends, instead of failing on `ENVOY_NATS_URL is required`.
-- A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json`.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json`, holds only a `dispatch` section, and turns Envoy off when it holds an `envoy` one.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server.
 - The channel server writes one notice to stderr when a section is off: the missing file or the section's error.
 

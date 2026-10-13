@@ -24,8 +24,9 @@ from a parent process never stands in).
 
 The serve reads one envoy.json: `$OPENCODE_CONFIG_DIR/envoy.json` when `OPENCODE_CONFIG_DIR` is
 set, else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
-with a `<repo>/.envoy/envoy.json` merged over it (its server or listener only with the token beside
-it). Its `dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
+with the `dispatch` section of a `<repo>/.envoy/envoy.json` merged over it (its server only with the
+token beside it); an `envoy` section in that checkout's file turns Envoy off, naming it. Its
+`dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
 `natsUrls`, `token`, `natsSeed`) are resolved each on its own: `enabled: false` turns one off, a
 missing file turns both off, and a `token` starting with `!` is a command whose trimmed output is
 the value. `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_TOKEN_FILE`

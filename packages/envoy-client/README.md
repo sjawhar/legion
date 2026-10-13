@@ -59,31 +59,41 @@ Every client and command reads one envoy.json holding a `dispatch` section and a
 harness's directory and no other harness's: Oh My Pi's `$PI_CODING_AGENT_DIR/envoy.json` when
 `OMP_PROFILE` names a profile other than `default`, Claude Code's `$CLAUDE_CONFIG_DIR/envoy.json`,
 OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads the file
-`ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A command
-(harness `command`: `dispatch`, `scripts/dispatch/ask-census.ts`) reads `ENVOY_CONFIG_FILE` first,
-then the Oh My Pi, Claude Code and OpenCode directories in that order, then the same neutral file.
-A relative `XDG_CONFIG_HOME` is refused naming its value. Each plugin hands the path it chose to
-the commands its session runs in `ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load,
+`ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. The
+`dispatch` command takes its host plugin's rule (`DISPATCH_HOST`). A script outside any plugin
+(harness `command`: `scripts/dispatch/ask-census.ts`) reads `ENVOY_CONFIG_FILE` first, then the
+Oh My Pi, Claude Code and OpenCode directories in that order, then the same neutral file. A
+relative `XDG_CONFIG_HOME` is refused naming its value. Each plugin hands the path it chose to the
+commands its session runs in `ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load,
 Claude Code's `SessionStart` hook appends it to `$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook
 sets it), so a session's `dispatch` reads the file its plugin read; the innermost session's value
-wins. A Claude Code subagent's shell does not inherit what the hook wrote, and its `dispatch`
-falls back to `CLAUDE_CONFIG_DIR`, the session's own directory.
+wins. A Claude Code subagent's Bash does not get what the hook wrote (`DISPATCH_HOST` included),
+so with `DISPATCH_HOST` unset and `CLAUDE_CODE_CHILD_SESSION=1`, which Claude Code sets in every
+Bash it runs, `dispatch` takes host `claude` and reads `CLAUDE_CONFIG_DIR`, the session's own
+directory, ahead of any `ENVOY_CONFIG_FILE` an outer session exported.
 
 `readEnvoyConfig(path, env, { cwd })` reads that file and a checkout's `<cwd>/.envoy/envoy.json`
 as written, running no command. Each section is strict: an unknown key is refused naming it, and
 so is a top-level `natsUrls`, which belongs in `envoy.natsUrls`. A missing file turns both
 sections off and sets `notice`: `no envoy.json at <path>: Dispatch and Envoy are off`; when that
-file is the neutral one and `~/.config/opencode/envoy.json` still exists, the notice names both and
-says to move it. Nothing reads the old file. A file that cannot be read or is not valid sets
-`error`, naming the file and the key, and both sections are then empty.
+file is the neutral one at `$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or
+`$HOME/.config`) and `~/.config/opencode/envoy.json` still exists, the notice names both and says
+to move it. An `XDG_CONFIG_HOME` naming another directory, as a Legion pane's does, gets no such
+hint. Nothing reads the old file. A file that cannot be read or is not valid sets `error`, naming
+the file and the key, and both sections are then empty.
 
-Each section is resolved on its own: `dispatchSettings(env, config)` and `envoySettings(env,
-config)` merge the checkout's section over the chosen file's, key by key, and a failure in one
-section leaves the other as it is. The chosen file's `enabled: false` turns its section off
-whatever the environment says; a checkout's does only while no variable names that section's
-address (`DISPATCH_URL`; `ENVOY_URL` or `ENVOY_NATS_URL`) (`sectionSwitch`). A checkout's
-`dispatch.serverUrl` or `envoy.url` is used only with the token written beside it, and is refused
-without one only when it would be used, that is while no variable replaces it.
+A checkout's file is the repository's, and may hold only a `dispatch` section. An `envoy` section
+there, whatever it holds, turns Envoy off with `<checkout>: envoy is not read from a checkout's
+envoy.json; put it in <chosen file>` and leaves Dispatch as it is, so a cloned repository never
+chooses where a session's deliveries come from or which servers the user's NATS seed signs in to.
+
+Each section is resolved on its own: `dispatchSettings(env, config)` merges the checkout's
+`dispatch` section over the chosen file's, key by key, and `envoySettings(env, config)` reads the
+chosen file's `envoy` section alone; a failure in one section leaves the other as it is. The
+chosen file's `enabled: false` turns its section off whatever the environment says; a checkout's
+`dispatch.enabled: false` does only while `DISPATCH_URL` is unset (`sectionSwitch`). A checkout's
+`dispatch.serverUrl` is used only with the token written beside it, and is refused without one
+only when it would be used, that is while `DISPATCH_URL` does not replace it.
 
 A `token` or `natsSeed` value starting with `!` is a command (`fileValue`): it runs under
 `/bin/sh -c` for at most 10 s, and its trimmed stdout is the value. It runs only when its
@@ -98,13 +108,12 @@ heartbeatMs }`, or `{ enabled: false, notice, error }`. `ENVOY_URL`, `ENVOY_NATS
 `NATS_NKEY_SEED` each override their own field of an enabled section; with no enabled section,
 `ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy, which is how a Legion pane gets the one its
 daemon names. The seed is resolved only when there are NATS servers to use it on. A set `_FILE`
-pointer that cannot be read is an `error`, never a fallback. A file's `envoy.token` goes with
-`ENVOY_URL` only when it names the origin of the listener written in the file the token comes
-from. A file's `envoy.natsSeed` goes only with the servers written in that same file, since a
-server that is not the real one can relay the real server's nonce and replay the signature:
-`ENVOY_NATS_URL` gets it only when it names those servers (as a set), otherwise Envoy is refused
-naming `NATS_NKEY_SEED_FILE`, and a checkout's `envoy.natsUrls` need the checkout's own
-`envoy.natsSeed`. A seed from the variables goes with whatever servers resolve. `natsAuthOptions`
+pointer that cannot be read is an `error`, never a fallback. The file's `envoy.token` goes with
+`ENVOY_URL` only when it names the origin of the listener written in the file. The file's
+`envoy.natsSeed` goes only with the servers written in the file, since a server that is not the
+real one can relay the real server's nonce and replay the signature: `ENVOY_NATS_URL` gets it
+only when it names those servers (as a set), otherwise Envoy is refused naming
+`NATS_NKEY_SEED_FILE`. A seed from the variables goes with whatever servers resolve. `natsAuthOptions`
 takes the resolved seed and names its source when it is not a user seed;
 `natsSeedFromEnvironment` resolves one from the two variables alone.
 
@@ -196,9 +205,12 @@ arguments a command would send.
 under Claude Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the command exits 2
 naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
 directory's `title` file, names the session on what it writes. It resolves Dispatch as
-`activeDispatchConfig` does with harness `command`; with no envoy.json and no Dispatch in its
-environment it prints that file's notice and exits 2, and when a file turns Dispatch off it prints
-`dispatch: <file> turns Dispatch off (dispatch.enabled is false)` and exits 2. stdout carries what
+`activeDispatchConfig` does with its host's harness (`omp`, `claude` or `opencode`); with no
+envoy.json and no Dispatch in its environment it prints that file's notice and exits 2; when a file
+turns Dispatch off it prints `dispatch: <file> turns Dispatch off (dispatch.enabled is false)`, and
+when the file has no enabled `dispatch` section and `DISPATCH_URL` is unset it prints
+`dispatch: <file> has no enabled dispatch section, and DISPATCH_URL is not set`, each exiting 2.
+`DISPATCH_HOST` unset with `CLAUDE_CODE_CHILD_SESSION=1` is host `claude`. stdout carries what
 the model reads: the result, one `- picture: <path>` line per image (written under the session
 directory), the follow notice the first time a call follows an ask, and every refusal. It exits 0
 on success, 1 when Dispatch or the arguments refused the call, and 2 on a usage error, a corrupted

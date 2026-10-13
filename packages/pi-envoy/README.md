@@ -131,8 +131,9 @@ A session reads one envoy.json, with a section for Dispatch and one for Envoy:
 
 An Oh My Pi profile (`OMP_PROFILE` other than `default`) reads `$PI_CODING_AGENT_DIR/envoy.json`;
 any other session reads the file `ENVOY_CONFIG_FILE` names, else
-`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. A `<cwd>/.envoy/envoy.json` merges over it, and
-its server or listener is used only with the token written beside it. Each section is resolved on
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The `dispatch` section of a
+`<cwd>/.envoy/envoy.json` merges over it, and its server is used only with the token written beside
+it; an `envoy` section there turns Envoy off, naming it. Each section is resolved on
 its own: `enabled: false` turns it off, and a missing file turns both off. A `token` or `natsSeed`
 starting with `!` is a command whose trimmed output is the value (10 s; never run from a
 checkout's file). `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`,

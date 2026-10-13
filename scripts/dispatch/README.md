@@ -19,8 +19,8 @@ bun scripts/dispatch/ask-census.ts \
 
 `--project` is required and repeats: name each Dispatch project the census reads.
 
-The script resolves Dispatch as the `dispatch` command does (`activeDispatchConfig` in
-`packages/envoy-client/src/dispatch-config.ts`, harness `command`), from the envoy.json that
+The script resolves Dispatch with `activeDispatchConfig`
+(`packages/envoy-client/src/dispatch-config.ts`) under harness `command`, from the envoy.json that
 `ENVOY_CONFIG_FILE` names, else the omp profile's, `CLAUDE_CONFIG_DIR`'s or `OPENCODE_CONFIG_DIR`'s,
 else `~/.config/legion/envoy.json`: the URL from `DISPATCH_URL`, else `dispatch.serverUrl` with
 `dispatch.enabled`; the token from `DISPATCH_TOKEN_FILE`, else `DISPATCH_TOKEN`, else

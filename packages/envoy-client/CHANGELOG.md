@@ -6,20 +6,27 @@
 
 - **Breaking:** Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
   `resolveDispatchConfig` and `activeDispatchConfig` take `{ harness, cwd }` and read the file
-  `envoyConfigPath(harness, env)` names, with the checkout's `.envoy/envoy.json` merged over it.
-  `DISPATCH_URL` with a file's token at another origin than the server written in the file the
-  token comes from is refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`. The chosen file's
-  `dispatch.enabled: false` is off whatever the variables say; a checkout's only while
-  `DISPATCH_URL` is unset. A checkout's server without its own token is refused only when it would
-  be used, and turns off Dispatch alone. To move an existing file:
+  `envoyConfigPath(harness, env)` names, with the `dispatch` section of the checkout's
+  `.envoy/envoy.json` merged over it. A checkout's file may hold no `envoy` section: one there
+  turns Envoy off with `<checkout>: envoy is not read from a checkout's envoy.json; put it in
+  <chosen file>` and leaves Dispatch as it is. `DISPATCH_URL` with a file's token at another origin
+  than the server written in the file the token comes from is refused naming `DISPATCH_TOKEN` and
+  `DISPATCH_TOKEN_FILE`. The chosen file's `dispatch.enabled: false` is off whatever the variables
+  say; a checkout's only while `DISPATCH_URL` is unset. A checkout's server without its own token
+  is refused only when it would be used, and turns off Dispatch alone. To move an existing file:
   `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move its
   top-level `natsUrls` into the `envoy` section (`envoy.natsUrls`), and a checkout's
-  `.opencode/envoy.json` to `.envoy/envoy.json`.
+  `.opencode/envoy.json` to `.envoy/envoy.json`, leaving out any Envoy setting.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
-- The `dispatch` command resolves its envoy.json with harness `command`; a missing file prints
-  `dispatch: no envoy.json at <path>: Dispatch and Envoy are off`, and a file that turns Dispatch
-  off prints `dispatch: <file> turns Dispatch off (dispatch.enabled is false)`, each exiting 2.
+- The `dispatch` command resolves its envoy.json with its host plugin's rule (`DISPATCH_HOST`:
+  `omp`, `claude` or `opencode`), and with `DISPATCH_HOST` unset and `CLAUDE_CODE_CHILD_SESSION=1`
+  takes host `claude`, reading `CLAUDE_CONFIG_DIR`'s file in a Claude Code subagent's Bash, which
+  gets nothing the `SessionStart` hook writes. A missing file prints
+  `dispatch: no envoy.json at <path>: Dispatch and Envoy are off`, a file that turns Dispatch off
+  prints `dispatch: <file> turns Dispatch off (dispatch.enabled is false)`, and a file with no
+  enabled `dispatch` section, with `DISPATCH_URL` unset, prints
+  `dispatch: <file> has no enabled dispatch section, and DISPATCH_URL is not set`, each exiting 2.
 - The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
   Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000
   characters: past it the result text and picture lines are written whole to a file the output
@@ -40,23 +47,23 @@
 - `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
 - `envoyDefaultsFromEnvironment`, replaced by `envoySettings`.
 - `~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read; a missing
-  file's notice names the first when it is still there. A top-level `natsUrls` is refused, naming
-  `envoy.natsUrls`.
+  neutral file's notice names the first when it is still there and the neutral file is
+  `$HOME/.config/legion/envoy.json`. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
 
 ### Added
 
 - `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
-  else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a command tries `ENVOY_CONFIG_FILE`
-  and then each harness's directory first; a relative `XDG_CONFIG_HOME` is refused),
-  `readEnvoyConfig`, which validates both sections strictly and runs no command, `sectionSwitch`,
-  and `fileValue`, which runs a `token` or `natsSeed` starting with `!` as a command (10 s, once
-  per process with its value or failure kept, never from a checkout's file, its output never in an
-  error) when that section's resolver uses it.
+  else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a script, harness `command`, tries
+  `ENVOY_CONFIG_FILE` and then each harness's directory first; a relative `XDG_CONFIG_HOME` is
+  refused), `readEnvoyConfig`, which validates both sections strictly and runs no command,
+  `sectionSwitch`, and `fileValue`, which runs a `token` or `natsSeed` starting with `!` as a
+  command (10 s, once per process with its value or failure kept, never from a checkout's file,
+  its output never in an error) when that section's resolver uses it.
 - `envoySettings(env, config)`: the Envoy a session uses, `{ enabled: true, url, natsUrls, token,
   natsSeed, heartbeatMs }` or `{ enabled: false, notice, error }`, each variable overriding its own
-  field; `ENVOY_URL` with a file's token at another origin than that file's listener is refused,
-  and a file's `natsSeed` goes only with that file's `natsUrls` (`ENVOY_NATS_URL` naming other
-  servers needs `NATS_NKEY_SEED_FILE`; a checkout's servers need the checkout's own seed).
+  field of the chosen file's section; `ENVOY_URL` with the file's token at another origin than the
+  file's listener is refused, and the file's `natsSeed` goes only with the file's `natsUrls`
+  (`ENVOY_NATS_URL` naming other servers needs `NATS_NKEY_SEED_FILE`).
 - `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
   `activeDispatchConfig` for a caller that has already read its envoy.json.
 - `session-settings`: `sessionConfigFile(harness, env)`, the file a plugin's harness rule chooses with a relative `XDG_CONFIG_HOME` as an `error` instead of a throw; `sessionSettings(file, env, { cwd })`, both sections and the one start notice a plugin shows; and `sessionDispatchSettings`, Dispatch re-read from that same file on each use.

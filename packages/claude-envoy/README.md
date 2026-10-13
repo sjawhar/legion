@@ -27,8 +27,9 @@ events and sends them to the current Claude Code session as supported
   session id for the channel server, and puts the session's open Dispatch asks into the model's
   context (`Dispatch authored-ask summary:`; `unavailable: <reason>` when Dispatch cannot be
   reached; nothing when Dispatch is not configured). A subagent's Bash does not take what the hook
-  writes there (anthropics/claude-code#46696); its `dispatch` command reads `CLAUDE_CONFIG_DIR`
-  itself. With Dispatch configured,
+  writes there (anthropics/claude-code#46696); its `dispatch` command, finding no `DISPATCH_HOST`,
+  takes host `claude` from the `CLAUDE_CODE_CHILD_SESSION=1` Claude Code sets in every Bash, and
+  reads `CLAUDE_CONFIG_DIR` itself. With Dispatch configured,
   `dist/session-hook.js dispatch-first` puts the `dispatch-first` skill into the context of every
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
@@ -190,8 +191,9 @@ skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy 
 
 The plugin reads one envoy.json: `$CLAUDE_CONFIG_DIR/envoy.json` when `CLAUDE_CONFIG_DIR` is set,
 else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
-with a `<cwd>/.envoy/envoy.json` merged over it (its server or listener only with the token beside
-it). Its `dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
+with the `dispatch` section of a `<cwd>/.envoy/envoy.json` merged over it (its server only with the
+token beside it); an `envoy` section in that checkout's file turns Envoy off, naming it. Its
+`dispatch` section (`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`,
 `natsUrls`, `token`, `natsSeed`) are resolved each on its own; `enabled: false` turns one off, a
 missing file turns both off, and a `token` or `natsSeed` starting with `!` is a command whose
 trimmed output is the value. `DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`,

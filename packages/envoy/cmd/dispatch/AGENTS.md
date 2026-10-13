@@ -76,15 +76,18 @@ authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
 configured. An unmapped repository without a default is rejected; issues that
 use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
-Otherwise Dispatch loads config in this precedence order: the user `envoy.json`
-(`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the checkout's
-`.envoy/envoy.json` in the directory it starts in, then environment overrides.
-A user file still at `~/.config/opencode/envoy.json` with none at the current
-path refuses startup, naming both paths; so does an `XDG_CONFIG_HOME` that is
-not an absolute path, naming it; and a file that still carries a top-level
-`natsUrls` is refused, naming `envoy.natsUrls`. The server reads
-`envoy.natsUrls` whatever `envoy.enabled` says: `enabled` switches a session's
-Envoy, not the server's. A present `NATS_URLS`
+Dispatch loads config at every start, `DISPATCH_NATS_DISABLED` set or not, in this
+precedence order: the user `envoy.json` (`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`),
+the `dispatch` section of the checkout's `.envoy/envoy.json` in the directory it starts in,
+then environment overrides. Each refusal below stops startup whether or not NATS is
+disabled: a checkout's file that holds an `envoy` section, naming `envoy` and the user file
+it belongs in (a cloned repository does not choose the NATS servers the server connects
+to); a user file still at `~/.config/opencode/envoy.json` with none at the current path,
+naming both, while that path is `~/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset,
+empty or `~/.config`); an `XDG_CONFIG_HOME` that is not an absolute path, naming it; and a
+file that still carries a top-level `natsUrls`, naming `envoy.natsUrls`. The server reads
+`envoy.natsUrls` whatever `envoy.enabled` says: `enabled` switches a session's Envoy, not
+the server's. A present `NATS_URLS`
 overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the outbox
 start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
 to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`

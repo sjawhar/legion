@@ -175,10 +175,12 @@ A session reads one envoy.json (`@legion/envoy-client/session-settings` over `en
 chosen at module load by Oh My Pi's rule: with `OMP_PROFILE` naming a profile other than
 `default`, `$PI_CODING_AGENT_DIR/envoy.json`; otherwise the file `ENVOY_CONFIG_FILE` names, else
 `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The module sets `ENVOY_CONFIG_FILE` to that
-path beside `PATH` and `DISPATCH_HOST` (below), so the `dispatch` command a shell command runs
-reads the same file, and so does `@sjawhar/pi-legion` in the same process. A checkout's
-`<cwd>/.envoy/envoy.json` merges over it; its server or listener is used only with the token
-written beside it, and a `!` value in it is refused. The file holds a `dispatch` section
+path beside `PATH` and `DISPATCH_HOST` (below), so the `dispatch` command a shell command runs,
+which reads its file by the same Oh My Pi rule (`DISPATCH_HOST=omp`), reads the same file, and so
+does `@sjawhar/pi-legion` in the same process. The `dispatch` section of a checkout's
+`<cwd>/.envoy/envoy.json` merges over it; its server is used only with the token written beside
+it, and a `!` value in it is refused. An `envoy` section in the checkout's file turns Envoy off,
+naming it, and leaves Dispatch as it is. The file holds a `dispatch` section
 (`enabled`, `serverUrl`, `token`) and an `envoy` section (`enabled`, `url`, `natsUrls`, `token`,
 `natsSeed`), each strict and each resolved on its own: one section's failure leaves the other as
 it is, `enabled: false` turns a section off whatever the variables say, and a missing file turns
