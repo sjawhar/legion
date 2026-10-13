@@ -113,10 +113,6 @@ type Runtime struct {
 	watch map[claim.Token]runtime.Locator
 	// observer is the running Observe, nil when none runs.
 	observer *observer
-	// replaced is every pod that a relaunch replaced while it was live (markReplaced): a process
-	// recorded in one ended by the daemon's own act, not a fault of its own (evaluate). It lives in
-	// memory only, one entry per replacement for the daemon's life.
-	replaced map[types.UID]bool
 	// podTurns serializes the relaunches, issue suspension, release and orphan deletion of one pod,
 	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
 	// other: each issue's pod provisions its own clone on its own volume.
@@ -266,7 +262,6 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		replaced:  map[types.UID]bool{},
 		launchers: newLaunchers(),
 	}
 	if len(r.agent) == 0 {
@@ -549,9 +544,9 @@ func terminal(p *corev1.Pod) bool {
 // A pod is built whole from one image, so one container's drift is the pod's: it was launched by
 // another release of the daemon, and its agents call this daemon as that release — for a route it
 // no longer serves, a variable it no longer sets — until the pod is replaced. relaunch replaces
-// such a pod at the first launch of one of its roles that finds no other role running in it,
-// never under one, and ReconcileOrphans warns of each one it finds. A nil pod holds no drift: it
-// is replaced for being absent.
+// such a pod at the next launch of any of its roles, as it does one holding a moved address
+// (movedInPod), and ReconcileOrphans warns of each one it finds. A nil pod holds no drift: it is
+// replaced for being absent.
 func imageDrift(p *corev1.Pod, image string) (string, bool) {
 	if p == nil {
 		return "", false

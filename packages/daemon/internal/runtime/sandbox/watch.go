@@ -6,8 +6,6 @@ import (
 	"slices"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -78,35 +76,6 @@ func (r *Runtime) recorded(token claim.Token) (runtime.Locator, bool) {
 	defer r.mu.Unlock()
 	loc, ok := r.watch[token]
 	return loc, ok
-}
-
-// othersLiveIn reports whether the watch records a claim other than token running in the pod of
-// the Sandbox name with uid podUID: a process that replacing the pod would end.
-func (r *Runtime) othersLiveIn(name, podUID string, token claim.Token) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for other, loc := range r.watch {
-		if other != token && loc.Sandbox.Name == name && loc.Sandbox.PodUID == podUID {
-			return true
-		}
-	}
-	return false
-}
-
-// markReplaced records uid as a live pod the daemon itself is replacing (relaunch), before its
-// Sandbox is set Suspended: a process recorded in it then ends by the daemon's own act, which
-// evaluate reports as PodReplaced once the pod is going or gone.
-func (r *Runtime) markReplaced(uid types.UID) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.replaced[uid] = true
-}
-
-// replacedPod reports whether the daemon replaced the pod with uid (markReplaced).
-func (r *Runtime) replacedPod(uid types.UID) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.replaced[uid]
 }
 
 // Observe reports on every watched claim: each one at once, again whenever its Sandbox or pod

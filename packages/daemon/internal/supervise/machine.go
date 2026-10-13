@@ -1055,7 +1055,7 @@ func (m *Machine) judge(ctx context.Context, observation runtime.Observation, al
 		}
 		return alive(ctx)
 	case runtime.Gone, runtime.NotRecordedProcess:
-		if observation.PodReplaced {
+		if observation.Displaced {
 			return m.displaced(ctx, observation)
 		}
 		return m.died(ctx, observation)

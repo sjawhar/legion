@@ -28,12 +28,12 @@ func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) 
 }
 
 // displaced is the claim's process found gone, or found to be some other process, because the
-// daemon itself replaced its pod while it ran, to launch another role of the pod
-// (runtime.Observation.PodReplaced): a replacement no other role's life defers, such as a pod whose
-// launchers dial a stream the daemon moved from or one whose launcher Secret no longer binds it.
-// The process did nothing wrong, so it is recovered as repoint recovers a stale one: nothing is
-// charged, neither a launch failure nor a death with work outstanding, and the claim's session is
-// relaunched at once into the new pod (replaceProcess), a held suspension ending in a suspension.
+// daemon itself replaced its pod while it ran, to launch another role there
+// (runtime.Observation.Displaced). The process did nothing wrong, so it is recovered as repoint
+// recovers a stale one: nothing is charged, neither a launch failure nor a death with work
+// outstanding, and the claim's session is relaunched at once into the new pod (replaceProcess). A
+// turn the process was in is lost, and its task goes back to waiting, sent again once the session
+// resumes; a held suspension ends in a suspension.
 func (m *Machine) displaced(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: the process ended with a pod the daemon replaced; relaunching it uncharged",
 		"incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind), "detail", observation.Detail)

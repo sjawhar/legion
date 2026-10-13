@@ -10,7 +10,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -61,9 +60,42 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 	return r.evaluate(ctx, loc), nil
 }
 
-// evaluate is the observation mapping for one recorded role process. Pod loss applies to every
-// role in the issue, but a live pod is judged through the recorded role container: Ready changes
-// during a neighbour's container restart and is never a whole-pod death verdict.
+// evaluate is one observation of loc's process from the stores: Uncertain while they cannot answer
+// (view), otherwise the verdict the mapping reads from them, said Displaced when the daemon's own
+// replacement of the recorded pod is what ended the process (displaced).
+func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
+	v, err := r.view(loc.Sandbox.Name)
+	if err != nil {
+		return runtime.Observation{Locator: loc, Kind: runtime.Uncertain, At: r.now(), Detail: err.Error()}
+	}
+	obs := r.verdict(ctx, loc, v)
+	if displaced(v, loc, obs) {
+		obs.Displaced = true
+		obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role there", loc.Sandbox.PodUID)
+	}
+	return obs
+}
+
+// displaced reports whether obs, the verdict on loc's process from v, is an end the daemon made:
+// a Gone or NotRecordedProcess, never a lost workspace, of a process whose recorded pod the Sandbox
+// names as the live pod a relaunch replaced (displacedAnnotation), once that pod is being deleted
+// or is gone. A role that ends while its pod still runs undeleted ended on its own, and so did one
+// whose pod the Sandbox does not name: the annotation is written in the patch that suspends the
+// pod, so a suspension that never applied names nothing.
+func displaced(v view, loc runtime.Locator, obs runtime.Observation) bool {
+	if obs.Kind != runtime.Gone && obs.Kind != runtime.NotRecordedProcess || obs.WorkspaceLost || v.sandbox == nil {
+		return false
+	}
+	if named, ok := v.sandbox.Annotations[displacedAnnotation]; !ok || named != loc.Sandbox.PodUID {
+		return false
+	}
+	return v.pod == nil || string(v.pod.UID) != loc.Sandbox.PodUID || v.pod.DeletionTimestamp != nil
+}
+
+// verdict is the observation mapping for one recorded role process, from the stores' view of its
+// Sandbox and pod. Pod loss applies to every role in the issue, but a live pod is judged through
+// the recorded role container: Ready changes during a neighbour's container restart and is never a
+// whole-pod death verdict.
 //
 // A live pod that holds, for the recorded role, something fixed for its life that a pod created now
 // is not handed (movedInPod: the stream its launcher dials, or the secrets broker's enrollment the
@@ -75,27 +107,12 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // A role running its recorded generation whose Sandbox records it was started with other addresses
 // than a generation started now is handed (movedEnvironment) is StaleAddress too. Either names each
 // moved address, never its credentials.
-//
-// A Gone or NotRecordedProcess of a process whose recorded pod the daemon itself replaced while it
-// was live (markReplaced) says PodReplaced once that pod is being deleted or is gone: the process
-// ended by the daemon's own act, to launch another role of the pod, and the supervisor resumes it
-// charging nothing. A pod whose replacing suspension never landed — the patch failed, and the pod
-// runs on undeleted — says nothing of the kind, so a role that later dies in it is a death.
-func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
-	name := loc.Sandbox.Name
-	v, err := r.view(name)
+func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runtime.Observation {
 	observe := func(kind runtime.ObservationKind, format string, args ...any) runtime.Observation {
-		obs := runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
-		if (kind == runtime.Gone || kind == runtime.NotRecordedProcess) && r.replacedPod(types.UID(loc.Sandbox.PodUID)) &&
-			(v.pod == nil || string(v.pod.UID) != loc.Sandbox.PodUID || v.pod.DeletionTimestamp != nil) {
-			obs.PodReplaced = true
-			obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role there", loc.Sandbox.PodUID)
-		}
-		return obs
+		return runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
 	}
+	name := loc.Sandbox.Name
 	switch {
-	case err != nil:
-		return observe(runtime.Uncertain, "%v", err)
 	case v.sandbox == nil:
 		return observe(runtime.Gone, "sandbox %s/%s is absent", r.namespace, name)
 	case v.pod == nil:

@@ -1,8 +1,8 @@
 package supervise
 
 // A process the runtime reports ended with a pod the daemon itself replaced while it ran
-// (runtime.Observation.PodReplaced: the Sandbox runtime replacing a role's issue pod to launch
-// another role of it, LEGION-729) is not a death: these tests pin that the claim is relaunched at
+// (runtime.Observation.Displaced: the Sandbox runtime replacing a role's issue pod to launch
+// another role there, LEGION-729) is not a death: these tests pin that the claim is relaunched at
 // once on its recorded session, charging neither a launch failure nor a death, however often it
 // happens, and that a held suspension ends in a suspension instead.
 
@@ -14,11 +14,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// observeReplaced is the runtime's verdict that the claim's process ended with a pod the daemon
+// observeDisplaced is the runtime's verdict that the claim's process ended with a pod the daemon
 // replaced: the field, beside the kind the runtime read the pod as.
-func (h *harness) observeReplaced(kind runtime.ObservationKind) {
+func (h *harness) observeDisplaced(kind runtime.ObservationKind) {
 	h.t.Helper()
-	h.must(RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: kind, At: h.clock.Now(), PodReplaced: true}})
+	h.must(RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: kind, At: h.clock.Now(), Displaced: true}})
 }
 
 // A claim in any live state whose pod the daemon replaced, whether the runtime reads the pod gone
@@ -33,7 +33,7 @@ func TestAProcessEndedWithAPodTheDaemonReplacedIsRelaunchedChargingNothing(t *te
 				h.reach(state)
 				ended := h.locator()
 
-				h.observeReplaced(kind)
+				h.observeDisplaced(kind)
 
 				h.wantState(StateLaunching)
 				h.wantBudgets(Budgets{})
@@ -66,7 +66,7 @@ func TestReplacementsMidTurnInterruptTheTaskWithoutEverFailingTheClaim(t *testin
 	sent := h.wantPrompts(1)[0].DeliveryID
 
 	for replaced := 1; replaced <= testLimits().LaunchFailures+1; replaced++ {
-		h.observeReplaced(runtime.NotRecordedProcess)
+		h.observeDisplaced(runtime.NotRecordedProcess)
 
 		h.wantState(StateLaunching)
 		h.wantBudgets(Budgets{})
@@ -95,7 +95,7 @@ func TestAReplacementWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *testi
 		t.Fatalf("suspend mid-turn = %v, want ErrSuspendHeld", err)
 	}
 
-	h.observeReplaced(runtime.Gone)
+	h.observeDisplaced(runtime.Gone)
 
 	h.wantState(StateSuspended)
 	h.wantBudgets(Budgets{})
