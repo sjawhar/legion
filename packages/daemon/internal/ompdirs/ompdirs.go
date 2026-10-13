@@ -1,8 +1,8 @@
 // Package ompdirs is where Oh My Pi, started under a given environment, keeps a profile's
 // directories: the data root its plugins, their lock and its agent directory live under
 // (ProfileRoot), and the state root its logs and its browser broker's lock live under (StateRoot),
-// each ported from Oh My Pi's own resolution (@oh-my-pi/pi-utils 18.1.21, src/dirs.ts; the 18.6.0
-// that .omp-pin names keeps the rule, as internal/podsafety's test on that binary holds for the
+// each ported from Oh My Pi's own resolution (@oh-my-pi/pi-utils 18.1.21, src/dirs.ts; the Oh My
+// Pi that .omp-pin names keeps the rule, as internal/podsafety's test on that binary holds for the
 // state root) over that environment alone. The daemon's plugin gate reads the installed pi-legion
 // manifest under the data root (internal/daemon), the image's capability check the plugin lock
 // (internal/capabilities), and the pod's shim makes the state root's directory before Oh My Pi

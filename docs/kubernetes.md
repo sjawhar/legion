@@ -486,9 +486,9 @@ as it does a pod that dials a moved worker stream. The image probe's container i
 `OMP_SESSION_SQL_DSN_FILE` too, so `legion probe-image`, which reads the providers directory as
 the shim does, never exports the URL into Oh My Pi's environment.
 
-A resumed session also restores the model it last used, and since Oh My Pi 18.8.3, the release
-every pod runs under either store, `--mode rpc` refuses to resume one whose model the profile no
-longer has (`Could not restore model <provider>/<model>`, exit 1). So a change to the pods' model
+A resumed session also restores the model it last used, and under either store the Oh My Pi
+`.omp-pin` names refuses, in `--mode rpc`, to resume one whose model the profile no longer has
+(`Could not restore model <provider>/<model>`, exit 1). So a change to the pods' model
 route (`runtime.kubernetes.pod`, `provider_keys`) that drops a model fails the launch of every agent
 resuming a session on it, `pvc` or `postgres`, until the route offers that model again. Keep the
 route unchanged across the switch below in particular: there every session outlives its volume.

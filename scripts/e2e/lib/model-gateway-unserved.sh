@@ -46,8 +46,8 @@
 #     came, marked when it came before the check began: it had no key when the check asked it.
 #   - An agent served again after its last starve recovered, and is listed, with when it was first
 #     served again, when that starve came at or after <since> less the 30 s Oh My Pi waits before
-#     it runs a failed key command again (resolve-config-value.ts COMMAND_FAILURE_RETRY_MS, 30 s at
-#     18.2.9 and at the pinned 18.6.0).
+#     it runs a failed key command again (resolve-config-value.ts COMMAND_FAILURE_RETRY_MS, 30 s in
+#     the Oh My Pi .omp-pin names).
 #     Inside that wait a request fails with no key and runs no command, so it leaves no line, and
 #     the agent's first calls in the check can fail on a starve just before it.
 #   - An agent served again before that window held a key through the whole check, and is left out.
@@ -64,7 +64,7 @@
 set -euo pipefail
 
 me=model-gateway-unserved
-# Oh My Pi's COMMAND_FAILURE_RETRY_MS, in seconds (30 at 18.2.9 and at the pinned 18.6.0).
+# Oh My Pi's COMMAND_FAILURE_RETRY_MS, in seconds (30 in the Oh My Pi .omp-pin names).
 retry_s=30
 refuse() {
   echo "$me: $*" >&2
