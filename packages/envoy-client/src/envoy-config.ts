@@ -323,9 +323,11 @@ const FAILURE_KEPT_MS = 60_000;
 
 /** The process-wide store of kept outcomes, by command, file and working directory. It lives on
  * `globalThis` under a registered symbol because Oh My Pi loads each extension instance as a fresh
- * module, and every bundle of this module in one process (pi-envoy's, pi-legion's) shares it; an
- * entry's shape (`KeptOutcome`) is its contract across them. */
-const COMMAND_OUTCOMES: unique symbol = Symbol.for("legion.envoy-config.commands");
+ * module, and every bundle of this module in one process (pi-envoy's, pi-legion's, released
+ * separately) shares it; an entry's shape (`KeptOutcome`) is its contract across them. A change to
+ * that shape takes a new key (`.v2`), so an older bundle in the same process never misreads an
+ * entry a newer one wrote. */
+const COMMAND_OUTCOMES: unique symbol = Symbol.for("legion.envoy-config.commands.v1");
 const processGlobal = globalThis as typeof globalThis & {
   [COMMAND_OUTCOMES]?: Map<string, KeptOutcome>;
 };

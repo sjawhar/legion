@@ -155,9 +155,11 @@ exit status decides: a command that exited 0 has printed its value even when a p
 running holds stdout open; a timeout kills the whole group. It runs only when its section's
 resolver is about to use the value (the section on, no variable overriding the field). Its value
 is kept for the process, shared across module instances (one map on `globalThis` under
-`Symbol.for("legion.envoy-config.commands")`, since Oh My Pi loads each extension instance, a
-`task` subagent's included, as a fresh module), and keyed by the command, its file and its working
-directory. A command that ran out of time is kept as failed for the life of the process: a hanging
+`Symbol.for("legion.envoy-config.commands.v1")`, since Oh My Pi loads each extension instance, a
+`task` subagent's included, as a fresh module, and pi-envoy and pi-legion, released separately,
+each bundle this module; a change to an entry's shape takes a new key), and keyed by the command,
+its file and its working directory. A command that ran out of time is kept as failed for the life
+of the process: a hanging
 command never runs again in that process, since each run would block it for the whole 10 s. A
 failure that ended on its own (a non-zero exit, empty output, more than one line) is kept for 60 s
 and then the command runs again, so a cause that clears (a keyring unlocked after the session
