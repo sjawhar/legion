@@ -223,9 +223,9 @@ inbound messages: it registers nothing with the listener, its inbox stays empty,
 `envoy_subscribe` is refused with `inbound messages are off for this session: <why>`. Why a section
 is off, and that inbound messages are off, is written once to its stderr
 (`envoy-channel: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
-checkout's file holds that is not read, `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL):
-inbound messages are off; the Envoy tools still work`, or `Envoy's inbound messages are off:
-<refusal>; the Envoy tools still work`). The variables are inherited from the environment that
+checkout's file holds that is not read, or `Envoy's inbound messages are off: <why>; the Envoy tools
+still work`, `<why>` being `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` or the seed's
+refusal). The variables are inherited from the environment that
 launched `claude`
 — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because an unset `${VAR}` in `.mcp.json`
 is substituted as the literal text, which used to register a session as the literal id

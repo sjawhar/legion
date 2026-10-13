@@ -108,8 +108,9 @@ export interface PaneSource {
  * `legion` from bash; and, with `systemPrompt`, the system prompt argument. An inherited
  * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the caller's own GitHub
  * variables are dropped first. The profile's agent directory, and so its envoy.json, is under the
- * inherited `HOME`. Throws `envoy: <why>` when that Envoy is off with an error or on with its NATS
- * seed refused (`inboundError`). */
+ * inherited `HOME`. Throws `envoy: <why>` when that Envoy is off with an error, or on with inbound
+ * messages off (`inbound.off`: no NATS server, or its seed refused), since the pane's Legion claim
+ * refuses then. */
 export function workerPane(
   launch: WorkerLaunch,
   inherited: NodeJS.ProcessEnv,
@@ -137,14 +138,14 @@ export function workerPane(
     cwd: workspace,
   });
   if (!envoy.enabled && envoy.error !== null) throw new Error(`envoy: ${envoy.error}`);
-  if (envoy.enabled && envoy.inboundError !== null) throw new Error(`envoy: ${envoy.inboundError}`);
+  if (envoy.enabled && "off" in envoy.inbound) throw new Error(`envoy: ${envoy.inbound.off}`);
   const request: PaneRequest = {
     ...claim,
     stateDir,
     workspace,
     daemonUrl: `http://127.0.0.1:${launch.port}`,
     envoyUrl: envoy.enabled ? envoy.url : DEFAULT_ENVOY_URL,
-    natsUrls: envoy.enabled ? envoy.natsUrls : [],
+    natsUrls: envoy.enabled && "natsUrls" in envoy.inbound ? envoy.inbound.natsUrls : [],
     bootTokenFile: path.join(stateDir, "secrets", "boot"),
     ghToken: RIG_GH_TOKEN,
     path: env.PATH ?? "",

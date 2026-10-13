@@ -43,10 +43,11 @@ describe("envoySettings", () => {
     expect(envoySettings({}, config)).toEqual({
       enabled: true,
       url: "http://listener.internal.example:9020",
-      natsUrls: ["nats://nats.internal.example:4222"],
       token: "file-token",
-      natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
-      inboundError: null,
+      inbound: {
+        natsUrls: ["nats://nats.internal.example:4222"],
+        natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
+      },
       heartbeatMs: 120_000,
     });
   });
@@ -67,10 +68,11 @@ describe("envoySettings", () => {
     ).toEqual({
       enabled: true,
       url: "http://other-listener.internal.example:9020",
-      natsUrls: ["nats://one.internal.example:4222", "nats://two.internal.example:4222"],
       token: "environment-token",
-      natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
-      inboundError: null,
+      inbound: {
+        natsUrls: ["nats://one.internal.example:4222", "nats://two.internal.example:4222"],
+        natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
+      },
       heartbeatMs: 25,
     });
 
@@ -88,7 +90,9 @@ describe("envoySettings", () => {
     expect(pointers).toMatchObject({
       enabled: true,
       token: "pointer-token",
-      natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
+      inbound: {
+        natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
+      },
     });
   });
 
@@ -120,10 +124,8 @@ describe("envoySettings", () => {
     expect(envoySettings({ ENVOY_NATS_URL: "nats://nats.internal.example:4222" }, config)).toEqual({
       enabled: true,
       url: "http://127.0.0.1:9020",
-      natsUrls: ["nats://nats.internal.example:4222"],
       token: undefined,
-      natsSeed: undefined,
-      inboundError: null,
+      inbound: { natsUrls: ["nats://nats.internal.example:4222"], natsSeed: undefined },
       heartbeatMs: 120_000,
     });
   });
@@ -166,12 +168,7 @@ describe("envoySettings", () => {
       [{ NATS_NKEY_SEED_FILE: "" }, "NATS_NKEY_SEED_FILE is set but empty"],
       [{ NATS_NKEY_SEED: "" }, "NATS_NKEY_SEED is set but empty"],
     ] as const) {
-      expect(envoySettings(env, config)).toEqual({
-        ...fromFile,
-        natsUrls: [],
-        natsSeed: undefined,
-        inboundError: refusal,
-      });
+      expect(envoySettings(env, config)).toEqual({ ...fromFile, inbound: { off: refusal } });
     }
   });
 
@@ -220,8 +217,7 @@ describe("envoySettings", () => {
     const noServers = configFrom({ envoy: { enabled: true, natsSeed: `!touch ${ran}; echo SU` } });
     expect(envoySettings({ PATH: process.env.PATH }, noServers)).toMatchObject({
       enabled: true,
-      natsUrls: [],
-      natsSeed: undefined,
+      inbound: { off: "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)" },
     });
     expect(existsSync(ran)).toBe(false);
   });
@@ -242,10 +238,8 @@ describe("envoySettings", () => {
       expect(envoySettings(env, config, { nats: false })).toEqual({
         enabled: true,
         url: "http://listener.internal.example:9020",
-        natsUrls: [],
         token: "file-token",
-        natsSeed: undefined,
-        inboundError: null,
+        inbound: { off: "this session opens no NATS connection" },
         heartbeatMs: 120_000,
       });
     }
@@ -288,12 +282,12 @@ describe("envoySettings", () => {
         enabled: true,
         url: "http://listener.internal.example:9020",
         token: "file-token",
-        natsUrls: [],
-        natsSeed: undefined,
       });
-      if (!settings.enabled) throw new Error(`refused ${JSON.stringify(env)}`);
-      expect(settings.inboundError).toContain(message);
-      expect(settings.inboundError).not.toContain("SUENVSEED");
+      if (!settings.enabled || !("off" in settings.inbound)) {
+        throw new Error(`refused ${JSON.stringify(env)}, or took its seed`);
+      }
+      expect(settings.inbound.off).toContain(message);
+      expect(settings.inbound.off).not.toContain("SUENVSEED");
     }
   });
 
@@ -351,8 +345,10 @@ describe("the NATS seed in envoy.json", () => {
     });
     expect(envoySettings({}, config)).toMatchObject({
       enabled: true,
-      natsUrls: ["nats://one.internal.example:4222"],
-      natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
+      inbound: {
+        natsUrls: ["nats://one.internal.example:4222"],
+        natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
+      },
     });
   });
 
@@ -376,10 +372,10 @@ describe("the NATS seed in envoy.json", () => {
     expect(envoySettings(other, config)).toEqual({
       enabled: true,
       url: "http://listener.internal.example:9020",
-      natsUrls: [],
       token: "file-token",
-      natsSeed: undefined,
-      inboundError: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+      inbound: {
+        off: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+      },
       heartbeatMs: 120_000,
     });
     expect(existsSync(runs)).toBe(false);
@@ -391,7 +387,7 @@ describe("the NATS seed in envoy.json", () => {
     ]) {
       expect(
         envoySettings({ PATH: process.env.PATH, ENVOY_NATS_URL: mixed }, config)
-      ).toMatchObject({ enabled: true, natsUrls: [], inboundError: expect.any(String) });
+      ).toMatchObject({ enabled: true, inbound: { off: expect.any(String) } });
     }
     expect(existsSync(runs)).toBe(false);
 
@@ -402,8 +398,7 @@ describe("the NATS seed in envoy.json", () => {
     };
     expect(envoySettings(same, config)).toMatchObject({
       enabled: true,
-      natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${config.path}` },
-      inboundError: null,
+      inbound: { natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${config.path}` } },
     });
   });
 
@@ -420,16 +415,13 @@ describe("the NATS seed in envoy.json", () => {
     ]) {
       expect(envoySettings({ ENVOY_NATS_URL: named }, config)).toMatchObject({
         enabled: true,
-        natsUrls: [named],
-        natsSeed: { value: "SUFILESEED" },
-        inboundError: null,
+        inbound: { natsUrls: [named], natsSeed: { value: "SUFILESEED" } },
       });
     }
     for (const other of ["nats://one.internal.example:4223", "tls://one.internal.example:4222"]) {
       expect(envoySettings({ ENVOY_NATS_URL: other }, config)).toMatchObject({
         enabled: true,
-        natsUrls: [],
-        inboundError: expect.stringContaining("ENVOY_NATS_URL names other servers"),
+        inbound: { off: expect.stringContaining("ENVOY_NATS_URL names other servers") },
       });
     }
   });
@@ -449,8 +441,10 @@ describe("the NATS seed in envoy.json", () => {
       )
     ).toMatchObject({
       enabled: true,
-      natsUrls: ["nats://elsewhere.internal.example:4222"],
-      natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
+      inbound: {
+        natsUrls: ["nats://elsewhere.internal.example:4222"],
+        natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
+      },
     });
   });
 
@@ -473,8 +467,10 @@ describe("the NATS seed in envoy.json", () => {
     const config = readEnvoyConfig(user, env, { cwd });
     expect(envoySettings(env, config)).toMatchObject({
       enabled: true,
-      natsUrls: fileServers,
-      natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
+      inbound: {
+        natsUrls: fileServers,
+        natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
+      },
     });
     expect(dispatchSettings(env, config)).toEqual({
       enabled: true,

@@ -7978,7 +7978,7 @@ describe("envoy OMP extension", () => {
     await fixture.handlers.get("session_start")?.({}, context);
 
     expect(notifications).toEqual([
-      "envoy: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work",
+      "envoy: Envoy's inbound messages are off: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL); the Envoy tools still work",
     ]);
     expect(natsState.connectedNames.length).toBe(0);
     expect(intervals.length).toBe(0);

@@ -61,20 +61,28 @@ export function natsSeedFromEnvironment(env: EnvoyEnvironment): NatsSeed | undef
   return { value, source: "NATS_NKEY_SEED" };
 }
 
+/** Why an Envoy with no NATS server named, from the file or `ENVOY_NATS_URL`, takes no inbound
+ * messages. */
+const NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+/** Why a caller that opens no NATS connection (`nats: false`) takes none. */
+const NO_NATS_CONNECTION = "this session opens no NATS connection";
+
+/** How a session takes inbound messages: over `natsUrls` (never empty) as the nkey user `natsSeed`
+ * names, none for a server that asks for no credential; or not at all, `off` saying why. */
+export type EnvoyInbound =
+  | { readonly natsUrls: readonly string[]; readonly natsSeed: NatsSeed | undefined }
+  | { readonly off: string };
+
 /** An Envoy a session uses: every value resolved, credentials included. */
 export interface EnabledEnvoySettings {
   readonly enabled: true;
   readonly url: string;
-  /** The NATS servers inbound messages arrive over: none when nothing names one, or when
-   * `inboundError` refused the seed for them. */
-  readonly natsUrls: readonly string[];
   /** The listener's bearer; none for a loopback listener that asks for none. */
   readonly token: string | undefined;
-  /** The NATS user's nkey seed; none for a server that asks for no credential. */
-  readonly natsSeed: NatsSeed | undefined;
-  /** Why inbound messages are off though NATS servers are named: their seed could not be read or
-   * used. The listener and its bearer stand. Null otherwise. */
-  readonly inboundError: string | null;
+  /** Inbound messages, which arrive over NATS. Off with `NO_NATS_SERVER` when nothing names a
+   * NATS server, with the refusal when the seed for the named ones could not be read or used (the
+   * listener and its bearer stand), and with `NO_NATS_CONNECTION` for a caller that opens none. */
+  readonly inbound: EnvoyInbound;
   readonly heartbeatMs: number;
 }
 
@@ -139,7 +147,7 @@ function natsCredential(
  * empty `ENVOY_*` variable counts as unset; an empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is
  * refused, naming it (`natsSeedFromEnvironment`). A set pointer that cannot be read is refused,
  * never a fallback: `ENVOY_TOKEN_FILE`'s turns Envoy off with that `error`, and a seed's turns off
- * inbound messages alone (`inboundError`, no NATS servers), since the seed is for NATS only.
+ * inbound messages alone (`inbound.off` names the refusal), since the seed is for NATS only.
  *
  * Same server only: the file's token goes with `ENVOY_URL` only when it names the origin of the
  * listener written in the file (or the default listener when it names none); any other listener
@@ -151,8 +159,9 @@ function natsCredential(
  * resolve. The file's `!` token and seed run here, only when Envoy uses them, and a seed's failing
  * command, too, turns off inbound messages alone.
  *
- * A caller that opens no NATS connection (`nats: false`, OpenCode's plugin) gets no NATS servers
- * and resolves no seed, so a seed it would never send can neither run a command nor turn it off.
+ * A caller that opens no NATS connection (`nats: false`, OpenCode's plugin) takes no inbound
+ * messages and resolves no seed, so a seed it would never send can neither run a command nor turn
+ * it off.
  */
 export function envoySettings(
   env: EnvoyEnvironment,
@@ -209,30 +218,23 @@ export function envoySettings(
   } catch (error) {
     return offWithError(messageFor(error));
   }
-  let natsUrls =
-    options.nats === false
-      ? []
-      : namedNatsUrls.length > 0
-        ? namedNatsUrls
-        : (section.natsUrls ?? []);
-  let natsSeed: NatsSeed | undefined;
-  let inboundError: string | null = null;
-  if (natsUrls.length > 0) {
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : (section.natsUrls ?? []);
+  let inbound: EnvoyInbound;
+  if (options.nats === false) inbound = { off: NO_NATS_CONNECTION };
+  else if (natsUrls.length === 0) inbound = { off: NO_NATS_SERVER };
+  else {
     try {
-      natsSeed = natsCredential(env, section, namedNatsUrls, config.path);
+      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config.path) };
     } catch (error) {
-      natsUrls = [];
-      inboundError = messageFor(error);
+      inbound = { off: messageFor(error) };
     }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
-    natsUrls,
     token,
-    natsSeed,
-    inboundError,
+    inbound,
     heartbeatMs:
       Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
         ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)

@@ -54,8 +54,8 @@
   out (a relative `ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME`) arrives as that
   caller's Envoy-off refusal: `envoy-send` says `Envoy is off: <refusal>`,
   `scripts/e2e/lib/operator-nats-seed.ts` says `the NATS seed for <label> …: <refusal>`, and the
-  skill scenarios' `daemon-pane.ts` says `envoy: <refusal>`; those two refuse a refused NATS seed
-  (`inboundError`) the same way.
+  skill scenarios' `daemon-pane.ts` says `envoy: <refusal>`; those two refuse an Envoy that is on
+  with inbound messages off (`inbound.off`) the same way.
 - The `dispatch` command reads the envoy.json its session's plugin chose: with `DISPATCH_HOST` set,
   the file `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host plugin's
   rule (`omp`, `claude` or `opencode`); with `DISPATCH_HOST` unset and
@@ -99,20 +99,20 @@
   and its working directory, a failure kept for 60 s and then run again, never from a checkout's
   file, a value with
   whitespace inside refused, its output never in an error) when that section's resolver uses it.
-- `envoySettings(env, config, { nats })`: the Envoy a session uses, `{ enabled: true, url,
-  natsUrls, token, natsSeed, inboundError, heartbeatMs }` or a `SectionOff`, `{ enabled: false,
-  notice, error }` with exactly one of the two set, each variable overriding its own field of the
-  chosen file's section; `ENVOY_URL` with the file's token at another origin than the file's
-  listener is refused, as is an empty `envoy.token`, with the same messages as `dispatch.token`'s,
-  and the file's `natsSeed` goes only with the file's `natsUrls`, compared as normalised URLs
-  (scheme and host lower-cased, a trailing `/` dropped, the default port 4222 written), so
-  `ENVOY_NATS_URL` naming other servers needs `NATS_NKEY_SEED_FILE`. A refused seed (that pairing, a
-  failing `natsSeed` command, or a seed variable that cannot be read) turns off inbound messages
-  alone: Envoy stays on with its listener and bearer, `natsUrls` is empty, and `inboundError` names
-  the refusal, which `sessionSettings`'s start notice says (`Envoy's inbound messages are off:
-  <refusal>; the Envoy tools still work`), as it says an Envoy with no NATS server takes no inbound
-  messages. `nats: false`, for a caller that opens no NATS connection, resolves no NATS servers and
-  no seed, and its start notice says nothing of inbound messages.
+- `envoySettings(env, config, { nats })`: the Envoy a session uses, `{ enabled: true, url, token,
+  inbound, heartbeatMs }` or a `SectionOff`, `{ enabled: false, notice, error }` with exactly one of
+  the two set, each variable overriding its own field of the chosen file's section; `ENVOY_URL`
+  with the file's token at another origin than the file's listener is refused, as is an empty
+  `envoy.token`, with the same messages as `dispatch.token`'s, and the file's `natsSeed` goes only
+  with the file's `natsUrls`, compared as normalised URLs (scheme and host lower-cased, a trailing
+  `/` dropped, the default port 4222 written), so `ENVOY_NATS_URL` naming other servers needs
+  `NATS_NKEY_SEED_FILE`. `inbound` is `{ natsUrls, natsSeed }` or `{ off }`, `off` saying why the
+  session takes no inbound messages: `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)`;
+  a refused seed (that pairing, a failing `natsSeed` command, or a seed variable that cannot be
+  read), which leaves Envoy on with its listener and bearer; or `this session opens no NATS
+  connection` for `nats: false`, a caller that opens none, which resolves no seed.
+  `sessionSettings`'s start notice says `Envoy's inbound messages are off: <off>; the Envoy tools
+  still work`, except under `nats: false`, where it says nothing of inbound messages.
 - `dispatchSettings(env, config)`, Dispatch from an envoy.json already read, and
   `activeDispatchSettings(resolution)`, the one adapter that turns a resolution into the
   configuration a caller uses, null when nothing configures Dispatch, or a `dispatch config:

@@ -842,9 +842,10 @@ function pluginStateDirectory(): string {
 }
 
 /** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json. With
- * Envoy off it serves no tool (`serveEnvoyOff`, `./envoy-off`). With Envoy on and no NATS server, or
- * its seed refused (`inboundError`), it serves the tools, which call the listener, on an inbound-off
- * session (`inboundOffChannelSession`, `./envoy-off`); the start notice has said why on stderr. */
+ * Envoy off it serves no tool (`serveEnvoyOff`, `./envoy-off`). With Envoy on and inbound messages
+ * off (`inbound.off`: no NATS server, or its seed refused), it serves the tools, which call the
+ * listener, on an inbound-off session (`inboundOffChannelSession`, `./envoy-off`); the start notice
+ * has said why on stderr. */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
   // The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
@@ -911,17 +912,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
 
   let connection: ChannelForwarderConnection | undefined
   try {
-    if (envoy.natsUrls.length === 0) {
-      session = inboundOffChannelSession({
-        identity,
-        stateDirectory,
-        why: envoy.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
-      })
+    const { inbound } = envoy
+    if ("off" in inbound) {
+      session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
     } else {
       connection = await connect({
-        servers: [...envoy.natsUrls],
+        servers: [...inbound.natsUrls],
         name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(envoy.natsSeed),
+        ...natsAuthOptions(inbound.natsSeed),
         reconnect: true,
         maxReconnectAttempts: -1,
         reconnectTimeWait: 2_000,

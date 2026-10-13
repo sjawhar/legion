@@ -201,8 +201,8 @@ otherwise the section is off with an error naming the variable to set.
 With Envoy off the extension builds no listener client, registers no Envoy tool and no `/whoami`,
 and opens no NATS connection; the Legion claim bridge and every other listener call go through one
 accessor (`requireEnvoy`) that throws `Envoy is off for this session: <why>`, the section's notice
-or error. With Envoy on and no NATS server, or with its NATS seed refused (`inboundError`), inbound
-messages are off and the tools and `/whoami` still work; `envoy_subscribe` and the Legion
+or error. With Envoy on and no NATS server, or with its NATS seed refused, inbound messages are off
+(`inbound.off` says why) and the tools and `/whoami` still work; `envoy_subscribe` and the Legion
 interface's `claim` and `subscribe` throw `inbound messages are off for this session: <why>` (the
 refusal, or that Envoy has no NATS server) through one accessor (`requireInbound`), before any
 listener call or NATS connection: nats.js handed no server dials `127.0.0.1:4222`, and a claimed

@@ -132,3 +132,23 @@ test("refuses a profile envoy.json whose NATS seed Envoy refuses", () => {
     `envoy: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
   );
 }, 600_000);
+
+// An Envoy that is on with no NATS server takes no inbound messages either, and the pane's Legion
+// claim refuses then (pi-envoy's `requireInbound`), so the rig refuses it the same way.
+test("refuses a profile envoy.json whose Envoy has no NATS server", () => {
+  const agent = path.join(home, ".omp", "profiles", "rig-no-nats-profile", "agent");
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(
+    path.join(agent, "envoy.json"),
+    JSON.stringify({ envoy: { url: "http://rig-listener.internal.example:9020" } })
+  );
+
+  expect(() =>
+    workerPane(
+      { rig, port: 13399, profile: "rig-no-nats-profile" },
+      inherited,
+      { project: "skillsrig", issue: "LWEVAL-1", role: "tester" },
+      { daemonModule: DAEMON_MODULE }
+    )
+  ).toThrow("envoy: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)");
+}, 600_000);

@@ -135,7 +135,10 @@ describe("sessionSettings", () => {
     });
     const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
     expect(settings.dispatch).toMatchObject({ enabled: true, url: "https://dispatch.example" });
-    expect(settings.envoy).toMatchObject({ enabled: true, natsUrls: envoyOn.natsUrls });
+    expect(settings.envoy).toMatchObject({
+      enabled: true,
+      inbound: { natsUrls: envoyOn.natsUrls },
+    });
     expect(settings.notice).toBe(
       `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`
     );
@@ -194,9 +197,12 @@ describe("sessionSettings", () => {
       envoy: { url: envoyOn.url },
     });
     const settings = sessionSettings({ path: file, error: null }, {}, { cwd: tempDir() });
-    expect(settings.envoy).toMatchObject({ enabled: true, natsUrls: [] });
+    expect(settings.envoy).toMatchObject({
+      enabled: true,
+      inbound: { off: "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)" },
+    });
     expect(settings.notice).toBe(
-      "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work"
+      "Envoy's inbound messages are off: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL); the Envoy tools still work"
     );
     const noNats = sessionSettings(
       { path: file, error: null },
@@ -221,7 +227,9 @@ describe("sessionSettings", () => {
       enabled: true,
       url: envoyOn.url,
       token: "listener-token",
-      natsUrls: [],
+      inbound: {
+        off: `ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+      },
     });
     expect(settings.notice).toBe(
       `Envoy's inbound messages are off: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them; the Envoy tools still work`
@@ -313,7 +321,11 @@ describe("sessionEnvoySettings", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
     expect(
       sessionEnvoySettings({ path: file, error: null }, {}, { cwd: tempDir(), nats: false })
-    ).toMatchObject({ enabled: true, url: envoyOn.url, natsUrls: [] });
+    ).toMatchObject({
+      enabled: true,
+      url: envoyOn.url,
+      inbound: { off: "this session opens no NATS connection" },
+    });
     expect(sessionEnvoySettings({ path: null, error: "no location" }, {}, { cwd: "/" })).toEqual({
       enabled: false,
       notice: null,

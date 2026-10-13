@@ -438,7 +438,7 @@ export default function envoyExtension(pi: PiApi): void {
   // takes none, and its tools, which call the listener, still work. The start notice says so
   // (`sessionSettings`), with why a section is off, once, and `envoy_subscribe` and the Legion
   // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
-  const inbound = envoy.enabled && envoy.natsUrls.length > 0;
+  const inbound = envoy.enabled && !("off" in envoy.inbound);
   const startNotice = atStart.notice ?? "";
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
   // reach it through `requireEnvoy`, which refuses, saying why Envoy is off, so this session
@@ -695,27 +695,25 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
   registerEnvoyMessageRenderer(pi);
 
-  // Refuses, saying why inbound messages are off, when Envoy has no NATS server or refused its
-  // seed. A subscription and a Legion claim both ask it first: nats.js dials 127.0.0.1:4222 when
-  // handed no server, which would attach this session to whatever NATS runs there, and a role's
-  // every task and notice reaches its holder only over NATS.
-  const requireInbound = (): NonNullable<typeof active>["settings"] => {
-    const { settings } = requireEnvoy();
-    if (settings.natsUrls.length === 0) {
-      throw new Error(
-        `inbound messages are off for this session: ${settings.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)"}`
-      );
+  // Refuses, saying why inbound messages are off (`inbound.off`: no NATS server, or the seed's
+  // refusal). A subscription and a Legion claim both ask it first: nats.js dials 127.0.0.1:4222
+  // when handed no server, which would attach this session to whatever NATS runs there, and a
+  // role's every task and notice reaches its holder only over NATS.
+  const requireInbound = () => {
+    const { inbound } = requireEnvoy().settings;
+    if ("off" in inbound) {
+      throw new Error(`inbound messages are off for this session: ${inbound.off}`);
     }
-    return settings;
+    return inbound;
   };
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
-    const settings = requireInbound();
+    const { natsUrls, natsSeed } = requireInbound();
     connection = await connect({
-      servers: [...settings.natsUrls],
+      servers: [...natsUrls],
       name: `omp-${sessionID || "unknown"}`,
-      ...natsAuthOptions(settings.natsSeed),
+      ...natsAuthOptions(natsSeed),
       // Survive NATS drops after the first connection: nats.js re-subscribes
       // existing subscriptions on its own once reconnected.
       reconnect: true,

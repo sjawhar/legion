@@ -61,8 +61,8 @@ export interface SessionSettings {
  * off, or holds no section for it, says nothing. What a checkout's files hold that the session does
  * not read is said too: an `envoy` section, a file that cannot be used while `DISPATCH_URL`
  * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`). Last, for a session that
- * opens a NATS connection (`nats` not false), an Envoy that is on with no NATS server is said to
- * take no inbound messages, naming why when its seed was refused (`inboundError`).
+ * opens a NATS connection (`nats` not false), an Envoy that is on and takes no inbound messages is
+ * said to, naming why (`inbound.off`: no NATS server, or the seed's refusal).
  */
 function startNotice(
   config: EnvoyConfig,
@@ -93,13 +93,9 @@ function startNotice(
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
   parts.push(...config.warnings);
-  if (envoy.enabled && nats && envoy.inboundError !== null) {
+  if (envoy.enabled && nats && "off" in envoy.inbound) {
     parts.push(
-      `Envoy's inbound messages are off: ${envoy.inboundError}; the Envoy tools still work`
-    );
-  } else if (envoy.enabled && nats && envoy.natsUrls.length === 0) {
-    parts.push(
-      "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work"
+      `Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`
     );
   }
   return parts.length === 0 ? null : parts.join("; ");

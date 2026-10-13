@@ -861,7 +861,7 @@ test("with Envoy on and no NATS server the server serves its listener tools with
       ),
     })
     expect(stderr).toContain(
-      "envoy-channel: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work",
+      "envoy-channel: Envoy's inbound messages are off: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL); the Envoy tools still work",
     )
     expect(calls).toEqual(["GET /v1/sessions"])
     expect(exitCode).toBe(0)

@@ -752,8 +752,8 @@ describe("each section of envoy.json", () => {
     expect(envoySettings(env, fromFile)).toMatchObject({
       enabled: true,
       url: "http://listener.internal.example:9020",
-      natsUrls: [],
       token: "listener-token",
+      inbound: { off: "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)" },
     });
     // The same file under a launcher that names the same servers: each section keeps its bearer.
     const launcher = {
@@ -771,7 +771,7 @@ describe("each section of envoy.json", () => {
     expect(envoySettings(env, readEnvoyConfig(nats, env, { cwd: tempDir() }))).toMatchObject({
       enabled: true,
       url: "http://127.0.0.1:9020",
-      natsUrls: ["nats://nats.internal.example:4222"],
+      inbound: { natsUrls: ["nats://nats.internal.example:4222"] },
     });
   });
 
@@ -841,7 +841,7 @@ describe("a ! command in envoy.json", () => {
     expect(envoySettings(env, config)).toMatchObject({
       enabled: true,
       token: "listener-secret",
-      natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${file}` },
+      inbound: { natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${file}` } },
     });
   });
 
@@ -975,15 +975,15 @@ describe("a ! command in envoy.json", () => {
     });
     const brokenSeed = readEnvoyConfig(seedFails, env, { cwd: tempDir() });
     const inboundOff = envoySettings(env, brokenSeed);
-    if (!inboundOff.enabled) throw new Error(`a failing natsSeed turned Envoy off`);
+    if (!inboundOff.enabled || !("off" in inboundOff.inbound)) {
+      throw new Error(`a failing natsSeed turned Envoy off, or was taken`);
+    }
     expect(inboundOff).toMatchObject({
       url: "http://listener.internal.example:9020",
       token: "listener-token",
-      natsUrls: [],
-      natsSeed: undefined,
     });
-    expect(inboundOff.inboundError).toContain(`${seedFails}: envoy.natsSeed's command exited with`);
-    expect(inboundOff.inboundError).not.toContain("canary");
+    expect(inboundOff.inbound.off).toContain(`${seedFails}: envoy.natsSeed's command exited with`);
+    expect(inboundOff.inbound.off).not.toContain("canary");
     expect(dispatchSettings(env, brokenSeed)).toMatchObject({ enabled: true });
   });
 
@@ -1139,8 +1139,8 @@ describe("a checkout's .envoy/envoy.json", () => {
     expect(envoySettings(env, repoConfig)).toMatchObject({
       enabled: true,
       url: "http://listener.internal.example:9020",
-      natsUrls: ["nats://nats.internal.example:4222"],
       token: "listener-token",
+      inbound: { natsUrls: ["nats://nats.internal.example:4222"] },
     });
 
     const off = withCheckout({ dispatch: { enabled: false } });
@@ -1174,14 +1174,16 @@ describe("a checkout's .envoy/envoy.json", () => {
       expect(envoySettings(commandEnvironment(home), config)).toMatchObject({
         enabled: true,
         url: "http://listener.internal.example:9020",
-        natsUrls: ["nats://nats.internal.example:4222"],
         token: "listener-token",
+        inbound: { natsUrls: ["nats://nats.internal.example:4222"] },
       });
       expect(envoySettings(pane, readEnvoyConfig(user, pane, { cwd }))).toMatchObject({
         enabled: true,
-        natsUrls: ["nats://pane.internal.example:4222"],
         token: "environment-token",
-        natsSeed: { value: "SUENVSEED" },
+        inbound: {
+          natsUrls: ["nats://pane.internal.example:4222"],
+          natsSeed: { value: "SUENVSEED" },
+        },
       });
       expect(dispatchSettings(pane, config)).toEqual({
         enabled: true,

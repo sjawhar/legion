@@ -166,8 +166,8 @@ value with whitespace or a control character inside it, written, printed by a co
 it cannot go in a header as one bearer. A checkout's file is the repository's, so a command in it
 is refused.
 
-`envoySettings` is the Envoy a session uses: `{ enabled: true, url, natsUrls, token, natsSeed,
-inboundError, heartbeatMs }`, or a `SectionOff`, `{ enabled: false, notice, error }` with exactly
+`envoySettings` is the Envoy a session uses: `{ enabled: true, url, token, inbound, heartbeatMs }`,
+or a `SectionOff`, `{ enabled: false, notice, error }` with exactly
 one of the two set. A `notice` says why nothing is wrong: `<file> sets envoy.enabled to false:
 Envoy is off`, `<file> names no Envoy listener or NATS server, and neither ENVOY_URL nor
 ENVOY_NATS_URL is set: Envoy is off`, or the missing-file text. An `error` names what could not be
@@ -175,9 +175,12 @@ read or used. `ENVOY_URL`, `ENVOY_NATS_URL` (comma-separated), `ENVOY_TOKEN_FILE
 `ENVOY_TOKEN`, and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` each override their own field of the
 section; with no `envoy` section, `ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy, which is
 how a Legion pane gets the one its daemon names. An empty `ENVOY_*` variable counts as unset; an
-empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is refused, naming it. The seed is resolved only
-when there are NATS servers to use it on, and a caller that opens no NATS connection (`{ nats:
-false }`, OpenCode's plugin) gets no NATS servers and resolves no seed. A set `_FILE` pointer that
+empty `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` is refused, naming it. `inbound` is how the session
+takes inbound messages: `{ natsUrls, natsSeed }`, never with an empty `natsUrls`, or `{ off }`, `off`
+saying why: `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` when nothing names one, a
+seed's refusal (below), or `this session opens no NATS connection` for a caller that opens none
+(`{ nats: false }`, OpenCode's plugin). The seed is resolved only when there are NATS servers to
+use it on, so that caller resolves none. A set `_FILE` pointer that
 cannot be read is refused, never a fallback. The file's `envoy.token` goes with `ENVOY_URL` only
 when it names the origin of the listener written in the file (`http://127.0.0.1:9020` when it names
 none), and is otherwise refused with `ENVOY_URL names <origin>, but <file>'s envoy.token is for
@@ -190,8 +193,8 @@ lower-cased, a trailing `/` dropped, the default port 4222 written when none is,
 `nats://a:4222` and `nats://a:4222/` pair), and is otherwise refused with `ENVOY_NATS_URL names
 other servers than <file>'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`. The seed is for NATS
 alone, so its refusal (that pairing, a `natsSeed` command that fails, or a seed variable that cannot
-be read) leaves Envoy on with its listener and bearer, and turns off inbound messages: `natsUrls` is
-empty and `inboundError` names the refusal, which is null otherwise. A credential from the variables
+be read) leaves Envoy on with its listener and bearer, and turns off inbound messages: `inbound.off`
+names the refusal. A credential from the variables
 goes with whatever address resolves. `natsAuthOptions` takes the resolved seed and names its source
 when it is not a user seed; `natsSeedFromEnvironment` resolves one from the two variables alone.
 
@@ -207,9 +210,8 @@ the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is of
 what a checkout's files hold that the session does not read (its `envoy` section, the file's own
 error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`), then, for a session that
 opens a NATS connection (`nats` not `false`), that an Envoy that is on takes no inbound messages:
-`Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy
-tools still work`, or `Envoy's inbound messages are off: <inboundError>; the Envoy tools still
-work`. A file that turns a section off, or holds no section for it, says nothing.
+`Envoy's inbound messages are off: <inbound.off>; the Envoy tools still work`. A file that turns a
+section off, or holds no section for it, says nothing.
 `sessionDispatchSettings(file, env, { cwd })` reads
 Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution beside the files the
 read found and did not read and the missing-file record, for a command, which says the `warnings`
