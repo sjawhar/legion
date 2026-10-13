@@ -1,7 +1,9 @@
 package sandbox
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -111,6 +113,62 @@ func TestInstallScriptQuotesShellUnsafeSources(t *testing.T) {
 	cmd := exec.Command("sh", "-n", "-c", script, "legion-plugins")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("sh -n the rendered script: %v\n%s\nscript:\n%s", err, out, script)
+	}
+}
+
+// bunInstallArgs runs the rendered install script under sh with a stand-in bun at the script's
+// own bun path and reports the arguments bun was asked to install with: the words the shell
+// hands it after quoting, the one surface that decides whether the install can resolve. The
+// stand-in exits non-zero, so the script stops at its install-failed line and nothing else runs.
+func bunInstallArgs(t *testing.T, plugins *runtime.PluginInstall) []string {
+	t.Helper()
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("no /bin/sh in this environment")
+	}
+	dir := t.TempDir()
+	recorded := filepath.Join(dir, "bun-args")
+	stub := filepath.Join(dir, "bun")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+recorded+"\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := installScript(filepath.Join(dir, "state"), 3, plugins)
+	if !strings.Contains(script, "/usr/local/bin/bun") {
+		t.Fatalf("the install script does not call bun by the image path:\n%s", script)
+	}
+	script = strings.Replace(script, "/usr/local/bin/bun", stub, 1)
+	out, err := exec.Command("sh", "-c", script, "legion-plugins", "true").CombinedOutput()
+	if err == nil {
+		t.Fatalf("the script ran on past a failed install:\n%s", out)
+	}
+	args, err := os.ReadFile(recorded)
+	if err != nil {
+		t.Fatalf("the script never ran bun (%v):\n%s", err, out)
+	}
+	return strings.Split(strings.TrimRight(string(args), "\n"), "\n")
+}
+
+// A source that is an exact version — `runtime.kubernetes.plugins: {pi_legion: 9.7.0, …}` as
+// the loader accepts it, and the pair the release links into the binary — reaches bun as the
+// package at that version, `@sjawhar/pi-legion@9.7.0`: a bare `9.7.0` is a package name to
+// `bun add`, which refuses it (`Package "9.7.0" with tag "latest" not found`), and the agent
+// never starts (LEGION-164, the production default source).
+func TestAVersionSourceIsInstalledAsThePackageAtThatVersion(t *testing.T) {
+	args := bunInstallArgs(t, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24})
+	if !slices.Contains(args, "@sjawhar/pi-legion@9.7.0") || !slices.Contains(args, "@sjawhar/pi-envoy@9.6.1") {
+		t.Fatalf("bun add was asked for %q, want @sjawhar/pi-legion@9.7.0 and @sjawhar/pi-envoy@9.6.1", args)
+	}
+	if slices.Contains(args, "9.7.0") || slices.Contains(args, "9.6.1") {
+		t.Fatalf("bun add was asked for a bare version in %q, which it reads as a package name", args)
+	}
+}
+
+// A tarball path or an http(s) URL source reaches bun as it is: bun resolves those by their own
+// shape, and prefixing a package name would turn them into a version it cannot find.
+func TestATarballOrURLSourceReachesBunVerbatim(t *testing.T) {
+	legion, envoy := "/tmp/plugins/sjawhar-pi-legion-9.7.0.tgz", "https://registry.example/pi-envoy-9.6.1.tgz"
+	args := bunInstallArgs(t, &runtime.PluginInstall{PiLegion: legion, PiEnvoy: envoy, Contract: 24})
+	if !slices.Contains(args, legion) || !slices.Contains(args, envoy) {
+		t.Fatalf("bun add was asked for %q, want %q and %q verbatim", args, legion, envoy)
 	}
 }
 
