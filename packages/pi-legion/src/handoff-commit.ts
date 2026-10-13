@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { DISPATCH_KEY_PATTERN, type LegionRole } from "@legion/contracts";
 import type { LegionPhase } from "@legion/contracts/legion-api";
+import { staleGitLockNote } from "./git-lock";
 
 /**
  * The commit a `handoff_complete` reports, found in the pane with its own jj: what
@@ -51,7 +52,8 @@ const FILE_BACKED: Readonly<Partial<Record<LegionPhase, { word: string; role: Le
 const execFileAsync = promisify(execFile);
 
 /** PATH's jj, run as `jj -R <workspace> …` from the workspace, so a root-anchored fileset names
- * the same path from any directory. The stderr of a failure is the error. */
+ * the same path from any directory. The stderr of a failure is the error, followed by a note on
+ * each stale git lock it names (`staleGitLockNote`). */
 export const pathJj: JjRunner = async (args, cwd) => {
   try {
     const { stdout } = await execFileAsync("jj", ["-R", cwd, ...args], {
@@ -66,7 +68,8 @@ export const pathJj: JjRunner = async (args, cwd) => {
         : error instanceof Error
           ? error.message
           : String(error);
-    throw new Error(`jj ${args.join(" ")} failed: ${detail}`);
+    const note = await staleGitLockNote(detail);
+    throw new Error(`jj ${args.join(" ")} failed: ${detail}${note === "" ? "" : `\n${note}`}`);
   }
 };
 
