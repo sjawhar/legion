@@ -3,11 +3,15 @@
 // characters, so a long open-asks summary sharing a command with the skill could push it out.
 //
 // open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
-// 1. Name Claude Code as the `dispatch` command's host: append `export DISPATCH_HOST=claude` to
+// 1. Name Claude Code as the `dispatch` command's host and hand on the session's envoy.json:
+//    append `export DISPATCH_HOST=claude` and `export ENVOY_CONFIG_FILE='<path>'` (the file
+//    Claude Code's rule picks, `$CLAUDE_CONFIG_DIR/envoy.json` when that is set) to
 //    `CLAUDE_ENV_FILE`, which Claude Code sources into every later Bash command of the session,
-//    unless an earlier SessionStart already wrote that line there.
-//    The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which Claude Code sets fresh
-//    in each Bash command, so a `/clear` needs nothing more here.
+//    each unless an earlier SessionStart already wrote that line there. A subagent's Bash takes
+//    nothing from that file (anthropics/claude-code#46696); the `dispatch` command it runs reads
+//    `CLAUDE_CONFIG_DIR` itself. The path is single-quoted, the one form Claude Code's PowerShell
+//    bridge also reads. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
+//    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
 // 2. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
 // 3. Put the session's open Dispatch asks into the model's context.
@@ -33,6 +37,7 @@ import {
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
 import { messageFor } from "@legion/envoy-client/errors"
+import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -46,23 +51,31 @@ const DispatchFirstInput = z.object({
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
 
-/** Appends the host line to the env file, once: every SessionStart of the session runs this. */
-function nameDispatchHost(envFile: string): void {
+/** Appends `line` to the env file, once: every SessionStart of the session runs this. */
+function appendOnce(envFile: string, line: string): void {
   let written = ""
   try {
     written = readFileSync(envFile, "utf8")
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
   }
-  if (written.split("\n").includes(DISPATCH_HOST_LINE)) return
+  if (written.split("\n").includes(line)) return
   const separator = written === "" || written.endsWith("\n") ? "" : "\n"
-  appendFileSync(envFile, `${separator}${DISPATCH_HOST_LINE}\n`)
+  appendFileSync(envFile, `${separator}${line}\n`)
 }
 
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
   const envFile = process.env["CLAUDE_ENV_FILE"]
-  if (envFile) nameDispatchHost(envFile)
+  if (envFile) {
+    appendOnce(envFile, DISPATCH_HOST_LINE)
+    // A file location that cannot be worked out hands nothing on: the open-asks summary below says
+    // why Dispatch is unavailable.
+    const chosen = sessionConfigFile("claude", process.env)
+    if (chosen.path !== null) {
+      appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`)
+    }
+  }
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
   if (pluginData !== undefined && pluginData.trim().length > 0) {
     try {

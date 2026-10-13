@@ -18687,6 +18687,193 @@ function readDispatchFirstContext(skillFile) {
 `);
 }
 
+// ../envoy-client/src/defaults.ts
+var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
+var DEFAULT_HEARTBEAT_MS = 120000;
+var MIN_HEARTBEAT_MS = 25;
+function natsSeedFromEnvironment(env) {
+  const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
+  if (file2 !== undefined) {
+    if (file2 === "")
+      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
+    return {
+      value: readSecretFile("NATS_NKEY_SEED_FILE", file2),
+      source: `NATS_NKEY_SEED_FILE (${file2})`
+    };
+  }
+  if (plain === undefined)
+    return;
+  const value = plain.trim();
+  if (value.length === 0)
+    throw new Error("NATS_NKEY_SEED is set but empty");
+  return { value, source: "NATS_NKEY_SEED" };
+}
+function disabled(error48) {
+  return { enabled: false, notice: null, error: error48 };
+}
+function envoySettings(env, config2) {
+  if (config2.error !== null)
+    return disabled(config2.error);
+  const state = sectionSwitch(config2, "envoy", env);
+  if (state.offBy !== null) {
+    return {
+      enabled: false,
+      notice: `${state.offBy} sets envoy.enabled to false: Envoy is off`,
+      error: null
+    };
+  }
+  const namedUrl = env.ENVOY_URL === "" ? undefined : env.ENVOY_URL;
+  const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url3) => url3.trim()).filter((url3) => url3.length > 0);
+  if (!state.enabled && namedUrl === undefined && namedNatsUrls.length === 0) {
+    return {
+      enabled: false,
+      notice: config2.notice ?? `${config2.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`,
+      error: null
+    };
+  }
+  const own = state.enabled ? config2.envoy : {};
+  const checkout = state.enabled ? config2.checkout : null;
+  let url2;
+  let token;
+  if (namedUrl === undefined && checkout?.envoy.url !== undefined) {
+    if (!checkout.envoy.token) {
+      return disabled(`${checkout.path}: envoy.url requires envoy.token in the same file`);
+    }
+    if (checkout.envoy.token.startsWith("!")) {
+      return disabled(checkoutCommandRefusal(checkout.path, "envoy.token"));
+    }
+    url2 = checkout.envoy.url;
+    token = checkout.envoy.token;
+  } else {
+    url2 = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
+    let tokenFile = null;
+    const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
+    if (tokenPointer !== undefined) {
+      try {
+        token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
+      } catch (error48) {
+        return disabled(messageFor(error48));
+      }
+    } else if (env.ENVOY_TOKEN) {
+      token = env.ENVOY_TOKEN;
+    } else if (checkout?.envoy.token !== undefined) {
+      token = checkout.envoy.token;
+      const listener = checkout.envoy.url ?? own.url ?? DEFAULT_ENVOY_URL;
+      tokenFile = { path: checkout.path, url: listener };
+    } else if (own.token !== undefined) {
+      token = own.token;
+      tokenFile = { path: config2.path, url: own.url ?? DEFAULT_ENVOY_URL };
+    }
+    if (namedUrl !== undefined && tokenFile !== null) {
+      let named;
+      try {
+        named = new URL(namedUrl).origin;
+      } catch {
+        return disabled("ENVOY_URL must be a valid URL");
+      }
+      const listener = new URL(tokenFile.url).origin;
+      if (named !== listener) {
+        return disabled(`ENVOY_URL names ${named}, but ${tokenFile.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
+      }
+    }
+    if (tokenFile !== null && token?.startsWith("!")) {
+      if (tokenFile.path !== config2.path) {
+        return disabled(checkoutCommandRefusal(tokenFile.path, "envoy.token"));
+      }
+      try {
+        token = fileValue(token, "envoy.token", config2.path, env);
+      } catch (error48) {
+        return disabled(messageFor(error48));
+      }
+    }
+  }
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : checkout?.envoy.natsUrls ?? own.natsUrls ?? [];
+  let natsSeed;
+  if (natsUrls.length > 0) {
+    try {
+      natsSeed = natsSeedFromEnvironment(env);
+    } catch (error48) {
+      return disabled(messageFor(error48));
+    }
+    const seedFile = natsSeed !== undefined ? null : checkout?.envoy.natsSeed !== undefined ? {
+      path: checkout.path,
+      seed: checkout.envoy.natsSeed,
+      servers: checkout.envoy.natsUrls ?? own.natsUrls ?? []
+    } : own.natsSeed !== undefined ? { path: config2.path, seed: own.natsSeed, servers: own.natsUrls ?? [] } : null;
+    if (seedFile !== null) {
+      const servers = new Set(seedFile.servers.map((server) => server.trim()));
+      const used = new Set(natsUrls.map((url3) => url3.trim()));
+      const sameServers = used.size === servers.size && [...used].every((url3) => servers.has(url3));
+      if (!sameServers) {
+        const serversFile = checkout?.envoy.natsUrls !== undefined ? checkout.path : config2.path;
+        return disabled(namedNatsUrls.length > 0 ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them` : `${serversFile}: envoy.natsUrls requires envoy.natsSeed in the same file`);
+      }
+      if (seedFile.path !== config2.path && seedFile.seed.startsWith("!")) {
+        return disabled(checkoutCommandRefusal(seedFile.path, "envoy.natsSeed"));
+      }
+      try {
+        const value = fileValue(seedFile.seed, "envoy.natsSeed", config2.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${seedFile.path}` };
+      } catch (error48) {
+        return disabled(messageFor(error48));
+      }
+    }
+  }
+  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  return {
+    enabled: true,
+    url: normalizeEnvoyUrl(url2),
+    natsUrls,
+    token,
+    natsSeed,
+    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+  };
+}
+function normalizeEnvoyUrl(value) {
+  return value.replace(/\/+$/, "");
+}
+
+// ../envoy-client/src/session-settings.ts
+function sessionConfigFile(harness, env) {
+  try {
+    return { path: envoyConfigPath(harness, env), error: null };
+  } catch (error48) {
+    return { path: null, error: messageFor(error48) };
+  }
+}
+function startNotice(config2, dispatch, envoy) {
+  if (config2.error !== null)
+    return `${config2.error}: Dispatch and Envoy are off`;
+  const missing = config2.notice !== null;
+  const dispatchOff = !dispatch.enabled && dispatch.error === null;
+  const envoyOff = !envoy.enabled && envoy.error === null;
+  if (missing && dispatchOff && envoyOff)
+    return config2.notice;
+  const parts = [];
+  if (dispatch.error !== null)
+    parts.push(`Dispatch is off: ${dispatch.error}`);
+  else if (dispatchOff && missing)
+    parts.push(`no envoy.json at ${config2.path}: Dispatch is off`);
+  if (!envoy.enabled && envoy.error !== null)
+    parts.push(`Envoy is off: ${envoy.error}`);
+  else if (envoyOff && missing)
+    parts.push(`no envoy.json at ${config2.path}: Envoy is off`);
+  return parts.length === 0 ? null : parts.join("; ");
+}
+function sessionSettings(file2, env, options) {
+  if (file2.path === null) {
+    return {
+      dispatch: { enabled: false, url: null, token: null, error: file2.error },
+      envoy: { enabled: false, notice: null, error: file2.error },
+      notice: `${file2.error}: Dispatch and Envoy are off`
+    };
+  }
+  const config2 = readEnvoyConfig(file2.path, env, options);
+  const dispatch = dispatchSettings(env, config2);
+  const envoy = envoySettings(env, config2);
+  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy) };
+}
+
 // src/claude-session.ts
 function configuredValue(value) {
   return value !== undefined && value.trim().length > 0 ? value : undefined;
@@ -18777,7 +18964,7 @@ var DispatchFirstInput = exports_external.object({
   cwd: exports_external.string().optional()
 });
 var DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude";
-function nameDispatchHost(envFile) {
+function appendOnce(envFile, line) {
   let written = "";
   try {
     written = readFileSync4(envFile, "utf8");
@@ -18786,19 +18973,24 @@ function nameDispatchHost(envFile) {
       throw error48;
   }
   if (written.split(`
-`).includes(DISPATCH_HOST_LINE))
+`).includes(line))
     return;
   const separator = written === "" || written.endsWith(`
 `) ? "" : `
 `;
-  appendFileSync(envFile, `${separator}${DISPATCH_HOST_LINE}
+  appendFileSync(envFile, `${separator}${line}
 `);
 }
 async function openAsks(raw) {
   const input = OpenAsksInput.parse(raw);
   const envFile = process.env["CLAUDE_ENV_FILE"];
-  if (envFile)
-    nameDispatchHost(envFile);
+  if (envFile) {
+    appendOnce(envFile, DISPATCH_HOST_LINE);
+    const chosen = sessionConfigFile("claude", process.env);
+    if (chosen.path !== null) {
+      appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`);
+    }
+  }
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"];
   if (pluginData !== undefined && pluginData.trim().length > 0) {
     try {

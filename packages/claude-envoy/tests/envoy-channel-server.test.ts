@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
@@ -24,6 +25,7 @@ import {
   sessionOptions,
   settled,
 } from "./channel-session-harness"
+import { FakeNatsServer } from "./fake-nats-server"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
@@ -568,3 +570,148 @@ test("drops a malformed targeted frame that has no reply address", async () => {
   expect(notifier.notifications).toEqual([])
   expect(delivery.inbox()).toEqual([])
 })
+
+const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
+
+/**
+ * Runs the channel server as Claude Code does, in `env.HOME` with `env` as its whole environment:
+ * it initializes over MCP, lists the tools, calls `envoy_whoami`, then closes stdin. Returns the
+ * exit code, each response by its request id, and stderr.
+ */
+async function runChannelServer(
+  env: Readonly<Record<string, string>> & { readonly HOME: string },
+): Promise<{
+  readonly exitCode: number
+  readonly responses: ReadonlyMap<number, Record<string, unknown>>
+  readonly stderr: string
+}> {
+  const server = Bun.spawn(["bun", channelEntry], {
+    cwd: env.HOME,
+    env: { PATH: process.env["PATH"] ?? "", ...env },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const responses = new Map<number, Record<string, unknown>>()
+  const waiters = new Map<number, () => void>()
+  // A response, or the server's exit naming the request it never answered.
+  const answered = (id: number): Promise<void> => {
+    if (responses.has(id)) return Promise.resolve()
+    const waiting = Promise.withResolvers<void>()
+    waiters.set(id, waiting.resolve)
+    return Promise.race([
+      waiting.promise,
+      server.exited.then((code) => {
+        throw new Error(`the channel server exited ${code} before answering request ${id}`)
+      }),
+    ])
+  }
+  const reading = (async () => {
+    let buffered = ""
+    for await (const chunk of server.stdout.pipeThrough(new TextDecoderStream())) {
+      buffered += chunk
+      for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
+        const message = JSON.parse(buffered.slice(0, newline)) as Record<string, unknown>
+        buffered = buffered.slice(newline + 1)
+        const id = message["id"]
+        if (typeof id !== "number") continue
+        responses.set(id, message)
+        waiters.get(id)?.()
+      }
+    }
+  })()
+  const send = (message: object) => server.stdin.write(`${JSON.stringify(message)}\n`)
+  try {
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test", version: "0" },
+      },
+    })
+    await answered(1)
+    send({ jsonrpc: "2.0", method: "notifications/initialized" })
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
+    send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "envoy_whoami", arguments: {} },
+    })
+    await Promise.all([answered(2), answered(3)])
+    await server.stdin.end()
+    const [exitCode, stderr] = await Promise.all([
+      server.exited,
+      new Response(server.stderr).text(),
+      reading,
+    ])
+    return { exitCode, responses, stderr }
+  } finally {
+    server.kill("SIGKILL")
+  }
+}
+
+test("with CLAUDE_CONFIG_DIR holding no envoy.json the server lists no tool, refuses each call, and exits 0 when stdin ends", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-off-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  try {
+    const { exitCode, responses, stderr } = await runChannelServer({
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_off",
+      CLAUDE_PLUGIN_DATA: home,
+    })
+    const file = join(configDirectory, "envoy.json")
+
+    expect(responses.get(2)?.["result"]).toEqual({ tools: [] })
+    expect(responses.get(3)?.["error"]).toMatchObject({
+      message: expect.stringContaining(`Envoy is off for this session (${file})`),
+    })
+    expect(stderr).toContain(`envoy-channel: no envoy.json at ${file}: Dispatch and Envoy are off`)
+    expect(exitCode).toBe(0)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("an envoy.json that turns Envoy off opens no NATS connection and calls no listener, whatever the variables name", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-off-file-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({ envoy: { enabled: false } }),
+  )
+  const broker = new FakeNatsServer()
+  const listenerCalls: string[] = []
+  const listener = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      listenerCalls.push(`${request.method} ${new URL(request.url).pathname}`)
+      return Response.json({ error: "no call belongs here" }, { status: 500 })
+    },
+  })
+  try {
+    const { exitCode, responses } = await runChannelServer({
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_off_file",
+      CLAUDE_PLUGIN_DATA: home,
+      ENVOY_URL: `http://127.0.0.1:${listener.port}`,
+      ENVOY_NATS_URL: broker.url,
+    })
+
+    expect(responses.get(2)?.["result"]).toEqual({ tools: [] })
+    expect(exitCode).toBe(0)
+    expect(broker.connections).toBe(0)
+    expect(listenerCalls).toEqual([])
+  } finally {
+    listener.stop(true)
+    await broker.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)

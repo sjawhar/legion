@@ -1,7 +1,6 @@
 import { unwatchFile, watchFile } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
 import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
-import { envoySettings } from "@legion/envoy-client/defaults"
 import {
   type DispatchDelivery,
   expectsLaneReceipt,
@@ -11,10 +10,10 @@ import {
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
-import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
+import { sessionConfigFile, sessionSettings } from "@legion/envoy-client/session-settings"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -848,13 +847,44 @@ function pluginStateDirectory(): string {
   return pluginData
 }
 
-/** Start the stdio MCP server Claude Code invokes for this plugin. */
+/**
+ * The MCP server of a session whose Envoy is off: no tool, every call refused with `refusal`, and
+ * nothing subscribed, until stdin ends or a signal stops it.
+ */
+async function serveEnvoyOff(refusal: string): Promise<void> {
+  const server = new Server(MCP_SERVER_INFO, { capabilities: { tools: {} } })
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }))
+  server.setRequestHandler(CallToolRequestSchema, async () => {
+    throw new Error(refusal)
+  })
+  const stopped = Promise.withResolvers<void>()
+  process.stdin.once("end", stopped.resolve)
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
+    process.once(signal, () => stopped.resolve())
+  }
+  await server.connect(new StdioServerTransport())
+  try {
+    await stopped.promise
+  } finally {
+    await server.close().catch(() => undefined)
+  }
+}
+
+/** Start the stdio MCP server Claude Code invokes for this plugin, on the envoy.json Claude Code's
+ * rule picks (`$CLAUDE_CONFIG_DIR/envoy.json` when that is set). */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
-  const dispatchConfig = currentDispatchConfig(directory)
-  if (!dispatchConfig.enabled) {
-    process.stderr.write(
-      `envoy-channel: Dispatch disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}\n`,
+  const configFile = sessionConfigFile("claude", process.env)
+  const { envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
+  // Claude Code logs the server's stderr: why a section is off, once.
+  if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
+  if (!envoy.enabled) {
+    await serveEnvoyOff(`Envoy is off for this session (${configFile.path ?? configFile.error})`)
+    return
+  }
+  if (envoy.natsUrls.length === 0) {
+    throw new Error(
+      "the Envoy Claude channel server needs a NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
     )
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
@@ -865,16 +895,6 @@ export async function runEnvoyChannelServer(): Promise<void> {
     }),
     directory,
   )
-  const envoy = envoySettings(
-    process.env,
-    readEnvoyConfig(envoyConfigPath("claude", process.env), process.env, { cwd: directory }),
-  )
-  if (!envoy.enabled && envoy.error !== null) {
-    throw new Error(`Envoy disabled for the Envoy Claude channel server: ${envoy.error}`)
-  }
-  if (!envoy.enabled || envoy.natsUrls.length === 0) {
-    throw new Error("ENVOY_NATS_URL is required for the Envoy Claude channel server")
-  }
   const stateDirectory = pluginStateDirectory()
 
   const server = new Server(MCP_SERVER_INFO, {

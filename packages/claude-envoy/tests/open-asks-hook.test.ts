@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 
@@ -139,8 +139,9 @@ test("adds nothing to context when Dispatch is not configured", async () => {
 })
 
 // The `dispatch` command the plugin's bin/ puts on the Bash tool's PATH reads its host from
-// DISPATCH_HOST; Claude Code sources CLAUDE_ENV_FILE into every later Bash command of the session.
-test("names Claude Code as the dispatch host in CLAUDE_ENV_FILE, after whatever other hooks wrote", async () => {
+// DISPATCH_HOST, and its envoy.json from ENVOY_CONFIG_FILE; Claude Code sources CLAUDE_ENV_FILE into
+// every later Bash command of the session.
+test("names Claude Code as the dispatch host and hands on the session's envoy.json in CLAUDE_ENV_FILE, after whatever other hooks wrote", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-env-"))
   const envFile = join(scratch, "session-env.sh")
   await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
@@ -153,15 +154,72 @@ test("names Claude Code as the dispatch host in CLAUDE_ENV_FILE, after whatever 
 
     expect(result.exitCode).toBe(0)
     expect(await readFile(envFile, "utf8")).toBe(
-      "export FROM_ANOTHER_HOOK=1\nexport DISPATCH_HOST=claude\n",
+      [
+        "export FROM_ANOTHER_HOOK=1",
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        "",
+      ].join("\n"),
     )
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
 })
 
-// SessionStart fires on startup, resume, clear, compact and fork; the file keeps one line for it.
-test("names the dispatch host once however many SessionStarts write the same env file", async () => {
+test("hands on the CLAUDE_CONFIG_DIR envoy.json, single-quoted so the shell reads the path as written", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-config-"))
+  const configDirectory = join(scratch, "it's claude")
+  await mkdir(configDirectory)
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_ENV_FILE: envFile,
+    })
+
+    expect(result.exitCode).toBe(0)
+    const file = join(configDirectory, "envoy.json")
+    expect(await readFile(envFile, "utf8")).toBe(
+      `export DISPATCH_HOST=claude\nexport ENVOY_CONFIG_FILE='${file.replaceAll("'", "'\\''")}'\n`,
+    )
+    const sourced = Bun.spawnSync([
+      "bash",
+      "-c",
+      `. "$1"; printf %s "$ENVOY_CONFIG_FILE"`,
+      "-",
+      envFile,
+    ])
+    expect(sourced.stdout.toString()).toBe(file)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+test("with a relative XDG_CONFIG_HOME, hands on no envoy.json, says why Dispatch is unavailable, and still exits 0", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-xdg-"))
+  const envFile = join(scratch, "session-env.sh")
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      XDG_CONFIG_HOME: "relative/config",
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+      CLAUDE_ENV_FILE: envFile,
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(await readFile(envFile, "utf8")).toBe("export DISPATCH_HOST=claude\n")
+    expect(result.stdout).toBe(
+      "Dispatch authored-ask summary unavailable: XDG_CONFIG_HOME is relative/config, which is not an absolute path\n",
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
+// SessionStart fires on startup, resume, clear, compact and fork; the file keeps one of each line.
+test("writes the host and envoy.json lines once however many SessionStarts write the same env file", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-env-twice-"))
   const envFile = join(scratch, "session-env.sh")
   await writeFile(envFile, "export FROM_ANOTHER_HOOK=1\n")
@@ -174,7 +232,12 @@ test("names the dispatch host once however many SessionStarts write the same env
     expect((await runHook(hookInput, env)).exitCode).toBe(0)
     expect((await runHook(hookInput, env)).exitCode).toBe(0)
     expect(await readFile(envFile, "utf8")).toBe(
-      "export FROM_ANOTHER_HOOK=1\nexport DISPATCH_HOST=claude\n",
+      [
+        "export FROM_ANOTHER_HOOK=1",
+        "export DISPATCH_HOST=claude",
+        `export ENVOY_CONFIG_FILE='${scratch}/.config/legion/envoy.json'`,
+        "",
+      ].join("\n"),
     )
   } finally {
     await rm(scratch, { recursive: true, force: true })
