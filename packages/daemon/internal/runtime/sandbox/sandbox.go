@@ -113,9 +113,10 @@ type Runtime struct {
 	watch map[claim.Token]runtime.Locator
 	// observer is the running Observe, nil when none runs.
 	observer *observer
-	// replaced is every pod, by uid, that a relaunch replaced while it was live (markReplaced): a
-	// process recorded in one ended by the daemon's own act, not a fault of its own (evaluate).
-	replaced map[string]bool
+	// replaced is every pod that a relaunch replaced while it was live (markReplaced): a process
+	// recorded in one ended by the daemon's own act, not a fault of its own (evaluate). It lives in
+	// memory only, one entry per replacement for the daemon's life.
+	replaced map[types.UID]bool
 	// podTurns serializes the relaunches, issue suspension, release and orphan deletion of one pod,
 	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
 	// other: each issue's pod provisions its own clone on its own volume.
@@ -265,7 +266,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		replaced:  map[string]bool{},
+		replaced:  map[types.UID]bool{},
 		launchers: newLaunchers(),
 	}
 	if len(r.agent) == 0 {

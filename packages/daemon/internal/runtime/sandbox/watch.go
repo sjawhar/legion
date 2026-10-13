@@ -6,6 +6,8 @@ import (
 	"slices"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -91,20 +93,20 @@ func (r *Runtime) othersLiveIn(name, podUID string, token claim.Token) bool {
 	return false
 }
 
-// markReplaced records podUID as a live pod the daemon itself is replacing (relaunch), before its
+// markReplaced records uid as a live pod the daemon itself is replacing (relaunch), before its
 // Sandbox is set Suspended: a process recorded in it then ends by the daemon's own act, which
 // evaluate reports as PodReplaced once the pod is going or gone.
-func (r *Runtime) markReplaced(podUID string) {
+func (r *Runtime) markReplaced(uid types.UID) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.replaced[podUID] = true
+	r.replaced[uid] = true
 }
 
-// replacedPod reports whether the daemon replaced the pod with uid podUID (markReplaced).
-func (r *Runtime) replacedPod(podUID string) bool {
+// replacedPod reports whether the daemon replaced the pod with uid (markReplaced).
+func (r *Runtime) replacedPod(uid types.UID) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.replaced[podUID]
+	return r.replaced[uid]
 }
 
 // Observe reports on every watched claim: each one at once, again whenever its Sandbox or pod

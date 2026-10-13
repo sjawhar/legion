@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -83,13 +84,12 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
 	name := loc.Sandbox.Name
 	v, err := r.view(name)
-	replaced := err == nil && r.replacedPod(loc.Sandbox.PodUID) &&
-		(v.pod == nil || string(v.pod.UID) != loc.Sandbox.PodUID || v.pod.DeletionTimestamp != nil)
 	observe := func(kind runtime.ObservationKind, format string, args ...any) runtime.Observation {
 		obs := runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
-		if replaced && (kind == runtime.Gone || kind == runtime.NotRecordedProcess) {
+		if (kind == runtime.Gone || kind == runtime.NotRecordedProcess) && r.replacedPod(types.UID(loc.Sandbox.PodUID)) &&
+			(v.pod == nil || string(v.pod.UID) != loc.Sandbox.PodUID || v.pod.DeletionTimestamp != nil) {
 			obs.PodReplaced = true
-			obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role of it", loc.Sandbox.PodUID)
+			obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role there", loc.Sandbox.PodUID)
 		}
 		return obs
 	}

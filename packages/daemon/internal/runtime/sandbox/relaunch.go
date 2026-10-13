@@ -123,7 +123,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		if s.mode() != modeSuspended {
 			if ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil {
-				r.markReplaced(string(pod.UID))
+				r.markReplaced(pod.UID)
 			}
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
