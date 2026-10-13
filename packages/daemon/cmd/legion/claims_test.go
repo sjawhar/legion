@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -505,6 +506,39 @@ func TestClaimsClosePostsToTheClaimsCloseRoute(t *testing.T) {
 	}
 }
 
+// retry posts to the claim's retry route, with no body, and prints the claim as the retry left it:
+// a claim whose launches the runtime refused until its budget ran out launches again. A retry of a
+// claim that has not failed is the daemon's refusal, naming its state.
+func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
+	d := newOperatorDaemon(t)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	d.runtime.ScriptSpawn(refused, refused, refused)
+	if code, _, _ := d.claims(d.spawnArgs()...); code != 1 {
+		t.Fatalf("spawn whose every launch the runtime refused exited %d, want 1", code)
+	}
+	retry := append(append([]string{"retry"}, d.reach()...), "--claim", string(architectClaim))
+
+	out := d.succeed(retry...)
+
+	seen := d.lastOperatorRequest()
+	wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(architectClaim)+"/retry")
+	if len(seen.body) != 0 {
+		t.Fatalf("retry sent a body %q, want none", seen.body)
+	}
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0\n"; out != want {
+		t.Fatalf("retry stdout = %q, want %q", out, want)
+	}
+	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 4 {
+		t.Fatalf("the runtime saw %d spawns, want the retry's launch after the three refused", len(spawns))
+	}
+
+	code, out, errb := d.claims(retry...)
+
+	if want := "the daemon answered 409 Conflict: retry refused: the claim is launching (the claim has not failed)"; code != 1 || out != "" || !strings.Contains(errb, want) {
+		t.Fatalf("retry of the launching claim: exit %d, stdout %q, stderr %q; want 1 naming %q", code, out, errb, want)
+	}
+}
+
 // list prints one line per claim — token, role, issue, state, generation, plugin contract — in the
 // daemon's token order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
@@ -666,6 +700,7 @@ func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
 		{"suspend", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"resume", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"stop", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
+		{"retry", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"close", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"list", [][2]string{{"operator-token-file", token}}},
 	} {
@@ -734,6 +769,7 @@ func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 		{"suspend", "--claim", string(architectClaim)},
 		{"resume", "--claim", string(architectClaim)},
 		{"stop", "--claim", string(architectClaim)},
+		{"retry", "--claim", string(architectClaim)},
 		{"close", "--claim", string(architectClaim)},
 		{"list"},
 	} {

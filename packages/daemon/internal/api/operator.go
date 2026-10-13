@@ -280,6 +280,12 @@ func stopEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (super
 	return supervise.RequestStop{Claim: c.Token}, true
 }
 
+// retryEvent is the operator's retry of a failed claim: its session relaunched with fresh budgets.
+// The machine refuses it for a claim in any other state, naming that state.
+func retryEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
+	return supervise.RequestOperatorRetry{Claim: c.Token}, true
+}
+
 // closeTree is the operator closing a tree no workflow issue backs, through its root claim: the
 // tree's close, as the workflow's tree_close is for a tree whose linger expired. Without it a
 // root the operator spawned could never end — under a sandbox, its Sandbox and the tree volume

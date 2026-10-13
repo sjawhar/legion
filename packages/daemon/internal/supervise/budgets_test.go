@@ -2,6 +2,7 @@ package supervise
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -408,26 +409,31 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 }
 
 // A failed claim stays failed until someone decides otherwise; the architect's retry of a held
-// phase is that decision. It relaunches the same session with fresh budgets.
+// phase is that decision, and so is the operator's retry. Each relaunches the same session with
+// fresh budgets.
 func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
-	h := newHarness(t)
-	h.reach(StateReady)
-	for range 3 {
-		h.observe(runtime.Gone)
-	}
-	h.wantState(StateFailed)
-	resumes := len(h.calls("Resume"))
+	for _, retry := range []Event{RequestRetry{Claim: testToken}, RequestOperatorRetry{Claim: testToken}} {
+		t.Run(fmt.Sprintf("%T", retry), func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateReady)
+			for range 3 {
+				h.observe(runtime.Gone)
+			}
+			h.wantState(StateFailed)
+			resumes := len(h.calls("Resume"))
 
-	h.must(RequestRetry{Claim: testToken})
+			h.must(retry)
 
-	h.wantState(StateLaunching)
-	h.wantBudgets(Budgets{})
-	calls := h.wantCalls("Resume", resumes+1)
-	if got := calls[len(calls)-1].Spec.ResumeSessionFile; got != sessionFile {
-		t.Errorf("retry resumed session file %q, want the claim's %q", got, sessionFile)
+			h.wantState(StateLaunching)
+			h.wantBudgets(Budgets{})
+			calls := h.wantCalls("Resume", resumes+1)
+			if got := calls[len(calls)-1].Spec.ResumeSessionFile; got != sessionFile {
+				t.Errorf("retry resumed session file %q, want the claim's %q", got, sessionFile)
+			}
+			h.relaunched()
+			h.wantState(StateReady)
+		})
 	}
-	h.relaunched()
-	h.wantState(StateReady)
 }
 
 // A retry relaunches the same session, so it hands the runtime the process the claim last ran to

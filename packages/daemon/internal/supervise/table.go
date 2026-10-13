@@ -213,6 +213,13 @@ type RequestOperatorClose struct{ Claim claim.Token }
 // re-admitted after its linger stopped every claim.
 type RequestRetry struct{ Claim claim.Token }
 
+// RequestOperatorRetry is the operator relaunching a failed claim through the API: the retry
+// RequestRetry makes, fresh budgets and the same session, from failed alone. A retired claim
+// belongs to its tree's lifecycle, which the workflow decides, so the operator's retry refuses it,
+// as it refuses every claim that has not failed. It is its own event, as the two closes are, so
+// the table answers each caller's retry its own way.
+type RequestOperatorRetry struct{ Claim claim.Token }
+
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
 //
@@ -260,6 +267,7 @@ func (RequestTreeClose) isEvent()     {}
 func (RequestIssueClose) isEvent()    {}
 func (RequestOperatorClose) isEvent() {}
 func (RequestRetry) isEvent()         {}
+func (RequestOperatorRetry) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
 
@@ -292,6 +300,7 @@ const (
 	onIssueClose    eventKind = "request_issue_close"
 	onOperatorClose eventKind = "request_operator_close"
 	onRetry         eventKind = "request_retry"
+	onOperatorRetry eventKind = "request_operator_retry"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
@@ -347,6 +356,8 @@ func kindOf(ev Event) eventKind {
 		return onOperatorClose
 	case RequestRetry:
 		return onRetry
+	case RequestOperatorRetry:
+		return onOperatorRetry
 	case RequestDeliver:
 		return onDeliver
 	case RequestExit:
@@ -372,7 +383,7 @@ func requestName(ev Event) (string, bool) {
 		return "stop", true
 	case RequestTreeClose, RequestOperatorClose, RequestIssueClose:
 		return "close", true
-	case RequestRetry:
+	case RequestRetry, RequestOperatorRetry:
 		return "retry", true
 	case RequestDeliver:
 		return "deliver", true
@@ -600,6 +611,14 @@ func fillTable(t *builder) {
 	t.ignore(onRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onRetry, "the claim has not failed", live...)
 	t.ignore(onRetry, "a suspended claim is resumed, not retried", StateSuspended)
+
+	t.row(onOperatorRetry, "the operator's retry: fresh budgets, and the same session relaunched", retry,
+		[]ClaimState{StateLaunching, StateFailed}, StateFailed)
+	t.ignore(onOperatorRetry, "a queued claim is spawned, not retried", StateQueued)
+	t.ignore(onOperatorRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
+	t.ignore(onOperatorRetry, "the claim has not failed", live...)
+	t.ignore(onOperatorRetry, "a suspended claim is resumed, not retried", StateSuspended)
+	t.ignore(onOperatorRetry, "a retired claim runs again only when the workflow starts it", StateRetired)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
