@@ -801,13 +801,12 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 
 // loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, the user file
 // under the XDG_CONFIG_HOME row, overridden by the DISPATCH_SERVER_URL and NATS_URLS rows of the
-// settings table.
+// settings table. Each file config.Load found and did not read is logged at WARN once at start.
 func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
 	cfg, err := config.Load(env.lookup, options)
 	if err != nil {
 		return nil, err
 	}
-	// An input a later release stops reading, once at each start, so its log can be counted.
 	for _, warning := range cfg.Warnings {
 		slog.Warn(warning.Message, "path", warning.Path, "fix", warning.Fix)
 	}

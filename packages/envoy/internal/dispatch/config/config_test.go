@@ -169,43 +169,25 @@ func TestLoadRejectsInvalidEnvironmentOverrides(t *testing.T) {
 	}
 }
 
-// A user file's top-level natsUrls, the layout before the envoy section, is read as
-// envoy.natsUrls with a warning, and refused beside an envoy.natsUrls; a checkout's stays refused,
-// since a checkout's file holds only Dispatch.
-func TestLoadReadsATopLevelNatsURLsUntilItMoves(t *testing.T) {
-	home := t.TempDir()
-	mustWrite(t, userFile(home), `{"natsUrls": [" nats://user:4222 "]}`)
-	cfg, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if got := strings.Join(cfg.Envoy.NatsURLs, ","); got != "nats://user:4222" {
-		t.Errorf("envoy.natsUrls: got %q, want nats://user:4222", got)
-	}
-	want := Warning{Message: WarnTopLevelNatsURLs, Path: userFile(home),
-		Fix: userFile(home) + ": the top-level natsUrls is read until it moves (a later release stops reading it): move natsUrls into envoy.natsUrls"}
-	if len(cfg.Warnings) != 1 || cfg.Warnings[0] != want {
-		t.Errorf("warnings: got %+v, want %+v", cfg.Warnings, want)
-	}
-
+// The NATS URLs live in the envoy section now, so a file that still carries the top-level key is
+// refused, in either file: the user file's naming where they go, the checkout's saying it holds
+// only Dispatch.
+func TestLoadRefusesTopLevelNatsURLs(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		path  func(home, cwd string) string
-		body  string
 		issue string
 	}{
-		{name: "beside envoy.natsUrls", path: func(home, _ string) string { return userFile(home) },
-			body:  `{"natsUrls": ["nats://one:4222"], "envoy": {"natsUrls": ["nats://two:4222"]}}`,
-			issue: "natsUrls: set beside envoy.natsUrls; keep envoy.natsUrls"},
+		{name: "user file", path: func(home, _ string) string { return userFile(home) },
+			issue: "natsUrls: no longer read; write it as envoy.natsUrls"},
 		{name: "checkout file", path: func(_, cwd string) string { return checkoutFile(cwd) },
-			body:  `{"natsUrls": ["nats://user:4222"]}`,
 			issue: "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			cwd := t.TempDir()
 			path := tc.path(home, cwd)
-			mustWrite(t, path, tc.body)
+			mustWrite(t, path, `{"natsUrls": ["nats://user:4222"]}`)
 			_, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home})
 			var invalid *InvalidConfigError
 			if !errors.As(err, &invalid) {
@@ -218,41 +200,34 @@ func TestLoadReadsATopLevelNatsURLsUntilItMoves(t *testing.T) {
 	}
 }
 
-// While the user file is ~/.config/legion/envoy.json and none is there, the OpenCode-era file is
-// read in its place, in its old shape, with one warning naming the move; the environment still
-// overrides it. Once the new file exists the old one is neither read nor named, and an
-// XDG_CONFIG_HOME naming another directory, where the old file does not belong, reads nothing.
-func TestLoadReadsTheOldUserFileUntilItMoves(t *testing.T) {
+// The OpenCode-era user file is not read. While it is the only user file beside the current one's
+// directory, Load refuses, naming both paths and the move, whatever the environment overrides; once
+// the new file exists, the old one is ignored. An XDG_CONFIG_HOME naming another directory is not
+// where the old file belongs, so nothing refuses there.
+func TestLoadRefusesTheOldUserFile(t *testing.T) {
 	home := t.TempDir()
 	oldPath := filepath.Join(home, ".config", "opencode", "envoy.json")
 	mustWrite(t, oldPath, `{"natsUrls": ["nats://old:4222"], "dispatch": {"serverUrl": "https://old.dispatch.example"}}`)
-	want := Warning{Message: WarnOpenCodeUserFile, Path: oldPath,
-		Fix: oldPath + " is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv " +
-			oldPath + " " + userFile(home) + ", then move a top-level natsUrls into envoy.natsUrls"}
 
 	for _, tc := range []struct {
-		name                string
-		values              map[string]string
-		wantServer, wantNat string
+		name   string
+		values map[string]string
 	}{
-		{name: "no environment", wantServer: "https://old.dispatch.example", wantNat: "nats://old:4222"},
-		{name: "XDG_CONFIG_HOME is ~/.config", values: map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, ".config") + "/"},
-			wantServer: "https://old.dispatch.example", wantNat: "nats://old:4222"},
+		{name: "no environment"},
+		{name: "XDG_CONFIG_HOME is ~/.config", values: map[string]string{"XDG_CONFIG_HOME": filepath.Join(home, ".config") + "/"}},
 		{name: "both overrides set", values: map[string]string{
 			"DISPATCH_SERVER_URL": "https://environment.dispatch.example",
 			"NATS_URLS":           "nats://environment:4222",
-		}, wantServer: "https://environment.dispatch.example", wantNat: "nats://environment:4222"},
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg, err := Load(environment(tc.values), LoadOptions{CWD: t.TempDir(), HomeDir: home})
-			if err != nil {
-				t.Fatalf("load with the old user file alone: %v", err)
+			_, err := Load(environment(tc.values), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+			if err == nil {
+				t.Fatalf("expected a refusal while only the old user file exists")
 			}
-			if cfg.Dispatch == nil || cfg.Dispatch.ServerURL != tc.wantServer || strings.Join(cfg.Envoy.NatsURLs, ",") != tc.wantNat {
-				t.Errorf("got %+v (dispatch %+v), want %s and %s", cfg.Envoy, cfg.Dispatch, tc.wantServer, tc.wantNat)
-			}
-			if len(cfg.Warnings) != 1 || cfg.Warnings[0] != want {
-				t.Errorf("warnings: got %+v, want only %+v", cfg.Warnings, want)
+			want := oldPath + " is not read: mkdir -p " + filepath.Dir(userFile(home)) + " && mv " + oldPath + " " + userFile(home)
+			if err.Error() != want {
+				t.Errorf("error: got %q, want %q", err, want)
 			}
 		})
 	}
@@ -262,8 +237,8 @@ func TestLoadReadsTheOldUserFileUntilItMoves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load under another XDG_CONFIG_HOME: %v", err)
 	}
-	if cfg.Dispatch != nil || cfg.Envoy.NatsURLs != nil || len(cfg.Warnings) != 0 {
-		t.Errorf("got %+v, want nothing from the old file", cfg)
+	if cfg.Dispatch != nil || cfg.Envoy.NatsURLs != nil {
+		t.Errorf("got %+v (dispatch %+v), want nothing from the old file", cfg.Envoy, cfg.Dispatch)
 	}
 
 	mustWrite(t, userFile(home), `{"envoy": {"natsUrls": ["nats://new:4222"]}}`)
@@ -271,8 +246,8 @@ func TestLoadReadsTheOldUserFileUntilItMoves(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load with both files: %v", err)
 	}
-	if strings.Join(cfg.Envoy.NatsURLs, ",") != "nats://new:4222" || cfg.Dispatch != nil || len(cfg.Warnings) != 0 {
-		t.Errorf("got %+v, want only the new file's values and no warning", cfg)
+	if strings.Join(cfg.Envoy.NatsURLs, ",") != "nats://new:4222" || cfg.Dispatch != nil {
+		t.Errorf("got %+v (dispatch %+v), want only the new file's values", cfg.Envoy, cfg.Dispatch)
 	}
 }
 
@@ -325,52 +300,37 @@ func TestLoadReadsNatsURLsFromAnEnvoySectionThatIsOff(t *testing.T) {
 	}
 }
 
-// The OpenCode-era checkout file is read while the checkout has no .envoy/envoy.json. It carries
-// Dispatch forward but ignores the old top-level NATS and envoy keys with a warning, so a checkout
-// cannot select the server's NATS connection.
-func TestLoadReadsTheOldCheckoutFileUntilItMoves(t *testing.T) {
+// The OpenCode-era checkout file is not read, whatever it holds, and nothing in it is refused: while
+// the checkout has no .envoy/envoy.json, one Warning names the rename.
+func TestLoadIgnoresTheOldCheckoutFile(t *testing.T) {
 	cwd := t.TempDir()
-	home := t.TempDir()
 	oldPath := filepath.Join(cwd, ".opencode", "envoy.json")
 	mustWrite(t, oldPath, `{
 		"dispatch": {"serverUrl": "https://old.dispatch.example"},
 		"natsUrls": ["nats://checkout:4222"],
 		"envoy": {"natsUrls": ["nats://other-checkout:4222"]}
 	}`)
-	cfg, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home})
+	cfg, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.Dispatch == nil || cfg.Dispatch.ServerURL != "https://old.dispatch.example" {
-		t.Errorf("dispatch: got %+v, want the old checkout file's server", cfg.Dispatch)
+	if cfg.Dispatch != nil || cfg.Envoy.NatsURLs != nil {
+		t.Errorf("got %+v (dispatch %+v), want nothing from .opencode/envoy.json", cfg.Envoy, cfg.Dispatch)
 	}
-	if len(cfg.Envoy.NatsURLs) != 0 {
-		t.Errorf("envoy.natsUrls: got %q, want none from the checkout", cfg.Envoy.NatsURLs)
-	}
-	move := oldPath + " is read until it moves (a later release stops reading it): mkdir -p " +
-		filepath.Join(cwd, ".envoy") + " && mv " + oldPath + " " + checkoutFile(cwd)
-	ignored := oldPath + ": natsUrls/envoy is not read from a checkout's envoy.json; ignored"
-	want := []Warning{
-		{Message: WarnOpenCodeCheckout, Path: oldPath, Fix: move},
-		{Message: ignored, Path: oldPath, Fix: ignored},
-	}
-	if len(cfg.Warnings) != len(want) {
-		t.Fatalf("warnings: got %+v, want %+v", cfg.Warnings, want)
-	}
-	for i := range want {
-		if cfg.Warnings[i] != want[i] {
-			t.Errorf("warning %d: got %+v, want %+v", i, cfg.Warnings[i], want[i])
-		}
+	want := Warning{Message: WarnOpenCodeCheckout, Path: oldPath,
+		Fix: oldPath + " is not read: mkdir -p " + filepath.Join(cwd, ".envoy") + " && mv " + oldPath + " " + checkoutFile(cwd)}
+	if len(cfg.Warnings) != 1 || cfg.Warnings[0] != want {
+		t.Errorf("warnings: got %+v, want only %+v", cfg.Warnings, want)
 	}
 
 	// A .envoy/envoy.json beside it is read, and the old file is not named.
 	mustWrite(t, checkoutFile(cwd), `{"dispatch": {"serverUrl": "https://new.dispatch.example"}}`)
-	cfg, err = Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home})
+	cfg, err = Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: t.TempDir()})
 	if err != nil {
 		t.Fatalf("load with both checkout files: %v", err)
 	}
 	if cfg.Dispatch == nil || cfg.Dispatch.ServerURL != "https://new.dispatch.example" || len(cfg.Warnings) != 0 {
-		t.Errorf("got %+v, want the new checkout file and no warning", cfg)
+		t.Errorf("got %+v (dispatch %+v), want the new checkout file and no warning", cfg, cfg.Dispatch)
 	}
 }
 
