@@ -40,10 +40,13 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //     to drain the daemon, say — needs the stop bounded. The daemon's own suspension (its issue left
 //     the workflow, or its tree lingers) waits for the turn however long it takes: what bounds it is
 //     what ends the process anyway, the tree's close when its linger expires or the child's close
-//     as done. Asked again meanwhile, it is the
-//     same hold, its timeout unchanged, except that the operator's suspend takes a daemon's hold
-//     over: from then on it is the operator's, and its stop timeout runs from then. Until it runs the
-//     agent keeps its process and its capability.
+//     as done. A daemon's suspension that asks to be bounded (RequestSuspend.Bounded) is held to the
+//     stop timeout as the operator's is: no close reaches a carried child's role still running in its
+//     old tree, since the child has left that tree. Asked again meanwhile, it is the same hold, its
+//     timeout unchanged, except that a suspension that bounds a hold not yet bounded takes it over:
+//     the operator's suspend over a daemon's hold, from then on the operator's, and a bounded daemon
+//     suspend over an unbounded daemon's hold, still the daemon's; the stop timeout runs from then.
+//     Until it runs the agent keeps its process and its capability.
 //   - A stop the runtime refuses keeps it held and tries again every probe interval (suspendHeld),
 //     so the stop timeout bounds the wait only while the runtime can stop the process. A claim
 //     whose turn ended stays idle meanwhile and is handed nothing (sendPending); a turn it starts
@@ -68,7 +71,7 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 	switch {
 	case m.held == nil:
 		m.held = &request
-		if request.By == SuspendedByOperator {
+		if request.By == SuspendedByOperator || request.Bounded {
 			m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
 			m.log.Info("supervise: the suspension is held for the agent's turn to end", "reason", request.Reason, "by", request.By,
 				"stopTimeout", m.deps.Timeouts.Stop)
@@ -77,6 +80,11 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 		}
 	case request.By == SuspendedByOperator && m.held.By != SuspendedByOperator:
 		m.log.Info("supervise: the operator's suspension takes the held suspension over", "reason", request.Reason, "held", m.held.Reason,
+			"stopTimeout", m.deps.Timeouts.Stop)
+		m.held = &request
+		m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
+	case request.Bounded && m.held.By != SuspendedByOperator && !m.held.Bounded:
+		m.log.Info("supervise: the held suspension is bounded by the stop timeout from now", "reason", request.Reason, "held", m.held.Reason,
 			"stopTimeout", m.deps.Timeouts.Stop)
 		m.held = &request
 		m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")

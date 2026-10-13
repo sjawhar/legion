@@ -264,7 +264,12 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
-			ops := []jsonPatchOp{{Op: "add", Path: labelPatchPath(labelTree), Value: tree}}
+			// Fenced to the resourceVersion read, beside the uid patch tests: a delete, a relabel or a
+			// mode change since that read conflicts, and the next launch reads the Sandbox again.
+			ops := []jsonPatchOp{
+				{Op: "test", Path: "/metadata/resourceVersion", Value: s.ResourceVersion},
+				{Op: "add", Path: labelPatchPath(labelTree), Value: tree},
+			}
 			if s.mode() != modeSuspended {
 				running, err := r.store.IssueRunsElsewhere(ctx, r.project, l.spec.Issue, l.spec.Tree)
 				if err != nil {

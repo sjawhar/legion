@@ -113,6 +113,54 @@ func TestTheDaemonsSuspensionWaitsForTheTurnPastTheStopTimeout(t *testing.T) {
 	}
 }
 
+// A daemon's suspension that asks to be bounded (a carried child's new tree stopping a role still
+// running in its old tree, which no close of that tree reaches) is held to the stop timeout as the
+// operator's is: a turn that never ends is stopped there, its session kept and the claim suspended
+// by the daemon, so its new tree resumes it by rule. One that arrives over an unbounded daemon's
+// hold bounds that hold from then, and a repeat changes nothing.
+func TestABoundedDaemonSuspensionStopsATurnThatNeverEndsAtTheStopTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// before is what is held before the bounded request arrives, if anything.
+		before *RequestSuspend
+	}{
+		{"with nothing held before it", nil},
+		{"over the daemon's unbounded hold", &RequestSuspend{Claim: testToken, Reason: "the tree of LEGION-208 lingers", By: SuspendedByDaemon}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.reach(StateWorking)
+			if tc.before != nil {
+				if err := h.handle(*tc.before); !errors.Is(err, ErrSuspendHeld) {
+					t.Fatalf("the unbounded suspend mid-turn returned %v, want ErrSuspendHeld", err)
+				}
+				h.advance(10 * testStop)
+				h.wantState(StateWorking)
+			}
+			bounded := RequestSuspend{Claim: testToken, Reason: "LEGION-209 moved from tree LEGION-208 to tree LEGION-209", By: SuspendedByDaemon, Bounded: true}
+			if err := h.handle(bounded); !errors.Is(err, ErrSuspendHeld) {
+				t.Fatalf("the bounded suspend mid-turn returned %v, want ErrSuspendHeld", err)
+			}
+			h.advance(testStop - time.Second)
+			if err := h.handle(bounded); !errors.Is(err, ErrSuspendHeld) {
+				t.Fatalf("the repeated bounded suspend returned %v, want ErrSuspendHeld", err)
+			}
+			h.wantState(StateWorking)
+			h.wantCalls("Suspend", 0)
+			h.advance(time.Second)
+			h.wantState(StateSuspended)
+			h.wantCalls("Suspend", 1)
+			c := h.claim()
+			if c.SuspendedBy != SuspendedByDaemon || c.Session != session || c.SessionFile == "" {
+				t.Errorf("the claim after the stop timeout = %+v, want it suspended by the daemon with its session kept", c)
+			}
+			if c.RuleHolds() {
+				t.Errorf("the claim after the stop timeout holds against the rule, want it resumable by its new tree")
+			}
+		})
+	}
+}
+
 // A held suspension whose stop the runtime refuses stays held and is tried again at the probe
 // interval, so it lands with nothing else retrying it — an operator's suspend has no outbox row.
 // At the turn's end the claim is left idle meanwhile, and is handed nothing while it is stopped.

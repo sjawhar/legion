@@ -157,20 +157,27 @@ func (s *Store) StoredClaimMayRun(ctx context.Context, token claim.Token, row in
 	return may, nil
 }
 
-// claimRunsAProcess is a stored claim that may hold a process right now: one that records a
-// locator, or one in a state with a process of its own, running or coming up. A queued claim, for
-// which nothing was ever launched, holds none, unlike for claimMayRun, whose stop row may race its
-// first launch (supervise's Claim.RunsNothing is the in-memory twin).
-const claimRunsAProcess = `(state not in ('queued', 'suspended', 'failed', 'retired') or locator is not null)`
+// runsNothingStates is supervise's runs-nothing set (supervise.RunsNothingStates), as the text
+// array a query binds: the store names no state of that set itself.
+func runsNothingStates() []string {
+	states := supervise.RunsNothingStates()
+	names := make([]string, len(states))
+	for i, state := range states {
+		names[i] = string(state)
+	}
+	return names
+}
 
 // IssueRunsElsewhere names, as token:state, a stored claim of issue whose tree is not tree and that
-// may hold a process (claimRunsAProcess), or "" when none does. A child carried into a tree of its
-// own keeps its Sandbox, labelled with the tree it left, until a launch of its new tree relabels
-// it: while a claim of the old tree runs there, the relabel would end it.
+// does not run nothing: a claim in a state with a process of its own, running or coming up
+// (supervise.RunsNothingStates), or one that still records a locator. It answers "" when none
+// does. A child carried into a tree of its own keeps its Sandbox, labelled with the tree it left,
+// until a launch of its new tree relabels it: while a claim of the old tree runs there, the relabel
+// would end it.
 func (s *Store) IssueRunsElsewhere(ctx context.Context, project, issue, tree string) (string, error) {
 	var running string
-	err := s.pool.QueryRow(ctx, `select token || ':' || state from claims where project = $1 and issue = $2 and tree <> $3 and `+
-		claimRunsAProcess+` order by token limit 1`, project, issue, tree).Scan(&running)
+	err := s.pool.QueryRow(ctx, `select token || ':' || state from claims where project = $1 and issue = $2 and tree <> $3
+		and not (state = any($4) and locator is null) order by token limit 1`, project, issue, tree, runsNothingStates()).Scan(&running)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}

@@ -29,11 +29,16 @@ import (
 // (admission's consumption of the hand-over) — moves to a new generation, and the close's suspend
 // row, of the earlier generation, finishes without acting. The new tree's starts then stop that
 // role themselves: they hold its suspension, as the daemon and keeping its session, and launch
-// nothing of the new tree while it runs in the old one. Once its turn ends, the new tree's
-// architect launches and the role resumes its session in the new tree.
+// nothing of the new tree while it runs in the old one. They do so with the close's hold still in
+// memory, and with nothing held, as after a restart that forgot it. Once the turn ends, or the stop
+// timeout ends a turn that never does, the new tree's architect launches and the role resumes its
+// session in the new tree.
 func TestACarriedChildsRoleStillInATurnStopsBeforeItsNewTreeLaunches(t *testing.T) {
 	const rootKey, childKey = "LEGION-207", "LEGION-208"
-	for _, tc := range []struct {
+	// stopTimeout is the machines' stop timeout, a length no other timer of the test is armed for, so
+	// firing it fires only the held suspension's.
+	const stopTimeout = 7 * time.Second
+	carries := []struct {
 		name string
 		// carry moves the child into a tree of its own, through admission.
 		carry func(apply func(id string, fact intake.Fact))
@@ -45,136 +50,198 @@ func TestACarriedChildsRoleStillInATurnStopsBeforeItsNewTreeLaunches(t *testing.
 		{"the root's hand-over at its linger's expiry", func(apply func(string, intake.Fact)) {
 			apply("handover:"+childKey, intake.Handover{Issue: childKey, Tree: rootKey, Generation: 1})
 		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
-			pool := isolatedOutboxPool(t)
-			records := record.NewStore()
-			until := time.Now().Add(time.Hour)
-			parent := rootKey
-			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				for _, put := range []error{
-					records.PutIssue(ctx, tx, record.Issue{Key: rootKey, Tree: rootKey, Project: "LEGION", Title: "root", Phase: phase.Done,
-						Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}),
-					records.PutIssue(ctx, tx, record.Issue{Key: childKey, Tree: rootKey, Project: "LEGION", Title: "child", Parent: &parent,
-						Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
-					records.PutHandover(ctx, tx, record.Handover{Issue: childKey, Tree: rootKey, Generation: 1}),
-				} {
-					if put != nil {
-						return put
-					}
-				}
-				return nil
-			}); err != nil {
-				t.Fatalf("seed the finished root and its child: %v", err)
-			}
-			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-			engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
-			admission := admit.New(records, engine, 2, "legion", quietLogger())
-			var logs bytes.Buffer
-			clock := time.Now()
-			runner := &outbox{
-				dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, rootKey),
-				tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
-				githubAPI: newBranchGitHub(t, nil, branchExists).url, notices: &outboxPublisher{},
-				dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo", HandedOver: true, Labels: []string{"legion"}}},
-				handlers: []intake.Handler{engine, admission}, now: func() time.Time { return clock },
-				log: slog.New(slog.NewJSONHandler(&logs, nil)),
-				provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
-					return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/" + childKey}, nil
-				},
-			}
-			run := func(what string) {
-				t.Helper()
-				for range 3 {
-					if err := runner.RunOnce(ctx); err != nil {
-						t.Fatalf("%s: %v", what, err)
-					}
-					clock = clock.Add(5 * time.Minute)
-				}
-			}
-
-			// The child's implementer works in its old tree, in a turn when the root's close suspends it.
-			implementer := launchedClaim(t, sup, rootKey, childKey, claim.RoleImplementer)
-			machine, _ := sup.Machine(implementer)
-			if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer}); err != nil {
-				t.Fatalf("the implementer's turn: %v", err)
-			}
-			enqueueOutbox(t, pool, records, mustOutboxRow(t, childKey, record.SuperviseRequest{Op: "suspend", Tree: rootKey,
-				Role: claim.RoleImplementer, Generation: 1, Reason: "the tree of LEGION-207 lingers"}, clock))
-			if err := runner.RunOnce(ctx); err != nil {
-				t.Fatalf("run the close's suspend: %v", err)
-			}
-			if got := machine.Claim(); got.State != supervise.StateWorking || !got.SuspensionHeld {
-				t.Fatalf("the implementer after the close's suspend = %s, held %t; want working with the suspension held", got.State, got.SuspensionHeld)
-			}
-
-			tc.carry(func(id string, fact intake.Fact) {
-				t.Helper()
-				if _, err := intake.ApplyFact(ctx, pool, "dispatch", id, fact, engine, admission); err != nil {
-					t.Fatalf("apply %s: %v", id, err)
-				}
+	}
+	stops := []struct {
+		name string
+		// closeHeld is whether the close's suspension is held in memory when the child is carried.
+		closeHeld bool
+		// timeout is whether the turn never ends, so the stop timeout ends it.
+		timeout bool
+	}{
+		{"with the close's suspension held", true, false},
+		{"with nothing held, as after a restart", false, false},
+		{"with a turn that never ends", false, true},
+	}
+	for _, cc := range carries {
+		for _, sc := range stops {
+			t.Run(cc.name+"/"+sc.name, func(t *testing.T) {
+				carriedChildStops(t, rootKey, childKey, stopTimeout, cc.carry, sc.closeHeld, sc.timeout)
 			})
-			var carried *record.Issue
-			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-				var err error
-				carried, err = records.Issue(ctx, tx, childKey)
-				return err
-			}); err != nil || carried == nil || carried.Tree != childKey || carried.Generation != 2 || carried.Phase != phase.Implementing {
-				t.Fatalf("the carried child = %+v, %v; want its own tree at generation 2 in implementing", carried, err)
-			}
+		}
+	}
+}
 
-			run("the carry's rows while the implementer's turn runs")
-			if !strings.Contains(logs.String(), `"msg":"outbox supervise row serves an earlier generation; finished without acting"`) {
-				t.Fatalf("the close's suspend row did not finish as one of an earlier generation; log:\n%s", logs.String())
+// carriedChildStops runs one case of TestACarriedChildsRoleStillInATurnStopsBeforeItsNewTreeLaunches:
+// carry moves the child, closeHeld holds the close's suspension in memory first, and timeout lets
+// the stop timeout end the turn instead of the turn's own end.
+func carriedChildStops(t *testing.T, rootKey, childKey string, stopTimeout time.Duration, carry func(apply func(id string, fact intake.Fact)), closeHeld, timeout bool) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(time.Hour)
+	parent := rootKey
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(ctx, tx, record.Issue{Key: rootKey, Tree: rootKey, Project: "LEGION", Title: "root", Phase: phase.Done,
+				Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}),
+			records.PutIssue(ctx, tx, record.Issue{Key: childKey, Tree: rootKey, Project: "LEGION", Title: "child", Parent: &parent,
+				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+			records.PutHandover(ctx, tx, record.Handover{Issue: childKey, Tree: rootKey, Generation: 1}),
+		} {
+			if put != nil {
+				return put
 			}
-			architect := mustClaimToken(t, childKey, claim.RoleArchitect)
-			launchesOf := func(method string, token claim.Token) []fake.Call {
-				var of []fake.Call
-				for _, call := range rt.CallsOf(method) {
-					if call.Spec.Claim == token {
-						of = append(of, call)
-					}
-				}
-				return of
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed the finished root and its child: %v", err)
+	}
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	machineClock := &heldClock{}
+	sup.deps.Clock, sup.deps.Timeouts.Stop = machineClock, stopTimeout
+	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
+	admission := admit.New(records, engine, 2, "legion", quietLogger())
+	var logs bytes.Buffer
+	clock := time.Now()
+	runner := &outbox{
+		dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, rootKey),
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		githubAPI: newBranchGitHub(t, nil, branchExists).url, notices: &outboxPublisher{},
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo", HandedOver: true, Labels: []string{"legion"}}},
+		handlers: []intake.Handler{engine, admission}, now: func() time.Time { return clock },
+		log: slog.New(slog.NewJSONHandler(&logs, nil)),
+		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
+			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/" + childKey}, nil
+		},
+	}
+	run := func(what string) {
+		t.Helper()
+		for range 3 {
+			if err := runner.RunOnce(ctx); err != nil {
+				t.Fatalf("%s: %v", what, err)
 			}
-			if spawns := launchesOf("Spawn", architect); len(spawns) != 0 {
-				t.Fatalf("the new tree's architect launched %d times while the implementer still ran its turn in tree %s; want none", len(spawns), rootKey)
-			}
-			if got := machine.Claim(); got.State != supervise.StateWorking || !got.SuspensionHeld || got.SuspensionHeldBy != supervise.SuspendedByDaemon || got.Tree != rootKey {
-				t.Fatalf("the implementer while its turn runs = %s in tree %s, held %t by %q; want working in %s with the daemon's suspension held",
-					got.State, got.Tree, got.SuspensionHeld, got.SuspensionHeldBy, rootKey)
-			}
+			clock = clock.Add(5 * time.Minute)
+		}
+	}
 
-			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-				t.Fatalf("end the implementer's turn: %v", err)
+	// The child's implementer works in its old tree, in a turn when the root's close suspends it.
+	implementer := launchedClaim(t, sup, rootKey, childKey, claim.RoleImplementer)
+	machine, _ := sup.Machine(implementer)
+	if err := machine.Handle(ctx, supervise.StreamTurnStart{Claim: implementer}); err != nil {
+		t.Fatalf("the implementer's turn: %v", err)
+	}
+	if closeHeld {
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, childKey, record.SuperviseRequest{Op: "suspend", Tree: rootKey,
+			Role: claim.RoleImplementer, Generation: 1, Reason: "the tree of LEGION-207 lingers"}, clock))
+		if err := runner.RunOnce(ctx); err != nil {
+			t.Fatalf("run the close's suspend: %v", err)
+		}
+		if got := machine.Claim(); got.State != supervise.StateWorking || !got.SuspensionHeld {
+			t.Fatalf("the implementer after the close's suspend = %s, held %t; want working with the suspension held", got.State, got.SuspensionHeld)
+		}
+	}
+
+	carry(func(id string, fact intake.Fact) {
+		t.Helper()
+		if _, err := intake.ApplyFact(ctx, pool, "dispatch", id, fact, engine, admission); err != nil {
+			t.Fatalf("apply %s: %v", id, err)
+		}
+	})
+	var carried *record.Issue
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		carried, err = records.Issue(ctx, tx, childKey)
+		return err
+	}); err != nil || carried == nil || carried.Tree != childKey || carried.Generation != 2 || carried.Phase != phase.Implementing {
+		t.Fatalf("the carried child = %+v, %v; want its own tree at generation 2 in implementing", carried, err)
+	}
+
+	run("the carry's rows while the implementer's turn runs")
+	if closeHeld && !strings.Contains(logs.String(), `"msg":"outbox supervise row serves an earlier generation; finished without acting"`) {
+		t.Fatalf("the close's suspend row did not finish as one of an earlier generation; log:\n%s", logs.String())
+	}
+	architect := mustClaimToken(t, childKey, claim.RoleArchitect)
+	launchesOf := func(method string, token claim.Token) []fake.Call {
+		var of []fake.Call
+		for _, call := range rt.CallsOf(method) {
+			if call.Spec.Claim == token {
+				of = append(of, call)
 			}
-			if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByDaemon ||
-				got.Session != "ses-implementer" || got.SessionFile != "/tmp/implementer.jsonl" {
-				t.Fatalf("the implementer after its turn = %+v; want suspended by the daemon with its session kept", got)
-			}
-			// The work the old generation did — its pushed branch, its handoff, a completion refused as
-			// a stale generation — is the resumed session's own: the start that resumes it delivers
-			// its phase's resume task at the new generation.
-			var task string
-			if err := pool.QueryRow(ctx, `select payload->>'task' from outbox where kind = 'supervise' and issue = $1
+		}
+		return of
+	}
+	if spawns := launchesOf("Spawn", architect); len(spawns) != 0 {
+		t.Fatalf("the new tree's architect launched %d times while the implementer still ran its turn in tree %s; want none", len(spawns), rootKey)
+	}
+	if got := machine.Claim(); got.State != supervise.StateWorking || !got.SuspensionHeld || got.SuspensionHeldBy != supervise.SuspendedByDaemon || got.Tree != rootKey {
+		t.Fatalf("the implementer while its turn runs = %s in tree %s, held %t by %q; want working in %s with the daemon's suspension held",
+			got.State, got.Tree, got.SuspensionHeld, got.SuspensionHeldBy, rootKey)
+	}
+
+	if timeout {
+		if fired := machineClock.fire(stopTimeout); fired != 1 {
+			t.Fatalf("fired %d stop timeouts, want the held suspension's one", fired)
+		}
+	} else if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
+		t.Fatalf("end the implementer's turn: %v", err)
+	}
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByDaemon ||
+		got.Session != "ses-implementer" || got.SessionFile != "/tmp/implementer.jsonl" {
+		t.Fatalf("the implementer after its turn = %+v; want suspended by the daemon with its session kept", got)
+	}
+	// The work the old generation did — its pushed branch, its handoff, a completion refused as
+	// a stale generation — is the resumed session's own: the start that resumes it delivers
+	// its phase's resume task at the new generation.
+	var task string
+	if err := pool.QueryRow(ctx, `select payload->>'task' from outbox where kind = 'supervise' and issue = $1
 				and payload->>'op' = 'start' and payload->>'role' = 'implementer' and (payload->>'generation')::int = 2`, childKey).Scan(&task); err != nil {
-				t.Fatalf("read the implementer's start at generation 2: %v", err)
-			}
-			if want := "Issue: " + childKey + ". Phase: implementing. Resume the existing phase work."; !strings.Contains(task, want) {
-				t.Fatalf("the implementer's start task = %q, want it to say %q", task, want)
-			}
-			run("the carry's rows once the implementer has stopped")
-			if spawns := launchesOf("Spawn", architect); len(spawns) != 1 || spawns[0].Spec.Tree != childKey {
-				t.Fatalf("the architect's launches = %+v; want one, in tree %s", spawns, childKey)
-			}
-			resumes := launchesOf("Resume", implementer)
-			if len(resumes) != 1 || resumes[0].Spec.Tree != childKey || resumes[0].Spec.ResumeSessionFile != "/tmp/implementer.jsonl" {
-				t.Fatalf("the implementer's resumes = %+v; want its session resumed once, in tree %s", resumes, childKey)
-			}
-			if got := machine.Claim(); got.Tree != childKey {
-				t.Fatalf("the implementer's claim names tree %s, want %s", got.Tree, childKey)
-			}
-		})
+		t.Fatalf("read the implementer's start at generation 2: %v", err)
+	}
+	if want := "Issue: " + childKey + ". Phase: implementing. Resume the existing phase work."; !strings.Contains(task, want) {
+		t.Fatalf("the implementer's start task = %q, want it to say %q", task, want)
+	}
+	run("the carry's rows once the implementer has stopped")
+	if spawns := launchesOf("Spawn", architect); len(spawns) != 1 || spawns[0].Spec.Tree != childKey {
+		t.Fatalf("the architect's launches = %+v; want one, in tree %s", spawns, childKey)
+	}
+	resumes := launchesOf("Resume", implementer)
+	if len(resumes) != 1 || resumes[0].Spec.Tree != childKey || resumes[0].Spec.ResumeSessionFile != "/tmp/implementer.jsonl" {
+		t.Fatalf("the implementer's resumes = %+v; want its session resumed once, in tree %s", resumes, childKey)
+	}
+	if got := machine.Claim(); got.Tree != childKey {
+		t.Fatalf("the implementer's claim names tree %s, want %s", got.Tree, childKey)
+	}
+}
+
+// A start whose issue's claims all name its own tree waits on none of them: the outbox runs one row
+// at a time, and a machine holds its lock through the runtime call its decision makes, so reading a
+// sibling claim that way would hold every row behind it for as long as a Sandbox relaunch waits on
+// the cluster. The check before a start reads each claim's view, which only Retree changes, and
+// goes on while the issue's architect launches.
+func TestAStartOfAnIssueInItsOwnTreeWaitsOnNoSiblingsLaunch(t *testing.T) {
+	sup, fakeRuntime := newOutboxSupervisor(t, "legion", t.TempDir())
+	rt := newStallingRuntime(t, fakeRuntime, false)
+	sup.deps.Runtime = rt
+	architect := architectClaim(t, sup, "LEGION-1", supervise.StateQueued)
+	machine, _ := sup.Machine(architect)
+	rt.stalling.Store(true)
+	go func() { _ = machine.Handle(context.Background(), supervise.RequestSpawn{Claim: architect}) }()
+	select {
+	case <-rt.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the architect's launch never reached the runtime")
+	}
+	runner := &outbox{log: quietLogger(), supervisor: sup, project: "legion"}
+	checked := make(chan error, 1)
+	go func() {
+		checked <- runner.stopElsewhere(context.Background(), record.Issue{Key: "LEGION-1", Tree: "LEGION-1"})
+	}()
+	select {
+	case err := <-checked:
+		if err != nil {
+			t.Fatalf("the check before a start of LEGION-1 in its own tree = %v, want nothing to wait for", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the check before a start waited on its architect's launch in the runtime")
 	}
 }

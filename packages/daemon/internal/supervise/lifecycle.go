@@ -33,13 +33,9 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 	return m.deps.Store.CheckLaunch(ctx, m.claim)
 }
 
-// retreeable is where a claim runs nothing and may move to another tree: queued, or one of the
-// states its process is gone in. A launch whose outcome is uncertain may still run, so it waits.
-var retreeable = append([]ClaimState{StateQueued}, gone...)
-
-// RunsNothing is whether the claim is in a state with no process of its own, running or coming up
-// (retreeable): only such a claim may move to another tree.
-func (c Claim) RunsNothing() bool { return slices.Contains(retreeable, c.State) }
+// RunsNothing is whether the claim is in a state with no process of its own (RunsNothingStates):
+// only such a claim may move to another tree.
+func (c Claim) RunsNothing() bool { return slices.Contains(runsNothing, c.State) }
 
 // Retree re-points a claim to tree, the tree its issue belongs to now: a child of a closed tree
 // re-admitted as a root of its own keeps its roles' claims, which still name the tree it left. The

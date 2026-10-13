@@ -131,11 +131,15 @@ type RequestReady struct {
 
 // RequestSuspend stops the claim's process and keeps its session. Reason is why, for the line the
 // suspension logs; By is who asks, which the suspended claim records (Claim.SuspendedBy) and every
-// suspension must name.
+// suspension must name. Bounded asks that the stop timeout bound the suspension's hold for a turn,
+// as it bounds the operator's, though the daemon asks: the daemon's stop of a carried child's role
+// still running in its old tree, which no close of that tree reaches (the daemon's outbox,
+// stopElsewhere). holdSuspension says what a hold does.
 type RequestSuspend struct {
-	Claim  claim.Token
-	Reason string
-	By     SuspendSource
+	Claim   claim.Token
+	Reason  string
+	By      SuspendSource
+	Bounded bool
 }
 
 // RequestResume is the operator's resume: it relaunches a suspended claim's session, whoever
@@ -377,12 +381,23 @@ var (
 	processless = []ClaimState{StateQueued, StateLaunchUncertain, StateSuspended, StateFailed, StateRetired}
 	unready     = []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered}
 	gone        = []ClaimState{StateSuspended, StateFailed, StateRetired}
+	// runsNothing is where a claim has no process of its own, running or coming up: queued, for which
+	// nothing was launched, or gone. A launch whose outcome is uncertain may still run, so it is not
+	// here. It is the one statement of the set: Claim.RunsNothing reads it in memory, and the store's
+	// queries take it as a parameter (RunsNothingStates).
+	runsNothing = append([]ClaimState{StateQueued}, gone...)
 )
 
 // LiveStates are the states of a claim whose process is up or coming up: launched, and not
 // suspended, failed or retired. It is a copy, so no caller changes the table's own set.
 func LiveStates() []ClaimState {
 	return slices.Clone(live)
+}
+
+// RunsNothingStates are the states of a claim with no process of its own (runsNothing). It is a
+// copy, so no caller changes the table's own set.
+func RunsNothingStates() []ClaimState {
+	return slices.Clone(runsNothing)
 }
 
 const (

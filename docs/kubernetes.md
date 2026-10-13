@@ -710,9 +710,12 @@ turn when the old tree closed holds that close's suspension until the turn ends,
 generation finishes the close's own suspend row without acting. So no start of the new tree launches
 anything while a claim of the issue still runs a process in another tree: the start suspends that
 claim itself, as the daemon and keeping its session, and waits on its backoff, charging nothing, until
-the claim has stopped (`stopElsewhere`, `internal/daemon/outbox.go`). A Sandbox the old tree left
-`Running`, none of whose claims runs any more, is relabelled and suspended in one fenced patch, so the
-launch waits its pod out; while a claim of the old tree still runs, the launch is refused, naming it.
+the claim has stopped (`stopElsewhere`, `internal/daemon/outbox.go`). No close of the old tree
+reaches that claim, so its stop is bounded as an operator's is: a turn that has not ended within the
+stop timeout (`worker_stop_timeout_seconds`) is ended there, its task taken back as interrupted and
+its session kept. A Sandbox the old tree left `Running`, none of whose claims runs any more, is
+relabelled and suspended in one patch fenced to the uid and resourceVersion it read, so the launch
+waits its pod out; while a claim of the old tree still runs, the launch is refused, naming it.
 That holds while the old tree lingers; once its cleanup has run (`CleanupTree`, after the linger),
 the Sandbox and the volume are gone, and the re-pointed claim still names its session (`Retree`,
 `internal/supervise/lifecycle.go`, keeps it: the supervisor knows nothing of Sandboxes, and a check

@@ -759,11 +759,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 // runs a process in a tree other than the issue's, and is a wait (wait.ErrWaiting) until none
 // does. A claim in a turn holds the suspension for the turn's end and a launching one until its
 // agent is ready (supervise's suspend rows), so the start that asks is what waits, retried on its
-// backoff, charging no claim a launch. The hold lives in the claim's memory, so a restart that
-// forgets it is asked again by the start's next attempt. Once none runs, every claim of the issue
-// may be re-pointed to the issue's tree (supervise.Machine.Retree), and the issue's Sandbox, which
-// no role of the old tree then runs in, is the new tree's to relabel (runtime/sandbox's
-// ensureSandbox).
+// backoff, charging no claim a launch. No close of the old tree reaches such a claim, so the
+// suspension asks to be bounded (RequestSuspend.Bounded): a turn that has not ended within the
+// stop timeout is ended there, its task taken back as interrupted and its session kept, as the
+// operator's stop would. The hold lives in the claim's memory, so a restart that forgets it is
+// asked again by the start's next attempt. Once none runs, every claim of the issue may be
+// re-pointed to the issue's tree (supervise.Machine.Retree), and the issue's Sandbox, which no role
+// of the old tree then runs in, is the new tree's to relabel (runtime/sandbox's ensureSandbox).
+// A claim already in the issue's tree is skipped on its view, which only Retree changes, so a start
+// waits on no decision a sibling claim has in flight.
 func (r *outbox) stopElsewhere(ctx context.Context, issue record.Issue) error {
 	var running []string
 	for _, role := range claim.Roles {
@@ -772,14 +776,14 @@ func (r *outbox) stopElsewhere(ctx context.Context, issue record.Issue) error {
 			return fmt.Errorf("derive the %s claim of %s: %w", role, issue.Key, err)
 		}
 		machine, found := r.supervisor.Machine(token)
-		if !found {
+		if !found || machine.View().Claim.Tree == issue.Tree {
 			continue
 		}
 		held := machine.Claim()
 		if held.Tree == issue.Tree || held.RunsNothing() {
 			continue
 		}
-		err = machine.Handle(ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByDaemon,
+		err = machine.Handle(ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByDaemon, Bounded: true,
 			Reason: fmt.Sprintf("%s moved from tree %s to tree %s", issue.Key, held.Tree, issue.Tree)})
 		var refused *supervise.RefusedError
 		if err != nil && !errors.Is(err, supervise.ErrSuspendHeld) && !errors.As(err, &refused) {

@@ -252,6 +252,9 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	})
 	t.Run("left running by its old tree, none of whose roles runs", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		// A claim of the orphan root's own tree runs nothing the relabel would end: only a claim of
+		// another tree holds the Sandbox.
+		g.store.running["LEGION-209"] = runningClaim{tree: "LEGION-209", claim: "legion-legion-legion-209-planner:launching"}
 		g.eventually("the old tree's pod", func() bool { return g.pod(name) != nil })
 		old := g.pod(name).UID
 		loc := g.spawn(orphanSpec(t))
@@ -263,6 +266,9 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 		for _, w := range g.writes() {
 			if w.resource == "sandboxes" && w.verb == "patch" && modePatched(t, w.patch, modeSuspended) && strings.Contains(w.patch, labelValue("LEGION-209")) {
 				relabels++
+				if !strings.Contains(w.patch, `{"op":"test","path":"/metadata/resourceVersion"`) {
+					t.Errorf("the relabel patch %s tests no resourceVersion, want it fenced to the Sandbox it read", w.patch)
+				}
 			}
 		}
 		if relabels != 1 {
@@ -279,7 +285,7 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
-		g.store.elsewhere["LEGION-209"] = "legion-legion-legion-209-implementer:working"
+		g.store.running["LEGION-209"] = runningClaim{tree: testTree, claim: "legion-legion-legion-209-implementer:working"}
 		g.launcher(orphan)
 		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles (legion-legion-legion-209-implementer:working)") {
 			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal naming the running claim", err)

@@ -151,12 +151,11 @@ func (s *Store) ReserveOperatorTreeCleanup(ctx context.Context, project, tree st
 // since moved to another tree (a child re-admitted as a root of its own) and that runs nothing is
 // not the tree's: its new tree re-points it before it starts again (supervise.Machine.Retree), and
 // waiting on it would hold this tree's cleanup for as long as the new tree leaves it idle. "Runs
-// nothing" is Retree's own set (supervise's retreeable: queued and the gone states), retired
-// already excluded.
+// nothing" is Retree's own set (supervise.RunsNothingStates), retired already excluded.
 func pendingTreeClaims(ctx context.Context, tx pgx.Tx, project, tree string) ([]string, error) {
 	rows, err := tx.Query(ctx, `select c.token, c.state from claims c where c.project = $1 and c.tree = $2 and c.state <> 'retired'
-		and not (c.state in ('queued', 'suspended', 'failed') and exists (select 1 from issues i where i.key = c.issue and i.tree <> $2))
-		order by c.token`, project, tree)
+		and not (c.state = any($3) and exists (select 1 from issues i where i.key = c.issue and i.tree <> $2))
+		order by c.token`, project, tree, runsNothingStates())
 	if err != nil {
 		return nil, fmt.Errorf("census claims of tree %s: %w", tree, err)
 	}
