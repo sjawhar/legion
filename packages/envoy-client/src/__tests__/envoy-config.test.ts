@@ -1122,4 +1122,31 @@ describe("a checkout's .envoy/envoy.json", () => {
       token: "daemon-token",
     });
   });
+
+  // A checkout contributes only its enabled: false, or a server with its own token. Its
+  // enabled: true alone would name the default server and draw a variable's token to it.
+  test("its dispatch.enabled: true alone turns nothing on", () => {
+    const cwd = tempDir();
+    writeFile(path.join(cwd, ".envoy", "envoy.json"), { dispatch: { enabled: true } });
+    const env = { HOME: tempDir(), DISPATCH_TOKEN: "environment-token" };
+    const quiet = writeFile(path.join(tempDir(), "envoy.json"), { envoy: envoyOn });
+    expect(dispatchSettings(env, readEnvoyConfig(quiet, env, { cwd }))).toEqual({
+      enabled: false,
+      notice: `${quiet} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`,
+      error: null,
+    });
+    const missing = path.join(tempDir(), "envoy.json");
+    expect(dispatchSettings(env, readEnvoyConfig(missing, env, { cwd }))).toEqual({
+      enabled: false,
+      notice: `no envoy.json at ${missing}: Dispatch is off`,
+      error: null,
+    });
+    // The chosen file's own enabled: true is what turns it on.
+    const own = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: { enabled: true } });
+    expect(dispatchSettings(env, readEnvoyConfig(own, env, { cwd }))).toEqual({
+      enabled: true,
+      url: "http://localhost:8766",
+      token: "environment-token",
+    });
+  });
 });

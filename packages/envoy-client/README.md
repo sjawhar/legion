@@ -114,12 +114,14 @@ Each section is resolved on its own: `dispatchSettings(env, config)` reads the c
 config)` reads the chosen file's `envoy` section alone. The chosen file's `enabled: false` turns its
 section off whatever the environment says. `DISPATCH_URL` replaces a checkout's file whole: while it
 is set, the checkout's server, token and `dispatch.enabled: false` are neither used nor refused.
-Otherwise a checkout's `dispatch.serverUrl` is used only with the `dispatch.token` written beside
-it, and is refused without one; its `dispatch.token` is used only beside its own
-`dispatch.serverUrl`, and is refused without one unless `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`
-replaces it. A checkout's server with its own token points the session at that server as that
-token's holder, whichever server it names, the user's own included; what a checkout cannot do is
-take the user's token, or a variable's, anywhere.
+Otherwise a checkout contributes only its `dispatch.enabled: false`, or a `dispatch.serverUrl` with
+the `dispatch.token` written beside it: its `dispatch.enabled: true` alone turns nothing on, since it
+would name the default server and draw a variable's token to it. A checkout's `dispatch.serverUrl`
+without its own token is refused, and so is its `dispatch.token` without its own
+`dispatch.serverUrl`, unless `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE` replaces it. A checkout's
+server with its own token points the session at that server as that token's holder, whichever
+server it names, the user's own included; what a checkout cannot do is take the user's token, or a
+variable's, anywhere.
 
 A `token` or `natsSeed` value starting with `!` is a command (`fileValue`): it runs under
 `/bin/sh -c` in its own process group for at most 10 s, and its trimmed stdout is the value. Its

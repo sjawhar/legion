@@ -18,8 +18,9 @@
   `dispatch.enabled: false` is off whatever the variables say. `DISPATCH_URL` replaces a checkout's
   file whole: while it is set, the checkout's server, token and `dispatch.enabled: false` are neither
   used nor refused, so a checkout's token never goes to the server `DISPATCH_URL` names. Otherwise a
-  checkout's server goes only with its own token and is refused without one, and its token only
-  beside its own `dispatch.serverUrl`, refused without one unless `DISPATCH_TOKEN` or
+  checkout contributes only its `dispatch.enabled: false`, or its own server with its own token: its
+  `dispatch.enabled: true` alone turns nothing on. A checkout's server without its own token is
+  refused, and so is its token without its own `dispatch.serverUrl` unless `DISPATCH_TOKEN` or
   `DISPATCH_TOKEN_FILE` replaces it; either refusal turns off Dispatch alone. An empty `DISPATCH_*`
   variable counts as unset.
 - **Breaking:** the OpenCode-era files are not read. While `~/.config/opencode/envoy.json` is there
