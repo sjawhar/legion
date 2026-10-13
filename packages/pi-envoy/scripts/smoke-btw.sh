@@ -4,7 +4,6 @@
 set -euo pipefail
 
 readonly envoy_url="${ENVOY_URL:-http://127.0.0.1:9020}"
-readonly dispatch_url="${DISPATCH_URL:-http://127.0.0.1:8766}"
 readonly dispatch_issue="${DISPATCH_SMOKE_ISSUE:?set DISPATCH_SMOKE_ISSUE to an open issue key}"
 readonly mode="${MODE:-btw}"
 readonly omp_bin="${OMP_BIN:-omp}"
@@ -12,58 +11,15 @@ readonly session_timeout=60
 readonly answer_timeout=90
 readonly teardown_timeout=15
 readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-envoy/package.json"
-# The envoy.json this shell's commands read: ENVOY_CONFIG_FILE, which a session's plugin sets, else
-# ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json.
-readonly envoy_config="${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-${HOME}/.config}/legion/envoy.json}"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
 }
 
-# A URL's scheme://host[:port], lowercased, without user info or the scheme's default port: the
-# origin the Dispatch client pairs a file's bearer with (`new URL(url).origin`).
-url_origin() {
-  local url="${1,,}" authority
-  authority="${url#*://}"
-  authority="${authority%%[/?#]*}"
-  authority="${authority##*@}"
-  case "${url%%://*}:${authority}" in
-    http:*:80) authority="${authority%:80}" ;;
-    https:*:443) authority="${authority%:443}" ;;
-  esac
-  printf '%s://%s' "${url%%://*}" "$authority"
-}
-
-# The bearer the installed plugin resolves: DISPATCH_TOKEN_FILE, then DISPATCH_TOKEN, then
-# dispatch.token in that envoy.json, which goes only to the server written beside it (its
-# dispatch.serverUrl, http://localhost:8766 when it names none). A dispatch.token starting with `!`
-# is a command, which only a session runs, so the script asks for DISPATCH_TOKEN instead.
-resolve_dispatch_bearer() {
-  if [[ -n "${DISPATCH_TOKEN_FILE:-}" ]]; then
-    local token
-    token="$(tr -d '[:space:]' <"$DISPATCH_TOKEN_FILE" 2>/dev/null)" ||
-      fail "DISPATCH_TOKEN_FILE names ${DISPATCH_TOKEN_FILE}, which could not be read"
-    [[ -n "$token" ]] || fail "DISPATCH_TOKEN_FILE names ${DISPATCH_TOKEN_FILE}, which is empty"
-    printf '%s' "$token"
-    return
-  fi
-  if [[ -n "${DISPATCH_TOKEN:-}" ]]; then
-    printf '%s' "$DISPATCH_TOKEN"
-    return
-  fi
-  [[ -f "$envoy_config" ]] ||
-    fail "no Dispatch credential: set DISPATCH_AUTH_HEADER, DISPATCH_TOKEN(_FILE), or dispatch.token in ${envoy_config}"
-  local token server
-  token="$(jq -er '.dispatch.token // empty' "$envoy_config" 2>/dev/null)" ||
-    fail "${envoy_config} has no dispatch.token; set DISPATCH_AUTH_HEADER or DISPATCH_TOKEN(_FILE)"
-  [[ "$token" != '!'* ]] ||
-    fail "${envoy_config}'s dispatch.token is a command, which only a session runs; set DISPATCH_TOKEN to the bearer it prints"
-  server="$(jq -r '.dispatch.serverUrl // "http://localhost:8766"' "$envoy_config")"
-  [[ "$(url_origin "$dispatch_url")" == "$(url_origin "$server")" ]] ||
-    fail "${envoy_config}'s dispatch.token is for $(url_origin "$server"), not $(url_origin "$dispatch_url") (DISPATCH_URL); set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it"
-  printf '%s' "$token"
-}
+# operator_dispatch: the Dispatch and bearer a command run from this shell resolves.
+# shellcheck source-path=SCRIPTDIR source=../../../scripts/e2e/lib/operator-dispatch.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/e2e/lib/operator-dispatch.sh"
 
 write_dispatch_header_file() {
   local output="$1"
@@ -102,10 +58,16 @@ readonly hex
 bearer=""
 actor_session=""
 if [[ -n "${DISPATCH_AUTH_HEADER:-}" ]]; then
+  readonly dispatch_url="${DISPATCH_URL:-http://127.0.0.1:8766}"
   readonly dispatch_auth_header="$DISPATCH_AUTH_HEADER"
   readonly asker="human (${dispatch_auth_header%%:*} header)"
 else
-  bearer="$(resolve_dispatch_bearer)"
+  command -v bun >/dev/null 2>&1 || fail "bun is required to resolve the Dispatch bearer; or set DISPATCH_AUTH_HEADER"
+  operator_dispatch
+  [[ -n "$operator_dispatch_url" ]] ||
+    fail "no Dispatch to ask: ${operator_dispatch_notice}; set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, enable dispatch in ${operator_dispatch_file}, or set DISPATCH_AUTH_HEADER"
+  readonly dispatch_url="$operator_dispatch_url"
+  bearer="$operator_dispatch_token"
   readonly dispatch_auth_header="Authorization: Bearer ${bearer}"
   actor_session="${SMOKE_ACTOR_SESSION:-smoke-btw-${hex}}"
   readonly asker="agent session ${actor_session} (bearer)"

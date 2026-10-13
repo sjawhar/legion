@@ -292,15 +292,12 @@ the end, a read-only audit replays production Dispatch events from a baseline re
 baseline event is the replay's positive control) and fails on any event a rig session authored or
 that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`,
 `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. The
-audit writes nothing. It reads the operator's Dispatch from the envoy.json the operator's shell
-reads (`ENVOY_CONFIG_FILE`, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`) and sends to
-its `dispatch.serverUrl` with its `dispatch.token`. When that token is empty or starts with `!` (a
-command, which only a session runs), `DISPATCH_TOKEN` stands in for it, but only while
-`DISPATCH_URL` is unset or names the file's server: the baseline read refuses any other case,
-naming the file and both servers or the variable to set. The script reads `DISPATCH_TOKEN` at
-start and takes it out of its environment, so nothing the run starts inherits it. The scratch
-Dispatch runs with `HOME` and `XDG_CONFIG_HOME` in the run's work directory, so it reads no
-envoy.json of the operator's.
+audit writes nothing. It reads the operator's Dispatch as a command run from the operator's shell
+resolves it ([`lib/operator-dispatch.sh`](#liboperator-dispatchsh)), with the `DISPATCH_TOKEN` the
+script read at start and took out of its environment, so nothing the run starts inherits it. A file,
+URL or token that prevents Dispatch fails the baseline read, naming it; with no Dispatch
+configured, there is none to audit. The scratch Dispatch runs with `HOME` and `XDG_CONFIG_HOME` in
+the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
@@ -1756,6 +1753,32 @@ container or process it would own, since pids are reused. Only processes in the 
 namespace are read, since a pid means nothing across namespaces (an agent box's run is its own).
 What a live run started is left alone, since Stages 2 and 3 take no lock and two lanes may run one
 at once.
+
+## lib/operator-dispatch.sh
+
+The operator's Dispatch, for a script run from the operator's shell. Stage 3 and
+`stage3-4b13b-acceptance.sh` read their production audit's server and bearer through it, and
+`packages/pi-envoy/scripts/smoke-btw.sh` the Dispatch it asks as an agent.
+
+```sh
+. "$root/scripts/e2e/lib/operator-dispatch.sh"     # sourced, never run
+operator_dispatch     # sets operator_dispatch_file, _url, _token and _notice
+```
+
+`operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts`, which resolves Dispatch with
+`@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or
+the same-server rule: the envoy.json `envoyConfigPath("command")` chooses (`ENVOY_CONFIG_FILE`,
+which the operator's own session sets, then a named omp profile's `PI_CODING_AGENT_DIR`,
+`CLAUDE_CONFIG_DIR` and `OPENCODE_CONFIG_DIR`, then `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`),
+the working directory's `.envoy/envoy.json`, and `dispatchSettings` over the environment as it is at
+the call (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`; a file's `dispatch.token` goes
+only with the server written beside it, and a `!` token runs). With Dispatch on it sets the
+envoy.json's path, the URL and the bearer; when nothing configures Dispatch or a file turns it off,
+the URL and bearer are empty and `operator_dispatch_notice` says why. A relative path the rule would
+use, a file that cannot be read, or a URL or token that does not resolve fails the call through the
+caller's `fail`, naming it and never the token. The bearer stays in the caller's unexported
+variable, so it reaches no argv and no process's environment. The entry imports the checkout's
+`packages/envoy-client`, so the checkout's dependencies must be installed (`bun install`).
 
 ## lib/workflow.sh
 

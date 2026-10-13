@@ -75,10 +75,10 @@ gate_artifact=
 gate_version=
 prod_baseline=
 prod_dispatch_url=
-# The operator's DISPATCH_URL and DISPATCH_TOKEN, read once here, with the token taken out of the
-# environment so nothing the run starts inherits a production bearer (production_baseline).
-operator_dispatch_url=${DISPATCH_URL:-}
-operator_dispatch_token=${DISPATCH_TOKEN:-}
+# The operator's DISPATCH_TOKEN, taken out of the environment here so nothing the run starts
+# inherits a production bearer; production_baseline hands it back to the one call that resolves the
+# operator's Dispatch.
+operator_token=${DISPATCH_TOKEN:-}
 unset DISPATCH_TOKEN
 prod_token=
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
@@ -96,6 +96,8 @@ fail() { printf 'FAIL %s: %s\n' "$check" "$*" >&2; exit 1; }
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/leftovers.sh
 . "$root/scripts/e2e/lib/leftovers.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/operator-dispatch.sh
+. "$root/scripts/e2e/lib/operator-dispatch.sh"
 
 # collect_transcripts copies every OMP session the rig's profile wrote into the evidence directory
 # before the isolated profile is removed.
@@ -412,54 +414,25 @@ every_launch_checked() {
 no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
 report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
 
-# The operator's Dispatch is the one in the envoy.json this shell's commands read: ENVOY_CONFIG_FILE,
-# which the operator's own session sets, else ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json.
-operator_envoy_config=${ENVOY_CONFIG_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json}
-# url_origin URL prints URL's scheme://host[:port], lowercased, without user info or the scheme's
-# default port: the origin the Dispatch client pairs a file's token with (`new URL(url).origin`).
-url_origin() {
-  local url=${1,,} authority
-  authority=${url#*://}
-  authority=${authority%%[/?#]*}
-  authority=${authority##*@}
-  case ${url%%://*}:$authority in
-    http:*:80) authority=${authority%:80} ;;
-    https:*:443) authority=${authority%:443} ;;
-  esac
-  printf '%s://%s' "${url%%://*}" "$authority"
-}
 prod_header_file() {
   local header=$work/production-dispatch-auth
   (umask 077 && printf 'Authorization: Bearer %s\n' "$prod_token" >"$header")
   printf '%s\n' "$header"
 }
 # production_baseline reads a recent production Dispatch event id so the post-run audit replays
-# only this run's window. It is a read-only query, sent to the file's dispatch.serverUrl with the
-# operator's existing Dispatch token: the file's dispatch.token. A dispatch.token that is empty, or
-# starts with `!` (a command, which only a session runs: packages/envoy-client/src/envoy-config.ts),
-# gives the script no bearer; DISPATCH_TOKEN stands in for it then, but only while DISPATCH_URL is
-# unset or names the file's server, since a DISPATCH_TOKEN for another Dispatch must never reach
-# this one. Anything else is refused, naming what to set.
+# only this run's window. It is a read-only query to the operator's Dispatch, resolved as every
+# command of the operator's resolves it (lib/operator-dispatch.sh) with the DISPATCH_TOKEN the
+# script took out of its environment at start; a file, URL or token that prevents it fails the run,
+# naming it. With no Dispatch configured there is no production Dispatch to audit.
 production_baseline() {
-  local header since keys key id max=0 file_token
-  prod_dispatch_url=$(jq -r '.dispatch.serverUrl // empty' "$operator_envoy_config" 2>/dev/null || true)
-  [ -n "$prod_dispatch_url" ] || { prod_baseline=none; return 0; }
-  file_token=$(jq -r '.dispatch.token // empty' "$operator_envoy_config")
-  case $file_token in
-    '' | '!'*)
-      if [ -z "$operator_dispatch_token" ]; then
-        [ -n "$file_token" ] ||
-          fail "$operator_envoy_config has no dispatch.token for its dispatch.serverUrl; set DISPATCH_TOKEN to that server's bearer"
-        fail "$operator_envoy_config's dispatch.token is a command, which only a session runs; set DISPATCH_TOKEN to the bearer it prints"
-      fi
-      if [ -n "$operator_dispatch_url" ] &&
-        [ "$(url_origin "$operator_dispatch_url")" != "$(url_origin "$prod_dispatch_url")" ]; then
-        fail "DISPATCH_URL names $(url_origin "$operator_dispatch_url"), but $operator_envoy_config's dispatch.serverUrl is $(url_origin "$prod_dispatch_url"), the server the audit reads; DISPATCH_TOKEN stands in for the file's token only with DISPATCH_URL unset or naming that server"
-      fi
-      prod_token=$operator_dispatch_token
-      ;;
-    *) prod_token=$file_token ;;
-  esac
+  local header since keys key id max=0
+  DISPATCH_TOKEN=$operator_token operator_dispatch
+  if [ -z "$operator_dispatch_url" ]; then
+    note "$operator_dispatch_notice"
+    prod_baseline=none
+    return 0
+  fi
+  prod_dispatch_url=$operator_dispatch_url prod_token=$operator_dispatch_token
   header=$(prod_header_file)
   since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
   keys=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues?updated_since=$since" | jq -r '.[:50][].key')

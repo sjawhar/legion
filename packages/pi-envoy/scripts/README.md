@@ -63,23 +63,23 @@ cd packages/pi-envoy/scripts && MODE=btw DISPATCH_SMOKE_ISSUE=CORE-1 ./smoke-btw
 ```
 
 Set `MODE=btw` (the default) for an ephemeral reply, or `MODE=steer` to prove the primary-turn
-delivery path. `ENVOY_URL` defaults to `http://127.0.0.1:9020`, `DISPATCH_URL` defaults to
-`http://127.0.0.1:8766`, and `OMP_BIN` defaults to `omp`. `DISPATCH_SMOKE_ISSUE` names the open
-issue that will receive the smoke card.
+delivery path. `ENVOY_URL` defaults to `http://127.0.0.1:9020` and `OMP_BIN` defaults to `omp`.
+`DISPATCH_SMOKE_ISSUE` names the open issue that will receive the smoke card.
 
-Who asks: by default the script is an agent. It authenticates with the same Dispatch bearer the
-installed plugin resolves (`DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
-the envoy.json this shell's commands read: `ENVOY_CONFIG_FILE`, else
-`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`) and names itself in the message's `actor` as
-`SMOKE_ACTOR_SESSION` (default `smoke-btw-<hex>`; pass your own Envoy session id when you run it
-from a session), so the card on the issue is visibly agent-authored. The file's token goes only to
-the server written beside it: when `DISPATCH_URL` (or its default) has another origin than that
-file's `dispatch.serverUrl` (`http://localhost:8766` when it names none), the script refuses, naming
-both, until `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE` gives the bearer. It refuses a
-`dispatch.token` that starts with `!` too: that is a command, which only a session runs, so it asks
-for `DISPATCH_TOKEN`. Set `DISPATCH_AUTH_HEADER` to one human-authenticated HTTP header (the current
-Dispatch cookie or a trusted identity header) to ask as a human instead, exactly as the dashboard
-would; `actor` is then omitted.
+Who asks: by default the script is an agent. It asks the Dispatch a command run from this shell
+resolves, with that command's bearer
+([`scripts/e2e/lib/operator-dispatch.sh`](../../../scripts/e2e/README.md#liboperator-dispatchsh),
+which runs `bun` and needs the checkout's dependencies installed): `DISPATCH_URL`,
+`DISPATCH_TOKEN_FILE` and `DISPATCH_TOKEN` over the `dispatch` section of the envoy.json
+`envoyConfigPath("command")` chooses, whose token goes only to the server written beside it and
+whose `!` token runs. It names itself in the message's `actor` as `SMOKE_ACTOR_SESSION` (default
+`smoke-btw-<hex>`; pass your own Envoy session id when you run it from a session), so the card on
+the issue is visibly agent-authored. With no Dispatch configured it refuses, saying why; any other
+refusal of the client's (a file's token that `DISPATCH_URL` names another server for, a token file
+that cannot be read) stops it naming the reason. Set `DISPATCH_AUTH_HEADER` to one
+human-authenticated HTTP header (the current Dispatch cookie or a trusted identity header) to ask as
+a human instead, exactly as the dashboard would: `actor` is then omitted, and the script asks
+`DISPATCH_URL`, default `http://127.0.0.1:8766`.
 
 The script requires live Envoy, Dispatch, and model credentials; it is never a fake-listener test or
 a CI step. A 404 from the targeted message path prints `SKIP` and exits zero, meaning the server does
