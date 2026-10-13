@@ -22696,7 +22696,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // src/envoy-channel-server.ts
 import { unwatchFile, watchFile } from "fs";
-import { readFile as readFile2, rm as rm2 } from "fs/promises";
+import { rm as rm2 } from "fs/promises";
 
 // ../../node_modules/.bun/zod@4.3.6/node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -39330,7 +39330,7 @@ function parseFile(filePath, schema, checkout) {
   return { kind: "valid", settings: parsed.data };
 }
 var FAILURE_KEPT_MS = 60000;
-var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands");
+var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
 var processGlobal = globalThis;
 var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
 processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
@@ -39357,7 +39357,7 @@ function runCommand(command, env, cwd) {
         detached: true
       });
     } catch (error48) {
-      return { failure: `could not start: ${messageFor(error48)}` };
+      return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
     } finally {
       closeSync(fd);
     }
@@ -39365,16 +39365,25 @@ function runCommand(command, env, cwd) {
       process.kill(-result.pid, "SIGKILL");
     } catch {}
     if (result.exitedDueToTimeout) {
-      return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+      return {
+        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
+        timedOut: true
+      };
     }
     if (!result.success) {
-      return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
+      return {
+        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
+        timedOut: false
+      };
     }
     const value = readFileSync2(output, "utf-8").trim();
     if (value.length === 0)
-      return { failure: "printed nothing" };
+      return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
-      return { failure: "printed more than one line, or whitespace inside its value" };
+      return {
+        failure: "printed more than one line, or whitespace inside its value",
+        timedOut: false
+      };
     }
     return { value };
   } finally {
@@ -39392,7 +39401,7 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -39605,6 +39614,8 @@ function natsSeedFromEnvironment(env) {
     throw new Error("NATS_NKEY_SEED is set but empty");
   return { value, source: "NATS_NKEY_SEED" };
 }
+var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+var NO_NATS_CONNECTION = "this session opens no NATS connection";
 function natsServerKey(url2) {
   const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url2);
   if (match === null)
@@ -39659,25 +39670,25 @@ function envoySettings(env, config2, options = {}) {
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
-  let natsUrls = options.nats === false ? [] : namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
-  let natsSeed;
-  let inboundError = null;
-  if (natsUrls.length > 0) {
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  let inbound;
+  if (options.nats === false)
+    inbound = { off: NO_NATS_CONNECTION };
+  else if (natsUrls.length === 0)
+    inbound = { off: NO_NATS_SERVER };
+  else {
     try {
-      natsSeed = natsCredential(env, section, namedNatsUrls, config2.path);
+      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config2.path) };
     } catch (error48) {
-      natsUrls = [];
-      inboundError = messageFor(error48);
+      inbound = { off: messageFor(error48) };
     }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
-    natsUrls,
     token,
-    natsSeed,
-    inboundError,
+    inbound,
     heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
   };
 }
@@ -39728,10 +39739,8 @@ function startNotice(config2, dispatch, envoy, nats) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
   parts.push(...config2.warnings);
-  if (envoy.enabled && nats && envoy.inboundError !== null) {
-    parts.push(`Envoy's inbound messages are off: ${envoy.inboundError}; the Envoy tools still work`);
-  } else if (envoy.enabled && nats && envoy.natsUrls.length === 0) {
-    parts.push("Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work");
+  if (envoy.enabled && nats && "off" in envoy.inbound) {
+    parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
   return parts.length === 0 ? null : parts.join("; ");
 }
@@ -42730,6 +42739,8 @@ function claudeProjectDirectory(environment, fallback) {
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join2 } from "path";
+var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
+
 class SessionIdentity {
   directory;
   #id;
@@ -42752,6 +42763,19 @@ function sessionHandoffFile(stateDirectory, claudePid) {
 }
 function roleStateFile(stateDirectory, sessionId) {
   return join2(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+}
+async function readPersistedRole(roleFile) {
+  try {
+    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return;
+    throw error48;
+  }
+}
+async function writePersistedRole(roleFile, state) {
+  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
+`);
 }
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname2(file2), { recursive: true, mode: 448 });
@@ -42795,12 +42819,53 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
   }
 }
 
+// src/envoy-off.ts
+function inboundOffChannelSession(options) {
+  const { identity, stateDirectory, why } = options;
+  return {
+    delivery: { enqueue: async () => false, inbox: () => [] },
+    topics: () => [],
+    async follow() {
+      throw new Error(`inbound messages are off for this session: ${why}`);
+    },
+    unfollow: async () => [],
+    async rememberRole(role) {
+      await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
+        session_id: identity.id,
+        role
+      });
+    },
+    shutdown: async () => {
+      return;
+    }
+  };
+}
+async function serveEnvoyOff(serverInfo, refusal) {
+  const server = new Server(serverInfo, { capabilities: { tools: {} } });
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
+  server.setRequestHandler(CallToolRequestSchema, async () => {
+    throw new Error(refusal);
+  });
+  const stopped = Promise.withResolvers();
+  process.stdin.once("end", stopped.resolve);
+  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+    process.once(signal, () => stopped.resolve());
+  }
+  await server.connect(new StdioServerTransport);
+  try {
+    await stopped.promise;
+  } finally {
+    await server.close().catch(() => {
+      return;
+    });
+  }
+}
+
 // src/envoy-channel-server.ts
 var CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel";
 var CHANNEL_INBOX_LIMIT = 50;
 var EMPTY_RECEIPT = new Uint8Array;
 var ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/;
-var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
 var HANDOFF_POLL_MS = 250;
 var HANDOFF_FLUSH_TIMEOUT_MS = 1e4;
 async function withTimeout(promise3, ms, what) {
@@ -42936,19 +43001,6 @@ function createChannelDelivery(input) {
       return [...inbox];
     }
   };
-}
-async function readPersistedRole(roleFile) {
-  try {
-    return PersistedRole.parse(JSON.parse(await readFile2(roleFile, "utf8")));
-  } catch (error48) {
-    if (hasErrnoCode(error48, "ENOENT"))
-      return;
-    throw error48;
-  }
-}
-async function writePersistedRole(roleFile, state) {
-  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
-`);
 }
 async function enqueueChannelMessage(delivery, connection, directSubject, message) {
   const queued = message.duplicate ? Promise.resolve(false) : delivery.enqueue({ subject: message.subject, raw: message.raw });
@@ -43219,26 +43271,6 @@ async function startChannelSession(options) {
     }
   };
 }
-function inboundOffChannelSession(options) {
-  const { identity, stateDirectory, why } = options;
-  return {
-    delivery: { enqueue: async () => false, inbox: () => [] },
-    topics: () => [],
-    async follow() {
-      throw new Error(`inbound messages are off for this session: ${why}`);
-    },
-    unfollow: async () => [],
-    async rememberRole(role) {
-      await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
-        session_id: identity.id,
-        role
-      });
-    },
-    shutdown: async () => {
-      return;
-    }
-  };
-}
 async function executeEnvoyTool(runtime, name, input) {
   const { identity } = runtime;
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
@@ -43325,26 +43357,6 @@ function pluginStateDirectory() {
   }
   return pluginData;
 }
-async function serveEnvoyOff(refusal) {
-  const server = new Server(MCP_SERVER_INFO, { capabilities: { tools: {} } });
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
-  server.setRequestHandler(CallToolRequestSchema, async () => {
-    throw new Error(refusal);
-  });
-  const stopped = Promise.withResolvers();
-  process.stdin.once("end", stopped.resolve);
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
-    process.once(signal, () => stopped.resolve());
-  }
-  await server.connect(new StdioServerTransport);
-  try {
-    await stopped.promise;
-  } finally {
-    await server.close().catch(() => {
-      return;
-    });
-  }
-}
 async function runEnvoyChannelServer() {
   const directory = projectDirectory();
   const configFile = sessionConfigFile("claude", process.env);
@@ -43353,7 +43365,7 @@ async function runEnvoyChannelServer() {
     process.stderr.write(`envoy-channel: ${notice}
 `);
   if (!envoy.enabled) {
-    await serveEnvoyOff(`Envoy is off for this session: ${envoy.error ?? envoy.notice}`);
+    await serveEnvoyOff(MCP_SERVER_INFO, `Envoy is off for this session: ${envoy.error ?? envoy.notice}`);
     return;
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
@@ -43399,17 +43411,14 @@ async function runEnvoyChannelServer() {
   await server.connect(new StdioServerTransport);
   let connection;
   try {
-    if (envoy.natsUrls.length === 0) {
-      session = inboundOffChannelSession({
-        identity,
-        stateDirectory,
-        why: envoy.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)"
-      });
+    const { inbound } = envoy;
+    if ("off" in inbound) {
+      session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off });
     } else {
       connection = await import_nats2.connect({
-        servers: [...envoy.natsUrls],
+        servers: [...inbound.natsUrls],
         name: `claude-envoy-channel-${identity.id}`,
-        ...natsAuthOptions(envoy.natsSeed),
+        ...natsAuthOptions(inbound.natsSeed),
         reconnect: true,
         maxReconnectAttempts: -1,
         reconnectTimeWait: 2000

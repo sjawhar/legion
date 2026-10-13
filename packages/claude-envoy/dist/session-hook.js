@@ -18619,7 +18619,7 @@ function parseFile(filePath, schema, checkout) {
   return { kind: "valid", settings: parsed.data };
 }
 var FAILURE_KEPT_MS = 60000;
-var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands");
+var COMMAND_OUTCOMES = Symbol.for("legion.envoy-config.commands.v1");
 var processGlobal = globalThis;
 var commandOutcomes = processGlobal[COMMAND_OUTCOMES] ?? new Map;
 processGlobal[COMMAND_OUTCOMES] = commandOutcomes;
@@ -18646,7 +18646,7 @@ function runCommand(command, env, cwd) {
         detached: true
       });
     } catch (error48) {
-      return { failure: `could not start: ${messageFor(error48)}` };
+      return { failure: `could not start: ${messageFor(error48)}`, timedOut: false };
     } finally {
       closeSync(fd);
     }
@@ -18654,16 +18654,25 @@ function runCommand(command, env, cwd) {
       process.kill(-result.pid, "SIGKILL");
     } catch {}
     if (result.exitedDueToTimeout) {
-      return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
+      return {
+        failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s, and does not run again in this process`,
+        timedOut: true
+      };
     }
     if (!result.success) {
-      return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
+      return {
+        failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}`,
+        timedOut: false
+      };
     }
     const value = readFileSync3(output, "utf-8").trim();
     if (value.length === 0)
-      return { failure: "printed nothing" };
+      return { failure: "printed nothing", timedOut: false };
     if (!sendable(value)) {
-      return { failure: "printed more than one line, or whitespace inside its value" };
+      return {
+        failure: "printed more than one line, or whitespace inside its value",
+        timedOut: false
+      };
     }
     return { value };
   } finally {
@@ -18681,7 +18690,7 @@ function fileValue(value, field, filePath, env) {
   const cwd = path.dirname(path.resolve(filePath));
   const key = JSON.stringify([command, filePath, cwd]);
   let outcome = commandOutcomes.get(key);
-  if (outcome === undefined || "failure" in outcome && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
+  if (outcome === undefined || "failure" in outcome && !outcome.timedOut && Date.now() - outcome.at >= FAILURE_KEPT_MS) {
     outcome = { ...runCommand(command, env, cwd), at: Date.now() };
     commandOutcomes.set(key, outcome);
   }
@@ -18894,6 +18903,8 @@ function natsSeedFromEnvironment(env) {
     throw new Error("NATS_NKEY_SEED is set but empty");
   return { value, source: "NATS_NKEY_SEED" };
 }
+var NO_NATS_SERVER = "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+var NO_NATS_CONNECTION = "this session opens no NATS connection";
 function natsServerKey(url2) {
   const match = /^([a-z][a-z0-9+.-]*):\/\/([^@/]*@)?(\[[^\]]*\]|[^:/]*)(?::(\d+))?(\/.*)?$/i.exec(url2);
   if (match === null)
@@ -18948,25 +18959,25 @@ function envoySettings(env, config2, options = {}) {
   } catch (error48) {
     return offWithError(messageFor(error48));
   }
-  let natsUrls = options.nats === false ? [] : namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
-  let natsSeed;
-  let inboundError = null;
-  if (natsUrls.length > 0) {
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : section.natsUrls ?? [];
+  let inbound;
+  if (options.nats === false)
+    inbound = { off: NO_NATS_CONNECTION };
+  else if (natsUrls.length === 0)
+    inbound = { off: NO_NATS_SERVER };
+  else {
     try {
-      natsSeed = natsCredential(env, section, namedNatsUrls, config2.path);
+      inbound = { natsUrls, natsSeed: natsCredential(env, section, namedNatsUrls, config2.path) };
     } catch (error48) {
-      natsUrls = [];
-      inboundError = messageFor(error48);
+      inbound = { off: messageFor(error48) };
     }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
-    natsUrls,
     token,
-    natsSeed,
-    inboundError,
+    inbound,
     heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
   };
 }
@@ -19017,10 +19028,8 @@ function startNotice(config2, dispatch, envoy, nats) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }
   parts.push(...config2.warnings);
-  if (envoy.enabled && nats && envoy.inboundError !== null) {
-    parts.push(`Envoy's inbound messages are off: ${envoy.inboundError}; the Envoy tools still work`);
-  } else if (envoy.enabled && nats && envoy.natsUrls.length === 0) {
-    parts.push("Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work");
+  if (envoy.enabled && nats && "off" in envoy.inbound) {
+    parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
   return parts.length === 0 ? null : parts.join("; ");
 }
@@ -19062,6 +19071,8 @@ function claudeProjectDirectory(environment, fallback) {
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join3 } from "path";
+var PersistedRole = exports_external.object({ session_id: exports_external.string().min(1), role: exports_external.string().min(1) });
+
 class SessionIdentity {
   directory;
   #id;
@@ -19084,6 +19095,19 @@ function sessionHandoffFile(stateDirectory, claudePid) {
 }
 function roleStateFile(stateDirectory, sessionId) {
   return join3(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
+}
+async function readPersistedRole(roleFile) {
+  try {
+    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")));
+  } catch (error48) {
+    if (hasErrnoCode(error48, "ENOENT"))
+      return;
+    throw error48;
+  }
+}
+async function writePersistedRole(roleFile, state) {
+  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}
+`);
 }
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname2(file2), { recursive: true, mode: 448 });
