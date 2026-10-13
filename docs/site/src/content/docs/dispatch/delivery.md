@@ -27,6 +27,22 @@ address, so a link shows the same figures to whoever opens it. Dragging across t
 the measures to the stretch you dragged over; the timeline itself keeps the whole window. **clear
 brush window** puts the measures back.
 
+## Live updates
+
+An open Delivery or Pipeline page keeps itself current over one connection to Dispatch. A merge
+or a deploy appears within seconds, without a reload. Nothing reads again on a timer: Dispatch
+sends the page an update only when something it shows has changed, and each update carries only
+what changed, such as the pull requests and runs that moved, the counts beside the filters and
+the measures' new numbers. A preset window keeps its end at the present, so a pull request or run
+leaves the page at the moment it ages out of the window. A deploy shows once its production job
+finishes, without waiting for the rest of its run.
+
+Each page's freshness row says **Live** while the connection is open, with how long ago the last
+change arrived. A source Dispatch reports as stale, or a failed reconcile, still shows
+in red with its age and error. While the connection is lost the row reads **Reconnecting** in red,
+with how long it has been lost; the page reconnects by itself and is sent only what changed while
+it was away. A page away for more than a day reads its window once, whole.
+
 ## Grouping sessions
 
 A pull request's **Parent agent** is the first agent session that wrote it, shown by the session's
@@ -102,9 +118,50 @@ targets, whether each is met, and the unowned P0 issues. It takes the timeline's
 search, and any filter repeated for several values, such as `&repo=acme/widgets&priority=P0`. Any
 signed-in person or agent token reads it. `GET /api/v1/delivery/timeline` carries the same
 answer as its `measures` for its own window and filters, so an agent reading both needs only the
-timeline. The page and the route compute from the same stored facts on every request, so they
-always agree. `flags_source` says whether recorded flags fed the change failure rate; `none`
-means no flags are recorded yet.
+timeline. The routes and the page's live updates compute from the same stored facts with the same
+code, so they agree. `flags_source` says whether recorded flags fed the change failure rate;
+`none` means no flags are recorded yet.
+
+`GET /ws/delivery` is the websocket the pages keep themselves current over, and any signed-in
+person or agent token may open it. Each frame is one JSON object; `DeliveryLive*` in
+`packages/contracts/src/dispatch-api.ts` types them all. A client subscribes to a view with
+`{"type": "subscribe", "sub": "<its own id>", "view": ...}`, where the view is
+`{"kind": "timeline" | "measures", "window": {"preset": 28}, "query": "repo=acme%2Fwidgets"}`
+(a window is a preset of 7, 14, 28 or 84 days, or a custom `{"from", "to"}`; `query` is the GET
+route's query string without `from` and `to`), or `{"kind": "pipeline"}` with an optional `at`.
+`{"type": "unsubscribe", "sub"}` ends one. Dispatch answers a subscription with:
+
+- a `snapshot`: the matching GET route's body for the window resolved now, the change it reflects
+  (`seq`), when that change was recorded (`changed_at`), and a revision for every key it holds;
+- then only `delta` frames: the pull requests, runs and session groups that changed (`items`,
+  each list's `upsert` and the ids it `remove`s), the map entries and counts that changed (`maps`
+  and `counts`, null for a key that left), and the fields replaced whole (`set`, which carries
+  `window` whenever it moved, never alone);
+- `freshness`, sent to every subscriber only when the freshness verdict changes;
+- `error`, with the code the GET route would answer (`INVALID_QUERY`,
+  `DELIVERY_NOT_CONFIGURED`) or `INVALID_FRAME`;
+- `heartbeat`, every 15 seconds. While nothing the view shows changes, the heartbeat is the only
+  frame sent: a reconcile pass that records nothing new sends nothing.
+
+A client that reconnects subscribes again with `"resume": {"seq", "revs"}`, the last change it
+applied and the revisions it holds, and is sent a delta of what changed since; a resume from
+before the day of changes Dispatch keeps is answered with a snapshot. Dispatch closes every
+socket with code 1012 when it restarts, and a client reconnects at once.
+
+`packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch the route from a checkout:
+
+```sh
+cd packages/dispatch
+bun e2e/delivery-live-probe.ts --url <dispatch> --token-file <file> \
+  --view '{"kind":"timeline","window":{"preset":28},"query":""}' --minutes 10 --compare
+```
+
+It subscribes under the token in the file, writes one JSON line per frame (`at`, `type`, `bytes`,
+and the pull requests, runs, map keys, counts and `set` fields the frame carries), applies each
+frame as the page does, and reconnects and resumes as the page does. When the time is up,
+`--compare` reads the GET routes for the last window it applied and writes, for each, whether the
+pull request ids, run ids and every measure equal what it holds; it exits 1 when one does not.
+`--body-file <file>` writes the body it holds.
 
 A session group's Parent agent value is `group:<id>`, so a rename keeps every filter and link that
 names it; the timeline's `session_groups` lists every group with its name and sessions, beside
@@ -122,7 +179,10 @@ route.
 The **Pipeline** page (`/pipeline`, **Pipeline** in the sidebar under **Delivery**) shows how
 long each step between a pull request and production takes, and how often it succeeds, over the
 last seven UTC days. Today is the last day, drawn faded because it is not over. The page follows
-neither the Delivery page's window nor its filters.
+neither the Delivery page's window nor its filters. It updates itself live, as the Delivery page
+does, and a deploy card moves as soon as the deploy job it times finishes. A pull request's CI run
+reaches the **PR CI** card and its two tables only when the five-minute reconcile records it,
+since Envoy relays no event for a workflow run of a pull request.
 
 ![The Pipeline page: six timing cards over the slowest-jobs and failing-jobs tables](/legion/media/dispatch/pipeline.png)
 
