@@ -16,7 +16,9 @@
 //    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
 // 2. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
-// 3. Put the session's open Dispatch asks into the model's context.
+// 3. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
+//    line for each file the read found and did not read (a checkout's `.opencode/envoy.json`,
+//    naming its rename), as the other plugins' start notices and the `dispatch` command name it.
 // Plain stdout becomes context; it always exits 0 so a Dispatch outage never
 // blocks a session from starting.
 //
@@ -31,18 +33,19 @@
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
+import {
+  type DispatchConfigResolution,
+  dispatchSettings,
+} from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
+import { offWithError, readEnvoyConfig } from "@legion/envoy-client/envoy-config"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
-import {
-  resolveDispatchConfig,
-  sessionConfigFile,
-  sessionDispatchSettings,
-} from "@legion/envoy-client/session-settings"
+import { resolveDispatchConfig, sessionConfigFile } from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -94,7 +97,16 @@ async function openAsks(raw: unknown): Promise<void> {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  const config = sessionDispatchSettings(chosen, process.env, { cwd: directory })
+  let config: DispatchConfigResolution
+  if (chosen.path === null) {
+    config = offWithError(chosen.error)
+  } else {
+    const envoyConfig = readEnvoyConfig(chosen.path, process.env, { cwd: directory })
+    if (envoyConfig.kind === "read") {
+      for (const warning of envoyConfig.warnings) process.stdout.write(`envoy: ${warning}\n`)
+    }
+    config = dispatchSettings(process.env, envoyConfig)
+  }
   if (config.enabled) {
     try {
       const snapshot = await new DispatchClient(

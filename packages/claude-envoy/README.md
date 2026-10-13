@@ -28,8 +28,10 @@ events and sends them to the current Claude Code session as supported
   context (`Dispatch authored-ask summary:`; `unavailable: <reason>` when Dispatch cannot be
   reached; nothing when Dispatch is not configured, unless the session's file is missing beside
   `~/.config/opencode/envoy.json`, which is not read: then `unavailable: <notice>`, the notice
-  naming what to do with it). The `dispatch` command reads the file `ENVOY_CONFIG_FILE` names
-  whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the
+  naming what to do with it). Before that, whether Dispatch is on or off, a checkout's
+  `.opencode/envoy.json`, which is not read, is one `envoy: <file> is not read: mkdir -p … && mv …`
+  line while the checkout has no `.envoy/envoy.json`. The `dispatch` command reads the file
+  `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the
   hook writes there (anthropics/claude-code#46696); its `dispatch` command, finding no
   `DISPATCH_HOST`, then takes host `claude` from the `CLAUDE_CODE_CHILD_SESSION=1` Claude Code sets
   in every Bash, and reads `CLAUDE_CONFIG_DIR` itself. With Dispatch configured,

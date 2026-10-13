@@ -173,6 +173,72 @@ test("summarises a missing Claude profile file with where its unread old file be
   }
 })
 
+test("names a checkout's unread .opencode/envoy.json and still summarises the asks from the user file's server", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-old-checkout-"))
+  const checkout = join(scratch, "checkout")
+  const old = join(checkout, ".opencode", "envoy.json")
+  const requests: string[] = []
+  const server = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      requests.push(`${request.headers.get("authorization")} ${new URL(request.url).pathname}`)
+      return Response.json({
+        session_id: "s-1",
+        as_of: "2026-09-14T00:00:00Z",
+        opened_since: false,
+        count: 0,
+        waiting_on_human: 0,
+        waiting_on_agent: 0,
+        asks: [],
+      })
+    },
+  })
+  await mkdir(join(scratch, ".config", "legion"), { recursive: true })
+  await writeFile(
+    join(scratch, ".config", "legion", "envoy.json"),
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: `http://127.0.0.1:${server.port}`,
+        token: "user-token",
+      },
+    }),
+  )
+  await mkdir(join(checkout, ".opencode"), { recursive: true })
+  await writeFile(
+    old,
+    JSON.stringify({
+      dispatch: { enabled: true, serverUrl: "http://127.0.0.1:1", token: "checkout-token" },
+    }),
+  )
+  const rename = `envoy: ${old} is not read: mkdir -p ${join(checkout, ".envoy")} && mv ${old} ${join(checkout, ".envoy", "envoy.json")}\n`
+  try {
+    const result = await runHook(
+      { ...hookInput, cwd: checkout },
+      { HOME: scratch, CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data") },
+    )
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toStartWith(`${rename}Dispatch authored-ask summary:\n`)
+    expect(result.stdout.split(rename)).toHaveLength(2)
+    expect(requests).toEqual(["Bearer user-token /api/v1/asks/open"])
+
+    // With no user file the checkout's old file is all that ever configured Dispatch here: the
+    // hook still names it, beside the missing file's quiet off.
+    await rm(join(scratch, ".config", "legion", "envoy.json"))
+    const off = await runHook(
+      { ...hookInput, cwd: checkout },
+      { HOME: scratch, CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data") },
+    )
+    expect(off.exitCode).toBe(0)
+    expect(off.stdout).toBe(rename)
+    expect(requests).toHaveLength(1)
+  } finally {
+    server.stop(true)
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 // The `dispatch` command the plugin's bin/ puts on the Bash tool's PATH reads its host from
 // DISPATCH_HOST, and its envoy.json by Claude Code's rule: CLAUDE_CONFIG_DIR's, else the file
 // ENVOY_CONFIG_FILE names; Claude Code sources CLAUDE_ENV_FILE into every later Bash command of the
