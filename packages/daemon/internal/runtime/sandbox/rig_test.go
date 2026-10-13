@@ -112,32 +112,26 @@ func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, er
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
 // unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
 // so, a claim of an issue runs a process only when running names it, in the tree it names, and an
-// issue belongs to a tree only when homes says so (unrecorded otherwise).
+// issue's Sandbox belongs to a tree only when homes names it (to none otherwise). The store's own
+// rule for a Sandbox's home is held by its tests (store.IssueSandboxHome); here a test sets it.
 type fakeStore struct {
 	mu               sync.Mutex
 	closed, sessions map[string]bool
 	running          map[string]runningClaim
-	homes            map[string]issueHome
+	homes            map[string]string
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
 type runningClaim struct{ tree, claim string }
 
-// issueHome is the tree an issue's Sandbox belongs to now, and whether that tree has a lifecycle.
-type issueHome struct {
-	tree   string
-	opened bool
-}
-
 func newFakeStore() *fakeStore {
-	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]issueHome{}}
+	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{}}
 }
 
-func (s *fakeStore) IssueTree(_ context.Context, _, issue string) (string, bool, error) {
+func (s *fakeStore) IssueSandboxHome(_ context.Context, _, issue string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	home := s.homes[issue]
-	return home.tree, home.opened, nil
+	return s.homes[issue], nil
 }
 
 func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {

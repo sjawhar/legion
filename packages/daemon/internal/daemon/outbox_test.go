@@ -509,6 +509,64 @@ func TestAStaleHandOverRowLeavesANewerLingersFence(t *testing.T) {
 	}
 }
 
+// A hand-over Dispatch refuses permanently (the child is gone from Dispatch) never lands, so no
+// admission ever consumes its fence. The refused row is finished as any refused status write is,
+// and its fence goes with it in the same transaction: left behind, the fence would name the child's
+// own tree as its Sandbox's home for good, and the orphan sweep would keep that Sandbox forever.
+func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	st, err := store.Open(ctx, pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	until := time.Now().Add(time.Hour)
+	parent := root
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B"}),
+			records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 3}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed the hand-over: %v", err)
+	}
+	if home, err := st.IssueSandboxHome(ctx, "legion", child); err != nil || home != child {
+		t.Fatalf("the child's Sandbox home while its hand-over is pending = %q, %v; want %s", home, err, child)
+	}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now()))
+	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: func() error {
+		return &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
+	}}
+	runner := &outbox{pool: pool, records: records, dispatchProject: "LEGION", dispatch: client, now: time.Now, log: quietLogger()}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(client.handOvers) != 1 || outboxRows(t, pool) != 0 {
+		t.Fatalf("hand-over writes %v, %d rows left; want the one refused write and its row finished", client.handOvers, outboxRows(t, pool))
+	}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		fence, err := records.Handover(ctx, tx, child)
+		if err != nil || fence != nil {
+			t.Fatalf("the fence after its refused hand-over = %#v, %v; want none", fence, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if home, err := st.IssueSandboxHome(ctx, "legion", child); err != nil || home == child {
+		t.Fatalf("the child's Sandbox home after its refused hand-over = %q, %v; want it no longer its own tree", home, err)
+	}
+}
+
 // A done write with a reason posts the reason on the issue before it writes the status, since
 // Dispatch refuses a message on a closed issue, and no status is written until the message posts.
 // The message is the row's own, under its marker, so a retry after a failed status write finds it
@@ -1737,7 +1795,7 @@ func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issu
 
 // outboxTreeStore is the daemon's store on pool, the outbox's tree barrier as production wires it
 // (newOutbox's trees), with each root's tree lifecycle opened as admission opens it: every workflow
-// tree the daemon runs was admitted, and a close of a tree that never was is an error.
+// tree the daemon runs was admitted.
 func outboxTreeStore(t *testing.T, pool *pgxpool.Pool, roots ...string) *store.Store {
 	t.Helper()
 	ctx := context.Background()

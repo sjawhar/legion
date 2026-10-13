@@ -11,19 +11,20 @@ import (
 )
 
 // CleanupTree deletes every issue Sandbox of tree, and with each its role Secrets and the issue's
-// volume (deleteSandbox says how its foreground delete takes them), except a Sandbox whose issue now
-// belongs to another tree (Store.IssueTree: a child carried into a tree of its own, or one whose
-// hand-over is pending): that one is handed over to the tree its issue belongs to, relabelled and
-// left Suspended with its volume, its role Secrets and the sessions on it (handOverSandbox), so the
-// new tree's first launch finds it its own whenever that launch comes. The tree's cleanup
-// reservation calls it (store.CleanupReservedTree) once every stored claim of the tree has retired,
-// or runs nothing and belongs to an issue that moved, so no launch creates a Sandbox of the tree
-// meanwhile. The API's own listing by the tree's label is the census: each Sandbox it names is
-// deleted or handed over, in any order, and awaited, and the listing is read again until none is
+// volume (deleteSandbox says how its foreground delete takes them), except a Sandbox whose home is
+// another tree (Store.IssueSandboxHome: a child whose hand-over is pending, or one carried into a
+// tree of its own that is in it or can still be admitted into it): that one is handed over to its
+// home, relabelled and left Suspended with its volume, its role Secrets and the sessions on it
+// (handOverSandbox), so the new tree's first launch finds it its own whenever that launch comes. The
+// tree's cleanup reservation calls it (store.CleanupReservedTree) once every stored claim of the tree
+// has retired, or runs nothing and belongs to an issue that moved, so no launch creates a Sandbox of
+// the tree meanwhile. The API's own listing by the tree's label is the census: each Sandbox it names
+// is deleted or handed over, in any order, and awaited, and the listing is read again until none is
 // left. Each write is fenced to the listed object's UID and resourceVersion, and one the object
-// changed since (a status write, or the new tree's launch relabelling it first) lists again after a
-// recheck interval, so a controller writing status through a foreground delete does not spin the
-// census; a Sandbox already gone is gone, so a retry after a failure finishes the rest.
+// changed since lists again after a recheck interval: a delete's precondition the API refuses with
+// 409, and the hand-over's failed patch `test` with 409 or 422 (a status write, or the new tree's
+// launch relabelling it first), so a controller writing status through a foreground delete does not
+// spin the census; a Sandbox already gone is gone, so a retry after a failure finishes the rest.
 func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 	for {
 		sandboxes, err := r.treeSandboxes(ctx, tree)
@@ -34,16 +35,19 @@ func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 			return nil
 		}
 		for _, object := range sandboxes {
-			home, _, err := r.store.IssueTree(ctx, r.project, object.GetLabels()[labelIssue])
+			home, err := r.store.IssueSandboxHome(ctx, r.project, object.GetLabels()[labelIssue])
 			if err != nil {
 				return fmt.Errorf("cleanup tree %s: %w", tree, err)
 			}
+			var changed bool
 			if home != "" && home != tree {
 				err = r.handOverSandbox(ctx, object, tree, home)
+				changed = apierrors.IsConflict(err) || apierrors.IsInvalid(err)
 			} else {
 				err = r.deleteSandbox(ctx, object)
+				changed = apierrors.IsConflict(err)
 			}
-			if apierrors.IsConflict(err) || apierrors.IsInvalid(err) {
+			if changed {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()

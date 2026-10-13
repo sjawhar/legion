@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -306,64 +305,98 @@ func holdSerializerThenLock(t *testing.T, store *Store, lock string, step func()
 	}
 }
 
-// IssueTree is where an issue's Sandbox belongs now: the tree its record names, or, while a
-// hand-over of it is pending, its own key, the tree a carried child becomes; and whether that tree
-// has ever had a lifecycle, which a carried child's tree has only once admission opens it. A
-// cancelled hand-over no longer counts, and an issue never recorded belongs nowhere.
-func TestIssueTreeIsTheRecordsTreeOrTheIssuesOwnWhileItsHandOverIsPending(t *testing.T) {
+// IssueSandboxHome is the tree an issue's Sandbox belongs to now, and only while the issue is in that
+// tree or can still be admitted into it: a live hand-over fence names the issue's own key; otherwise
+// the record's tree, while its lifecycle is open or releasing, or, for a tree never opened, while
+// the issue waits in admission's line or lingers after its own close. Every other case is no tree,
+// the Sandbox anybody's to delete: a carried child that left the line (backlog, done, its label
+// taken off), a fence cancelled or naming a tree the record has moved from, a tree whose cleanup
+// confirmed, an issue never recorded.
+func TestIssueSandboxHomeIsATreeTheIssueIsInOrCanStillBeAdmittedInto(t *testing.T) {
 	ctx := context.Background()
 	store := migratedStore(t)
-	home := func(issue string) string {
-		t.Helper()
-		tree, opened, err := store.IssueTree(ctx, "legion", issue)
-		if err != nil {
-			t.Fatalf("IssueTree(%s): %v", issue, err)
-		}
-		return fmt.Sprintf("%s opened=%t", tree, opened)
+	const otherTree = "LEGION-300"
+	type fence struct {
+		tree      string
+		cancelled bool
 	}
+	for _, tc := range []struct {
+		name       string
+		tree       string // the child's record's tree
+		status     string
+		handedOver bool
+		lingers    bool
+		fence      *fence
+		lifecycles map[string]string // tree: open or confirmed
+		want       string
+	}{
+		{"a child of a live tree", rootIssue, "in_progress", false, false, nil, map[string]string{rootIssue: "open"}, rootIssue},
+		{"a child of a tree whose cleanup confirmed", rootIssue, "in_progress", false, false, nil, map[string]string{rootIssue: "confirmed"}, ""},
+		{"a child whose hand-over is pending", rootIssue, "in_progress", false, false, &fence{tree: rootIssue}, map[string]string{rootIssue: "open"}, childIssue},
+		{"a child whose hand-over was cancelled", rootIssue, "in_progress", false, false, &fence{tree: rootIssue, cancelled: true}, map[string]string{rootIssue: "open"}, rootIssue},
+		{"a fence its child's record moved away from, to a live tree", otherTree, "in_progress", false, false, &fence{tree: rootIssue}, map[string]string{rootIssue: "open", otherTree: "open"}, otherTree},
+		{"a fence its child's record moved away from, to its own tree it left", childIssue, "backlog", true, false, &fence{tree: rootIssue}, map[string]string{rootIssue: "open"}, ""},
+		{"a carried child waiting for admission", childIssue, "todo", true, false, nil, map[string]string{rootIssue: "confirmed"}, childIssue},
+		{"a carried child admitted into its own tree", childIssue, "in_progress", true, false, nil, map[string]string{childIssue: "open"}, childIssue},
+		{"a carried child that left the line for backlog", childIssue, "backlog", true, false, nil, nil, ""},
+		{"a carried child closed as done before admission", childIssue, "done", true, false, nil, nil, ""},
+		{"a carried child whose label was taken off", childIssue, "todo", false, false, nil, nil, ""},
+		{"a carried child that left the line, inside its own linger", childIssue, "done", true, true, nil, nil, childIssue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.Pool().Exec(ctx, `truncate handovers, tree_lifecycles, issues cascade`); err != nil {
+				t.Fatal(err)
+			}
+			var lingerUntil *time.Time
+			if tc.lingers {
+				until := time.Now().Add(time.Hour)
+				lingerUntil = &until
+			}
+			if _, err := store.Pool().Exec(ctx, `insert into issues
+				(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over, linger_until)
+				values ($1, $2, 'LEGION', 'child', 'implementing', 2, $3, 'B', 1, $4, $5)`,
+				childIssue, tc.tree, tc.status, tc.handedOver, lingerUntil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.fence != nil {
+				if _, err := store.Pool().Exec(ctx, `insert into handovers (issue, tree, linger_generation, cancelled) values ($1, $2, 1, $3)`,
+					childIssue, tc.fence.tree, tc.fence.cancelled); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for tree, state := range tc.lifecycles {
+				if _, err := store.Pool().Exec(ctx, `insert into tree_lifecycles (project, tree, epoch, authority, cleanup_started, cleanup_confirmed_at)
+					values ('legion', $1, 1, 'workflow', $2, case when $2 then now() end)`, tree, state == "confirmed"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := store.IssueSandboxHome(ctx, "legion", childIssue)
+			if err != nil {
+				t.Fatalf("IssueSandboxHome: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("IssueSandboxHome = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got, err := store.IssueSandboxHome(ctx, "legion", "LEGION-999"); err != nil || got != "" {
+		t.Errorf("an issue never recorded: IssueSandboxHome = %q, %v; want no tree", got, err)
+	}
+}
+
+// A tree that never had a lifecycle (a root that left admission's waiting line before a slot
+// opened it) reserves no cleanup at its linger's close: there is nothing for one to release, and
+// the outbox's ordinary fences finish the close.
+func TestAWorkflowCloseOfATreeNeverOpenedReservesNothing(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
 	if _, err := store.Pool().Exec(ctx, `insert into issues
-		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
-		values ($1, $1, 'LEGION', 'root', 'done', 1, 'done', 'A', 1), ($2, $1, 'LEGION', 'child', 'implementing', 1, 'in_progress', 'B', 1)`,
-		rootIssue, childIssue); err != nil {
+		(key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over, linger_until)
+		values ($1, $1, 'LEGION', 'root', 'done', 1, 'backlog', 'A', 1, true, now() - interval '1 minute')`, rootIssue); err != nil {
 		t.Fatal(err)
 	}
-	for _, step := range []struct {
-		what, want string
-		do         func() error
-	}{
-		{"a child of a tree never opened", rootIssue + " opened=false", func() error { return nil }},
-		{"a child of an opened tree", rootIssue + " opened=true", func() error {
-			_, err := store.OpenTreeLifecycle(ctx, "legion", rootIssue, treelifecycle.AuthorityWorkflow)
-			return err
-		}},
-		{"a child whose hand-over is pending", childIssue + " opened=false", func() error {
-			_, err := store.Pool().Exec(ctx, `insert into handovers (issue, tree, linger_generation) values ($1, $2, 1)`, childIssue, rootIssue)
-			return err
-		}},
-		{"a child whose hand-over is pending, its tree admitted", childIssue + " opened=true", func() error {
-			_, err := store.OpenTreeLifecycle(ctx, "legion", childIssue, treelifecycle.AuthorityWorkflow)
-			return err
-		}},
-		{"a child whose hand-over was cancelled", rootIssue + " opened=true", func() error {
-			_, err := store.Pool().Exec(ctx, `update handovers set cancelled = true where issue = $1`, childIssue)
-			return err
-		}},
-		{"a child carried, its record moved and its hand-over gone", childIssue + " opened=true", func() error {
-			if _, err := store.Pool().Exec(ctx, `delete from handovers where issue = $1`, childIssue); err != nil {
-				return err
-			}
-			_, err := store.Pool().Exec(ctx, `update issues set tree = $1, generation = 2 where key = $1`, childIssue)
-			return err
-		}},
-	} {
-		if err := step.do(); err != nil {
-			t.Fatalf("%s: %v", step.what, err)
-		}
-		if got := home(childIssue); got != step.want {
-			t.Errorf("%s: IssueTree = %s, want %s", step.what, got, step.want)
-		}
-	}
-	if got := home("LEGION-999"); got != " opened=false" {
-		t.Errorf("an issue never recorded: IssueTree = %q, want no tree", got)
+	lifecycle, reserved, err := store.ReserveWorkflowTreeCleanup(ctx, "legion", rootIssue, 1)
+	if err != nil || reserved {
+		t.Fatalf("ReserveWorkflowTreeCleanup of a tree never opened = %+v, %t, %v; want nothing reserved and no error", lifecycle, reserved, err)
 	}
 }

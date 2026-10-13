@@ -1,19 +1,26 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -230,5 +237,66 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 				t.Fatalf("orphan's planner = %+v, want its session kept and its workspace not lost", got)
 			}
 		})
+	}
+}
+
+// A root that leaves admission's waiting line before a slot opens its tree (labelled and todo, then
+// set to backlog) lingers like any root, and its linger's expiry queues a close row per role. Its
+// tree never had a lifecycle, so it holds nothing a cleanup releases: each close reserves nothing
+// and finishes at the ordinary fences, with no claim to close. Before, the reservation refused the
+// absent lifecycle, and every close row retried on its backoff forever, logged as a failure each
+// time.
+func TestANeverOpenedTreesLingerClosesFinishWithoutRetrying(t *testing.T) {
+	ctx := context.Background()
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "waiting", Phase: phase.Admitted, Generation: 1,
+		Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "U", LastDispatchSeq: 5}
+	putOutboxIssue(t, pool, records, root)
+	st := outboxTreeStore(t, pool) // no slot ever opened the tree
+	sup := newSupervisor(ctx, nil, "legion", t.TempDir(), quietLogger())
+	sup.deps = supervise.Deps{
+		Runtime: fake.NewRuntime(), Conns: fake.NewConns(), Store: st, Specs: outboxSpecs{}, Clock: stillClock{}, Log: quietLogger(),
+		Limits:   supervise.Limits{LaunchFailures: 2, PromptFailures: 2, PromptRetires: 2},
+		Timeouts: supervise.Timeouts{Boot: time.Second, RegistrationIntervals: 2, RPC: time.Second, Probe: time.Second, Stop: time.Second},
+	}
+	t.Cleanup(sup.stop)
+	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	admission := admit.New(records, engine, 1, "legion", quietLogger())
+	var logs bytes.Buffer
+	runner := &outbox{
+		dispatchProject: "LEGION",
+		pool:            pool, records: records, supervisor: sup, trees: st, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "backlog"}}, handlers: []intake.Handler{engine, admission},
+		now: func() time.Time { return time.Now().Add(time.Hour) }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
+		remove: func(context.Context, workspace.Workspace) error { return nil },
+	}
+
+	// A person moves the waiting root to backlog: it leaves the line and lingers.
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "backlog", intake.DispatchIssue{Key: root.Key, Seq: 6, Type: "issue.updated", Status: "backlog", Title: root.Title, Rank: root.Rank, HandedOver: true}, engine, admission); err != nil {
+		t.Fatalf("apply the backlog: %v", err)
+	}
+	rows := func() (closes, all int) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `select count(*) filter (where kind = 'supervise' and payload->>'op' = 'tree_close'), count(*) from outbox`).Scan(&closes, &all); err != nil {
+			t.Fatalf("read the outbox: %v", err)
+		}
+		return closes, all
+	}
+	// The first run expires the linger, which queues the tree's close rows; the second runs them.
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the linger: %v", err)
+	}
+	if closes, _ := rows(); closes != len(claim.Roles) {
+		t.Fatalf("the linger's expiry queued %d close rows, want one per role (%d)", closes, len(claim.Roles))
+	}
+	if err := runner.RunOnce(ctx); err != nil {
+		t.Fatalf("run the close rows: %v", err)
+	}
+	if closes, all := rows(); closes != 0 || all != 0 {
+		t.Errorf("the outbox holds %d close rows and %d rows in all after the closes ran, want none", closes, all)
+	}
+	if failed := strings.Count(logs.String(), `"msg":"outbox row failed"`); failed != 0 {
+		t.Errorf("%d close attempts were logged as failed, want none", failed)
 	}
 }

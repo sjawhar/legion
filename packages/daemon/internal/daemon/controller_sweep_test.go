@@ -28,8 +28,8 @@ func (liveTrees) TreeLive(context.Context, string, string) (bool, error)        
 func (liveTrees) IssueRunsElsewhere(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
-func (liveTrees) IssueTree(context.Context, string, string) (string, bool, error) {
-	return "", false, nil
+func (liveTrees) IssueSandboxHome(context.Context, string, string) (string, error) {
+	return "", nil
 }
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime

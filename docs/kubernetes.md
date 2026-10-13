@@ -687,12 +687,14 @@ listing them from the API by the tree's label, in any order (`CleanupTree`,
 `internal/runtime/sandbox/cleanup.go`): each delete carries the listed object's UID and
 resourceVersion plus `foreground` propagation and is awaited until the API no longer has it, the
 listing is read again until it holds none, and a delete the API refuses because the Sandbox changed
-since the listing lists again after a short wait. A Sandbox whose issue now belongs to another tree
-(`Store.IssueTree`: a child carried into a tree of its own, or one whose hand-over is pending) is
-handed over instead of deleted: under the pod's launch turn, one patch fenced to the listed uid and
-resourceVersion relabels it for the issue's tree and suspends it, keeping its volume and the
-sessions on it (`handOverSandbox`), so the new tree's first launch finds it its own whenever that
-launch comes. Agent Sandbox v1.0.3 creates each Sandbox's PVC
+since the listing lists again after a short wait. A Sandbox whose home is another tree
+(`Store.IssueSandboxHome`: a child whose hand-over is pending, or one carried into a tree of its own
+that it is in or can still be admitted into) is handed over instead of deleted: under the pod's
+launch turn, one patch fenced to the listed uid and resourceVersion relabels it for the issue's tree
+and suspends it, keeping its volume and the sessions on it (`handOverSandbox`), so the new tree's
+first launch finds it its own whenever that launch comes. A patch the API refuses because the
+Sandbox changed since the listing (its failed `test` operation, answered 409 or 422) lists again
+too. Agent Sandbox v1.0.3 creates each Sandbox's PVC
 with that Sandbox as its controller owner and `blockOwnerDeletion: true`; foreground deletion keeps
 the owner visible until Kubernetes garbage collection deletes that blocking dependent. The restricted
 daemon has no PVC API verb, so a Sandbox's absence after its foreground delete is the API's
@@ -703,7 +705,10 @@ that result from labels or a generic garbage-collection rule.
 An operator-created tree has no workflow record: its stored operator authority, not a zero or
 sentinel generation, selects the operator cleanup entry point, which then applies the same
 cleanup without manufacturing a workflow issue. A tree closed before any of
-its Sandboxes was created lists none and confirms its reservation without deleting anything.
+its Sandboxes was created lists none and confirms its reservation without deleting anything. A root
+that left admission's waiting line before a slot opened its tree (labelled `todo`, then set to
+`backlog`, `icebox` or `done`) lingers as any root does, but its tree never had a lifecycle and
+holds nothing a cleanup releases, so its linger's close rows reserve nothing and finish.
 
 A child of a closed tree re-admitted as a root of its own keeps its key, so its claims and its
 Sandbox's name. Its old tree's cleanup does not wait on a claim of it that runs nothing; each of
@@ -729,7 +734,13 @@ resourceVersion it read, so the launch waits its pod out; while a claim of the o
 the launch is refused, naming it.
 That holds whether the new tree's start or the old tree's cleanup comes first: a cleanup that finds
 the issue already belongs to another tree hands its Sandbox over rather than deleting it (above),
-and the orphan sweep keeps a Sandbox handed to a tree admission has not opened yet. Only a child
+and the orphan sweep keeps a Sandbox while its home is the tree it is labelled with. A Sandbox's home
+ends when its issue can no longer be admitted into that tree: for a tree admission has not opened, a
+child that leaves the waiting line (set to `backlog`, `icebox` or `done`, or its label taken off)
+keeps its Sandbox through its own linger at most, and a hand-over fence counts only while the
+child's record still names the tree the fence was written for. A hand-over Dispatch refuses
+permanently drops its fence with its row (`finishRefused`, `internal/daemon/outbox.go`). Past that
+the Sandbox is an orphan, which the sweep deletes with its volume, fenced and logged. Only a child
 re-admitted after its old tree's cleanup, one that had left the workflow before the close (a parked
 child the close does not hand over), finds its Sandbox and volume gone; its re-pointed claim still
 names its session (`Retree`, `internal/supervise/lifecycle.go`, keeps it: the supervisor knows
@@ -1800,13 +1811,15 @@ ages a volume; it goes with its Sandbox, and the Sandbox goes:
   and its volume until the tree closes;
 - at the tree's close, linger expiry: the tree's cleanup foreground-deletes every remaining issue
   Sandbox of the tree, in any order, each taking the volume it owns (`CleanupTree`,
-  `internal/runtime/sandbox/cleanup.go`), except one whose issue now belongs to another tree (a
-  child carried into a tree of its own, or one whose hand-over is pending), which it hands over to
-  that tree, relabelled and `Suspended`, keeping its volume;
+  `internal/runtime/sandbox/cleanup.go`), except one whose home is another tree (a child whose
+  hand-over is pending, or one carried into a tree of its own that it is in or can still be admitted
+  into), which it hands over to that tree, relabelled and `Suspended`, keeping its volume;
 - by the orphan sweep, for a Sandbox of a tree whose cleanup confirmed or that has no lifecycle:
-  the sweep keeps every Sandbox of a live tree, and one handed to a tree admission has not opened
-  yet, and, deleting a closed tree's, takes its volume with it through the owner reference
-  (`ReconcileOrphans`, `internal/runtime/sandbox/sandbox.go`).
+  the sweep keeps every Sandbox of a live tree, and one whose home is the tree it is labelled with (a
+  carried child waiting in admission's line, or inside its own linger), and, deleting any other,
+  takes its volume with it through the owner reference (`ReconcileOrphans`,
+  `internal/runtime/sandbox/sandbox.go`). A carried child that leaves the line before admission
+  opens its tree loses its Sandbox there, once its own linger ends.
 
 A child of a closed tree carried into a tree of its own keeps its Sandbox, its volume and its roles'
 sessions: the Sandbox is relabelled for the new tree, by the new tree's launch (`ensureSandbox`,

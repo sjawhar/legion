@@ -183,7 +183,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				// finished instead, and the board follows the workflow again from the next one.
 				r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
 					"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", err)
-				if err := r.finish(ctx, row); err != nil {
+				if err := r.finishRefused(ctx, row); err != nil {
 					r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
 				}
 				continue
@@ -205,6 +205,34 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
 	}); err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
+	}
+	return nil
+}
+
+// finishRefused finishes a status row Dispatch refused permanently. A hand-over's row drops its
+// fence in the same transaction: the write that would hand the child to Legion never lands, so no
+// admission consumes the fence, and one left behind would keep naming the child's own tree as its
+// Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until a person
+// labels it, which admits it as an orphan.
+func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow) error {
+	payload, err := record.DecodeOutboxPayload(row)
+	if err != nil {
+		return fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+	}
+	write, _ := payload.(record.StatusWrite) // permanentStatusRefusal judges status rows alone
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if write.HandOver {
+			if err := r.records.DeleteHandoverAt(ctx, tx, row.Issue, write.HandOverTree, write.HandOverLinger); err != nil {
+				return err
+			}
+		}
+		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
+	}); err != nil {
+		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
+	}
+	if write.HandOver {
+		r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
+			"row", row.ID, "issue", row.Issue, "tree", write.HandOverTree, "linger", write.HandOverLinger)
 	}
 	return nil
 }

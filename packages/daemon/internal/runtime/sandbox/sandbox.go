@@ -823,12 +823,14 @@ func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
 // sweep deletes u, the Sandbox as the informer held it, unless something owns it
 // (ReconcileOrphans), by its kind (podKindOf): the controller's pod is kept while it is one of
 // controllers, the Sandboxes of the known controller claims; an issue pod while its tree's lifecycle
-// is live, or while its issue belongs to the tree it is labelled with and that tree has never had a
-// lifecycle (Store.IssueTree): a carried child's Sandbox the old tree's cleanup handed over
-// (handOverSandbox), waiting for the admission that opens its tree. A live tree is checked before
-// any turn is taken, so a Sandbox a concurrent launch of the same issue is still creating or waiting
-// on is never serialized behind that launch: the common case, where the tree stays live, costs no
-// turn at all. Only once the tree looks closed does the pod's launch turn apply, held from a second,
+// is live, or while its issue's Sandbox belongs to the tree it is labelled with
+// (Store.IssueSandboxHome): a carried child's Sandbox the old tree's cleanup handed over
+// (handOverSandbox), while the child waits for the admission that opens its tree or lingers after
+// its own close. One whose child left the line, or whose linger expired, belongs nowhere and is
+// deleted, as every other orphan is, with the line that names it. A live tree is checked before any
+// turn is taken, so a Sandbox a concurrent launch of the same issue is still creating or waiting on
+// is never serialized behind that launch: the common case, where the tree stays live, costs no turn
+// at all. Only once the tree looks closed does the pod's launch turn apply, held from a second,
 // authoritative read through the delete (lockPod), so a launch that begins meanwhile still waits for
 // the delete and then creates the Sandbox afresh. A Sandbox whose labels name no kind, or whose
 // issue and tree labels are no keys, is kept and reported: what cannot be told apart from a live
@@ -877,9 +879,9 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	if live {
 		return nil
 	}
-	if home, opened, err := r.store.IssueTree(ctx, r.project, issue); err != nil {
+	if home, err := r.store.IssueSandboxHome(ctx, r.project, issue); err != nil {
 		return fmt.Errorf("reconcile orphans: %w", err)
-	} else if home == tree && !opened {
+	} else if home == tree {
 		return nil
 	}
 	// Fenced to the uid and resourceVersion the decision read: a re-admission of this issue that

@@ -2604,11 +2604,14 @@ refused=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H "Authorizatio
   fail "production Dispatch did not answer the invalid-bearer control: $(scrub <<<"$refused")"
 [ "$refused" = 401 ] || fail "production Dispatch answered $refused to an invalid bearer, not 401, so the bearer's read proves nothing"
 note "[dispatch] the run's bearer reads whoami as an agent session; an invalid bearer is refused 401"
-# LEGSMOKE's stale todo roots would be admitted at boot ahead of the run's own.
-stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[] | select(.parent == null or .parent == "") | .key')
+# LEGSMOKE's stale todo issues would be taken ahead of the run's own: a root admitted at boot, a
+# leaf labelled and admitted by the controller's walk. A run that fails between the checkpoints
+# that file a child todo (mid-run-child, mid-turn-child) and the ones that take it out leaves it
+# there, so every stale todo issue, root or child, goes to backlog.
+stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')
 for key in $stale; do
   set_status "$key" backlog
-  note "moved stale todo root $key to backlog"
+  note "moved stale todo issue $key to backlog"
 done
 [ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "$project still holds todo issues"
 # The configured stream carries both halves of the workflow's intake. Dispatch publishes every
@@ -5051,12 +5054,14 @@ begin mid-turn-carry
 # own while a role of its old tree is in a turn. Tree 1's close asked to suspend child 4's planner,
 # whose hold is still running, so the suspension is held for the turn's end. The proof human then
 # labels child 4, which still shows todo, as a person handing it to Legion would while tree 1
-# lingers; admission carries it (`admission orphan`, or `admission hand-over` when the linger's
-# expiry handed it over first) into a tree of its own at generation 2 in planning, and the close's
-# suspend row, of generation 1, finishes without acting. While the turn runs, the new tree's starts
-# wait for the planner to stop (daemon/outbox.go stopElsewhere), bounded at tree 1's linger expiry,
-# where its close would have ended the turn: nothing of the new tree launches, and the Sandbox stays
-# tree 1's and Running. The driver then ends the turn with the release file, inside the linger, so
+# lingers; admission carries it as an orphan (`admission orphan`) into a tree of its own at
+# generation 2 in planning, and the close's suspend row, of generation 1, finishes without acting. A
+# carry by the linger's own hand-over would mean the linger had expired first, and the release
+# below needs the linger still running, so only the orphan carry passes. While the turn runs, the
+# new tree's starts wait for the planner to stop (daemon/outbox.go stopElsewhere), bounded at tree
+# 1's linger expiry, where its close would have ended the turn: nothing of the new tree launches, and
+# the Sandbox stays tree 1's and Running. The driver then ends the turn with the release file, inside
+# the linger, so
 # the turn ends on its own: the planner is suspended by the daemon after the release with its session,
 # never cut mid-turn by the deadline, the architect launches in the child's own tree
 # (carried_mid_turn_ordered holds the order and the turn's end, held to a fabricated refusal and a
@@ -5070,7 +5075,10 @@ child4_close_held() {
   claim_by_token "$child4_planner" | jq -e --arg tree "$tree1" '.tree == $tree and .state == "working" and .suspensionHeld == true' >/dev/null
 }
 until_true 300 "tree 1's close to hold $child4's planner's suspension for its turn" child4_close_held
-pod_runs "$child4_pod" planner "/usr/bin/sleep 13" || fail "$child4's planner no longer runs its hold in pod $child4_pod when tree 1 has closed"
+# One read of the planner's processes can straddle the end of one of the hold's sleeps and the
+# start of the next, and so miss the hold that runs; the hold is judged by any read inside 60 s,
+# more than four of its polls.
+until_true 60 "$child4's planner to still run its hold in pod $child4_pod now tree 1 has closed" pod_runs "$child4_pod" planner "/usr/bin/sleep 13"
 note "tree 1's close holds $child4's planner's suspension for its turn, its hold still running"
 shown=$(dispatch_get "issues/$child4") || fail "Dispatch could not be read for $child4"
 [ "$(jq -r .status <<<"$shown")" = todo ] || fail "Dispatch shows $child4 $(jq -r .status <<<"$shown"), want the todo it was released in"
@@ -5082,12 +5090,8 @@ child4_carried() {
 }
 until_true 600 "$child4 to become a tree of its own at generation 2 in planning, admitted into a slot" child4_carried
 orphaned=$(log_lines "admission orphan" | jq -c --arg issue "$child4" 'select(.issue == $issue)' | grep -c . || true)
-consumed=$(log_lines "admission hand-over" | jq -c --arg issue "$child4" 'select(.issue == $issue)' | grep -c . || true)
-case "$orphaned $consumed" in
-  "1 0") carry_path="admission's orphan carry of the proof human's labelled todo" ;;
-  "0 1") carry_path="admission's consumption of tree 1's hand-over" ;;
-  *) fail "the daemon logged \"admission orphan\" $orphaned times and \"admission hand-over\" $consumed times for $child4, want exactly one carry once" ;;
-esac
+[ "$orphaned" -eq 1 ] || fail "the daemon logged \"admission orphan\" $orphaned times for $child4, want its one carry by the proof human's label inside tree 1's linger"
+carry_path="admission's orphan carry of the proof human's labelled todo"
 child4_start_waits() {
   log_lines "outbox row waits" | jq -e -s --arg issue "$child4" --arg planner "$child4_planner" --arg old "$tree1" \
     'any(.[]; .issue == $issue and ((.error // "") | contains($planner + ":") and contains("in tree " + $old)))' >/dev/null
