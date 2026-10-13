@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -29,6 +30,17 @@ func pluginGenDir(stateHome string, generation uint64) string {
 // node_modules, where `bun add` lands them.
 func pluginRoots(genDir string) (envoy, legion string) {
 	return genDir + "/node_modules/@sjawhar/pi-envoy", genDir + "/node_modules/@sjawhar/pi-legion"
+}
+
+// bunSpec is what `bun add` is handed for one plugin source: a tarball path (absolute) or an
+// http(s) URL travels as written, since bun resolves those by their own shape; anything else is
+// the exact version the loader admitted (config.readPluginSource, and the release's linked bare
+// versions), which bun reads as a package name unless it is spelled pkg@version.
+func bunSpec(pkg, source string) string {
+	if strings.HasPrefix(source, "/") || strings.HasPrefix(source, "http://") || strings.HasPrefix(source, "https://") {
+		return source
+	}
+	return pkg + "@" + source
 }
 
 // pluginCheckScript is the node -e script the install wrapper runs over the installed pi-legion's
@@ -66,13 +78,17 @@ if (got !== want) {
 // execs its own argv — the agent's real command — only once all of that has succeeded. Every line
 // but the final exec writes to stderr: the shim reads the child's stdout as the RPC frame stream
 // (shim.go), so nothing of the install may write there. bun is called by its image path; a pod
-// whose image lacks it fails the same way, with the shell's own "not found" on stderr. The
-// directory, the two sources and the contract are each shell-quoted into the script
-// (shellprefix.Literal): they travel as literal text the daemon renders, never as something the
-// shell expands.
+// whose image lacks it fails the same way, with the shell's own "not found" on stderr. Each
+// source is handed to `bun add` as bunSpec renders it — a tarball path or URL verbatim, an exact
+// version as the scoped package at that version — so the install can never read a bare version as
+// a package name of its own. The directory, the two specs and the contract are each shell-quoted
+// into the script (shellprefix.Literal): they travel as literal text the daemon renders, never as
+// something the shell expands.
 func installScript(stateHome string, generation uint64, plugins *runtime.PluginInstall) string {
 	root, genDir := pluginsRoot(stateHome), pluginGenDir(stateHome, generation)
-	failMsg := fmt.Sprintf("legion plugins: installing %s and %s failed", plugins.PiLegion, plugins.PiEnvoy)
+	legionSpec := bunSpec("@sjawhar/pi-legion", plugins.PiLegion)
+	envoySpec := bunSpec("@sjawhar/pi-envoy", plugins.PiEnvoy)
+	failMsg := fmt.Sprintf("legion plugins: installing %s and %s failed", legionSpec, envoySpec)
 	return fmt.Sprintf(`set -eu
 {
   rm -rf -- %s/g*
@@ -85,7 +101,7 @@ exec "$@"
 `,
 		shellprefix.Literal(root),
 		shellprefix.Literal(genDir), shellprefix.Literal(genDir),
-		shellprefix.Literal(plugins.PiLegion), shellprefix.Literal(plugins.PiEnvoy),
+		shellprefix.Literal(legionSpec), shellprefix.Literal(envoySpec),
 		shellprefix.Literal(failMsg),
 		shellprefix.Literal(pluginCheckScript),
 		shellprefix.Literal(genDir),

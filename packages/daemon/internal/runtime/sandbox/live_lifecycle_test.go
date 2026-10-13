@@ -449,14 +449,16 @@ func (r *liveRig) checkResume() error {
 	return nil
 }
 
-// stalePluginBlocked reports why stale-plugin-install cannot run: the script packs the three
-// tarballs and names them in these five variables together, so one set or none.
+// stalePluginBlocked reports why stale-plugin-install cannot run: the script packs the two
+// checkout tarballs and names them in these four variables together, so one set or none. Its
+// negative control needs no tarball of its own: it names the published pi-legion@9.6.1 by exact
+// version, which the install script resolves through the registry inside the pod.
 func stalePluginBlocked(r *liveRig) string {
 	if r.env.piLegionTarball != "" && r.env.piEnvoyTarball != "" && r.env.piLegionVersion != "" &&
-		r.env.piEnvoyVersion != "" && r.env.stalePiLegionTarball != "" {
+		r.env.piEnvoyVersion != "" {
 		return ""
 	}
-	return "LEGION_E2E_PI_LEGION_TARBALL/PI_ENVOY_TARBALL/PI_LEGION_VERSION/PI_ENVOY_VERSION/STALE_PI_LEGION_TARBALL are unset; an older invocation of scripts/e2e/stage4a-sandbox-runtime.sh packs no plugins"
+	return "LEGION_E2E_PI_LEGION_TARBALL/PI_ENVOY_TARBALL/PI_LEGION_VERSION/PI_ENVOY_VERSION are unset; an older invocation of scripts/e2e/stage4a-sandbox-runtime.sh packs no plugins"
 }
 
 // pluginPackageInfo reads an installed plugin's package.json through node, as the wrapper's own
@@ -498,8 +500,11 @@ func containsConsecutive(haystack, needle []string) bool {
 // provisioned again), the installed pi-legion declares this run's contract, and the shim that
 // forked the agent — the one process of the launch chain whose own cmdline the agent's own execs
 // (into the install script, then the stub, then `sleep infinity`) never touch — names the two
-// installed --extension roots. Its negative control relaunches again naming a published pi-legion
-// that declares another contract: the install still lands (so the earlier generation's own
+// installed --extension roots. Its negative control relaunches again naming the published
+// pi-legion@9.6.1 by exact version — the daemon resolves it to @sjawhar/pi-legion@9.6.1 before
+// `bun add` ever sees it (LEGION-164), and bun fetches it from the registry inside the pod, so
+// a devbox run proves the version→package mapping end to end, not just a tarball install. That
+// release declares another contract: the install still lands (so the earlier generation's own
 // directory is gone, replaced by this one's `rm -rf .../g*`) but the wrapper's own check ends the
 // child before `exec`, which the runtime reports Gone, and the pod is still the one this check
 // started with. kill-launcher, the next check to touch worker, resumes it with ensureRunning on a
@@ -523,17 +528,16 @@ func (r *liveRig) checkStalePluginInstall() error {
 	if _, err := r.exec(worker, "mkdir", "-p", dir); err != nil {
 		return err
 	}
-	legionTar, envoyTar, staleTar := dir+"/pi-legion.tgz", dir+"/pi-envoy.tgz", dir+"/stale-pi-legion.tgz"
+	legionTar, envoyTar := dir+"/pi-legion.tgz", dir+"/pi-envoy.tgz"
 	for _, cp := range []struct{ local, remote string }{
 		{r.env.piLegionTarball, legionTar},
 		{r.env.piEnvoyTarball, envoyTar},
-		{r.env.stalePiLegionTarball, staleTar},
 	} {
 		if _, err := r.kubectl("cp", cp.local, r.env.namespace+"/"+name+":"+cp.remote, "-c", string(worker.role)); err != nil {
 			return fmt.Errorf("kubectl cp %s %s: %w", cp.local, cp.remote, err)
 		}
 	}
-	note("operator", "kubectl cp the checkout's packed pi-legion@%s and pi-envoy@%s, and the published pi-legion@9.6.1, into %s:%s (-c %s)",
+	note("operator", "kubectl cp the checkout's packed pi-legion@%s and pi-envoy@%s into %s:%s (-c %s)",
 		r.env.piLegionVersion, r.env.piEnvoyVersion, name, dir, worker.role)
 
 	old := *worker.last
@@ -602,12 +606,17 @@ func (r *liveRig) checkStalePluginInstall() error {
 	}
 	note("operator", "/proc/%s/cmdline (the shim, never replaced by the agent's own execs): carries %v", shim, want)
 
-	// The negative control: a published pi-legion that declares another contract. The install
+	// The negative control: the published pi-legion@9.6.1 by exact version. The daemon's loader
+	// (config.readPluginSource) and the release's linked bare versions admit only an exact
+	// version, an absolute tarball path, or an http(s) URL — never a dist-tag or a range — and
+	// installScript's bunSpec turns that version into @sjawhar/pi-legion@9.6.1 before bun ever
+	// sees it (LEGION-164), so bun fetches it from the registry inside the pod: a devbox run
+	// proves the version→package mapping end to end, not just a tarball install. The install
 	// still lands — so the earlier generation's own directory is gone once this one's own `rm -rf
 	// .../g*` has run — but the wrapper's own check ends the child before `exec`, and the runtime
 	// observes it Gone.
 	mark := r.obs.mark()
-	negLoc, err := r.resumeWithPlugins(worker, worker.marker, &runtime.PluginInstall{PiLegion: staleTar, PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
+	negLoc, err := r.resumeWithPlugins(worker, worker.marker, &runtime.PluginInstall{PiLegion: "9.6.1", PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
 	if err != nil {
 		return err
 	}

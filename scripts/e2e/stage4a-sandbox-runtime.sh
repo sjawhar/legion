@@ -213,13 +213,16 @@ if [ -n "$agent_secrets_account" ]; then
 fi
 
 begin plugins
-# The stale-plugin-install checkpoint's own pack of this checkout's two plugins, and of the
-# published pi-legion its negative control relaunches onto: scripts/pi-plugin-prepack.sh (both
-# plugins' prepack) refuses to pack the committed manifest's own omp.extensions, the source path a
-# repo checkout loads (extensions/<entry>.ts) — it packs only the built dist bundle, so this step
-# points each manifest at its dist entry exactly as the release workflow does before publishing,
-# packs, and restores the checkout's own manifest at once; the cleanup trap covers every other
-# exit this step itself might take (pi_envoy_manifest_backup, pi_legion_manifest_backup, above).
+# The stale-plugin-install checkpoint's own pack of this checkout's two plugins:
+# scripts/pi-plugin-prepack.sh (both plugins' prepack) refuses to pack the committed manifest's
+# own omp.extensions, the source path a repo checkout loads (extensions/<entry>.ts) — it packs
+# only the built dist bundle, so this step points each manifest at its dist entry exactly as the
+# release workflow does before publishing, packs, and restores the checkout's own manifest at
+# once; the cleanup trap covers every other exit this step itself might take
+# (pi_envoy_manifest_backup, pi_legion_manifest_backup, above). Its negative control names the
+# published pi-legion@9.6.1 by exact version with no pack of its own: the daemon-rendered install
+# script resolves that version to @sjawhar/pi-legion@9.6.1 and bun fetches it from the registry
+# inside the pod.
 # Failing here fails the run before anything is created in the namespace.
 plugins_dir="$work/plugins"
 mkdir -p "$plugins_dir"
@@ -246,15 +249,7 @@ pi_legion_tarball_name=$( (cd "$root/packages/pi-legion" && npm pack --pack-dest
 cp "$pi_legion_manifest_backup" "$root/packages/pi-legion/package.json"
 pi_legion_tarball="$plugins_dir/$pi_legion_tarball_name"
 
-# The negative control: the release before this checkout, which the current daemon still has to
-# relaunch a role off. Its daemonApiVersion is 23, this checkout's pi-legion's is 24.
-stale_pi_legion_tarball_name=$(npm pack @sjawhar/pi-legion@9.6.1 --pack-destination "$plugins_dir" --json | jq -r '.[0].filename') &&
-  [ -n "$stale_pi_legion_tarball_name" ] && [ "$stale_pi_legion_tarball_name" != null ] ||
-  fail "npm pack @sjawhar/pi-legion@9.6.1 (the negative control) failed"
-stale_pi_legion_tarball="$plugins_dir/$stale_pi_legion_tarball_name"
-
 note "packed pi-envoy@$pi_envoy_version ($pi_envoy_tarball) and pi-legion@$pi_legion_version ($pi_legion_tarball) from the checkout"
-note "packed the published pi-legion@9.6.1 ($stale_pi_legion_tarball), the stale-plugin-install checkpoint's negative control"
 pass
 
 begin snapshot
@@ -350,7 +345,6 @@ if env \
   LEGION_E2E_PI_ENVOY_TARBALL="$pi_envoy_tarball" \
   LEGION_E2E_PI_LEGION_VERSION="$pi_legion_version" \
   LEGION_E2E_PI_ENVOY_VERSION="$pi_envoy_version" \
-  LEGION_E2E_STALE_PI_LEGION_TARBALL="$stale_pi_legion_tarball" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then
   harness_ok=1
 fi

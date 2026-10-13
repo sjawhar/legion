@@ -920,7 +920,8 @@ and `trigger` (`boot` or `registration`).
 Under Kubernetes that relaunch keeps the pod — even one built from another image — rather than
 replacing it: the role container's shim runs an install script,
 `/bin/sh -c '<install script>' legion-plugins <omp argv…>`, which runs
-`bun add --exact <pi-legion source> <pi-envoy source>` into a fresh generation directory,
+`bun add --exact @sjawhar/pi-legion@<version> @sjawhar/pi-envoy@<version>` (a tarball path or
+URL source is handed to `bun add` as written) into a fresh generation directory,
 `$XDG_STATE_HOME/legion-plugins/g<generation>/` (`/home/legion/.local/state/<role>/legion-plugins/g<N>/`),
 checks with a `node -e` snippet that the installed `pi-legion`'s `legion.daemonApiVersion` equals
 the daemon's own (exiting 1 before `exec`, printing

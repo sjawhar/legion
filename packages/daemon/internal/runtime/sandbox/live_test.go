@@ -227,11 +227,12 @@ type liveEnv struct {
 	// listens on, which every pod must reach as it reaches the worker stream.
 	sessionDSNFile, sessionDBAddress string
 	// The stale-plugin-install checkpoint's own inputs: the devbox paths of this checkout's packed
-	// pi-legion and pi-envoy and their versions, and the devbox path of a published pi-legion that
-	// declares another contract (its negative control). Read with os.Getenv, unlike the rest of
-	// liveEnv: unset skips the checkpoint with a clear message, never a refusal to start, so an
-	// older invocation of the script still runs every checkpoint it knows (stalePluginBlocked).
-	piLegionTarball, piEnvoyTarball, piLegionVersion, piEnvoyVersion, stalePiLegionTarball string
+	// pi-legion and pi-envoy and their versions. Its negative control names the published
+	// pi-legion@9.6.1 by exact version — no devbox path of its own — so bun resolves it from the
+	// registry inside the pod. Read with os.Getenv, unlike the rest of liveEnv: unset skips the
+	// checkpoint with a clear message, never a refusal to start, so an older invocation of the
+	// script still runs every checkpoint it knows (stalePluginBlocked).
+	piLegionTarball, piEnvoyTarball, piLegionVersion, piEnvoyVersion string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -271,7 +272,6 @@ func readLiveEnv(t *testing.T) liveEnv {
 		piEnvoyTarball:        os.Getenv("LEGION_E2E_PI_ENVOY_TARBALL"),
 		piLegionVersion:       os.Getenv("LEGION_E2E_PI_LEGION_VERSION"),
 		piEnvoyVersion:        os.Getenv("LEGION_E2E_PI_ENVOY_VERSION"),
-		stalePiLegionTarball:  os.Getenv("LEGION_E2E_STALE_PI_LEGION_TARBALL"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
