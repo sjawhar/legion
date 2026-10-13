@@ -1,5 +1,5 @@
 import { unwatchFile, watchFile } from "node:fs"
-import { readFile, rm } from "node:fs/promises"
+import { rm } from "node:fs/promises"
 import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
 import {
   type DispatchDelivery,
@@ -9,7 +9,7 @@ import {
   renderInbound,
 } from "@legion/envoy-client/delivery"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
-import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
+import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
 import {
@@ -46,20 +46,21 @@ import {
   createChannelForwarder,
 } from "./channel-forwarder"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
+import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
 import {
   pruneStaleSessionHandoffs,
+  readPersistedRole,
   readSessionHandoff,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
-  writeAtomicStateFile,
+  writePersistedRole,
 } from "./session-identity"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
-const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
 /** How often the handoff file is checked for a `/clear`. */
 const HANDOFF_POLL_MS = 250
 /** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
@@ -323,24 +324,6 @@ export function createChannelDelivery(input: {
       return [...inbox]
     },
   }
-}
-
-async function readPersistedRole(
-  roleFile: string,
-): Promise<z.infer<typeof PersistedRole> | undefined> {
-  try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")))
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT")) return undefined
-    throw error
-  }
-}
-
-async function writePersistedRole(
-  roleFile: string,
-  state: z.infer<typeof PersistedRole>,
-): Promise<void> {
-  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}\n`)
 }
 
 /**
@@ -759,35 +742,6 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 }
 
-/**
- * The session of a channel server whose Envoy takes no inbound messages, for `why`: no NATS
- * consumer, nothing registered with the listener (which would route a delivery to a deaf process),
- * an empty inbox, and following a topic refused naming `why`. A role an explicit `envoy_role_set`
- * claimed through the listener is still persisted, so a later server with NATS takes it back.
- */
-export function inboundOffChannelSession(options: {
-  readonly identity: SessionIdentity
-  readonly stateDirectory: string
-  readonly why: string
-}): ChannelSession {
-  const { identity, stateDirectory, why } = options
-  return {
-    delivery: { enqueue: async () => false, inbox: () => [] },
-    topics: () => [],
-    async follow() {
-      throw new Error(`inbound messages are off for this session: ${why}`)
-    },
-    unfollow: async () => [],
-    async rememberRole(role) {
-      await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
-        session_id: identity.id,
-        role,
-      })
-    },
-    shutdown: async () => undefined,
-  }
-}
-
 export interface ChannelToolRuntime {
   readonly identity: SessionIdentity
   readonly client: EnvoyClient
@@ -887,33 +841,10 @@ function pluginStateDirectory(): string {
   return pluginData
 }
 
-/**
- * The MCP server of a session whose Envoy is off: no tool, every call refused with `refusal`, and
- * nothing subscribed, until stdin ends or a signal stops it.
- */
-async function serveEnvoyOff(refusal: string): Promise<void> {
-  const server = new Server(MCP_SERVER_INFO, { capabilities: { tools: {} } })
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }))
-  server.setRequestHandler(CallToolRequestSchema, async () => {
-    throw new Error(refusal)
-  })
-  const stopped = Promise.withResolvers<void>()
-  process.stdin.once("end", stopped.resolve)
-  for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
-    process.once(signal, () => stopped.resolve())
-  }
-  await server.connect(new StdioServerTransport())
-  try {
-    await stopped.promise
-  } finally {
-    await server.close().catch(() => undefined)
-  }
-}
-
 /** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json. With
- * Envoy off it serves no tool (`serveEnvoyOff`). With Envoy on and no NATS server, or its seed
- * refused (`inboundError`), it serves the tools, which call the listener, on an inbound-off session
- * (`inboundOffChannelSession`); the start notice has said why on stderr. */
+ * Envoy off it serves no tool (`serveEnvoyOff`, `./envoy-off`). With Envoy on and no NATS server, or
+ * its seed refused (`inboundError`), it serves the tools, which call the listener, on an inbound-off
+ * session (`inboundOffChannelSession`, `./envoy-off`); the start notice has said why on stderr. */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
   // The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
@@ -924,7 +855,10 @@ export async function runEnvoyChannelServer(): Promise<void> {
   // Claude Code logs the server's stderr: why a section is off, once.
   if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
   if (!envoy.enabled) {
-    await serveEnvoyOff(`Envoy is off for this session: ${envoy.error ?? envoy.notice}`)
+    await serveEnvoyOff(
+      MCP_SERVER_INFO,
+      `Envoy is off for this session: ${envoy.error ?? envoy.notice}`,
+    )
     return
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
