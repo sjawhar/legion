@@ -735,12 +735,17 @@ the launch is refused, naming it.
 That holds whether the new tree's start or the old tree's cleanup comes first: a cleanup that finds
 the issue already belongs to another tree hands its Sandbox over rather than deleting it (above),
 and the orphan sweep keeps a Sandbox while its home is the tree it is labelled with. A Sandbox's home
-ends when its issue can no longer be admitted into that tree: for a tree admission has not opened, a
-child that leaves the waiting line (set to `backlog`, `icebox` or `done`, or its label taken off)
-keeps its Sandbox through its own linger at most, and a hand-over fence counts only while the
-child's record still names the tree the fence was written for. A hand-over Dispatch refuses
-permanently drops its fence with its row (`finishRefused`, `internal/daemon/outbox.go`). Past that
-the Sandbox is an orphan, which the sweep deletes with its volume, fenced and logged. Only a child
+ends when its issue can no longer be admitted into that tree. For a tree admission has not opened,
+a child set to `backlog`, `icebox` or `done` leaves the waiting line and lingers like any root, so
+its Sandbox stays until its linger expires; one whose label is taken off leaves the line with no
+linger, so its Sandbox goes at the next sweep. Either way, once the child is `todo` with the label
+again it is admitted, and its run continues on a new volume, from the issue's branch: under
+`session_store: postgres` its roles' sessions continue from the table, and under `pvc` they went
+with the volume and start fresh ([Volume retention](#volume-retention)). A hand-over fence counts
+only while the child's record still names the tree the fence was written for, and a hand-over
+Dispatch refuses permanently drops its fence with its row (`finishRefused`,
+`internal/daemon/outbox.go`). Past that the Sandbox is an orphan, which the sweep deletes with its
+volume, fenced and logged. Only a child
 re-admitted after its old tree's cleanup, one that had left the workflow before the close (a parked
 child the close does not hand over), finds its Sandbox and volume gone; its re-pointed claim still
 names its session (`Retree`, `internal/supervise/lifecycle.go`, keeps it: the supervisor knows
@@ -1819,7 +1824,8 @@ ages a volume; it goes with its Sandbox, and the Sandbox goes:
   carried child waiting in admission's line, or inside its own linger), and, deleting any other,
   takes its volume with it through the owner reference (`ReconcileOrphans`,
   `internal/runtime/sandbox/sandbox.go`). A carried child that leaves the line before admission
-  opens its tree loses its Sandbox there, once its own linger ends.
+  opens its tree loses its Sandbox there: once its own linger ends when it is set to `backlog`,
+  `icebox` or `done`, and at the next sweep when its label is taken off.
 
 A child of a closed tree carried into a tree of its own keeps its Sandbox, its volume and its roles'
 sessions: the Sandbox is relabelled for the new tree, by the new tree's launch (`ensureSandbox`,

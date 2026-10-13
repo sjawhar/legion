@@ -327,10 +327,11 @@ func TestIssueSandboxHomeIsATreeTheIssueIsInOrCanStillBeAdmittedInto(t *testing.
 		handedOver bool
 		lingers    bool
 		fence      *fence
-		lifecycles map[string]string // tree: open or confirmed
+		lifecycles map[string]string // tree: open, releasing (cleanup started, not confirmed) or confirmed
 		want       string
 	}{
 		{"a child of a live tree", rootIssue, "in_progress", false, false, nil, map[string]string{rootIssue: "open"}, rootIssue},
+		{"a child of a tree whose cleanup is releasing", rootIssue, "in_progress", false, false, nil, map[string]string{rootIssue: "releasing"}, rootIssue},
 		{"a child of a tree whose cleanup confirmed", rootIssue, "in_progress", false, false, nil, map[string]string{rootIssue: "confirmed"}, ""},
 		{"a child whose hand-over is pending", rootIssue, "in_progress", false, false, &fence{tree: rootIssue}, map[string]string{rootIssue: "open"}, childIssue},
 		{"a child whose hand-over was cancelled", rootIssue, "in_progress", false, false, &fence{tree: rootIssue, cancelled: true}, map[string]string{rootIssue: "open"}, rootIssue},
@@ -366,7 +367,7 @@ func TestIssueSandboxHomeIsATreeTheIssueIsInOrCanStillBeAdmittedInto(t *testing.
 			}
 			for tree, state := range tc.lifecycles {
 				if _, err := store.Pool().Exec(ctx, `insert into tree_lifecycles (project, tree, epoch, authority, cleanup_started, cleanup_confirmed_at)
-					values ('legion', $1, 1, 'workflow', $2, case when $2 then now() end)`, tree, state == "confirmed"); err != nil {
+					values ('legion', $1, 1, 'workflow', $2, case when $3 then now() end)`, tree, state != "open", state == "confirmed"); err != nil {
 					t.Fatal(err)
 				}
 			}
