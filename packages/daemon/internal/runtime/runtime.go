@@ -244,6 +244,11 @@ type Observation struct {
 	// relaunches the claim as a fresh session rather than resume one that no longer exists. It is
 	// a field rather than a shape of Detail, which is prose for an operator and nothing else.
 	WorkspaceLost bool
+	// PodReplaced is a Gone or NotRecordedProcess of a process whose pod the daemon itself replaced
+	// while it ran, to launch another role of the pod (the Sandbox runtime's relaunch). The process
+	// ended with that pod through no fault of its own, so the supervisor resumes its session at once,
+	// charging nothing, rather than count a death. A field, as WorkspaceLost is.
+	PodReplaced bool
 }
 
 // GitIdentity is the author a worker's commits carry.

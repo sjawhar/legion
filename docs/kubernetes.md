@@ -926,13 +926,32 @@ runbook above) or every issue pod is relaunched onto the new image. The daemon's
 every orphan sweep after it, names each pod still on another image —
 `sandbox runtime: <sandbox> runs image <image>, the configured image is <image>; its agents call
 this daemon as the older release until the pod is relaunched` (`warnImageDrift` in
-`internal/runtime/sandbox/sandbox.go`) — and the daemon replaces such a pod at the next launch of
-any of its roles (`imageDrift` beside the moved-stream trigger in `relaunch.go`), which interrupts
-the roles live in it once: they are stopped and resumed in the new pod, as a moved worker stream
-already does. The daemon-launched controller's pod is in scope for both the warning and the
-replacement, which happens only when the controller's process is being started anyway. The boot
-action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and
-trigger nothing.
+`internal/runtime/sandbox/sandbox.go`). The daemon replaces such a pod (`imageDrift` in
+`relaunch.go`) at the first launch of one of its roles that finds no other role of the pod
+running, and never under a live one (LEGION-729). A launch while another role runs there starts
+its role in the pod as it is, as a stale-plugin relaunch keeps a drifted pod (below): the roles
+already in it keep their processes and whatever turn they are in, and the new role runs the
+pod's own `legion` launcher and shim, which is why a release that changes what those speak is
+pinned only once no pod of the earlier image is left (below). A role keeps its process in its
+issue's pod between turns, so the pod of an issue still being worked can stay on the earlier
+image until the issue closes and its roles are suspended. To relaunch it sooner without draining
+its tree, suspend each claim of the issue (`legion claims suspend`, which waits out a turn in
+progress up to the stop timeout) and then resume them (`legion claims resume`): the first resume
+replaces the pod, and the others resume into the new one. The daemon-launched controller's pod,
+whose controller is its only role, is in scope for both the warning and the replacement, which
+happens only when the controller's process is being started anyway. The boot action is the log
+line alone: refusing to adopt a drifted pod would stop observing a live pod and trigger nothing.
+
+A pod the daemon replaces while another role still runs in it, for a reason that leaves the
+launching role unable to run there — its launchers dial a worker stream the daemon moved from, it
+lacks the secrets broker's volumes, or a role's launcher Secret no longer binds it — ends that
+role's process. That end is the daemon's act, not the role's: the runtime reports it with the pod
+it replaced, the supervisor logs `supervise: the process ended with a pod the daemon replaced;
+relaunching it uncharged`, and it resumes the role's session in the new pod at once, charging
+neither a launch failure nor a death and handing back the task of a turn it ended, as a moved
+address's relaunch does. The record of which pods it replaced lives in the daemon's memory, so a
+daemon restarted in the middle of a replacement charges a role it re-adopts in the replaced pod as
+it charges any death.
 
 A route change the plugin calls is a contract bump by `version.go`'s rule, and since LEGION-164 a
 contract bump is brought in place at the daemon's first boot on it, with no pod replacement and
@@ -979,9 +998,10 @@ in place of `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`. A pod replaced f
 in the same relaunch — a suspended Sandbox, a lost launcher binding, a failed init container, a
 moved address — installs nothing: it comes up on the configured image, whose copies the boot gate
 already holds to the daemon's contract; and a relaunch that is not a stale-plugin one (a death, a
-moved address) still replaces a pod on another image as the section above says. An install failure ends the
-child before Oh My Pi starts; the launcher reports it gone, the daemon charges it as a launch
-failure, and the claim is retried until the budget ends it in a `worker-died`.
+moved address) still replaces a pod on another image as the section above says, once no other
+role of the pod runs in it. An install failure ends the child before Oh My Pi starts; the launcher
+reports it gone, the daemon charges it as a launch failure, and the claim is retried until the
+budget ends it in a `worker-died`.
 
 The pair the install uses is `runtime.kubernetes.plugins: { pi_legion: <exact version | absolute
 tarball path | http(s) URL>, pi_envoy: <same> }` (both keys together; a dist-tag or version range

@@ -60,13 +60,21 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // unless the launch is installing a stale-plugin pair into this pod (spec.Plugins set,
 // LEGION-164): then drift alone is not a reason to replace it, since the install, not a fresh pod on the
 // configured image, is what brings this launch's agent onto the current plugin, and a pod replaced
-// for some other reason in the same sweep still is. The first role relaunched after any of these
-// replaces it, and its siblings resume into the new pod. Before each start the Sandbox records the
-// addresses the generation is handed (recordAddresses). A new pod is provisioned by its kind
-// (podKind.provision), under nothing but the pod's own launch turn: an issue pod has its
-// workspace's provisioning token minted, the controller's pod needs nothing. A workflow claim
-// passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
-// cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
+// for some other reason in the same sweep still is. Drift alone is no reason either while the
+// watch records another role running in the pod (othersLiveIn): a drifted pod still runs every
+// role, on its earlier image, as an installing launch already runs one there, and replacing it
+// would end that role's process wherever its turn stood (LEGION-729). The launch starts its role
+// in the pod as it is, and the first launch that finds no other role live there replaces it — once
+// each is suspended, as the issue's close or an operator's suspension of each leaves them. The
+// first role relaunched after any of these replaces it, and its siblings resume into the new pod. A
+// pod replaced while live is marked first (markReplaced), so every role still running in it is
+// reported ended by the daemon's replacement (evaluate's PodReplaced), which the supervisor resumes
+// uncharged. Before each start the Sandbox records the addresses the generation is handed
+// (recordAddresses). A new pod is provisioned by its kind (podKind.provision), under nothing but
+// the pod's own launch turn: an issue pod has its workspace's provisioning token minted, the
+// controller's pod needs nothing. A workflow claim passed its tree's lifecycle check before the
+// call (supervise's checkLaunch), so the tree's cleanup, which waits for every claim of the tree
+// to retire, lists whatever Sandbox this creates.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
 // not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
@@ -98,7 +106,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	_, drifted := imageDrift(pod, r.image)
 	installing := l.spec.Plugins != nil
 	replace := s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil ||
-		(drifted && !installing) ||
+		(drifted && !installing && !r.othersLiveIn(s.Name, string(pod.UID), spec.Claim)) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(ctx, s, pod, l.roles)
@@ -114,6 +122,9 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	if replace {
 		if s.mode() != modeSuspended {
+			if ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil {
+				r.markReplaced(string(pod.UID))
+			}
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
 			}

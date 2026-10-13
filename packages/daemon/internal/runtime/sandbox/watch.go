@@ -78,6 +78,35 @@ func (r *Runtime) recorded(token claim.Token) (runtime.Locator, bool) {
 	return loc, ok
 }
 
+// othersLiveIn reports whether the watch records a claim other than token running in the pod of
+// the Sandbox name with uid podUID: a process that replacing the pod would end.
+func (r *Runtime) othersLiveIn(name, podUID string, token claim.Token) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for other, loc := range r.watch {
+		if other != token && loc.Sandbox.Name == name && loc.Sandbox.PodUID == podUID {
+			return true
+		}
+	}
+	return false
+}
+
+// markReplaced records podUID as a live pod the daemon itself is replacing (relaunch), before its
+// Sandbox is set Suspended: a process recorded in it then ends by the daemon's own act, which
+// evaluate reports as PodReplaced once the pod is going or gone.
+func (r *Runtime) markReplaced(podUID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.replaced[podUID] = true
+}
+
+// replacedPod reports whether the daemon replaced the pod with uid podUID (markReplaced).
+func (r *Runtime) replacedPod(podUID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.replaced[podUID]
+}
+
 // Observe reports on every watched claim: each one at once, again whenever its Sandbox or pod
 // changes, and every claim again each probe interval. Every observation carries the recorded
 // locator, whatever pod it saw, so the supervisor's incarnation fence holds (B3). Gone and
