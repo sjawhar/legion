@@ -6,9 +6,15 @@ commands do not cover.
 ## Agent authentication
 
 Use a personal Dispatch token: a human mints it in Dispatch **Settings → Agent tokens** and supplies
-it to the agent through `dispatch.token` in `~/.config/opencode/envoy.json` or `DISPATCH_TOKEN`.
-The server records the minting human as the owner of that session's writes. `DISPATCH_AGENT_TOKEN`
-is the shared devbox fallback; do not configure it for an individual agent.
+it to the agent through `DISPATCH_TOKEN` or `dispatch.token` in the `envoy.json` the agent's
+session reads. That file is `~/.config/legion/envoy.json` (under `$XDG_CONFIG_HOME` when set), or
+the `envoy.json` in the session's own directory under an Oh My Pi profile other than `default`, a
+Claude Code `CLAUDE_CONFIG_DIR` or an OpenCode `OPENCODE_CONFIG_DIR`; the plugin hands its path to
+the session's commands in `ENVOY_CONFIG_FILE`. A `dispatch.token` written `!<command>` is a
+command whose output is the token. The file's token goes only to its own `dispatch.serverUrl`: a
+`DISPATCH_URL` naming another server needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. The server
+records the minting human as the owner of that session's writes.
+`DISPATCH_AGENT_TOKEN` is the shared devbox fallback; do not configure it for an individual agent.
 
 The deployed Dispatch server's browser origin is configured separately with
 `DISPATCH_SERVER_URL` in the deployment `compose/.env`. Do not change an

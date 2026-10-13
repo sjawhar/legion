@@ -62,7 +62,12 @@ OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads th
 `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`. A command
 (harness `command`: `dispatch`, `scripts/dispatch/ask-census.ts`) reads `ENVOY_CONFIG_FILE` first,
 then the Oh My Pi, Claude Code and OpenCode directories in that order, then the same neutral file.
-A relative `XDG_CONFIG_HOME` is refused naming its value.
+A relative `XDG_CONFIG_HOME` is refused naming its value. Each plugin hands the path it chose to
+the commands its session runs in `ENVOY_CONFIG_FILE` (Oh My Pi sets it in `process.env` at load,
+Claude Code's `SessionStart` hook appends it to `$CLAUDE_ENV_FILE`, OpenCode's `shell.env` hook
+sets it), so a session's `dispatch` reads the file its plugin read; the innermost session's value
+wins. A Claude Code subagent's shell does not inherit what the hook wrote, and its `dispatch`
+falls back to `CLAUDE_CONFIG_DIR`, the session's own directory.
 
 `readEnvoyConfig(path, env, { cwd })` reads that file and a checkout's `<cwd>/.envoy/envoy.json`
 as written, running no command. Each section is strict: an unknown key is refused naming it, and

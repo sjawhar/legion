@@ -107,7 +107,9 @@ Link the pull request that delivers the issue with `--external-link` when you op
 renders its state and checks from that link, and `dispatch read` lists it under `External links:`.
 The command is authenticated with the same bearer as every
 other `dispatch` command: a Legion pane reads it from the `DISPATCH_TOKEN_FILE` path the daemon sets on
-the pane; an OMP session outside Legion reads `dispatch.token` from `~/.config/opencode/envoy.json`.
+the pane; an OMP session outside Legion reads `dispatch.token` from the `envoy.json` its plugin names
+in `ENVOY_CONFIG_FILE`: `~/.config/legion/envoy.json`, or its profile directory's under an omp
+profile other than `default`.
 
 A write to an issue still in `triage` answers once with `… is still in triage …`; move the status
 when work has started.

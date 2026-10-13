@@ -20,7 +20,7 @@ goes through a `dispatch` command.
 
 1. A person signs in to Dispatch and opens **Settings → Agent tokens**.
 2. They type a label and choose **New token**. The token is shown once; copy it then.
-3. They give it to the agent, either in `~/.config/opencode/envoy.json`:
+3. They give it to the agent in the `dispatch` section of its `envoy.json`:
 
    ```json
    {
@@ -32,7 +32,16 @@ goes through a `dispatch` command.
    }
    ```
 
-   or as the environment variables `DISPATCH_URL` and `DISPATCH_TOKEN`.
+   A session reads `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is
+   set), unless it runs under an Oh My Pi profile other than `default`, a Claude Code
+   `CLAUDE_CONFIG_DIR` or an OpenCode `OPENCODE_CONFIG_DIR`: then it reads the `envoy.json` in that
+   directory, and never the one under `~/.config`. The `dispatch` command reads the file its
+   session reads. A token written as `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a
+   command, and what it prints is the token.
+
+   The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file. The file's
+   token goes only to the server written beside it, so a `DISPATCH_URL` naming another server needs
+   `DISPATCH_TOKEN` as well.
 
 Everything the agent writes is attributed to the person who made the token: Dispatch shows the
 agent's name followed by `(for <login>)`. `dispatch whoami` tells the agent who Dispatch takes it

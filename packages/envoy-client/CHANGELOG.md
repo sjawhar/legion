@@ -4,14 +4,17 @@
 
 ### Changed
 
-- Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
+- **Breaking:** Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
   `resolveDispatchConfig` and `activeDispatchConfig` take `{ harness, cwd }` and read the file
   `envoyConfigPath(harness, env)` names, with the checkout's `.envoy/envoy.json` merged over it.
   `DISPATCH_URL` with a file's token at another origin than the server written in the file the
   token comes from is refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`. The chosen file's
   `dispatch.enabled: false` is off whatever the variables say; a checkout's only while
   `DISPATCH_URL` is unset. A checkout's server without its own token is refused only when it would
-  be used, and turns off Dispatch alone.
+  be used, and turns off Dispatch alone. To move an existing file:
+  `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`, then move its
+  top-level `natsUrls` into the `envoy` section (`envoy.natsUrls`), and a checkout's
+  `.opencode/envoy.json` to `.envoy/envoy.json`.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
 - The `dispatch` command resolves its envoy.json with harness `command`; a missing file prints

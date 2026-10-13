@@ -1609,8 +1609,8 @@ func TestRealTmuxProviderKeysReachOMPAndNothingElse(t *testing.T) {
 }
 
 // A Go pane must reach the Dispatch server its daemon is configured for. Without these two
-// variables, OMP's Dispatch client falls back to the operator's ~/.config/opencode/envoy.json and
-// a scratch proof writes to that deployment instead.
+// variables, OMP's Dispatch client falls back to the envoy.json its session reads, which can name
+// the operator's own Dispatch, and a scratch proof writes to that deployment instead.
 func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 	ctx := context.Background()
 	token := "dispatch-" + randomHex(t, 8)
