@@ -2,52 +2,53 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-164",
-  "completed": "2026-10-13T03:19:42Z",
-  "round": 3,
+  "completed": "2026-10-13T04:31:17Z",
+  "round": 4,
+  "reviewRound": 2,
   "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
-  "head": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d (code head 36a4d40c2fc571665df0aecdfc2f588b1eef296b; the round's fix is 4b806e7e)",
-  "reviewRound": 1,
+  "head": "13327c2d1ae212fb907b054bbe7c40861b6cee13 (code head 049e9bed7693; the round's fix)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The implementer's sweep-retry proof (TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep, refusing through overrides.checkLaunch) re-created on the real daemon without the override: a workflow tree seeded with a live ready claim at pluginContract 0 and one at 24, the tree's cleanup reserved in the store (`update tree_lifecycles set cleanup_started = true`), so the real store's CheckLaunch refused with `tree cleanup is reserved`; the recorded outcomes reproduced — a refused boot attempt and per-sweep attempts leaving the claim ready at generation 1 with zero budgets and no Resume, then exactly one Resume at generation 2 with the session file and a `trigger=sweep` line within one sweep of clearing the reservation, the current claim untouched. The config cases (`//` refused, upper-case scheme canonicalised) re-run through `legion start --check-config` on a binary built from this head. Every lane the round touched re-run green here (sandbox, config, supervise under CGO_ENABLED=0, api Stale|Undecodable, the daemon plugin tests, cmd/legion). CI Tests run 38339833162 green at 36a4d40c."
+    "how": "The implementer's rewritten sweep-retry proof (a working claim with a confirmed delivery, refused through overrides.checkLaunch) re-created on the real daemon without the override: the tree's cleanup reserved in tree_lifecycles so the real store's CheckLaunch refuses. Its recorded outcomes reproduced: while refused, no `relaunching` Warn, the stored claim working at generation 1 with pluginRelaunchFor 0, launchFailures 0 and its delivery confirmed and uninterrupted, only `supervise: an event failed … tree cleanup is reserved` per attempt; once cleared, one Resume at generation 2, one trigger=sweep Warn, pluginRelaunchFor 24, the delivery taken back (unconfirmed, interrupted), the current claim untouched. The host-less URL refusals re-run through `legion start --check-config` on a binary built from this head. config, supervise (CGO_ENABLED=0) and the daemon plugin tests green here; CI Tests run 38344594722 green at 049e9bed."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "Review finding 1 / acceptance 5's sentence: a stale-plugin relaunch the launch path refuses is retried at every orphan sweep, so a stale process's calls are refused 'the daemon is relaunching this process' only while a relaunch is in fact pending, and the relaunch lands once the refusal clears",
-      "surface": "The real daemon (tmux config, fake runtime) on my embedded Postgres 16.4, the tree's cleanup reserved through the store's own tree_lifecycles row (the real CheckLaunch refusal, no test gate), orphan sweep 200 ms; the stale process's calls over curl; `legion claims list`",
-      "command": "seedWorkflowTree(stale implementer: ready, gen 1, pluginContract 0, session file, capabilityHash(secret); architect at 24); update tree_lifecycles set cleanup_started = true; boot; curl POST /legion/v1/claims/ready | /claims/ready + push | /grants (claim form) | /claims/exit as the stale process; update tree_lifecycles set cleanup_started = false; read the fake runtime's Resume calls and the JSON log; curl POST /legion/v1/claims/ready with the old secret; curl POST /legion/v1/claims/register at 24 with generation 2's boot token",
-      "observed": "boot: relaunch line trigger=boot ×1 then trigger=sweep ×1 per sweep, each with `supervise: an event failed … launch claim …: bind work of tree …: tree cleanup is reserved`; claim ready, gen 1, budgets {0 0 0 0}, Resume 0. Window: ready → 409 `pi-legion registered no daemon API contract; this daemon requires 24: the daemon is relaunching this process onto the current plugin`; ready + unknown field → the same 409; grants → 409 STALE_PLUGIN_CONTRACT with the sentence; exit → the same 409; each logged `api: refused a call from a process on another plugin contract` (route, claim, pluginContract 0). Cleared: Resume gen 2 with implementer.jsonl 160 ms later, claim `launching 2 0`, budgets zero, trigger=sweep line; old secret's ready → 403 Invalid session secret; sweep lines flat across 700 ms while launching; register gen 2 at 24 → 200, `registered 2 24`, sweep lines flat again; the current claim: 0 Resumes, 0 Spawns throughout.",
-      "headSha": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d",
-      "negativeControl": "A wrong secret with the unknown-field ready body from the stale claim → `400 invalid request body: json: unknown field \"push\"` logged `api: refused an undecodable request body` — never the 409; the claim at 24 in the same tree got no Resume and no Spawn across every sweep, so the re-post selects only a differing contract."
+      "criterion": "Review round-2 important: a refused stale-plugin relaunch attempt changes nothing (no Warn, no PluginRelaunchFor mark, no interruption), so the sweep's retry is a true no-op until the refusal clears, a later stale registration is not charged for a relaunch that never ran, and the 409 window's sentence stays true",
+      "surface": "The real daemon (tmux config, fake runtime) on my embedded Postgres 16.4, the tree's cleanup reserved through the store's own tree_lifecycles row, orphan sweep 200 ms; the stored claim read back; the stale process's calls over curl",
+      "command": "seedWorkflowTree(stale implementer: working, gen 1, pluginContract 0, session file, capabilityHash(secret), Pending{outbox:1, confirmed}; architect at 24); update tree_lifecycles set cleanup_started = true; boot; storedClaim reads; curl POST /legion/v1/grants and /claims/ready (+unknown field) as the stale process; update tree_lifecycles set cleanup_started = false; curl POST /legion/v1/claims/register at 23 (gen 2) and at 24 (gen 3)",
+      "observed": "while refused: warn lines 0, event-failed lines 3 (`launch claim …: bind work of tree …: tree cleanup is reserved`), state working, gen 1, pluginContract 0, pluginRelaunchFor 0, launchFailures 0, pending {outbox:1 confirmed=true interrupted=false}, resumes 0; grants → 409 STALE_PLUGIN_CONTRACT with the sentence, ready+push → the same 409. Cleared: state launching, gen 2, pluginRelaunchFor 24, pending {confirmed=false interrupted=true}, one Warn trigger=sweep pluginContract=0 daemonApiVersion=24, resumes 1; current claim 0 Resumes 0 Spawns. gen 2 at 23 → 409 `pi-legion speaks daemon API contract 23; this daemon requires 24: …`, launchFailures 1, gen 3; gen 3 at 24 → 200, pluginRelaunchFor 0; sweeps after recovery: event-failed and warn counts flat.",
+      "headSha": "13327c2d1ae212fb907b054bbe7c40861b6cee13",
+      "negativeControl": "The claim at 24 in the same tree: no Resume and no Spawn across every sweep; the delivery of the stale claim stayed confirmed and uninterrupted through every refused attempt (before this round a refused attempt interrupted it and marked PluginRelaunchFor 24)."
     },
     {
-      "criterion": "Census 3 / review minor: runtime.kubernetes.plugins refuses a `//` source by name and stores an http(s) URL with a lower-case scheme; the loader and bunSpec agree",
-      "surface": "`legion start --check-config` on a binary built from this head against the shipped legion.yaml.example (plus its stub files)",
-      "command": "legion start --check-config --config legion-variant.yaml with pi_legion: //cache/pi-legion.tgz | HTTPS://Cache.Example/Pi-Legion.tgz | https://cache/x.tgz?token=abc#frag | 9.6.1 | /tmp/…/sjawhar-pi-legion-9.6.1.tgz",
-      "observed": "`runtime.kubernetes.plugins.pi_legion must not begin with //: that is a network-path reference, not a tarball bun can fetch; got \"//cache/pi-legion.tgz\"`, exit 1; `plugins: @sjawhar/pi-legion https://Cache.Example/Pi-Legion.tgz @sjawhar/pi-envoy 9.5.1 (from legion.yaml)` (scheme canonicalised, host case kept); the query and fragment kept verbatim; the version and tarball forms accepted as before. `go test ./internal/runtime/sandbox` ok: `TestAnUppercaseSchemeReachesBunVerbatim` beside my two red tests.",
-      "headSha": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d",
-      "negativeControl": "`//cache/pi-legion.tgz` refused by name; round 1's refused values (`latest`, `^9`, `9.x`, `v9.6.1`, `./x.tgz`, `file:///…`, `@sjawhar/pi-legion@9.6.1`, a half block, `\"\"`) stand at the otherwise unchanged loader."
+      "criterion": "Review round-2 minor: a host-less http(s) URL plugin source is refused by name, as `//` is",
+      "surface": "`legion start --check-config` on a binary built from this head against the shipped legion.yaml.example",
+      "command": "legion start --check-config --config legion-variant.yaml with pi_legion: https:///x.tgz | http:/cache/x.tgz | //cache/x.tgz | https://cache/x.tgz | HTTPS://Cache/x.tgz | /opt/plugins/x.tgz",
+      "observed": "the first three → `runtime.kubernetes.plugins.pi_legion names no host bun can fetch a tarball from: got \"…\"`, exit 1; `https://cache/x.tgz` accepted; `HTTPS://Cache/x.tgz` accepted and printed `https://Cache/x.tgz`; `/opt/plugins/x.tgz` accepted. `go test ./internal/config` ok.",
+      "headSha": "13327c2d1ae212fb907b054bbe7c40861b6cee13",
+      "negativeControl": "The hosted URL and the absolute path pass unchanged; round 1's refused values stand at the otherwise unchanged loader."
     },
     {
-      "criterion": "Acceptance 1–6 and the census entries a person invokes, at the unchanged code: the install wrapper (version, tarball, mixed, URL forms against the live registry), pluginContract on state/`legion state --json`/`legion claims list` across a restart, the stale registration's 409 and uncharged relaunch, the charged still-stale repeat, the boot relaunch line, the operator controller's 409, `legion version`'s second line, the runbook; stage 4a's live `CHECK stale-plugin-install: PASS` by the operator",
-      "surface": "Rounds 1 and 2 (previousRounds), on this pod and the real daemon; the operator's full stage 4a on the devbox host at 94325e57. The round's Go delta touches none of those paths except bunSpec's scheme-case fold (covered above) and the StalePlugin event's Trigger field.",
-      "command": "see previousRounds[0].verified and previousRounds[1].proof; jj diff --from 75f88f40 --to 64406d0c --summary",
-      "observed": "As recorded there; the lanes those paths live in re-run green at this head (sandbox, config, supervise, api, daemon, cmd/legion). docs/kubernetes.md now names the `sweep` trigger and says `every other undecodable request body` (the two removed sentences still grep 0).",
-      "headSha": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d",
-      "negativeControl": "As recorded in previousRounds (the version pair at contract 24 refused by the install's contract check; a wrong secret → 400/403 never 409; a mint on contract 23 → 409; the stage 4a negative control's `Observe gone … declares contract 23, not 24`)."
+      "criterion": "Acceptance 1–6, the census entries a person invokes, and acceptance 4(d), at the unchanged code",
+      "surface": "Rounds 1–3 (previousRounds), on this pod and the real daemon; the operator's full stage 4a at 94325e57. The round's Go delta is supervise/plugin.go's pre-check, config/kubernetes.go's host check, comments and tests (`jj diff --from 690bf7fb --to 13327c2d --summary`).",
+      "command": "see previousRounds[*]; the lanes those paths live in re-run at this head: `go test ./internal/config`, `CGO_ENABLED=0 go test ./internal/supervise`, the 12 internal/daemon plugin/boot/registration tests",
+      "observed": "As recorded there; all three lanes ok at this head. docs/kubernetes.md's Contract discipline now says the sweep is the one periodic pass that reads every claim, and names the integrity trust of a tarball or URL source.",
+      "headSha": "13327c2d1ae212fb907b054bbe7c40861b6cee13",
+      "negativeControl": "As recorded in previousRounds."
     }
   ],
   "notReached": [
     "7. Production: the post-merge production check (the implementer's, plan §6); its preconditions were answered on dispatch://LEGION-164/ask/28313726-42fe-49db-a0fa-5df9fa9e97aa."
   ],
   "observations": [
-    "While a stale claim's relaunch stays refused (a reserved tree cleanup), every orphan sweep (one minute in production, orphanSweepInterval) writes two lines for it: the Warn `relaunching it onto the current plugin` (trigger=sweep) and an Error `supervise: an event failed … tree cleanup is reserved`. A reserved cleanup is a tree closing, whose claims retire soon, so the noise is bounded; noted for the reviewer, not a finding.",
-    "Rounds 1–2's observations stand (a pod still on the old image converges in two launches; stage 4b names the bare-version form but never installs)."
+    "While a stale claim's relaunch stays refused, each sweep (one minute in production) now writes one line per stuck claim — `supervise: an event failed` with the store's reason — and no Warn; bounded by the tree's close.",
+    "A stale re-registration arriving during a refused window takes the uncharged branch (pluginRelaunchFor stays 0) and its own pre-check refuses it, so the registration route answers it as a failed decision rather than the 409; the claim stays live and the sweep retries. Pre-existing shape, not a regression; recorded for the reviewer.",
+    "Rounds 1–3's observations stand."
   ],
-  "ci": "Round 3: Tests run 38339833162 (lint, typecheck, test success) and PR Title run 38339833064 at 36a4d40c2fc571665df0aecdfc2f588b1eef296b; 64406d0c is the implementer's handoff-only push (skip-checks trailer). Earlier rounds in previousRounds.",
-  "localLanes": "Embedded Postgres 16.4 at 127.0.0.1:54351 (UTF8); at this head: `go test ./internal/runtime/sandbox ./internal/config`, `CGO_ENABLED=0 go test ./internal/supervise`, `go test ./internal/api -run 'Stale|Undecodable|WrongSecret|OperatorBearer'` (14 PASS), the 16 `internal/daemon` plugin/boot/registration tests, `go test ./cmd/legion` — all ok.",
+  "ci": "Round 4: Tests run 38344594722 (lint, typecheck, test success) at 049e9bed7693; 13327c2d is the implementer's handoff-only push (skip-checks trailer). Earlier rounds in previousRounds.",
+  "localLanes": "Embedded Postgres 16.4 at 127.0.0.1:54351 (UTF8); at this head: `go test ./internal/config`, `CGO_ENABLED=0 go test ./internal/supervise`, the 12 internal/daemon plugin/boot/registration tests — all ok.",
   "previousRounds": [
     {
       "completed": "2026-10-13T01:12:00Z",
@@ -182,6 +183,53 @@
       ],
       "ci": "Round 2: Tests run 38332984930 (lint, typecheck, test success) and PR Title run 38332984989 at 94325e57c7af6a66efa513dda981b404517a2cfb; Tests run 38331911739 green at 851a98a5; 056b20a0 is the implementer's handoff-only push (skip-checks trailer). Round 1: Tests run 38328392549 at c8626dff.",
       "localLanes": "Embedded Postgres 16.4 (zonky jar) at 127.0.0.1:54351 (round 1); `go test ./internal/runtime/sandbox ./internal/config` ok at this head."
+    },
+    {
+      "round": 3,
+      "reviewRound": 1,
+      "completed": "2026-10-13T03:19:42Z",
+      "head": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d (code head 36a4d40c2fc571665df0aecdfc2f588b1eef296b; the round's fix is 4b806e7e)",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "The implementer's sweep-retry proof (TestAStalePluginRelaunchTheLaunchPathRefusesIsRetriedAtTheNextSweep, refusing through overrides.checkLaunch) re-created on the real daemon without the override: a workflow tree seeded with a live ready claim at pluginContract 0 and one at 24, the tree's cleanup reserved in the store (`update tree_lifecycles set cleanup_started = true`), so the real store's CheckLaunch refused with `tree cleanup is reserved`; the recorded outcomes reproduced — a refused boot attempt and per-sweep attempts leaving the claim ready at generation 1 with zero budgets and no Resume, then exactly one Resume at generation 2 with the session file and a `trigger=sweep` line within one sweep of clearing the reservation, the current claim untouched. The config cases (`//` refused, upper-case scheme canonicalised) re-run through `legion start --check-config` on a binary built from this head. Every lane the round touched re-run green here (sandbox, config, supervise under CGO_ENABLED=0, api Stale|Undecodable, the daemon plugin tests, cmd/legion). CI Tests run 38339833162 green at 36a4d40c."
+      },
+      "failed": 0,
+      "failures": [],
+      "proof": [
+        {
+          "criterion": "Review finding 1 / acceptance 5's sentence: a stale-plugin relaunch the launch path refuses is retried at every orphan sweep, so a stale process's calls are refused 'the daemon is relaunching this process' only while a relaunch is in fact pending, and the relaunch lands once the refusal clears",
+          "surface": "The real daemon (tmux config, fake runtime) on my embedded Postgres 16.4, the tree's cleanup reserved through the store's own tree_lifecycles row (the real CheckLaunch refusal, no test gate), orphan sweep 200 ms; the stale process's calls over curl; `legion claims list`",
+          "command": "seedWorkflowTree(stale implementer: ready, gen 1, pluginContract 0, session file, capabilityHash(secret); architect at 24); update tree_lifecycles set cleanup_started = true; boot; curl POST /legion/v1/claims/ready | /claims/ready + push | /grants (claim form) | /claims/exit as the stale process; update tree_lifecycles set cleanup_started = false; read the fake runtime's Resume calls and the JSON log; curl POST /legion/v1/claims/ready with the old secret; curl POST /legion/v1/claims/register at 24 with generation 2's boot token",
+          "observed": "boot: relaunch line trigger=boot ×1 then trigger=sweep ×1 per sweep, each with `supervise: an event failed … launch claim …: bind work of tree …: tree cleanup is reserved`; claim ready, gen 1, budgets {0 0 0 0}, Resume 0. Window: ready → 409 `pi-legion registered no daemon API contract; this daemon requires 24: the daemon is relaunching this process onto the current plugin`; ready + unknown field → the same 409; grants → 409 STALE_PLUGIN_CONTRACT with the sentence; exit → the same 409; each logged `api: refused a call from a process on another plugin contract` (route, claim, pluginContract 0). Cleared: Resume gen 2 with implementer.jsonl 160 ms later, claim `launching 2 0`, budgets zero, trigger=sweep line; old secret's ready → 403 Invalid session secret; sweep lines flat across 700 ms while launching; register gen 2 at 24 → 200, `registered 2 24`, sweep lines flat again; the current claim: 0 Resumes, 0 Spawns throughout.",
+          "headSha": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d",
+          "negativeControl": "A wrong secret with the unknown-field ready body from the stale claim → `400 invalid request body: json: unknown field \"push\"` logged `api: refused an undecodable request body` — never the 409; the claim at 24 in the same tree got no Resume and no Spawn across every sweep, so the re-post selects only a differing contract."
+        },
+        {
+          "criterion": "Census 3 / review minor: runtime.kubernetes.plugins refuses a `//` source by name and stores an http(s) URL with a lower-case scheme; the loader and bunSpec agree",
+          "surface": "`legion start --check-config` on a binary built from this head against the shipped legion.yaml.example (plus its stub files)",
+          "command": "legion start --check-config --config legion-variant.yaml with pi_legion: //cache/pi-legion.tgz | HTTPS://Cache.Example/Pi-Legion.tgz | https://cache/x.tgz?token=abc#frag | 9.6.1 | /tmp/…/sjawhar-pi-legion-9.6.1.tgz",
+          "observed": "`runtime.kubernetes.plugins.pi_legion must not begin with //: that is a network-path reference, not a tarball bun can fetch; got \"//cache/pi-legion.tgz\"`, exit 1; `plugins: @sjawhar/pi-legion https://Cache.Example/Pi-Legion.tgz @sjawhar/pi-envoy 9.5.1 (from legion.yaml)` (scheme canonicalised, host case kept); the query and fragment kept verbatim; the version and tarball forms accepted as before. `go test ./internal/runtime/sandbox` ok: `TestAnUppercaseSchemeReachesBunVerbatim` beside my two red tests.",
+          "headSha": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d",
+          "negativeControl": "`//cache/pi-legion.tgz` refused by name; round 1's refused values (`latest`, `^9`, `9.x`, `v9.6.1`, `./x.tgz`, `file:///…`, `@sjawhar/pi-legion@9.6.1`, a half block, `\"\"`) stand at the otherwise unchanged loader."
+        },
+        {
+          "criterion": "Acceptance 1–6 and the census entries a person invokes, at the unchanged code: the install wrapper (version, tarball, mixed, URL forms against the live registry), pluginContract on state/`legion state --json`/`legion claims list` across a restart, the stale registration's 409 and uncharged relaunch, the charged still-stale repeat, the boot relaunch line, the operator controller's 409, `legion version`'s second line, the runbook; stage 4a's live `CHECK stale-plugin-install: PASS` by the operator",
+          "surface": "Rounds 1 and 2 (previousRounds), on this pod and the real daemon; the operator's full stage 4a on the devbox host at 94325e57. The round's Go delta touches none of those paths except bunSpec's scheme-case fold (covered above) and the StalePlugin event's Trigger field.",
+          "command": "see previousRounds[0].verified and previousRounds[1].proof; jj diff --from 75f88f40 --to 64406d0c --summary",
+          "observed": "As recorded there; the lanes those paths live in re-run green at this head (sandbox, config, supervise, api, daemon, cmd/legion). docs/kubernetes.md now names the `sweep` trigger and says `every other undecodable request body` (the two removed sentences still grep 0).",
+          "headSha": "64406d0c98ed4cd3fbf7964ef8092adf03958f5d",
+          "negativeControl": "As recorded in previousRounds (the version pair at contract 24 refused by the install's contract check; a wrong secret → 400/403 never 409; a mint on contract 23 → 409; the stage 4a negative control's `Observe gone … declares contract 23, not 24`)."
+        }
+      ],
+      "notReached": [
+        "7. Production: the post-merge production check (the implementer's, plan §6); its preconditions were answered on dispatch://LEGION-164/ask/28313726-42fe-49db-a0fa-5df9fa9e97aa."
+      ],
+      "observations": [
+        "While a stale claim's relaunch stays refused (a reserved tree cleanup), every orphan sweep (one minute in production, orphanSweepInterval) writes two lines for it: the Warn `relaunching it onto the current plugin` (trigger=sweep) and an Error `supervise: an event failed … tree cleanup is reserved`. A reserved cleanup is a tree closing, whose claims retire soon, so the noise is bounded; noted for the reviewer, not a finding.",
+        "Rounds 1–2's observations stand (a pod still on the old image converges in two launches; stage 4b names the bare-version form but never installs)."
+      ],
+      "ci": "Round 3: Tests run 38339833162 (lint, typecheck, test success) and PR Title run 38339833064 at 36a4d40c2fc571665df0aecdfc2f588b1eef296b; 64406d0c is the implementer's handoff-only push (skip-checks trailer). Earlier rounds in previousRounds.",
+      "localLanes": "Embedded Postgres 16.4 at 127.0.0.1:54351 (UTF8); at this head: `go test ./internal/runtime/sandbox ./internal/config`, `CGO_ENABLED=0 go test ./internal/supervise`, `go test ./internal/api -run 'Stale|Undecodable|WrongSecret|OperatorBearer'` (14 PASS), the 16 `internal/daemon` plugin/boot/registration tests, `go test ./cmd/legion` — all ok."
     }
   ]
 }
