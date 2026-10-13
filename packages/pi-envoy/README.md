@@ -150,8 +150,10 @@ Legion daemon delivers it to a pane) never falls back when unreadable. Omitting
 server's listen address. With Envoy off the session has no Envoy tools and takes no inbound
 messages; with Envoy on and no NATS server, or with its NATS seed refused (a seed that pairs with
 other servers, a failing `natsSeed` command, a seed variable that cannot be read), it keeps the
-tools, `/whoami` and the Legion role claim, takes no inbound messages, connects to no NATS server,
-and refuses `envoy_subscribe` with `inbound messages are off for this session: <why>`. When a
+tools and `/whoami`, takes no inbound messages, connects to no NATS server, and refuses
+`envoy_subscribe` and the Legion role claim with `inbound messages are off for this session: <why>`,
+the claim before any listener call, so a Legion process fails its boot rather than hold a role
+whose tasks reach nobody. When a
 section is off for a reason worth saying, the session says so once at its start:
 `envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
 checkout's file holds that is not read, or that inbound messages are off and why. Invalid configuration, an
