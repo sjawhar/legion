@@ -8,10 +8,12 @@
 #   work           the run's scratch directory, holding the files the lib reads: legion, the Go
 #                  daemon binary it asks for state; legion.yaml, the daemon's configuration, which
 #                  says where the daemon answers; dispatch-auth-header, the curl header line
-#                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as; and
-#                  dispatch-human-header, the one the proof human's writes are sent with. Headers
-#                  go by file, so no bearer is ever in a process's argv. The caller writes both
-#                  headers itself or has write_dispatch_header write them from dispatch_token_file
+#                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as (dispatch_get's
+#                  reads, and dispatch_agent's writes in a stand-in session's name); and
+#                  dispatch-human-header, the one the proof human's writes (dispatch_human) are sent
+#                  with. Headers go by file, so no bearer is ever in a process's argv. The caller
+#                  writes both headers itself or has write_dispatch_header write them from
+#                  dispatch_token_file
 #   evidence       the evidence directory
 #   project        the Dispatch project the run's issues live in; the daemon writes as
 #                  legion-daemon:<project>
@@ -43,9 +45,9 @@
 # ---- Dispatch -------------------------------------------------------------------------------------
 
 # write_dispatch_header writes $work/dispatch-token, dispatch-auth-header and dispatch-human-header
-# from dispatch_token_file alone: the bearer dispatch_get, dispatch_human and ensure_project all
-# send, needed before any of them runs. Stage 4b's prerequisites calls it first, before the lock,
-# so ensure_project can run there; read_bearers calls it again for the run proper.
+# from dispatch_token_file alone: the bearer dispatch_get, dispatch_agent, dispatch_human and
+# ensure_project all send, needed before any of them runs. Stage 4b's prerequisites calls it first,
+# before the lock, so ensure_project can run there; read_bearers calls it again for the run proper.
 write_dispatch_header() {
   (umask 077 &&
     tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
@@ -93,6 +95,19 @@ dispatch_human() {
   else
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
+}
+# dispatch_agent METHOD PATH BODY is a write in an agent's name over the agents' bearer, as a role's
+# own Dispatch tool writes: for a proof step whose author must be a session rather than the proof
+# human (a decision block the architect would write into its spec). A bearer caller must name its
+# session in the body (ACTOR_KIND, as proof_human_body says); the one named is
+# dispatch_agent_session, a stand-in that holds no claim, so the workflow reads nothing it writes
+# as a role's move. It never reads dispatch_actor: that is the proof human's session.
+dispatch_agent_session=stage3-architect-stand-in
+dispatch_agent() {
+  local method=$1 path=$2 body
+  body=$(jq -c --arg id "$dispatch_agent_session" '. + {actor: {kind: "session", id: $id}}' <<<"$3")
+  curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-auth-header" -H 'content-type: application/json' \
+    --data "$body" "$(dispatch_url)/api/v1/$path"
 }
 # ensure_project creates $project when Dispatch does not already hold it, as a proof-human write
 # like every other (`POST /api/v1/projects` takes any signed-in person or agent session), over the
