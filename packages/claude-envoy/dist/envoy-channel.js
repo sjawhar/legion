@@ -37240,13 +37240,13 @@ var COMMAND_TIMEOUT_MS = 1e4;
 function setValue(value) {
   return value === undefined || value === "" ? undefined : value;
 }
-function neutralConfigPath(env) {
+function neutralConfig(env) {
   const xdgConfigHome = setValue(env.XDG_CONFIG_HOME);
   if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
-    throw new Error(`XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path`);
+    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
   }
   const configHome = xdgConfigHome ?? path.join(setValue(env.HOME) ?? homedir(), ".config");
-  return path.resolve(configHome, "legion", "envoy.json");
+  return { path: path.resolve(configHome, "legion", "envoy.json") };
 }
 function ompProfileDirectory(env) {
   const profile = setValue(env.OMP_PROFILE);
@@ -37273,7 +37273,10 @@ function envoyConfigPath(harness, env) {
     return path.resolve(directory, "envoy.json");
   if (handed !== undefined)
     return path.resolve(handed);
-  return neutralConfigPath(env);
+  const neutral = neutralConfig(env);
+  if ("error" in neutral)
+    throw new Error(neutral.error);
+  return neutral.path;
 }
 var DispatchSectionSchema = exports_external.strictObject({
   enabled: exports_external.boolean().optional(),
@@ -37292,11 +37295,18 @@ var EnvoyFileSchema = exports_external.looseObject({
   dispatch: DispatchSectionSchema.optional(),
   envoy: EnvoySectionSchema.optional()
 });
-function dispatchTokenVariableSet(env) {
-  return env.DISPATCH_TOKEN_FILE !== undefined || env.DISPATCH_TOKEN !== undefined;
-}
-function envoyTokenVariableSet(env) {
-  return setValue(env.ENVOY_TOKEN_FILE) !== undefined || setValue(env.ENVOY_TOKEN) !== undefined;
+function sectionSwitch(config2, section, env) {
+  const own = config2[section].enabled;
+  if (own === false)
+    return { offBy: config2.path };
+  const checkout = config2.checkout;
+  const theirs = checkout?.[section].enabled;
+  if (checkout === null || theirs === undefined)
+    return { offBy: null, enabled: own === true };
+  if (theirs)
+    return { offBy: null, enabled: true };
+  const addressNamed = section === "dispatch" ? env.DISPATCH_URL !== undefined : setValue(env.ENVOY_URL) !== undefined || setValue(env.ENVOY_NATS_URL) !== undefined;
+  return addressNamed ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
 }
 function describeSchemaIssue(filePath, error48) {
   const issue2 = error48.issues[0];
@@ -37336,12 +37346,8 @@ function parseFile(filePath) {
   }
   return { kind: "valid", settings: parsed.data };
 }
-var commandValues = new Map;
-function commandValue(value, field, filePath, env) {
-  const command = value.slice(1);
-  const cached2 = commandValues.get(command);
-  if (cached2 !== undefined)
-    return cached2;
+var commandOutcomes = new Map;
+function runCommand(command, env) {
   const childEnv = {};
   for (const [name, variable] of Object.entries(env)) {
     if (variable !== undefined)
@@ -37357,55 +37363,45 @@ function commandValue(value, field, filePath, env) {
       timeout: COMMAND_TIMEOUT_MS
     });
   } catch (error48) {
-    throw new Error(`${filePath}: ${field}'s command could not start: ${messageFor(error48)}`);
+    return { failure: `could not start: ${messageFor(error48)}` };
   }
   if (result.exitedDueToTimeout) {
-    throw new Error(`${filePath}: ${field}'s command did not finish within ${COMMAND_TIMEOUT_MS / 1000} s`);
+    return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
   }
   if (!result.success) {
-    const status = result.signalCode ?? `status ${result.exitCode}`;
-    throw new Error(`${filePath}: ${field}'s command exited with ${status}`);
+    return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
   }
-  const output = result.stdout.toString().trim();
-  if (output.length === 0)
-    throw new Error(`${filePath}: ${field}'s command printed nothing`);
-  commandValues.set(command, output);
-  return output;
+  const value = result.stdout.toString().trim();
+  return value.length === 0 ? { failure: "printed nothing" } : { value };
 }
-function fieldValue(value, runs, field, filePath, env) {
-  if (value === undefined || !value.startsWith("!"))
+function fileValue(value, field, filePath, env) {
+  if (!value.startsWith("!"))
     return value;
-  return runs ? commandValue(value, field, filePath, env) : undefined;
+  const command = value.slice(1);
+  let outcome = commandOutcomes.get(command);
+  if (outcome === undefined) {
+    outcome = runCommand(command, env);
+    commandOutcomes.set(command, outcome);
+  }
+  if ("failure" in outcome)
+    throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
+  return outcome.value;
 }
-function checkoutProblem(checkout, dispatch, envoy) {
-  const commands = [
-    ["dispatch.token", checkout.dispatch.token],
-    ["envoy.token", checkout.envoy.token],
-    ["envoy.natsSeed", checkout.envoy.natsSeed]
-  ];
-  for (const [field, value] of commands) {
-    if (value?.startsWith("!")) {
-      return `${checkout.path}: ${field} is a command, which a checkout's envoy.json cannot run`;
-    }
-  }
-  if (dispatch.enabled === true && checkout.dispatch.serverUrl !== undefined && !checkout.dispatch.token) {
-    return `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`;
-  }
-  if (envoy.enabled === true && checkout.envoy.url !== undefined && !checkout.envoy.token) {
-    return `${checkout.path}: envoy.url requires envoy.token in the same file`;
-  }
-  return null;
+function checkoutCommandRefusal(checkoutPath, field) {
+  return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 function failed(filePath, error48) {
   return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error: error48 };
 }
 function missingNotice(filePath, env) {
   const notice = `no envoy.json at ${filePath}: Dispatch and Envoy are off`;
-  const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
-  const neutral = neutralConfigPath(env);
-  if (!existsSync(old) || existsSync(neutral))
+  const neutral = neutralConfig(env);
+  if ("error" in neutral || neutral.path !== path.resolve(filePath))
     return notice;
-  return `${notice}; ${old} is no longer read: move it to ${neutral}`;
+  const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
+  if (!existsSync(old))
+    return notice;
+  return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
 }
 function readEnvoyConfig(filePath, env, options) {
   const chosen = parseFile(filePath);
@@ -37416,47 +37412,18 @@ function readEnvoyConfig(filePath, env, options) {
   if (checkoutFile.kind === "invalid")
     return failed(filePath, checkoutFile.reason);
   const own = chosen.kind === "valid" ? chosen.settings : {};
-  const checkout = checkoutFile.kind === "valid" ? {
-    path: checkoutPath,
-    dispatch: checkoutFile.settings.dispatch ?? {},
-    envoy: checkoutFile.settings.envoy ?? {}
-  } : null;
-  const mergedDispatch = { ...own.dispatch, ...checkout?.dispatch };
-  const mergedEnvoy = { ...own.envoy, ...checkout?.envoy };
-  if (checkout !== null) {
-    const problem = checkoutProblem(checkout, mergedDispatch, mergedEnvoy);
-    if (problem !== null)
-      return failed(filePath, problem);
-  }
-  let dispatch = { enabled: false };
-  let envoy = { enabled: false };
-  let notice = null;
-  try {
-    if (mergedDispatch.enabled !== false) {
-      const { token, ...rest } = mergedDispatch;
-      const runs = !dispatchTokenVariableSet(env);
-      const value = fieldValue(token, runs, "dispatch.token", filePath, env);
-      dispatch = value === undefined ? rest : { ...rest, token: value };
-    }
-    if (mergedEnvoy.enabled !== false) {
-      const { token, natsSeed, ...rest } = mergedEnvoy;
-      const on = mergedEnvoy.enabled === true;
-      const tokenRuns = on && !envoyTokenVariableSet(env);
-      const seedRuns = on && env.NATS_NKEY_SEED_FILE === undefined && env.NATS_NKEY_SEED === undefined;
-      const tokenValue = fieldValue(token, tokenRuns, "envoy.token", filePath, env);
-      const seedValue = fieldValue(natsSeed, seedRuns, "envoy.natsSeed", filePath, env);
-      envoy = {
-        ...rest,
-        ...tokenValue === undefined ? {} : { token: tokenValue },
-        ...seedValue === undefined ? {} : { natsSeed: seedValue }
-      };
-    }
-    if (chosen.kind === "absent")
-      notice = missingNotice(filePath, env);
-  } catch (error48) {
-    return failed(filePath, messageFor(error48));
-  }
-  return { path: filePath, dispatch, envoy, checkout, notice, error: null };
+  return {
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout: checkoutFile.kind === "valid" ? {
+      path: checkoutPath,
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoy: checkoutFile.settings.envoy ?? {}
+    } : null,
+    notice: chosen.kind === "absent" ? missingNotice(filePath, env) : null,
+    error: null
+  };
 }
 
 // ../envoy-client/src/secret-file.ts
@@ -37501,72 +37468,103 @@ function disabled(error48) {
 function envoySettings(env, config2) {
   if (config2.error !== null)
     return disabled(config2.error);
-  const section = config2.envoy;
-  const checkout = config2.checkout;
-  if (section.enabled === false) {
-    const file3 = checkout?.envoy.enabled === false ? checkout.path : config2.path;
+  const state = sectionSwitch(config2, "envoy", env);
+  if (state.offBy !== null) {
     return {
       enabled: false,
-      notice: `${file3} sets envoy.enabled to false: Envoy is off`,
+      notice: `${state.offBy} sets envoy.enabled to false: Envoy is off`,
       error: null
     };
   }
-  const file2 = section.enabled === true ? section : {};
   const namedUrl = env.ENVOY_URL === "" ? undefined : env.ENVOY_URL;
   const namedNatsUrls = (env.ENVOY_NATS_URL ?? "").split(",").map((url3) => url3.trim()).filter((url3) => url3.length > 0);
-  if (section.enabled !== true && namedUrl === undefined && namedNatsUrls.length === 0) {
+  if (!state.enabled && namedUrl === undefined && namedNatsUrls.length === 0) {
     return {
       enabled: false,
       notice: config2.notice ?? `${config2.path} has no enabled envoy section, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`,
       error: null
     };
   }
+  const own = state.enabled ? config2.envoy : {};
+  const checkout = state.enabled ? config2.checkout : null;
   let url2;
   let token;
-  if (namedUrl === undefined && section.enabled === true && checkout?.envoy.url !== undefined) {
+  if (namedUrl === undefined && checkout?.envoy.url !== undefined) {
+    if (!checkout.envoy.token) {
+      return disabled(`${checkout.path}: envoy.url requires envoy.token in the same file`);
+    }
+    if (checkout.envoy.token.startsWith("!")) {
+      return disabled(checkoutCommandRefusal(checkout.path, "envoy.token"));
+    }
     url2 = checkout.envoy.url;
     token = checkout.envoy.token;
   } else {
-    url2 = namedUrl ?? file2.url ?? DEFAULT_ENVOY_URL;
-    const tokenFile = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
-    if (tokenFile !== undefined) {
+    url2 = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
+    let tokenFile = null;
+    const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
+    if (tokenPointer !== undefined) {
       try {
-        token = readSecretFile("ENVOY_TOKEN_FILE", tokenFile);
+        token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
       } catch (error48) {
         return disabled(messageFor(error48));
       }
-    } else {
-      token = env.ENVOY_TOKEN || file2.token;
+    } else if (env.ENVOY_TOKEN) {
+      token = env.ENVOY_TOKEN;
+    } else if (checkout?.envoy.token !== undefined) {
+      token = checkout.envoy.token;
+      const listener = checkout.envoy.url ?? own.url ?? DEFAULT_ENVOY_URL;
+      tokenFile = { path: checkout.path, url: listener };
+    } else if (own.token !== undefined) {
+      token = own.token;
+      tokenFile = { path: config2.path, url: own.url ?? DEFAULT_ENVOY_URL };
     }
-    if (namedUrl !== undefined && file2.token !== undefined && !envoyTokenVariableSet(env)) {
+    if (namedUrl !== undefined && tokenFile !== null) {
       let named;
       try {
         named = new URL(namedUrl).origin;
       } catch {
         return disabled("ENVOY_URL must be a valid URL");
       }
-      const listener = new URL(file2.url ?? DEFAULT_ENVOY_URL).origin;
+      const listener = new URL(tokenFile.url).origin;
       if (named !== listener) {
-        const tokenPath = checkout?.envoy.token !== undefined ? checkout.path : config2.path;
-        return disabled(`ENVOY_URL names ${named}, but ${tokenPath}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
+        return disabled(`ENVOY_URL names ${named}, but ${tokenFile.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
+      }
+    }
+    if (tokenFile !== null && token?.startsWith("!")) {
+      if (tokenFile.path !== config2.path) {
+        return disabled(checkoutCommandRefusal(tokenFile.path, "envoy.token"));
+      }
+      try {
+        token = fileValue(token, "envoy.token", config2.path, env);
+      } catch (error48) {
+        return disabled(messageFor(error48));
       }
     }
   }
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : checkout?.envoy.natsUrls ?? own.natsUrls ?? [];
   let natsSeed;
-  try {
-    natsSeed = natsSeedFromEnvironment(env);
-  } catch (error48) {
-    return disabled(messageFor(error48));
-  }
-  if (natsSeed === undefined && file2.natsSeed !== undefined) {
-    const seedPath = checkout?.envoy.natsSeed !== undefined ? checkout.path : config2.path;
-    natsSeed = { value: file2.natsSeed.trim(), source: `envoy.natsSeed in ${seedPath}` };
+  if (natsUrls.length > 0) {
+    try {
+      natsSeed = natsSeedFromEnvironment(env);
+      if (natsSeed === undefined && checkout?.envoy.natsSeed !== undefined) {
+        if (checkout.envoy.natsSeed.startsWith("!")) {
+          return disabled(checkoutCommandRefusal(checkout.path, "envoy.natsSeed"));
+        }
+        const source = `envoy.natsSeed in ${checkout.path}`;
+        natsSeed = { value: checkout.envoy.natsSeed.trim(), source };
+      } else if (natsSeed === undefined && own.natsSeed !== undefined) {
+        const value = fileValue(own.natsSeed, "envoy.natsSeed", config2.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config2.path}` };
+      }
+    } catch (error48) {
+      return disabled(messageFor(error48));
+    }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
-    natsUrls: namedNatsUrls.length > 0 ? namedNatsUrls : file2.natsUrls ?? [],
+    natsUrls,
     token,
     natsSeed,
     heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
@@ -39345,31 +39343,33 @@ function dispatchSettings(env, config2) {
   if (config2.error !== null) {
     return { enabled: false, url: null, token: null, error: config2.error };
   }
-  const settings = config2.dispatch;
-  if (settings.enabled === false)
+  const state = sectionSwitch(config2, "dispatch", env);
+  if (state.offBy !== null)
     return { enabled: false, url: null, token: null, error: null };
-  const explicitUrl = env.DISPATCH_URL;
+  const own = config2.dispatch;
   const checkout = config2.checkout;
-  if (explicitUrl === undefined && settings.enabled === true && checkout?.dispatch.serverUrl !== undefined) {
-    const token2 = checkout.dispatch.token ?? null;
+  const explicitUrl = env.DISPATCH_URL;
+  if (explicitUrl === undefined && state.enabled && checkout?.dispatch.serverUrl !== undefined) {
     const source = `dispatch.serverUrl in ${checkout.path}`;
     const url3 = parsedDispatchUrl(checkout.dispatch.serverUrl, source);
     if (url3.error !== null)
       return { enabled: false, url: null, token: null, error: url3.error };
+    const token2 = checkout.dispatch.token;
     if (!token2) {
-      return {
-        enabled: false,
-        url: url3.url,
-        token: null,
-        error: `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`
-      };
+      const error48 = `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`;
+      return { enabled: false, url: null, token: null, error: error48 };
+    }
+    if (token2.startsWith("!")) {
+      const error48 = checkoutCommandRefusal(checkout.path, "dispatch.token");
+      return { enabled: false, url: null, token: null, error: error48 };
     }
     return { enabled: true, url: url3.url, token: token2, error: null };
   }
-  const rawUrl = explicitUrl !== undefined ? { value: explicitUrl, source: "DISPATCH_URL" } : settings.enabled === true ? { value: settings.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" } : null;
+  const rawUrl = explicitUrl !== undefined ? { value: explicitUrl, source: "DISPATCH_URL" } : state.enabled ? { value: own.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" } : null;
   const url2 = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
   let token;
   let tokenSource;
+  let tokenFile = null;
   if (env.DISPATCH_TOKEN_FILE !== undefined) {
     tokenSource = "DISPATCH_TOKEN_FILE";
     try {
@@ -39380,25 +39380,44 @@ function dispatchSettings(env, config2) {
   } else if (env.DISPATCH_TOKEN !== undefined) {
     tokenSource = "DISPATCH_TOKEN";
     token = env.DISPATCH_TOKEN;
+  } else if (checkout?.dispatch.token !== undefined) {
+    tokenSource = "dispatch.token";
+    token = checkout.dispatch.token;
+    const serverUrl = checkout.dispatch.serverUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL;
+    tokenFile = { path: checkout.path, serverUrl };
   } else {
     tokenSource = "dispatch.token";
-    token = settings.token ?? null;
+    token = own.token ?? null;
+    if (token !== null) {
+      tokenFile = { path: config2.path, serverUrl: own.serverUrl ?? DEFAULT_SERVER_URL };
+    }
   }
+  const shownToken = tokenFile !== null && token?.startsWith("!") ? null : token;
   if (url2.error !== null)
-    return { enabled: false, url: null, token, error: url2.error };
+    return { enabled: false, url: null, token: shownToken, error: url2.error };
   if (url2.url === null)
-    return { enabled: false, url: null, token, error: null };
-  if (explicitUrl !== undefined && token !== null && !dispatchTokenVariableSet(env)) {
+    return { enabled: false, url: null, token: shownToken, error: null };
+  if (explicitUrl !== undefined && tokenFile !== null) {
     const named = new URL(url2.url).origin;
-    const fileServer = new URL(settings.serverUrl ?? DEFAULT_SERVER_URL).origin;
-    if (named !== fileServer) {
-      const tokenFile = checkout?.dispatch.token !== undefined ? checkout.path : config2.path;
+    const paired = new URL(tokenFile.serverUrl).origin;
+    if (named !== paired) {
       return {
         enabled: false,
         url: null,
         token: null,
-        error: `DISPATCH_URL names ${named}, but ${tokenFile}'s dispatch.token is for ${fileServer}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`
+        error: `DISPATCH_URL names ${named}, but ${tokenFile.path}'s dispatch.token is for ${paired}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`
       };
+    }
+  }
+  if (tokenFile !== null && token?.startsWith("!")) {
+    if (tokenFile.path !== config2.path) {
+      const error48 = checkoutCommandRefusal(tokenFile.path, "dispatch.token");
+      return { enabled: false, url: null, token: null, error: error48 };
+    }
+    try {
+      token = fileValue(token, "dispatch.token", config2.path, env);
+    } catch (error48) {
+      return { enabled: false, url: url2.url, token: null, error: messageFor(error48) };
     }
   }
   if (!token) {

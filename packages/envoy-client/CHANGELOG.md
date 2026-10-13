@@ -7,13 +7,16 @@
 - Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
   `resolveDispatchConfig` and `activeDispatchConfig` take `{ harness, cwd }` and read the file
   `envoyConfigPath(harness, env)` names, with the checkout's `.envoy/envoy.json` merged over it.
-  `DISPATCH_URL` with the file's token at another origin than the file's `dispatch.serverUrl` is
-  refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`, and `dispatch.enabled: false` is off
-  whatever the variables say.
+  `DISPATCH_URL` with a file's token at another origin than the server written in the file the
+  token comes from is refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`. The chosen file's
+  `dispatch.enabled: false` is off whatever the variables say; a checkout's only while
+  `DISPATCH_URL` is unset. A checkout's server without its own token is refused only when it would
+  be used, and turns off Dispatch alone.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
 - The `dispatch` command resolves its envoy.json with harness `command`; a missing file prints
-  `dispatch: no envoy.json at <path>: Dispatch and Envoy are off` and exits 2.
+  `dispatch: no envoy.json at <path>: Dispatch and Envoy are off`, and a file that turns Dispatch
+  off prints `dispatch: <file> turns Dispatch off (dispatch.enabled is false)`, each exiting 2.
 - The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
   Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000
   characters: past it the result text and picture lines are written whole to a file the output
@@ -41,13 +44,14 @@
 
 - `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
   else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a command tries `ENVOY_CONFIG_FILE`
-  and then each harness's directory first; a relative `XDG_CONFIG_HOME` is refused) and
-  `readEnvoyConfig`, which validates both sections strictly and runs a `token` or `natsSeed`
-  starting with `!` as a command (10 s, once per process, never in a checkout's file, its output
-  never in an error).
+  and then each harness's directory first; a relative `XDG_CONFIG_HOME` is refused),
+  `readEnvoyConfig`, which validates both sections strictly and runs no command, `sectionSwitch`,
+  and `fileValue`, which runs a `token` or `natsSeed` starting with `!` as a command (10 s, once
+  per process with its value or failure kept, never from a checkout's file, its output never in an
+  error) when that section's resolver uses it.
 - `envoySettings(env, config)`: the Envoy a session uses, `{ enabled: true, url, natsUrls, token,
   natsSeed, heartbeatMs }` or `{ enabled: false, notice, error }`, each variable overriding its own
-  field; `ENVOY_URL` with the file's token at another origin is refused.
+  field; `ENVOY_URL` with a file's token at another origin than that file's listener is refused.
 - `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
   `activeDispatchConfig` for a caller that has already read its envoy.json.
 - `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line

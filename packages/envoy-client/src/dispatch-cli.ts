@@ -18,7 +18,7 @@ import {
   writePicture,
 } from "./dispatch-session-state";
 import { dispatchFollowNotice } from "./dispatch-subscribe";
-import { envoyConfigPath, readEnvoyConfig } from "./envoy-config";
+import { envoyConfigPath, readEnvoyConfig, sectionSwitch } from "./envoy-config";
 import { messageFor } from "./errors";
 import { ToolInputError } from "./tool-input-errors";
 
@@ -167,21 +167,22 @@ export async function runDispatchCli(
   }
 
   let config: ActiveDispatchConfig | null;
-  let notice: string | null;
+  let unconfigured: string;
   try {
     const envoyConfig = readEnvoyConfig(envoyConfigPath("command", env), env, { cwd: io.cwd });
-    notice = envoyConfig.notice;
+    const offBy = sectionSwitch(envoyConfig, "dispatch", env).offBy;
+    unconfigured =
+      offBy !== null
+        ? `${offBy} turns Dispatch off (dispatch.enabled is false)`
+        : (envoyConfig.notice ??
+          "Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)");
     config = activeDispatchSettings(dispatchSettings(env, envoyConfig));
   } catch (error) {
     print(`dispatch: ${messageFor(error)}`);
     return USAGE;
   }
   if (config === null) {
-    print(
-      notice !== null
-        ? `dispatch: ${notice}`
-        : "dispatch: Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)"
-    );
+    print(`dispatch: ${unconfigured}`);
     return USAGE;
   }
 

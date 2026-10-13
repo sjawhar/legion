@@ -1,7 +1,9 @@
 import {
+  checkoutCommandRefusal,
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
-  envoyTokenVariableSet,
+  fileValue,
+  sectionSwitch,
 } from "./envoy-config";
 import { messageFor } from "./errors";
 import { readSecretFile } from "./secret-file";
@@ -17,8 +19,10 @@ const MIN_HEARTBEAT_MS = 25;
 
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
-  readonly ENVOY_URL?: string | undefined;
-  readonly ENVOY_NATS_URL?: string | undefined;
+  readonly ENVOY_TOKEN?: string | undefined;
+  readonly ENVOY_TOKEN_FILE?: string | undefined;
+  readonly NATS_NKEY_SEED?: string | undefined;
+  readonly NATS_NKEY_SEED_FILE?: string | undefined;
   readonly ENVOY_HEARTBEAT_MS?: string | undefined;
 };
 
@@ -77,38 +81,36 @@ function disabled(error: string): DisabledEnvoySettings {
 /**
  * The Envoy a session uses, from `config` (`readEnvoyConfig`) and the environment.
  *
- * An `envoy.enabled: false` turns Envoy off whatever the variables say. Otherwise each variable
- * overrides its own field of an enabled `envoy` section: `ENVOY_URL` the listener (`url`),
- * `ENVOY_NATS_URL` (comma-separated) the NATS servers (`natsUrls`), `ENVOY_TOKEN_FILE` (trimmed
- * file contents, how the Legion daemon delivers it) then `ENVOY_TOKEN` the listener's bearer
- * (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` the NATS user's seed (`natsSeed`). An
- * empty variable counts as unset. With no enabled section, `ENVOY_URL` or `ENVOY_NATS_URL` alone
- * names an Envoy; with neither, Envoy is off. A set pointer that cannot be read is an `error`,
- * never a fallback.
+ * A file that turns Envoy off (`sectionSwitch`) wins. Otherwise each variable overrides its own
+ * field of an enabled `envoy` section, the checkout's merged over the chosen file's: `ENVOY_URL`
+ * the listener (`url`), `ENVOY_NATS_URL` (comma-separated) the NATS servers (`natsUrls`),
+ * `ENVOY_TOKEN_FILE` (trimmed file contents, how the Legion daemon delivers it) then `ENVOY_TOKEN`
+ * the listener's bearer (`token`), and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` the NATS user's
+ * seed (`natsSeed`, resolved only when there are NATS servers to use it on). An empty variable
+ * counts as unset. With no enabled section, `ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy;
+ * with neither, Envoy is off. A set pointer that cannot be read is an `error`, never a fallback.
  *
- * The file's token goes with `ENVOY_URL` only when both name the same origin; any other listener
- * needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. A checkout's `envoy.url` is used only with the
- * `envoy.token` written beside it.
+ * A file's token goes with `ENVOY_URL` only when it names the origin of the listener written in the
+ * file the token comes from; any other listener needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. A
+ * checkout's `envoy.url` is used only with the `envoy.token` written beside it. The chosen file's
+ * `!` token and seed run here, only when Envoy uses them; a checkout's are refused.
  */
 export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): EnvoySettings {
   if (config.error !== null) return disabled(config.error);
-  const section = config.envoy;
-  const checkout = config.checkout;
-  if (section.enabled === false) {
-    const file = checkout?.envoy.enabled === false ? checkout.path : config.path;
+  const state = sectionSwitch(config, "envoy", env);
+  if (state.offBy !== null) {
     return {
       enabled: false,
-      notice: `${file} sets envoy.enabled to false: Envoy is off`,
+      notice: `${state.offBy} sets envoy.enabled to false: Envoy is off`,
       error: null,
     };
   }
-  const file = section.enabled === true ? section : {};
   const namedUrl = env.ENVOY_URL === "" ? undefined : env.ENVOY_URL;
   const namedNatsUrls = (env.ENVOY_NATS_URL ?? "")
     .split(",")
     .map((url) => url.trim())
     .filter((url) => url.length > 0);
-  if (section.enabled !== true && namedUrl === undefined && namedNatsUrls.length === 0) {
+  if (!state.enabled && namedUrl === undefined && namedNatsUrls.length === 0) {
     return {
       enabled: false,
       notice:
@@ -117,58 +119,95 @@ export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): Envoy
       error: null,
     };
   }
+  // The files' values count only for an enabled section.
+  const own = state.enabled ? config.envoy : {};
+  const checkout = state.enabled ? config.checkout : null;
 
   let url: string;
   let token: string | undefined;
-  if (namedUrl === undefined && section.enabled === true && checkout?.envoy.url !== undefined) {
+  if (namedUrl === undefined && checkout?.envoy.url !== undefined) {
     // A repository may name its own listener only with its own bearer, never the user's.
+    if (!checkout.envoy.token) {
+      return disabled(`${checkout.path}: envoy.url requires envoy.token in the same file`);
+    }
+    if (checkout.envoy.token.startsWith("!")) {
+      return disabled(checkoutCommandRefusal(checkout.path, "envoy.token"));
+    }
     url = checkout.envoy.url;
     token = checkout.envoy.token;
   } else {
-    url = namedUrl ?? file.url ?? DEFAULT_ENVOY_URL;
-    const tokenFile = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
-    if (tokenFile !== undefined) {
+    url = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
+    // When a file supplies the token: that file and the listener it is written for.
+    let tokenFile: { readonly path: string; readonly url: string } | null = null;
+    const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
+    if (tokenPointer !== undefined) {
       try {
-        token = readSecretFile("ENVOY_TOKEN_FILE", tokenFile);
+        token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
       } catch (error) {
         return disabled(messageFor(error));
       }
-    } else {
-      token = env.ENVOY_TOKEN || file.token;
+    } else if (env.ENVOY_TOKEN) {
+      token = env.ENVOY_TOKEN;
+    } else if (checkout?.envoy.token !== undefined) {
+      token = checkout.envoy.token;
+      const listener = checkout.envoy.url ?? own.url ?? DEFAULT_ENVOY_URL;
+      tokenFile = { path: checkout.path, url: listener };
+    } else if (own.token !== undefined) {
+      token = own.token;
+      tokenFile = { path: config.path, url: own.url ?? DEFAULT_ENVOY_URL };
     }
-    if (namedUrl !== undefined && file.token !== undefined && !envoyTokenVariableSet(env)) {
+    if (namedUrl !== undefined && tokenFile !== null) {
       let named: string;
       try {
         named = new URL(namedUrl).origin;
       } catch {
         return disabled("ENVOY_URL must be a valid URL");
       }
-      const listener = new URL(file.url ?? DEFAULT_ENVOY_URL).origin;
+      const listener = new URL(tokenFile.url).origin;
       if (named !== listener) {
-        const tokenPath = checkout?.envoy.token !== undefined ? checkout.path : config.path;
         return disabled(
-          `ENVOY_URL names ${named}, but ${tokenPath}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
+          `ENVOY_URL names ${named}, but ${tokenFile.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
         );
+      }
+    }
+    if (tokenFile !== null && token?.startsWith("!")) {
+      if (tokenFile.path !== config.path) {
+        return disabled(checkoutCommandRefusal(tokenFile.path, "envoy.token"));
+      }
+      try {
+        token = fileValue(token, "envoy.token", config.path, env);
+      } catch (error) {
+        return disabled(messageFor(error));
       }
     }
   }
 
+  const natsUrls =
+    namedNatsUrls.length > 0 ? namedNatsUrls : (checkout?.envoy.natsUrls ?? own.natsUrls ?? []);
   let natsSeed: NatsSeed | undefined;
-  try {
-    natsSeed = natsSeedFromEnvironment(env);
-  } catch (error) {
-    return disabled(messageFor(error));
-  }
-  if (natsSeed === undefined && file.natsSeed !== undefined) {
-    const seedPath = checkout?.envoy.natsSeed !== undefined ? checkout.path : config.path;
-    natsSeed = { value: file.natsSeed.trim(), source: `envoy.natsSeed in ${seedPath}` };
+  if (natsUrls.length > 0) {
+    try {
+      natsSeed = natsSeedFromEnvironment(env);
+      if (natsSeed === undefined && checkout?.envoy.natsSeed !== undefined) {
+        if (checkout.envoy.natsSeed.startsWith("!")) {
+          return disabled(checkoutCommandRefusal(checkout.path, "envoy.natsSeed"));
+        }
+        const source = `envoy.natsSeed in ${checkout.path}`;
+        natsSeed = { value: checkout.envoy.natsSeed.trim(), source };
+      } else if (natsSeed === undefined && own.natsSeed !== undefined) {
+        const value = fileValue(own.natsSeed, "envoy.natsSeed", config.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config.path}` };
+      }
+    } catch (error) {
+      return disabled(messageFor(error));
+    }
   }
 
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
-    natsUrls: namedNatsUrls.length > 0 ? namedNatsUrls : (file.natsUrls ?? []),
+    natsUrls,
     token,
     natsSeed,
     heartbeatMs:

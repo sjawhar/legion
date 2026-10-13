@@ -197,4 +197,36 @@ describe("envoySettings", () => {
       token: "repo-token",
     });
   });
+
+  test("compares ENVOY_URL with the listener of the file the token comes from, never a checkout's listener beside another file's token", () => {
+    const user = path.join(tempDir(), "envoy.json");
+    writeFileSync(user, JSON.stringify({ envoy: listener }));
+    const cwd = tempDir();
+    mkdirSync(path.join(cwd, ".envoy"));
+    const checkout = path.join(cwd, ".envoy", "envoy.json");
+    writeFileSync(
+      checkout,
+      JSON.stringify({ envoy: { url: "http://staging.internal.example:9020" } })
+    );
+    const env = { ENVOY_URL: "http://staging.internal.example:9020" };
+
+    expect(envoySettings(env, readEnvoyConfig(user, { HOME: tempDir() }, { cwd }))).toEqual({
+      enabled: false,
+      notice: null,
+      error: `ENVOY_URL names http://staging.internal.example:9020, but ${user}'s envoy.token is for http://listener.internal.example:9020; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`,
+    });
+
+    // The checkout's own token goes with the checkout's own listener.
+    writeFileSync(
+      checkout,
+      JSON.stringify({
+        envoy: { url: "http://staging.internal.example:9020", token: "repo-token" },
+      })
+    );
+    expect(envoySettings(env, readEnvoyConfig(user, { HOME: tempDir() }, { cwd }))).toMatchObject({
+      enabled: true,
+      url: "http://staging.internal.example:9020",
+      token: "repo-token",
+    });
+  });
 });

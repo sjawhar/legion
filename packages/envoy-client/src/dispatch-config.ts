@@ -1,9 +1,11 @@
 import {
-  dispatchTokenVariableSet,
+  checkoutCommandRefusal,
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
+  fileValue,
   readEnvoyConfig,
+  sectionSwitch,
 } from "./envoy-config";
 import { messageFor } from "./errors";
 import { readSecretFile } from "./secret-file";
@@ -54,15 +56,17 @@ export interface DispatchConfigOptions {
 /**
  * Dispatch's URL and bearer token from `config` (`readEnvoyConfig`) and the environment.
  *
- * A `dispatch.enabled: false` turns Dispatch off whatever the variables say. Otherwise
- * `DISPATCH_URL` overrides the file's URL, and the token resolves from `DISPATCH_TOKEN_FILE`
- * (trimmed file contents — how the Legion daemon delivers it to a pane), then `DISPATCH_TOKEN`,
- * then `dispatch.token`; a set `DISPATCH_TOKEN_FILE` that cannot be read or is blank disables
- * Dispatch with that failure as `error` and never falls back. The file's token goes with
- * `DISPATCH_URL` only when both name the same origin; any other server needs `DISPATCH_TOKEN` or
- * `DISPATCH_TOKEN_FILE`. A checkout's `dispatch.serverUrl` is used only with the `dispatch.token`
- * written beside it, so it cannot redirect a credential from the user's file or the environment.
- * Dispatch tools are available only when both URL and bearer token resolve.
+ * A file that turns Dispatch off (`sectionSwitch`) wins. Otherwise `DISPATCH_URL` overrides the
+ * file's URL, and the token resolves from `DISPATCH_TOKEN_FILE` (trimmed file contents — how the
+ * Legion daemon delivers it to a pane), then `DISPATCH_TOKEN`, then `dispatch.token`, the
+ * checkout's ahead of the chosen file's; a set `DISPATCH_TOKEN_FILE` that cannot be read or is
+ * blank disables Dispatch with that failure as `error` and never falls back. A file's token goes
+ * with `DISPATCH_URL` only when it names the origin of the server written in the file the token
+ * comes from; any other server needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. A checkout's
+ * `dispatch.serverUrl` is used only with the `dispatch.token` written beside it, so it cannot
+ * redirect a credential from the user's file or the environment. The chosen file's `!` token runs
+ * here, only once Dispatch is about to use it; a checkout's is refused. Dispatch tools are
+ * available only when both URL and bearer token resolve.
  */
 export function dispatchSettings(
   env: DispatchEnvironment,
@@ -71,30 +75,26 @@ export function dispatchSettings(
   if (config.error !== null) {
     return { enabled: false, url: null, token: null, error: config.error };
   }
-  const settings = config.dispatch;
-  if (settings.enabled === false) return { enabled: false, url: null, token: null, error: null };
-  const explicitUrl = env.DISPATCH_URL;
+  const state = sectionSwitch(config, "dispatch", env);
+  if (state.offBy !== null) return { enabled: false, url: null, token: null, error: null };
+  const own = config.dispatch;
   const checkout = config.checkout;
+  const explicitUrl = env.DISPATCH_URL;
 
-  // Repository configuration is controlled by the repository author. It may provide its own
-  // endpoint and credential, but must never redirect a credential inherited from the user's
-  // file or the process environment.
-  if (
-    explicitUrl === undefined &&
-    settings.enabled === true &&
-    checkout?.dispatch.serverUrl !== undefined
-  ) {
-    const token = checkout.dispatch.token ?? null;
+  // Repository configuration is controlled by the repository author. Its server goes only with
+  // the token written beside it; a server DISPATCH_URL replaces is not used, so not refused.
+  if (explicitUrl === undefined && state.enabled && checkout?.dispatch.serverUrl !== undefined) {
     const source = `dispatch.serverUrl in ${checkout.path}`;
     const url = parsedDispatchUrl(checkout.dispatch.serverUrl, source);
     if (url.error !== null) return { enabled: false, url: null, token: null, error: url.error };
+    const token = checkout.dispatch.token;
     if (!token) {
-      return {
-        enabled: false,
-        url: url.url,
-        token: null,
-        error: `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`,
-      };
+      const error = `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`;
+      return { enabled: false, url: null, token: null, error };
+    }
+    if (token.startsWith("!")) {
+      const error = checkoutCommandRefusal(checkout.path, "dispatch.token");
+      return { enabled: false, url: null, token: null, error };
     }
     return { enabled: true, url: url.url, token, error: null };
   }
@@ -102,12 +102,14 @@ export function dispatchSettings(
   const rawUrl =
     explicitUrl !== undefined
       ? { value: explicitUrl, source: "DISPATCH_URL" }
-      : settings.enabled === true
-        ? { value: settings.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
+      : state.enabled
+        ? { value: own.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
         : null;
   const url = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
+  // The token, and when a file supplies it, that file and the server it is written for.
   let token: string | null;
   let tokenSource: string;
+  let tokenFile: { readonly path: string; readonly serverUrl: string } | null = null;
   if (env.DISPATCH_TOKEN_FILE !== undefined) {
     tokenSource = "DISPATCH_TOKEN_FILE";
     try {
@@ -118,23 +120,43 @@ export function dispatchSettings(
   } else if (env.DISPATCH_TOKEN !== undefined) {
     tokenSource = "DISPATCH_TOKEN";
     token = env.DISPATCH_TOKEN;
+  } else if (checkout?.dispatch.token !== undefined) {
+    tokenSource = "dispatch.token";
+    token = checkout.dispatch.token;
+    const serverUrl = checkout.dispatch.serverUrl ?? own.serverUrl ?? DEFAULT_SERVER_URL;
+    tokenFile = { path: checkout.path, serverUrl };
   } else {
     tokenSource = "dispatch.token";
-    token = settings.token ?? null;
+    token = own.token ?? null;
+    if (token !== null) {
+      tokenFile = { path: config.path, serverUrl: own.serverUrl ?? DEFAULT_SERVER_URL };
+    }
   }
-  if (url.error !== null) return { enabled: false, url: null, token, error: url.error };
-  if (url.url === null) return { enabled: false, url: null, token, error: null };
-  if (explicitUrl !== undefined && token !== null && !dispatchTokenVariableSet(env)) {
+  // A file's `!` token is a command that has not run: it is never handed out as a token.
+  const shownToken = tokenFile !== null && token?.startsWith("!") ? null : token;
+  if (url.error !== null) return { enabled: false, url: null, token: shownToken, error: url.error };
+  if (url.url === null) return { enabled: false, url: null, token: shownToken, error: null };
+  if (explicitUrl !== undefined && tokenFile !== null) {
     const named = new URL(url.url).origin;
-    const fileServer = new URL(settings.serverUrl ?? DEFAULT_SERVER_URL).origin;
-    if (named !== fileServer) {
-      const tokenFile = checkout?.dispatch.token !== undefined ? checkout.path : config.path;
+    const paired = new URL(tokenFile.serverUrl).origin;
+    if (named !== paired) {
       return {
         enabled: false,
         url: null,
         token: null,
-        error: `DISPATCH_URL names ${named}, but ${tokenFile}'s dispatch.token is for ${fileServer}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
+        error: `DISPATCH_URL names ${named}, but ${tokenFile.path}'s dispatch.token is for ${paired}; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
       };
+    }
+  }
+  if (tokenFile !== null && token?.startsWith("!")) {
+    if (tokenFile.path !== config.path) {
+      const error = checkoutCommandRefusal(tokenFile.path, "dispatch.token");
+      return { enabled: false, url: null, token: null, error };
+    }
+    try {
+      token = fileValue(token, "dispatch.token", config.path, env);
+    } catch (error) {
+      return { enabled: false, url: url.url, token: null, error: messageFor(error) };
     }
   }
   if (!token) {

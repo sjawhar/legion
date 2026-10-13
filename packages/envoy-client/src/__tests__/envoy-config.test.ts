@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { envoySettings } from "../defaults";
+import { dispatchSettings } from "../dispatch-config";
 import { envoyConfigPath, readEnvoyConfig } from "../envoy-config";
 
 function tempDir(): string {
@@ -135,182 +137,81 @@ describe("readEnvoyConfig", () => {
     });
   });
 
-  test("a missing file beside the old OpenCode file names both and says to move it", () => {
+  test("a missing neutral file beside the old OpenCode file names both and says to move it", () => {
     const home = tempDir();
     const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
       dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "old-token" },
     });
     const neutral = path.join(home, ".config", "legion", "envoy.json");
-    const profile = path.join(tempDir(), "envoy.json");
-    for (const file of [neutral, profile]) {
-      const config = readEnvoyConfig(file, { HOME: home }, { cwd: tempDir() });
-      expect(config.dispatch).toEqual({});
-      expect(config.envoy).toEqual({});
-      expect(config.error).toBeNull();
-      expect(config.notice).toBe(
-        `no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is no longer read: move it to ${neutral}`
-      );
-    }
-    // With the neutral file in place, the old one is not mentioned.
-    writeFile(neutral, { dispatch: { enabled: false } });
-    expect(readEnvoyConfig(profile, { HOME: home }, { cwd: tempDir() }).notice).toBe(
-      `no envoy.json at ${profile}: Dispatch and Envoy are off`
+    const config = readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() });
+    expect(config).toMatchObject({ dispatch: {}, envoy: {}, error: null });
+    expect(config.notice).toBe(
+      `no envoy.json at ${neutral}: Dispatch and Envoy are off; ${old} is no longer read: move it to ${neutral}`
     );
+    // Another chosen file is named alone, and the neutral path is not worked out for it, so a
+    // relative XDG_CONFIG_HOME refuses nothing here.
+    const profile = path.join(tempDir(), "envoy.json");
+    for (const env of [{ HOME: home }, { HOME: home, XDG_CONFIG_HOME: "relative/config" }]) {
+      expect(readEnvoyConfig(profile, env, { cwd: tempDir() })).toMatchObject({
+        notice: `no envoy.json at ${profile}: Dispatch and Envoy are off`,
+        error: null,
+      });
+    }
   });
 
-  test("reads both sections as written", () => {
+  test("reads both sections as written, commands included, and runs none of them", () => {
     const home = tempDir();
-    const file = writeFile(path.join(tempDir(), "envoy.json"), {
+    const runs = path.join(home, "runs");
+    const written = {
       $schema: "https://dispatch.example/envoy.schema.json",
-      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "dispatch-token" },
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://dispatch.example",
+        token: `!echo dispatch >> ${runs}; echo x`,
+      },
       envoy: {
         enabled: true,
         url: "http://listener.internal.example:9020",
         natsUrls: ["nats://nats.internal.example:4222"],
-        token: "listener-token",
-        natsSeed: "SUSEED",
+        token: `!echo envoy >> ${runs}; echo y`,
+        natsSeed: `!echo seed >> ${runs}; echo z`,
       },
-    });
-    expect(readEnvoyConfig(file, { HOME: home }, { cwd: tempDir() })).toEqual({
+    };
+    const file = writeFile(path.join(tempDir(), "envoy.json"), written);
+    expect(readEnvoyConfig(file, commandEnvironment(home), { cwd: tempDir() })).toEqual({
       path: file,
-      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "dispatch-token" },
-      envoy: {
-        enabled: true,
-        url: "http://listener.internal.example:9020",
-        natsUrls: ["nats://nats.internal.example:4222"],
-        token: "listener-token",
-        natsSeed: "SUSEED",
-      },
+      dispatch: written.dispatch,
+      envoy: written.envoy,
       checkout: null,
       notice: null,
       error: null,
     });
+    expect(existsSync(runs)).toBe(false);
   });
 
-  test("enabled: false turns that section off and leaves the other", () => {
-    const home = tempDir();
-    const envoy = {
-      enabled: true,
-      url: "http://listener.internal.example:9020",
-      natsUrls: ["nats://nats.internal.example:4222"],
+  test("keeps a checkout's .envoy/envoy.json beside the chosen file", () => {
+    const cwd = tempDir();
+    const own = {
+      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
+      envoy: { enabled: true, natsUrls: ["nats://nats.internal.example:4222"] },
     };
-    const dispatch = { enabled: true, serverUrl: "https://dispatch.example", token: "t" };
-    const dispatchOff = writeFile(path.join(tempDir(), "envoy.json"), {
-      dispatch: { ...dispatch, enabled: false },
-      envoy,
+    const file = writeFile(path.join(tempDir(), "envoy.json"), own);
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      dispatch: { enabled: false },
+      envoy: { natsUrls: ["nats://checkout.internal.example:4222"] },
     });
-    const offDispatch = readEnvoyConfig(dispatchOff, { HOME: home }, { cwd: tempDir() });
-    expect(offDispatch.dispatch).toEqual({ enabled: false });
-    expect(offDispatch.envoy).toEqual(envoy);
-
-    const envoyOff = writeFile(path.join(tempDir(), "envoy.json"), {
-      dispatch,
-      envoy: { ...envoy, enabled: false },
-    });
-    const offEnvoy = readEnvoyConfig(envoyOff, { HOME: home }, { cwd: tempDir() });
-    expect(offEnvoy.dispatch).toEqual(dispatch);
-    expect(offEnvoy.envoy).toEqual({ enabled: false });
-  });
-
-  test("a ! value is its command's trimmed stdout", () => {
-    const home = tempDir();
-    const file = writeFile(path.join(home, "envoy.json"), {
-      dispatch: {
-        enabled: true,
-        serverUrl: "https://dispatch.example",
-        token: `!printf '  dispatch-secret\\n' # ${home}`,
+    expect(readEnvoyConfig(file, { HOME: tempDir() }, { cwd })).toEqual({
+      path: file,
+      dispatch: own.dispatch,
+      envoy: own.envoy,
+      checkout: {
+        path: checkout,
+        dispatch: { enabled: false },
+        envoy: { natsUrls: ["nats://checkout.internal.example:4222"] },
       },
-      envoy: {
-        enabled: true,
-        natsUrls: ["nats://nats.internal.example:4222"],
-        token: `!echo listener-secret # ${home}`,
-        natsSeed: `!echo SUSEED # ${home}`,
-      },
+      notice: null,
+      error: null,
     });
-    const config = readEnvoyConfig(file, commandEnvironment(home), { cwd: tempDir() });
-    expect(config.error).toBeNull();
-    expect(config.dispatch.token).toBe("dispatch-secret");
-    expect(config.envoy.token).toBe("listener-secret");
-    expect(config.envoy.natsSeed).toBe("SUSEED");
-  });
-
-  test("a command runs once per process, whichever read asks for its value", () => {
-    const home = tempDir();
-    const runs = path.join(home, "runs");
-    const file = writeFile(path.join(home, "envoy.json"), {
-      dispatch: { enabled: true, token: `!echo run >> ${runs}; echo cached-secret` },
-    });
-    for (let read = 0; read < 2; read += 1) {
-      expect(
-        readEnvoyConfig(file, commandEnvironment(home), { cwd: tempDir() }).dispatch.token
-      ).toBe("cached-secret");
-    }
-    expect(readFileSync(runs, "utf-8")).toBe("run\n");
-  });
-
-  test("a command that fails or prints nothing is an error naming the field and the file, never its output", () => {
-    const home = tempDir();
-    const cases: [Record<string, unknown>, string][] = [
-      [
-        { dispatch: { enabled: true, token: `!echo canary-${path.basename(home)}; exit 3` } },
-        "dispatch.token",
-      ],
-      [
-        {
-          envoy: {
-            enabled: true,
-            natsSeed: `!echo canary-${path.basename(home)} >&2; echo canary-${path.basename(home)}; false`,
-          },
-        },
-        "envoy.natsSeed",
-      ],
-      [{ envoy: { enabled: true, token: `!printf '  \\n' # ${home}` } }, "envoy.token"],
-    ];
-    for (const [contents, field] of cases) {
-      const file = writeFile(path.join(tempDir(), "envoy.json"), contents);
-      const config = readEnvoyConfig(file, commandEnvironment(home), { cwd: tempDir() });
-      expect(config.error).toContain(file);
-      expect(config.error).toContain(field);
-      expect(config.error).not.toContain("canary");
-      expect(config.dispatch).toEqual({});
-      expect(config.envoy).toEqual({});
-    }
-  });
-
-  test("a command still running after 10 s is an error naming the field and the file", () => {
-    const home = tempDir();
-    const file = writeFile(path.join(home, "envoy.json"), {
-      dispatch: { enabled: true, token: `!echo canary; sleep 30 # ${home}` },
-    });
-    const started = Date.now();
-    const config = readEnvoyConfig(file, commandEnvironment(home), { cwd: tempDir() });
-    expect(Date.now() - started).toBeLessThan(15_000);
-    expect(config.error).toContain(file);
-    expect(config.error).toContain("dispatch.token");
-    expect(config.error).toContain("10 s");
-    expect(config.error).not.toContain("canary");
-  }, 20_000);
-
-  test("a command whose field a variable overrides, or whose section is off, is not run", () => {
-    const home = tempDir();
-    const runs = path.join(home, "runs");
-    const file = writeFile(path.join(home, "envoy.json"), {
-      dispatch: { enabled: true, token: `!echo dispatch >> ${runs}; echo x` },
-      envoy: {
-        enabled: false,
-        token: `!echo envoy >> ${runs}; echo x`,
-        natsSeed: `!echo seed >> ${runs}; echo x`,
-      },
-    });
-    const config = readEnvoyConfig(
-      file,
-      { ...commandEnvironment(home), DISPATCH_TOKEN: "from-the-environment" },
-      { cwd: tempDir() }
-    );
-    expect(config.error).toBeNull();
-    expect(config.dispatch.token).toBeUndefined();
-    expect(config.envoy).toEqual({ enabled: false });
-    expect(() => readFileSync(runs, "utf-8")).toThrow();
   });
 
   test("an unknown key in either section, or the top-level natsUrls, is refused naming the key", () => {
@@ -331,58 +232,285 @@ describe("readEnvoyConfig", () => {
       "invalid JSON"
     );
   });
+});
 
-  test("a checkout's .envoy/envoy.json merges over the chosen file", () => {
-    const home = tempDir();
-    const cwd = tempDir();
-    const file = writeFile(path.join(tempDir(), "envoy.json"), {
-      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
-      envoy: { enabled: true, natsUrls: ["nats://nats.internal.example:4222"] },
+const dispatchOn = { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" };
+const envoyOn = {
+  enabled: true,
+  url: "http://listener.internal.example:9020",
+  natsUrls: ["nats://nats.internal.example:4222"],
+  token: "listener-token",
+};
+
+describe("each section of envoy.json", () => {
+  test("enabled: false turns that section off and leaves the other", () => {
+    const env = { HOME: tempDir() };
+    const dispatchOff = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: { ...dispatchOn, enabled: false },
+      envoy: envoyOn,
     });
-    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
-      dispatch: { enabled: false },
-      envoy: { natsUrls: ["nats://checkout.internal.example:4222"] },
-    });
-    expect(readEnvoyConfig(file, { HOME: home }, { cwd })).toEqual({
-      path: file,
-      dispatch: { enabled: false },
-      envoy: { enabled: true, natsUrls: ["nats://checkout.internal.example:4222"] },
-      checkout: {
-        path: checkout,
-        dispatch: { enabled: false },
-        envoy: { natsUrls: ["nats://checkout.internal.example:4222"] },
-      },
-      notice: null,
+    const offDispatch = readEnvoyConfig(dispatchOff, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, offDispatch)).toEqual({
+      enabled: false,
+      url: null,
+      token: null,
       error: null,
+    });
+    expect(envoySettings(env, offDispatch)).toMatchObject({
+      enabled: true,
+      token: "listener-token",
+    });
+
+    const envoyOff = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: { ...envoyOn, enabled: false },
+    });
+    const offEnvoy = readEnvoyConfig(envoyOff, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, offEnvoy)).toMatchObject({ enabled: true, token: "user-token" });
+    expect(envoySettings(env, offEnvoy)).toMatchObject({ enabled: false, error: null });
+  });
+});
+
+describe("a ! command in envoy.json", () => {
+  test("is its command's trimmed stdout, run when its section is resolved", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!printf '  dispatch-secret\\n' # ${home}` },
+      envoy: {
+        ...envoyOn,
+        token: `!echo listener-secret # ${home}`,
+        natsSeed: `!echo SUSEED # ${home}`,
+      },
+    });
+    const config = readEnvoyConfig(file, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, config)).toMatchObject({
+      enabled: true,
+      token: "dispatch-secret",
+    });
+    expect(envoySettings(env, config)).toMatchObject({
+      enabled: true,
+      token: "listener-secret",
+      natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${file}` },
     });
   });
 
-  test("a checkout's server without its own token is refused, and so is a command in it", () => {
+  test("runs once per process, its value or its failure kept for every later resolution", () => {
     const home = tempDir();
-    const file = writeFile(path.join(tempDir(), "envoy.json"), {
-      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
-      envoy: {
+    const env = commandEnvironment(home);
+    const runs = path.join(home, "runs");
+    const failures = path.join(home, "failures");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo run >> ${runs}; echo cached-secret` },
+      envoy: { ...envoyOn, token: `!echo run >> ${failures}; exit 1` },
+    });
+    for (let resolution = 0; resolution < 2; resolution += 1) {
+      const config = readEnvoyConfig(file, env, { cwd: tempDir() });
+      expect(dispatchSettings(env, config).token).toBe("cached-secret");
+      expect(envoySettings(env, config)).toMatchObject({ enabled: false });
+    }
+    expect(readFileSync(runs, "utf-8")).toBe("run\n");
+    expect(readFileSync(failures, "utf-8")).toBe("run\n");
+  });
+
+  test("that fails or prints nothing turns off only its own section, naming the field and the file, never its output", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const canary = `canary-${path.basename(home)}`;
+
+    const dispatchFails = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo ${canary}; exit 3` },
+      envoy: envoyOn,
+    });
+    const brokenDispatch = readEnvoyConfig(dispatchFails, env, { cwd: tempDir() });
+    const dispatch = dispatchSettings(env, brokenDispatch);
+    expect(dispatch).toMatchObject({ enabled: false, token: null });
+    expect(dispatch.error).toContain(`${dispatchFails}: dispatch.token's command exited with`);
+    expect(dispatch.error).not.toContain("canary");
+    expect(envoySettings(env, brokenDispatch)).toMatchObject({ enabled: true });
+
+    for (const [field, value] of [
+      ["natsSeed", `!echo ${canary} >&2; echo ${canary}; false`],
+      ["token", `!printf '  \\n' # ${home}`],
+    ] as const) {
+      const envoyFails = writeFile(path.join(tempDir(), "envoy.json"), {
+        dispatch: dispatchOn,
+        envoy: { ...envoyOn, [field]: value },
+      });
+      const brokenEnvoy = readEnvoyConfig(envoyFails, env, { cwd: tempDir() });
+      const envoy = envoySettings(env, brokenEnvoy);
+      if (envoy.enabled) throw new Error(`envoy.${field}'s failing command was accepted`);
+      expect(envoy.error).toContain(`${envoyFails}: envoy.${field}'s command`);
+      expect(envoy.error).not.toContain("canary");
+      expect(dispatchSettings(env, brokenEnvoy)).toEqual({
         enabled: true,
-        url: "http://listener.internal.example:9020",
-        natsUrls: ["nats://nats.internal.example:4222"],
-        token: "listener-token",
+        url: "https://dispatch.example",
+        token: "user-token",
+        error: null,
+      });
+    }
+  });
+
+  test("still running after 10 s is an error naming the field and the file", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo canary; sleep 30 # ${home}` },
+    });
+    const started = Date.now();
+    const error = dispatchSettings(env, readEnvoyConfig(file, env, { cwd: tempDir() })).error;
+    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(error).toBe(`${file}: dispatch.token's command did not finish within 10 s`);
+  }, 20_000);
+
+  test("whose field a variable overrides, or whose section is off, is not run", () => {
+    const home = tempDir();
+    const runs = path.join(home, "runs");
+    const file = writeFile(path.join(home, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: `!echo dispatch >> ${runs}; echo x` },
+      envoy: {
+        ...envoyOn,
+        enabled: false,
+        token: `!echo envoy >> ${runs}; echo x`,
+        natsSeed: `!echo seed >> ${runs}; echo x`,
       },
     });
-    const cases: [unknown, string][] = [
-      [
-        { dispatch: { serverUrl: "https://collector.attacker.test" } },
-        "dispatch.serverUrl requires dispatch.token",
-      ],
-      [{ envoy: { url: "http://collector.attacker.test" } }, "envoy.url requires envoy.token"],
-      [{ dispatch: { token: "!cat ~/.ssh/id_ed25519" } }, "dispatch.token"],
-      [{ envoy: { natsSeed: "!cat ~/.ssh/id_ed25519" } }, "envoy.natsSeed"],
-    ];
-    for (const [contents, problem] of cases) {
-      const cwd = tempDir();
-      const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), contents);
-      const config = readEnvoyConfig(file, { HOME: home }, { cwd });
-      expect(config.error).toContain(checkout);
-      expect(config.error).toContain(problem);
-    }
+    const env = { ...commandEnvironment(home), DISPATCH_TOKEN: "from-the-environment" };
+    const config = readEnvoyConfig(file, env, { cwd: tempDir() });
+    expect(dispatchSettings(env, config)).toMatchObject({ token: "from-the-environment" });
+    expect(envoySettings(env, config)).toMatchObject({ enabled: false, error: null });
+    expect(existsSync(runs)).toBe(false);
+  });
+});
+
+describe("a checkout's .envoy/envoy.json", () => {
+  /** The chosen file holding both sections on, and a checkout holding `contents`. */
+  function withCheckout(contents: unknown) {
+    const cwd = tempDir();
+    const user = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: envoyOn,
+    });
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), contents);
+    return { user, checkout, cwd };
+  }
+
+  test("merges over the chosen file", () => {
+    const { user, cwd } = withCheckout({
+      dispatch: { enabled: false },
+      envoy: { natsUrls: ["nats://checkout.internal.example:4222"] },
+    });
+    const env = { HOME: tempDir() };
+    const config = readEnvoyConfig(user, env, { cwd });
+    expect(dispatchSettings(env, config)).toMatchObject({ enabled: false, error: null });
+    expect(envoySettings(env, config)).toMatchObject({
+      enabled: true,
+      natsUrls: ["nats://checkout.internal.example:4222"],
+      token: "listener-token",
+    });
+  });
+
+  test("an address without its own token is refused, for its own section only", () => {
+    const env = { HOME: tempDir() };
+    const server = withCheckout({ dispatch: { serverUrl: "https://collector.attacker.test" } });
+    const serverConfig = readEnvoyConfig(server.user, env, { cwd: server.cwd });
+    expect(dispatchSettings(env, serverConfig)).toMatchObject({
+      enabled: false,
+      token: null,
+      error: `${server.checkout}: dispatch.serverUrl requires dispatch.token in the same file`,
+    });
+    expect(envoySettings(env, serverConfig)).toMatchObject({ enabled: true });
+
+    const listener = withCheckout({ envoy: { url: "http://collector.attacker.test" } });
+    const listenerConfig = readEnvoyConfig(listener.user, env, { cwd: listener.cwd });
+    expect(envoySettings(env, listenerConfig)).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${listener.checkout}: envoy.url requires envoy.token in the same file`,
+    });
+    expect(dispatchSettings(env, listenerConfig)).toMatchObject({ enabled: true });
+  });
+
+  test("an address the variables replace is not refused, and the variables are used", () => {
+    const server = withCheckout({ dispatch: { serverUrl: "https://collector.attacker.test" } });
+    const dispatchEnv = {
+      HOME: tempDir(),
+      DISPATCH_URL: "https://other.internal.example",
+      DISPATCH_TOKEN: "environment-token",
+    };
+    const serverConfig = readEnvoyConfig(server.user, dispatchEnv, { cwd: server.cwd });
+    expect(dispatchSettings(dispatchEnv, serverConfig)).toEqual({
+      enabled: true,
+      url: "https://other.internal.example",
+      token: "environment-token",
+      error: null,
+    });
+    expect(envoySettings(dispatchEnv, serverConfig)).toMatchObject({ enabled: true });
+
+    const listener = withCheckout({ envoy: { url: "http://collector.attacker.test" } });
+    const envoyEnv = {
+      HOME: tempDir(),
+      ENVOY_URL: "http://other.internal.example:9020",
+      ENVOY_TOKEN: "environment-token",
+    };
+    const listenerConfig = readEnvoyConfig(listener.user, envoyEnv, { cwd: listener.cwd });
+    expect(envoySettings(envoyEnv, listenerConfig)).toMatchObject({
+      enabled: true,
+      url: "http://other.internal.example:9020",
+      token: "environment-token",
+    });
+    expect(dispatchSettings(envoyEnv, listenerConfig)).toMatchObject({ enabled: true });
+  });
+
+  test("a command in it is refused, for its own section only", () => {
+    const env = { HOME: tempDir() };
+    const token = withCheckout({ dispatch: { token: "!cat ~/.ssh/id_ed25519" } });
+    const tokenConfig = readEnvoyConfig(token.user, env, { cwd: token.cwd });
+    expect(dispatchSettings(env, tokenConfig)).toMatchObject({
+      enabled: false,
+      token: null,
+      error: `${token.checkout}: dispatch.token is a command, which a checkout's envoy.json cannot run`,
+    });
+    expect(envoySettings(env, tokenConfig)).toMatchObject({ enabled: true });
+
+    const seed = withCheckout({ envoy: { natsSeed: "!cat ~/.ssh/id_ed25519" } });
+    const seedConfig = readEnvoyConfig(seed.user, env, { cwd: seed.cwd });
+    expect(envoySettings(env, seedConfig)).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${seed.checkout}: envoy.natsSeed is a command, which a checkout's envoy.json cannot run`,
+    });
+    expect(dispatchSettings(env, seedConfig)).toMatchObject({ enabled: true });
+  });
+
+  test("its enabled: false yields to a variable naming that section's address", () => {
+    const tokenFile = writeFile(path.join(tempDir(), "dispatch-token"), "daemon-token\n");
+    const off = withCheckout({ dispatch: { enabled: false }, envoy: { enabled: false } });
+    const quiet = { HOME: tempDir() };
+    const quietConfig = readEnvoyConfig(off.user, quiet, { cwd: off.cwd });
+    expect(dispatchSettings(quiet, quietConfig)).toMatchObject({ enabled: false, error: null });
+    expect(envoySettings(quiet, quietConfig)).toEqual({
+      enabled: false,
+      notice: `${off.checkout} sets envoy.enabled to false: Envoy is off`,
+      error: null,
+    });
+
+    const daemon = {
+      HOME: tempDir(),
+      DISPATCH_URL: "https://daemon.internal.example",
+      DISPATCH_TOKEN_FILE: tokenFile,
+      ENVOY_NATS_URL: "nats://daemon.internal.example:4222",
+    };
+    const daemonConfig = readEnvoyConfig(off.user, daemon, { cwd: off.cwd });
+    expect(dispatchSettings(daemon, daemonConfig)).toEqual({
+      enabled: true,
+      url: "https://daemon.internal.example",
+      token: "daemon-token",
+      error: null,
+    });
+    expect(envoySettings(daemon, daemonConfig)).toMatchObject({
+      enabled: true,
+      natsUrls: ["nats://daemon.internal.example:4222"],
+    });
   });
 });

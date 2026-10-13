@@ -17,12 +17,9 @@ export type EnvoyConfigEnvironment = {
   readonly PI_CODING_AGENT_DIR?: string | undefined;
   readonly CLAUDE_CONFIG_DIR?: string | undefined;
   readonly OPENCODE_CONFIG_DIR?: string | undefined;
-  readonly DISPATCH_TOKEN?: string | undefined;
-  readonly DISPATCH_TOKEN_FILE?: string | undefined;
-  readonly ENVOY_TOKEN?: string | undefined;
-  readonly ENVOY_TOKEN_FILE?: string | undefined;
-  readonly NATS_NKEY_SEED?: string | undefined;
-  readonly NATS_NKEY_SEED_FILE?: string | undefined;
+  readonly DISPATCH_URL?: string | undefined;
+  readonly ENVOY_URL?: string | undefined;
+  readonly ENVOY_NATS_URL?: string | undefined;
 } & Readonly<Record<string, string | undefined>>;
 
 /** How long a `!` command may run before its field is an error. */
@@ -33,17 +30,17 @@ function setValue(value: string | undefined): string | undefined {
   return value === undefined || value === "" ? undefined : value;
 }
 
-/** `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`, the file that belongs to no harness. A
- * relative `XDG_CONFIG_HOME` is invalid under the XDG Base Directory spec and is refused. */
-function neutralConfigPath(env: EnvoyConfigEnvironment): string {
+/** `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`, the file that belongs to no harness, or
+ * the refusal of a relative `XDG_CONFIG_HOME`, which the XDG Base Directory spec makes invalid. */
+function neutralConfig(env: EnvoyConfigEnvironment): { path: string } | { error: string } {
   const xdgConfigHome = setValue(env.XDG_CONFIG_HOME);
   if (xdgConfigHome !== undefined && !path.isAbsolute(xdgConfigHome)) {
-    throw new Error(`XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path`);
+    return { error: `XDG_CONFIG_HOME is ${xdgConfigHome}, which is not an absolute path` };
   }
   // env is the call's one source of truth: os.homedir() alone is not a seam, since Bun resolves it
   // once at startup and ignores later HOME changes.
   const configHome = xdgConfigHome ?? path.join(setValue(env.HOME) ?? homedir(), ".config");
-  return path.resolve(configHome, "legion", "envoy.json");
+  return { path: path.resolve(configHome, "legion", "envoy.json") };
 }
 
 /** The omp profile's directory: `PI_CODING_AGENT_DIR` when `OMP_PROFILE` names a profile other
@@ -86,7 +83,9 @@ export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironme
   const directory = harnessDirectory(harness, env);
   if (directory !== undefined) return path.resolve(directory, "envoy.json");
   if (handed !== undefined) return path.resolve(handed);
-  return neutralConfigPath(env);
+  const neutral = neutralConfig(env);
+  if ("error" in neutral) throw new Error(neutral.error);
+  return neutral.path;
 }
 
 // Strict per section, URL-shaped addresses, tolerant top level. The Dispatch server reads the
@@ -135,32 +134,52 @@ export interface CheckoutEnvoyConfig {
 }
 
 /**
- * One envoy.json, read. `dispatch` and `envoy` are the checkout's `.envoy/envoy.json` merged over
- * the chosen file, key by key; a section off (`enabled: false`) reads as `{ enabled: false }`. A
- * `!` value has been replaced by its command's output, except where a variable overrides that
- * field or its section is off: such a command is not run, and the field reads as unset.
+ * One envoy.json and the checkout's file beside it, as written: a `!` value is still its command,
+ * which only the section's own resolver runs (`dispatchSettings`, `envoySettings`), and only when
+ * that section uses the value.
  */
 export interface EnvoyConfig {
   /** The file the harness rule chose (`envoyConfigPath`). */
   readonly path: string;
+  /** The chosen file's sections. */
   readonly dispatch: DispatchFileSettings;
   readonly envoy: EnvoyFileSettings;
   /** The checkout's own file, when the working directory has one. */
   readonly checkout: CheckoutEnvoyConfig | null;
   /** Set when the chosen file does not exist: both sections are then off in the file. */
   readonly notice: string | null;
-  /** Set when a file cannot be read or used: both sections are then empty. */
+  /** Set when a file cannot be read or is not valid: both sections are then empty. */
   readonly error: string | null;
 }
 
-/** Whether a variable overriding `dispatch.token` is set, as `resolveDispatchConfig` reads it. */
-export function dispatchTokenVariableSet(env: EnvoyConfigEnvironment): boolean {
-  return env.DISPATCH_TOKEN_FILE !== undefined || env.DISPATCH_TOKEN !== undefined;
-}
+/** Whether a section's file settings count: a file that turns it off, else whether
+ * `enabled: true` stands once the checkout merges over the chosen file. */
+export type SectionSwitch =
+  | { readonly offBy: string }
+  | { readonly offBy: null; readonly enabled: boolean };
 
-/** Whether a variable overriding `envoy.token` is set, as `envoySettings` reads it. */
-export function envoyTokenVariableSet(env: EnvoyConfigEnvironment): boolean {
-  return setValue(env.ENVOY_TOKEN_FILE) !== undefined || setValue(env.ENVOY_TOKEN) !== undefined;
+/**
+ * A section's switch. The chosen file's `enabled: false` turns the section off whatever the
+ * variables say. A checkout's `enabled: false` does only while no variable names that section's
+ * address (`DISPATCH_URL`; `ENVOY_URL` or `ENVOY_NATS_URL`), so a repository cannot turn off what
+ * the session's environment configured.
+ */
+export function sectionSwitch(
+  config: EnvoyConfig,
+  section: "dispatch" | "envoy",
+  env: EnvoyConfigEnvironment
+): SectionSwitch {
+  const own = config[section].enabled;
+  if (own === false) return { offBy: config.path };
+  const checkout = config.checkout;
+  const theirs = checkout?.[section].enabled;
+  if (checkout === null || theirs === undefined) return { offBy: null, enabled: own === true };
+  if (theirs) return { offBy: null, enabled: true };
+  const addressNamed =
+    section === "dispatch"
+      ? env.DISPATCH_URL !== undefined
+      : setValue(env.ENVOY_URL) !== undefined || setValue(env.ENVOY_NATS_URL) !== undefined;
+  return addressNamed ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
 }
 
 type ParsedFile =
@@ -207,20 +226,13 @@ function parseFile(filePath: string): ParsedFile {
   return { kind: "valid", settings: parsed.data };
 }
 
-/** Values of `!` commands already run in this process, by command. */
-const commandValues = new Map<string, string>();
+/** What a `!` command came to: its value, or why it gave none. */
+type CommandOutcome = { readonly value: string } | { readonly failure: string };
 
-/** A `!` value's command output: run under `/bin/sh -c` with `env`, at most 10 s, its trimmed
- * stdout the value. Neither stream ever reaches an error or a log. */
-function commandValue(
-  value: string,
-  field: string,
-  filePath: string,
-  env: EnvoyConfigEnvironment
-): string {
-  const command = value.slice(1);
-  const cached = commandValues.get(command);
-  if (cached !== undefined) return cached;
+/** The outcome of every `!` command already run in this process, by command. */
+const commandOutcomes = new Map<string, CommandOutcome>();
+
+function runCommand(command: string, env: EnvoyConfigEnvironment): CommandOutcome {
   const childEnv: Record<string, string> = {};
   for (const [name, variable] of Object.entries(env)) {
     if (variable !== undefined) childEnv[name] = variable;
@@ -235,88 +247,66 @@ function commandValue(
       timeout: COMMAND_TIMEOUT_MS,
     });
   } catch (error) {
-    throw new Error(`${filePath}: ${field}'s command could not start: ${messageFor(error)}`);
+    return { failure: `could not start: ${messageFor(error)}` };
   }
   if (result.exitedDueToTimeout) {
-    throw new Error(
-      `${filePath}: ${field}'s command did not finish within ${COMMAND_TIMEOUT_MS / 1000} s`
-    );
+    return { failure: `did not finish within ${COMMAND_TIMEOUT_MS / 1000} s` };
   }
   if (!result.success) {
-    const status = result.signalCode ?? `status ${result.exitCode}`;
-    throw new Error(`${filePath}: ${field}'s command exited with ${status}`);
+    return { failure: `exited with ${result.signalCode ?? `status ${result.exitCode}`}` };
   }
-  const output = result.stdout.toString().trim();
-  if (output.length === 0) throw new Error(`${filePath}: ${field}'s command printed nothing`);
-  commandValues.set(command, output);
-  return output;
+  const value = result.stdout.toString().trim();
+  return value.length === 0 ? { failure: "printed nothing" } : { value };
 }
 
-/** A field's value: as written, or its command's output when it starts with `!` and `runs`;
- * unset for a command that does not run. */
-function fieldValue(
-  value: string | undefined,
-  runs: boolean,
+/**
+ * A value from the chosen file: as written, or, for one starting with `!`, its command's trimmed
+ * stdout. The command runs under `/bin/sh -c` with `env`, for at most 10 s, once per process: its
+ * outcome, value or failure, is kept by command. A non-zero exit, a timeout or empty output throws
+ * naming the field and the file; neither stream ever reaches an error or a log.
+ */
+export function fileValue(
+  value: string,
   field: string,
   filePath: string,
   env: EnvoyConfigEnvironment
-): string | undefined {
-  if (value === undefined || !value.startsWith("!")) return value;
-  return runs ? commandValue(value, field, filePath, env) : undefined;
+): string {
+  if (!value.startsWith("!")) return value;
+  const command = value.slice(1);
+  let outcome = commandOutcomes.get(command);
+  if (outcome === undefined) {
+    outcome = runCommand(command, env);
+    commandOutcomes.set(command, outcome);
+  }
+  if ("failure" in outcome) throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
+  return outcome.value;
 }
 
-/** A checkout's file: commands refused, and an address only with the token written beside it. */
-function checkoutProblem(
-  checkout: CheckoutEnvoyConfig,
-  dispatch: DispatchFileSettings,
-  envoy: EnvoyFileSettings
-): string | null {
-  const commands: [string, string | undefined][] = [
-    ["dispatch.token", checkout.dispatch.token],
-    ["envoy.token", checkout.envoy.token],
-    ["envoy.natsSeed", checkout.envoy.natsSeed],
-  ];
-  for (const [field, value] of commands) {
-    if (value?.startsWith("!")) {
-      return `${checkout.path}: ${field} is a command, which a checkout's envoy.json cannot run`;
-    }
-  }
-  if (
-    dispatch.enabled === true &&
-    checkout.dispatch.serverUrl !== undefined &&
-    !checkout.dispatch.token
-  ) {
-    return `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`;
-  }
-  if (envoy.enabled === true && checkout.envoy.url !== undefined && !checkout.envoy.token) {
-    return `${checkout.path}: envoy.url requires envoy.token in the same file`;
-  }
-  return null;
+/** The refusal of a `!` value in a checkout's file, which the repository controls. */
+export function checkoutCommandRefusal(checkoutPath: string, field: string): string {
+  return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 
 function failed(filePath: string, error: string): EnvoyConfig {
   return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error };
 }
 
-/** The notice for a chosen file that does not exist, naming the old OpenCode file when it is still
- * there and the neutral file is not. */
+/** The notice for a chosen file that does not exist. When that file is the neutral one and the old
+ * OpenCode file is still there, it names both and says to move it. */
 function missingNotice(filePath: string, env: EnvoyConfigEnvironment): string {
   const notice = `no envoy.json at ${filePath}: Dispatch and Envoy are off`;
+  const neutral = neutralConfig(env);
+  if ("error" in neutral || neutral.path !== path.resolve(filePath)) return notice;
   const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
-  const neutral = neutralConfigPath(env);
-  if (!existsSync(old) || existsSync(neutral)) return notice;
-  return `${notice}; ${old} is no longer read: move it to ${neutral}`;
+  if (!existsSync(old)) return notice;
+  return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
 }
 
 /**
  * Read the envoy.json at `filePath` (`envoyConfigPath`) and the checkout's `.envoy/envoy.json`
- * under `cwd`, which merges over it. A missing chosen file sets `notice`; a file that cannot be
- * read, is not valid, or whose `!` command fails sets `error`, naming the file and the key.
- *
- * A `token` or `natsSeed` value starting with `!` is a command, run once per process (see
- * `EnvoyConfig` for when it is not run at all). Only the chosen file may hold one: a checkout's
- * file is the repository's, so its commands are refused, and its `dispatch.serverUrl` or
- * `envoy.url` is refused without the token written beside it.
+ * under `cwd`, which its section's resolver merges over it. Runs no command. A missing chosen file
+ * sets `notice`; a file that cannot be read or is not valid sets `error`, naming the file and the
+ * key.
  */
 export function readEnvoyConfig(
   filePath: string,
@@ -329,52 +319,20 @@ export function readEnvoyConfig(
   const checkoutFile =
     checkoutPath === path.resolve(filePath) ? { kind: "absent" as const } : parseFile(checkoutPath);
   if (checkoutFile.kind === "invalid") return failed(filePath, checkoutFile.reason);
-
   const own: EnvoyFile = chosen.kind === "valid" ? chosen.settings : {};
-  const checkout: CheckoutEnvoyConfig | null =
-    checkoutFile.kind === "valid"
-      ? {
-          path: checkoutPath,
-          dispatch: checkoutFile.settings.dispatch ?? {},
-          envoy: checkoutFile.settings.envoy ?? {},
-        }
-      : null;
-  const mergedDispatch: DispatchFileSettings = { ...own.dispatch, ...checkout?.dispatch };
-  const mergedEnvoy: EnvoyFileSettings = { ...own.envoy, ...checkout?.envoy };
-  if (checkout !== null) {
-    const problem = checkoutProblem(checkout, mergedDispatch, mergedEnvoy);
-    if (problem !== null) return failed(filePath, problem);
-  }
-
-  let dispatch: DispatchFileSettings = { enabled: false };
-  let envoy: EnvoyFileSettings = { enabled: false };
-  let notice: string | null = null;
-  try {
-    if (mergedDispatch.enabled !== false) {
-      const { token, ...rest } = mergedDispatch;
-      const runs = !dispatchTokenVariableSet(env);
-      const value = fieldValue(token, runs, "dispatch.token", filePath, env);
-      dispatch = value === undefined ? rest : { ...rest, token: value };
-    }
-    if (mergedEnvoy.enabled !== false) {
-      const { token, natsSeed, ...rest } = mergedEnvoy;
-      const on = mergedEnvoy.enabled === true;
-      const tokenRuns = on && !envoyTokenVariableSet(env);
-      // As natsSeedFromEnvironment reads them: a set variable, even an empty one, overrides.
-      const seedRuns =
-        on && env.NATS_NKEY_SEED_FILE === undefined && env.NATS_NKEY_SEED === undefined;
-      const tokenValue = fieldValue(token, tokenRuns, "envoy.token", filePath, env);
-      const seedValue = fieldValue(natsSeed, seedRuns, "envoy.natsSeed", filePath, env);
-      envoy = {
-        ...rest,
-        ...(tokenValue === undefined ? {} : { token: tokenValue }),
-        ...(seedValue === undefined ? {} : { natsSeed: seedValue }),
-      };
-    }
-    if (chosen.kind === "absent") notice = missingNotice(filePath, env);
-  } catch (error) {
-    return failed(filePath, messageFor(error));
-  }
-
-  return { path: filePath, dispatch, envoy, checkout, notice, error: null };
+  return {
+    path: filePath,
+    dispatch: own.dispatch ?? {},
+    envoy: own.envoy ?? {},
+    checkout:
+      checkoutFile.kind === "valid"
+        ? {
+            path: checkoutPath,
+            dispatch: checkoutFile.settings.dispatch ?? {},
+            envoy: checkoutFile.settings.envoy ?? {},
+          }
+        : null,
+    notice: chosen.kind === "absent" ? missingNotice(filePath, env) : null,
+    error: null,
+  };
 }

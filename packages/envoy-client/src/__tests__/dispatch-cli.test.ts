@@ -710,6 +710,17 @@ describe("the dispatch CLI's envoy.json", () => {
     expect(code).toBe(2);
     expect(requests).toEqual([]);
   });
+
+  test("a file that turns Dispatch off says so and exits 2, sending nothing", async () => {
+    const dir = join(stateDir, "off");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "envoy.json");
+    writeFileSync(file, JSON.stringify({ dispatch: { enabled: false } }));
+    const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
+    expect(stdout).toBe(`dispatch: ${file} turns Dispatch off (dispatch.enabled is false)\n`);
+    expect(code).toBe(2);
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("fitOutput", () => {

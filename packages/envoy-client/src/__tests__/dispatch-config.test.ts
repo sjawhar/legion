@@ -303,6 +303,62 @@ describe("resolveDispatchConfig", () => {
       error: null,
     });
   });
+
+  test("compares DISPATCH_URL with the server of the file the token comes from, never a checkout's server beside another file's token", () => {
+    const home = tempDir();
+    const user = writeUserConfig(home, {
+      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
+    });
+    const cwd = tempDir();
+    mkdirSync(path.join(cwd, ".envoy"), { recursive: true });
+    const checkout = path.join(cwd, ".envoy", "envoy.json");
+    writeFileSync(
+      checkout,
+      JSON.stringify({ dispatch: { serverUrl: "https://staging.internal.example" } })
+    );
+    const env = { HOME: home, DISPATCH_URL: "https://staging.internal.example" };
+
+    expect(resolveDispatchConfig(env, { harness: "command", cwd })).toEqual({
+      enabled: false,
+      url: null,
+      token: null,
+      error: `DISPATCH_URL names https://staging.internal.example, but ${user}'s dispatch.token is for https://dispatch.example; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
+    });
+
+    // The checkout's own token goes with the checkout's own server.
+    writeFileSync(
+      checkout,
+      JSON.stringify({
+        dispatch: { serverUrl: "https://staging.internal.example", token: "repo-token" },
+      })
+    );
+    expect(resolveDispatchConfig(env, { harness: "command", cwd })).toEqual({
+      enabled: true,
+      url: "https://staging.internal.example",
+      token: "repo-token",
+      error: null,
+    });
+  });
+
+  test("a relative XDG_CONFIG_HOME refuses nothing when the harness names its own directory", () => {
+    expect(
+      resolveDispatchConfig(
+        {
+          HOME: tempDir(),
+          XDG_CONFIG_HOME: "relative/config",
+          CLAUDE_CONFIG_DIR: tempDir(),
+          DISPATCH_URL: "https://dispatch.example",
+          DISPATCH_TOKEN: "environment-token",
+        },
+        { harness: "claude", cwd: tempDir() }
+      )
+    ).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "environment-token",
+      error: null,
+    });
+  });
 });
 
 // The one "is Dispatch configured" check every host shares: a configuration that resolves is

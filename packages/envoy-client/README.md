@@ -64,32 +64,39 @@ OpenCode's `$OPENCODE_CONFIG_DIR/envoy.json`. Without that directory it reads th
 then the Oh My Pi, Claude Code and OpenCode directories in that order, then the same neutral file.
 A relative `XDG_CONFIG_HOME` is refused naming its value.
 
-`readEnvoyConfig(path, env, { cwd })` reads that file with a checkout's `<cwd>/.envoy/envoy.json`
-merged over it key by key. Each section is strict: an unknown key is refused naming it, and so is a
-top-level `natsUrls`, which belongs in `envoy.natsUrls`. `enabled: false` turns a section off
-whatever the environment says. A missing file turns both sections off and sets `notice`:
-`no envoy.json at <path>: Dispatch and Envoy are off`, which also names
-`~/.config/opencode/envoy.json` and says to move it while that file exists and the neutral file
-does not; nothing reads it. A file that cannot be read or used sets `error`, naming the file and
-the key.
+`readEnvoyConfig(path, env, { cwd })` reads that file and a checkout's `<cwd>/.envoy/envoy.json`
+as written, running no command. Each section is strict: an unknown key is refused naming it, and
+so is a top-level `natsUrls`, which belongs in `envoy.natsUrls`. A missing file turns both
+sections off and sets `notice`: `no envoy.json at <path>: Dispatch and Envoy are off`; when that
+file is the neutral one and `~/.config/opencode/envoy.json` still exists, the notice names both and
+says to move it. Nothing reads the old file. A file that cannot be read or is not valid sets
+`error`, naming the file and the key, and both sections are then empty.
 
-A `token` or `natsSeed` value starting with `!` is a command: it runs under `/bin/sh -c` for at most
-10 s, once per process, and its trimmed stdout is the value. A non-zero exit, a timeout or empty
-output is an error naming the field and the file, never the output. A command whose field a
-variable overrides, or whose section is off, is not run. A checkout's file is the repository's: a
-command in it is refused, and so is its `dispatch.serverUrl` or `envoy.url` without the token
-written beside it.
+Each section is resolved on its own: `dispatchSettings(env, config)` and `envoySettings(env,
+config)` merge the checkout's section over the chosen file's, key by key, and a failure in one
+section leaves the other as it is. The chosen file's `enabled: false` turns its section off
+whatever the environment says; a checkout's does only while no variable names that section's
+address (`DISPATCH_URL`; `ENVOY_URL` or `ENVOY_NATS_URL`) (`sectionSwitch`). A checkout's
+`dispatch.serverUrl` or `envoy.url` is used only with the token written beside it, and is refused
+without one only when it would be used, that is while no variable replaces it.
 
-`envoySettings(env, config)` (`defaults.ts`) is the Envoy a session uses:
-`{ enabled: true, url, natsUrls, token, natsSeed, heartbeatMs }`, or
-`{ enabled: false, notice, error }`. `ENVOY_URL`, `ENVOY_NATS_URL` (comma-separated),
-`ENVOY_TOKEN_FILE` then `ENVOY_TOKEN`, and `NATS_NKEY_SEED_FILE` then `NATS_NKEY_SEED` each
-override their own field of an enabled section; with no enabled section, `ENVOY_URL` or
-`ENVOY_NATS_URL` alone names an Envoy, which is how a Legion pane gets the one its daemon names. A
-set `_FILE` pointer that cannot be read is an `error`, never a fallback. The file's `envoy.token`
-goes with `ENVOY_URL` only when both name the same origin, and a checkout's `envoy.url` only with
-the checkout's own `envoy.token`. `natsAuthOptions` takes the resolved seed and names its source
-when it is not a user seed; `natsSeedFromEnvironment` resolves one from the two variables alone.
+A `token` or `natsSeed` value starting with `!` is a command (`fileValue`): it runs under
+`/bin/sh -c` for at most 10 s, and its trimmed stdout is the value. It runs only when its
+section's resolver is about to use the value (the section on, no variable overriding the field),
+and once per process: its outcome, value or failure, is kept by command. A non-zero exit, a
+timeout or empty output is an error naming the field and the file, never the output. A checkout's
+file is the repository's, so a command in it is refused.
+
+`envoySettings` is the Envoy a session uses: `{ enabled: true, url, natsUrls, token, natsSeed,
+heartbeatMs }`, or `{ enabled: false, notice, error }`. `ENVOY_URL`, `ENVOY_NATS_URL`
+(comma-separated), `ENVOY_TOKEN_FILE` then `ENVOY_TOKEN`, and `NATS_NKEY_SEED_FILE` then
+`NATS_NKEY_SEED` each override their own field of an enabled section; with no enabled section,
+`ENVOY_URL` or `ENVOY_NATS_URL` alone names an Envoy, which is how a Legion pane gets the one its
+daemon names. The seed is resolved only when there are NATS servers to use it on. A set `_FILE`
+pointer that cannot be read is an `error`, never a fallback. A file's `envoy.token` goes with
+`ENVOY_URL` only when it names the origin of the listener written in the file the token comes
+from. `natsAuthOptions` takes the resolved seed and names its source when it is not a user seed;
+`natsSeedFromEnvironment` resolves one from the two variables alone.
 
 ## Dispatch
 
@@ -142,12 +149,11 @@ and bearer token resolve. `DISPATCH_URL` overrides `dispatch.serverUrl`, which c
 The token resolves from `DISPATCH_TOKEN_FILE` (a path; the trimmed file contents are the token —
 how the Legion daemon hands the bearer to a pane without putting it on argv), then
 `DISPATCH_TOKEN`, then `dispatch.token`. A set `DISPATCH_TOKEN_FILE` that is unreadable or blank
-disables Dispatch and names the path in `error`; it never falls back. The file's token goes with
-`DISPATCH_URL` only when both name the same origin: any other server needs `DISPATCH_TOKEN` or
-`DISPATCH_TOKEN_FILE`, and is refused naming them. A checkout's `dispatch.serverUrl` goes only
-with the `dispatch.token` written beside it, never with a credential from the user's file or the
-environment. Invalid configuration, malformed URLs, and empty tokens leave Dispatch disabled and
-name the failing source in `error`.
+disables Dispatch and names the path in `error`; it never falls back. A file's token goes with
+`DISPATCH_URL` only when it names the origin of the server written in the file the token comes
+from (a checkout's server only beside the checkout's own token): any other server needs
+`DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`, and is refused naming them. Invalid configuration,
+malformed URLs, and empty tokens leave Dispatch disabled and name the failing source in `error`.
 
 ### The `dispatch` command
 
@@ -170,14 +176,15 @@ under Claude Code, `DISPATCH_SESSION_ID` elsewhere); with either missing the com
 naming it, and an empty variable counts as unset. `DISPATCH_SESSION_TITLE`, or the session
 directory's `title` file, names the session on what it writes. It resolves Dispatch as
 `activeDispatchConfig` does with harness `command`; with no envoy.json and no Dispatch in its
-environment it prints that file's notice and exits 2. stdout carries what the model reads: the
-result, one `- picture: <path>` line per image (written under the session directory), the follow
-notice the first time a call follows an ask, and every refusal. It exits 0 on success, 1 when
-Dispatch or the arguments refused the call, and 2 on a usage error, a corrupted `state.json`
-included. Under Claude Code the whole output stays under 25,000 characters: the result text is cut
-to fit, the full text written to a file the output names, and the picture lines and follow notice
-kept. When Dispatch took the call but the session's state (a picture, the ledger, the memory) could
-not be written, the result still prints, with one line saying so.
+environment it prints that file's notice and exits 2, and when a file turns Dispatch off it prints
+`dispatch: <file> turns Dispatch off (dispatch.enabled is false)` and exits 2. stdout carries what
+the model reads: the result, one `- picture: <path>` line per image (written under the session
+directory), the follow notice the first time a call follows an ask, and every refusal. It exits 0
+on success, 1 when Dispatch or the arguments refused the call, and 2 on a usage error, a corrupted
+`state.json` included. Under Claude Code the whole output stays under 25,000 characters: the
+result text is cut to fit, the full text written to a file the output names, and the picture lines
+and follow notice kept. When Dispatch took the call but the session's state (a picture, the
+ledger, the memory) could not be written, the result still prints, with one line saying so.
 
 `dispatch-session-state.ts` keeps one directory per session under `DISPATCH_STATE_DIR` (default
 `<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
