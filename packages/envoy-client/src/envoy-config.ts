@@ -65,34 +65,37 @@ function neutralConfig(env: EnvoyConfigEnvironment): { path: string } | { error:
   return { path: path.resolve(configHome, "legion", "envoy.json") };
 }
 
-/** The omp profile's directory: `PI_CODING_AGENT_DIR` when `OMP_PROFILE` names a profile other
- * than `default`. */
-function ompProfileDirectory(env: EnvoyConfigEnvironment): string | undefined {
-  const profile = nonEmpty(env.OMP_PROFILE);
-  return profile === undefined || profile === "default"
-    ? undefined
-    : absolute("PI_CODING_AGENT_DIR", nonEmpty(env.PI_CODING_AGENT_DIR));
+/** The variable naming each plugin's own directory. */
+const HARNESS_DIRECTORY_VARIABLE = {
+  omp: "PI_CODING_AGENT_DIR",
+  claude: "CLAUDE_CONFIG_DIR",
+  opencode: "OPENCODE_CONFIG_DIR",
+} as const;
+
+type PluginHarness = keyof typeof HARNESS_DIRECTORY_VARIABLE;
+
+const PLUGIN_HARNESSES = Object.keys(HARNESS_DIRECTORY_VARIABLE) as readonly PluginHarness[];
+
+/** The directory a plugin's harness names, as written: Oh My Pi's `PI_CODING_AGENT_DIR` when
+ * `OMP_PROFILE` names a profile other than `default`, Claude Code's `CLAUDE_CONFIG_DIR`,
+ * OpenCode's `OPENCODE_CONFIG_DIR`. */
+function namedDirectory(harness: PluginHarness, env: EnvoyConfigEnvironment): string | undefined {
+  if (harness === "omp") {
+    const profile = nonEmpty(env.OMP_PROFILE);
+    if (profile === undefined || profile === "default") return undefined;
+  }
+  return nonEmpty(env[HARNESS_DIRECTORY_VARIABLE[harness]]);
 }
 
+/** The directory `harness` reads its envoy.json from, refused when relative: a plugin's own
+ * (`namedDirectory`), or for a command the first one named of Oh My Pi's, Claude Code's and
+ * OpenCode's, in that order. */
 function harnessDirectory(harness: EnvoyHarness, env: EnvoyConfigEnvironment): string | undefined {
-  switch (harness) {
-    case "omp":
-      return ompProfileDirectory(env);
-    case "claude":
-      return absolute("CLAUDE_CONFIG_DIR", nonEmpty(env.CLAUDE_CONFIG_DIR));
-    case "opencode":
-      return absolute("OPENCODE_CONFIG_DIR", nonEmpty(env.OPENCODE_CONFIG_DIR));
-    case "command":
-      return (
-        ompProfileDirectory(env) ??
-        absolute("CLAUDE_CONFIG_DIR", nonEmpty(env.CLAUDE_CONFIG_DIR)) ??
-        absolute("OPENCODE_CONFIG_DIR", nonEmpty(env.OPENCODE_CONFIG_DIR))
-      );
-    default: {
-      const unknown: never = harness;
-      throw new Error(`unknown harness ${String(unknown)}`);
-    }
+  for (const plugin of harness === "command" ? PLUGIN_HARNESSES : [harness]) {
+    const directory = namedDirectory(plugin, env);
+    if (directory !== undefined) return absolute(HARNESS_DIRECTORY_VARIABLE[plugin], directory);
   }
+  return undefined;
 }
 
 /**
@@ -428,21 +431,14 @@ function oldUserFileNotice(filePath: string, env: EnvoyConfigEnvironment): strin
     return `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
   }
 
-  const profileDirectories = [
-    nonEmpty(env.OMP_PROFILE) !== undefined && nonEmpty(env.OMP_PROFILE) !== "default"
-      ? nonEmpty(env.PI_CODING_AGENT_DIR)
-      : undefined,
-    nonEmpty(env.CLAUDE_CONFIG_DIR),
-    nonEmpty(env.OPENCODE_CONFIG_DIR),
-  ];
-  if (
-    profileDirectories.some(
-      (directory) =>
-        directory !== undefined &&
-        path.isAbsolute(directory) &&
-        selected === path.resolve(directory, "envoy.json")
-    )
-  ) {
+  // A relative directory chose no file here (`harnessDirectory` refuses it), so it is skipped.
+  const profileFile = PLUGIN_HARNESSES.map((harness) => namedDirectory(harness, env)).some(
+    (directory) =>
+      directory !== undefined &&
+      path.isAbsolute(directory) &&
+      selected === path.resolve(directory, "envoy.json")
+  );
+  if (profileFile) {
     return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
   }
 
