@@ -4,12 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
@@ -17,8 +21,11 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	corev1client "k8s.io/client-go/kubernetes/typed/core/v1"
+	"k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -353,5 +360,106 @@ func TestLaunchesInFlightAtARestartOutwaitTheReconnectingLaunchersReads(t *testi
 		if reads := g.secretReads[name]; reads != 1 {
 			t.Errorf("%s was read %d times over %d hellos of %d launchers, want once", name, reads, sent.Load(), len(hellos))
 		}
+	}
+}
+
+// After a restart, a launcher Secret whose read failed is not read again for credentialRetry: the
+// launcher's hellos meanwhile are refused without a request, and the first hello after it reads the
+// Secret again and is accepted.
+func TestAFailedLauncherCredentialReadHoldsOffTheNextForTheRetryInterval(t *testing.T) {
+	g := newRig(t, nil)
+	loc := g.spawn(workerSpec(t))
+	name := roleSecretName(loc.Sandbox.Name, claim.RoleTester)
+	hello := shimwire.LauncherHello{
+		Token: string(g.secret(name).Data[LauncherTokenFile]), Sandbox: loc.Sandbox.Name, Role: string(claim.RoleTester),
+		PodUID: loc.Sandbox.PodUID, LauncherID: "l-1",
+	}
+	var reads atomic.Int32
+	var failing atomic.Bool
+	failing.Store(true)
+	g.kube.PrependReactor("get", "secrets", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if a.(k8stesting.GetAction).GetName() != name {
+			return false, nil, nil
+		}
+		reads.Add(1)
+		if failing.Load() {
+			return true, nil, apierrors.NewInternalError(errors.New("etcdserver: request timed out"))
+		}
+		return false, nil, nil
+	})
+	accept := secondRuntime(t, g, func(*Options) {})().LauncherResolver()
+
+	for range 5 {
+		if handler, _ := accept(hello); handler != nil {
+			t.Fatal("the launcher was accepted while its Secret could not be read")
+		}
+	}
+	if got := reads.Load(); got != 1 {
+		t.Fatalf("five hellos read the Secret %d times, want once", got)
+	}
+	g.advance(credentialRetry - time.Second)
+	if handler, _ := accept(hello); handler != nil || reads.Load() != 1 {
+		t.Fatalf("a hello inside the retry interval: accepted %t after %d reads, want refused without a read", handler != nil, reads.Load())
+	}
+	failing.Store(false)
+	g.advance(time.Second)
+	if handler, reason := accept(hello); handler == nil {
+		t.Fatalf("the first hello after the retry interval was refused: %s", reason)
+	}
+	if got := reads.Load(); got != 2 {
+		t.Fatalf("the Secret was read %d times, want once more after the retry interval", got)
+	}
+}
+
+// The runtime's clients share one limiter at 50 requests a second with a burst of 100, whatever
+// rate the caller's configuration names; the requests' client bounds each request by apiTimeout,
+// and the informers' has no timeout, which would end a watch.
+func TestTheRuntimesClientsShareOneLimiterAtTheDaemonsRate(t *testing.T) {
+	rc := &rest.Config{Host: "https://192.0.2.1", QPS: 5, Burst: 10, Timeout: time.Minute}
+	informers, requests := clientConfigs(rc)
+	if informers.RateLimiter == nil || informers.RateLimiter != requests.RateLimiter {
+		t.Fatalf("informers' limiter %v, requests' %v, want one limiter for both", informers.RateLimiter, requests.RateLimiter)
+	}
+	if qps := requests.RateLimiter.QPS(); qps != clientQPS {
+		t.Errorf("the limiter's rate is %v a second, want %d", qps, clientQPS)
+	}
+	for i := range clientBurst {
+		if !requests.RateLimiter.TryAccept() {
+			t.Fatalf("the limiter let %d requests through at once, want a burst of %d", i, clientBurst)
+		}
+	}
+	if informers.Timeout != 0 || requests.Timeout != apiTimeout {
+		t.Errorf("timeouts: informers %s, requests %s, want none and %s", informers.Timeout, requests.Timeout, apiTimeout)
+	}
+	if rc.RateLimiter != nil || rc.Timeout != time.Minute {
+		t.Errorf("the caller's configuration was changed: %+v", rc)
+	}
+}
+
+// A request's own timeout starts once the client's limiter lets it go (client-go's
+// Request.request), which is what lets a launch wait out a queue longer than apiTimeout: here the
+// limiter holds a request of the requests' client four times its timeout, and it succeeds.
+func TestARequestsTimeoutStartsOnceTheClientsLimiterLetsItGo(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"apiVersion":"v1","kind":"Secret","metadata":{"name":"held","namespace":"legion"}}`)
+	}))
+	t.Cleanup(server.Close)
+	_, requests := clientConfigs(&rest.Config{Host: server.URL})
+	limit := newFakeLimiter(5, 1)
+	if err := limit.Wait(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	requests.RateLimiter, requests.Timeout = limit, 50*time.Millisecond
+	kube, err := kubernetes.NewForConfig(requests)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := time.Now()
+	if _, err := kube.CoreV1().Secrets("legion").Get(context.Background(), "held", metav1.GetOptions{}); err != nil {
+		t.Fatalf("a request the limiter held past its client's timeout failed: %v", err)
+	}
+	if waited := time.Since(started); waited < 150*time.Millisecond {
+		t.Fatalf("the request went after %s, want it held about 200ms by the limiter", waited)
 	}
 }

@@ -362,8 +362,9 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	if g.limit != nil {
 		dyn, kube = limitedDynamic{g.dyn, g.limit}, limitedKube{g.kube, g.limit, g}
 	}
+	fakes := kubeClients{dyn: dyn, kube: kube}
 	if g.prober {
-		p, err := newProber(ctx, dyn, kube, opts)
+		p, err := newProber(ctx, fakes, fakes, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -373,7 +374,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := r.start(ctx, dyn, kube); err != nil {
+		if err := r.start(ctx, fakes, fakes); err != nil {
 			t.Fatal(err)
 		}
 		g.r = r
@@ -426,6 +427,9 @@ func (t generationTracker) specChanged(gvr schema.GroupVersionResource, obj k8sr
 	after, isAfter := obj.(*unstructured.Unstructured)
 	return !isBefore || !isAfter || !reflect.DeepEqual(before.Object["spec"], after.Object["spec"])
 }
+
+// clients are the rig's two fakes, as a runtime's informers' or requests' clients.
+func (g *rig) clients() kubeClients { return kubeClients{dyn: g.dyn, kube: g.kube} }
 
 // advance moves the runtime's clock.
 func (g *rig) advance(d time.Duration) {

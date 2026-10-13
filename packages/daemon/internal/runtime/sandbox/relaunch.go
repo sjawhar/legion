@@ -301,17 +301,13 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
 	for {
-		getting, cancel := call(ctx)
-		u, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
-		cancel()
+		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			manifest, err := encodeSandbox(r.sandboxManifest(l))
 			if err != nil {
 				return nil, err
 			}
-			creating, cancel := call(ctx)
-			createdObject, err := r.sandboxClient().Create(creating, manifest, metav1.CreateOptions{})
-			cancel()
+			createdObject, err := r.sandboxClient().Create(ctx, manifest, metav1.CreateOptions{})
 			if apierrors.IsAlreadyExists(err) && time.Now().Before(deadline) {
 				continue
 			}
@@ -361,9 +357,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {
-			getting, cancel := call(ctx)
-			defer cancel()
-			current, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
+			current, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return true, nil
 			}
@@ -386,9 +380,7 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 			old[pod.UID] = true
 			return false, nil
 		}
-		getting, cancel := call(ctx)
-		defer cancel()
-		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(getting, s.Name, metav1.GetOptions{})
+		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(ctx, s.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -504,8 +496,6 @@ func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMet
 }
 
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
-	ctx, cancel := call(ctx)
-	defer cancel()
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
 	switch {
@@ -603,9 +593,7 @@ func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) (*s
 	if err != nil {
 		return nil, err
 	}
-	patching, cancel := call(ctx)
-	defer cancel()
-	u, err := r.sandboxClient().Patch(patching, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
+	u, err := r.sandboxClient().Patch(ctx, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
 	}

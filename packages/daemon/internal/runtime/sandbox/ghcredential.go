@@ -76,9 +76,7 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 		r.log.Warn("sandbox runtime: github credential refresh failed", "sandbox", sandbox, "role", role, "err", err)
 	}
 	read := func() (*corev1.Secret, error) {
-		reading, cancel := call(ctx)
-		defer cancel()
-		return secrets.Get(reading, name, metav1.GetOptions{})
+		return secrets.Get(ctx, name, metav1.GetOptions{})
 	}
 	secret, err := read()
 	if err != nil {
@@ -103,9 +101,7 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 			secret.Data = map[string][]byte{}
 		}
 		secret.Data[GitHubHostsKey], secret.Data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
-		updating, cancel := call(ctx)
-		_, err = secrets.Update(updating, secret, metav1.UpdateOptions{})
-		cancel()
+		_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
 		if err == nil {
 			break
 		}

@@ -693,7 +693,7 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	}
 	r.rc = rc
 	// The harness's own reads under the runtime identity ask the rules of every namespace, so
-	// they run faster than client-go's default rate; the runtime keeps the default.
+	// they run faster than client-go's default rate; the runtime paces its own (clientQPS).
 	own := rest.CopyConfig(rc)
 	own.QPS, own.Burst = 50, 100
 	if r.kube, err = kubernetes.NewForConfig(own); err != nil {

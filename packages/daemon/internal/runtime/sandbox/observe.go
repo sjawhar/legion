@@ -243,10 +243,8 @@ func containerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never
 // changes its verdict.
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
-	reading, cancel := call(ctx)
-	defer cancel()
 	lines := int64(logTailLines)
-	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
+	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(ctx)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
@@ -277,10 +275,8 @@ func (r *Runtime) events(ctx context.Context, pod *corev1.Pod) string {
 
 // podEvents lists the events the API server holds for pod, this incarnation's only.
 func (r *Runtime) podEvents(ctx context.Context, pod *corev1.Pod) ([]corev1.Event, error) {
-	reading, cancel := call(ctx)
-	defer cancel()
 	selector := fields.Set{"involvedObject.kind": "Pod", "involvedObject.name": pod.Name, "involvedObject.uid": string(pod.UID)}
-	list, err := r.kube.CoreV1().Events(r.namespace).List(reading, metav1.ListOptions{FieldSelector: selector.String()})
+	list, err := r.kube.CoreV1().Events(r.namespace).List(ctx, metav1.ListOptions{FieldSelector: selector.String()})
 	if err != nil {
 		return nil, err
 	}

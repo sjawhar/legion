@@ -311,9 +311,7 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 	for _, role := range l.roles {
 		name := roleSecretName(s.Name, role)
 		read := func() (*corev1.Secret, error) {
-			reading, cancel := call(ctx)
-			defer cancel()
-			secret, err := secrets.Get(reading, name, metav1.GetOptions{})
+			secret, err := secrets.Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("bind launcher secret %s: %w", name, err)
 			}
@@ -331,9 +329,7 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 				secret.Annotations = map[string]string{}
 			}
 			secret.Annotations[launcherPodUIDAnnotation] = uid
-			updating, cancel := call(ctx)
-			_, err = secrets.Update(updating, secret, metav1.UpdateOptions{})
-			cancel()
+			_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
 			if err == nil {
 				break
 			}
@@ -359,9 +355,7 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
 	for _, role := range roles {
 		name := roleSecretName(s.Name, role)
-		reading, cancel := call(ctx)
-		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(reading, name, metav1.GetOptions{})
-		cancel()
+		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, name, metav1.GetOptions{})
 		switch {
 		case apierrors.IsNotFound(err):
 			return false, nil

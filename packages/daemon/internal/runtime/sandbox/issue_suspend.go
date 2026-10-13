@@ -35,9 +35,7 @@ func (r *Runtime) SuspendIssue(ctx context.Context, issue, tree string, release 
 	if err != nil || !act {
 		return err
 	}
-	reading, cancel := call(ctx)
-	object, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-	cancel()
+	object, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil
 	}
@@ -74,9 +72,7 @@ func (r *Runtime) SuspendIssue(ctx context.Context, issue, tree string, release 
 // turn.
 func (r *Runtime) releaseIssue(ctx context.Context, issue, name string) error {
 	for {
-		reading, cancel := call(ctx)
-		object, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-		cancel()
+		object, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil
 		}

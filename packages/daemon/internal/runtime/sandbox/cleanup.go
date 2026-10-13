@@ -76,9 +76,7 @@ func (r *Runtime) handOverSandbox(ctx context.Context, object *unstructured.Unst
 		return err
 	}
 	defer release()
-	reading, cancel := call(ctx)
-	current, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-	cancel()
+	current, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) || err == nil && (current.GetUID() != object.GetUID() || current.GetLabels()[labelTree] != labelValue(tree)) {
 		return nil
 	}
@@ -106,9 +104,7 @@ func (r *Runtime) handOverSandbox(ctx context.Context, object *unstructured.Unst
 
 // treeSandboxes lists tree's issue Sandboxes from the API, the image probe's left out.
 func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructured.Unstructured, error) {
-	reading, cancel := call(ctx)
-	defer cancel()
-	list, err := r.sandboxClient().List(reading, metav1.ListOptions{
+	list, err := r.sandboxClient().List(ctx, metav1.ListOptions{
 		LabelSelector: labelProject + "=" + r.project + "," + labelTree + "=" + labelValue(tree),
 	})
 	if err != nil {
@@ -136,9 +132,7 @@ func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstru
 		PropagationPolicy: &policy,
 		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	}
-	deleting, cancel := call(ctx)
-	err := r.sandboxClient().Delete(deleting, name, options)
-	cancel()
+	err := r.sandboxClient().Delete(ctx, name, options)
 	if err != nil && !apierrors.IsNotFound(err) {
 		if apierrors.IsConflict(err) {
 			return err
@@ -157,9 +151,7 @@ func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {
 	deadline := time.NewTimer(r.bootTimeout)
 	defer deadline.Stop()
 	for {
-		reading, cancel := call(ctx)
-		_, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-		cancel()
+		_, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
