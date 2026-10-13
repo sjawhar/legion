@@ -84,11 +84,6 @@ record=$work/sandboxes
 session_db=legion-e2e4a-db-$project
 session_db_started=
 agent_secrets_reminter=
-# Set by the plugins step once it has copied each manifest aside, so the cleanup trap restores it
-# on every exit, including one this step's own `fail` causes: pi-plugin-prepack.sh packs only a
-# manifest pointed at its built dist bundle, never the checkout's own source-path omp.extensions.
-pi_envoy_manifest_backup=
-pi_legion_manifest_backup=
 check=setup
 torn_down=
 snapshotted=
@@ -124,8 +119,6 @@ cleanup() {
   set +e
   teardown
   [ -z "$session_db_started" ] || docker rm -f "$session_db" >/dev/null 2>&1 || echo "could not remove the scratch session database container $session_db"
-  [ -z "$pi_envoy_manifest_backup" ] || cp "$pi_envoy_manifest_backup" "$root/packages/pi-envoy/package.json"
-  [ -z "$pi_legion_manifest_backup" ] || cp "$pi_legion_manifest_backup" "$root/packages/pi-legion/package.json"
   [ -z "$agent_secrets_reminter" ] || kill "$agent_secrets_reminter" 2>/dev/null
   if [ -z "$compared" ] && [ -n "$snapshotted" ]; then (namespace_clean) || status=1; fi
   rm -rf "$work"
@@ -139,7 +132,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 begin prerequisites
-for tool in go kubectl aws curl ss secrets diff docker jq bun npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go kubectl aws curl ss secrets diff docker jq bun; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the runtime must run as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image pinned by digest (…@sha256:…), not '$image'" ;; esac
@@ -213,42 +206,22 @@ if [ -n "$agent_secrets_account" ]; then
 fi
 
 begin plugins
-# The stale-plugin-install checkpoint's own pack of this checkout's two plugins:
-# scripts/pi-plugin-prepack.sh (both plugins' prepack) refuses to pack the committed manifest's
-# own omp.extensions, the source path a repo checkout loads (extensions/<entry>.ts) — it packs
-# only the built dist bundle, so this step points each manifest at its dist entry exactly as the
-# release workflow does before publishing, packs, and restores the checkout's own manifest at
-# once; the cleanup trap covers every other exit this step itself might take
-# (pi_envoy_manifest_backup, pi_legion_manifest_backup, above). Its negative control names the
-# published pi-legion@9.6.1 by exact version with no pack of its own: the daemon-rendered install
-# script resolves that version to @sjawhar/pi-legion@9.6.1 and bun fetches it from the registry
-# inside the pod.
-# Failing here fails the run before anything is created in the namespace.
+# The stale-plugin-install checkpoint's own pack of this checkout's two plugins, through
+# lib/pack-plugin.sh as every other proof that installs a branch-built plugin packs: it points
+# each manifest at its dist bundle exactly as the release does (scripts/pi-plugin-prepack.sh
+# refuses to pack the committed manifest's own source-path omp.extensions), runs `bun pm pack`
+# with the prepack's build report on stderr, restores the committed manifest on every exit of its
+# own, and prints the tarball's path alone. The checkpoint's negative control names the published
+# pi-legion@9.6.1 by exact version with no pack of its own: the daemon-rendered install script
+# resolves that version to @sjawhar/pi-legion@9.6.1 and bun fetches it from the registry inside
+# the pod. Failing here fails the run before anything is created in the namespace.
 plugins_dir="$work/plugins"
-mkdir -p "$plugins_dir"
 pi_envoy_version=$(jq -r .version "$root/packages/pi-envoy/package.json") || fail "reading packages/pi-envoy/package.json's version failed"
 pi_legion_version=$(jq -r .version "$root/packages/pi-legion/package.json") || fail "reading packages/pi-legion/package.json's version failed"
-
-pi_envoy_manifest_backup="$plugins_dir/pi-envoy-package.json.orig"
-cp "$root/packages/pi-envoy/package.json" "$pi_envoy_manifest_backup"
-jq '.omp.extensions = ["dist/envoy.js"]' "$pi_envoy_manifest_backup" >"$root/packages/pi-envoy/package.json" ||
-  fail "pointing packages/pi-envoy/package.json at its packed bundle failed"
-pi_envoy_tarball_name=$( (cd "$root/packages/pi-envoy" && npm pack --pack-destination "$plugins_dir" --json) | jq -r '.[0].filename') &&
-  [ -n "$pi_envoy_tarball_name" ] && [ "$pi_envoy_tarball_name" != null ] ||
-  fail "npm pack packages/pi-envoy (pi-envoy@$pi_envoy_version) failed"
-cp "$pi_envoy_manifest_backup" "$root/packages/pi-envoy/package.json"
-pi_envoy_tarball="$plugins_dir/$pi_envoy_tarball_name"
-
-pi_legion_manifest_backup="$plugins_dir/pi-legion-package.json.orig"
-cp "$root/packages/pi-legion/package.json" "$pi_legion_manifest_backup"
-jq '.omp.extensions = ["dist/legion.js"]' "$pi_legion_manifest_backup" >"$root/packages/pi-legion/package.json" ||
-  fail "pointing packages/pi-legion/package.json at its packed bundle failed"
-pi_legion_tarball_name=$( (cd "$root/packages/pi-legion" && npm pack --pack-destination "$plugins_dir" --json) | jq -r '.[0].filename') &&
-  [ -n "$pi_legion_tarball_name" ] && [ "$pi_legion_tarball_name" != null ] ||
-  fail "npm pack packages/pi-legion (pi-legion@$pi_legion_version) failed"
-cp "$pi_legion_manifest_backup" "$root/packages/pi-legion/package.json"
-pi_legion_tarball="$plugins_dir/$pi_legion_tarball_name"
-
+pi_envoy_tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" pi-envoy "$plugins_dir/pi-envoy") ||
+  fail "packing packages/pi-envoy (pi-envoy@$pi_envoy_version) failed"
+pi_legion_tarball=$(bash "$root/scripts/e2e/lib/pack-plugin.sh" pi-legion "$plugins_dir/pi-legion") ||
+  fail "packing packages/pi-legion (pi-legion@$pi_legion_version) failed"
 note "packed pi-envoy@$pi_envoy_version ($pi_envoy_tarball) and pi-legion@$pi_legion_version ($pi_legion_tarball) from the checkout"
 pass
 

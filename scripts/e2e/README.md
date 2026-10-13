@@ -516,7 +516,7 @@ LEGION_E2E_SESSION_DB_PORT=<port> \
 in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
-`diff`, `docker` (the scratch session database), `jq`, `bun` and `npm` (the `plugins` step, below),
+`diff`, `docker` (the scratch session database), `jq` and `bun` (the `plugins` step, below),
 and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
 YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
@@ -524,15 +524,17 @@ the harness reads into memory. The harness decodes it there and mints the implem
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
 
-The `plugins` step packs this checkout's own `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` (`npm
-pack`, which runs each package's `prepack`, `scripts/pi-plugin-prepack.sh`, and so needs `bun`
-too) for `stale-plugin-install`'s own Resume; `prepack` packs only a manifest pointed at its built
-`dist` bundle, so the step rewrites each package's `omp.extensions` to it exactly as the release
-workflow does before publishing, and restores the checkout's committed manifest once it has
-packed (and on any exit, through the same trap that removes the scratch session database). That
-checkpoint's negative control packs nothing of its own: it names the published
-`@sjawhar/pi-legion@9.6.1` by exact version, which the daemon-rendered install script resolves to
-`@sjawhar/pi-legion@9.6.1` for `bun add` and bun fetches from the registry inside the pod.
+The `plugins` step packs this checkout's own `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` for
+`stale-plugin-install`'s own Resume through `lib/pack-plugin.sh`, as every proof that installs a
+branch-built plugin does: it rewrites each package's `omp.extensions` to its built `dist` bundle
+exactly as the release workflow does before publishing (`scripts/pi-plugin-prepack.sh` packs no
+other manifest), runs `bun pm pack` with the prepack's build report on stderr, restores the
+committed manifest on every exit of its own, and prints the tarball's path alone (the checkout
+needs `bun install --frozen-lockfile` first, since the bundle resolves `@legion/*` through the
+root's `node_modules`). That checkpoint's negative control packs nothing of its own: it names the
+published `@sjawhar/pi-legion@9.6.1` by exact version, which the daemon-rendered install script
+resolves to `@sjawhar/pi-legion@9.6.1` for `bun add` and bun fetches from the registry inside the
+pod.
 
 Every pod carries the operator route's pod,
 [`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
