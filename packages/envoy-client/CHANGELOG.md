@@ -82,7 +82,8 @@
   harness directory or `XDG_CONFIG_HOME` is refused when the rule uses it), `readEnvoyConfig`,
   which validates both sections strictly, names where JSON stops parsing by line and column alone,
   and runs no command, and `fileValue`, which runs a `token` or `natsSeed` starting with `!` as a
-  command (under `/bin/sh -c` in its own process group for at most 10 s, its exit status deciding,
+  command (under `/bin/sh -c` in the directory of the envoy.json that names it, never the session's
+  working directory, in its own process group for at most 10 s, its exit status deciding,
   once per process with its value or failure kept, never from a checkout's file, a value with
   whitespace inside refused, its output never in an error) when that section's resolver uses it.
 - `envoySettings(env, config, { nats })`: the Envoy a session uses, `{ enabled: true, url,

@@ -138,7 +138,10 @@ server it names, the user's own included; what a checkout cannot do is take the 
 variable's, anywhere.
 
 A `token` or `natsSeed` value starting with `!` is a command (`fileValue`): it runs under
-`/bin/sh -c` in its own process group for at most 10 s, and its trimmed stdout is the value. Its
+`/bin/sh -c` in the directory of the envoy.json that names it, never the session's working
+directory, so `./bin/token` or a directory-configured shim (mise, direnv) resolves against that
+file and not whatever repository the session started in. It runs in its own process group for at
+most 10 s, and its trimmed stdout is the value. Its
 exit status decides: a command that exited 0 has printed its value even when a process it left
 running holds stdout open; a timeout kills the whole group. It runs only when its section's
 resolver is about to use the value (the section on, no variable overriding the field), and once per

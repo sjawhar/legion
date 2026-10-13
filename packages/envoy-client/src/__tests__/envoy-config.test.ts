@@ -1,10 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -767,6 +769,32 @@ describe("a ! command in envoy.json", () => {
       token: "listener-secret",
       natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${file}` },
     });
+  });
+
+  // A command relative to a directory, or one a directory configures (a mise or direnv shim), must
+  // resolve against the file that names it, never whatever repository the session started in.
+  test("runs in its envoy.json's directory, never the session's", () => {
+    const home = tempDir();
+    const env = commandEnvironment(home);
+    const directory = path.join(home, "config");
+    writeFile(path.join(directory, "bin", "token"), "#!/bin/sh\necho relative-secret\n");
+    chmodSync(path.join(directory, "bin", "token"), 0o755);
+    const session = tempDir();
+    writeFile(path.join(session, "bin", "token"), "#!/bin/sh\necho checkout-secret\n");
+    chmodSync(path.join(session, "bin", "token"), 0o755);
+    const file = writeFile(path.join(directory, "envoy.json"), {
+      dispatch: { ...dispatchOn, token: "!./bin/token" },
+      envoy: { ...envoyOn, token: `!pwd # ${home}` },
+    });
+    const original = process.cwd();
+    process.chdir(session);
+    try {
+      const config = readEnvoyConfig(file, env, { cwd: session });
+      expect(dispatchSettings(env, config)).toMatchObject({ token: "relative-secret" });
+      expect(envoySettings(env, config)).toMatchObject({ token: realpathSync(directory) });
+    } finally {
+      process.chdir(original);
+    }
   });
 
   test("runs once per process, its value or its failure kept for every later resolution", () => {

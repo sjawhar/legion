@@ -311,7 +311,7 @@ type CommandOutcome = { readonly value: string } | { readonly failure: string };
 /** The outcome of every `!` command already run in this process, by command. */
 const commandOutcomes = new Map<string, CommandOutcome>();
 
-function runCommand(command: string, env: EnvoyConfigEnvironment): CommandOutcome {
+function runCommand(command: string, env: EnvoyConfigEnvironment, cwd: string): CommandOutcome {
   const childEnv: Record<string, string> = {};
   for (const [name, variable] of Object.entries(env)) {
     if (variable !== undefined) childEnv[name] = variable;
@@ -327,6 +327,7 @@ function runCommand(command: string, env: EnvoyConfigEnvironment): CommandOutcom
     try {
       // Its own process group, so every process the command started is killed with it.
       result = Bun.spawnSync(["/bin/sh", "-c", command], {
+        cwd,
         env: childEnv,
         stdin: "ignore",
         stdout: fd,
@@ -365,13 +366,15 @@ function runCommand(command: string, env: EnvoyConfigEnvironment): CommandOutcom
 
 /**
  * A value from the chosen file: as written, or, for one starting with `!`, its command's trimmed
- * stdout. The command runs under `/bin/sh -c` with `env`, in its own process group, for at most
- * 10 s, once per process: its outcome, value or failure, is kept by command. Its exit status
- * decides, and the wait is for the shell alone: once it exits or runs out of time, every process
- * of its group still running is killed, then its output is read. A non-zero exit, a timeout or
- * empty output throws naming the field and the file. A value with whitespace or a control
- * character inside it, as written or as printed, throws too, since it cannot be sent as one
- * bearer. No error carries the value or either stream.
+ * stdout. The command runs under `/bin/sh -c` with `env`, in the directory of the file that names
+ * it (never the session's working directory, so a relative command or a directory-configured shim
+ * resolves against that file), in its own process group, for at most 10 s, once per process: its
+ * outcome, value or failure, is kept by command. Its exit status decides, and the wait is for the
+ * shell alone: once it exits or runs out of time, every process of its group still running is
+ * killed, then its output is read. A non-zero exit, a timeout or empty output throws naming the
+ * field and the file. A value with whitespace or a control character inside it, as written or as
+ * printed, throws too, since it cannot be sent as one bearer. No error carries the value or either
+ * stream.
  */
 export function fileValue(
   value: string,
@@ -388,7 +391,7 @@ export function fileValue(
   const command = value.slice(1);
   let outcome = commandOutcomes.get(command);
   if (outcome === undefined) {
-    outcome = runCommand(command, env);
+    outcome = runCommand(command, env, path.dirname(path.resolve(filePath)));
     commandOutcomes.set(command, outcome);
   }
   if ("failure" in outcome) throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
