@@ -253,7 +253,8 @@ export function AgentTokensSection(): ReactNode {
             If the file exists, replace its <code>dispatch</code> section with this one and keep the
             rest. A session under a named omp profile, or with <code>CLAUDE_CONFIG_DIR</code> or{" "}
             <code>OPENCODE_CONFIG_DIR</code> set, reads the <code>envoy.json</code> in that
-            directory instead.
+            directory instead; any other session reads the file <code>ENVOY_CONFIG_FILE</code> names
+            when it is set.
           </p>
           <p className={`mt-4 text-sm ${textSecondaryOnSurface}`}>
             Or set these environment variables:
