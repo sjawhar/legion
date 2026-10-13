@@ -1756,9 +1756,11 @@ launching again while you work:
    command waits `--wait`, a minute by default), and a `launching` or `shim_connected` one once its
    agent is ready. For a child issue, suspend its tree's architect too: it runs in the root's pod,
    and its retry of a held phase relaunches the child's failed worker.
-2. `legion claims suspend` stops a role's process but leaves the pod, and its Sandbox `Running`
-   (`Suspend`, `internal/runtime/sandbox/sandbox.go`), so set the Sandbox `Suspended` from the
-   operator's context.
+2. Once each suspend has printed its claim `suspended` (run one that exits 1 again, with a longer
+   `--wait`: it exits 1 when the wait runs out with the suspension still held for the agent's turn,
+   and the patch below would cut that turn off mid-write, leaving a stale lock of its own), set the
+   Sandbox `Suspended` from the operator's context. `legion claims suspend` stops a role's process
+   but leaves the pod, and its Sandbox `Running` (`Suspend`, `internal/runtime/sandbox/sandbox.go`).
 3. Run git or jj writes only once the issue lists no pod. A claim the suspend does not act on —
    `queued`, `launch_uncertain`, `failed`, `retired` — the workflow can still start: a start row
    spawns a queued claim and retries a failed or retired one (`internal/daemon/outbox.go`), which
