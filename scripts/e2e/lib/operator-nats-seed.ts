@@ -15,7 +15,8 @@ import {
  * NATS_NKEY_SEED, else the chosen file's `envoy.natsSeed` when its `envoy.natsUrls` are exactly
  * these servers; undefined when neither names one, for a server that asks for no credential.
  * Throws naming `label` when Envoy resolves none: a file that turns Envoy off or cannot be read, a
- * seed variable that cannot be read, or a file's seed for other servers.
+ * seed variable that cannot be read, or a file's seed for other servers (which leave Envoy on with
+ * inbound messages off, `inboundError`, and are a refusal here all the same).
  */
 export function operatorNatsSeed(
   servers: string,
@@ -25,8 +26,7 @@ export function operatorNatsSeed(
 ): NatsSeed | undefined {
   const named = { ...env, ENVOY_NATS_URL: servers };
   const settings = sessionEnvoySettings(sessionConfigFile("command", named), named, { cwd });
-  if (settings.enabled) return settings.natsSeed;
-  throw new Error(
-    `the NATS seed for ${label} (resolved as ENVOY_NATS_URL): ${settings.error ?? settings.notice}`
-  );
+  const refusal = settings.enabled ? settings.inboundError : (settings.error ?? settings.notice);
+  if (refusal === null) return settings.enabled ? settings.natsSeed : undefined;
+  throw new Error(`the NATS seed for ${label} (resolved as ENVOY_NATS_URL): ${refusal}`);
 }
