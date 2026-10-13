@@ -687,7 +687,12 @@ listing them from the API by the tree's label, in any order (`CleanupTree`,
 `internal/runtime/sandbox/cleanup.go`): each delete carries the listed object's UID and
 resourceVersion plus `foreground` propagation and is awaited until the API no longer has it, the
 listing is read again until it holds none, and a delete the API refuses because the Sandbox changed
-since the listing lists again after a short wait. Agent Sandbox v1.0.3 creates each Sandbox's PVC
+since the listing lists again after a short wait. A Sandbox whose issue now belongs to another tree
+(`Store.IssueTree`: a child carried into a tree of its own, or one whose hand-over is pending) is
+handed over instead of deleted: under the pod's launch turn, one patch fenced to the listed uid and
+resourceVersion relabels it for the issue's tree and suspends it, keeping its volume and the
+sessions on it (`handOverSandbox`), so the new tree's first launch finds it its own whenever that
+launch comes. Agent Sandbox v1.0.3 creates each Sandbox's PVC
 with that Sandbox as its controller owner and `blockOwnerDeletion: true`; foreground deletion keeps
 the owner visible until Kubernetes garbage collection deletes that blocking dependent. The restricted
 daemon has no PVC API verb, so a Sandbox's absence after its foreground delete is the API's
@@ -722,14 +727,17 @@ and `legion claims resume` relaunches its session there. A Sandbox the old tree 
 of whose claims runs any more, is relabelled and suspended in one patch fenced to the uid and
 resourceVersion it read, so the launch waits its pod out; while a claim of the old tree still runs,
 the launch is refused, naming it.
-That holds while the old tree lingers; once its cleanup has run (`CleanupTree`, after the linger),
-the Sandbox and the volume are gone, and the re-pointed claim still names its session (`Retree`,
-`internal/supervise/lifecycle.go`, keeps it: the supervisor knows nothing of Sandboxes, and a check
-there would race the cleanup). The launch then expects the volume to hold the clone
-(`LEGION_EXPECT_ISSUE_VOLUME`), `workspace-init` exits 3 on the fresh volume, the daemon logs
-`the issue's volume was lost` once and relaunches the role as a fresh session on the new volume
-([Volume retention](#volume-retention)): the re-admission runs, from the issue's branch, with the
-old sessions gone — the same path a root re-admitted after its own tree's close takes.
+That holds whether the new tree's start or the old tree's cleanup comes first: a cleanup that finds
+the issue already belongs to another tree hands its Sandbox over rather than deleting it (above),
+and the orphan sweep keeps a Sandbox handed to a tree admission has not opened yet. Only a child
+re-admitted after its old tree's cleanup, one that had left the workflow before the close (a parked
+child the close does not hand over), finds its Sandbox and volume gone; its re-pointed claim still
+names its session (`Retree`, `internal/supervise/lifecycle.go`, keeps it: the supervisor knows
+nothing of Sandboxes, and a check there would race the cleanup). The launch then expects the volume
+to hold the clone (`LEGION_EXPECT_ISSUE_VOLUME`), `workspace-init` exits 3 on the fresh volume, the
+daemon logs `the issue's volume was lost` once and relaunches the role as a fresh session on the new
+volume ([Volume retention](#volume-retention)): the re-admission runs, from the issue's branch, with
+the old sessions gone — the same path a root re-admitted after its own tree's close takes.
 
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
 that Agent Sandbox is installed and refuses a namespace that holds a Sandbox of its project whose pod
@@ -1792,18 +1800,22 @@ ages a volume; it goes with its Sandbox, and the Sandbox goes:
   and its volume until the tree closes;
 - at the tree's close, linger expiry: the tree's cleanup foreground-deletes every remaining issue
   Sandbox of the tree, in any order, each taking the volume it owns (`CleanupTree`,
-  `internal/runtime/sandbox/cleanup.go`);
+  `internal/runtime/sandbox/cleanup.go`), except one whose issue now belongs to another tree (a
+  child carried into a tree of its own, or one whose hand-over is pending), which it hands over to
+  that tree, relabelled and `Suspended`, keeping its volume;
 - by the orphan sweep, for a Sandbox of a tree whose cleanup confirmed or that has no lifecycle:
-  the sweep keeps every Sandbox of a live tree and, deleting a closed tree's, takes its volume with
-  it through the owner reference (`ReconcileOrphans`, `internal/runtime/sandbox/sandbox.go`).
+  the sweep keeps every Sandbox of a live tree, and one handed to a tree admission has not opened
+  yet, and, deleting a closed tree's, takes its volume with it through the owner reference
+  (`ReconcileOrphans`, `internal/runtime/sandbox/sandbox.go`).
 
-A child of a closed tree re-admitted as a root of its own while its old tree lingers keeps its
-Sandbox, its volume and its roles' sessions: the Sandbox is relabelled for the new tree
-(`ensureSandbox`, `internal/runtime/sandbox/relaunch.go`), and the Sandbox alone — the daemon's
-identity has no PVC verb, which is why the claim carries no tree label to go stale. Re-admitted
-after the old tree's cleanup took its Sandbox and volume, it starts fresh on a new volume with
-`the issue's volume was lost` logged once, its re-pointed claims' sessions gone with the volume
-([Kubernetes runtime: the Go daemon on Agent Sandbox](#kubernetes-runtime-the-go-daemon-on-agent-sandbox)
+A child of a closed tree carried into a tree of its own keeps its Sandbox, its volume and its roles'
+sessions: the Sandbox is relabelled for the new tree, by the new tree's launch (`ensureSandbox`,
+`internal/runtime/sandbox/relaunch.go`) or by the old tree's cleanup when that comes first
+(`handOverSandbox`), and the Sandbox alone — the daemon's identity has no PVC verb, which is why the
+claim carries no tree label to go stale. A child re-admitted only after its old tree's cleanup took
+its Sandbox and volume (one that had left the workflow before the close) starts fresh on a new
+volume with `the issue's volume was lost` logged once, its re-pointed claims' sessions gone with the
+volume ([Kubernetes runtime: the Go daemon on Agent Sandbox](#kubernetes-runtime-the-go-daemon-on-agent-sandbox)
 says why `Retree` keeps them). A near-full volume slows jj's
 working-copy snapshot before a push, which is why `legion push`'s grant lives `credential.pushTTL`
 (5 minutes) in place of the usual 60 seconds (`internal/credential/grants.go`;

@@ -5218,12 +5218,12 @@ pass
 begin close
 # At linger expiry the tree's cleanup foreground-deletes every Sandbox of tree 1, each with the
 # volume it owns: the root's and child 2's, kept from child-release (child 1's went with its done).
-# Child 3's, left mid-run, is the cleanup's too unless the child's hand-over has already relaunched
-# it in the child's own tree, relabelling its Suspended Sandbox before the cleanup lists tree 1's
-# (runtime/sandbox/relaunch.go). A Dispatch that knows labels_add takes the hand-over write at the
-# expiry itself, so that race is real there, and the PVC a carried child gets in its own tree carries
-# the same issue label: no check of child 3's PVC holds here. Its Sandbox must stop being tree 1's
-# either way (the tree label read below), and carried-child judges its volume against the uid
+# Child 3's, left mid-run, is handed over instead: its hand-over is pending at the cleanup (production
+# Dispatch rides the write out), so the cleanup relabels its Sandbox for the child's own tree and
+# leaves it Suspended with its volume (runtime/sandbox/cleanup.go handOverSandbox); or the child's
+# own launch relabelled it first (runtime/sandbox/relaunch.go). The PVC a carried child keeps carries
+# the same issue label, so no check of child 3's PVC holds here. Its Sandbox must stop being tree
+# 1's either way (the tree label read below), and carried-child judges its volume against the uid
 # mid-run-child recorded.
 # The Sandboxes are read by the tree label, which the cleanup selects them by; the PVCs by issue,
 # since a claim carries no tree label (the volume is the issue's: its tree changes on re-admission
@@ -5386,16 +5386,21 @@ tree_label=$(op get sandbox "$child3_pod" -o jsonpath='{.metadata.labels.legion\
 [ "$tree_label" = "$child3" ] || fail "$child3's Sandbox $child3_pod carries tree label '$tree_label', want $child3"
 assert_one_bound_pvc "$child3" " in its own tree"
 child3_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's PVC ${found%% *}"
+# Child 3's hand-over is pending from tree 1's linger expiry until it is consumed, and its record
+# names its own tree after, so tree 1's cleanup always finds child 3 belonging to another tree and
+# hands its Sandbox over rather than deleting it (runtime/sandbox/cleanup.go handOverSandbox). The
+# planner must therefore come back on its kept session and volume; a fresh one means the cleanup
+# took the carried child's volume.
 case $came_back in
   fresh)
-    [ "$child3_volume" != "$child3_tree1_volume" ] ||
-      fail "$child3's planner came back as a fresh session, yet its PVC ${found%% *} is still uid $child3_volume, the volume it had in $tree1"
-    came_back_note="came back as a fresh session on a new volume (uid $child3_volume; the lost-volume lines of $child3's claims: $lost3)"
+    fail "$child3's planner came back as a fresh session on PVC uid $child3_volume (the lost-volume lines of $child3's claims: $lost3); want its kept session on uid $child3_tree1_volume, which tree 1's cleanup hands over rather than deletes"
     ;;
   kept)
     [ "$child3_volume" = "$child3_tree1_volume" ] ||
       fail "$child3's planner came back on its kept session, yet its PVC ${found%% *} is uid $child3_volume, not $child3_tree1_volume, the volume it had in $tree1"
-    came_back_note="came back on its kept session and volume (uid $child3_volume), its Sandbox relabelled for $child3 before tree 1's cleanup took it"
+    handed=$(log_lines "sandbox runtime: handed a carried issue's sandbox over to its new tree, keeping its volume" |
+      jq -c --arg sandbox "$child3_pod" 'select(.sandbox == $sandbox)' | grep -c . || true)
+    came_back_note="came back on its kept session and volume (uid $child3_volume), its Sandbox relabelled for $child3 by $([ "$handed" -ge 1 ] && echo "tree 1's cleanup" || echo "its own launch, before tree 1's cleanup")"
     ;;
 esac
 # Either way admission starts the planner in its new tree with its phase's resume task (admit's

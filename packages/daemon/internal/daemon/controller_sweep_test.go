@@ -28,6 +28,9 @@ func (liveTrees) TreeLive(context.Context, string, string) (bool, error)        
 func (liveTrees) IssueRunsElsewhere(context.Context, string, string, string) (string, error) {
 	return "", nil
 }
+func (liveTrees) IssueTree(context.Context, string, string) (string, bool, error) {
+	return "", false, nil
+}
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime
 // keeps the controller's Sandbox exactly while a known claim is the controller's. So the

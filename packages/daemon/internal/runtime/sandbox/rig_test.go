@@ -111,18 +111,33 @@ func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, er
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
 // unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
-// so, and a claim of an issue runs a process only when running names it, in the tree it names.
+// so, a claim of an issue runs a process only when running names it, in the tree it names, and an
+// issue belongs to a tree only when homes says so (unrecorded otherwise).
 type fakeStore struct {
 	mu               sync.Mutex
 	closed, sessions map[string]bool
 	running          map[string]runningClaim
+	homes            map[string]issueHome
 }
 
 // runningClaim is a claim of an issue that runs a process (token:state), in tree.
 type runningClaim struct{ tree, claim string }
 
+// issueHome is the tree an issue's Sandbox belongs to now, and whether that tree has a lifecycle.
+type issueHome struct {
+	tree   string
+	opened bool
+}
+
 func newFakeStore() *fakeStore {
-	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}}
+	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]issueHome{}}
+}
+
+func (s *fakeStore) IssueTree(_ context.Context, _, issue string) (string, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	home := s.homes[issue]
+	return home.tree, home.opened, nil
 }
 
 func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {

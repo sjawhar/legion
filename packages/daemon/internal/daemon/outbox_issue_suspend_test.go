@@ -40,10 +40,12 @@ import (
 // issueSandboxAPI is the Kubernetes API as the daemon's issue closes see it: the project's
 // Sandboxes by name, each with the volume claim it owns, and no pod — there is no controller, so a
 // Sandbox's operatingMode is the daemon's request to the real Sandbox controller, not a claim about
-// that controller's pods. Every Sandbox delete is recorded with its options and, with foreground
-// propagation, takes the PVC the Sandbox owns as garbage collection would; a create gives the new
-// Sandbox a uid and is recorded; a patch applies the daemon's JSON patch; role Secrets are accepted
-// and forgotten; and every PVC request is counted, since the restricted daemon identity has none.
+// that controller's pods. A list honours its label selector's `key=value` terms. Every Sandbox
+// delete is recorded with its options and, with foreground propagation, takes the PVC the Sandbox
+// owns as garbage collection would; a create gives the new Sandbox a uid and is recorded; a patch
+// applies the daemon's JSON patch, refusing one whose uid or resourceVersion test fails; role
+// Secrets are accepted and forgotten; and every PVC request is counted, since the restricted daemon
+// identity has none.
 type issueSandboxAPI struct {
 	mu      sync.Mutex
 	objects map[string]map[string]any
@@ -117,13 +119,17 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.Contains(path, "/secrets/") && r.Method == http.MethodGet:
 		missing()
 	case strings.Contains(path, "/secrets"):
-		// A role Secret written for a new pod: accepted as sent, and kept by nothing here.
+		// A role Secret written for a new pod: accepted, and kept by nothing here. The typed client
+		// may send it as protobuf, so the answer is a Secret of its own rather than the body echoed.
+		_, _ = io.Copy(io.Discard, r.Body)
 		w.WriteHeader(http.StatusCreated)
-		_, _ = io.Copy(w, r.Body)
+		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "v1", "kind": "Secret", "metadata": map[string]any{"name": filepath.Base(path)}})
 	case r.Method == http.MethodGet && strings.HasSuffix(path, "/sandboxes"):
 		items := []any{}
 		for _, object := range a.objects {
-			items = append(items, object)
+			if selected(object, r.URL.Query().Get("labelSelector")) {
+				items = append(items, object)
+			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "SandboxList", "metadata": map[string]any{"resourceVersion": "1"}, "items": items})
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/sandboxes"):
@@ -168,6 +174,7 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			for _, op := range ops {
 				switch {
 				case op.Op == "test" && op.Path == "/metadata/uid" && op.Value == meta["uid"]:
+				case op.Op == "test" && op.Path == "/metadata/resourceVersion" && op.Value == meta["resourceVersion"]:
 				case op.Op == "add" && strings.HasPrefix(op.Path, "/spec/"):
 					spec[strings.TrimPrefix(op.Path, "/spec/")] = op.Value
 					meta["generation"] = meta["generation"].(float64) + 1
@@ -202,6 +209,34 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "unexpected resource", 404)
 	}
+}
+
+// selected is whether object's labels hold every `key=value` term of selector, an empty selector
+// selecting every object.
+func selected(object map[string]any, selector string) bool {
+	labels, _ := object["metadata"].(map[string]any)["labels"].(map[string]any)
+	for _, term := range strings.Split(selector, ",") {
+		if term == "" {
+			continue
+		}
+		key, value, _ := strings.Cut(term, "=")
+		if labels[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+// label is the Sandbox's label key, "" once the API no longer has it.
+func (a *issueSandboxAPI) label(name, key string) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	object, ok := a.objects[name]
+	if !ok {
+		return ""
+	}
+	value, _ := object["metadata"].(map[string]any)["labels"].(map[string]any)[key].(string)
+	return value
 }
 
 // mode is the Sandbox's operatingMode, or "deleted" once the API no longer has it.

@@ -224,3 +224,24 @@ func (s *Store) TreeLive(ctx context.Context, project, tree string) (bool, error
 	}
 	return live, nil
 }
+
+// IssueTree is the tree an issue's Sandbox belongs to now, and whether that tree has ever had a
+// lifecycle. While a hand-over of the issue is pending (a handovers row not cancelled) it is the
+// issue's own key, since a carried child becomes a tree of its own; otherwise it is the tree the
+// issue's record names; "" when the issue is not recorded. A carried child's tree has no lifecycle
+// until admission gives it a slot, which is what opened tells apart from a tree that has closed: the
+// tree cleanup hands a Sandbox whose issue belongs to another tree over to it rather than deleting
+// it, and the orphan sweep keeps a Sandbox handed to a tree not yet opened.
+func (s *Store) IssueTree(ctx context.Context, project, issue string) (string, bool, error) {
+	var tree string
+	var opened bool
+	err := s.pool.QueryRow(ctx, `with home as (select coalesce(
+			(select h.issue from handovers h where h.issue = $2 and not h.cancelled),
+			(select i.tree from issues i where i.key = $2), '') as tree)
+		select home.tree, exists (select 1 from tree_lifecycles l where l.project = $1 and l.tree = home.tree) from home`,
+		project, issue).Scan(&tree, &opened)
+	if err != nil {
+		return "", false, fmt.Errorf("read the tree issue %s belongs to: %w", issue, err)
+	}
+	return tree, opened, nil
+}

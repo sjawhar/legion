@@ -10,6 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -242,5 +243,116 @@ func TestATreeCleanupOfATreeWithNoSandboxWritesNothing(t *testing.T) {
 	}
 	if writes := g.writes(); len(writes) != 0 {
 		t.Fatalf("a tree with no Sandbox wrote %+v", writes)
+	}
+}
+
+// A Sandbox of the tree whose issue now belongs to another tree — a child carried into a tree of its
+// own, recorded under it or with its hand-over still pending — is handed over, not deleted: one
+// patch, fenced to the uid and resourceVersion the census listed, relabels it for the issue's tree
+// and suspends it, and the Sandbox keeps its uid and the PVC it owns, so the new tree's launch finds
+// it its own. The rest of the tree is deleted as before. The orphan sweep then keeps the handed-over
+// Sandbox while its tree has never had a lifecycle (admission has not opened it yet), and sweeps it
+// only once that tree has closed.
+func TestATreeCleanupHandsACarriedIssuesSandboxOverToItsNewTree(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		opened bool
+	}{
+		{"carried into a tree admission opened", true},
+		{"with its hand-over still pending, its tree not opened", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCleanupRig(t)
+			c.store.homes[childIssue] = issueHome{tree: childIssue, opened: tc.opened}
+			if err := c.r.CleanupTree(c.ctx, testTree); err != nil {
+				t.Fatalf("cleanup: %v", err)
+			}
+			if got, want := c.deletes(), []string{"sandboxes " + c.root}; !slices.Equal(got, want) {
+				t.Fatalf("deletes = %v, want %v: the carried child's Sandbox is handed over, not deleted", got, want)
+			}
+			s := c.sandbox(c.child)
+			if s == nil || s.UID != "uid-sandbox-child" || s.Labels[labelTree] != labelValue(childIssue) || s.mode() != modeSuspended {
+				t.Fatalf("the carried child's Sandbox after the cleanup = %+v, want uid-sandbox-child relabelled for %s and Suspended", s, childIssue)
+			}
+			if pvc := c.pvc(c.child); pvc == nil || pvc.UID != "uid-pvc-uid-sandbox-child" {
+				t.Fatalf("the carried child's PVC after the cleanup = %+v, want the one it owned", pvc)
+			}
+			var handOvers []string
+			for _, w := range c.writes() {
+				if w.resource == "sandboxes" && w.verb == "patch" && w.name == c.child {
+					handOvers = append(handOvers, w.patch)
+				}
+			}
+			if len(handOvers) != 1 || !strings.Contains(handOvers[0], `{"op":"test","path":"/metadata/uid","value":"uid-sandbox-child"}`) ||
+				!strings.Contains(handOvers[0], `{"op":"test","path":"/metadata/resourceVersion","value":"sandbox-rv-child"}`) {
+				t.Fatalf("the hand-over patches = %v, want one fenced to the listed uid and resourceVersion", handOvers)
+			}
+			if c.sandbox(c.root) != nil || c.pvc(c.root) != nil {
+				t.Fatalf("the root's Sandbox %+v or its PVC survived the cleanup", c.sandbox(c.root))
+			}
+
+			// The sweep, past every grace, once the old tree's cleanup has confirmed, on the informer's
+			// copy of the handed-over Sandbox.
+			c.store.close(testTree)
+			if !tc.opened {
+				c.store.close(childIssue) // no lifecycle of the child's tree: TreeLive reads false
+			}
+			c.eventually("the runtime's store to hold the handed-over Sandbox under "+childIssue, func() bool {
+				object, ok, _ := c.r.sandboxes.GetStore().GetByKey(testNamespace + "/" + c.child)
+				return ok && object.(*unstructured.Unstructured).GetLabels()[labelTree] == labelValue(childIssue)
+			})
+			if err := c.r.ReconcileOrphans(c.ctx, nil, 0); err != nil {
+				t.Fatal(err)
+			}
+			if s := c.sandbox(c.child); s == nil || s.UID != "uid-sandbox-child" {
+				t.Fatalf("the orphan sweep deleted the handed-over Sandbox of %s, whose tree is live or not yet opened", childIssue)
+			}
+			c.store.homes[childIssue] = issueHome{tree: childIssue, opened: true}
+			c.store.close(childIssue)
+			if err := c.r.ReconcileOrphans(c.ctx, nil, 0); err != nil {
+				t.Fatal(err)
+			}
+			if c.sandbox(c.child) != nil {
+				t.Fatalf("the handed-over Sandbox of %s survived the sweep once its own tree closed", childIssue)
+			}
+		})
+	}
+}
+
+// A carried issue's Sandbox the new tree's launch relabelled after the census listed it is not
+// written again: under the pod's turn the cleanup reads it, no longer of the tree, and leaves it.
+func TestATreeCleanupLeavesASandboxTheNewTreeRelabelledFirst(t *testing.T) {
+	c := newCleanupRig(t)
+	c.store.homes[childIssue] = issueHome{tree: childIssue, opened: true}
+	relabelled := false
+	c.dyn.PrependReactor("get", "sandboxes", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.(k8stesting.GetAction).GetName() != c.child || relabelled {
+			return false, nil, nil
+		}
+		relabelled = true
+		object, err := c.dyn.Tracker().Get(sandboxGVR, testNamespace, c.child)
+		if err != nil {
+			return true, nil, err
+		}
+		u := object.(*unstructured.Unstructured)
+		labels := u.GetLabels()
+		labels[labelTree] = labelValue(childIssue)
+		u.SetLabels(labels)
+		u.SetResourceVersion("sandbox-rv-child-relabelled")
+		if err := c.dyn.Tracker().Update(sandboxGVR, u, testNamespace); err != nil {
+			return true, nil, err
+		}
+		return true, u, nil
+	})
+	if err := c.r.CleanupTree(c.ctx, testTree); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	for _, w := range c.writes() {
+		if w.resource == "sandboxes" && w.name == c.child {
+			t.Fatalf("the cleanup wrote %s %s to the Sandbox the new tree relabelled first, want nothing", w.verb, w.patch)
+		}
+	}
+	if s := c.sandbox(c.child); s == nil || s.UID != "uid-sandbox-child" || s.Labels[labelTree] != labelValue(childIssue) {
+		t.Fatalf("the relabelled Sandbox after the cleanup = %+v, want it as the new tree's launch left it", s)
 	}
 }
