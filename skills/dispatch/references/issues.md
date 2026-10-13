@@ -108,8 +108,8 @@ renders its state and checks from that link, and `dispatch read` lists it under 
 The command is authenticated with the same bearer as every
 other `dispatch` command: a Legion pane reads it from the `DISPATCH_TOKEN_FILE` path the daemon sets on
 the pane; an OMP session outside Legion reads `dispatch.token` from the `envoy.json` its plugin names
-in `ENVOY_CONFIG_FILE`: `~/.config/legion/envoy.json`, or its profile directory's under an omp
-profile other than `default`.
+in `ENVOY_CONFIG_FILE`: its profile directory's under an omp profile other than `default`, else the
+file an inherited `ENVOY_CONFIG_FILE` named, else `~/.config/legion/envoy.json`.
 
 A write to an issue still in `triage` answers once with `… is still in triage …`; move the status
 when work has started.

@@ -32,16 +32,17 @@ goes through a `dispatch` command.
    }
    ```
 
-   A session reads `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is
-   set), unless it runs under an Oh My Pi profile other than `default`, a Claude Code
-   `CLAUDE_CONFIG_DIR` or an OpenCode `OPENCODE_CONFIG_DIR`: then it reads the `envoy.json` in that
-   directory, and never the one under `~/.config`. The `dispatch` command reads the file its
-   session reads. A token written as `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a
-   command, and what it prints is the token.
+   A session under an Oh My Pi profile other than `default`, a Claude Code `CLAUDE_CONFIG_DIR` or
+   an OpenCode `OPENCODE_CONFIG_DIR` reads the `envoy.json` in that directory and no other. Any
+   other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
+   `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The
+   `dispatch` command reads the file its session reads. A token written as `!<command>`, such as
+   `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the token.
 
-   The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file. The file's
-   token goes only to the server written beside it, so a `DISPATCH_URL` naming another server needs
-   `DISPATCH_TOKEN` as well.
+   The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
+   but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to
+   the server written beside it, so a `DISPATCH_URL` naming another server needs `DISPATCH_TOKEN`
+   as well.
 
 Everything the agent writes is attributed to the person who made the token: Dispatch shows the
 agent's name followed by `(for <login>)`. `dispatch whoami` tells the agent who Dispatch takes it

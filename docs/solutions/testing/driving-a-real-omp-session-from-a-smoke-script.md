@@ -48,8 +48,8 @@ form exists.
 When a tmux server already exists, a new session's environment comes from the server's
 global environment, not from the shell that ran `new-session`. An exported `DISPATCH_URL`
 never reached the plugin, which fell back to the `dispatch.serverUrl` of the envoy.json it reads
-(`~/.config/legion/envoy.json` for a session outside a profile) and posted its
-reply to the production Dispatch, where the message id did not exist. Secrets still must
+(`~/.config/legion/envoy.json` for a session outside a profile with no `ENVOY_CONFIG_FILE`) and
+posted its reply to the production Dispatch, where the message id did not exist. Secrets still must
 not ride argv (`/proc/<pid>/cmdline` is world-readable, the LEGION-6 rule): write the
 token to a 0600 file under the run's workdir and pass `-e DISPATCH_TOKEN_FILE=<path>`;
 `resolveDispatchConfig` reads `DISPATCH_TOKEN_FILE` ahead of `DISPATCH_TOKEN`. Pass curl

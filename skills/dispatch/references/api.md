@@ -7,10 +7,11 @@ commands do not cover.
 
 Use a personal Dispatch token: a human mints it in Dispatch **Settings → Agent tokens** and supplies
 it to the agent through `DISPATCH_TOKEN` or `dispatch.token` in the `envoy.json` the agent's
-session reads. That file is `~/.config/legion/envoy.json` (under `$XDG_CONFIG_HOME` when set), or
-the `envoy.json` in the session's own directory under an Oh My Pi profile other than `default`, a
-Claude Code `CLAUDE_CONFIG_DIR` or an OpenCode `OPENCODE_CONFIG_DIR`; the plugin hands its path to
-the session's commands in `ENVOY_CONFIG_FILE`. A `dispatch.token` written `!<command>` is a
+session reads. Under an Oh My Pi profile other than `default`, a Claude Code `CLAUDE_CONFIG_DIR` or
+an OpenCode `OPENCODE_CONFIG_DIR`, that is the `envoy.json` in the session's own directory; any
+other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
+`~/.config/legion/envoy.json` (under `$XDG_CONFIG_HOME` when set). The plugin hands the path it
+chose to the session's commands in `ENVOY_CONFIG_FILE`. A `dispatch.token` written `!<command>` is a
 command whose output is the token. The file's token goes only to its own `dispatch.serverUrl`: a
 `DISPATCH_URL` naming another server needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. The server
 records the minting human as the owner of that session's writes.
