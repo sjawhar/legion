@@ -197,7 +197,8 @@ credential can exist without any skill having told you so). When the evidence ge
 reachable, do not have a different running session perform the read on this tree's behalf and
 fold the result into the spec as if it were routine: write the missing capability as its own
 decision block — which external system, which read or write, why the spec needs it — addressed
-to the human, in the same spirit as the implementer reports a production-check gap (section 6) and leave it
+to the human, in the same spirit as the implementer's ask to a person when the deployment
+instructions name nobody for a deploy (section 6), and leave it
 open until the human resolves it. A workaround substituted for that record only hides the gap
 from the next tree that hits it.
 
