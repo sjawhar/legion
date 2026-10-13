@@ -264,8 +264,16 @@
 - **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
   `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
   `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
-  that holds an `envoy` section refuses startup, naming `envoy` and the user file it belongs in: a
-  cloned repository does not choose the NATS servers the process connects to.
+  that holds an `envoy` section refuses startup, naming `envoy` and the user file it belongs in
+  (`envoy: not read from a checkout's envoy.json; put it in <user file>`): a cloned repository
+  does not choose the NATS servers the process connects to. The session clients ignore such a
+  section and say so in their start notice instead. A `.envoy` that is a plain file, as some
+  repositories have, counts as no checkout file. A JSON `null`, at the top level, as a section or
+  as any key's value, is refused naming the key (`dispatch: Expected object`,
+  `envoy.natsUrls: Expected string array`), as the clients refuse it, and JSON that does not parse
+  is refused naming the file, the line and the column, never the text it stopped at, which can be
+  the start of a token or seed. A checkout's top-level `natsUrls` is refused saying a checkout's
+  envoy.json holds only a `dispatch` section.
   `~/.config/opencode/envoy.json` and `.opencode/envoy.json` are not read: while the old user file
   is the only one and the user file is `~/.config/legion/envoy.json`, startup refuses, naming both
   paths and saying to move it, and a file that still carries a top-level `natsUrls` is refused,
