@@ -10,6 +10,7 @@
 - A `token` or `natsSeed` starting with `!` is a command whose output is the value; a checkout's `.envoy/envoy.json` replaces `.opencode/envoy.json`, holds only a `dispatch` section, and turns Envoy off when it holds an `envoy` one.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server.
 - The channel server writes one notice to stderr when a section is off: the missing file or the section's error.
+- `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
 
 ## [1.0.0]
 

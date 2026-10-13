@@ -72,7 +72,11 @@ events and sends them to the current Claude Code session as supported
   summary (the same shape as OMP on fork). `ENVOY_SESSION_ID` (QA override) disables the handoff.
 - `envoy_inbox` is local recovery state: the most recent 50 event summaries, with no envelope
   body, ordered newest first.
-- `bin/envoy-send.ts` sends direct messages through Envoy's local listener HTTP API.
+- `bin/envoy-send.ts` sends direct messages through the Envoy listener's HTTP API, to the listener
+  and with the bearer a command resolves: `envoySettings` over the envoy.json
+  `envoyConfigPath("command")` chooses (the `ENVOY_CONFIG_FILE` the `open-asks` hook hands the
+  session's Bash first), with `ENVOY_URL` and `ENVOY_TOKEN_FILE` or `ENVOY_TOKEN` over its `envoy`
+  section. With Envoy off it sends nothing and exits 1, saying why.
 
 ## Channel metadata
 
