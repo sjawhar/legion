@@ -723,9 +723,12 @@ claim itself, as the daemon and keeping its session, and waits on its backoff, c
 the claim has stopped (`stopElsewhere`, `internal/daemon/outbox.go`). No close of the old tree
 reaches that claim, so its stop is bounded where that close would have ended the turn, at the old
 root's linger expiry (`linger_hours`): a turn that ends within the linger ends on its own, and one
-still running at the expiry is stopped there. Either way the claim keeps its workspace, the issue's
-branch and its session, which the new tree's start resumes with its phase's resume task. A turn that
-hangs inside the linger is the operator's to stop sooner: `legion claims suspend` stops it at the
+still running at the expiry is stopped there. Once the old root no longer lingers (it was reopened,
+say), there is no close left to wait for, and the stop falls back to the stop timeout
+(`worker_stop_timeout_seconds`) from then (`carriedStopDeadline`): a role still in a turn is stopped
+that long after, losing only the tool call in flight. Either way the claim keeps its workspace, the
+issue's branch and its session, which the new tree's start resumes with its phase's resume task. A
+turn that hangs inside the linger is the operator's to stop sooner: `legion claims suspend` stops it at the
 stop timeout (`worker_stop_timeout_seconds`) from then and makes the hold the operator's, so the new
 tree's start of that role waits for the operator, with the claim already re-pointed to the new tree,
 and `legion claims resume` relaunches its session there. A Sandbox the old tree left `Running`, none

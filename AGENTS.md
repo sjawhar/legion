@@ -167,13 +167,15 @@ into a new generation, then starts that phase's role. A child whose old root had
 by a reopen in its linger) carries none: its architect registers its own spec while the child is
 before `awaiting_merge` (after that its READY is already through), and decomposes nothing anew,
 since its workers already run their phases. A role of a carried child still in a turn under its old
-tree stops first: nothing of the new tree launches until that turn ends and the daemon suspends the
-role, keeping its session, which the new tree then resumes. A child stays its own tree after
-hand-over; reopening the old root later does not take it back. A root reopened inside its linger
-instead keeps its children. Taking the label off a waiting root drops it from the waiting line, as a
-status that leaves `todo` does; taking it off a root already admitted does not stop its tree. The
-mark is a label rather than the issue's `route` because Dispatch publishes every event of a routed
-issue to the route's topic, where a label only marks the issue; it carries no workflow state.
+tree stops first: nothing of the new tree launches until that turn ends, or is stopped at the old
+root's linger expiry, or at the stop timeout once that root no longer lingers, and the daemon
+suspends the role, keeping its session, which the new tree then resumes. A child stays its own tree
+after hand-over; reopening the old root later does not take it back. A root reopened inside its
+linger instead keeps its children. Taking the label off a waiting root drops it from the waiting
+line, as a status that leaves `todo` does; taking it off a root already admitted does not stop its
+tree. The mark is a label rather than the issue's `route` because Dispatch publishes every event of
+a routed issue to the route's topic, where a label only marks the issue; it carries no workflow
+state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's
