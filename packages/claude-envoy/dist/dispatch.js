@@ -15072,18 +15072,21 @@ var EnvoyFileSchema = exports_external.looseObject({
   dispatch: DispatchSectionSchema.optional(),
   envoy: EnvoySectionSchema.optional()
 });
+var CheckoutFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  dispatch: DispatchSectionSchema.optional()
+});
 function sectionSwitch(config2, section, env) {
   const own = config2[section].enabled;
   if (own === false)
     return { offBy: config2.path };
-  const checkout = config2.checkout;
-  const theirs = checkout?.[section].enabled;
+  const checkout = section === "dispatch" ? config2.checkout : null;
+  const theirs = checkout?.dispatch.enabled;
   if (checkout === null || theirs === undefined)
     return { offBy: null, enabled: own === true };
   if (theirs)
     return { offBy: null, enabled: true };
-  const addressNamed = section === "dispatch" ? env.DISPATCH_URL !== undefined : setValue(env.ENVOY_URL) !== undefined || setValue(env.ENVOY_NATS_URL) !== undefined;
-  return addressNamed ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
+  return env.DISPATCH_URL !== undefined ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
 }
 function describeSchemaIssue(filePath, error48) {
   const issue2 = error48.issues[0];
@@ -15096,7 +15099,7 @@ function describeSchemaIssue(filePath, error48) {
   }
   return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
 }
-function parseFile(filePath) {
+function parseFile(filePath, schema) {
   let raw;
   try {
     raw = readFileSync(filePath, "utf-8");
@@ -15117,7 +15120,7 @@ function parseFile(filePath) {
       reason: `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
     };
   }
-  const parsed = EnvoyFileSchema.safeParse(parsedJson);
+  const parsed = schema.safeParse(parsedJson);
   if (!parsed.success) {
     return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
   }
@@ -15175,17 +15178,20 @@ function missingConfigNotice(filePath, env, off) {
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath))
     return notice;
-  const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
+  const home = setValue(env.HOME) ?? homedir();
+  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
+    return notice;
+  const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
     return notice;
   return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
 }
 function readEnvoyConfig(filePath, env, options) {
-  const chosen = parseFile(filePath);
+  const chosen = parseFile(filePath, EnvoyFileSchema);
   if (chosen.kind === "invalid")
     return failed(filePath, chosen.reason);
   const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent" } : parseFile(checkoutPath);
+  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent" } : parseFile(checkoutPath, CheckoutFileSchema);
   if (checkoutFile.kind === "invalid")
     return failed(filePath, checkoutFile.reason);
   const own = chosen.kind === "valid" ? chosen.settings : {};
@@ -15196,7 +15202,7 @@ function readEnvoyConfig(filePath, env, options) {
     checkout: checkoutFile.kind === "valid" ? {
       path: checkoutPath,
       dispatch: checkoutFile.settings.dispatch ?? {},
-      envoy: checkoutFile.settings.envoy ?? {}
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
     } : null,
     notice: chosen.kind === "absent" ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off") : null,
     error: null
@@ -18941,7 +18947,7 @@ async function runDispatchCli(argv, rawEnv, io) {
     print(new ToolInputError(parsed.tool, parsed.problems).message);
     return REFUSED;
   }
-  const hostName = env.DISPATCH_HOST;
+  const hostName = env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = hostName === undefined ? undefined : HOSTS[hostName];
   if (host === undefined) {
     print(hostName === undefined ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself." : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`);
@@ -18967,9 +18973,9 @@ async function runDispatchCli(argv, rawEnv, io) {
   let config2;
   let unconfigured;
   try {
-    const envoyConfig = readEnvoyConfig(envoyConfigPath("command", env), env, { cwd: io.cwd });
+    const envoyConfig = readEnvoyConfig(envoyConfigPath(host, env), env, { cwd: io.cwd });
     const offBy = sectionSwitch(envoyConfig, "dispatch", env).offBy;
-    unconfigured = offBy !== null ? `${offBy} turns Dispatch off (dispatch.enabled is false)` : envoyConfig.notice ?? "Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)";
+    unconfigured = offBy !== null ? `${offBy} turns Dispatch off (dispatch.enabled is false)` : envoyConfig.notice ?? `${envoyConfig.path} has no enabled dispatch section, and DISPATCH_URL is not set`;
     config2 = activeDispatchSettings(dispatchSettings(env, envoyConfig));
   } catch (error48) {
     print(`dispatch: ${messageFor(error48)}`);

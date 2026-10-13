@@ -139,8 +139,9 @@ test("adds nothing to context when Dispatch is not configured", async () => {
 })
 
 // The `dispatch` command the plugin's bin/ puts on the Bash tool's PATH reads its host from
-// DISPATCH_HOST, and its envoy.json from ENVOY_CONFIG_FILE; Claude Code sources CLAUDE_ENV_FILE into
-// every later Bash command of the session.
+// DISPATCH_HOST, and its envoy.json by Claude Code's rule: CLAUDE_CONFIG_DIR's, else the file
+// ENVOY_CONFIG_FILE names; Claude Code sources CLAUDE_ENV_FILE into every later Bash command of the
+// session.
 test("names Claude Code as the dispatch host and hands on the session's envoy.json in CLAUDE_ENV_FILE, after whatever other hooks wrote", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-env-"))
   const envFile = join(scratch, "session-env.sh")

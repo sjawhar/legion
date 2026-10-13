@@ -13654,18 +13654,21 @@ var EnvoyFileSchema = exports_external.looseObject({
   dispatch: DispatchSectionSchema.optional(),
   envoy: EnvoySectionSchema.optional()
 });
+var CheckoutFileSchema = exports_external.looseObject({
+  $schema: exports_external.string().optional(),
+  dispatch: DispatchSectionSchema.optional()
+});
 function sectionSwitch(config2, section, env) {
   const own = config2[section].enabled;
   if (own === false)
     return { offBy: config2.path };
-  const checkout = config2.checkout;
-  const theirs = checkout?.[section].enabled;
+  const checkout = section === "dispatch" ? config2.checkout : null;
+  const theirs = checkout?.dispatch.enabled;
   if (checkout === null || theirs === undefined)
     return { offBy: null, enabled: own === true };
   if (theirs)
     return { offBy: null, enabled: true };
-  const addressNamed = section === "dispatch" ? env.DISPATCH_URL !== undefined : setValue(env.ENVOY_URL) !== undefined || setValue(env.ENVOY_NATS_URL) !== undefined;
-  return addressNamed ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
+  return env.DISPATCH_URL !== undefined ? { offBy: null, enabled: own === true } : { offBy: checkout.path };
 }
 function describeSchemaIssue(filePath, error48) {
   const issue2 = error48.issues[0];
@@ -13678,7 +13681,7 @@ function describeSchemaIssue(filePath, error48) {
   }
   return `${filePath}: ${issue2.path.join(".")}: ${issue2.message}`;
 }
-function parseFile(filePath) {
+function parseFile(filePath, schema) {
   let raw;
   try {
     raw = readFileSync(filePath, "utf-8");
@@ -13699,7 +13702,7 @@ function parseFile(filePath) {
       reason: `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
     };
   }
-  const parsed = EnvoyFileSchema.safeParse(parsedJson);
+  const parsed = schema.safeParse(parsedJson);
   if (!parsed.success) {
     return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
   }
@@ -13757,17 +13760,20 @@ function missingConfigNotice(filePath, env, off) {
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath))
     return notice;
-  const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
+  const home = setValue(env.HOME) ?? homedir();
+  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
+    return notice;
+  const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
     return notice;
   return `${notice}; ${old} is no longer read: move it to ${neutral.path}`;
 }
 function readEnvoyConfig(filePath, env, options) {
-  const chosen = parseFile(filePath);
+  const chosen = parseFile(filePath, EnvoyFileSchema);
   if (chosen.kind === "invalid")
     return failed(filePath, chosen.reason);
   const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent" } : parseFile(checkoutPath);
+  const checkoutFile = checkoutPath === path.resolve(filePath) ? { kind: "absent" } : parseFile(checkoutPath, CheckoutFileSchema);
   if (checkoutFile.kind === "invalid")
     return failed(filePath, checkoutFile.reason);
   const own = chosen.kind === "valid" ? chosen.settings : {};
@@ -13778,7 +13784,7 @@ function readEnvoyConfig(filePath, env, options) {
     checkout: checkoutFile.kind === "valid" ? {
       path: checkoutPath,
       dispatch: checkoutFile.settings.dispatch ?? {},
-      envoy: checkoutFile.settings.envoy ?? {}
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
     } : null,
     notice: chosen.kind === "absent" ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off") : null,
     error: null
@@ -18714,6 +18720,9 @@ function disabled(error48) {
 function envoySettings(env, config2) {
   if (config2.error !== null)
     return disabled(config2.error);
+  if (config2.checkout !== null && config2.checkout.envoyError !== null) {
+    return disabled(config2.checkout.envoyError);
+  }
   const state = sectionSwitch(config2, "envoy", env);
   if (state.offBy !== null) {
     return {
@@ -18732,62 +18741,37 @@ function envoySettings(env, config2) {
     };
   }
   const own = state.enabled ? config2.envoy : {};
-  const checkout = state.enabled ? config2.checkout : null;
-  let url2;
+  const url2 = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
   let token;
-  if (namedUrl === undefined && checkout?.envoy.url !== undefined) {
-    if (!checkout.envoy.token) {
-      return disabled(`${checkout.path}: envoy.url requires envoy.token in the same file`);
+  const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
+  if (tokenPointer !== undefined) {
+    try {
+      token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
+    } catch (error48) {
+      return disabled(messageFor(error48));
     }
-    if (checkout.envoy.token.startsWith("!")) {
-      return disabled(checkoutCommandRefusal(checkout.path, "envoy.token"));
-    }
-    url2 = checkout.envoy.url;
-    token = checkout.envoy.token;
-  } else {
-    url2 = namedUrl ?? own.url ?? DEFAULT_ENVOY_URL;
-    let tokenFile = null;
-    const tokenPointer = env.ENVOY_TOKEN_FILE === "" ? undefined : env.ENVOY_TOKEN_FILE;
-    if (tokenPointer !== undefined) {
-      try {
-        token = readSecretFile("ENVOY_TOKEN_FILE", tokenPointer);
-      } catch (error48) {
-        return disabled(messageFor(error48));
-      }
-    } else if (env.ENVOY_TOKEN) {
-      token = env.ENVOY_TOKEN;
-    } else if (checkout?.envoy.token !== undefined) {
-      token = checkout.envoy.token;
-      const listener = checkout.envoy.url ?? own.url ?? DEFAULT_ENVOY_URL;
-      tokenFile = { path: checkout.path, url: listener };
-    } else if (own.token !== undefined) {
-      token = own.token;
-      tokenFile = { path: config2.path, url: own.url ?? DEFAULT_ENVOY_URL };
-    }
-    if (namedUrl !== undefined && tokenFile !== null) {
+  } else if (env.ENVOY_TOKEN) {
+    token = env.ENVOY_TOKEN;
+  } else if (own.token !== undefined) {
+    if (namedUrl !== undefined) {
       let named;
       try {
         named = new URL(namedUrl).origin;
       } catch {
         return disabled("ENVOY_URL must be a valid URL");
       }
-      const listener = new URL(tokenFile.url).origin;
+      const listener = new URL(own.url ?? DEFAULT_ENVOY_URL).origin;
       if (named !== listener) {
-        return disabled(`ENVOY_URL names ${named}, but ${tokenFile.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
+        return disabled(`ENVOY_URL names ${named}, but ${config2.path}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`);
       }
     }
-    if (tokenFile !== null && token?.startsWith("!")) {
-      if (tokenFile.path !== config2.path) {
-        return disabled(checkoutCommandRefusal(tokenFile.path, "envoy.token"));
-      }
-      try {
-        token = fileValue(token, "envoy.token", config2.path, env);
-      } catch (error48) {
-        return disabled(messageFor(error48));
-      }
+    try {
+      token = fileValue(own.token, "envoy.token", config2.path, env);
+    } catch (error48) {
+      return disabled(messageFor(error48));
     }
   }
-  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : checkout?.envoy.natsUrls ?? own.natsUrls ?? [];
+  const natsUrls = namedNatsUrls.length > 0 ? namedNatsUrls : own.natsUrls ?? [];
   let natsSeed;
   if (natsUrls.length > 0) {
     try {
@@ -18795,25 +18779,15 @@ function envoySettings(env, config2) {
     } catch (error48) {
       return disabled(messageFor(error48));
     }
-    const seedFile = natsSeed !== undefined ? null : checkout?.envoy.natsSeed !== undefined ? {
-      path: checkout.path,
-      seed: checkout.envoy.natsSeed,
-      servers: checkout.envoy.natsUrls ?? own.natsUrls ?? []
-    } : own.natsSeed !== undefined ? { path: config2.path, seed: own.natsSeed, servers: own.natsUrls ?? [] } : null;
-    if (seedFile !== null) {
-      const servers = new Set(seedFile.servers.map((server) => server.trim()));
-      const used = new Set(natsUrls.map((url3) => url3.trim()));
-      const sameServers = used.size === servers.size && [...used].every((url3) => servers.has(url3));
-      if (!sameServers) {
-        const serversFile = checkout?.envoy.natsUrls !== undefined ? checkout.path : config2.path;
-        return disabled(namedNatsUrls.length > 0 ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them` : `${serversFile}: envoy.natsUrls requires envoy.natsSeed in the same file`);
-      }
-      if (seedFile.path !== config2.path && seedFile.seed.startsWith("!")) {
-        return disabled(checkoutCommandRefusal(seedFile.path, "envoy.natsSeed"));
+    if (natsSeed === undefined && own.natsSeed !== undefined) {
+      const servers = new Set((own.natsUrls ?? []).map((server) => server.trim()));
+      const used = new Set(natsUrls.map((server) => server.trim()));
+      if (used.size !== servers.size || ![...used].every((server) => servers.has(server))) {
+        return disabled(`ENVOY_NATS_URL names other servers than ${config2.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`);
       }
       try {
-        const value = fileValue(seedFile.seed, "envoy.natsSeed", config2.path, env);
-        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${seedFile.path}` };
+        const value = fileValue(own.natsSeed, "envoy.natsSeed", config2.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config2.path}` };
       } catch (error48) {
         return disabled(messageFor(error48));
       }
