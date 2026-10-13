@@ -655,10 +655,22 @@ async function runChannelServer(
   }
 }
 
-test("with CLAUDE_CONFIG_DIR holding no envoy.json the server lists no tool, refuses each call, and exits 0 when stdin ends", async () => {
+test("with CLAUDE_CONFIG_DIR holding no envoy.json the server names the unread old file, lists no tool, and exits 0 when stdin ends", async () => {
   const home = await mkdtemp(join(tmpdir(), "claude-envoy-off-"))
   const configDirectory = join(home, "claude-config")
+  const old = join(home, ".config", "opencode", "envoy.json")
   await mkdir(configDirectory)
+  await mkdir(dirname(old), { recursive: true })
+  await writeFile(
+    old,
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: "old-token",
+      },
+    }),
+  )
   try {
     const { exitCode, responses, stderr } = await runChannelServer({
       HOME: home,
@@ -667,14 +679,17 @@ test("with CLAUDE_CONFIG_DIR holding no envoy.json the server lists no tool, ref
       CLAUDE_PLUGIN_DATA: home,
     })
     const file = join(configDirectory, "envoy.json")
+    const notice = `${old} is not read for this profile; copy or link it to ${file}, or write that file`
 
     expect(responses.get(2)?.["result"]).toEqual({ tools: [] })
     expect(responses.get(3)?.["error"]).toMatchObject({
       message: expect.stringContaining(
-        `Envoy is off for this session: no envoy.json at ${file}: Envoy is off`,
+        `Envoy is off for this session: no envoy.json at ${file}: Envoy is off; ${notice}`,
       ),
     })
-    expect(stderr).toContain(`envoy-channel: no envoy.json at ${file}: Dispatch and Envoy are off`)
+    expect(stderr).toContain(
+      `envoy-channel: no envoy.json at ${file}: Dispatch and Envoy are off; ${notice}`,
+    )
     expect(exitCode).toBe(0)
   } finally {
     await rm(home, { recursive: true, force: true })

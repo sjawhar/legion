@@ -3430,10 +3430,25 @@ describe("envoy OMP extension", () => {
     });
     const userTurn = { messages: [{ role: "user", content: "Fix the bug.", timestamp: 1 }] };
 
-    test("envoy.json: a named profile with none registers no Envoy tool, reaches nothing, and says so once", async () => {
+    test("envoy.json: a named profile with none keeps the old user file unread and says where it belongs", async () => {
+      const home = mkdtempSync(join(tmpdir(), "envoy-profile-home-"));
       const agentDirectory = mkdtempSync(join(tmpdir(), "envoy-profile-"));
+      const marker = join(home, "old-token-ran");
+      const old = join(home, ".config", "opencode", "envoy.json");
+      process.env.HOME = home;
       process.env.OMP_PROFILE = "work";
       process.env.PI_CODING_AGENT_DIR = agentDirectory;
+      mkdirSync(dirname(old), { recursive: true });
+      writeFileSync(
+        old,
+        JSON.stringify({
+          dispatch: {
+            enabled: true,
+            serverUrl: "https://old.dispatch.example",
+            token: `!touch ${marker}; echo old-token`,
+          },
+        })
+      );
       delete process.env.ENVOY_URL;
       delete process.env.ENVOY_NATS_URL;
       const requests: string[] = [];
@@ -3454,16 +3469,20 @@ describe("envoy OMP extension", () => {
         expect(fixture.tools).toEqual([]);
         expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
         expect(notifications).toEqual([
-          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off`,
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
         ]);
+        expect(existsSync(marker)).toBe(false);
         // A Legion claim reaches the listener through the one accessor, which refuses it.
         await expect(
           claimEnvoyRole("ses_profile", "legion-omp-repo-1-implementer", context)
-        ).rejects.toThrow(`Envoy is off for this session: no envoy.json at ${file}: Envoy is off`);
+        ).rejects.toThrow(
+          `Envoy is off for this session: no envoy.json at ${file}: Envoy is off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`
+        );
         await fixture.handlers.get("session_shutdown")?.({}, context);
         expect(requests).toEqual([]);
         expect(natsState.connectedNames).toEqual([]);
       } finally {
+        rmSync(home, { recursive: true, force: true });
         rmSync(agentDirectory, { recursive: true, force: true });
       }
     });

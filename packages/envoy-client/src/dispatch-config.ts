@@ -137,10 +137,12 @@ export function dispatchSettings(
   }
   const enabled = checkout?.dispatch.enabled === true || own.enabled === true;
   if (explicitUrl === undefined && !enabled) {
+    const missing = config.missing;
     return offWithNotice(
-      config.missing === null
+      missing === null
         ? `${config.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off`
-        : missingConfigNotice(config.path, config.missing, "Dispatch is off")
+        : missingConfigNotice(config.path, missing, "Dispatch is off"),
+      missing?.oldUserFileNotice !== undefined
     );
   }
 

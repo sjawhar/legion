@@ -140,6 +140,39 @@ test("adds nothing to context when Dispatch is not configured", async () => {
   }
 })
 
+test("summarises a missing Claude profile file with where its unread old file belongs", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-profile-off-"))
+  const configDirectory = join(scratch, "claude-config")
+  const old = join(scratch, ".config", "opencode", "envoy.json")
+  await mkdir(configDirectory)
+  await mkdir(join(scratch, ".config", "opencode"), { recursive: true })
+  await writeFile(
+    old,
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: "old-token",
+      },
+    }),
+  )
+  try {
+    const result = await runHook(hookInput, {
+      HOME: scratch,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_PLUGIN_DATA: join(scratch, "plugin-data"),
+    })
+    const chosen = join(configDirectory, "envoy.json")
+
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe(
+      `Dispatch authored-ask summary unavailable: no envoy.json at ${chosen}: Dispatch is off; ${old} is not read for this profile; copy or link it to ${chosen}, or write that file\n`,
+    )
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 // The `dispatch` command the plugin's bin/ puts on the Bash tool's PATH reads its host from
 // DISPATCH_HOST, and its envoy.json by Claude Code's rule: CLAUDE_CONFIG_DIR's, else the file
 // ENVOY_CONFIG_FILE names; Claude Code sources CLAUDE_ENV_FILE into every later Bash command of the

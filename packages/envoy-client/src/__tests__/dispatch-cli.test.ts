@@ -825,6 +825,38 @@ describe("the dispatch CLI's envoy.json", () => {
     expect(requests).toEqual([]);
   });
 
+  test("a profile's missing file tells dispatch where the old file belongs without running its token", async () => {
+    const profile = join(stateDir, "profile");
+    mkdirSync(profile);
+    const marker = join(stateDir, "old-token-ran");
+    const old = join(stateDir, ".config", "opencode", "envoy.json");
+    mkdirSync(join(stateDir, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: `!touch ${marker}; echo old-token`,
+        },
+      })
+    );
+
+    const { code, stdout } = await run(["projects"], {
+      ...fromFile,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: profile,
+    });
+
+    const chosen = join(profile, "envoy.json");
+    expect(stdout).toBe(
+      `dispatch: no envoy.json at ${chosen}: Dispatch is off; ${old} is not read for this profile; copy or link it to ${chosen}, or write that file\n`
+    );
+    expect(code).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+    expect(requests).toEqual([]);
+  });
+
   test("a file that turns Dispatch off says so and exits 2, sending nothing", async () => {
     const dir = join(stateDir, "off");
     mkdirSync(dir, { recursive: true });

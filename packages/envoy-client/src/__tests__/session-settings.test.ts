@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { sessionConfigFile, sessionDispatchSettings, sessionSettings } from "../session-settings";
@@ -240,7 +240,7 @@ describe("the OpenCode-era file", () => {
 
   test("is not read when XDG_CONFIG_HOME puts the neutral file in another directory", () => {
     const home = tempDir();
-    writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
       dispatch: { enabled: true, token: "old-token" },
     });
     // A Legion pane in the default omp profile: the daemon moves XDG_CONFIG_HOME under its state
@@ -249,7 +249,71 @@ describe("the OpenCode-era file", () => {
     const chosen = sessionConfigFile("omp", pane);
     expect(chosen).toEqual({ path: "/var/lib/legion/home/.config/legion/envoy.json", error: null });
     expect(sessionSettings(chosen, pane, { cwd: tempDir() }).notice).toBe(
-      "no envoy.json at /var/lib/legion/home/.config/legion/envoy.json: Dispatch and Envoy are off"
+      `no envoy.json at /var/lib/legion/home/.config/legion/envoy.json: Dispatch and Envoy are off; ${old} is not read under XDG_CONFIG_HOME=${pane.XDG_CONFIG_HOME}`
     );
+  });
+});
+
+describe("old user file notices", () => {
+  test("a profile's missing file stays off, tells every harness where the old file belongs, and never runs its token", () => {
+    const home = tempDir();
+    const marker = path.join(home, "old-token-ran");
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
+    });
+    const profiles = [
+      ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: path.join(home, "omp") }],
+      ["claude", { CLAUDE_CONFIG_DIR: path.join(home, "claude") }],
+      ["opencode", { OPENCODE_CONFIG_DIR: path.join(home, "opencode") }],
+    ] as const;
+
+    for (const [harness, profile] of profiles) {
+      const env = { HOME: home, ...profile };
+      const chosen = sessionConfigFile(harness, env);
+      if (chosen.path === null) throw new Error(chosen.error);
+      const settings = sessionSettings(chosen, env, { cwd: tempDir() });
+      expect(settings.dispatch).toEqual({
+        enabled: false,
+        notice: `no envoy.json at ${chosen.path}: Dispatch is off; ${old} is not read for this profile; copy or link it to ${chosen.path}, or write that file`,
+        error: null,
+        oldUserFileNotRead: true,
+      });
+      expect(settings.envoy).toEqual({
+        enabled: false,
+        notice: `no envoy.json at ${chosen.path}: Envoy is off; ${old} is not read for this profile; copy or link it to ${chosen.path}, or write that file`,
+        error: null,
+      });
+      expect(settings.notice).toBe(
+        `no envoy.json at ${chosen.path}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${chosen.path}, or write that file`
+      );
+      expect(existsSync(marker)).toBe(false);
+    }
+  });
+
+  test("a relocated XDG neutral file stays off, without reading or asking to move the old file", () => {
+    const home = tempDir();
+    const marker = path.join(home, "old-token-ran");
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
+    });
+    const configHome = path.join(home, "relocated-config");
+    const env = { HOME: home, XDG_CONFIG_HOME: configHome };
+    const chosen = sessionConfigFile("omp", env);
+    if (chosen.path === null) throw new Error(chosen.error);
+
+    const settings = sessionSettings(chosen, env, { cwd: tempDir() });
+    expect(settings.notice).toBe(
+      `no envoy.json at ${chosen.path}: Dispatch and Envoy are off; ${old} is not read under XDG_CONFIG_HOME=${configHome}`
+    );
+    expect(settings.notice).not.toContain("move");
+    expect(existsSync(marker)).toBe(false);
   });
 });

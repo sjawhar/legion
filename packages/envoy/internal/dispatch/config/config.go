@@ -43,10 +43,13 @@ type EnvoyConfig struct {
 	Warnings []Warning
 	// topLevelNatsURLs is set when the file's NATS servers came from a top-level natsUrls.
 	topLevelNatsURLs bool
+	// ignoredLegacyCheckoutSettings marks the old checkout layout's NATS or Envoy key.
+	ignoredLegacyCheckoutSettings bool
 }
 
-// Warning is one input read until it moves: Message names what was read, as the server logs it,
-// Path the file, and Fix how to move it.
+// Warning is one input read until it moves or ignored because the old checkout layout cannot
+// configure Envoy. Message names it as the server logs it, Path the file, and Fix its migration
+// or ignored-setting notice.
 type Warning struct {
 	Message string
 	Path    string
@@ -55,10 +58,11 @@ type Warning struct {
 
 // The messages a Warning carries.
 const (
-	WarnOpenCodeUserFile  = "dispatch: read the OpenCode-era envoy.json"
-	WarnOpenCodeCheckout  = "dispatch: read a checkout's .opencode/envoy.json"
-	WarnTopLevelNatsURLs  = "dispatch: read a top-level natsUrls as envoy.natsUrls"
-	laterReleaseStopsRead = " is read until it moves (a later release stops reading it): "
+	WarnOpenCodeUserFile        = "dispatch: read the OpenCode-era envoy.json"
+	WarnOpenCodeCheckout        = "dispatch: read a checkout's .opencode/envoy.json"
+	WarnTopLevelNatsURLs        = "dispatch: read a top-level natsUrls as envoy.natsUrls"
+	WarnIgnoredCheckoutSettings = "natsUrls/envoy is not read from a checkout's envoy.json; ignored"
+	laterReleaseStopsRead       = " is read until it moves (a later release stops reading it): "
 )
 
 // LoadOptions controls where Load looks for config files.
@@ -101,15 +105,16 @@ func (e *InvalidConfigError) Error() string {
 // os.UserConfigDir refuses it, and so does Load, rather than read a file found from wherever the
 // process started or fall back silently. envoy-dispatch hands Load its settings table's lookup; any
 // other caller names the environment it means. A missing file is not an error. A file that exists
-// but fails validation (an unrecognized key, a malformed value, an envoy section in the checkout's
-// file) stops the load and returns an *InvalidConfigError naming the file and the key.
+// but fails validation (an unrecognized key, a malformed value, or an envoy section in a current
+// checkout file) stops the load and returns an *InvalidConfigError naming the file and the key.
 //
 // Three saved inputs from before this layout are read until they move, each with a Warning: while
-// the user file is ~/.config/legion/envoy.json (XDG_CONFIG_HOME unset, empty or ~/.config) and none
-// is there, ~/.config/opencode/envoy.json in its place; while the checkout has no
-// .envoy/envoy.json, its .opencode/envoy.json, under every checkout rule; and a user file's
-// top-level natsUrls as envoy.natsUrls. A later release stops reading them; setting the top-level
-// key beside envoy.natsUrls remains refused.
+// the user file is the default ~/.config/legion/envoy.json and none is there,
+// ~/.config/opencode/envoy.json in its place; while the checkout has no .envoy/envoy.json, its
+// .opencode/envoy.json; and a user file's top-level natsUrls as envoy.natsUrls. A profile or
+// relocated XDG_CONFIG_HOME never reads the old user file. A legacy checkout ignores its top-level
+// natsUrls and envoy keys with a warning, while the current checkout refuses them. Setting the
+// top-level key beside envoy.natsUrls remains refused.
 func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConfig, error) {
 	cwd := opts.CWD
 	if cwd == "" {
@@ -137,7 +142,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 
 	merged := &EnvoyConfig{}
 	userPath := filepath.Join(configHome, "legion", "envoy.json")
-	userCfg, err := readConfigFile(userPath, "")
+	userCfg, err := readConfigFile(userPath, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -145,7 +150,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 	// directory is not where it belongs.
 	if userCfg == nil && userPath == filepath.Join(home, ".config", "legion", "envoy.json") {
 		oldPath := filepath.Join(home, ".config", "opencode", "envoy.json")
-		if userCfg, err = readConfigFile(oldPath, ""); err != nil {
+		if userCfg, err = readConfigFile(oldPath, "", false); err != nil {
 			return nil, err
 		}
 		if userCfg != nil {
@@ -162,21 +167,22 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 		merged = userCfg
 	}
 	checkoutPath := filepath.Join(cwd, ".envoy", "envoy.json")
-	checkoutCfg, err := readConfigFile(checkoutPath, userPath)
+	checkoutCfg, err := readConfigFile(checkoutPath, userPath, false)
 	if err != nil {
 		return nil, err
 	}
 	if checkoutCfg == nil {
 		oldCheckout := filepath.Join(cwd, ".opencode", "envoy.json")
-		if checkoutCfg, err = readConfigFile(oldCheckout, userPath); err != nil {
+		if checkoutCfg, err = readConfigFile(oldCheckout, userPath, true); err != nil {
 			return nil, err
 		}
 		if checkoutCfg != nil {
-			checkoutCfg.Warnings = append(checkoutCfg.Warnings, Warning{
+			migration := Warning{
 				Message: WarnOpenCodeCheckout,
 				Path:    oldCheckout,
 				Fix:     oldCheckout + laterReleaseStopsRead + "mkdir -p " + filepath.Dir(checkoutPath) + " && mv " + oldCheckout + " " + checkoutPath,
-			})
+			}
+			checkoutCfg.Warnings = append([]Warning{migration}, checkoutCfg.Warnings...)
 		}
 	}
 	if checkoutCfg != nil {
@@ -233,9 +239,10 @@ func natsURLs(raw string) ([]string, error) {
 
 // readConfigFile reads one envoy.json, or nil when there is none: a missing file, or a path through
 // a regular file (a repository with a file named .envoy). checkoutOf is empty for the user file;
-// for a checkout's file it is the user file's path, where the envoy section a checkout's file may
-// not hold belongs.
-func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
+// for a checkout's file it is the user file's path, where the envoy section a current checkout
+// file may not hold belongs. legacyCheckout makes a .opencode/envoy.json ignore its NATS and Envoy
+// keys rather than refuse them.
+func readConfigFile(path, checkoutOf string, legacyCheckout bool) (*EnvoyConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
@@ -243,7 +250,7 @@ func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 		}
 		return nil, err
 	}
-	cfg, issues := parseAndValidate(data, checkoutOf)
+	cfg, issues := parseAndValidate(data, checkoutOf, legacyCheckout)
 	if len(issues) > 0 {
 		return nil, &InvalidConfigError{Path: path, Issues: issues}
 	}
@@ -252,6 +259,14 @@ func readConfigFile(path, checkoutOf string) (*EnvoyConfig, error) {
 			Message: WarnTopLevelNatsURLs,
 			Path:    path,
 			Fix:     path + ": the top-level natsUrls" + laterReleaseStopsRead + "move natsUrls into envoy.natsUrls",
+		})
+	}
+	if cfg.ignoredLegacyCheckoutSettings {
+		ignored := path + ": " + WarnIgnoredCheckoutSettings
+		cfg.Warnings = append(cfg.Warnings, Warning{
+			Message: ignored,
+			Path:    path,
+			Fix:     ignored,
 		})
 	}
 	return cfg, nil
@@ -281,9 +296,9 @@ func jsonError(data []byte, err error) string {
 // top, type checks with null refused, unknown-key rejection under dispatch and envoy, http(s) URLs,
 // non-empty NATS URLs, a user file's top-level natsUrls read as envoy.natsUrls with a warning until
 // it moves (a later release stops reading it), and the refusal when it is set beside
-// envoy.natsUrls. For a checkout's file (checkoutOf set), it refuses top-level natsUrls and any
-// envoy section, naming the user file the section belongs in.
-func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
+// envoy.natsUrls. A current checkout's file refuses top-level natsUrls and any envoy section,
+// while its legacy .opencode/envoy.json predecessor ignores those keys with a warning.
+func parseAndValidate(data []byte, checkoutOf string, legacyCheckout bool) (*EnvoyConfig, []string) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, []string{jsonError(data, err)}
@@ -298,19 +313,24 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 		var s string
 		issues = append(issues, checkType("$schema", "string", v, &s)...)
 	}
-	if v, ok := raw["natsUrls"]; ok && checkoutOf != "" {
-		issues = append(issues, "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section")
-	} else if ok {
-		var natsURLs []string
-		issues = append(issues, checkType("natsUrls", "string array", v, &natsURLs)...)
-		for i, natsURL := range natsURLs {
-			natsURLs[i] = strings.TrimSpace(natsURL)
-			if natsURLs[i] == "" {
-				issues = append(issues, fmt.Sprintf("natsUrls.%d: must not be empty", i))
+	if v, ok := raw["natsUrls"]; ok {
+		switch {
+		case checkoutOf != "" && legacyCheckout:
+			cfg.ignoredLegacyCheckoutSettings = true
+		case checkoutOf != "":
+			issues = append(issues, "natsUrls: not read, and a checkout's envoy.json holds only a dispatch section")
+		default:
+			var natsURLs []string
+			issues = append(issues, checkType("natsUrls", "string array", v, &natsURLs)...)
+			for i, natsURL := range natsURLs {
+				natsURLs[i] = strings.TrimSpace(natsURL)
+				if natsURLs[i] == "" {
+					issues = append(issues, fmt.Sprintf("natsUrls.%d: must not be empty", i))
+				}
 			}
+			cfg.Envoy.NatsURLs = natsURLs
+			cfg.topLevelNatsURLs = true
 		}
-		cfg.Envoy.NatsURLs = natsURLs
-		cfg.topLevelNatsURLs = true
 	}
 	if v, ok := raw["dispatch"]; ok {
 		d, dIssues := parseDispatch(v)
@@ -318,7 +338,9 @@ func parseAndValidate(data []byte, checkoutOf string) (*EnvoyConfig, []string) {
 		cfg.Dispatch = d
 	}
 	if v, ok := raw["envoy"]; ok {
-		if checkoutOf != "" {
+		if checkoutOf != "" && legacyCheckout {
+			cfg.ignoredLegacyCheckoutSettings = true
+		} else if checkoutOf != "" {
 			issues = append(issues, "envoy: not read from a checkout's envoy.json; put it in "+checkoutOf)
 		} else {
 			e, eIssues := parseEnvoy(v)

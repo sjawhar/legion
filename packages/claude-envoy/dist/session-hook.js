@@ -18352,6 +18352,7 @@ function readDispatchFirstContext(skillFile) {
 import {
   chmodSync,
   closeSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
   openSync,
@@ -18438,8 +18439,13 @@ var CheckoutFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
   dispatch: DispatchSectionSchema.optional()
 });
-function offWithNotice(notice) {
-  return { enabled: false, notice, error: null };
+function offWithNotice(notice, oldUserFileNotRead = false) {
+  return {
+    enabled: false,
+    notice,
+    error: null,
+    ...oldUserFileNotRead ? { oldUserFileNotRead: true } : {}
+  };
 }
 function offWithError(error48) {
   return { enabled: false, notice: null, error: error48 };
@@ -18660,9 +18666,31 @@ function unsendableRefusal(source, value) {
 function checkoutCommandRefusal(checkoutPath, field) {
   return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
+function oldUserFileNotice(filePath, env) {
+  const home = nonEmpty(env.HOME) ?? homedir();
+  const old = path.join(home, ".config", "opencode", "envoy.json");
+  if (!existsSync(old))
+    return;
+  const selected = path.resolve(filePath);
+  const profileDirectories = [
+    nonEmpty(env.OMP_PROFILE) !== undefined && nonEmpty(env.OMP_PROFILE) !== "default" ? nonEmpty(env.PI_CODING_AGENT_DIR) : undefined,
+    nonEmpty(env.CLAUDE_CONFIG_DIR),
+    nonEmpty(env.OPENCODE_CONFIG_DIR)
+  ];
+  if (profileDirectories.some((directory) => directory !== undefined && path.isAbsolute(directory) && selected === path.resolve(directory, "envoy.json"))) {
+    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
+  }
+  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
+  const neutral = neutralConfig(env);
+  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path && neutral.path !== path.resolve(home, ".config", "legion", "envoy.json")) {
+    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
+  }
+  return;
+}
 function missingConfigNotice(filePath, missing, off) {
   const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
-  return `no envoy.json at ${filePath}${link}: ${off}`;
+  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
 }
 function openCodeUserFile(filePath, env) {
   const neutral = neutralConfig(env);
@@ -18692,6 +18720,7 @@ function readEnvoyConfig(filePath, env, options) {
   const warnings = [];
   let readPath = filePath;
   let chosen = parseFile(filePath, EnvoyFileSchema, false);
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
   const openCode = chosen.kind === "absent" ? openCodeUserFile(filePath, env) : null;
   if (openCode !== null) {
     const old = parseFile(openCode, EnvoyFileSchema, false);
@@ -18708,27 +18737,33 @@ function readEnvoyConfig(filePath, env, options) {
     return { kind: "failed", path: readPath, error: sections.error };
   const own = sections.settings;
   const resolvedChosen = path.resolve(filePath);
-  const checkoutFile = (candidate) => candidate === resolvedChosen ? { kind: "absent", link: null } : parseFile(candidate, CheckoutFileSchema, true);
+  const checkoutFile = (candidate, legacy) => candidate === resolvedChosen ? { kind: "absent", link: null } : parseFile(candidate, CheckoutFileSchema, !legacy);
   let checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  let parsedCheckout = checkoutFile(checkoutPath);
+  let legacyCheckout = false;
+  let parsedCheckout = checkoutFile(checkoutPath, false);
   if (parsedCheckout.kind === "absent") {
     const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-    const old = checkoutFile(oldCheckout);
+    const old = checkoutFile(oldCheckout, true);
     if (old.kind !== "absent") {
       warnings.push(`${oldCheckout} is read until it moves (a later release stops reading it): mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`);
       parsedCheckout = old;
       checkoutPath = oldCheckout;
+      legacyCheckout = true;
     }
   }
   let checkout = null;
   if (parsedCheckout.kind === "invalid") {
     checkout = { kind: "invalid", path: checkoutPath, error: parsedCheckout.reason };
   } else if (parsedCheckout.kind === "valid") {
+    const ignoredLegacySettings = legacyCheckout && (Object.hasOwn(parsedCheckout.settings, "natsUrls") || Object.hasOwn(parsedCheckout.settings, "envoy"));
+    if (ignoredLegacySettings) {
+      warnings.push(`${checkoutPath}: natsUrls/envoy is not read from a checkout's envoy.json; ignored`);
+    }
     checkout = {
       kind: "valid",
       path: checkoutPath,
       dispatch: parsedCheckout.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(parsedCheckout.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+      envoyError: legacyCheckout || !Object.hasOwn(parsedCheckout.settings, "envoy") ? null : `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
     };
   }
   return {
@@ -18737,7 +18772,10 @@ function readEnvoyConfig(filePath, env, options) {
     dispatch: own.dispatch ?? {},
     envoy: own.envoy ?? {},
     checkout,
-    missing: chosen.kind === "absent" ? { link: chosen.link } : null,
+    missing: chosen.kind === "absent" ? {
+      link: chosen.link,
+      ...unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }
+    } : null,
     warnings
   };
 }
@@ -18912,7 +18950,8 @@ function dispatchSettings(env, config2) {
   }
   const enabled = checkout?.dispatch.enabled === true || own.enabled === true;
   if (explicitUrl === undefined && !enabled) {
-    return offWithNotice(config2.missing === null ? `${config2.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, config2.missing, "Dispatch is off"));
+    const missing = config2.missing;
+    return offWithNotice(missing === null ? `${config2.path} has no enabled dispatch section, and DISPATCH_URL is not set: Dispatch is off` : missingConfigNotice(config2.path, missing, "Dispatch is off"), missing?.oldUserFileNotice !== undefined);
   }
   if (explicitUrl === undefined && checkout?.dispatch.serverUrl !== undefined) {
     const token = checkout.dispatch.token;
@@ -19167,6 +19206,9 @@ ${formatOpenAsksSummary(snapshot, config2.url)}
     }
   } else if (config2.error !== null) {
     process.stdout.write(`Dispatch authored-ask summary unavailable: ${config2.error}
+`);
+  } else if (config2.oldUserFileNotRead && config2.notice !== null) {
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config2.notice}
 `);
   }
 }

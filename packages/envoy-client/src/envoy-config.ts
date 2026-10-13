@@ -1,6 +1,7 @@
 import {
   chmodSync,
   closeSync,
+  existsSync,
   lstatSync,
   mkdtempSync,
   openSync,
@@ -172,9 +173,11 @@ export type CheckoutEnvoyConfig =
     }
   | { readonly kind: "invalid"; readonly path: string; readonly error: string };
 
-/** A chosen file that does not exist: a dangling link's target (`missingConfigNotice`). */
+/** A chosen file that does not exist: a dangling link's target and any old-file notice
+ * (`missingConfigNotice`). */
 export interface MissingConfig {
   readonly link: string | null;
+  readonly oldUserFileNotice?: string;
 }
 
 /**
@@ -207,11 +210,21 @@ export type ReadEnvoyConfig = Extract<EnvoyConfig, { readonly kind: "read" }>;
 /** A section that is off: a `notice` says why when nothing is wrong (a file turns it off, or
  * nothing names it), an `error` names what could not be read or used. */
 export type SectionOff =
-  | { readonly enabled: false; readonly notice: string; readonly error: null }
+  | {
+      readonly enabled: false;
+      readonly notice: string;
+      readonly error: null;
+      readonly oldUserFileNotRead?: true;
+    }
   | { readonly enabled: false; readonly notice: null; readonly error: string };
 
-export function offWithNotice(notice: string): SectionOff {
-  return { enabled: false, notice, error: null };
+export function offWithNotice(notice: string, oldUserFileNotRead = false): SectionOff {
+  return {
+    enabled: false,
+    notice,
+    error: null,
+    ...(oldUserFileNotRead ? { oldUserFileNotRead: true as const } : {}),
+  };
 }
 
 export function offWithError(error: string): SectionOff {
@@ -483,11 +496,51 @@ export function checkoutCommandRefusal(checkoutPath: string, field: string): str
   return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 
+/** What a missing chosen file says about the OpenCode-era user file without reading it. */
+function oldUserFileNotice(filePath: string, env: EnvoyConfigEnvironment): string | undefined {
+  const home = nonEmpty(env.HOME) ?? homedir();
+  const old = path.join(home, ".config", "opencode", "envoy.json");
+  if (!existsSync(old)) return undefined;
+
+  const selected = path.resolve(filePath);
+  const profileDirectories = [
+    nonEmpty(env.OMP_PROFILE) !== undefined && nonEmpty(env.OMP_PROFILE) !== "default"
+      ? nonEmpty(env.PI_CODING_AGENT_DIR)
+      : undefined,
+    nonEmpty(env.CLAUDE_CONFIG_DIR),
+    nonEmpty(env.OPENCODE_CONFIG_DIR),
+  ];
+  if (
+    profileDirectories.some(
+      (directory) =>
+        directory !== undefined &&
+        path.isAbsolute(directory) &&
+        selected === path.resolve(directory, "envoy.json")
+    )
+  ) {
+    return `${old} is not read for this profile; copy or link it to ${filePath}, or write that file`;
+  }
+
+  const configHome = nonEmpty(env.XDG_CONFIG_HOME);
+  const neutral = neutralConfig(env);
+  if (
+    configHome !== undefined &&
+    path.isAbsolute(configHome) &&
+    "path" in neutral &&
+    selected === neutral.path &&
+    neutral.path !== path.resolve(home, ".config", "legion", "envoy.json")
+  ) {
+    return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
+  }
+  return undefined;
+}
+
 /** The notice for a chosen file that does not exist, saying what is `off` for want of it, and
- * naming the link's target when the file is a dangling link (`readEnvoyConfig`). */
+ * naming the link's target and any unread old user file (`readEnvoyConfig`). */
 export function missingConfigNotice(filePath: string, missing: MissingConfig, off: string): string {
   const link = missing.link === null ? "" : ` (a link to ${missing.link}, which does not exist)`;
-  return `no envoy.json at ${filePath}${link}: ${off}`;
+  const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
+  return `no envoy.json at ${filePath}${link}: ${off}${old}`;
 }
 
 /** The OpenCode-era user file, read in place of a missing chosen file: only when that file is the
@@ -538,12 +591,12 @@ function chosenSections(
  * `envoy` section in it sets `checkout.envoyError` rather than configuring anything.
  *
  * Three saved inputs from before this layout are read until they move, each with a warning in
- * `warnings`: in place of a missing neutral file at `$HOME/.config/legion/envoy.json`, the
- * OpenCode-era `~/.config/opencode/envoy.json`, trusted as the chosen file is; in place of a
- * missing `.envoy/envoy.json`, the checkout's `.opencode/envoy.json`, under every checkout rule;
- * and a chosen file's top-level `natsUrls` as `envoy.natsUrls`. A later release stops reading
- * each input; a checkout's top-level `natsUrls` and one set beside `envoy.natsUrls` remain
- * refused.
+ * `warnings`: in place of a missing default neutral file at `$HOME/.config/legion/envoy.json`, the
+ * OpenCode-era `~/.config/opencode/envoy.json`; in place of a missing `.envoy/envoy.json`, the
+ * checkout's `.opencode/envoy.json`; and a chosen user file's top-level `natsUrls` as
+ * `envoy.natsUrls`. A profile or relocated-XDG file never reads the old user file; its missing
+ * notice says why. A legacy checkout ignores top-level `natsUrls` and `envoy` with a warning, while
+ * the current checkout keeps refusing them.
  */
 export function readEnvoyConfig(
   filePath: string,
@@ -553,6 +606,7 @@ export function readEnvoyConfig(
   const warnings: string[] = [];
   let readPath = filePath;
   let chosen = parseFile(filePath, EnvoyFileSchema, false);
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
   const openCode = chosen.kind === "absent" ? openCodeUserFile(filePath, env) : null;
   if (openCode !== null) {
     const old = parseFile(openCode, EnvoyFileSchema, false);
@@ -573,34 +627,49 @@ export function readEnvoyConfig(
   const own = sections.settings;
 
   const resolvedChosen = path.resolve(filePath);
-  const checkoutFile = (candidate: string): ParsedFile<z.infer<typeof CheckoutFileSchema>> =>
+  const checkoutFile = (
+    candidate: string,
+    legacy: boolean
+  ): ParsedFile<z.infer<typeof CheckoutFileSchema>> =>
     candidate === resolvedChosen
       ? { kind: "absent", link: null }
-      : parseFile(candidate, CheckoutFileSchema, true);
+      : parseFile(candidate, CheckoutFileSchema, !legacy);
   let checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  let parsedCheckout = checkoutFile(checkoutPath);
+  let legacyCheckout = false;
+  let parsedCheckout = checkoutFile(checkoutPath, false);
   if (parsedCheckout.kind === "absent") {
     const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-    const old = checkoutFile(oldCheckout);
+    const old = checkoutFile(oldCheckout, true);
     if (old.kind !== "absent") {
       warnings.push(
         `${oldCheckout} is read until it moves (a later release stops reading it): mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`
       );
       parsedCheckout = old;
       checkoutPath = oldCheckout;
+      legacyCheckout = true;
     }
   }
   let checkout: CheckoutEnvoyConfig | null = null;
   if (parsedCheckout.kind === "invalid") {
     checkout = { kind: "invalid", path: checkoutPath, error: parsedCheckout.reason };
   } else if (parsedCheckout.kind === "valid") {
+    const ignoredLegacySettings =
+      legacyCheckout &&
+      (Object.hasOwn(parsedCheckout.settings, "natsUrls") ||
+        Object.hasOwn(parsedCheckout.settings, "envoy"));
+    if (ignoredLegacySettings) {
+      warnings.push(
+        `${checkoutPath}: natsUrls/envoy is not read from a checkout's envoy.json; ignored`
+      );
+    }
     checkout = {
       kind: "valid",
       path: checkoutPath,
       dispatch: parsedCheckout.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(parsedCheckout.settings, "envoy")
-        ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
-        : null,
+      envoyError:
+        legacyCheckout || !Object.hasOwn(parsedCheckout.settings, "envoy")
+          ? null
+          : `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`,
     };
   }
   return {
@@ -609,7 +678,13 @@ export function readEnvoyConfig(
     dispatch: own.dispatch ?? {},
     envoy: own.envoy ?? {},
     checkout,
-    missing: chosen.kind === "absent" ? { link: chosen.link } : null,
+    missing:
+      chosen.kind === "absent"
+        ? {
+            link: chosen.link,
+            ...(unreadOldUserFile === undefined ? {} : { oldUserFileNotice: unreadOldUserFile }),
+          }
+        : null,
     warnings,
   };
 }

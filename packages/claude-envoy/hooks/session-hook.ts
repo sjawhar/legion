@@ -111,6 +111,8 @@ async function openAsks(raw: unknown): Promise<void> {
     }
   } else if (config.error !== null) {
     process.stdout.write(`Dispatch authored-ask summary unavailable: ${config.error}\n`)
+  } else if (config.oldUserFileNotRead && config.notice !== null) {
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config.notice}\n`)
   }
 }
 

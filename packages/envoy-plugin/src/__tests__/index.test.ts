@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { logger } from "../log";
@@ -39,9 +39,23 @@ async function shellEnvironment(hooks: {
 }
 
 describe("the serve's envoy.json", () => {
-  it("with OPENCODE_CONFIG_DIR holding no envoy.json, registers no tool and hands that file to every shell", async () => {
-    const opencodeDirectory = path.join(configDirectory(), "opencode");
+  it("with OPENCODE_CONFIG_DIR holding no envoy.json, logs where the unread old file belongs and hands that file to every shell", async () => {
+    const home = configDirectory();
+    const opencodeDirectory = path.join(home, "opencode");
+    const old = path.join(home, ".config", "opencode", "envoy.json");
+    const marker = path.join(home, "old-token-ran");
     mkdirSync(opencodeDirectory);
+    mkdirSync(path.dirname(old), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: "https://old.dispatch.example",
+          token: `!touch ${marker}; echo old-token`,
+        },
+      })
+    );
     process.env.OPENCODE_CONFIG_DIR = opencodeDirectory;
     const previous = { ...process.env };
     delete process.env.ENVOY_URL;
@@ -70,8 +84,11 @@ describe("the serve's envoy.json", () => {
       expect(Object.keys(hooks.tool)).toEqual([]);
       expect((await shellEnvironment(hooks)).ENVOY_CONFIG_FILE).toBe(file);
       expect(warn.mock.calls).toEqual([
-        [`envoy: no envoy.json at ${file}: Dispatch and Envoy are off`],
+        [
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
+        ],
       ]);
+      expect(existsSync(marker)).toBe(false);
       // The busy session's title is the serve's to look up; no listener is called.
       expect(requests.filter((url) => !url.startsWith("http://127.0.0.1:13381/"))).toEqual([]);
       hooks.dispose();

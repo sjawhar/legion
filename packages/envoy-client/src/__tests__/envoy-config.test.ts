@@ -280,6 +280,65 @@ describe("readEnvoyConfig", () => {
     }
   });
 
+  test("a missing harness file leaves the OpenCode-era file unread and names how to configure each profile", () => {
+    const home = tempDir();
+    const marker = path.join(home, "old-token-ran");
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
+    });
+    const profiles = [
+      ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: path.join(home, "omp") }],
+      ["claude", { CLAUDE_CONFIG_DIR: path.join(home, "claude") }],
+      ["opencode", { OPENCODE_CONFIG_DIR: path.join(home, "opencode") }],
+    ] as const;
+
+    for (const [harness, profile] of profiles) {
+      const chosen = envoyConfigPath(harness, { HOME: home, ...profile });
+      const config = readEnvoyConfig(chosen, { HOME: home, ...profile }, { cwd: tempDir() });
+      expect(config).toMatchObject({
+        path: chosen,
+        dispatch: {},
+        envoy: {},
+        missing: { link: null },
+      });
+      expect(missingNotice(config, "Dispatch and Envoy are off")).toBe(
+        `no envoy.json at ${chosen}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${chosen}, or write that file`
+      );
+      expect(existsSync(marker)).toBe(false);
+    }
+  });
+
+  test("a relocated neutral file leaves the OpenCode-era file unread and says why", () => {
+    const home = tempDir();
+    const marker = path.join(home, "old-token-ran");
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
+    });
+    const configHome = path.join(home, "relocated-config");
+    const env = { HOME: home, XDG_CONFIG_HOME: configHome };
+    const chosen = envoyConfigPath("omp", env);
+    const config = readEnvoyConfig(chosen, env, { cwd: tempDir() });
+
+    expect(config).toMatchObject({
+      path: chosen,
+      dispatch: {},
+      envoy: {},
+      missing: { link: null },
+    });
+    expect(missingNotice(config, "Dispatch and Envoy are off")).toBe(
+      `no envoy.json at ${chosen}: Dispatch and Envoy are off; ${old} is not read under XDG_CONFIG_HOME=${configHome}`
+    );
+    expect(existsSync(marker)).toBe(false);
+  });
+
   test("the OpenCode-era file that is not valid is refused, naming it", () => {
     const home = tempDir();
     const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
@@ -427,24 +486,32 @@ describe("readEnvoyConfig", () => {
     });
   });
 
-  test("a checkout's .opencode/envoy.json is read when .envoy/envoy.json is absent, under the checkout's rules, with a warning", () => {
+  test("a legacy checkout's .opencode/envoy.json ignores NATS and Envoy settings but keeps its Dispatch server", () => {
     const cwd = tempDir();
     const old = writeFile(path.join(cwd, ".opencode", "envoy.json"), {
-      dispatch: { serverUrl: "https://old.internal.example", token: "t" },
-      envoy: { enabled: true },
+      dispatch: { enabled: true, serverUrl: "https://old.internal.example", token: "t" },
+      natsUrls: ["nats://checkout.internal.example:4222"],
+      envoy: { enabled: true, natsUrls: ["nats://other.internal.example:4222"] },
     });
     const file = writeFile(path.join(tempDir(), "envoy.json"), {});
     const config = readEnvoyConfig(file, { HOME: tempDir() }, { cwd });
     expect(config).toMatchObject({
+      envoy: {},
       checkout: {
         kind: "valid",
         path: old,
         dispatch: { serverUrl: "https://old.internal.example", token: "t" },
-        envoyError: `${old}: envoy is not read from a checkout's envoy.json; put it in ${file}`,
+        envoyError: null,
       },
       warnings: [
         `${old} is read until it moves (a later release stops reading it): mkdir -p ${path.join(cwd, ".envoy")} && mv ${old} ${path.join(cwd, ".envoy", "envoy.json")}`,
+        `${old}: natsUrls/envoy is not read from a checkout's envoy.json; ignored`,
       ],
+    });
+    expect(dispatchSettings({}, config)).toEqual({
+      enabled: true,
+      url: "https://old.internal.example",
+      token: "t",
     });
     // Its `!` token is refused, as any checkout's is.
     writeFile(old, {

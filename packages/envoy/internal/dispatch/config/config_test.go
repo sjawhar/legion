@@ -325,13 +325,18 @@ func TestLoadReadsNatsURLsFromAnEnvoySectionThatIsOff(t *testing.T) {
 	}
 }
 
-// The OpenCode-era checkout file is read while the checkout has no .envoy/envoy.json, under every
-// checkout rule, with a warning naming the move.
+// The OpenCode-era checkout file is read while the checkout has no .envoy/envoy.json. It carries
+// Dispatch forward but ignores the old top-level NATS and envoy keys with a warning, so a checkout
+// cannot select the server's NATS connection.
 func TestLoadReadsTheOldCheckoutFileUntilItMoves(t *testing.T) {
 	cwd := t.TempDir()
 	home := t.TempDir()
 	oldPath := filepath.Join(cwd, ".opencode", "envoy.json")
-	mustWrite(t, oldPath, `{"dispatch": {"serverUrl": "https://old.dispatch.example"}}`)
+	mustWrite(t, oldPath, `{
+		"dispatch": {"serverUrl": "https://old.dispatch.example"},
+		"natsUrls": ["nats://checkout:4222"],
+		"envoy": {"natsUrls": ["nats://other-checkout:4222"]}
+	}`)
 	cfg, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home})
 	if err != nil {
 		t.Fatalf("load: %v", err)
@@ -339,18 +344,23 @@ func TestLoadReadsTheOldCheckoutFileUntilItMoves(t *testing.T) {
 	if cfg.Dispatch == nil || cfg.Dispatch.ServerURL != "https://old.dispatch.example" {
 		t.Errorf("dispatch: got %+v, want the old checkout file's server", cfg.Dispatch)
 	}
-	want := Warning{Message: WarnOpenCodeCheckout, Path: oldPath,
-		Fix: oldPath + " is read until it moves (a later release stops reading it): mkdir -p " +
-			filepath.Join(cwd, ".envoy") + " && mv " + oldPath + " " + checkoutFile(cwd)}
-	if len(cfg.Warnings) != 1 || cfg.Warnings[0] != want {
-		t.Errorf("warnings: got %+v, want %+v", cfg.Warnings, want)
+	if len(cfg.Envoy.NatsURLs) != 0 {
+		t.Errorf("envoy.natsUrls: got %q, want none from the checkout", cfg.Envoy.NatsURLs)
 	}
-
-	// An envoy section there refuses startup, as in .envoy/envoy.json.
-	mustWrite(t, oldPath, `{"envoy": {"enabled": false}}`)
-	var invalid *InvalidConfigError
-	if _, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home}); !errors.As(err, &invalid) || invalid.Path != oldPath {
-		t.Errorf("err = %v, want %s refused for its envoy section", err, oldPath)
+	move := oldPath + " is read until it moves (a later release stops reading it): mkdir -p " +
+		filepath.Join(cwd, ".envoy") + " && mv " + oldPath + " " + checkoutFile(cwd)
+	ignored := oldPath + ": natsUrls/envoy is not read from a checkout's envoy.json; ignored"
+	want := []Warning{
+		{Message: WarnOpenCodeCheckout, Path: oldPath, Fix: move},
+		{Message: ignored, Path: oldPath, Fix: ignored},
+	}
+	if len(cfg.Warnings) != len(want) {
+		t.Fatalf("warnings: got %+v, want %+v", cfg.Warnings, want)
+	}
+	for i := range want {
+		if cfg.Warnings[i] != want[i] {
+			t.Errorf("warning %d: got %+v, want %+v", i, cfg.Warnings[i], want[i])
+		}
 	}
 
 	// A .envoy/envoy.json beside it is read, and the old file is not named.
