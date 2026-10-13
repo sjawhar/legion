@@ -15170,8 +15170,8 @@ function checkoutCommandRefusal(checkoutPath, field) {
 function failed(filePath, error48) {
   return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error: error48 };
 }
-function missingNotice(filePath, env) {
-  const notice = `no envoy.json at ${filePath}: Dispatch and Envoy are off`;
+function missingConfigNotice(filePath, env, off) {
+  const notice = `no envoy.json at ${filePath}: ${off}`;
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath))
     return notice;
@@ -15198,7 +15198,7 @@ function readEnvoyConfig(filePath, env, options) {
       dispatch: checkoutFile.settings.dispatch ?? {},
       envoy: checkoutFile.settings.envoy ?? {}
     } : null,
-    notice: chosen.kind === "absent" ? missingNotice(filePath, env) : null,
+    notice: chosen.kind === "absent" ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off") : null,
     error: null
   };
 }

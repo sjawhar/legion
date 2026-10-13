@@ -4,6 +4,7 @@ import {
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
+  missingConfigNotice,
   readEnvoyConfig,
 } from "./envoy-config";
 import { messageFor } from "./errors";
@@ -35,12 +36,14 @@ export interface SessionSettings {
 /**
  * The start notice. A file that cannot be read turns both sections off with its one error. A
  * missing file turns both off with its own notice; when a variable turned a section on, each
- * section still off names the file alone. A section's own error (a token that does not resolve, a
- * command that failed) is said for that section. A file that turns a section off, or holds no
- * section for it, says nothing.
+ * section still off is said with the same missing-file text (`missingConfigNotice`), which names
+ * the old OpenCode file while it is still there. A section's own error (a token that does not
+ * resolve, a command that failed) is said for that section. A file that turns a section off, or
+ * holds no section for it, says nothing.
  */
 function startNotice(
   config: EnvoyConfig,
+  env: EnvoyEnvironment,
   dispatch: DispatchConfigResolution,
   envoy: EnvoySettings
 ): string | null {
@@ -51,9 +54,10 @@ function startNotice(
   if (missing && dispatchOff && envoyOff) return config.notice;
   const parts: string[] = [];
   if (dispatch.error !== null) parts.push(`Dispatch is off: ${dispatch.error}`);
-  else if (dispatchOff && missing) parts.push(`no envoy.json at ${config.path}: Dispatch is off`);
+  else if (dispatchOff && missing)
+    parts.push(missingConfigNotice(config.path, env, "Dispatch is off"));
   if (!envoy.enabled && envoy.error !== null) parts.push(`Envoy is off: ${envoy.error}`);
-  else if (envoyOff && missing) parts.push(`no envoy.json at ${config.path}: Envoy is off`);
+  else if (envoyOff && missing) parts.push(missingConfigNotice(config.path, env, "Envoy is off"));
   return parts.length === 0 ? null : parts.join("; ");
 }
 
@@ -75,7 +79,7 @@ export function sessionSettings(
   const config = readEnvoyConfig(file.path, env, options);
   const dispatch = dispatchSettings(env, config);
   const envoy = envoySettings(env, config);
-  return { dispatch, envoy, notice: startNotice(config, dispatch, envoy) };
+  return { dispatch, envoy, notice: startNotice(config, env, dispatch, envoy) };
 }
 
 /** Dispatch from `file` as it reads now, for a plugin that resolves Dispatch on every use rather

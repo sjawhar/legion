@@ -291,10 +291,15 @@ function failed(filePath: string, error: string): EnvoyConfig {
   return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error };
 }
 
-/** The notice for a chosen file that does not exist. When that file is the neutral one and the old
- * OpenCode file is still there, it names both and says to move it. */
-function missingNotice(filePath: string, env: EnvoyConfigEnvironment): string {
-  const notice = `no envoy.json at ${filePath}: Dispatch and Envoy are off`;
+/** The notice for a chosen file that does not exist, saying what is `off` for want of it. When that
+ * file is the neutral one and the old OpenCode file is still there, it names both and says to move
+ * it. */
+export function missingConfigNotice(
+  filePath: string,
+  env: EnvoyConfigEnvironment,
+  off: string
+): string {
+  const notice = `no envoy.json at ${filePath}: ${off}`;
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath)) return notice;
   const old = path.join(setValue(env.HOME) ?? homedir(), ".config", "opencode", "envoy.json");
@@ -332,7 +337,10 @@ export function readEnvoyConfig(
             envoy: checkoutFile.settings.envoy ?? {},
           }
         : null,
-    notice: chosen.kind === "absent" ? missingNotice(filePath, env) : null,
+    notice:
+      chosen.kind === "absent"
+        ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off")
+        : null,
     error: null,
   };
 }

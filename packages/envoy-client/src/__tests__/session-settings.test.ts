@@ -157,3 +157,29 @@ describe("sessionDispatchSettings", () => {
     );
   });
 });
+
+describe("the old OpenCode file", () => {
+  test("is named whenever the neutral file is missing and it is still there, a section on or not", () => {
+    const home = tempDir();
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {});
+    const neutral = path.join(home, ".config", "legion", "envoy.json");
+    const hint = `${old} is no longer read: move it to ${neutral}`;
+    const chosen = { path: neutral, error: null } as const;
+
+    expect(sessionSettings(chosen, { HOME: home }, { cwd: tempDir() }).notice).toBe(
+      `no envoy.json at ${neutral}: Dispatch and Envoy are off; ${hint}`
+    );
+    const envoyOn = { HOME: home, ENVOY_NATS_URL: "nats://nats.internal.example:4222" };
+    expect(sessionSettings(chosen, envoyOn, { cwd: tempDir() }).notice).toBe(
+      `no envoy.json at ${neutral}: Dispatch is off; ${hint}`
+    );
+    const dispatchOn = {
+      HOME: home,
+      DISPATCH_URL: "https://dispatch.example",
+      DISPATCH_TOKEN: "environment-token",
+    };
+    expect(sessionSettings(chosen, dispatchOn, { cwd: tempDir() }).notice).toBe(
+      `no envoy.json at ${neutral}: Envoy is off; ${hint}`
+    );
+  });
+});

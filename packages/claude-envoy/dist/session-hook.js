@@ -13752,8 +13752,8 @@ function checkoutCommandRefusal(checkoutPath, field) {
 function failed(filePath, error48) {
   return { path: filePath, dispatch: {}, envoy: {}, checkout: null, notice: null, error: error48 };
 }
-function missingNotice(filePath, env) {
-  const notice = `no envoy.json at ${filePath}: Dispatch and Envoy are off`;
+function missingConfigNotice(filePath, env, off) {
+  const notice = `no envoy.json at ${filePath}: ${off}`;
   const neutral = neutralConfig(env);
   if ("error" in neutral || neutral.path !== path.resolve(filePath))
     return notice;
@@ -13780,7 +13780,7 @@ function readEnvoyConfig(filePath, env, options) {
       dispatch: checkoutFile.settings.dispatch ?? {},
       envoy: checkoutFile.settings.envoy ?? {}
     } : null,
-    notice: chosen.kind === "absent" ? missingNotice(filePath, env) : null,
+    notice: chosen.kind === "absent" ? missingConfigNotice(filePath, env, "Dispatch and Envoy are off") : null,
     error: null
   };
 }
@@ -18841,7 +18841,7 @@ function sessionConfigFile(harness, env) {
     return { path: null, error: messageFor(error48) };
   }
 }
-function startNotice(config2, dispatch, envoy) {
+function startNotice(config2, env, dispatch, envoy) {
   if (config2.error !== null)
     return `${config2.error}: Dispatch and Envoy are off`;
   const missing = config2.notice !== null;
@@ -18853,11 +18853,11 @@ function startNotice(config2, dispatch, envoy) {
   if (dispatch.error !== null)
     parts.push(`Dispatch is off: ${dispatch.error}`);
   else if (dispatchOff && missing)
-    parts.push(`no envoy.json at ${config2.path}: Dispatch is off`);
+    parts.push(missingConfigNotice(config2.path, env, "Dispatch is off"));
   if (!envoy.enabled && envoy.error !== null)
     parts.push(`Envoy is off: ${envoy.error}`);
   else if (envoyOff && missing)
-    parts.push(`no envoy.json at ${config2.path}: Envoy is off`);
+    parts.push(missingConfigNotice(config2.path, env, "Envoy is off"));
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -18871,7 +18871,7 @@ function sessionSettings(file2, env, options) {
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
   const envoy = envoySettings(env, config2);
-  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy) };
+  return { dispatch, envoy, notice: startNotice(config2, env, dispatch, envoy) };
 }
 
 // src/claude-session.ts
