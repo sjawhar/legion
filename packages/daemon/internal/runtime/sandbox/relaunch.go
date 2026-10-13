@@ -63,15 +63,16 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // for some other reason in the same sweep still is. The first role relaunched after any of these
 // replaces it, and its siblings resume into the new pod. Replacing a live pod — its Sandbox
 // Running, the pod its own, not ended, its init containers passed — ends the process of every role
-// still running in it, wherever its turn stood, so the Suspended patch that replaces it names it on
-// the Sandbox in the same write (displacedMark): evaluate then reports each of those roles ended by
-// the daemon's replacement (Displaced), which the supervisor resumes uncharged (LEGION-729). A pod
-// already ended, or never the Sandbox's, is named nothing. Before each start the Sandbox records
-// the addresses the generation is handed (recordAddresses). A new pod is provisioned by its kind
-// (podKind.provision), under nothing but the pod's own launch turn: an issue pod has its
-// workspace's provisioning token minted, the controller's pod needs nothing. A workflow claim
-// passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
-// cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
+// still running in it, wherever its turn stood, so the Suspended patch that replaces it names it
+// on the Sandbox in the same write (suspendDisplacing): evaluate then reports each of those roles
+// ended by the daemon's replacement (Displaced), which the supervisor resumes uncharged
+// (LEGION-729). A pod already ended, or never the Sandbox's, is named nothing. Before each start
+// the Sandbox records the addresses the generation is handed (recordAddresses). A new pod is
+// provisioned by its kind (podKind.provision), under nothing but the pod's own launch turn: an
+// issue pod has its workspace's provisioning token minted, the controller's pod needs nothing. A
+// workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so
+// the tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox
+// this creates.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
 // not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
@@ -120,8 +121,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		switch {
 		case live:
-			suspend := jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeSuspended}
-			if _, err := r.patch(ctx, s, suspend, displacedMark(s, pod.UID)); err != nil {
+			if err := r.suspendDisplacing(ctx, s, pod.UID); err != nil {
 				return fail("suspend its sandbox", err)
 			}
 		case s.mode() != modeSuspended:
@@ -610,17 +610,24 @@ func labelPatchPath(key string) string {
 // (evaluate's displaced). It lives with the Sandbox, so a restarted daemon reads it as well.
 const displacedAnnotation = "legion.dev/displaced-pod"
 
-// displacedMark is the operation, in the patch that sets the Sandbox read as s Suspended, that
-// names uid as the live pod it replaces (displacedAnnotation): the one write either applies both or
-// neither, so no refused suspension leaves a pod named. An `add` under an absent annotations map
-// fails, so a Sandbox with none gets the map whole; s is read under the pod's launch turn, which
-// every annotation write of the runtime's (recordAddresses) also holds, so that map is the
-// Sandbox's as it stands.
-func displacedMark(s *sandbox, uid types.UID) jsonPatchOp {
-	if s.Annotations == nil {
-		return jsonPatchOp{Op: "add", Path: "/metadata/annotations", Value: map[string]string{displacedAnnotation: string(uid)}}
+// suspendDisplacing sets the Sandbox read as s Suspended and names uid on it as the live pod that
+// suspension replaces (displacedAnnotation), in one JSON merge patch: the API server applies both
+// or neither, so a refused suspension names no pod, and a merge patch sets the one annotation key
+// whatever other annotations the Sandbox carries, or none. It carries s's uid, which the API server
+// refuses to change on a live object, so a Sandbox deleted and recreated in between is never
+// written: the fence recordAddresses keeps.
+func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) error {
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"uid": string(s.UID), "annotations": map[string]string{displacedAnnotation: string(uid)}},
+		"spec":     map[string]any{"operatingMode": modeSuspended},
+	})
+	if err != nil {
+		return err
 	}
-	return jsonPatchOp{Op: "add", Path: "/metadata/annotations/" + labelPatchEscape.Replace(displacedAnnotation), Value: string(uid)}
+	patching, cancel := call(ctx)
+	defer cancel()
+	_, err = r.sandboxClient().Patch(patching, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
+	return err
 }
 
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's

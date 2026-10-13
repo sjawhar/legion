@@ -3,7 +3,9 @@ package sandbox
 import (
 	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -160,10 +162,13 @@ func TestARoleWhosePodTheDaemonReplacedIsResumedUncharged(t *testing.T) {
 	}
 }
 
-// A Sandbox carrying no annotations at all — its pod launched, but no generation of it recorded
-// its addresses yet — gets the name of the live pod replaced in it as its one annotation: an `add`
-// under an absent map fails, so the mark brings the map whole, in the same patch as the suspension.
-func TestReplacingALivePodNamesItOnASandboxWithNoAnnotations(t *testing.T) {
+// A Sandbox carrying no annotations when the launch reads it — its pod launched, but no generation
+// of it recorded its addresses yet — gets the name of the live pod replaced in it, and an
+// annotation another writer adds between that read and the suspension (the Agent Sandbox
+// controller writes one of its own) stands beside it: the suspension is a merge patch of its one
+// annotation key, never a write of the whole map.
+func TestReplacingALivePodNamesItBesideEveryOtherAnnotation(t *testing.T) {
+	const between = "example.io/written-between"
 	g := newRig(t, nil)
 	testerLoc := g.spawn(workerSpec(t))
 	name := testerLoc.Sandbox.Name
@@ -179,16 +184,86 @@ func TestReplacingALivePodNamesItOnASandboxWithNoAnnotations(t *testing.T) {
 	if err := g.kube.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("secrets"), testNamespace, roleSecretName(name, claim.RoleReviewer)); err != nil {
 		t.Fatal(err)
 	}
+	var wrote atomic.Bool
+	g.dyn.PrependReactor("patch", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if !modePatched(t, string(a.(k8stesting.PatchAction).GetPatch()), modeSuspended) || !wrote.CompareAndSwap(false, true) {
+			return false, nil, nil
+		}
+		current, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, name)
+		if err != nil {
+			return true, nil, err
+		}
+		annotated := current.(*unstructured.Unstructured).DeepCopy()
+		annotated.SetAnnotations(map[string]string{between: "kept"})
+		if err := g.dyn.Tracker().Update(sandboxGVR, annotated, testNamespace); err != nil {
+			return true, nil, err
+		}
+		return false, nil, nil
+	})
 
 	reviewerLoc := g.spawn(testSpec(t, otherToken, claim.RoleReviewer, testTree))
 	if reviewerLoc.Sandbox.PodUID == testerLoc.Sandbox.PodUID {
 		t.Fatalf("the reviewer's launch kept pod %s, whose reviewer Secret is gone", testerLoc.Sandbox.PodUID)
 	}
-	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != testerLoc.Sandbox.PodUID {
+	annotations := g.sandbox(name).Annotations
+	if named := annotations[displacedAnnotation]; named != testerLoc.Sandbox.PodUID {
 		t.Fatalf("the Sandbox names %q as the pod the daemon replaced, want %s", named, testerLoc.Sandbox.PodUID)
+	}
+	if !wrote.Load() || annotations[between] != "kept" {
+		t.Fatalf("the Sandbox's annotations after the suspension = %v, want %s, written before it, kept", annotations, between)
 	}
 	if obs, err := g.r.Probe(g.ctx, testerLoc); err != nil || !obs.Displaced {
 		t.Fatalf("the tester in the replaced pod: %+v, %v; want it displaced", obs, err)
+	}
+}
+
+// A final verdict whose cause cannot be confirmed — the cached Sandbox names no pod, and reading
+// the Sandbox itself fails — is Uncertain, never a death: the claim stays watched and is evaluated
+// again once the read can answer.
+func TestAnEndWhoseSandboxCannotBeReadIsUncertain(t *testing.T) {
+	name := SandboxName(workerToken)
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeSuspended, claimLabels(claim.RoleTester))}, withoutController())
+	g.dyn.PrependReactor("get", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		return true, nil, errors.New("etcdserver: request timed out")
+	})
+	obs, err := g.r.Probe(g.ctx, sandboxLocator(workerToken, recorded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Uncertain || !strings.Contains(obs.Detail, "etcdserver: request timed out") || !strings.Contains(obs.Detail, "the stores report gone") {
+		t.Fatalf("an end whose Sandbox cannot be read: %s (%s), want Uncertain naming the verdict and the failed read", obs.Kind, obs.Detail)
+	}
+}
+
+// The pod store and the Sandbox store are fed by two informers that nothing orders, so the pod's
+// end can reach the runtime before the Suspended patch that names it does. A final verdict on a
+// role whose cached Sandbox does not name its pod is confirmed with one read of the Sandbox
+// itself before it is reported: with the Sandbox store 300 ms behind, the tester whose pod the
+// reviewer's launch replaced is still reported Displaced, never a death to charge.
+func TestADisplacementIsConfirmedPastALaggingSandboxStore(t *testing.T) {
+	g := newRig(t, nil, withLaggingSandboxInformer(300*time.Millisecond))
+	testerLoc := g.spawn(workerSpec(t))
+	if err := g.kube.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("secrets"), testNamespace, roleSecretName(testerLoc.Sandbox.Name, claim.RoleReviewer)); err != nil {
+		t.Fatal(err)
+	}
+	observations, err := g.r.Observe(g.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewer := testSpec(t, otherToken, claim.RoleReviewer, testTree)
+	g.launcher(reviewer.Claim)
+	spawned := make(chan error, 1)
+	go func() {
+		_, err := g.r.Spawn(g.ctx, reviewer)
+		spawned <- err
+	}()
+
+	ended := endOf(t, observations, testerLoc)
+	if !ended.Displaced || ended.Locator != testerLoc {
+		t.Errorf("the tester's end behind a lagging Sandbox store: %s, Displaced %t, at %+v (%s); want it displaced at its recorded locator", ended.Kind, ended.Displaced, ended.Locator, ended.Detail)
+	}
+	if err := <-spawned; err != nil {
+		t.Fatalf("Spawn the reviewer: %v", err)
 	}
 }
 
