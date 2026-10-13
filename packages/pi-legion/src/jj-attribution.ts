@@ -19,10 +19,8 @@
 // bounded: a jj that never answers (a PATH wrapper that loops) degrades to no
 // trailer instead of holding the rest of the claim's boot, the Envoy role
 // claim and `claims/ready`, which run after it.
-import { execFile } from "node:child_process";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 /** The bound on `jj config path --user`, which reads no repository and answers in milliseconds:
@@ -47,11 +45,41 @@ export async function userConfigChain(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<string | undefined> {
   try {
-    const { stdout } = await promisify(execFile)("jj", ["config", "path", "--user"], {
+    const child = Bun.spawn(["jj", "config", "path", "--user"], {
+      detached: true,
       env,
-      timeout: timeoutMs,
-      killSignal: "SIGKILL",
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
     });
+    // Include both streams in the deadline: a wrapper can fork a helper that inherits them after
+    // its leader exits, and attribution must never wait for that helper.
+    const completed = Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    const stdout = await new Promise<string | undefined>((resolve) => {
+      const timer = setTimeout(() => {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch {
+          // The group exited between the deadline and the signal.
+        }
+        resolve(undefined);
+      }, timeoutMs);
+      void completed.then(
+        ([code, output]) => {
+          clearTimeout(timer);
+          resolve(code === 0 ? output : undefined);
+        },
+        () => {
+          clearTimeout(timer);
+          resolve(undefined);
+        }
+      );
+    });
+    if (stdout === undefined) return undefined;
     const paths = stdout.split("\n").filter(Boolean);
     return paths.length > 0 ? paths.join(":") : undefined;
   } catch {

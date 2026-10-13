@@ -237,7 +237,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
-- Session attribution's `jj config path --user` gives up after 10 s. Root bootstrap awaits it, so a
-  `jj` that never answered (a PATH wrapper that loops) held the `session_start` handler past Oh My
-  Pi's 30 s and the claim never reached `ready`; attribution now degrades to no trailer, as it does
-  for any other failure to resolve jj.
+- Session attribution's `jj config path --user` gives up after 10 s and kills its process group.
+  Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
+  `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now
+  degrades to no trailer, as it does for any other failure to resolve jj.
