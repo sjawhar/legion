@@ -6,24 +6,21 @@
 
 - A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
   profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
-  `~/.config/legion/envoy.json`. During the warn-first migration, the old user file is read with a
-  warning only when no harness directory is selected and that neutral file is at the default XDG
-  location. A harness directory that is the default config directory follows the default-file rule.
-  A profile with no file gets no Dispatch or Envoy; its notice names the existing old file and the
-  chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old file is
-  not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
-  `dispatch`, ignoring top-level `natsUrls` and `envoy` with a warning; the current
-  `.envoy/envoy.json` keeps refusing checkout settings. A top-level `natsUrls` in a user file is
-  read as `envoy.natsUrls` with a warning.
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the session's file is missing, the start notice says so and names the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for a
+  profile's own file, the file to copy or link it to; under a relocated `XDG_CONFIG_HOME` it says
+  only that the old file is not read there. A top-level `natsUrls` is refused, naming
+  `envoy.natsUrls`.
 - The extension hands the file it read to every shell command as `ENVOY_CONFIG_FILE`, so the `dispatch` command reads the same one.
 - Each section turns on and off on its own; a missing file contributes nothing, so a section is then on only when its variables name it, and with Envoy off the session has no Envoy tools, no `/whoami` and no NATS connection, and a listener call is refused with `Envoy is off for this session: <why>`.
-- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A current
-  checkout's `.envoy/envoy.json` configures Dispatch alone and cannot run one; a legacy
-  `.opencode/envoy.json` ignores its Envoy settings with a warning. A checkout's file that is not
-  valid refuses Dispatch only while `DISPATCH_URL` is unset. A checkout's `dispatch.token` needs
-  its own `dispatch.serverUrl` beside it.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone and cannot run one; its `.opencode/envoy.json` is
+  not read, and while `.envoy/envoy.json` is absent the start notice names the rename. A checkout's
+  file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset. A checkout's
+  `dispatch.token` needs its own `dispatch.serverUrl` beside it.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server; another server needs its own token or seed variable.
-- One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, what a checkout's file holds that is not read, a migration warning, or that inbound messages are off.
+- One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, what a checkout's files hold that is not read, or that inbound messages are off.
 - A relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR` no longer stops the extension loading: both sections are off and the notice says why.
 
 ### Added

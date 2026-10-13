@@ -6,22 +6,20 @@
 
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
   `$OPENCODE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
-  `~/.config/legion/envoy.json`. During the warn-first migration, the old user file is read with a
-  warning only when no harness directory is selected and that neutral file is at the default XDG
-  location. A harness directory that is the default config directory follows the default-file rule.
-  A profile with no file gets no Dispatch or Envoy; its notice names the existing old file and the
-  chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old file is
-  not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
-  `dispatch`, ignoring top-level `natsUrls` and `envoy` with a warning; the current
-  `.envoy/envoy.json` keeps refusing checkout settings. A top-level `natsUrls` in a user file is
-  read as `envoy.natsUrls` with a warning.
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the serve's file is missing, the logged notice says so and names the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for
+  `$OPENCODE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
+  `XDG_CONFIG_HOME` it says only that the old file is not read there. A top-level `natsUrls` is
+  refused, naming `envoy.natsUrls`.
 - The `shell.env` hook sets `ENVOY_CONFIG_FILE` to that file beside `DISPATCH_HOST=opencode`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the same one.
 - With Envoy off the plugin registers no Envoy tool and calls no listener; Dispatch keeps its instruction file and session title.
-- A `token` starting with `!` is a command whose output is the value. A current checkout's
-  `.envoy/envoy.json` configures Dispatch alone; a legacy `.opencode/envoy.json` ignores its Envoy
-  settings with a warning. A checkout's file that is not valid refuses Dispatch only while
-  `DISPATCH_URL` is unset, and a checkout's `dispatch.token` needs its own `dispatch.serverUrl`
-  beside it. The serve opens no NATS connection, so it never runs an `envoy.natsSeed` command.
+- A `token` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone; its `.opencode/envoy.json` is not read, and while
+  `.envoy/envoy.json` is absent the logged notice and the `dispatch` command name the rename. A
+  checkout's file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset, and a
+  checkout's `dispatch.token` needs its own `dispatch.serverUrl` beside it. The serve opens no NATS
+  connection, so it never runs an `envoy.natsSeed` command.
 - `DISPATCH_URL` and `ENVOY_URL` take a file's token only for that file's own server.
 - One logged notice replaces the `Dispatch disabled` and `Envoy disabled` warnings, and a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `OPENCODE_CONFIG_DIR` no longer stops the plugin loading.
 - Agents reach Dispatch through the `dispatch` command (LEGION-588). The `shell.env` hook puts

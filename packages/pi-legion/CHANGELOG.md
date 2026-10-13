@@ -61,15 +61,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, with the `dispatch` section of the workspace's
   `.envoy/envoy.json` over it. `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which the daemon sets on
-  every pane when Dispatch is configured (`dispatch_url`), still override both. During the
-  warn-first migration, the old user file is read with a warning only when no harness directory is
-  selected and the neutral file is at the default XDG location. A harness directory that is the
-  default config directory follows the default-file rule. A profile with no file gets no Dispatch
-  or Envoy; its notice names the old file and profile file to copy or link it to, or write. A
-  relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A legacy
-  checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and `envoy`
-  with a warning; the current `.envoy/envoy.json` keeps refusing checkout settings. A top-level
-  `natsUrls` in a user file is read as `envoy.natsUrls` with a warning.
+  every pane when Dispatch is configured (`dispatch_url`), still override both.
+  `~/.config/opencode/envoy.json` and a workspace's `.opencode/envoy.json` are not read: a pane
+  with only the old user file has no Dispatch for the lookup, and its Envoy plugin's start notice
+  names the move.
 - `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an

@@ -6,24 +6,22 @@
 
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
   `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
-  `~/.config/legion/envoy.json`. During the warn-first migration, the old user file is read with a
-  warning only when no harness directory is selected and that neutral file is at the default XDG
-  location. A harness directory that is the default config directory follows the default-file rule.
-  A profile with no file gets no Dispatch or Envoy; its notice names the existing old file and the
-  chosen file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old file is
-  not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
-  `dispatch`, ignoring top-level `natsUrls` and `envoy` with a warning; the current
-  `.envoy/envoy.json` keeps refusing checkout settings. A top-level `natsUrls` in a user file is
-  read as `envoy.natsUrls` with a warning.
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the session's file is missing, the channel server's notice and the `open-asks` hook's summary say
+  so and name the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for
+  `$CLAUDE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
+  `XDG_CONFIG_HOME` they say only that the old file is not read there. A top-level `natsUrls` is
+  refused, naming `envoy.natsUrls`.
 - The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE` beside `DISPATCH_HOST`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the session's own file. A Bash that lacks what that hook writes, as a subagent's can, runs `dispatch` as host `claude` (`CLAUDE_CODE_CHILD_SESSION=1` with `DISPATCH_HOST` unset) on `CLAUDE_CONFIG_DIR`'s file, where it was refused for want of `DISPATCH_HOST`.
 - With Envoy off the channel server lists no tool, refuses each call with `Envoy is off for this session: <why>`, and exits 0 when stdin ends, instead of failing on `ENVOY_NATS_URL is required`.
-- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A current
-  checkout's `.envoy/envoy.json` configures Dispatch alone; a legacy `.opencode/envoy.json` ignores
-  its Envoy settings with a warning. A checkout's file that is not valid refuses Dispatch only
-  while `DISPATCH_URL` is unset, and a checkout's `dispatch.token` needs its own
-  `dispatch.serverUrl` beside it.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone; its `.opencode/envoy.json` is not read, and while
+  `.envoy/envoy.json` is absent the channel server's notice and the `dispatch` command name the
+  rename. A checkout's file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset,
+  and a checkout's `dispatch.token` needs its own `dispatch.serverUrl` beside it.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server.
-- The channel server writes one notice to stderr when a section is off: the missing file, the section's error, what a checkout's file holds that is not read, or a migration warning.
+- The channel server writes one notice to stderr when a section is off: the missing file, the section's error, or what a checkout's files hold that is not read.
 - `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
 
 ## [1.0.0]

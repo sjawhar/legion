@@ -203,22 +203,20 @@ or error. With Envoy on and no NATS server, inbound messages are off and the too
 Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the file stopped
 configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
 throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
-off for a reason worth saying: the
-missing file's (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`), a section's error,
-what a checkout's file holds that the session does not read, or that inbound messages are off; a
-file that turns a section off says nothing.
+off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
+Envoy are off`), a section's error, what a checkout's files hold that the session does not read, or
+that inbound messages are off; a file that turns a section off says nothing. A file location that
+cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`)
+still loads the extension, with both sections off, nothing handed on, and that refusal as the
+notice.
 
-During the warn-first migration, the old user file is read with a warning only for a session whose
-harness names no directory and whose neutral file is at the default XDG location. A harness
-directory that is the default config directory follows the default-file rule. A profile whose file
-is missing gets no Dispatch or Envoy; when the old file exists, the notice says it is not read and
-names the profile file to copy or link it to, or write. A relocated `XDG_CONFIG_HOME` says the old
-file is not read without asking to move it. A legacy checkout `.opencode/envoy.json` keeps only
-its `dispatch` section, ignoring top-level `natsUrls` and `envoy` with a warning. The current
-`.envoy/envoy.json` continues to refuse checkout settings. A top-level `natsUrls` in a user file is
-read as `envoy.natsUrls` with a warning. A file location that cannot be worked out (a relative
-`XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`) still loads the extension, with
-both sections off, nothing handed on, and that refusal as the notice.
+`~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
+user file is there and the session's file is missing, the missing file's notice ends with what to
+do: for `~/.config/legion/envoy.json`,
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`; for a profile's
+own file, copy or link the old file to it, or write it; under a relocated `XDG_CONFIG_HOME`, only
+that it is not read there. While a checkout has no `.envoy/envoy.json`, the notice names the rename
+of its `.opencode/envoy.json`. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
 
 ## The `dispatch` command
 

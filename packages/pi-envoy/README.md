@@ -154,15 +154,15 @@ section is off for a reason worth saying, the session says so once at its start:
 checkout's file holds that is not read, or that inbound messages are off. Invalid configuration, an
 invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the error.
 
-During the warn-first migration, the old user file is read with a warning only for a session whose
-harness names no directory and whose neutral file is at the default XDG location
-`~/.config/legion/envoy.json`. A harness directory that is the default config directory follows the
-default-file rule. A profile with no file gets no Dispatch or Envoy; when the old file exists, its
-start notice says it is not read and names the profile's file to copy or link it to, or write. A
-relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A legacy
-checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and `envoy`
-with a warning; the current `.envoy/envoy.json` continues to refuse checkout settings. A top-level
-`natsUrls` in a user file is read as `envoy.natsUrls` with a warning.
+`~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
+user file is there and the session's file is missing, Dispatch and Envoy stay off unless a variable
+names one, and the start notice says the old file is not read and what to do: for
+`~/.config/legion/envoy.json`,
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`; for a profile's
+own file, copy or link the old file to it, or write it; under a relocated `XDG_CONFIG_HOME`, only
+that it is not read there. While a checkout has no `.envoy/envoy.json`, the start notice and the
+`dispatch` command name the rename of its `.opencode/envoy.json`. A top-level `natsUrls` is
+refused, naming `envoy.natsUrls`.
 
 A command that writes to an owner names either an issue (`--issue`, a native `KEY` or an external
 `owner/repo#n` reference) or an unlinked project document (`--project` plus `--artifact`). A Legion

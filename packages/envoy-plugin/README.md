@@ -40,17 +40,17 @@ own. The `dispatch` command reads the file the `shell.env` hook hands it in `ENV
 Dispatch on, every session also carries the `dispatch-first` skill as an instruction file; with
 Envoy off, the plugin registers no Envoy tool and calls no listener. Why a section is off is logged
 once (`envoy: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or what a
-checkout's file holds that is not read).
+checkout's files hold that is not read).
 
-During the warn-first migration, the old user file is read with a warning only for a session whose
-harness names no directory and whose neutral file is at the default XDG location
-`~/.config/legion/envoy.json`. A harness directory that is the default config directory follows the
-default-file rule. A profile with no file gets no Dispatch or Envoy; when the old file exists, its
-log says it is not read and names the profile's file to copy or link it to, or write. A relocated
-`XDG_CONFIG_HOME` says the old file is not read without asking to move it. A legacy checkout
-`.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and `envoy` with a
-warning; the current `.envoy/envoy.json` continues to refuse checkout settings. A top-level
-`natsUrls` in a user file is read as `envoy.natsUrls` with a warning.
+`~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
+user file is there and the serve's file is missing, Dispatch and Envoy stay off unless a variable
+names one, and the log says the old file is not read and what to do: for
+`~/.config/legion/envoy.json`,
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`; for
+`$OPENCODE_CONFIG_DIR/envoy.json`, copy or link the old file to it, or write it; under a relocated
+`XDG_CONFIG_HOME`, only that it is not read there. While a checkout has no `.envoy/envoy.json`, the
+log and the `dispatch` command name the rename of its `.opencode/envoy.json`. A top-level
+`natsUrls` is refused, naming `envoy.natsUrls`.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

@@ -77,30 +77,37 @@ runs; `dispatch` then takes host `claude` and Claude Code's rule, so `CLAUDE_CON
 session's own directory, comes ahead of any `ENVOY_CONFIG_FILE` an outer session exported.
 
 `readEnvoyConfig(path, env, { cwd })` reads that file and a checkout's `<cwd>/.envoy/envoy.json`
-as written, running no command. Each section is strict: an unknown key is refused naming it. A
-top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a warning until it moves; a
-later release stops reading it. Setting it beside `envoy.natsUrls` is refused, naming the latter.
-JSON that does not parse is refused at its line and column, never with the parser's message, which
-quotes the text it stopped at.
+as written, running no command. Each section is strict: an unknown key is refused naming it, and
+so is a top-level `natsUrls`, which belongs in `envoy.natsUrls`. JSON that does not parse is
+refused at its line and column, never with the parser's message, which quotes the text it stopped
+at. A missing chosen file contributes nothing and sets `missing`: each section is then on only when
+its variables name it, and a section still off says `no envoy.json at <path>: Dispatch is off`
+(`Envoy is off`, or `Dispatch and Envoy are off` when neither is on), with
+`(a link to <target>, which does not exist)` after the path when it is a dangling link. A chosen
+file that cannot be read or is not valid is `failed`, naming the file and the key, and both
+sections are off with that error.
 
-During the warn-first migration, the old user file is read with a warning only for a session whose
-harness names no directory and whose neutral file is at the default XDG location
-`$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or `$HOME/.config`). A harness
-directory that is the default config directory follows the default-file rule. A profile with no
-file of its own gets no Dispatch or Envoy; if `$HOME/.config/opencode/envoy.json` exists, the
-missing-file notice says it is not read and names the chosen file to copy or link it to, or write.
-A neutral file under a relocated `XDG_CONFIG_HOME` never reads the old file and says so without
-asking to move it.
+Nothing reads the OpenCode-era `$HOME/.config/opencode/envoy.json`. While it is there and the
+chosen file is missing, the notice ends with what to do about it, decided by the chosen file's
+path: for `$HOME/.config/legion/envoy.json`, whichever rule chose it,
+`; <old file> is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+for a profile's own file, `; <old file> is not read for this profile; copy or link it to <path>, or
+write that file`; for the neutral file under a relocated `XDG_CONFIG_HOME`, as a Legion pane's is,
+`; <old file> is not read under XDG_CONFIG_HOME=<dir>`, without asking anyone to move it.
 
-A checkout's current `.envoy/envoy.json` may configure Dispatch alone: its top-level `natsUrls`
-remains refused, and an `envoy` section is not read by a client (or refuses a Go server start).
-When that file is absent, the legacy `.opencode/envoy.json` keeps only its `dispatch` section; its
-top-level `natsUrls` and any `envoy` section are ignored with a warning. A checkout file that
-cannot be read or is not valid refuses Dispatch with its error only while `DISPATCH_URL` is unset
-(a session's start notice then says `<error>; not read while DISPATCH_URL is set`), Envoy never
-reads it, and a `.envoy` that is a plain file is no checkout file. A cloned repository therefore
-cannot choose where a session's deliveries come from or which servers the user's NATS seed signs in
-to, nor turn off the Envoy the session's environment configured.
+A checkout's file is the repository's, and its failure is its own: one that cannot be read or is
+not valid refuses Dispatch with its error only while `DISPATCH_URL` is unset (a session's start
+notice then says `<error>; not read while DISPATCH_URL is set`), Envoy never reads it, and a `.envoy`
+that is a plain file is no checkout file. It may configure Dispatch alone: a top-level `natsUrls`
+there is refused saying a checkout's envoy.json holds only a `dispatch` section, and an `envoy`
+section, whatever it holds, is not read, which the start notice says
+(`<checkout>: envoy is not read from a checkout's envoy.json; put it in <chosen file>`). So a cloned
+repository neither chooses where a session's deliveries come from or which servers the user's NATS
+seed signs in to, nor turns off the Envoy the session's environment configured. The Go Dispatch
+server, which reads the same files, refuses to start on a checkout's `envoy` section. A checkout's
+OpenCode-era `.opencode/envoy.json` is never read: while the checkout has no `.envoy/envoy.json`,
+`warnings` holds `<old file> is not read: mkdir -p <cwd>/.envoy && mv <old file> <cwd>/.envoy/envoy.json`,
+which the start notice and the `dispatch` command say.
 
 Each section is resolved on its own: `dispatchSettings(env, config)` merges the checkout's
 `dispatch` section over the chosen file's, key by key, and `envoySettings(env, config)` reads the
@@ -154,15 +161,13 @@ a throw, so a plugin that cannot work out its file still loads, with both sectio
 `sessionSettings(file, env, { cwd, nats })` reads it once and returns both sections
 (`dispatchSettings`, `envoySettings`) and the one notice the session shows at its start: the
 file's error (`<error>: Dispatch and Envoy are off`), the missing file's notice, the missing-file
-text for a section still off when a variable turned the other on, a section's own error
-(`Dispatch is off: <error>`, `Envoy is off: <error>`), what a checkout's file holds that the
-session does not read (its `envoy` section, or the file's own error while `DISPATCH_URL` replaces
-it), or a migration warning; a file that turns a section off, or holds no section for it, says
-nothing. `sessionDispatchSettings(file, env, { cwd })` re-reads Dispatch from the same file on
-each use, for a plugin whose Dispatch calls follow a file that changes.
-`resolveDispatchConfig(env, { harness, cwd })` and `activeDispatchConfig` resolve Dispatch for a
-caller from its harness's file. `resolveDispatchConfigWithWarnings` returns that same resolution
-with each warning for a saved input the caller must move.
+text for a section still off when a variable turned the other on, or a section's own error
+(`Dispatch is off: <error>`, `Envoy is off: <error>`), then what a checkout's files hold that the
+session does not read (its `envoy` section, the file's own error while `DISPATCH_URL` replaces it,
+or its `.opencode/envoy.json`); a file that turns a section off, or holds no section for it, says
+nothing. `sessionDispatchSettings(file, env, { cwd })` re-reads Dispatch from the same file on each
+use, for a plugin whose Dispatch calls follow a file that changes. `resolveDispatchConfig(env, {
+harness, cwd })` and `activeDispatchConfig` resolve Dispatch for a caller from its harness's file.
 
 ## Dispatch
 

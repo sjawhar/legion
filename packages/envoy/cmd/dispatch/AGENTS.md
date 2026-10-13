@@ -79,23 +79,21 @@ database and SSE paths available and makes `/healthz` report `nats: null`.
 Dispatch loads config at every start, `DISPATCH_NATS_DISABLED` set or not, in this precedence
 order: the user `envoy.json` (`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the `dispatch`
 section of the checkout's `.envoy/envoy.json` in the directory it starts in, then environment
-overrides. A `.envoy` that is a plain file counts as no checkout file.
-
-During the warn-first migration, the old user file is read with a WARN only when a session's harness
-names no directory and the neutral file is at the default XDG location. A harness directory that is
-the default config directory follows the default-file rule. A profile with no file gets no Dispatch
-or Envoy; its notice names the existing old file and the profile file to copy or link it to, or
-write. A relocated `XDG_CONFIG_HOME` says the old file is not read without asking to move it. A
-legacy checkout `.opencode/envoy.json` keeps only `dispatch`, ignoring top-level `natsUrls` and
-`envoy` with a WARN. A top-level `natsUrls` in a user file is read as `envoy.natsUrls` with a WARN
-until it moves. The current `.envoy/envoy.json` still refuses its top-level `natsUrls` and `envoy`
-section, naming the user file that an Envoy section belongs in.
-
-Each other refusal below stops startup whether or not NATS is disabled, naming the file: an
-`XDG_CONFIG_HOME` that is not absolute; a JSON `null` at the top level, as a section or as any
-key's value, naming the key; and JSON that does not parse, naming the line and the column and never
-the text it stopped at, which can be the start of a token or seed. The server reads
-`envoy.natsUrls` whatever `envoy.enabled` says: `enabled` switches a session's Envoy, not the
+overrides. A `.envoy` that is a plain file counts as no checkout file. A checkout's
+`.opencode/envoy.json` is not read: while the checkout has no `.envoy/envoy.json`, Dispatch logs
+one WARN at start (`dispatch: a checkout's .opencode/envoy.json is not read`, with the rename as
+`fix`). Each refusal below stops startup whether or not NATS is disabled, naming the file: a
+checkout's file that holds an `envoy` section, naming `envoy` and the user file it belongs in (a
+cloned repository does not choose the NATS servers the server connects to; the session clients
+ignore such a section with a notice instead); a user file still at `~/.config/opencode/envoy.json`
+with none at the current path, naming both and the move, while that path is
+`~/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or `~/.config`), whatever
+`DISPATCH_SERVER_URL` and `NATS_URLS` say; an `XDG_CONFIG_HOME` that is not an absolute path,
+naming it; a file that carries a top-level `natsUrls`, naming `envoy.natsUrls` (a checkout's,
+saying a checkout's envoy.json holds only a `dispatch` section); a JSON `null` at the top level, as
+a section or as any key's value, naming the key; and JSON that does not parse, naming the line and
+the column and never the text it stopped at, which can be the start of a token or seed. The server
+reads `envoy.natsUrls` whatever `envoy.enabled` says: `enabled` switches a session's Envoy, not the
 server's.
 A present `NATS_URLS` overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the
 outbox start; the server
