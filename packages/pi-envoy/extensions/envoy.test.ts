@@ -8040,16 +8040,27 @@ describe("envoy OMP extension", () => {
     test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why, and no NATS is dialed`, async () => {
       const file = process.env.ENVOY_CONFIG_FILE ?? "";
       configure(file);
+      // A listener of the row's own on 127.0.0.1:4222 counts what dials it. Where something else
+      // already listens there (a local NATS, a CI service), only that count goes unchecked: every
+      // other assertion stands, and the mock records a connect without handing it to that server.
       let dialed = 0;
       const loopback = createServer((socket) => {
         dialed += 1;
         socket.destroy();
       });
-      const listening = Promise.withResolvers<void>();
-      loopback.once("error", listening.reject);
-      loopback.listen(4222, "127.0.0.1", listening.resolve);
-      await listening.promise;
-      natsState.realConnect = true;
+      const listening = Promise.withResolvers<boolean>();
+      loopback.once("error", (error: Error & { readonly code?: string }) => {
+        if (error.code === "EADDRINUSE") listening.resolve(false);
+        else listening.reject(error);
+      });
+      loopback.listen(4222, "127.0.0.1", () => listening.resolve(true));
+      const watching = await listening.promise;
+      if (!watching) {
+        console.warn(
+          "127.0.0.1:4222 is already in use: this row leaves unchecked that nothing dialed it"
+        );
+      }
+      natsState.realConnect = watching;
       try {
         const { default: envoyExtension } = await import(`./envoy.ts?inbound-off-${slug}`);
         const fixture = createPi();
@@ -8068,12 +8079,14 @@ describe("envoy OMP extension", () => {
         ).rejects.toThrow(refusal);
 
         // Each call above awaited its connect, so a dial would already have reached the listener.
-        expect(dialed).toBe(0);
+        if (watching) expect(dialed).toBe(0);
         expect(natsState.connects).toEqual([]);
       } finally {
-        const closed = Promise.withResolvers<void>();
-        loopback.close(() => closed.resolve());
-        await closed.promise;
+        if (watching) {
+          const closed = Promise.withResolvers<void>();
+          loopback.close(() => closed.resolve());
+          await closed.promise;
+        }
       }
     });
   }
