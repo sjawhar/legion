@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -30,14 +31,12 @@ import (
 // row, of the earlier generation, finishes without acting. The new tree's starts then stop that
 // role themselves: they hold its suspension, as the daemon and keeping its session, and launch
 // nothing of the new tree while it runs in the old one. They do so with the close's hold still in
-// memory, and with nothing held, as after a restart that forgot it. Once the turn ends, or the stop
-// timeout ends a turn that never does, the new tree's architect launches and the role resumes its
-// session in the new tree.
+// memory, and with nothing held, as after a restart that forgot it. The hold is bounded where the
+// old tree's close would have ended the turn, at the old root's linger expiry, not at the stop
+// timeout. Once the turn ends, or that expiry ends a turn that never does, the new tree's architect
+// launches and the role resumes its session in the new tree.
 func TestACarriedChildsRoleStillInATurnStopsBeforeItsNewTreeLaunches(t *testing.T) {
 	const rootKey, childKey = "LEGION-207", "LEGION-208"
-	// stopTimeout is the machines' stop timeout, a length no other timer of the test is armed for, so
-	// firing it fires only the held suspension's.
-	const stopTimeout = 7 * time.Second
 	carries := []struct {
 		name string
 		// carry moves the child into a tree of its own, through admission.
@@ -55,30 +54,50 @@ func TestACarriedChildsRoleStillInATurnStopsBeforeItsNewTreeLaunches(t *testing.
 		name string
 		// closeHeld is whether the close's suspension is held in memory when the child is carried.
 		closeHeld bool
-		// timeout is whether the turn never ends, so the stop timeout ends it.
-		timeout bool
+		// end is how the role's turn in the old tree ends.
+		end turnEnd
 	}{
-		{"with the close's suspension held", true, false},
-		{"with nothing held, as after a restart", false, false},
-		{"with a turn that never ends", false, true},
+		{"with the close's suspension held", true, turnEnds},
+		{"with nothing held, as after a restart", false, turnEnds},
+		{"with the close's suspension held and a turn that never ends", true, lingerExpires},
+		{"with nothing held and a turn that never ends", false, lingerExpires},
+		{"with the close's suspension held and the operator stopping a hung turn", true, operatorStops},
 	}
 	for _, cc := range carries {
 		for _, sc := range stops {
 			t.Run(cc.name+"/"+sc.name, func(t *testing.T) {
-				carriedChildStops(t, rootKey, childKey, stopTimeout, cc.carry, sc.closeHeld, sc.timeout)
+				carriedChildStops(t, rootKey, childKey, cc.carry, sc.closeHeld, sc.end)
 			})
 		}
 	}
 }
 
+// turnEnd is how a carried role's turn in its old tree ends in carriedChildStops.
+type turnEnd string
+
+const (
+	// turnEnds is the turn's own end.
+	turnEnds turnEnd = "turn"
+	// lingerExpires is a turn that never ends, stopped at the old root's linger expiry.
+	lingerExpires turnEnd = "expiry"
+	// operatorStops is a hung turn the operator suspends, stopped at the stop timeout from then.
+	operatorStops turnEnd = "operator"
+)
+
 // carriedChildStops runs one case of TestACarriedChildsRoleStillInATurnStopsBeforeItsNewTreeLaunches:
-// carry moves the child, closeHeld holds the close's suspension in memory first, and timeout lets
-// the stop timeout end the turn instead of the turn's own end.
-func carriedChildStops(t *testing.T, rootKey, childKey string, stopTimeout time.Duration, carry func(apply func(id string, fact intake.Fact)), closeHeld, timeout bool) {
+// carry moves the child, closeHeld holds the close's suspension in memory first, and end says how
+// the role's turn in the old tree ends.
+func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply func(id string, fact intake.Fact)), closeHeld bool, end turnEnd) {
+	// stopTimeout is the machines' stop timeout, and linger the old root's time left to linger, each a
+	// wait no other timer of the test is armed for, so firing one fires only the held suspension's.
+	const stopTimeout, linger = 7 * time.Second, time.Hour
 	ctx := context.Background()
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	until := time.Now().Add(time.Hour)
+	// Whole seconds, so the linger expiry Postgres stores (to the microsecond) reads back as set, and
+	// the deadline the daemon names from it is armed as exactly linger from the machines' start.
+	start := time.Now().UTC().Truncate(time.Second)
+	until := start.Add(linger)
 	parent := rootKey
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, put := range []error{
@@ -97,12 +116,12 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, stopTimeout time.
 		t.Fatalf("seed the finished root and its child: %v", err)
 	}
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	machineClock := &heldClock{}
+	machineClock := &heldClock{at: start}
 	sup.deps.Clock, sup.deps.Timeouts.Stop = machineClock, stopTimeout
 	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	var logs bytes.Buffer
-	clock := time.Now()
+	clock := start
 	runner := &outbox{
 		dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, rootKey),
 		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
@@ -178,16 +197,34 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, stopTimeout time.
 			got.State, got.Tree, got.SuspensionHeld, got.SuspensionHeldBy, rootKey)
 	}
 
-	if timeout {
-		if fired := machineClock.fire(stopTimeout); fired != 1 {
-			t.Fatalf("fired %d stop timeouts, want the held suspension's one", fired)
+	wantBy := supervise.SuspendedByDaemon
+	switch end {
+	case lingerExpires:
+		if fired := machineClock.fire(linger); fired != 1 {
+			t.Fatalf("fired %d deadlines at the old root's linger expiry, want the held suspension's one", fired)
 		}
-	} else if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
-		t.Fatalf("end the implementer's turn: %v", err)
+	case operatorStops:
+		wantBy = supervise.SuspendedByOperator
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: implementer, By: supervise.SuspendedByOperator,
+			Reason: "the turn hangs inside the linger"}); !errors.Is(err, supervise.ErrSuspendHeld) {
+			t.Fatalf("the operator's suspend of the hung turn = %v, want it held for the turn", err)
+		}
+		if fired := machineClock.fire(stopTimeout); fired != 1 {
+			t.Fatalf("fired %d stop timeouts after the operator's suspend, want the held suspension's one", fired)
+		}
+	default:
+		if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
+			t.Fatalf("end the implementer's turn: %v", err)
+		}
 	}
-	if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != supervise.SuspendedByDaemon ||
+	if got := machine.Claim(); got.State != supervise.StateSuspended || got.SuspendedBy != wantBy ||
 		got.Session != "ses-implementer" || got.SessionFile != "/tmp/implementer.jsonl" {
-		t.Fatalf("the implementer after its turn = %+v; want suspended by the daemon with its session kept", got)
+		t.Fatalf("the implementer after its turn = %+v; want suspended by %q with its session kept", got, wantBy)
+	}
+	if end != lingerExpires {
+		if fired := machineClock.fire(linger); fired != 0 {
+			t.Fatalf("the deadline at the old root's linger expiry fired %d times after the suspension ran; want it stopped with the hold", fired)
+		}
 	}
 	// The work the old generation did — its pushed branch, its handoff, a completion refused as
 	// a stale generation — is the resumed session's own: the start that resumes it delivers
@@ -203,6 +240,17 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, stopTimeout time.
 	run("the carry's rows once the implementer has stopped")
 	if spawns := launchesOf("Spawn", architect); len(spawns) != 1 || spawns[0].Spec.Tree != childKey {
 		t.Fatalf("the architect's launches = %+v; want one, in tree %s", spawns, childKey)
+	}
+	if end == operatorStops {
+		// The operator's suspension holds the claim, so its start waits for the operator; the claim
+		// is re-pointed to its new tree while it waits, so the operator's resume relaunches it there.
+		if got := machine.Claim(); got.Tree != childKey || got.State != supervise.StateSuspended || len(launchesOf("Resume", implementer)) != 0 {
+			t.Fatalf("the operator-held implementer while its start waits = %s in tree %s, resumed %d times; want suspended, re-pointed to %s and not resumed",
+				got.State, got.Tree, len(launchesOf("Resume", implementer)), childKey)
+		}
+		if err := machine.Handle(ctx, supervise.RequestResume{Claim: implementer}); err != nil {
+			t.Fatalf("the operator's resume: %v", err)
+		}
 	}
 	resumes := launchesOf("Resume", implementer)
 	if len(resumes) != 1 || resumes[0].Spec.Tree != childKey || resumes[0].Spec.ResumeSessionFile != "/tmp/implementer.jsonl" {
@@ -243,5 +291,29 @@ func TestAStartOfAnIssueInItsOwnTreeWaitsOnNoSiblingsLaunch(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the check before a start waited on its architect's launch in the runtime")
+	}
+}
+
+// A carried child's role still running in its old tree is stopped where that tree's close would
+// have ended it: at the old root's linger expiry while the root lingers. A root that no longer
+// lingers, or none recorded, leaves no close to wait for, so the stop is bounded at the stop timeout
+// from now, as an operator's is.
+func TestACarriedRolesStopDeadlineIsItsOldRootsLingerExpiry(t *testing.T) {
+	now := time.Date(2026, 10, 13, 1, 0, 0, 0, time.UTC)
+	until := now.Add(17 * time.Minute)
+	const stop = 10 * time.Second
+	for _, tc := range []struct {
+		name string
+		root *record.Issue
+		want time.Time
+	}{
+		{"an old root that lingers", &record.Issue{Key: "LEGION-207", LingerUntil: &until}, until},
+		{"an old root whose linger expired before the start asked", &record.Issue{Key: "LEGION-207", LingerUntil: &now}, now},
+		{"an old root that no longer lingers", &record.Issue{Key: "LEGION-207"}, now.Add(stop)},
+		{"no old root recorded", nil, now.Add(stop)},
+	} {
+		if got := carriedStopDeadline(tc.root, now, stop); !got.Equal(tc.want) {
+			t.Errorf("%s: carriedStopDeadline = %s, want %s", tc.name, got, tc.want)
+		}
 	}
 }

@@ -1341,31 +1341,39 @@ carried_child_sessions() {
       ;;
   esac
 }
-# carried_mid_turn_ordered LOG PREFIX PLANNER ARCHITECT OLD is mid-turn-carry's verdict, from the
-# daemon log LOG, on a child carried into a tree of its own while its planner claim PLANNER still ran
-# a turn in its old tree OLD: no role of the new tree launched while that turn ran. It holds three
-# things. A start of the new tree waited for PLANNER to stop (the outbox's `outbox row waits` line
-# for a start of the issue, whose error names the planner and OLD: daemon/outbox.go stopElsewhere,
-# logged at INFO on a row's first attempt). PLANNER's suspension landed after that wait (`supervise:
-# suspended`, supervise/suspend.go). And ARCHITECT's first launch (`supervise: launched`,
-# supervise/machine.go) came after it. No claim of the issue (tokens starting with PREFIX, claim_token's
-# issue prefix) may have logged a Sandbox refused for still running another tree's roles
-# (runtime/sandbox/relaunch.go ensureSandbox), which a launch that did not wait meets. Prints the
-# reason and fails otherwise.
+# carried_mid_turn_ordered LOG PREFIX PLANNER ARCHITECT OLD RELEASED is mid-turn-carry's verdict,
+# from the daemon log LOG, on a child carried into a tree of its own while its planner claim PLANNER
+# still ran a turn in its old tree OLD: no role of the new tree launched while that turn ran, and the
+# turn ended on its own after the driver released it at RELEASED (an RFC 3339 UTC time). A start of
+# the new tree waited for PLANNER to stop (the outbox's `outbox row waits` line for a start of the
+# issue, whose error names the planner and OLD: daemon/outbox.go stopElsewhere, logged at INFO on a
+# row's first attempt). PLANNER's suspension landed after that wait and after RELEASED (`supervise:
+# suspended`, supervise/suspend.go), and no line says its turn was cut mid-turn (`supervise: the
+# agent's turn has not ended; suspending it mid-turn`, suspendAtTimeout, which the hold's deadline at
+# OLD's linger expiry would log). ARCHITECT's first launch (`supervise: launched`,
+# supervise/machine.go) came after that suspension. No claim of the issue (tokens starting with
+# PREFIX, claim_token's issue prefix) may have logged a Sandbox refused for still running another
+# tree's roles (runtime/sandbox/relaunch.go ensureSandbox), which a launch that did not wait meets.
+# Prints the reason and fails otherwise.
 carried_mid_turn_ordered() {
   local verdict
-  verdict=$(jq -R -s -r --arg prefix "$2" --arg planner "$3" --arg architect "$4" --arg old "$5" '
+  verdict=$(jq -R -s -r --arg prefix "$2" --arg planner "$3" --arg architect "$4" --arg old "$5" --arg released "$6" '
+    def at: [(sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601), ((capture("\\.(?<f>[0-9]+)Z$").f // "0") | "0." + . | tonumber)];
     [split("\n")[] | fromjson? | select(type == "object")] as $log
+    | ($released | at) as $releasedAt
     | ([$log | to_entries[] | select(.value.msg == "outbox row waits" and ((.value.error // "") as $e
         | ($e | contains("waits for ")) and ($e | contains($planner + ":")) and ($e | contains("in tree " + $old)))) | .key] | first) as $wait
-    | ([$log | to_entries[] | select(.value.msg == "supervise: suspended" and .value.claim == $planner and $wait != null and .key > $wait) | .key] | first) as $stopped
+    | ([$log | to_entries[] | select(.value.msg == "supervise: suspended" and .value.claim == $planner and $wait != null and .key > $wait)] | first) as $stopped
     | ([$log | to_entries[] | select(.value.msg == "supervise: launched" and .value.claim == $architect) | .key] | first) as $launched
     | [$log[] | select(((.claim // "") | startswith($prefix)) and (tostring | contains("does not fit this launch of tree")))] as $refused
+    | [$log[] | select(.msg == "supervise: the agent'"'"'s turn has not ended; suspending it mid-turn" and .claim == $planner)] as $cut
     | if ($refused | length) > 0 then "FAIL: a launch of \($refused[0].claim) met the Sandbox still running tree \($old)'"'"'s roles: \(($refused[0].error // $refused[0].msg) | tostring | .[0:300])"
+      elif ($cut | length) > 0 then "FAIL: \($planner)'"'"'s turn was cut mid-turn at \($cut[0].time) (deadline \($cut[0].deadline // "none")), not ended by the release at \($released)"
       elif $wait == null then "FAIL: no start of the new tree waited for \($planner) to stop in tree \($old)"
       elif $stopped == null then "FAIL: \($planner) was never suspended after the new tree'"'"'s start waited for it"
+      elif ($stopped.value.time | at) < $releasedAt then "FAIL: \($planner) was suspended at \($stopped.value.time), before the release at \($released)"
       elif $launched == null then "FAIL: \($architect) never launched"
-      elif $launched < $stopped then "FAIL: \($architect) launched before \($planner) stopped in tree \($old)"
+      elif $launched < $stopped.key then "FAIL: \($architect) launched before \($planner) stopped in tree \($old)"
       else "ok" end' "$1") || return 1
   [ "$verdict" = ok ] || {
     printf '%s\n' "${verdict#FAIL: }" >&2
@@ -5046,14 +5054,16 @@ begin mid-turn-carry
 # lingers; admission carries it (`admission orphan`, or `admission hand-over` when the linger's
 # expiry handed it over first) into a tree of its own at generation 2 in planning, and the close's
 # suspend row, of generation 1, finishes without acting. While the turn runs, the new tree's starts
-# wait for the planner to stop (daemon/outbox.go stopElsewhere): nothing of the new tree launches,
-# and the Sandbox stays tree 1's and Running. The driver then ends the turn with the release file.
-# The planner is suspended by the daemon with its session, the architect launches in the child's
-# own tree (carried_mid_turn_ordered holds the order, held to a fabricated refusal here and in
-# stage4b-verdict.test.ts), the launch relabels the Sandbox the old tree left Running, keeping its
-# uid and volume, and the planner comes back on its kept session in the new tree, moved once
-# (retree_msg), given its phase's resume task. Child 4 is then taken out, so its pods go before
-# node-release.
+# wait for the planner to stop (daemon/outbox.go stopElsewhere), bounded at tree 1's linger expiry,
+# where its close would have ended the turn: nothing of the new tree launches, and the Sandbox stays
+# tree 1's and Running. The driver then ends the turn with the release file, inside the linger, so
+# the turn ends on its own: the planner is suspended by the daemon after the release with its session,
+# never cut mid-turn by the deadline, the architect launches in the child's own tree
+# (carried_mid_turn_ordered holds the order and the turn's end, held to a fabricated refusal and a
+# fabricated cut turn here and in stage4b-verdict.test.ts), the launch relabels the Sandbox the old
+# tree left Running, keeping its uid and volume, and the planner comes back on its kept session in
+# the new tree, moved once (retree_msg), given its phase's resume task. Child 4 is then taken out, so
+# its pods go before node-release.
 child4_planner=$(claim_token "$child4" planner)
 child4_architect=$(claim_token "$child4" architect)
 child4_close_held() {
@@ -5093,20 +5103,35 @@ sandbox_now=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid} {.metada
 [ "$sandbox_now" = "$child4_sandbox_uid $tree1 Running" ] ||
   fail "$child4's Sandbox while its planner's turn runs is '$sandbox_now', want '$child4_sandbox_uid $tree1 Running'"
 note "$child4 is a tree of its own at generation 2 in planning, by $carry_path; its starts wait for the planner's turn, nothing of the new tree launched, and its Sandbox is still tree 1's and Running"
+# The turn must end on the release, inside tree 1's linger (linger_hours 0.3): at its expiry the new
+# tree's hold would cut it instead, which the verdict refuses. So the release goes in only with a
+# minute of the linger left, read from the daemon's own line for tree 1's linger.
+tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" '[.[] | select(.tree == $tree)] | last | .until // empty')
+[ -n "$tree1_until" ] || fail "the daemon logged no linger for $tree1"
+left=$(($(date -u -d "$tree1_until" +%s) - $(date -u +%s)))
+[ "$left" -ge 60 ] || fail "only ${left}s of $tree1's linger (until $tree1_until) are left at the release; mid-turn-carry needs $child4's turn to end inside it"
+released_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
 pod_exec "$child4_pod" planner touch "$child4_release" || fail "the operator could not write $child4_release in $child4's planner container"
+note "the driver released $child4's hold at $released_at, ${left}s before $tree1's linger expires at $tree1_until"
 child4_role_back() {
   claim_by_token "$1" | jq -e --arg tree "$child4" '.tree == $tree and .locator != null and (.state | IN("ready", "idle", "working"))' >/dev/null
 }
 on_issue "$child4" until_true 900 "$child4's planner to stop and come back in its own tree" child4_role_back "$child4_planner"
 on_issue "$child4" until_true 900 "$child4's architect to launch and register in its own tree" child4_role_back "$child4_architect"
-carried_mid_turn_ordered "$daemon_log" "$(claim_token "$child4" "")" "$child4_planner" "$child4_architect" "$tree1" ||
-  fail "$child4's new tree did not wait for its planner's turn: $(carried_mid_turn_ordered "$daemon_log" "$(claim_token "$child4" "")" "$child4_planner" "$child4_architect" "$tree1" 2>&1)"
-# Control: the same log with one fabricated launch of the architect refused for the Sandbox still
-# running tree 1's roles, the failure the new tree meets when it does not wait, fails the verdict.
+mid_turn_verdict() { carried_mid_turn_ordered "$1" "$(claim_token "$child4" "")" "$child4_planner" "$child4_architect" "$tree1" "$released_at"; }
+mid_turn_verdict "$daemon_log" || fail "$child4's new tree did not wait for its planner's released turn: $(mid_turn_verdict "$daemon_log" 2>&1)"
+# Controls: the same log with one fabricated launch of the architect refused for the Sandbox still
+# running tree 1's roles, the failure the new tree meets when it does not wait, and the same log
+# with one fabricated mid-turn stop of the planner at tree 1's linger expiry, the turn cut instead of
+# released, each fail the verdict.
 cp "$daemon_log" "$work/daemon-mid-turn-refused.log"
 jq -cn --arg claim "$child4_architect" --arg error "ensure its sandbox: sandbox $child4_pod, made for tree $tree1, does not fit this launch of tree $child4 and still runs roles; fabricated by the driver" \
   '{time: (now | todate), level: "WARN", msg: "supervise: launch failed", claim: $claim, error: $error}' >>"$work/daemon-mid-turn-refused.log"
-expect_failure mid-turn-refused carried_mid_turn_ordered "$work/daemon-mid-turn-refused.log" "$(claim_token "$child4" "")" "$child4_planner" "$child4_architect" "$tree1"
+expect_failure mid-turn-refused mid_turn_verdict "$work/daemon-mid-turn-refused.log"
+cp "$daemon_log" "$work/daemon-mid-turn-cut.log"
+jq -cn --arg claim "$child4_planner" --arg deadline "$tree1_until" \
+  '{time: (now | todate), level: "WARN", msg: "supervise: the agent'"'"'s turn has not ended; suspending it mid-turn", claim: $claim, by: "daemon", deadline: $deadline}' >>"$work/daemon-mid-turn-cut.log"
+expect_failure mid-turn-cut mid_turn_verdict "$work/daemon-mid-turn-cut.log"
 came_back=$(claim_by_token "$child4_planner") || fail "legion claims list holds no claim $child4_planner"
 [ "$(jq -r .session <<<"$came_back")" = "$child4_session" ] ||
   fail "$child4's planner came back in its own tree as session $(jq -r .session <<<"$came_back"), not its kept $child4_session"

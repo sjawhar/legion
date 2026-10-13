@@ -711,11 +711,17 @@ generation finishes the close's own suspend row without acting. So no start of t
 anything while a claim of the issue still runs a process in another tree: the start suspends that
 claim itself, as the daemon and keeping its session, and waits on its backoff, charging nothing, until
 the claim has stopped (`stopElsewhere`, `internal/daemon/outbox.go`). No close of the old tree
-reaches that claim, so its stop is bounded as an operator's is: a turn that has not ended within the
-stop timeout (`worker_stop_timeout_seconds`) is ended there, its task taken back as interrupted and
-its session kept. A Sandbox the old tree left `Running`, none of whose claims runs any more, is
-relabelled and suspended in one patch fenced to the uid and resourceVersion it read, so the launch
-waits its pod out; while a claim of the old tree still runs, the launch is refused, naming it.
+reaches that claim, so its stop is bounded where that close would have ended the turn, at the old
+root's linger expiry (`linger_hours`): a turn that ends within the linger ends on its own, and one
+still running at the expiry is stopped there. Either way the claim keeps its workspace, the issue's
+branch and its session, which the new tree's start resumes with its phase's resume task. A turn that
+hangs inside the linger is the operator's to stop sooner: `legion claims suspend` stops it at the
+stop timeout (`worker_stop_timeout_seconds`) from then and makes the hold the operator's, so the new
+tree's start of that role waits for the operator, with the claim already re-pointed to the new tree,
+and `legion claims resume` relaunches its session there. A Sandbox the old tree left `Running`, none
+of whose claims runs any more, is relabelled and suspended in one patch fenced to the uid and
+resourceVersion it read, so the launch waits its pod out; while a claim of the old tree still runs,
+the launch is refused, naming it.
 That holds while the old tree lingers; once its cleanup has run (`CleanupTree`, after the linger),
 the Sandbox and the volume are gone, and the re-pointed claim still names its session (`Retree`,
 `internal/supervise/lifecycle.go`, keeps it: the supervisor knows nothing of Sandboxes, and a check

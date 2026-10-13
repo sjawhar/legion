@@ -352,9 +352,11 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 }
 
 // heldClock is the machines' time held still until the test fires the timers armed for one wait,
-// so a daemon test sees the deadline it fires and nothing else.
+// so a daemon test sees the deadline it fires and nothing else. Its time is the wall clock, or at
+// when set, so a deadline the daemon names as a time is armed as an exact wait from at.
 type heldClock struct {
 	mu     sync.Mutex
+	at     time.Time
 	timers []*heldTimer
 }
 
@@ -365,7 +367,12 @@ type heldTimer struct {
 	done  bool
 }
 
-func (c *heldClock) Now() time.Time { return time.Now() }
+func (c *heldClock) Now() time.Time {
+	if !c.at.IsZero() {
+		return c.at
+	}
+	return time.Now()
+}
 
 func (c *heldClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
 	c.mu.Lock()

@@ -35,20 +35,20 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 // process at once would cut that call off before Oh My Pi writes its result, and a session resumed
 // from that transcript holds a report with no answer. So the suspension is held:
 //
-//   - It runs when the turn ends (turnEnded). The operator's suspension also runs when the stop
-//     timeout runs out first (TimerSuspend, suspendAtTimeout): an operator stopping the process —
-//     to drain the daemon, say — needs the stop bounded. The daemon's own suspension (its issue left
-//     the workflow, or its tree lingers) waits for the turn however long it takes: what bounds it is
-//     what ends the process anyway, the tree's close when its linger expires or the child's close
-//     as done. A daemon's suspension that asks to be bounded (RequestSuspend.Bounded) is held to the
-//     stop timeout as the operator's is: no close reaches a carried child's role still running in its
-//     old tree, since the child has left that tree. Asked again meanwhile, it is the same hold, its
-//     timeout unchanged, except that a suspension that bounds a hold not yet bounded takes it over:
-//     the operator's suspend over a daemon's hold, from then on the operator's, and a bounded daemon
-//     suspend over an unbounded daemon's hold, still the daemon's; the stop timeout runs from then.
-//     Until it runs the agent keeps its process and its capability.
+//   - It runs when the turn ends (turnEnded), or at its deadline if the turn has not ended by then
+//     (TimerSuspend, suspendAtTimeout). The operator's suspension has one at the stop timeout from
+//     its arrival: an operator stopping the process — to drain the daemon, say — needs the stop
+//     bounded. The daemon's own suspension (its issue left the workflow, or its tree lingers) has
+//     none unless it names one (RequestSuspend.Deadline), and waits for the turn however long it
+//     takes: what bounds it is what ends the process anyway, the tree's close when its linger expires
+//     or the child's close as done. No close reaches a carried child's role still running in its old
+//     tree, since the child has left that tree, so the daemon names that suspension the deadline the
+//     old tree's close would have had, the old root's linger expiry. Asked again meanwhile, it is the
+//     same hold, under one rule: a request can only move the deadline earlier, and the operator's
+//     also takes the hold over, from then on the operator's. Until the deadline the agent keeps its
+//     process and its capability.
 //   - A stop the runtime refuses keeps it held and tries again every probe interval (suspendHeld),
-//     so the stop timeout bounds the wait only while the runtime can stop the process. A claim
+//     so the deadline bounds the wait only while the runtime can stop the process. A claim
 //     whose turn ended stays idle meanwhile and is handed nothing (sendPending); a turn it starts
 //     anyway is cut off at the next try.
 //   - A process that dies first, or is found at a stale address (repoint), leaves the claim
@@ -58,8 +58,8 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //     suspension holds waits instead. Every other end of the process drops it with the process
 //     (letGo).
 //   - It lives in memory only. A restart forgets it, so whoever holds the request asks again: the
-//     outbox retries its suspend row until the claim answers nil, and a restart starts the stop
-//     timeout over.
+//     outbox retries its suspend row until the claim answers nil. A restart starts the operator's
+//     stop timeout over; a deadline the daemon names is a time, so it holds as named.
 //   - It is the one thing that lets a row end in suspended without naming that state (Handle).
 //
 // It answers ErrSuspendHeld.
@@ -68,26 +68,24 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
+	// The deadline is the asker's own: suspendRequest hands a daemon's request under the operator's
+	// hold the operator's source, which must not give it the operator's stop timeout too.
+	deadline := ev.(RequestSuspend).Deadline
+	if ev.(RequestSuspend).By == SuspendedByOperator {
+		deadline = m.deps.Clock.Now().Add(m.deps.Timeouts.Stop)
+	}
 	switch {
 	case m.held == nil:
-		m.held = &request
-		if request.By == SuspendedByOperator || request.Bounded {
-			m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
-			m.log.Info("supervise: the suspension is held for the agent's turn to end", "reason", request.Reason, "by", request.By,
-				"stopTimeout", m.deps.Timeouts.Stop)
-		} else {
-			m.log.Info("supervise: the suspension is held for the agent's turn to end, however long it takes", "reason", request.Reason, "by", request.By)
-		}
+		m.held = &RequestSuspend{Claim: request.Claim, Reason: request.Reason, By: request.By}
+		m.log.Info("supervise: the suspension is held for the agent's turn to end", "reason", request.Reason, "by", request.By)
 	case request.By == SuspendedByOperator && m.held.By != SuspendedByOperator:
-		m.log.Info("supervise: the operator's suspension takes the held suspension over", "reason", request.Reason, "held", m.held.Reason,
-			"stopTimeout", m.deps.Timeouts.Stop)
-		m.held = &request
-		m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
-	case request.Bounded && m.held.By != SuspendedByOperator && !m.held.Bounded:
-		m.log.Info("supervise: the held suspension is bounded by the stop timeout from now", "reason", request.Reason, "held", m.held.Reason,
-			"stopTimeout", m.deps.Timeouts.Stop)
-		m.held = &request
-		m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
+		m.log.Info("supervise: the operator's suspension takes the held suspension over", "reason", request.Reason, "held", m.held.Reason)
+		m.held.By, m.held.Reason = request.By, request.Reason
+	}
+	if !deadline.IsZero() && (m.held.Deadline.IsZero() || deadline.Before(m.held.Deadline)) {
+		m.held.Deadline = deadline
+		m.arm(TimerSuspend, max(0, deadline.Sub(m.deps.Clock.Now())), "")
+		m.log.Info("supervise: the held suspension stops the agent at its deadline if its turn has not ended", "deadline", deadline, "by", m.held.By)
 	}
 	return ErrSuspendHeld
 }
@@ -124,19 +122,21 @@ func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 	return m.persist(ctx)
 }
 
-// suspendAtTimeout is the held suspension's timer: the turn did not end within the stop timeout,
-// so the process is stopped mid-turn; or an earlier stop failed, and it is tried again.
+// suspendAtTimeout is the held suspension's timer: the turn did not end by the hold's deadline, so
+// the process is stopped mid-turn; or an earlier stop failed, and it is tried again.
 //
 // A stop forced mid-turn is not the turn's end: the confirmed task did not finish, so it goes back
-// interrupted, as a death in a turn takes it back, and the operator's resume re-sends it to the
-// same owner. The task is taken back before the stop, as died does: a take-back that fails stops
-// nothing and is tried again at the probe interval, and a crash between the two leaves a running
-// claim holding an interrupted task, never a suspended claim holding a confirmed one, which settle
-// would retire as a finished turn.
+// interrupted, as a death in a turn takes it back. The task is taken back before the stop, as died
+// does: a take-back that fails stops nothing and is tried again at the probe interval, and a crash
+// between the two leaves a running claim holding an interrupted task, never a suspended claim holding
+// a confirmed one, which settle would retire as a finished turn. What happens to it then is the
+// suspension's: the operator's resume re-sends it to the same owner, and a daemon's suspension retires
+// a phase's task with the phase (settle), so the next start hands the session its phase's resume task;
+// the workspace, the issue's branch and the session are kept either way.
 func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
-	if m.claim.State == StateWorking {
-		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "stopTimeout", m.deps.Timeouts.Stop)
-		if err := m.interrupted(ctx, "the stop timeout ended the task's turn"); err != nil {
+	if m.held != nil && m.claim.State == StateWorking {
+		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "by", m.held.By, "deadline", m.held.Deadline)
+		if err := m.interrupted(ctx, "the held suspension's deadline ended the task's turn"); err != nil {
 			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("take back the task of %s before its forced stop: %w", m.claim.Token, err)
 		}

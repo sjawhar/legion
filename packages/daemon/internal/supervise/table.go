@@ -131,15 +131,17 @@ type RequestReady struct {
 
 // RequestSuspend stops the claim's process and keeps its session. Reason is why, for the line the
 // suspension logs; By is who asks, which the suspended claim records (Claim.SuspendedBy) and every
-// suspension must name. Bounded asks that the stop timeout bound the suspension's hold for a turn,
-// as it bounds the operator's, though the daemon asks: the daemon's stop of a carried child's role
-// still running in its old tree, which no close of that tree reaches (the daemon's outbox,
-// stopElsewhere). holdSuspension says what a hold does.
+// suspension must name. Deadline, when set, is when a suspension held for a turn stops the process
+// mid-turn if the turn has not ended by then (holdSuspension); a daemon's suspension without one
+// waits for the turn however long it takes. The daemon sets one for a carried child's role still
+// running in its old tree, at the old root's linger expiry, where that tree's close would have
+// ended it (the daemon's outbox, stopElsewhere). The operator's suspension sets none: it is bounded
+// at the stop timeout from its arrival.
 type RequestSuspend struct {
-	Claim   claim.Token
-	Reason  string
-	By      SuspendSource
-	Bounded bool
+	Claim    claim.Token
+	Reason   string
+	By       SuspendSource
+	Deadline time.Time
 }
 
 // RequestResume is the operator's resume: it relaunches a suspended claim's session, whoever
@@ -483,9 +485,9 @@ func fillTable(t *builder) {
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
 
-	t.row(onSuspendTimer, "the held operator suspension retries its stop", suspendAtTimeout,
+	t.row(onSuspendTimer, "the held suspension's deadline stops the turn, or its stop is tried again", suspendAtTimeout,
 		[]ClaimState{StateSuspended}, StateWorking, StateIdle, StateReady, StateLaunching, StateShimConnected, StateRegistered)
-	t.ignore(onSuspendTimer, "no operator suspension is held", StateQueued, StateLaunchUncertain, StateSuspended, StateRetired, StateFailed)
+	t.ignore(onSuspendTimer, "no suspension is held", StateQueued, StateLaunchUncertain, StateSuspended, StateRetired, StateFailed)
 
 	// The issue's volume, found lost by another claim of the issue.
 	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,

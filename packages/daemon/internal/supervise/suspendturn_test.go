@@ -113,19 +113,24 @@ func TestTheDaemonsSuspensionWaitsForTheTurnPastTheStopTimeout(t *testing.T) {
 	}
 }
 
-// A daemon's suspension that asks to be bounded (a carried child's new tree stopping a role still
-// running in its old tree, which no close of that tree reaches) is held to the stop timeout as the
-// operator's is: a turn that never ends is stopped there, its session kept and the claim suspended
-// by the daemon, so its new tree resumes it by rule. One that arrives over an unbounded daemon's
-// hold bounds that hold from then, and a repeat changes nothing.
-func TestABoundedDaemonSuspensionStopsATurnThatNeverEndsAtTheStopTimeout(t *testing.T) {
+// A daemon's suspension that names a deadline (a carried child's new tree stopping a role still
+// running in its old tree, at the old root's linger expiry) stops a turn that never ends there, not
+// at the stop timeout: its session kept and the claim suspended by the daemon, so its new tree
+// resumes it by rule. One held rule decides every later request: it can only move the deadline
+// earlier. So a deadline over the daemon's unbounded hold bounds it from then, a repeat or a later
+// deadline changes nothing, and an earlier one moves the stop forward.
+func TestADaemonSuspensionWithADeadlineStopsATurnThatNeverEndsAtTheDeadline(t *testing.T) {
+	const linger = 17 * time.Minute
 	for _, tc := range []struct {
 		name string
-		// before is what is held before the bounded request arrives, if anything.
+		// before is what is held before the deadline arrives, if anything.
 		before *RequestSuspend
+		// earlier, when set, is a second deadline this much before the first, asked after it.
+		earlier time.Duration
 	}{
-		{"with nothing held before it", nil},
-		{"over the daemon's unbounded hold", &RequestSuspend{Claim: testToken, Reason: "the tree of LEGION-208 lingers", By: SuspendedByDaemon}},
+		{"with nothing held before it", nil, 0},
+		{"over the daemon's unbounded hold", &RequestSuspend{Claim: testToken, Reason: "the tree of LEGION-208 lingers", By: SuspendedByDaemon}, 0},
+		{"moved earlier by a second deadline", nil, 5 * time.Minute},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
@@ -134,17 +139,29 @@ func TestABoundedDaemonSuspensionStopsATurnThatNeverEndsAtTheStopTimeout(t *test
 				if err := h.handle(*tc.before); !errors.Is(err, ErrSuspendHeld) {
 					t.Fatalf("the unbounded suspend mid-turn returned %v, want ErrSuspendHeld", err)
 				}
-				h.advance(10 * testStop)
-				h.wantState(StateWorking)
 			}
-			bounded := RequestSuspend{Claim: testToken, Reason: "LEGION-209 moved from tree LEGION-208 to tree LEGION-209", By: SuspendedByDaemon, Bounded: true}
-			if err := h.handle(bounded); !errors.Is(err, ErrSuspendHeld) {
-				t.Fatalf("the bounded suspend mid-turn returned %v, want ErrSuspendHeld", err)
+			deadline := h.clock.Now().Add(linger)
+			carried := RequestSuspend{Claim: testToken, Reason: "LEGION-209 moved from tree LEGION-208 to tree LEGION-209", By: SuspendedByDaemon, Deadline: deadline}
+			if err := h.handle(carried); !errors.Is(err, ErrSuspendHeld) {
+				t.Fatalf("the suspend with a deadline mid-turn returned %v, want ErrSuspendHeld", err)
 			}
-			h.advance(testStop - time.Second)
-			if err := h.handle(bounded); !errors.Is(err, ErrSuspendHeld) {
-				t.Fatalf("the repeated bounded suspend returned %v, want ErrSuspendHeld", err)
+			h.advance(10 * testStop)
+			h.wantState(StateWorking)
+			later := carried
+			later.Deadline = deadline.Add(time.Hour)
+			if err := h.handle(later); !errors.Is(err, ErrSuspendHeld) {
+				t.Fatalf("the suspend with a later deadline returned %v, want ErrSuspendHeld", err)
 			}
+			stopAt := linger
+			if tc.earlier > 0 {
+				sooner := carried
+				sooner.Deadline = deadline.Add(-tc.earlier)
+				if err := h.handle(sooner); !errors.Is(err, ErrSuspendHeld) {
+					t.Fatalf("the suspend with an earlier deadline returned %v, want ErrSuspendHeld", err)
+				}
+				stopAt -= tc.earlier
+			}
+			h.advance(stopAt - 10*testStop - time.Second)
 			h.wantState(StateWorking)
 			h.wantCalls("Suspend", 0)
 			h.advance(time.Second)
@@ -152,12 +169,38 @@ func TestABoundedDaemonSuspensionStopsATurnThatNeverEndsAtTheStopTimeout(t *test
 			h.wantCalls("Suspend", 1)
 			c := h.claim()
 			if c.SuspendedBy != SuspendedByDaemon || c.Session != session || c.SessionFile == "" {
-				t.Errorf("the claim after the stop timeout = %+v, want it suspended by the daemon with its session kept", c)
+				t.Errorf("the claim after the deadline = %+v, want it suspended by the daemon with its session kept", c)
 			}
 			if c.RuleHolds() {
-				t.Errorf("the claim after the stop timeout holds against the rule, want it resumable by its new tree")
+				t.Errorf("the claim after the deadline holds against the rule, want it resumable by its new tree")
 			}
 		})
+	}
+}
+
+// The operator's suspension over a daemon's hold with a later deadline takes the hold over and
+// moves its stop to the stop timeout from then; the daemon's suspend asked again after it, with its
+// later deadline, moves nothing, and the hold stays the operator's.
+func TestTheOperatorsSuspensionMovesADaemonsDeadlineEarlierAndTakesTheHoldOver(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+	carried := RequestSuspend{Claim: testToken, Reason: "LEGION-209 moved from tree LEGION-208 to tree LEGION-209", By: SuspendedByDaemon,
+		Deadline: h.clock.Now().Add(time.Hour)}
+	if err := h.handle(carried); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the daemon's suspend with a deadline returned %v, want ErrSuspendHeld", err)
+	}
+	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "drain", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the operator's suspend over it returned %v, want ErrSuspendHeld", err)
+	}
+	if err := h.handle(carried); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the daemon's suspend again returned %v, want ErrSuspendHeld", err)
+	}
+	h.advance(testStop - time.Second)
+	h.wantState(StateWorking)
+	h.advance(time.Second)
+	h.wantState(StateSuspended)
+	if c := h.claim(); c.SuspendedBy != SuspendedByOperator {
+		t.Errorf("the claim is suspended by %q, want the operator, who took the hold over", c.SuspendedBy)
 	}
 }
 
