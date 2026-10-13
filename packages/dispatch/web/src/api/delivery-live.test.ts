@@ -304,7 +304,10 @@ test("a connection error before open reconnects with backoff", async () => {
     sockets.latest().fail();
 
     expect(live.state().state).toBe("reconnecting");
-    jest.advanceTimersByTime(1_200);
+    // The first attempt waits a second, give or take a quarter for its jitter: 750 to 1,250 ms.
+    jest.advanceTimersByTime(749);
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(502);
     expect(sockets.sockets).toHaveLength(2);
   } finally {
     unsubscribe();
