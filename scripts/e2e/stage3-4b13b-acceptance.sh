@@ -86,11 +86,6 @@ port_daemon='' port_listener='' port_dispatch='' port_worker_stream='' port_nats
 # shellcheck disable=SC2034
 timeout_hook=''
 prod_baseline='' prod_dispatch_url=''
-# The operator's DISPATCH_TOKEN, taken out of the environment here so nothing the run starts
-# inherits a production bearer; production_baseline hands it back to the one call that resolves the
-# operator's Dispatch.
-operator_token=${DISPATCH_TOKEN:-}
-unset DISPATCH_TOKEN
 prod_token=''
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
@@ -118,6 +113,8 @@ soft() {
 . "$root/scripts/e2e/lib/workflow.sh"
 # shellcheck source-path=SCRIPTDIR source=lib/operator-dispatch.sh
 . "$root/scripts/e2e/lib/operator-dispatch.sh"
+# Nothing the run starts inherits the operator's production bearer (lib/operator-dispatch.sh).
+operator_dispatch_hold_token
 # The daemon's database is this run's own in the shared Postgres container, read with the host psql.
 db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
 
@@ -383,36 +380,6 @@ unchecked_launches() {
 no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
 report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
 
-prod_header_file() {
-  local header=$work/production-dispatch-auth
-  (umask 077 && printf 'Authorization: Bearer %s\n' "$prod_token" >"$header")
-  printf '%s\n' "$header"
-}
-# production_baseline reads a recent production Dispatch event id so the post-run audit replays
-# only this run's window. It is a read-only query to the operator's Dispatch, resolved as every
-# command of the operator's resolves it (lib/operator-dispatch.sh) with the DISPATCH_TOKEN the
-# script took out of its environment at start; a file, URL or token that prevents it fails the run,
-# naming it. With no Dispatch configured there is no production Dispatch to audit.
-production_baseline() {
-  local header since keys key id max=0
-  DISPATCH_TOKEN=$operator_token operator_dispatch
-  if [ -z "$operator_dispatch_url" ]; then
-    note "$operator_dispatch_notice"
-    prod_baseline=none
-    return 0
-  fi
-  prod_dispatch_url=$operator_dispatch_url prod_token=$operator_dispatch_token
-  header=$(prod_header_file)
-  since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
-  keys=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues?updated_since=$since" | jq -r '.[:50][].key')
-  for key in $keys; do
-    id=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues/$key/events?order=desc&limit=1" | jq -r '.[0].id // 0')
-    if [ "$id" -gt "$max" ]; then max=$id; fi
-  done
-  rm -f "$header"
-  [ "$max" -gt 0 ] || fail "could not read a production Dispatch baseline event id"
-  prod_baseline=$max
-}
 rig_sessions_json() {
   jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
 }

@@ -1767,7 +1767,15 @@ The operator's Dispatch, for a script run from the operator's shell. Stage 3 and
 ```sh
 . "$root/scripts/e2e/lib/operator-dispatch.sh"     # sourced, never run
 operator_dispatch     # sets operator_dispatch_file, _url, _token and _notice
+operator_dispatch_hold_token     # moves DISPATCH_TOKEN into operator_token, out of the environment
+production_baseline     # sets prod_dispatch_url, prod_token, prod_baseline (`none` without Dispatch)
 ```
+
+The two Stage 3 scripts call `operator_dispatch_hold_token` once at start, so nothing a run starts
+inherits the operator's production bearer, and `production_baseline` to open their audit's window:
+it resolves the operator's Dispatch with the held bearer and reads the newest event id of the
+issues updated in the last 24 hours, through a 0600 header file under the caller's `$work`
+(`prod_header_file`).
 
 `operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts`, which resolves Dispatch with
 `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or

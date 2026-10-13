@@ -117,3 +117,61 @@ printf '%s|%s|%s|%s\\n' "$operator_dispatch_file" "$operator_dispatch_url" "$ope
     );
   });
 });
+
+describe("operator_dispatch_hold_token and production_baseline", () => {
+  test("the held bearer leaves the environment, and the baseline is the newest event id read with it", async () => {
+    const requests: { path: string; auth: string | null }[] = [];
+    const events: Record<string, number> = { "OPS-1": 7, "OPS-2": 12 };
+    const server = Bun.serve({
+      port: 0,
+      fetch(request) {
+        const url = new URL(request.url);
+        requests.push({ path: url.pathname, auth: request.headers.get("authorization") });
+        if (url.pathname === "/api/v1/issues")
+          return Response.json([{ key: "OPS-1" }, { key: "OPS-2" }]);
+        const key = /^\/api\/v1\/issues\/([^/]+)\/events$/.exec(url.pathname)?.[1];
+        return key === undefined
+          ? new Response("", { status: 404 })
+          : Response.json([{ id: events[key] }]);
+      },
+    });
+    const work = mkdtempSync(join(dir, "work."));
+    const script = `fail() { printf 'FAIL %s\\n' "$*"; exit 1; }
+note() { printf 'NOTE %s\\n' "$*"; }
+work=$2
+. "$1"
+operator_dispatch_hold_token
+printf 'held:%s\\n' "\${DISPATCH_TOKEN-unset}"
+production_baseline
+printf '%s|%s|%s\\n' "$prod_dispatch_url" "$prod_baseline" "$(ls -A "$work")"`;
+    try {
+      const shell = Bun.spawn(
+        ["bash", "-c", script, "_", join(import.meta.dir, "operator-dispatch.sh"), work],
+        {
+          cwd,
+          env: {
+            HOME: join(dir, "empty-home"),
+            PATH: process.env.PATH ?? "",
+            DISPATCH_URL: `http://127.0.0.1:${server.port}`,
+            DISPATCH_TOKEN: "operator-bearer",
+          },
+          stdout: "pipe",
+          stderr: "pipe",
+        }
+      );
+      const stdout = await new Response(shell.stdout).text();
+      expect(await shell.exited).toBe(0);
+      expect(stdout).toBe(`held:unset\nhttp://127.0.0.1:${server.port}|12|\n`);
+      expect(requests.map((request) => request.path)).toEqual([
+        "/api/v1/issues",
+        "/api/v1/issues/OPS-1/events",
+        "/api/v1/issues/OPS-2/events",
+      ]);
+      expect(new Set(requests.map((request) => request.auth))).toEqual(
+        new Set(["Bearer operator-bearer"])
+      );
+    } finally {
+      server.stop(true);
+    }
+  });
+});
