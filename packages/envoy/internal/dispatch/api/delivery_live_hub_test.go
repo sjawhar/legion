@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -37,6 +39,81 @@ func newHubRig(t *testing.T, configure func(*deliveryHub)) *hubRig {
 	t.Helper()
 	handler, database, deps := newTestServer(t, testServerOptions{})
 	return hubOn(t, handler, database, deps, deliveryHubClock{}, configure)
+}
+
+// newClockedHubRig is newHubRig on a clock the test moves.
+func newClockedHubRig(t *testing.T, clock *fakeHubClock) *hubRig {
+	t.Helper()
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	return hubOn(t, handler, database, deps, clock, nil)
+}
+
+// fakeHubClock is the real clock moved forward by Advance: Now is the wall clock plus every
+// advance so far, and a timer fires once the wall clock plus the advance reaches its moment, so a
+// test moves the hub past a threshold or a midnight without waiting for it.
+type fakeHubClock struct {
+	mu     sync.Mutex
+	offset time.Duration
+	timers []*fakeHubTimer
+}
+
+type fakeHubTimer struct {
+	clock *fakeHubClock
+	at    time.Time
+	f     func()
+	real  *time.Timer
+	done  atomic.Bool
+}
+
+func (c *fakeHubClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return time.Now().UTC().Add(c.offset)
+}
+
+func (c *fakeHubClock) AfterFunc(d time.Duration, f func()) hubTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	timer := &fakeHubTimer{clock: c, at: time.Now().UTC().Add(c.offset).Add(d), f: f}
+	timer.real = time.AfterFunc(d, timer.fire)
+	c.timers = append(c.timers, timer)
+	return timer
+}
+
+func (t *fakeHubTimer) fire() {
+	if t.done.CompareAndSwap(false, true) {
+		t.f()
+	}
+}
+
+func (t *fakeHubTimer) Stop() bool {
+	t.real.Stop()
+	return t.done.CompareAndSwap(false, true)
+}
+
+// Advance moves the clock forward by d and fires every timer whose moment it reached.
+func (c *fakeHubClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.offset += d
+	now := time.Now().UTC().Add(c.offset)
+	var due []*fakeHubTimer
+	kept := c.timers[:0]
+	for _, timer := range c.timers {
+		if timer.done.Load() {
+			continue
+		}
+		if !timer.at.After(now) {
+			due = append(due, timer)
+			continue
+		}
+		kept = append(kept, timer)
+	}
+	c.timers = kept
+	c.mu.Unlock()
+	for _, timer := range due {
+		timer.real.Stop()
+		timer.fire()
+	}
 }
 
 // hubOn starts a hub on an existing test server, as a second Dispatch task's hub would.
@@ -637,6 +714,394 @@ func terminateListener(t *testing.T, database *store.Store) {
 	`).Scan(&ended); err != nil || ended == 0 {
 		t.Fatalf("terminate the listener's backend: ended %d, err %v", ended, err)
 	}
+}
+
+// createHubIssue creates issue title in project HUB (creating the project the first time), and
+// returns its key.
+func createHubIssue(t *testing.T, handler http.Handler, fields map[string]any) string {
+	t.Helper()
+	dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "HUB", "name": "Hub"}, "alice")
+	body := map[string]any{"project": "HUB"}
+	for name, value := range fields {
+		body[name] = value
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("create issue %v: status = %d, body = %s", fields, response.Code, response.Body.String())
+	}
+	return decodeBody[struct {
+		Key string `json:"key"`
+	}](t, response).Key
+}
+
+func patchHubIssue(t *testing.T, handler http.Handler, key string, patch map[string]any) {
+	t.Helper()
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, patch, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("patch %s %v: status = %d, body = %s", key, patch, response.Code, response.Body.String())
+	}
+}
+
+// prNaming is pull request n merged at merged, naming issue.
+func prNaming(n int, merged time.Time, issue string) delivery.DeliveryPullRequest {
+	pr := hubPR(n, merged)
+	pr.IssueKey = &issue
+	return pr
+}
+
+// seedHubComponents gives project HUB a component tree, platform > api.
+func seedHubComponents(t *testing.T, database *store.Store) {
+	t.Helper()
+	for _, statement := range []string{
+		`insert into architecture_snapshots (id, project_key, commit, files) values (901, 'HUB', 'c1', '{}')`,
+		`insert into components (project_key, id, title, prose, parent, snapshot_id) values
+			('HUB', 'platform', 'The platform', '', null, 901), ('HUB', 'api', 'Public API', '', 'platform', 901)`,
+	} {
+		if _, err := database.Pool.Exec(context.Background(), statement); err != nil {
+			t.Fatalf("seed components: %v\n%s", err, statement)
+		}
+	}
+}
+
+func TestAnIssueTitleChangeReachesPagesThatNameTheIssue(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	named := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	other := createHubIssue(t, rig.handler, map[string]any{"title": "Tidy docs"})
+	now := time.Now().UTC()
+	upsertPR(t, rig.database, prNaming(1, now.Add(-3*time.Hour), named))
+	upsertPR(t, rig.database, prNaming(2, time.Date(2024, 6, 3, 12, 0, 0, 0, time.UTC), other))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("names", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("other", timelineRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
+	var held json.RawMessage
+	for range 2 {
+		snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot)
+		if !ok {
+			t.Fatal("want a snapshot for each view")
+		}
+		if snapshot.Sub == "names" {
+			held = snapshot.Body
+		}
+	}
+
+	start := rig.mark()
+	patchHubIssue(t, rig.handler, named, map[string]any{"title": "Ship the widgets"})
+	delta := conn.delta(t, 3*time.Second, "names")
+	if got := liveMapValues(t, delta, "issue_titles"); got[named] != "Ship the widgets" {
+		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, named)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+	conn.none(t, time.Second, "a title change the other page does not name")
+	if n := rig.count(start, func(note deliveryHubNote) bool {
+		return note.what == "recompute begin" && strings.Contains(note.view, "2024-06-01")
+	}); n != 0 {
+		t.Fatalf("a title change the other page does not name recomputed it %d times, want 0", n)
+	}
+}
+
+func TestAParentsComponentChangeReachesPagesHoldingItsChildren(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	parent := createHubIssue(t, rig.handler, map[string]any{"title": "Platform work"})
+	seedHubComponents(t, rig.database)
+	child := createHubIssue(t, rig.handler, map[string]any{"title": "A child", "parent": parent})
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), child))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+
+	// The child inherits what its parent chooses.
+	patchHubIssue(t, rig.handler, parent, map[string]any{"components": map[string]any{"mode": "explicit", "ids": []string{"api"}}})
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveUpsertIDs(t, delta, "prs"); !slices.Equal(got, []string{"acme/widgets#1"}) {
+		t.Fatalf("the parent's component change upserts %v, want the child's pull request", got)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+// unownedP0Fields is the unowned_p0 and status a body of kind shows, decoded: a measures body's
+// own, a timeline's from its measures.
+func unownedP0Fields(t *testing.T, body json.RawMessage, kind string) map[string]any {
+	t.Helper()
+	if kind == deliveryLiveTimeline {
+		var timeline struct {
+			Measures json.RawMessage `json:"measures"`
+		}
+		if err := json.Unmarshal(body, &timeline); err != nil {
+			t.Fatalf("decode the timeline's measures: %v", err)
+		}
+		body = timeline.Measures
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatalf("decode the measures: %v", err)
+	}
+	return map[string]any{"unowned_p0": decoded["unowned_p0"], "status": decoded["status"]}
+}
+
+func TestAnUnownedP0ChangeReachesEveryTimelineAndMeasuresView(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	upsertPR(t, rig.database, hubPR(1, time.Now().UTC().Add(-3*time.Hour)))
+	seed := createHubIssue(t, rig.handler, map[string]any{"title": "Raised later", "priority": 1})
+	conn := newFakeLiveConn()
+	held := map[string]json.RawMessage{}
+	kinds := map[string]string{"t": deliveryLiveTimeline, "m": deliveryLiveMeasures}
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 28, "")))
+	for range 2 {
+		snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot)
+		if !ok {
+			t.Fatal("want a snapshot for each view")
+		}
+		held[snapshot.Sub] = snapshot.Body
+	}
+	var created string
+	for _, step := range []struct {
+		name string
+		act  func()
+	}{
+		{"a P0 created", func() {
+			created = createHubIssue(t, rig.handler, map[string]any{"title": "Production is down", "priority": 0})
+		}},
+		{"a P0 claimed", func() {
+			if response := dispatchRequest(t, rig.handler, http.MethodPost, "/api/v1/issues/"+created+"/claim", map[string]any{}, "alice"); response.Code != http.StatusOK {
+				t.Fatalf("claim: status = %d, body = %s", response.Code, response.Body.String())
+			}
+		}},
+		{"a claimed P0 released", func() {
+			if response := dispatchRequest(t, rig.handler, http.MethodDelete, "/api/v1/issues/"+created+"/claim", nil, "alice"); response.Code != http.StatusOK {
+				t.Fatalf("release: status = %d, body = %s", response.Code, response.Body.String())
+			}
+		}},
+		{"a P0 closed", func() { patchHubIssue(t, rig.handler, created, map[string]any{"status": "done"}) }},
+		{"a P1 raised to P0", func() { patchHubIssue(t, rig.handler, seed, map[string]any{"priority": 0}) }},
+		{"a P0 routed", func() { patchHubIssue(t, rig.handler, seed, map[string]any{"route": "role:reviewer"}) }},
+		{"a routed P0 unrouted", func() { patchHubIssue(t, rig.handler, seed, map[string]any{"route": ""}) }},
+		{"a P0 lowered to P1", func() { patchHubIssue(t, rig.handler, seed, map[string]any{"priority": 1}) }},
+	} {
+		step.act()
+		for range 2 {
+			delta, ok := conn.next(t, 3*time.Second, "each view's delta after "+step.name).(DeliveryLiveDelta)
+			if !ok {
+				t.Fatalf("after %s: want a delta for each view", step.name)
+			}
+			kind := kinds[delta.Sub]
+			applied := applyLiveDelta(t, kind, held[delta.Sub], delta)
+			// GET /measures for the window the view answers.
+			want := unownedP0Fields(t, getBody(t, rig.handler, windowTarget(t, deliveryLiveMeasures, applied, "")), deliveryLiveMeasures)
+			if got := unownedP0Fields(t, applied, kind); !reflect.DeepEqual(got, want) {
+				t.Fatalf("after %s, %s's measures hold %v; GET /measures answers %v", step.name, delta.Sub, got, want)
+			}
+			held[delta.Sub] = applied
+		}
+	}
+}
+
+func TestAnArchitectureSyncReachesEveryView(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	createHubIssue(t, rig.handler, map[string]any{"title": "Anything"})
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
+	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
+	for range 3 {
+		if _, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
+			t.Fatal("want a snapshot for each view")
+		}
+	}
+	start := rig.mark()
+	appendHubEvent(t, rig, projectOwner("HUB").event("architecture.synced", model.Actor{Kind: "system", ID: "architecture-importer"}, map[string]any{"commit": "c2"}))
+	for _, kind := range []string{deliveryLiveTimeline, deliveryLiveMeasures, deliveryLivePipeline} {
+		rig.waitFor(t, start, 3*time.Second, "the "+kind+" view's recompute", func(note deliveryHubNote) bool {
+			return note.what == "recompute begin" && strings.HasPrefix(note.view, kind)
+		})
+	}
+}
+
+// appendHubEvent commits event as a route does, and publishes it to the server's broker.
+func appendHubEvent(t *testing.T, rig *hubRig, event model.Event) model.Event {
+	t.Helper()
+	ctx := store.WithTransactionTracking(context.Background())
+	tx, err := rig.database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	appended, err := rig.deps.Events.Append(ctx, tx, event)
+	if err != nil {
+		t.Fatalf("append %s: %v", event.Type, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s: %v", event.Type, err)
+	}
+	rig.deps.Events.Publish(appended)
+	return appended
+}
+
+func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	for range 299 {
+		appendHubEvent(t, rig, projectOwner("HUB").event("user_state.updated", model.Actor{Kind: "user", ID: "alice"}, map[string]any{}))
+	}
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	held := conn.snapshot(t, 5*time.Second, "t").Body
+	rig.hub.catchUpNow()
+	if _, cursor := rig.cursors(); cursor < 300 {
+		t.Fatalf("the hub's event cursor = %d, want at least 300", cursor)
+	}
+
+	// The event log restarts at id 1, as e2e/seed.ts:20 and :150 reset it; then a title the view
+	// names changes, its event (id 1) below the hub's cursor.
+	if _, err := rig.database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("truncate events: %v", err)
+	}
+	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
+		t.Fatalf("after the event log's reset the delta's issue_titles = %v, want %s retitled", got, key)
+	}
+	held = requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+	if _, cursor := rig.cursors(); cursor != 1 {
+		t.Fatalf("the hub's event cursor after the reset = %d, want 1", cursor)
+	}
+
+	// Again, with the log refilled past the old cursor before the hub reads: the row at its cursor
+	// was created at another time than the hub read, so that is a reset too.
+	if _, err := rig.database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
+		t.Fatalf("truncate events: %v", err)
+	}
+	if _, err := rig.database.Pool.Exec(t.Context(), `
+		insert into events (project_key, seq, type, actor, payload, notify, created_at)
+		select 'HUB', n, 'user_state.updated', '{"kind":"user","id":"alice"}', '{}', false, now() - interval '1 hour'
+		from generate_series(1, 5) n
+	`); err != nil {
+		t.Fatalf("refill the event log: %v", err)
+	}
+	if _, err := rig.database.Pool.Exec(t.Context(), `update projects set last_seq = 5 where key = 'HUB'`); err != nil {
+		t.Fatalf("move the project's sequence: %v", err)
+	}
+	if _, err := rig.database.Pool.Exec(t.Context(), `update issues set title = 'Ship every widget' where key = $1`, key); err != nil {
+		t.Fatalf("retitle the issue without an event: %v", err)
+	}
+	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	delta = conn.delta(t, 3*time.Second, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship every widget" {
+		t.Fatalf("after the second reset the delta's issue_titles = %v, want %s retitled", got, key)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, held, delta, "")
+}
+
+func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	createHubIssue(t, rig.handler, map[string]any{"title": "Anything"})
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	conn.snapshot(t, 5*time.Second, "t")
+	rig.hub.catchUpNow()
+	_, before := rig.cursors()
+
+	// 500 events no view reads, written without the broker, as another task's would be.
+	if _, err := rig.database.Pool.Exec(t.Context(), `
+		insert into events (project_key, seq, type, actor, payload, notify)
+		select 'HUB', (select last_seq from projects where key = 'HUB') + n, 'artifact.version', '{"kind":"user","id":"alice"}', '{}', false
+		from generate_series(1, 500) n
+	`); err != nil {
+		t.Fatalf("append 500 events: %v", err)
+	}
+	var newest int64
+	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
+		t.Fatalf("read the newest event: %v", err)
+	}
+	start := rig.mark()
+	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	rig.waitFor(t, start, 3*time.Second, "the catch-up", func(note deliveryHubNote) bool {
+		return note.what == "events caught up" && note.through == newest
+	})
+	if n := rig.count(start, func(note deliveryHubNote) bool { return note.what == "events caught up" && note.from == before }); n != 1 {
+		t.Fatalf("catch-ups from the cursor before the 500 events = %d, want 1", n)
+	}
+	second := rig.mark()
+	notifyChannel(t, rig.database, dispatchEventsChannel, "")
+	rig.waitFor(t, second, 3*time.Second, "the second catch-up", func(note deliveryHubNote) bool { return note.what == "events caught up" })
+	if n := rig.count(second, func(note deliveryHubNote) bool { return note.what == "events caught up" && note.from != newest }); n != 0 {
+		t.Fatalf("the second notification scanned from below %d again", newest)
+	}
+	conn.none(t, time.Second, "500 events no view reads")
+}
+
+func TestADroppedBrokerSubscriptionIsRestoredWithoutMissingAnEvent(t *testing.T) {
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	rig := newHubRig(t, func(hub *deliveryHub) {
+		// The listener never connects, so only the broker or the store can tell the hub of an event.
+		hub.dial = func(context.Context) (deliveryListenerConn, error) { return nil, context.DeadlineExceeded }
+		hub.backoff = func(int) time.Duration { return time.Hour }
+		observe := hub.observe
+		hub.observe = func(note deliveryHubNote) {
+			observe(note)
+			if note.what == "broker dropped" {
+				// Hold the hub between losing its subscription and taking a new one, while the test
+				// commits an event.
+				<-release
+			}
+		}
+	})
+	// Registered after the rig's, so it runs first: a failed test never leaves the hub held.
+	t.Cleanup(releaseOnce)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+
+	start := rig.mark()
+	rig.deps.Events.CloseAll()
+	rig.waitFor(t, start, 3*time.Second, "the hub losing its subscription", func(note deliveryHubNote) bool { return note.what == "broker dropped" })
+	patchHubIssue(t, rig.handler, key, map[string]any{"title": "Ship the widgets"})
+	releaseOnce()
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
+		t.Fatalf("the delta's issue_titles = %v, want %s retitled", got, key)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
+}
+
+func TestAnEventAnotherTaskCommittedReachesThisHub(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	key := createHubIssue(t, rig.handler, map[string]any{"title": "Ship widgets"})
+	upsertPR(t, rig.database, prNaming(1, time.Now().UTC().Add(-3*time.Hour), key))
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
+	snapshot := conn.snapshot(t, 5*time.Second, "t")
+
+	// Another task: its own broker and documents, on the same database.
+	other := events.NewBroker()
+	documents := docs.New(docs.Deps{Store: rig.database, Events: other, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
+	t.Cleanup(func() { _ = documents.Shutdown(context.Background()) })
+	deps, err := NewDeps(DepsInput{
+		Store: rig.database, Identity: headerIdentity(rig.database), AgentTokens: sharedAgentTokens(t, "agent-token"),
+		ServerURL: "https://dispatch.example", Docs: documents, Events: other,
+	})
+	if err != nil {
+		t.Fatalf("the other task's dependencies: %v", err)
+	}
+	otherTask := http.NewServeMux()
+	Register(otherTask, deps)
+	patchHubIssue(t, otherTask, key, map[string]any{"title": "Ship the widgets"})
+	delta := conn.delta(t, 3*time.Second, "t")
+	if got := liveMapValues(t, delta, "issue_titles"); got[key] != "Ship the widgets" {
+		t.Fatalf("the delta's issue_titles = %v, want %s retitled by the other task", got, key)
+	}
+	requireLandsOnGET(t, rig.handler, deliveryLiveTimeline, snapshot.Body, delta, "")
 }
 
 func TestASubscriberGetsTheGETBodyAsItsSnapshot(t *testing.T) {

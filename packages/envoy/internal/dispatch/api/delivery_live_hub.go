@@ -266,7 +266,7 @@ type deliveryFreshnessVerdict struct {
 
 // deliveryHubNote is one thing the hub did, for a test's observe.
 type deliveryHubNote struct {
-	what          string // "recompute begin", "recompute end", "events caught up", "connected"
+	what          string // "recompute begin", "recompute end", "events caught up", "connected", "broker dropped"
 	view          string // the view's key
 	cause         string
 	read          bool
@@ -412,6 +412,7 @@ func (h *deliveryHub) intake(ctx context.Context) {
 			if !open {
 				// A full buffer (broker.go's Publish) or CloseAll dropped the subscription: take a new
 				// one, then read whatever the old one missed from the store.
+				h.note(deliveryHubNote{what: "broker dropped"})
 				events, unsubscribe = broker.Subscribe()
 				h.catchUp(false, true)
 				continue
