@@ -1176,10 +1176,11 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 }
 
 // A git lock an interrupted git or jj left in a running pod's workspace fails the adoption on
-// every write of what it locks, and nothing under a running pod removes it: a live git may hold
-// it. The failure names the lock, how long ago it was last written and that the issue pod's next
-// start removes it, whether jj's own git backend reported it (the index jj rewrites as it
-// snapshots the working copy, as in LEGION-731) or a git command jj ran; and the lock stays.
+// every write of what it locks, and nothing under a running pod removes it: another role's live git
+// may hold it. The failure names the lock and how long ago it was last written, says not to remove
+// it while the pod runs and that replacing the pod removes it, and says what holds under tmux,
+// whether jj's own git backend reported it (the index jj rewrites as it snapshots the working copy,
+// as in LEGION-731) or a git command jj ran; and the lock stays.
 func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 	jj, err := exec.LookPath("jj")
 	if err != nil {
@@ -1242,8 +1243,9 @@ func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
 			for _, want := range []string{
 				"Command failed (exit 1)",
 				"git lock " + lock + " was last written 31m",
-				"Legion never removes a lock under a running pod",
-				"the issue pod's next start removes it before any role runs",
+				"Do not remove it while the issue's pod runs: another role's git, which this container cannot see, may hold it.",
+				"Replacing the issue's pod removes it.",
+				"Under the tmux runtime nothing removes it",
 			} {
 				if !strings.Contains(got.Error, want) {
 					t.Errorf("the result's error %q does not mention %q", got.Error, want)

@@ -1483,11 +1483,14 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    logs each with its path and age (`RemoveStaleGitLocks`, `internal/workspace/stalelock.go`): a
    git or jj interrupted mid-write leaves its lock, and every later write of that file fails on it,
    but no process can hold one now, since no role container of the pod has started and no other pod
-   mounts the volume. Another worktree entry of the clone keeps its locks, and a lock it cannot
-   remove fails the container naming it. jj's own locks are `flock(2)` locks, which end with their
-   holder, so it leaves them. Under a running pod nothing removes a lock, since a live git may hold
-   it: the `jj` the shim's working-copy adoption and a `handoff_complete` run name each lock still
-   on disk that they failed on, with its age, in their error, and the pod's next start removes it.
+   mounts the volume. Another worktree entry of the clone keeps its locks; a lock it cannot remove,
+   and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it
+   would take the removal outside the clone), fail the container naming the path. jj's own locks
+   are `flock(2)` locks, which end with their holder, so it leaves them. Under a running pod nothing
+   removes a lock, since another role's git, which a role's container cannot see, may hold it: the
+   `jj` the shim's working-copy adoption and a `handoff_complete` run name each lock still on disk
+   that they failed on, with its age, in their error, say not to remove it while the pod runs, and
+   that replacing the issue's pod removes it.
 3. Each role container runs `legion launcher --connect tcp://<advertise_host, or bind with none
    set>:<worker_stream_port> --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1
    of that role, starting and stopping the role's `legion worker-shim` (Oh My Pi) child on the
@@ -1574,12 +1577,11 @@ Each role's shim is started with `--warm-codegraph`: once its Oh My Pi has writt
 its extensions loaded, its RPC loop serving — the shim builds the workspace's CodeGraph index in the
 background (`codegraph init`, or `codegraph index` to repair one an earlier build left partial, as
 `codegraph status --json` decides). Nothing waits on it: not the launch, not the role's registration,
-not a prompt. Six role shims share one workspace, and a draining pod can overlap its replacement, so
-the warm-up holds a lease at `.codegraph/legion-warm.lock` for its run — an exclusive create whose
-holder refreshes its mtime every 10 s, taken over once it is 60 s stale, the takeover itself under a
-second exclusive create beside it so two shims that both read one stale lease never both build — and a
-shim that finds the lease held leaves the build to its holder (a pod's `flock` reaches no other pod
-under gVisor, so the lease is a file, not a lock). A stop mid-build — the launcher's one SIGTERM to
+not a prompt. Six role shims share one workspace, so the warm-up holds a lease at
+`.codegraph/legion-warm.lock` for its run — an exclusive create whose holder refreshes its mtime
+every 10 s, taken over once it is 60 s stale, the takeover itself under a second exclusive create
+beside it so two shims that both read one stale lease never both build — and a shim that finds the
+lease held leaves the build to its holder. A stop mid-build — the launcher's one SIGTERM to
 the role's process group — ends Oh My Pi and the `codegraph` child together, and the shim exits only
 once the warm-up has released its lease, inside the pod's `terminationGracePeriodSeconds`
 (`worker_stop_timeout_seconds`, which the launcher passes the shim as `--stop-grace`), so the
@@ -1741,14 +1743,28 @@ does (`xargs -0 sh -c 'exec env -i "$@" omp …' agent-env </proc/<pid>/environ`
 `internal/workspace/provision.go`); no other issue's workspace is on this volume.
 
 **No pod of the issue is running**, as when the only pod is the one whose `workspace-init`
-refuses: mount the issue's claim in a pod of your own, `issue-<Sandbox>`, i.e.
+refuses. That pod is still there: the kubelet retries its `workspace-init` (`restartPolicy:
+Always`) and the daemon's next launch replaces it, and every attempt removes the git locks in the
+issue's clone, one a git of yours holds included. So make it go first. `legion claims suspend`
+stops a role's process but leaves the pod, and its Sandbox `Running` (`Suspend`,
+`internal/runtime/sandbox/sandbox.go`). Once `legion claims list` shows no claim of the issue
+launching or running (suspend a running one), set the Sandbox `Suspended` from the operator's
+context, and run git or jj writes only once the issue lists no pod:
+
+```sh
+kubectl -n legion patch sandbox legion-<project>-<issue key lowercased> --type merge -p '{"spec":{"operatingMode":"Suspended"}}'
+kubectl -n legion get pods -l legion.dev/issue=<KEY>
+```
+
+Then mount the issue's claim in a pod of your own, `issue-<Sandbox>`, i.e.
 `issue-legion-<project>-<issue key lowercased>` (`kubectl -n legion get pvc -l legion.dev/issue=<KEY>`).
 The claim is `ReadWriteOnce`, and the pod carries no affinity, so it lands wherever the pool has
-room and the volume follows it. Delete it before the issue's next pod starts. `ReadWriteOnce` binds
-the volume to one node, not one pod: on another node that pod waits on the detach, with
-`FailedAttachVolume` or `Multi-Attach` events, until this one is gone, but on the same node it
-mounts the volume beside this one, and its `workspace-init` removes the git locks in the issue's
-clone, one a git still running here holds included:
+room and the volume follows it. The issue's next launch (`legion claims resume` or `retry`) sets
+its Sandbox `Running` again (`relaunch`, `relaunch.go`); delete your pod before it. `ReadWriteOnce`
+binds the volume to one node, not one pod: on another node the new pod waits on the detach, with
+`FailedAttachVolume` or `Multi-Attach` events, until yours is gone, but on the same node it mounts
+the volume beside yours, and its `workspace-init` removes the clone's git locks, one a git still
+running in yours holds included:
 
 ```yaml
 apiVersion: v1

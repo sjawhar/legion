@@ -262,5 +262,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - A `handoff_complete` whose jj fails on a git lock file still on disk — the `index.lock` a git or
   jj interrupted mid-write leaves, which fails every later jj that snapshots a change into the
   working copy (LEGION-731) — names each such lock in its error, with how long ago it was last
-  written, and says Legion never removes a lock under a running pod, and that on Kubernetes the
-  issue pod's next start removes it (`src/git-lock.ts`). The lock is left as it is.
+  written. It says not to remove the lock while the issue's pod runs, since another role's git,
+  which the role's container cannot see, may hold it, and that replacing the issue's pod removes
+  it; and that under the tmux runtime nothing removes it, so it is removed by hand once no git or
+  jj on the host is using the repository (`src/git-lock.ts`). The lock is left as it is.

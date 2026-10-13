@@ -23,7 +23,7 @@ async function staleLock(name: string, ageMs: number): Promise<string> {
 }
 
 const note = (lock: string, age: string) =>
-  `git lock ${lock} was last written ${age} ago and blocks this command. If no git or jj process is still running, an interrupted one left it. Legion never removes a lock under a running pod; on Kubernetes the issue pod's next start removes it before any role runs.`;
+  `git lock ${lock} was last written ${age} ago and blocks this command. Do not remove it while the issue's pod runs: another role's git, which this container cannot see, may hold it. Replacing the issue's pod removes it. Under the tmux runtime nothing removes it: remove it by hand only once no git or jj process on the host is using the repository.`;
 
 test("names each git lock the output reports that is still there, with how long ago it was written", async () => {
   const index = await staleLock("index.lock", (31 * 60 + 4) * 1000);

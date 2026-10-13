@@ -15,8 +15,9 @@ import (
 // replace and rename over it once it is written. A process killed or interrupted mid-write leaves
 // its lock, and every later write of that file fails on it until someone deletes it. It walks the
 // clone's git directory, apart from its worktree entries, and the clone's worktree entries for
-// workspace (gitWorktreeEntries); another workspace's entry keeps its locks. Each removal is logged
-// with the lock's path and age, and a lock it cannot remove is an error naming it.
+// workspace (gitWorktreeEntries, which refuses a symlinked .git or .git/worktrees before anything
+// is removed); another workspace's entry keeps its locks. Each removal is logged with the lock's
+// path and age, and a lock it cannot remove is an error naming it.
 //
 // A lock some process still holds must never be removed: two writers would then replace one file.
 // So the caller is one that knows no process can hold any: a Kubernetes issue pod's

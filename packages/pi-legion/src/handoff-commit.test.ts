@@ -297,7 +297,7 @@ test.skipIf(jjOnPath === null)(
     await expect(failure).rejects.toThrow("Could not acquire lock for index file");
     await expect(failure).rejects.toThrow(
       new RegExp(
-        `git lock ${lock.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")} was last written 31m\\d+s ago and blocks this command\\. .*the issue pod's next start removes it before any role runs\\.`
+        `git lock ${lock.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")} was last written 31m\\d+s ago and blocks this command\\. Do not remove it while the issue's pod runs: .* Replacing the issue's pod removes it\\. Under the tmux runtime nothing removes it`
       )
     );
     expect((await lstat(lock)).isFile()).toBe(true);

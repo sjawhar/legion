@@ -34,9 +34,20 @@ const rootHeadRef = "ref: refs/jj/root"
 // dir: each <clone>/.git/worktrees/<id> whose gitdir file names dir's .git, dir as given or with its
 // symlinks resolved, as jj records it. git names an entry after the directory's base name, with a
 // number on a collision, so the id is read, never derived. A clone with no linked worktree, or a
-// jj that colocates no workspace (0.44), has none.
+// jj that colocates no workspace (0.44), has none. A clone whose .git or .git/worktrees is a
+// symlink is refused: git never creates either as one, and each caller writes or removes files in
+// the entries, which a symlink a tree agent planted would place outside the clone.
 func gitWorktreeEntries(cloneDir, dir string) ([]string, error) {
 	admin := filepath.Join(cloneDir, ".git", "worktrees")
+	for _, path := range []string{filepath.Dir(admin), admin} {
+		info, err := os.Lstat(path)
+		switch {
+		case err == nil && info.Mode()&fs.ModeSymlink != 0:
+			return nil, fmt.Errorf("refusing the git worktrees of %s: %s is a symlink, which git never creates", cloneDir, path)
+		case err != nil && !errors.Is(err, fs.ErrNotExist):
+			return nil, fmt.Errorf("read git worktrees: %w", err)
+		}
+	}
 	entries, err := os.ReadDir(admin)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil

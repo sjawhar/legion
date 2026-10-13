@@ -615,6 +615,50 @@ func TestWorkspaceInitFailsOnALockItCannotRemove(t *testing.T) {
 	}
 }
 
+// The clone's .git and its worktrees directory are real directories, as git creates them, and both
+// are on the volume every agent of the issue writes. Either one replaced with a symlink would take
+// the sweep, and the worktree writes after it, to whatever directory it names: there an entry
+// whose gitdir names the issue's workspace counts as the workspace's own. provision refuses it,
+// naming the symlink, before it removes anything or runs jj.
+func TestWorkspaceInitRefusesASymlinkedGitDirectory(t *testing.T) {
+	for _, linked := range []string{".git", filepath.Join(".git", "worktrees")} {
+		t.Run(linked, func(t *testing.T) {
+			v := newIssueVolume(t).withRemote(t)
+			v.fetch(t)
+			v.provisioned(t, "LEGION-42")
+			path := filepath.Join(v.clone(), linked)
+			elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.Rename(path, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, path); err != nil {
+				t.Fatal(err)
+			}
+			evil := filepath.Join(v.clone(), ".git", "worktrees", "evil")
+			if err := os.MkdirAll(evil, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(evil, "gitdir"), []byte(filepath.Join(v.workspace("LEGION-42"), ".git")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(evil, "victim.lock")
+			staleLock(t, victim, 31*time.Minute)
+			calls := len(v.jjCalls(t))
+
+			code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
+			if want := "refusing the git worktrees of " + v.clone() + ": " + path + " is a symlink"; code != 1 || !strings.Contains(stderr, want) {
+				t.Fatalf("exit %d, stdout %q, stderr %q, want exit 1 with %q", code, stdout, stderr, want)
+			}
+			if _, err := os.Lstat(victim); err != nil {
+				t.Fatalf("%s after the refusal: %v, want it left where the symlink points", victim, err)
+			}
+			if ran := v.jjCalls(t)[calls:]; len(ran) != 0 {
+				t.Fatalf("jj ran %q after the refusal, want nothing run", ran)
+			}
+		})
+	}
+}
+
 // Shared init distinguishes loss of the issue's storage from one role's missing transcript.
 // A clone or a retained session proves the volume still holds data; only the role launcher
 // decides whether its own session exists.
