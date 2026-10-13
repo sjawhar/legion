@@ -51,7 +51,9 @@
   error) when that section's resolver uses it.
 - `envoySettings(env, config)`: the Envoy a session uses, `{ enabled: true, url, natsUrls, token,
   natsSeed, heartbeatMs }` or `{ enabled: false, notice, error }`, each variable overriding its own
-  field; `ENVOY_URL` with a file's token at another origin than that file's listener is refused.
+  field; `ENVOY_URL` with a file's token at another origin than that file's listener is refused,
+  and a file's `natsSeed` goes only with that file's `natsUrls` (`ENVOY_NATS_URL` naming other
+  servers needs `NATS_NKEY_SEED_FILE`; a checkout's servers need the checkout's own seed).
 - `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
   `activeDispatchConfig` for a caller that has already read its envoy.json.
 - `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line

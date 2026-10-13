@@ -37546,18 +37546,30 @@ function envoySettings(env, config2) {
   if (natsUrls.length > 0) {
     try {
       natsSeed = natsSeedFromEnvironment(env);
-      if (natsSeed === undefined && checkout?.envoy.natsSeed !== undefined) {
-        if (checkout.envoy.natsSeed.startsWith("!")) {
-          return disabled(checkoutCommandRefusal(checkout.path, "envoy.natsSeed"));
-        }
-        const source = `envoy.natsSeed in ${checkout.path}`;
-        natsSeed = { value: checkout.envoy.natsSeed.trim(), source };
-      } else if (natsSeed === undefined && own.natsSeed !== undefined) {
-        const value = fileValue(own.natsSeed, "envoy.natsSeed", config2.path, env);
-        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config2.path}` };
-      }
     } catch (error48) {
       return disabled(messageFor(error48));
+    }
+    const seedFile = natsSeed !== undefined ? null : checkout?.envoy.natsSeed !== undefined ? {
+      path: checkout.path,
+      seed: checkout.envoy.natsSeed,
+      servers: checkout.envoy.natsUrls ?? own.natsUrls ?? []
+    } : own.natsSeed !== undefined ? { path: config2.path, seed: own.natsSeed, servers: own.natsUrls ?? [] } : null;
+    if (seedFile !== null) {
+      const servers = new Set(seedFile.servers.map((server) => server.trim()));
+      const used = new Set(natsUrls);
+      const sameServers = used.size === servers.size && [...used].every((url3) => servers.has(url3));
+      if (!sameServers) {
+        return disabled(namedNatsUrls.length > 0 ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them` : `${checkout?.path}: envoy.natsUrls requires envoy.natsSeed in the same file`);
+      }
+      if (seedFile.path !== config2.path && seedFile.seed.startsWith("!")) {
+        return disabled(checkoutCommandRefusal(seedFile.path, "envoy.natsSeed"));
+      }
+      try {
+        const value = fileValue(seedFile.seed, "envoy.natsSeed", config2.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${seedFile.path}` };
+      } catch (error48) {
+        return disabled(messageFor(error48));
+      }
     }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);

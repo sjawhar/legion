@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { envoySettings } from "../defaults";
+import { dispatchSettings } from "../dispatch-config";
 import { readEnvoyConfig } from "../envoy-config";
 
 function tempDir(): string {
@@ -227,6 +228,108 @@ describe("envoySettings", () => {
       enabled: true,
       url: "http://staging.internal.example:9020",
       token: "repo-token",
+    });
+  });
+});
+
+// nkey sign-in sends a signature of the server's nonce, never the seed, but a server that is not the
+// real one can relay the real server's nonce and replay the signature. A file's seed therefore goes
+// only with the servers written in that same file.
+describe("the NATS seed in envoy.json", () => {
+  const fileServers = ["nats://one.internal.example:4222", "nats://two.internal.example:4222"];
+
+  test("goes with ENVOY_NATS_URL only when it names the file's servers, and its command does not run otherwise", () => {
+    const home = tempDir();
+    const runs = path.join(home, "runs");
+    const config = configFrom({
+      envoy: {
+        enabled: true,
+        natsUrls: fileServers,
+        natsSeed: `!echo run >> ${runs}; echo SUSEED`,
+      },
+    });
+    const other = {
+      PATH: process.env.PATH,
+      ENVOY_NATS_URL: "nats://elsewhere.internal.example:4222",
+    };
+    expect(envoySettings(other, config)).toEqual({
+      enabled: false,
+      notice: null,
+      error: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+    });
+    expect(existsSync(runs)).toBe(false);
+
+    const same = {
+      PATH: process.env.PATH,
+      ENVOY_NATS_URL:
+        " nats://two.internal.example:4222,nats://one.internal.example:4222, nats://two.internal.example:4222",
+    };
+    expect(envoySettings(same, config)).toMatchObject({
+      enabled: true,
+      natsSeed: { value: "SUSEED", source: `envoy.natsSeed in ${config.path}` },
+    });
+  });
+
+  test("a seed from the variables goes with whatever servers ENVOY_NATS_URL names", () => {
+    const config = configFrom({
+      envoy: { enabled: true, natsUrls: fileServers, natsSeed: "SUFILESEED" },
+    });
+    const seedFile = secretFile("SUPOINTERSEED\n");
+    expect(
+      envoySettings(
+        {
+          ENVOY_NATS_URL: "nats://elsewhere.internal.example:4222",
+          NATS_NKEY_SEED_FILE: seedFile,
+        },
+        config
+      )
+    ).toMatchObject({
+      enabled: true,
+      natsUrls: ["nats://elsewhere.internal.example:4222"],
+      natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
+    });
+  });
+
+  test("a checkout's servers need the checkout's own seed, for Envoy only", () => {
+    const user = path.join(tempDir(), "envoy.json");
+    writeFileSync(
+      user,
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "user-token" },
+        envoy: { enabled: true, natsUrls: fileServers, natsSeed: "SUFILESEED" },
+      })
+    );
+    const cwd = tempDir();
+    mkdirSync(path.join(cwd, ".envoy"));
+    const checkout = path.join(cwd, ".envoy", "envoy.json");
+    writeFileSync(
+      checkout,
+      JSON.stringify({ envoy: { natsUrls: ["nats://repo.internal.example:4222"] } })
+    );
+    const env = { HOME: tempDir() };
+    const withoutSeed = readEnvoyConfig(user, env, { cwd });
+    expect(envoySettings(env, withoutSeed)).toEqual({
+      enabled: false,
+      notice: null,
+      error: `${checkout}: envoy.natsUrls requires envoy.natsSeed in the same file`,
+    });
+    expect(dispatchSettings(env, withoutSeed)).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "user-token",
+      error: null,
+    });
+
+    writeFileSync(
+      checkout,
+      JSON.stringify({
+        envoy: { natsUrls: ["nats://repo.internal.example:4222"], natsSeed: "SUREPOSEED" },
+      })
+    );
+    expect(envoySettings(env, readEnvoyConfig(user, env, { cwd }))).toMatchObject({
+      enabled: true,
+      natsUrls: ["nats://repo.internal.example:4222"],
+      natsSeed: { value: "SUREPOSEED", source: `envoy.natsSeed in ${checkout}` },
     });
   });
 });

@@ -92,8 +92,13 @@ function disabled(error: string): DisabledEnvoySettings {
  *
  * A file's token goes with `ENVOY_URL` only when it names the origin of the listener written in the
  * file the token comes from; any other listener needs `ENVOY_TOKEN` or `ENVOY_TOKEN_FILE`. A
- * checkout's `envoy.url` is used only with the `envoy.token` written beside it. The chosen file's
- * `!` token and seed run here, only when Envoy uses them; a checkout's are refused.
+ * checkout's `envoy.url` is used only with the `envoy.token` written beside it. A file's seed goes
+ * only with the servers written in that same file: nkey sign-in sends no seed, but a server that is
+ * not the real one can relay the real server's nonce and replay the signature. So `ENVOY_NATS_URL`
+ * gets a file's seed only when it names that file's servers (as a set), and a checkout's servers
+ * get only the checkout's own seed; a seed from the variables goes with whatever servers resolve.
+ * The chosen file's `!` token and seed run here, only when Envoy uses them; a checkout's are
+ * refused.
  */
 export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): EnvoySettings {
   if (config.error !== null) return disabled(config.error);
@@ -188,18 +193,42 @@ export function envoySettings(env: EnvoyEnvironment, config: EnvoyConfig): Envoy
   if (natsUrls.length > 0) {
     try {
       natsSeed = natsSeedFromEnvironment(env);
-      if (natsSeed === undefined && checkout?.envoy.natsSeed !== undefined) {
-        if (checkout.envoy.natsSeed.startsWith("!")) {
-          return disabled(checkoutCommandRefusal(checkout.path, "envoy.natsSeed"));
-        }
-        const source = `envoy.natsSeed in ${checkout.path}`;
-        natsSeed = { value: checkout.envoy.natsSeed.trim(), source };
-      } else if (natsSeed === undefined && own.natsSeed !== undefined) {
-        const value = fileValue(own.natsSeed, "envoy.natsSeed", config.path, env);
-        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${config.path}` };
-      }
     } catch (error) {
       return disabled(messageFor(error));
+    }
+    // With no seed from the variables: the file whose seed it would be, and its servers.
+    const seedFile =
+      natsSeed !== undefined
+        ? null
+        : checkout?.envoy.natsSeed !== undefined
+          ? {
+              path: checkout.path,
+              seed: checkout.envoy.natsSeed,
+              servers: checkout.envoy.natsUrls ?? own.natsUrls ?? [],
+            }
+          : own.natsSeed !== undefined
+            ? { path: config.path, seed: own.natsSeed, servers: own.natsUrls ?? [] }
+            : null;
+    if (seedFile !== null) {
+      const servers = new Set(seedFile.servers.map((server) => server.trim()));
+      const used = new Set(natsUrls);
+      const sameServers = used.size === servers.size && [...used].every((url) => servers.has(url));
+      if (!sameServers) {
+        return disabled(
+          namedNatsUrls.length > 0
+            ? `ENVOY_NATS_URL names other servers than ${seedFile.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
+            : `${checkout?.path}: envoy.natsUrls requires envoy.natsSeed in the same file`
+        );
+      }
+      if (seedFile.path !== config.path && seedFile.seed.startsWith("!")) {
+        return disabled(checkoutCommandRefusal(seedFile.path, "envoy.natsSeed"));
+      }
+      try {
+        const value = fileValue(seedFile.seed, "envoy.natsSeed", config.path, env);
+        natsSeed = { value: value.trim(), source: `envoy.natsSeed in ${seedFile.path}` };
+      } catch (error) {
+        return disabled(messageFor(error));
+      }
     }
   }
 

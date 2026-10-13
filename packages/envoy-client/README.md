@@ -95,7 +95,12 @@ heartbeatMs }`, or `{ enabled: false, notice, error }`. `ENVOY_URL`, `ENVOY_NATS
 daemon names. The seed is resolved only when there are NATS servers to use it on. A set `_FILE`
 pointer that cannot be read is an `error`, never a fallback. A file's `envoy.token` goes with
 `ENVOY_URL` only when it names the origin of the listener written in the file the token comes
-from. `natsAuthOptions` takes the resolved seed and names its source when it is not a user seed;
+from. A file's `envoy.natsSeed` goes only with the servers written in that same file, since a
+server that is not the real one can relay the real server's nonce and replay the signature:
+`ENVOY_NATS_URL` gets it only when it names those servers (as a set), otherwise Envoy is refused
+naming `NATS_NKEY_SEED_FILE`, and a checkout's `envoy.natsUrls` need the checkout's own
+`envoy.natsSeed`. A seed from the variables goes with whatever servers resolve. `natsAuthOptions`
+takes the resolved seed and names its source when it is not a user seed;
 `natsSeedFromEnvironment` resolves one from the two variables alone.
 
 ## Dispatch
