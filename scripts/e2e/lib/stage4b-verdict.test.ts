@@ -865,3 +865,98 @@ if out=$(carried_child_sessions ${JSON.stringify(log)} ${prefix} ${planner} 2>&1
     expect(cameBack([lost(other), lost(other)], "kept")).toBe("ok kept");
   });
 });
+
+// mid-turn-carry judges a child carried while its planner still ran a turn in its old tree
+// (carried_mid_turn_ordered): a start of the new tree waited for the planner to stop, the planner's
+// suspension landed after that wait, and the architect's first launch came after it. The rows hold
+// the daemon's order to a pass and each way a new tree that did not wait shows to a failure: a
+// launch refused for the Sandbox still running the old tree's roles, no wait, a planner never
+// stopped, and an architect launched before it.
+describe("stage 4b's mid-turn carry verdict", () => {
+  const prefix = "legion-legsmoke-legsmoke-14-";
+  const planner = `${prefix}planner`;
+  const architect = `${prefix}architect`;
+  const line = (msg: string, extra: object) => ({
+    time: "2026-10-13T00:10:00Z",
+    level: "INFO",
+    msg,
+    ...extra,
+  });
+  const wait = line("outbox row waits", {
+    row: 9,
+    kind: "supervise",
+    issue: "LEGSMOKE-14",
+    attempts: 1,
+    error: `start of LEGSMOKE-14 in tree LEGSMOKE-14 waits for ${planner}:working in tree LEGSMOKE-12 to stop`,
+  });
+  const stopped = line("supervise: suspended", {
+    claim: planner,
+    reason: "the tree of LEGSMOKE-12 lingers",
+    by: "daemon",
+  });
+  const launched = line("supervise: launched", { claim: architect, generation: 1, resumed: false });
+  const refused = line("supervise: launch failed", {
+    claim: architect,
+    level: "WARN",
+    error:
+      "ensure its sandbox: sandbox legion-legsmoke-legsmoke-14, made for tree LEGSMOKE-12, does not fit this launch of tree LEGSMOKE-14 and still runs roles",
+  });
+  const verdict = (lines: object[]) => {
+    const log = join(dir, `daemon-${++runs}.log`);
+    writeFileSync(log, `${lines.map((entry) => JSON.stringify(entry)).join("\n")}\n`);
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -Eeuo pipefail
+${fn("carried_mid_turn_ordered")}
+if out=$(carried_mid_turn_ordered ${JSON.stringify(log)} ${prefix} ${planner} ${architect} LEGSMOKE-12 2>&1); then echo "ok$out"; else echo "fail $out"; fi
+`,
+    ]);
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+
+  test("passes a new tree that waited for the planner, which stopped before the architect launched", () => {
+    expect(verdict([wait, stopped, launched])).toBe("ok");
+  });
+
+  test("fails a launch refused for the Sandbox still running the old tree's roles", () => {
+    expect(verdict([refused, wait, stopped, launched])).toBe(
+      `fail a launch of ${architect} met the Sandbox still running tree LEGSMOKE-12's roles: ${refused.error}`
+    );
+  });
+
+  test("fails a new tree whose starts never waited for the planner", () => {
+    expect(verdict([stopped, launched])).toBe(
+      `fail no start of the new tree waited for ${planner} to stop in tree LEGSMOKE-12`
+    );
+  });
+
+  test("fails a planner never suspended after the wait, counting no suspension before it", () => {
+    expect(verdict([stopped, wait, launched])).toBe(
+      `fail ${planner} was never suspended after the new tree's start waited for it`
+    );
+  });
+
+  test("fails an architect launched before the planner stopped", () => {
+    expect(verdict([wait, launched, stopped])).toBe(
+      `fail ${architect} launched before ${planner} stopped in tree LEGSMOKE-12`
+    );
+  });
+
+  test("fails an architect that never launched", () => {
+    expect(verdict([wait, stopped])).toBe(`fail ${architect} never launched`);
+  });
+
+  test("reads only the child's own claims and its own old tree", () => {
+    const other = { ...refused, claim: "legion-legsmoke-legsmoke-140-architect" };
+    const elsewhere = {
+      ...wait,
+      error: wait.error.replace("in tree LEGSMOKE-12", "in tree LEGSMOKE-99"),
+    };
+    expect(verdict([other, wait, stopped, launched])).toBe("ok");
+    expect(verdict([elsewhere, stopped, launched])).toBe(
+      `fail no start of the new tree waited for ${planner} to stop in tree LEGSMOKE-12`
+    );
+  });
+});
