@@ -56,6 +56,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   23 plugin's strict reader refuses a state whose views carry `pluginContract`, so the boot gate
   and `legion probe-image` refuse the mixed pair.
 
+- `register_gate`'s document lookup (LEGION-707) resolves Dispatch as the session's Envoy plugin
+  does, from the pane's own envoy.json: a named Oh My Pi profile's `$PI_CODING_AGENT_DIR/envoy.json`,
+  else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
+  with the `dispatch` section of the workspace's `.envoy/envoy.json` over it. `DISPATCH_URL` and
+  `DISPATCH_TOKEN_FILE`, which the daemon sets on every pane when Dispatch is configured
+  (`dispatch_url`), still override both. `~/.config/opencode/envoy.json` and `.opencode/envoy.json`
+  are no longer read.
 - `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an
