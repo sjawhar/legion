@@ -103,6 +103,17 @@ naming `NATS_NKEY_SEED_FILE`, and a checkout's `envoy.natsUrls` need the checkou
 takes the resolved seed and names its source when it is not a user seed;
 `natsSeedFromEnvironment` resolves one from the two variables alone.
 
+A plugin resolves its session through `session-settings.ts`. `sessionConfigFile(harness, env)` is
+the file `envoyConfigPath` chooses, with a relative `XDG_CONFIG_HOME` as `error` instead of a
+throw, so a plugin that cannot work out its file still loads. `sessionSettings(file, env, { cwd })`
+reads it once and returns both sections (`dispatchSettings`, `envoySettings`) and the one notice
+the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`), the
+missing file's notice, the missing-file text for a section still off when a variable turned the
+other on (`missingConfigNotice`, which names the old OpenCode file while it is still there), or a
+section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`); a file that turns a
+section off says nothing. `sessionDispatchSettings(file, env, { cwd })` re-reads Dispatch from the
+same file on each use, for a plugin whose Dispatch calls follow a file that changes.
+
 ## Dispatch
 
 `dispatch-http.ts` sends the native Dispatch JSON API with the configured bearer
