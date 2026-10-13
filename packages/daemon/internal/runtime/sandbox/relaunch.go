@@ -201,16 +201,24 @@ func (r *Runtime) stopIssuedChild(ctx context.Context, token claim.Token, podUID
 // awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
 // has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
 // launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
-// clone and its retries may take up to ProvisionBound. So the wait gives the launcher the boot
-// timeout from the later of the wait's start and the last moment it saw the pod provisioning (an
-// init container running, provisioning), never past the boot timeout plus ProvisionBound from the
-// start (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
+// clone and its retries may take up to ProvisionBound from the fetch's own start. So until the
+// wait first sees the pod provisioning (an init container running, provisioning) it gives the pod
+// the boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw
+// the pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
 func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
 	what := "role launcher " + string(loc.Claim)
 	start := time.Now()
 	deadline := start.Add(r.bootTimeout)
+	var first time.Time
 	ended := false
-	err := r.await(ctx, r.bootTimeout+r.ProvisionBound(), what, func() (bool, error) {
+	// await's own budget is only a backstop. The check below runs at every informer event and at
+	// least every recheckInterval, and it ends the wait before it extends the deadline, so the pod
+	// is first seen provisioning within the boot timeout of the start or never, and no deadline lies
+	// past twice the boot timeout plus ProvisionBound from the start. Two recheck intervals more let
+	// that check end the wait first.
+	backstop := 2*r.bootTimeout + r.ProvisionBound() + 2*recheckInterval
+	err := r.await(ctx, backstop, what, func() (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
 		if err != nil {
 			return false, err
@@ -224,23 +232,26 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 			return true, nil
 		}
 		now := time.Now()
-		if provisioning(view.pod) {
-			deadline = launcherDeadline(start, now, r.bootTimeout, r.ProvisionBound())
-		}
 		if !now.Before(deadline) {
 			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+		}
+		if provisioning(view.pod) {
+			if first.IsZero() {
+				first = now
+			}
+			deadline = launcherDeadline(first, now, r.bootTimeout, r.ProvisionBound())
 		}
 		return false, nil
 	})
 	return ended, deadline, err
 }
 
-// launcherDeadline is when a wait for a role launcher that started at start gives up, having last
-// seen its pod provisioning at provisioned: the boot timeout after that, but no later than the boot
-// timeout plus bound after start.
-func launcherDeadline(start, provisioned time.Time, boot, bound time.Duration) time.Time {
-	deadline := provisioned.Add(boot)
-	if limit := start.Add(boot + bound); deadline.After(limit) {
+// launcherDeadline is when a wait for a role launcher gives up, having first seen its pod
+// provisioning at first and last at last: the boot timeout after last, but no later than the boot
+// timeout plus bound after first.
+func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Time {
+	deadline := last.Add(boot)
+	if limit := first.Add(boot + bound); deadline.After(limit) {
 		return limit
 	}
 	return deadline

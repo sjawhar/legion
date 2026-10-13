@@ -40,11 +40,11 @@ type FetchRequest struct {
 // feed with no credential. It returns the feed repository.
 //
 // A clone that fails transiently (transientCloneFailure) is cloned again after the next of
-// fetchBackoff's waits, its failure logged and whatever it left at the feed removed first, all
-// within FetchTimeout from the first attempt's start: each attempt is bounded by what remains of
-// it, and no retry starts past it. Every other failure is the answer at once. Each attempt's
-// stderr has the token replaced by *** as soon as the attempt returns, so nothing Fetch logs or
-// returns carries it, wherever git echoed it.
+// fetchBackoff's waits, once per wait, its failure logged and whatever it left at the feed removed
+// first, all within FetchTimeout from the first attempt's start: each attempt is bounded by what
+// remains of it, and no retry starts past it. A clone still failing after the last wait, and every
+// other failure, is the answer at once. Each attempt's stderr has the token replaced by *** as soon
+// as the attempt returns, so nothing Fetch logs or returns carries it, wherever git echoed it.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
 	feed, err := feedRepository(request.Feed, request.Repo)
 	if err != nil {
@@ -55,10 +55,10 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 		return "", err
 	}
 	if request.Log == nil {
-		return "", errors.New("workspace fetch request names no log")
+		return "", errors.New("workspace fetch log is required")
 	}
 	if request.Clock == nil {
-		return "", errors.New("workspace fetch request names no clock")
+		return "", errors.New("workspace fetch clock is required")
 	}
 	credential, err := github.open(request.Repo, "")
 	if err != nil {
@@ -85,7 +85,10 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 		if runErr != nil || !transientCloneFailure(result) {
 			return "", failed
 		}
-		wait := fetchBackoff[min(attempt-1, len(fetchBackoff)-1)]
+		if attempt > len(fetchBackoff) {
+			return "", fmt.Errorf("%w\nclone attempt %d failed, and the fetch retries a clone at most %d times", failed, attempt, len(fetchBackoff))
+		}
+		wait := fetchBackoff[attempt-1]
 		if !request.Clock.Now().Add(wait).Before(deadline) {
 			return "", fmt.Errorf("%w\nclone attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, attempt, wait, FetchTimeout)
 		}
@@ -126,9 +129,10 @@ func (WallClock) Sleep(ctx context.Context, d time.Duration) error {
 	}
 }
 
-// fetchBackoff is the wait before each retry of the fetch's clone, its last repeated until
-// FetchTimeout: a first retry soon after a stream GitHub cut, then no more than one attempt a
-// minute through an outage.
+// fetchBackoff is the wait before each retry of the fetch's clone, one retry per entry: a first
+// retry soon after a stream GitHub cut, the last a minute later. A clone still failing after the
+// last fails the fetch, so a GitHub outage holds a launch for a few attempts, not the whole
+// FetchTimeout, which bounds a slow transfer instead.
 var fetchBackoff = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute}
 
 // gitFatalExit is the status git's die() exits with, which every failure below ends in. Any other

@@ -156,39 +156,41 @@ func clonesUnderTheBound(t *testing.T, run *failingClone, clock *testClock) time
 	return elapsed
 }
 
-// A clone that keeps failing quickly is retried after each backoff wait until a retry would start
-// past FetchTimeout, which Fetch does not make: it fails, naming the last attempt and the bound.
-// The waits are 5 s, 15 s and 30 s, then a minute each, so 33 attempts fit: the 33rd starts at
-// 29 min 50 s, and a retry after it would start at 30 min 50 s.
-func TestFetchStopsRetryingAtItsBound(t *testing.T) {
+// A clone that keeps failing quickly, as one does through a GitHub outage, is retried once after
+// each backoff wait and no more: the fifth transient failure ends the fetch, 1 min 50 s in, naming
+// the failure and the retry limit, rather than holding the launch for the whole FetchTimeout.
+func TestFetchStopsAfterItsLastRetry(t *testing.T) {
 	clock := newTestClock()
-	run := &failingClone{clock: clock, result: fatal("error: RPC failed; HTTP 408 curl 22 The requested URL returned error: 408\nfatal: expected 'packfile'\n")}
+	run := &failingClone{clock: clock, result: fatal("fatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 503\n")}
 	req := fetchRequest(t)
 	req.Clock = clock
 	var logged []string
 	req.Log = func(line string) { logged = append(logged, line) }
 
 	_, err := Fetch(context.Background(), run, req)
-	want := "clone attempt 33 failed, and a retry in 1m0s would start past the fetch's 30m0s bound"
-	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "HTTP 408") {
-		t.Fatalf("Fetch = %v, want the 408 and %q", err, want)
+	want := "clone attempt 5 failed, and the fetch retries a clone at most 4 times"
+	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "returned error: 503") {
+		t.Fatalf("Fetch = %v, want the 503 and %q", err, want)
 	}
-	if len(run.attempts) != 33 || len(logged) != 32 {
-		t.Fatalf("Fetch cloned %d times and logged %d retries, want 33 and 32", len(run.attempts), len(logged))
+	if len(run.attempts) != 5 || len(logged) != 4 {
+		t.Fatalf("Fetch cloned %d times and logged %d retries, want 5 and 4", len(run.attempts), len(logged))
 	}
-	if elapsed := clonesUnderTheBound(t, run, clock); elapsed != 29*time.Minute+50*time.Second {
-		t.Errorf("the fetch gave up %s in, want 29m50s", elapsed)
+	if !slices.Equal(clock.waits, fetchBackoff) {
+		t.Fatalf("Fetch waited %v, want %v", clock.waits, fetchBackoff)
+	}
+	if elapsed := clonesUnderTheBound(t, run, clock); elapsed != time.Minute+50*time.Second {
+		t.Errorf("the fetch gave up %s in, want 1m50s", elapsed)
 	}
 }
 
-// A clone whose every attempt takes as long as the production fetch's connect timeout (127 s) is
-// given what remains of FetchTimeout each time, and the eleventh, started 29 min in with less than
-// that left, is killed at the bound itself: Fetch never runs past FetchTimeout, which the daemon's
-// wait for a launching pod's role launcher allows the pod while it provisions
-// (sandbox.Runtime.ProvisionBound).
+// A clone whose every attempt runs ten minutes before it breaks, as a slow transfer GitHub cuts
+// does, is given what remains of FetchTimeout each time, and the third, started 20 min 20 s in
+// with less than ten minutes left, is killed at the bound itself: Fetch never runs past
+// FetchTimeout, which the daemon's wait for a launching pod's role launcher allows the pod while
+// it provisions (sandbox.Runtime.ProvisionBound).
 func TestFetchKillsTheAttemptThatReachesItsBound(t *testing.T) {
 	clock := newTestClock()
-	run := &failingClone{clock: clock, took: 127010 * time.Millisecond, result: fatal("fatal: unable to access 'https://github.com/acme/widgets/': Failed to connect to github.com port 443 after 127010 ms: Couldn't connect to server\n")}
+	run := &failingClone{clock: clock, took: 10 * time.Minute, result: fatal("error: RPC failed; curl 92 HTTP/2 stream 7 was not closed cleanly: CANCEL (err 8)\nfatal: early EOF\n")}
 	req := fetchRequest(t)
 	req.Clock = clock
 
@@ -196,11 +198,30 @@ func TestFetchKillsTheAttemptThatReachesItsBound(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "command timed out: git clone") {
 		t.Fatalf("Fetch = %v, want the last attempt's timeout", err)
 	}
-	if len(run.attempts) != 11 {
-		t.Fatalf("Fetch cloned %d times, want 11", len(run.attempts))
+	if len(run.attempts) != 3 {
+		t.Fatalf("Fetch cloned %d times, want 3", len(run.attempts))
 	}
 	if elapsed := clonesUnderTheBound(t, run, clock); elapsed != FetchTimeout {
 		t.Errorf("the fetch gave up %s in, want at its bound, %s", elapsed, FetchTimeout)
+	}
+}
+
+// A retry whose wait would end past FetchTimeout is not made: Fetch fails naming the failure and
+// the bound.
+func TestFetchMakesNoRetryThatWouldStartPastItsBound(t *testing.T) {
+	clock := newTestClock()
+	run := &failingClone{clock: clock, took: FetchTimeout - 3*time.Second,
+		result: fatal("error: RPC failed; HTTP 408 curl 22 The requested URL returned error: 408\nfatal: expected 'packfile'\n")}
+	req := fetchRequest(t)
+	req.Clock = clock
+
+	_, err := Fetch(context.Background(), run, req)
+	want := "clone attempt 1 failed, and a retry in 5s would start past the fetch's 30m0s bound"
+	if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "HTTP 408") {
+		t.Fatalf("Fetch = %v, want the 408 and %q", err, want)
+	}
+	if len(run.attempts) != 1 || len(clock.waits) != 0 {
+		t.Fatalf("Fetch cloned %d times and waited %v, want one clone and no wait", len(run.attempts), clock.waits)
 	}
 }
 
@@ -269,8 +290,8 @@ func TestFetchRefusesARequestWithNoLogOrClock(t *testing.T) {
 		edit func(*FetchRequest)
 		want string
 	}{
-		{"no log", func(r *FetchRequest) { r.Log = nil }, "workspace fetch request names no log"},
-		{"no clock", func(r *FetchRequest) { r.Clock = nil }, "workspace fetch request names no clock"},
+		{"no log", func(r *FetchRequest) { r.Log = nil }, "workspace fetch log is required"},
+		{"no clock", func(r *FetchRequest) { r.Clock = nil }, "workspace fetch clock is required"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)

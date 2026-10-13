@@ -48,6 +48,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 var _ runtime.Runtime = (*Runtime)(nil)
@@ -83,6 +84,7 @@ type Runtime struct {
 	agentSecrets                   *AgentSecrets
 	agent                          []string
 	bootTimeout                    time.Duration
+	provisionBound                 time.Duration
 	terminationGrace               time.Duration
 	probeInterval                  time.Duration
 	adoptTimeout                   time.Duration
@@ -256,7 +258,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionDSNKey: opts.SessionDSNKey,
-		bootTimeout:   opts.BootTimeout, terminationGrace: opts.TerminationGrace,
+		bootTimeout:   opts.BootTimeout, provisionBound: workspace.FetchTimeout, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},

@@ -296,6 +296,30 @@ func TestWorkspaceInitFetchRetriesATransientCloneFailure(t *testing.T) {
 	}
 }
 
+// A clone that keeps failing transiently is retried four times, one per backoff wait, and the
+// fifth failure fails the fetch: the four retries on stdout, the failure and the limit on stderr.
+func TestWorkspaceInitFetchGivesUpAfterItsLastRetry(t *testing.T) {
+	v := newIssueVolume(t).withRemote(t)
+	attempts := v.failClones(t, http408Failure, http408Failure, http408Failure, http408Failure, http408Failure, http408Failure)
+	clock := useInstantClock(t)
+	v.setenv(t)
+	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+
+	code, stdout, stderr := runWorkspaceInitHere(v.fetchArgs())
+	if says := "clone attempt 5 failed, and the fetch retries a clone at most 4 times"; code != 1 || !strings.Contains(stderr, says) {
+		t.Fatalf("exit %d, stderr %q; want 1 naming %q", code, stderr, says)
+	}
+	if retries := strings.Count(stdout, "workspace-init fetch: clone attempt "); retries != 4 {
+		t.Fatalf("stdout %q logs %d retries, want 4", stdout, retries)
+	}
+	if got := cloneAttempts(t, attempts); got != 5 {
+		t.Fatalf("git cloned %d times, want 5", got)
+	}
+	if waits := clock.waits; !slices.Equal(waits, []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, time.Minute}) {
+		t.Fatalf("the fetch waited %v, want 5s, 15s, 30s, 1m", waits)
+	}
+}
+
 // A clone GitHub refuses for good fails on its first attempt, with no wait and no retry, naming
 // git's own message on stderr and logging nothing on stdout. Which failures are permanent is
 // workspace.Fetch's to tell; this is what the command does with one.
