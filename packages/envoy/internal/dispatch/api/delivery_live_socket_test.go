@@ -585,11 +585,19 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 	opened := time.Now()
 	silent.read()
 
-	// A page that answers no ping is closed once two heartbeats pass without a pong.
+	// A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
+	// stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
+	// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
+	// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
+	// resolves.
 	select {
 	case <-silent.ended:
 		if waited := time.Since(opened); waited < heartbeat || waited > 2*heartbeat+time.Second {
 			t.Fatalf("the silent page's socket ended %s after it opened, want about two heartbeats (%s)", waited, 2*heartbeat)
+		}
+		var closed *gws.CloseError
+		if !errors.As(silent.err, &closed) || closed.Code != gws.CloseAbnormalClosure {
+			t.Fatalf("the silent page's socket ended with %v, want an end with no close frame (1006)", silent.err)
 		}
 	case <-time.After(2*heartbeat + 3*time.Second):
 		t.Fatal("a page that answers no ping kept its socket")

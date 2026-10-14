@@ -29,6 +29,9 @@ import (
 //   - 1009 (message too big) for a frame over deliverySocketReadLimit, which gorilla writes;
 //   - 1011 (internal error) for a frame Dispatch cannot encode.
 //
+// A page that answers no ping for two heartbeats, or whose connection fails, has gone or stopped
+// reading: its socket ends with no close frame, which the page reads as 1006.
+//
 // The page reconnects after each and resumes every subscription with its revisions, so what a close
 // cut off reaches it as part of what changed since.
 
@@ -172,7 +175,12 @@ func (s *server) serveDeliverySocket(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	upgrader := gws.Upgrader{EnableCompression: true}
+	// A read buffer of the socket's own keeps its reads off the request's connection. With none,
+	// gorilla reads through the bufio reader net/http hands over at the hijack, whose reads still
+	// go through the request's connection reader, and that reader cancels the request's context on
+	// any read error; the writer would then read the end of a pong deadline as the caller no longer
+	// resolving and close with 1008.
+	upgrader := gws.Upgrader{EnableCompression: true, ReadBufferSize: 4096}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // the upgrader has answered the request

@@ -697,6 +697,12 @@
 
 ### Fixed
 
+- A Delivery or Pipeline page that stops answering the `GET /ws/delivery` socket's pings now loses
+  the socket with no close frame, which the page reads as 1006, rather than with 1008, which says
+  the caller no longer resolves (LEGION-690). With no read buffer of its own the socket read through
+  the request's connection reader, which cancels the request's context on a read error, so the end
+  of the pong deadline closed it as a policy violation. The page reconnects with backoff either way.
+
 - A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
   line a pasted picture is written as, now shows in the document editor and in a past version,
   drawn from the version's bytes route; before, the editor's `<img>` carried the `dispatch://`
