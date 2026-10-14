@@ -20,7 +20,7 @@ import (
 // The script these tests run is the one the golden cloud-config writes, byte for byte, run as
 // the VM runs it: by /bin/sh with curl, jq and base64, which Container-Optimized OS ships. The
 // metadata server and Secret Manager are fakes it reaches through GCE_METADATA_HOST and
-// SECRET_MANAGER_ENDPOINT.
+// SECRET_MANAGER_ENDPOINT; sleep is a stub that records how long the script asked to wait.
 
 const (
 	fetchSecret = "example-hub-tailnet-auth-key"
@@ -109,13 +109,21 @@ func newFakeGCP(t *testing.T, access func(w http.ResponseWriter, call int32)) *f
 	return f
 }
 
-// fetchRun is one run of the script: its output, its exit code, and the directory holding the
-// key file.
+// fetchRun is one run of the script: its output, its exit code, the directory holding the key
+// file, and the argument of each sleep it ran, in order.
 type fetchRun struct {
 	stdout, stderr string
 	exitCode       int
 	dir, out       string
+	sleeps         []string
 }
+
+// sleepStub stands in for sleep(1) first on the script's PATH: it records its argument in the
+// file SLEEP_LOG names and returns at once, so a run takes no wall time between attempts and the
+// test reads the spacing the script asked for.
+const sleepStub = `#!/bin/sh
+printf '%s\n' "$1" >>"$SLEEP_LOG"
+`
 
 // fetch runs the script against f, writing to a key file that already exists, empty and mode
 // 0600, as the cloud-config's bootcmd leaves it.
@@ -124,13 +132,17 @@ func fetch(t *testing.T, f *fakeGCP) fetchRun {
 	scriptDir := t.TempDir()
 	script := filepath.Join(scriptDir, "fetch-tailnet-key")
 	require.NoError(t, os.WriteFile(script, []byte(fetchScript(t)), 0o700))
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "sleep"), []byte(sleepStub), 0o700))
+	sleepLog := filepath.Join(scriptDir, "sleeps")
 	dir := t.TempDir()
 	out := filepath.Join(dir, "tailnet-auth-key")
 	require.NoError(t, os.WriteFile(out, nil, 0o600))
 
 	cmd := exec.Command("/bin/sh", script, out, fetchSecret)
 	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"SLEEP_LOG=" + sleepLog,
 		"GCE_METADATA_HOST=" + f.metadata.Listener.Addr().String(),
 		"SECRET_MANAGER_ENDPOINT=" + f.secrets.URL,
 	}
@@ -143,6 +155,11 @@ func fetch(t *testing.T, f *fakeGCP) fetchRun {
 		run.exitCode = exit.ExitCode()
 	} else {
 		require.NoError(t, err)
+	}
+	sleeps, err := os.ReadFile(sleepLog)
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(t, err)
+		run.sleeps = strings.Fields(string(sleeps))
 	}
 	return run
 }
@@ -182,6 +199,7 @@ func TestFetchKeyWritesTheKeyReadableByRootAlone(t *testing.T) {
 	require.Empty(t, run.stderr)
 	requireOnlyTheKeyFile(t, run, authKey)
 	require.Equal(t, int32(1), f.accessCalls.Load())
+	require.Empty(t, run.sleeps, "a first attempt that succeeds waits for nothing")
 }
 
 // A grant on a new secret can take a while to reach Secret Manager, so a refusal is tried again,
@@ -197,6 +215,7 @@ func TestFetchKeyFailsOnAPermissionDeniedAfterSixAttempts(t *testing.T) {
 
 	require.NotEqual(t, 0, run.exitCode)
 	require.Equal(t, int32(6), f.accessCalls.Load())
+	require.Equal(t, []string{"10", "10", "10", "10", "10"}, run.sleeps, "ten seconds between attempts")
 	require.Contains(t, run.stderr, "no key after 6 attempts")
 	requireNothingSecretPrinted(t, run)
 	requireOnlyTheKeyFile(t, run, "")
@@ -215,6 +234,7 @@ func TestFetchKeyRecoversFromAFailedAttempt(t *testing.T) {
 
 	require.Equal(t, 0, run.exitCode, "stderr: %s", run.stderr)
 	require.Equal(t, int32(2), f.accessCalls.Load())
+	require.Equal(t, []string{"10"}, run.sleeps, "ten seconds before the second attempt")
 	requireNothingSecretPrinted(t, run)
 	requireOnlyTheKeyFile(t, run, authKey)
 }
@@ -228,6 +248,7 @@ func TestFetchKeyRefusesAnEmptyPayload(t *testing.T) {
 
 	require.NotEqual(t, 0, run.exitCode)
 	require.Equal(t, int32(6), f.accessCalls.Load())
+	require.Equal(t, []string{"10", "10", "10", "10", "10"}, run.sleeps, "ten seconds between attempts")
 	require.Contains(t, run.stderr, "holds no key")
 	requireOnlyTheKeyFile(t, run, "")
 }
