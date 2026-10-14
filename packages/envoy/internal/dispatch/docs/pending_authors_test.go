@@ -689,6 +689,7 @@ func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin the failing upload: %v", err)
 	}
+	defer tx.Rollback(ctx)
 	joined, ledger := taskA.Join(ctx, refusedCommitTx{Tx: tx})
 	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
 	uploader := model.Actor{Kind: "session", ID: "uploader-on-task-a"}
