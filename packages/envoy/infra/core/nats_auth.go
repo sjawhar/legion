@@ -45,8 +45,9 @@ var userKeyEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 // Validate refuses an authorization nats-server would read otherwise than its fields say. Every
 // refusal names the user, by index and name, and the field.
 //
-// A pending user (no NKey) stands for a seed still to be made: it is never rendered, so rules on
-// it are refused. An authorization whose users are all pending, or that has none, is refused too:
+// A pending user (no NKey) stands for a seed the consumer stores before the server knows its key:
+// it must have HasSeed, since without one it stands for nothing, and it is never rendered, so rules
+// on it are refused. An authorization whose users are all pending, or that has none, is refused too:
 // nats-server reads an authorization block with no users as no authentication at all
 // (server/auth.go configureAuthorization).
 func (a Authorization) Validate() error {
@@ -60,6 +61,9 @@ func (a Authorization) Validate() error {
 			return fmt.Errorf("%s: name must match %s", where, userName)
 		}
 		if u.NKey == "" {
+			if !u.HasSeed {
+				return fmt.Errorf("%s: hasSeed is required for a pending user (no nkey): it is never rendered, so without a seed it stands for nothing", where)
+			}
 			if u.Publish != nil {
 				return fmt.Errorf("%s: publish is set on a pending user (no nkey), which is never rendered", where)
 			}

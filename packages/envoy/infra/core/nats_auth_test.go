@@ -147,6 +147,7 @@ func TestValidateRefuses(t *testing.T) {
 		{"a name ending with a hyphen", func(a *core.Authorization) { listener(a).Name = "listener-" }, `users[0] "listener-": name`},
 		{"an empty name", func(a *core.Authorization) { listener(a).Name = "" }, `users[0] "": name`},
 		{"a name of 49 characters", func(a *core.Authorization) { listener(a).Name = strings.Repeat("a", 49) }, `users[0] "` + strings.Repeat("a", 49) + `": name`},
+		{"a pending user without a seed", func(a *core.Authorization) { pending(a).HasSeed = false }, `users[3] "example-pending": hasSeed`},
 		{"a pending user with a publish rule", func(a *core.Authorization) { pending(a).Publish = &core.Rules{Allow: []string{">"}} }, `users[3] "example-pending": publish`},
 		{"a pending user with a subscribe rule", func(a *core.Authorization) { pending(a).Subscribe = &core.Rules{Allow: []string{">"}} }, `users[3] "example-pending": subscribe`},
 		{"a keyed user without publish", func(a *core.Authorization) { listener(a).Publish = nil }, `users[0] "example-listener": publish`},
