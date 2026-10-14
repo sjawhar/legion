@@ -280,12 +280,14 @@ check "a version step that does not read the paths file fails" "$(is "$status" 1
 check "says so" "$(contains "$out" "the version step does not read $release_paths")"
 
 root=$(fixture extra-path)
+# shellcheck disable=SC2016 # literal workflow text, no expansion wanted
 edit "$root/$workflow" '-- "${paths[@]}")' '-- "${paths[@]}" packages/envoy/cmd/)'
 run_check "$root"
 check "a version step passing a path of its own fails" "$(is "$status" 1)"
 check "says what it must pass" "$(contains "$out" 'the lines of .github/envoy-infra-release-paths, and no other path')"
 
 root=$(fixture two-calls)
+# shellcheck disable=SC2016 # literal workflow text, no expansion wanted
 edit "$root/$workflow" '-- "${paths[@]}")' \
   '-- "${paths[@]}")'$'\n'"          OTHER=\$(.github/scripts/release-bump.sh 0.0.0 HEAD -- packages/envoy/)"
 run_check "$root"
