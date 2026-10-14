@@ -618,7 +618,7 @@ written here.
 - Create: `packages/envoy/infra/core/nats_auth.go`, `nats_auth_test.go`, `pyfmt.go`,
   `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
 - Modify: `packages/envoy/internal/testnats/nats.go`:
-  - export `startNkeyConfig` as `StartNkeyConfig` (its callers are `:220` and `:238`);
+  - (`startNkeyConfig` stays unexported: Task 2.2's live test uses `StartImageConfig`);
   - add `const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"`
     on one line beside `Image`;
   - add `StartImageConfig(t, image, config string, serverArgs []string, anonymous bool)`. It runs
@@ -811,8 +811,8 @@ starts, and record the version.
   SDK reaches it through `BaseEndpoint`.
 - [ ] **Step 3: the seed reaches NATS** (`seed_live_test.go`). `Generate` against the fake store;
   render a `core` authorization with the returned key; start the server with
-  `testnats.StartNkeyConfig`. A client using the stored seed connects, and one without it is
-  refused.
+  `testnats.StartImageConfig` on both images. A client using the stored seed connects, and one
+  without it is refused.
 - [ ] **Step 4: commit** `feat(envoy-infra): seed command with the AWS Secrets Manager store`.
 
 ### Task 2.3: release the CLI, and the slice's proof
@@ -844,7 +844,7 @@ starts, and record the version.
 
 Branch `envoy-infra-aws` in its own clone (`~/.worktrees/legion/envoy-infra-aws`), stacked on
 `envoy-infra-core`. Task 3.1 owns the pulumi-aws dependency (`go.mod`, `go.sum`); 3.2 needs 3.1,
-and its empty-list golden needs the deployment plan's PR 0 commit under that plan's decision (a);
+and its empty-list golden needs the deployment plan's PR 0 commit (Task 3.4);
 3.3 needs 3.2.
 
 Every task in this slice takes the reference inventory, supplied with its brief: each resource's
@@ -1051,11 +1051,9 @@ type WebhookListener struct {
   listed, and each webhook's secret entry only when its webhook is listed. That is the reference's
   rule once the deployment makes its listener slot-capable; for a deployment that lists both, the
   container is today's. The goldens show the result is byte for byte: one for both webhooks,
-  rendered by the reference implementation, and one for the empty list, rendered by the deployment
-  plan's PR 0 branch (its Task 0, under its decision (a)) at a commit the coordinator supplies in
-  the brief, from placeholder inputs. This step waits for that commit. Under that plan's decision
-  (b), no consumer lists fewer than both webhooks, so the component refuses any other list, naming
-  it, until a consumer needs one, and there is only the first golden.
+  rendered by the reference implementation. The first version accepts only the full list, refusing
+  any other naming it; Task 3.4 adds the empty list once the deployment plan's PR 0 (its Task 0)
+  renders it.
 - [ ] **Tests,** as in Task 3.1, including its construct test.
 - [ ] **Commit** `feat(envoy-infra): aws:WebhookListener`.
 
@@ -1076,8 +1074,8 @@ are gone, they read them from this command.
   - `render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>`
     prints the container's non-secret `KEY=value` lines in order. It applies the refusals that its
     own flags can meet, each with its own test row: `--webhook github` without `--reviewer-app-id`
-    or `--mention-trigger`; either of those flags without `--webhook github`; and, under the
-    deployment plan's decision (b), any list other than `github` and `slack`.
+    or `--mention-trigger`; either of those flags without `--webhook github`; and, until Task 3.4,
+    any list other than `github` and `slack`.
   - `render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --logical-name-prefix <p> --json`
     prints each filter's logical name, pattern, metric name and namespace; `<p>` is the component's
     `metricFilterLogicalNamePrefix` (Task 3.1 added the input: the reference names its filters with a
@@ -1101,6 +1099,20 @@ are gone, they read them from this command.
     its `staging` profile, production and dispatch under the instance identity.
   - The record goes on that repository's draft PR, opened early for it. This PR gets operation
     counts by resource type only.
+
+### Task 3.4: the empty webhooks list
+
+Sami left the deployment's proof surface to the coordinator on 2026-10-14, which chose a
+slot-capable Envoy (the deployment plan's PR 0): a standalone slot runs a listener with no webhooks.
+Once that PR has a commit, the coordinator supplies it in the brief:
+
+- [ ] Render the empty-list container definition with that commit's reference code from placeholder
+  inputs (header lines substituted as in Task 2.1), and commit it as the second golden.
+- [ ] `aws:WebhookListener` and `render webhook-listener-env` accept `webhooks: []` as well as the
+  full list, and still refuse any other list, naming it. The component's output for `[]` matches the
+  golden byte for byte; a refusal row per partial list stays.
+- [ ] The README's webhooks row says so.
+- [ ] Commit `feat(envoy-infra): a webhook listener with no webhooks`.
 
 ---
 
@@ -1363,7 +1375,7 @@ Items to verify, each with the row that settles it and where its result goes:
 
 Legion's own end-to-end stages (`scripts/e2e/stage*.sh`) exercise none of the changed paths. The
 Envoy changes (`bus.LocalNATSURL`, `bus.ListenerDurable`/`ListenerQueue`,
-`testnats.StartNkeyConfig`) are covered by `envoy-go` and `envoy-smoke`, which run on these PRs.
+`testnats.HubImage`/`StartImageConfig`) are covered by `envoy-go` and `envoy-smoke`, which run on these PRs.
 
 ## Skill catalog
 
@@ -1393,7 +1405,6 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   (now call the functions) and the tests `main_test.go:2260,2277`, `reconnect_shutdown_test.go:158`,
   `shutdown_test.go:113`, `startup_test.go:51` (keep their literals as independent checks). The
   names produced are unchanged (Task 4.1 Step 1).
-- `testnats.startNkeyConfig` → `StartNkeyConfig`: `nats.go:220,238,315`.
 - `release-envoy-listener.yaml` no longer runs for `packages/envoy/infra/**`, and its bump ignores
   it: `git grep -n 'packages/envoy' -- .github/` shows no `workflow_run` or other dependent of that
   workflow. Rollout: immediate.
