@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -28,7 +30,7 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 	fake := newJobsFake(t)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	stopped, err := StartIntakes(runCtx, func() (*bus.Client, error) {
+	stop, err := StartIntakes(runCtx, func() (*bus.Client, error) {
 		return bus.Connect([]string{natsURL})
 	}, pool, fake.newTestClient())
 	if err != nil {
@@ -39,7 +41,7 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 	// test ends only once both intakes have stopped (startIntake's reason).
 	t.Cleanup(func() {
 		cancel()
-		<-stopped
+		stop()
 	})
 
 	durables := []string{deliveryConsumerName, jobConsumerName}
@@ -100,20 +102,113 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 	}
 }
 
+// TestAMessageInItsHandlerAtShutdownIsAcknowledged: a merged pull request whose GitHub fetch is
+// still running when ctx is cancelled is acknowledged once the fetch returns, because the intake's
+// client stays open until stop. deliver runs on the subscription's delivery goroutine under a
+// deadline of its own, so it outlives Run; a client closed as Run returned took the acknowledgement
+// down with it, and the message stayed outstanding until the ack wait handed it to the next
+// process.
+func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
+	logs := captureLogs(t)
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	natsURL := testnats.URL(t)
+	publisher := intakeTestClient(t)
+	fake := newFakeGitHub(t)
+	entered, held := make(chan struct{}), make(chan struct{})
+	var enter sync.Once
+	fake.handle("GET /repos/{owner}/{repo}/pulls/{number}", func(w http.ResponseWriter, _ *http.Request) {
+		enter.Do(func() { close(entered) })
+		<-held
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	github := fake.newTestClient()
+	release := sync.OnceFunc(func() { close(held) })
+	// Registered after the fake's server, so it runs first: the server's Close waits for the
+	// handler it holds.
+	t.Cleanup(release)
+
+	runCtx, cancel := context.WithCancel(ctx)
+	stop, err := StartIntakes(runCtx, func() (*bus.Client, error) {
+		return bus.Connect([]string{natsURL})
+	}, pool, github)
+	if err != nil {
+		cancel()
+		t.Fatalf("start the intakes: %v", err)
+	}
+	t.Cleanup(func() {
+		cancel()
+		stop()
+	})
+	awaitBoundDurable(t, publisher)
+	consumer := func() string {
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		if err != nil {
+			return err.Error()
+		}
+		return fmt.Sprintf("push_bound=%t delivered=%d ack_floor=%d ack_pending=%d redelivered=%d",
+			info.PushBound, info.Delivered.Consumer, info.AckFloor.Consumer, info.NumAckPending, info.NumRedelivered)
+	}
+
+	publishPullRequestEnvelope(t, publisher, "acme", "widgets", 7, map[string]string{
+		"kind": "pr", "action": "closed", "merged": "true", "repo": "acme/widgets", "number": "7", "author": "octocat",
+	})
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatalf("the intake never fetched the merged pull request: %s", consumer())
+	}
+	cancel()
+	// Run has returned once the durable loses its subscriber: Run unsubscribes as it ends.
+	waitFor(t, 20*time.Second, func() bool {
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		return err == nil && !info.PushBound
+	}, func() string {
+		return "the intake's durable kept its subscriber after ctx was cancelled: " + consumer()
+	})
+	release()
+	// deliver logs an acknowledgement that failed, and the negative acknowledgement after it.
+	failedAcks := func() []map[string]any {
+		var failed []map[string]any
+		for _, record := range logs() {
+			if message, _ := record["msg"].(string); strings.Contains(message, "acknowledge") {
+				failed = append(failed, record)
+			}
+		}
+		return failed
+	}
+	waitFor(t, 20*time.Second, func() bool {
+		info, err := publisher.JS().ConsumerInfo(bus.Stream, deliveryConsumerName)
+		return err == nil && info.Delivered.Consumer == 1 && info.AckFloor.Consumer == 1 && info.NumAckPending == 0
+	}, func() string {
+		return fmt.Sprintf("the message in its handler at shutdown was never acknowledged: %s; failed acknowledgements: %v",
+			consumer(), failedAcks())
+	})
+	stop()
+	if failed := failedAcks(); len(failed) > 0 {
+		t.Fatalf("an acknowledgement failed at shutdown: %v", failed)
+	}
+}
+
 // TestIntakesWithoutTheAppConnectNothing: with no GitHub App neither intake reads anything, so
-// StartIntakes opens no connection and reports them stopped at once.
+// StartIntakes opens no connection and its stop returns at once.
 func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
-	stopped, err := StartIntakes(t.Context(), func() (*bus.Client, error) {
+	stop, err := StartIntakes(t.Context(), func() (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
 	}, nil, nil)
 	if err != nil {
 		t.Fatalf("start the intakes: %v", err)
 	}
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
 	select {
 	case <-stopped:
-	default:
-		t.Fatal("intakes with no GitHub App are not reported stopped")
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopping intakes with no GitHub App did not return")
 	}
 }
 

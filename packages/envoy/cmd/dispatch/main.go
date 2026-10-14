@@ -369,14 +369,21 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
-		// its own: a bus.Client keeps one JetStream subscription (delivery.StartIntakes).
+		// its own: a bus.Client keeps one JetStream subscription (delivery.StartIntakes). Their
+		// clients close with the publisher's, so a message still in its handler when the server
+		// stops is acknowledged; stop waits for both intakes, which stop once ctx is cancelled.
 		connectIntake := func() (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
 		}
-		if _, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub()); err != nil {
+		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub())
+		if err != nil {
 			slog.Error("dispatch delivery: connect NATS", "error", err)
 			os.Exit(1)
 		}
+		defer func() {
+			cancel()
+			stopIntakes()
+		}()
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
