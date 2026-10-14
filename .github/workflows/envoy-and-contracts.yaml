@@ -980,12 +980,12 @@ jobs:
         run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
         working-directory: packages/envoy
 
-  # The container smoke test, and the image it runs. Its own job, gated on envoy_image rather
-  # than envoy: the image is built from the Dispatch SPA and the Bun workspace as well as the Go
-  # sources, so a Dispatch-only change changes the image and must smoke it, while widening
-  # `envoy` would run the whole Go suite on every Dispatch pull request instead. Before this
-  # split the smoke lived in envoy-go, so PR #1562 (packages/dispatch only) skipped envoy-go and
-  # never smoked the image it changed (run 36494702052).
+  # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
+  # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
+  # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must
+  # smoke it, while widening `envoy` would run the whole Go suite on every Dispatch pull request
+  # instead. Before this split the smoke lived in envoy-go, so PR #1562 (packages/dispatch only)
+  # skipped envoy-go and never smoked the image it changed (run 36494702052).
   # .github/scripts/check-image-trigger-paths.sh fails the build when envoy_image misses a file
   # the build reads.
   envoy-smoke:
@@ -996,7 +996,8 @@ jobs:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
-      # The listener image the smoke test runs against, built by its own step below.
+      # The listener image the smoke test and envoy-infra's live tests run, built by its own step
+      # below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1069,6 +1070,34 @@ jobs:
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
+      # The envoy-infra plugin's live tests (packages/envoy/infra/host/live_test.go) apply Pulumi
+      # YAML programs with the pinned Pulumi CLI against this runner's Docker, on the listener image
+      # built above and on the docker provider the plugin's first consumer pins. Each download is
+      # checked against its SHA-256 before it is unpacked or installed.
+      - name: Install the Pulumi CLI
+        run: |
+          tarball="$RUNNER_TEMP/pulumi-v3.268.0-linux-x64.tar.gz"
+          curl -fsSL -o "$tarball" https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
+          echo "903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/pulumi" >> "$GITHUB_PATH"
+      # The release's own checksums file lists SHA-1 digests (this asset's is
+      # 9a7f6014d3ebc330030ec033ddc7222ec13ad116); the SHA-256 is the digest GitHub records for the
+      # release asset, which hashes to that same SHA-1.
+      - name: Install the docker provider plugin the live tests pin
+        run: |
+          tarball="$RUNNER_TEMP/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz"
+          curl -fsSL -o "$tarball" https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
+          echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
+          pulumi plugin install resource docker v4.11.0 --file "$tarball"
+      - name: Live tests of envoy-infra's host:Listener
+        run: go test -tags pulumilive -v -timeout 15m ./host/
+        working-directory: packages/envoy/infra
+      - name: The envoy-infra plugin's schema carries the version it was built with
+        run: >-
+          go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra &&
+          pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'
+        working-directory: packages/envoy/infra
 
   # packages/envoy/scripts/e2e-local.sh: signed GitHub fixtures and a direct message through a real
   # listener and NATS, every frame rendered by both inbound renderers (renderInbound and Go's
