@@ -1,17 +1,36 @@
 // Package pulumitest is the live tests' harness: it builds the envoy-infra plugin from this module
 // and runs the pulumi CLI on Pulumi YAML programs that use it, each stack on a file backend of its
-// own in a temporary directory.
+// own in a temporary directory, under a PULUMI_HOME the test binary makes for itself.
 package pulumitest
 
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
+
+// localRun is how to run the live tests by hand, from the repository root.
+const localRun = "From the repository root, build the listener image and fetch the docker provider " +
+	"plugin, checking its digest:\n" +
+	"  docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .\n" +
+	"  curl -fsSL -o /tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz " +
+	"https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz\n" +
+	"  echo '4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  " +
+	"/tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz' | sha256sum -c -\n" +
+	"then, in packages/envoy/infra, with the pulumi CLI on PATH:\n" +
+	"  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local " +
+	"ENVOY_INFRA_DOCKER_PLUGIN=/tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz " +
+	"go test -count=1 -tags pulumilive -v -timeout 15m ./host/\n" +
+	"-count=1 because go's test cache cannot see the image behind a fixed tag, and would " +
+	"replay a cached PASS against an image that had since changed. In CI each is a step of its " +
+	"own; see .github/workflows/envoy-and-contracts.yaml."
 
 // SmokeImage returns ENVOY_SMOKE_IMAGE, the already-built listener image a live test runs. Unset,
 // it fails the test at once and prints the build command: a build inside go test spends the test's
@@ -20,18 +39,73 @@ func SmokeImage(t testing.TB) string {
 	t.Helper()
 	image := os.Getenv("ENVOY_SMOKE_IMAGE")
 	if image == "" {
-		t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n" +
-			"From the repository root:\n" +
-			"  docker buildx build --load -t legion-envoy-smoke:local " +
-			"-f packages/envoy/docker/Dockerfile .\n" +
-			"then, in packages/envoy/infra, with the pulumi CLI on PATH:\n" +
-			"  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local go test -count=1 -tags pulumilive -v " +
-			"-timeout 15m ./host/\n" +
-			"-count=1 because go's test cache cannot see the image behind a fixed tag, and would " +
-			"replay a cached PASS against an image that had since changed. In CI the build is a " +
-			"step of its own; see .github/workflows/envoy-and-contracts.yaml.")
+		t.Fatal("ENVOY_SMOKE_IMAGE is unset, and this test never builds the image itself.\n" + localRun)
 	}
 	return image
+}
+
+// DockerPluginEnv names the docker provider plugin tarball, v4.11.0 for this machine's platform,
+// that the test binary installs into its own PULUMI_HOME. The live programs pin that version, so
+// the CLI loads it from there and never downloads a plugin itself.
+const DockerPluginEnv = "ENVOY_INFRA_DOCKER_PLUGIN"
+
+var (
+	mainRuns bool
+	homeOnce sync.Once
+	home     string
+	homeErr  error
+)
+
+// Main runs the package's tests, then removes the PULUMI_HOME they shared, and returns the exit
+// code. A package whose tests use NewCLI calls it from TestMain: os.Exit(pulumitest.Main(m)).
+func Main(m *testing.M) int {
+	mainRuns = true
+	code := m.Run()
+	if home != "" {
+		if err := os.RemoveAll(home); err != nil {
+			fmt.Fprintf(os.Stderr, "remove the tests' PULUMI_HOME %s: %v\n", home, err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}
+	return code
+}
+
+// pulumiHome returns the test binary's PULUMI_HOME, made on first use with the docker plugin
+// DockerPluginEnv names installed. It fails the test when that input is unset or the install
+// fails, and when no TestMain calls Main, which removes the home.
+func pulumiHome(t testing.TB) string {
+	t.Helper()
+	if !mainRuns {
+		t.Fatal("pulumitest: call os.Exit(pulumitest.Main(m)) from the package's TestMain, " +
+			"which removes the PULUMI_HOME the tests share")
+	}
+	homeOnce.Do(func() { home, homeErr = newHome() })
+	if homeErr != nil {
+		t.Fatal(homeErr)
+	}
+	return home
+}
+
+// newHome makes a temporary PULUMI_HOME and installs the docker plugin into it. It returns the
+// directory even when the install fails, so Main removes it.
+func newHome() (string, error) {
+	tarball := os.Getenv(DockerPluginEnv)
+	if tarball == "" {
+		return "", errors.New(DockerPluginEnv + " is unset: it names the docker provider plugin " +
+			"tarball the tests install, so the pulumi CLI never downloads one unchecked.\n" + localRun)
+	}
+	dir, err := os.MkdirTemp("", "envoy-infra-pulumi-home-")
+	if err != nil {
+		return "", fmt.Errorf("make the tests' PULUMI_HOME: %w", err)
+	}
+	install := exec.Command("pulumi", "plugin", "install", "resource", "docker", "v4.11.0", "--file", tarball)
+	install.Env = append(os.Environ(), "PULUMI_HOME="+dir, "PULUMI_SKIP_UPDATE_CHECK=true")
+	if out, err := install.CombinedOutput(); err != nil {
+		return dir, fmt.Errorf("install the docker plugin from %s=%s: %v\n%s", DockerPluginEnv, tarball, err, out)
+	}
+	return dir, nil
 }
 
 // PluginName is the plugin binary's file name, which Pulumi looks for in a plugin directory.
@@ -57,11 +131,13 @@ type CLI struct {
 	env []string
 }
 
-// NewCLI returns a CLI that runs pulumi in dir with the caller's environment plus a file backend
-// in a temporary directory, the test passphrase, and no update check.
+// NewCLI returns a CLI that runs pulumi in dir with the caller's environment plus the test
+// binary's PULUMI_HOME, a file backend in a temporary directory, the test passphrase, and no
+// update check.
 func NewCLI(t testing.TB, dir string) *CLI {
 	t.Helper()
 	return &CLI{t: t, dir: dir, env: append(os.Environ(),
+		"PULUMI_HOME="+pulumiHome(t),
 		"PULUMI_BACKEND_URL=file://"+t.TempDir(),
 		"PULUMI_CONFIG_PASSPHRASE=test",
 		"PULUMI_SKIP_UPDATE_CHECK=true",

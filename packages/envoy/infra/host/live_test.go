@@ -26,6 +26,9 @@ import (
 // listener runs on the host's network on a free port, with a container name of its own, and
 // reaches only a loopback NATS from testnats.
 
+// TestMain removes the PULUMI_HOME the live tests share once they have run.
+func TestMain(m *testing.M) { os.Exit(pulumitest.Main(m)) }
+
 // healthWindow is how long a listener has to answer "healthy", and how long a negative control
 // watches one that must not.
 const healthWindow = 60 * time.Second

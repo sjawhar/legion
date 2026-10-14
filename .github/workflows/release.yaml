@@ -32,11 +32,12 @@ on:
       # The two plugins' shared prepack, which stages each one's skills and writes its notices.
       - "scripts/pi-plugin-prepack.sh"
       # The notices each artifact ships: the bundles', the Go binaries' and the worker image's, and
-      # the Go archives' target list.
+      # the Go archives' target lists.
       - "scripts/third-party-notices.ts"
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+      - ".github/envoy-infra-targets.json"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
       - ".dockerignore"
@@ -44,8 +45,9 @@ on:
   workflow_dispatch:
 
 # Every job declares its own permissions (changes, legion, worker_image, worker_image_release_note,
-# envoy_plugin, pi_envoy, pi_legion below); nothing runs under this workflow-level default, so it
-# stays empty rather than becoming an unreviewed grant to a job added later with no block of its own.
+# envoy_plugin, pi_envoy, pi_legion, envoy_infra below); nothing runs under this workflow-level
+# default, so it stays empty rather than becoming an unreviewed grant to a job added later with no
+# block of its own.
 permissions: {}
 
 concurrency:
@@ -68,6 +70,7 @@ jobs:
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
       pi_legion: ${{ steps.filter.outputs.pi_legion }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
+      envoy_infra: ${{ steps.filter.outputs.envoy_infra }}
     steps:
       # Full history, for the base step's ancestry check.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -135,6 +138,21 @@ jobs:
               - 'scripts/go-third-party-notices.sh'
               - 'scripts/assemble-third-party-notices.sh'
               - '.github/go-release-targets.json'
+            # The envoy-infra Pulumi plugin and command the envoy_infra job releases: their module,
+            # every package of packages/envoy they compile in, the manifests that set the versions
+            # they build with (the module's own go.work binds packages/envoy), the notices script
+            # that writes their archives' notices, and the list of the targets they build.
+            # .github/scripts/check-envoy-infra-release-paths.sh fails the build when this list,
+            # the job's bump paths or this workflow's push paths miss a package either compiles
+            # in.
+            envoy_infra:
+              - 'packages/envoy/infra/**'
+              - 'packages/envoy/internal/bus/**'
+              - 'packages/envoy/internal/contracts/**'
+              - 'packages/envoy/go.mod'
+              - 'packages/envoy/go.sum'
+              - 'scripts/go-third-party-notices.sh'
+              - '.github/envoy-infra-targets.json'
             envoy_plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
@@ -349,10 +367,15 @@ jobs:
           test "$lines" -eq 2
           test "$(printf '%s\n' "$version" | sed -n '1p')" = "legion v$VERSION commit $GITHUB_SHA"
           test "$(printf '%s\n' "$version" | sed -n '2p')" = "plugins @sjawhar/pi-legion $PI_LEGION_VERSION @sjawhar/pi-envoy $PI_ENVOY_VERSION"
-      # Build provenance for the archives a mise pin installs, so `gh attestation verify
-      # legion-<os>-<arch>.tar.gz --repo sjawhar/legion` checks a downloaded asset against this
-      # workflow run rather than against SHA256SUMS, which sits in the same mutable release. The
-      # release below uploads these exact files.
+      # Build provenance for the archives a mise pin installs, which the release below uploads
+      # exactly, so a downloaded asset is checked against a run of this workflow on main rather than
+      # against SHA256SUMS, which sits in the same mutable release. `--repo` alone accepts an
+      # archive any workflow of this repository attested, so the check pins the signer as
+      # docs/kubernetes.md ("Pin by digest, never by tag") does:
+      #   gh attestation verify legion-<os>-<arch>.tar.gz --repo sjawhar/legion \
+      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+      #     --source-ref refs/heads/main --deny-self-hosted-runners
+      # and adds `--source-digest <the legion-v<version> tag's commit>` to pin the commit as well.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: steps.version.outputs.skip != 'true'
         with:
@@ -847,3 +870,244 @@ jobs:
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
         run: .github/scripts/release-push.sh push-main packages/pi-legion "${{ steps.version.outputs.version }}"
+
+  # The envoy-infra Pulumi plugin and the envoy-infra command (packages/envoy/infra), released
+  # together on an envoy-infra-v* tag of the commit the run checked out, as two archives per target
+  # (the build step says what each holds). The plugin's schema names that release as its download
+  # URL, so `pulumi package add envoy-infra@<version> --server <that URL>` installs it. Nothing is
+  # committed: a Go module carries no version file, so the tag alone records the version, which
+  # the plugin's schema and `envoy-infra --version` carry. Only main releases one: a
+  # workflow_dispatch from another branch skips this job.
+  envoy_infra:
+    # After pi_legion, as legion is: pi_legion runs after pi_envoy, which runs after envoy_plugin,
+    # so every job here that pushes a version-bump commit to main has finished before this one
+    # starts. A skipped pi_legion (nothing of its own to release) still lets this run.
+    needs: [changes, pi_legion]
+    if: >-
+      always() &&
+      github.ref == 'refs/heads/main' &&
+      (needs.changes.outputs.envoy_infra == 'true' || github.event_name == 'workflow_dispatch') &&
+      (needs.pi_legion.result == 'success' || needs.pi_legion.result == 'skipped')
+    runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`gh release create`, below); id-token and
+    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
+    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+      - name: Determine next version
+        id: version
+        run: |
+          # Anyone who can push a tag names one (no ruleset guards envoy-infra-v*), and git accepts
+          # shell syntax in a tag name, so a version taken from one is used only when it is a plain
+          # X.Y.Z. Every later step reads the version and the tag through env:, never pasted into
+          # its script.
+          plain_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
+          # A tag already at this commit is a re-run of a run that pushed it, perhaps without its
+          # release: rebuild and release that version, as release-envoy-listener.yaml does, so the
+          # tag and release steps below take their reuse branches rather than the run skipping.
+          EXISTING_TAG=$(git tag --list 'envoy-infra-v*' --points-at HEAD --sort=-v:refname | head -1)
+          if [ -n "$EXISTING_TAG" ]; then
+            if ! plain_version "${EXISTING_TAG#envoy-infra-v}"; then
+              echo "::error::The tag $EXISTING_TAG at this commit is not envoy-infra-v<X.Y.Z>; refusing to release it"
+              exit 1
+            fi
+            {
+              echo "version=${EXISTING_TAG#envoy-infra-v}"
+              echo "release_tag=$EXISTING_TAG"
+              echo "skip=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "Ensuring release for existing tag $EXISTING_TAG"
+            exit 0
+          fi
+
+          PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            # The first release is 0.1.0, as the listener's first was: the history of the paths
+            # below predates the plugin, and its breaking commits say nothing about its API.
+            VERSION="0.1.0"
+            {
+              echo "version=$VERSION"
+              echo "release_tag=envoy-infra-v${VERSION}"
+              echo "skip=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "First release: envoy-infra-v${VERSION}"
+            exit 0
+          fi
+          PREV_VERSION="${PREV_TAG#envoy-infra-v}"
+          if ! plain_version "$PREV_VERSION"; then
+            echo "::error::The newest envoy-infra-v* tag, $PREV_TAG, is not envoy-infra-v<X.Y.Z>; refusing to version from it"
+            exit 1
+          fi
+          # The plugin renders grants from the Envoy packages it compiles in, so a commit to one of
+          # them, or to any package the command compiles in, releases both, under one tag;
+          # .github/scripts/check-envoy-infra-release-paths.sh holds these paths
+          # to `go list -deps`. The notices script and the target list are runtime inputs of the
+          # archives, so any change to one needs a new tag rather than a CI-only rebuild.
+          # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
+          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
+            --patch-path scripts/go-third-party-notices.sh --patch-path .github/envoy-infra-targets.json \
+            -- packages/envoy/infra/ packages/envoy/internal/bus/ packages/envoy/internal/contracts/ \
+            packages/envoy/go.mod packages/envoy/go.sum scripts/go-third-party-notices.sh \
+            .github/envoy-infra-targets.json)
+
+          if [ "$VERSION" = "empty" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No commits in the envoy-infra plugin's or command's paths since $PREV_TAG"
+            exit 0
+          fi
+          if [ "$VERSION" = "none" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No version-bumping commits since $PREV_TAG"
+            echo "**No release published** — No version-bumping commits since $PREV_TAG" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "release_tag=envoy-infra-v${VERSION}"
+            echo "skip=false"
+          } >> "$GITHUB_OUTPUT"
+          echo "Bumping $PREV_TAG -> envoy-infra-v${VERSION}"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.version.outputs.skip != 'true'
+        with:
+          go-version-file: packages/envoy/infra/go.mod
+          cache-dependency-path: |
+            packages/envoy/infra/go.sum
+            packages/envoy/go.sum
+      # CGO_ENABLED=0: static binaries, so a linux archive runs on any distribution. Two archives per
+      # target .github/envoy-infra-targets.json lists (the pull request's notices check reads the
+      # same list):
+      # - the plugin, under the name Pulumi requests from the schema's download URL,
+      #   pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz, with the binary and
+      #   THIRD_PARTY_NOTICES at its root, where Pulumi looks for the binary;
+      # - the envoy-infra command, envoy-infra-<os>-<arch>.tar.gz, holding envoy-infra and
+      #   THIRD_PARTY_NOTICES in one top-level directory, envoy-infra-<os>-<arch>, as the legion
+      #   job's archives do: mise's github backend strips that one directory, leaving the binary.
+      # Both binaries carry the version (-X main.version). THIRD_PARTY_NOTICES is the license of
+      # every Go module its archive's binary compiles in (scripts/go-third-party-notices.sh, run
+      # with the build's own GOOS, GOARCH and CGO_ENABLED), and fails the build when one cannot be
+      # determined. SHA256SUMS, beside the archives, holds each one's SHA-256, for a consumer that
+      # pins an archive by digest. Every go command here runs in the module's own go.work, which
+      # binds it and packages/envoy.
+      - name: Build pulumi-resource-envoy-infra and envoy-infra
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p out assets
+          for target in $(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json); do
+            os=${target%/*}
+            arch=${target#*/}
+            dir="out/$os-$arch"
+            mkdir -p "$dir"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -buildvcs=false \
+              -ldflags "-X main.version=$VERSION" \
+              -o "$GITHUB_WORKSPACE/$dir/pulumi-resource-envoy-infra" ./cmd/pulumi-resource-envoy-infra
+            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              ../../../scripts/go-third-party-notices.sh "$GITHUB_WORKSPACE/$dir/THIRD_PARTY_NOTICES" \
+              ./cmd/pulumi-resource-envoy-infra)
+            tar czf "assets/pulumi-resource-envoy-infra-v$VERSION-$os-$arch.tar.gz" -C "$dir" \
+              pulumi-resource-envoy-infra THIRD_PARTY_NOTICES
+            cli="envoy-infra-$os-$arch"
+            mkdir -p "out/$cli"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -buildvcs=false \
+              -ldflags "-X main.version=$VERSION" \
+              -o "$GITHUB_WORKSPACE/out/$cli/envoy-infra" ./cmd/envoy-infra
+            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              ../../../scripts/go-third-party-notices.sh "$GITHUB_WORKSPACE/out/$cli/THIRD_PARTY_NOTICES" \
+              ./cmd/envoy-infra)
+            tar czf "assets/$cli.tar.gz" -C out "$cli/envoy-infra" "$cli/THIRD_PARTY_NOTICES"
+          done
+          (cd assets && sha256sum -- * > SHA256SUMS)
+      # The Pulumi CLI the envoy-smoke job's live tests run, checked against its SHA-256 before it
+      # is unpacked.
+      - name: Install the Pulumi CLI
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          tarball="$RUNNER_TEMP/pulumi-v3.268.0-linux-x64.tar.gz"
+          curl -fsSL -o "$tarball" https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
+          echo "903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  $tarball" | sha256sum -c -
+          tar -xzf "$tarball" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/pulumi" >> "$GITHUB_PATH"
+      # The schema the linux/amd64 plugin serves carries the version it was built with and names
+      # the release this job creates as the place Pulumi downloads the plugin from. ${VERSION} in
+      # the URL is Pulumi's own placeholder, which it fills in at install, so it is compared
+      # literally. The binary's path is absolute: `pulumi package get-schema` reads a path that
+      # starts with neither `/` nor `./` as a package name to resolve. The linux/amd64 command
+      # prints the same version.
+      - name: Smoke test
+        if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          schema=$(pulumi package get-schema "$GITHUB_WORKSPACE/out/linux-amd64/pulumi-resource-envoy-infra")
+          jq '{name, version, pluginDownloadURL}' <<<"$schema"
+          # shellcheck disable=SC2016 # ${VERSION} is Pulumi's placeholder, not a shell expansion
+          jq -e --arg v "$VERSION" \
+            '.version == $v and .pluginDownloadURL == "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"' \
+            <<<"$schema"
+          cli_version=$(out/envoy-infra-linux-amd64/envoy-infra --version)
+          echo "envoy-infra --version: $cli_version"
+          test "$cli_version" = "$VERSION"
+      # Build provenance for both kinds of archive: the plugin's, which Pulumi installs, and the
+      # command's, which writes seeds under its operator's credentials. The list is one glob per
+      # line. The release below uploads these exact files, with SHA256SUMS, as the legion job's
+      # release does. `--repo` alone accepts an archive any workflow of this repository attested,
+      # so a consumer pins the signer as docs/kubernetes.md ("Pin by digest, never by tag") does:
+      #   gh attestation verify <archive> --repo sjawhar/legion \
+      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+      #     --source-ref refs/heads/main --deny-self-hosted-runners
+      # and adds `--source-digest <the envoy-infra-v<version> tag's commit>` to pin the commit as well.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.version.outputs.skip != 'true'
+        with:
+          subject-path: |
+            assets/pulumi-resource-envoy-infra-v*.tar.gz
+            assets/envoy-infra-*.tar.gz
+      - name: Tag release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+            exit 0
+          fi
+          git tag "$TAG"
+          git push origin "refs/tags/$TAG"
+      # A re-run can find this release already there. gh release create makes a draft, uploads every
+      # asset and only then publishes it, so a published release holds them all and is reused as
+      # is. A draft is what a job that died mid-upload leaves (gh release view finds drafts too), so
+      # this run uploads its own attested assets over it and publishes it.
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$is_draft" = true ]; then
+              echo "Release $TAG is an unpublished draft; uploading this run's assets and publishing it"
+              gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+              gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+            else
+              echo "Release $TAG already exists; reusing it"
+            fi
+          else
+            gh release create "$TAG" \
+              assets/* \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "envoy-infra v$VERSION" \
+              --generate-notes \
+              --verify-tag
+          fi

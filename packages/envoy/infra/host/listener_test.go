@@ -186,13 +186,18 @@ var exampleContainer = map[string]any{
 }
 
 func TestListenerDefaultsReproduceTheDockerHostContainer(t *testing.T) {
+	// The listener's outputs are plain Outputs that RunErr does not wait for, so each capture
+	// signals the WaitGroup the assertions below wait on.
+	var captured sync.WaitGroup
 	var containerName string
 	var port int
 	m, err := run(t, exampleArgs(), func(l *host.Listener) {
-		l.ContainerName.ApplyT(func(v string) string { containerName = v; return v })
-		l.Port.ApplyT(func(v int) int { port = v; return v })
+		captured.Add(2)
+		l.ContainerName.ApplyT(func(v string) string { containerName = v; captured.Done(); return v })
+		l.Port.ApplyT(func(v int) int { port = v; captured.Done(); return v })
 	}, "docker")
 	require.NoError(t, err)
+	captured.Wait()
 
 	comp := m.one(t, listenerType)
 	require.Equal(t, "example-host-a", comp.name)
@@ -343,6 +348,16 @@ func TestListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			name: "a port above 65535",
 			edit: func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(65536) },
 			err:  []string{"port 65536 is outside 1-65535"},
+		},
+		{
+			name: "a blank machineId",
+			edit: func(a *host.ListenerArgs) { a.MachineID = " " },
+			err:  []string{"machineId is required"},
+		},
+		{
+			name: "a host bridge with surrounding whitespace",
+			edit: func(a *host.ListenerArgs) { a.HostBridge = pulumi.StringRef(" 127.0.0.1") },
+			err:  []string{"hostBridge has leading or trailing whitespace", `" 127.0.0.1"`},
 		},
 	}
 	for _, c := range cases {

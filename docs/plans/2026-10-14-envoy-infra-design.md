@@ -27,6 +27,9 @@ Sami, 2026-10-13 and 2026-10-14:
   themselves, which exist only in Pulumi state. Stack outputs stay unchanged.
 - The GCP hub has no webhook ingress in the first version. Webhooks get their own design later.
 - Dispatch is out of scope here. It gets its own design.
+- The existing deployments move onto the components first, or in parallel with the GCP work, each
+  with a preview that shows no diff (Sami, 2026-10-14). The components are generalized from what
+  those deployments already run.
 
 ## What the module contains
 
@@ -85,10 +88,13 @@ only for `v<version>` tags. Consumers install the plugin with `pulumi package ad
 
 ## Order
 
-1. `core`, the seed command, `gcp:NatsHub`, `host:Listener` and the release job. The first
-   consumers are a new GCP deployment, and an existing Docker-host deployment that moves onto
-   `host:Listener` under the preview rule and then adds a second stack.
-2. `aws:*`. An existing AWS deployment moves onto them under the preview rule.
+1. The module and `host:Listener`, with the release job. An existing Docker-host deployment moves
+   onto `host:Listener` under the preview rule.
+2. In parallel, once the module exists. The two below share their first part, and their second
+   parts run side by side:
+   - `core`'s NATS authorization and the seed command, then `aws:*`. An existing AWS deployment
+     moves onto them under the preview rule.
+   - `gcp:NatsHub`, on the same `core` and seed command, for the first GCP deployment.
 
 ## Acceptance
 
