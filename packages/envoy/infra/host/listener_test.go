@@ -2,6 +2,7 @@ package host_test
 
 import (
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -245,7 +246,7 @@ func TestListenerSeedIsAppendedAndMakesTheEnvsSecret(t *testing.T) {
 	require.NoError(t, err)
 
 	envs, secret := envsOf(t, m.one(t, containerType))
-	require.ElementsMatch(t, append(append([]string{}, exampleEnvs...), "NATS_NKEY_SEED=SUEXAMPLESEED"), envs)
+	require.ElementsMatch(t, append(slices.Clone(exampleEnvs), "NATS_NKEY_SEED=SUEXAMPLESEED"), envs)
 	require.True(t, secret, "envs holding the seed are secret")
 }
 

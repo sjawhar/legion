@@ -1,6 +1,7 @@
 package host_test
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/blang/semver"
@@ -66,7 +67,7 @@ func TestConstructTakesNatsUrlsAndSeedFromAnotherResource(t *testing.T) {
 	container := m.one(t, containerType)
 	require.Equal(t, exampleContainer, withoutEnvs(container))
 	envs, secret := envsOf(t, container)
-	require.ElementsMatch(t, append(append([]string{}, exampleEnvs...), "NATS_NKEY_SEED=SUEXAMPLESEED"), envs)
+	require.ElementsMatch(t, append(slices.Clone(exampleEnvs), "NATS_NKEY_SEED=SUEXAMPLESEED"), envs)
 	require.True(t, secret, "envs holding the seed are secret")
 	require.Contains(t, container.rpc.GetPropertyDependencies()["envs"].GetUrns(), string(upstream),
 		"the container's envs depend on the resource natsUrls and seed come from")

@@ -1048,15 +1048,10 @@ jobs:
           done
           (cd assets && sha256sum -- * > SHA256SUMS)
       # The Pulumi CLI the envoy-smoke job's live tests run, checked against its SHA-256 before it
-      # is unpacked.
+      # is unpacked (.github/actions/install-pulumi).
       - name: Install the Pulumi CLI
         if: steps.version.outputs.skip != 'true'
-        run: |
-          tarball="$RUNNER_TEMP/pulumi-v3.268.0-linux-x64.tar.gz"
-          curl -fsSL -o "$tarball" https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
-          echo "903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  $tarball" | sha256sum -c -
-          tar -xzf "$tarball" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/pulumi" >> "$GITHUB_PATH"
+        uses: ./.github/actions/install-pulumi
       # The schema the linux/amd64 binary serves carries the version it was built with and names
       # the release this job creates as the place Pulumi downloads the plugin from. ${VERSION} in
       # the URL is Pulumi's own placeholder, which it fills in at install, so it is compared
