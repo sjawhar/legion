@@ -53,19 +53,22 @@ type fakeStore struct {
 	calls    []string
 	puts     [][]byte
 	// newest makes the store's default the newest version whatever its state, as GCP's
-	// versions/latest is; unreadable is then that version's state when it is not served.
-	newest     bool
-	unreadable string
+	// versions/latest is; unreadable is then that version's state when it is not served, and
+	// unreadableAtCurrent the state it enters just before Current reads it.
+	newest              bool
+	unreadable          string
+	unreadableAtCurrent string
 
-	describeErr         error    // every Describe fails
-	versionsErr         error    // every Versions fails
-	versionsErrAfterPut error    // a Versions once Put has written fails
-	putErr              error    // Put fails and writes nothing
-	putErrAfterWrite    error    // Put writes, then answers its version with this error
-	currentErr          error    // Current fails
-	readBack            []byte   // what Current answers instead of the stored value
-	racing              *version // another writer's version, which lands with Put's
-	lateWriter          *version // another writer's version, which lands just before Current reads and is served
+	describeErr             error    // every Describe fails
+	describeErrAfterCurrent error    // a Describe once Current was called fails
+	versionsErr             error    // every Versions fails
+	versionsErrAfterPut     error    // a Versions once Put has written fails
+	putErr                  error    // Put fails and writes nothing
+	putErrAfterWrite        error    // Put writes, then answers its version with this error
+	currentErr              error    // Current fails
+	readBack                []byte   // what Current answers instead of the stored value
+	racing                  *version // another writer's version, which lands with Put's
+	lateWriter              *version // another writer's version, which lands just before Current reads and is served
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
@@ -104,6 +107,9 @@ func (f *fakeStore) Describe(_ context.Context, name string) (seed.Description, 
 	f.named(name)
 	if f.describeErr != nil {
 		return seed.Description{}, f.describeErr
+	}
+	if f.describeErrAfterCurrent != nil && slices.Contains(f.calls, "current") {
+		return seed.Description{}, f.describeErrAfterCurrent
 	}
 	switch {
 	case !f.exists:
@@ -158,6 +164,12 @@ func (f *fakeStore) Current(_ context.Context, name string) (string, []byte, err
 	f.named(name)
 	if f.currentErr != nil {
 		return "", nil, f.currentErr
+	}
+	if f.unreadableAtCurrent != "" {
+		f.unreadable, f.unreadableAtCurrent = f.unreadableAtCurrent, ""
+	}
+	if f.newest && f.unreadable != "" {
+		return "", nil, errors.New("access-secret-version " + secretName + "/versions/latest failed: FailedPrecondition")
 	}
 	if len(f.puts) > 0 && f.lateWriter != nil {
 		f.versions = append(f.versions, *f.lateWriter)
@@ -444,29 +456,68 @@ func TestVerifyOfTheLatestVersion(t *testing.T) {
 	}
 }
 
-// A latest version the store does not serve fails verify with check's line for it, exit 1, before
-// any read of its value: a failed check, not a refusal, though nothing was written.
+// A latest version the store does not serve fails verify with check's line for it, exit 1: a failed
+// check, not a refusal, though nothing was written. When Describe already reports it, verify reads no
+// value; when it stops being served between Describe and Current, Current fails and verify describes
+// the secret again to tell that from a refused read.
 func TestVerifyOfAnUnreadableLatestVersionFailsWithItsState(t *testing.T) {
 	for _, state := range []string{"DISABLED", "DESTROYED"} {
-		t.Run(state, func(t *testing.T) {
-			want := secretName + ": present; latest: version v2 is " + state
-			unreadable := func() *fakeStore {
-				f := newStore(t).latest().holding(readmeSeed, readmeSeed)
-				f.unreadable = state
-				return f
-			}
-			store := unreadable()
-			code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
-			require.Equal(t, 1, code, errs)
-			require.Equal(t, want+"\n", out)
-			require.Empty(t, errs)
-			require.Equal(t, []string{"describe"}, store.calls, "verify reads no value of a version the store does not serve")
-			requireNoValue(t, store, out, errs)
+		for _, when := range []struct {
+			name  string
+			set   func(*fakeStore)
+			calls []string
+		}{
+			{"before verify", func(f *fakeStore) { f.unreadable = state }, []string{"describe"}},
+			{"between describe and current", func(f *fakeStore) { f.unreadableAtCurrent = state },
+				[]string{"describe", "current", "describe"}},
+		} {
+			t.Run(state+"/"+when.name, func(t *testing.T) {
+				want := secretName + ": present; latest: version v2 is " + state
+				unreadable := func() *fakeStore {
+					f := newStore(t).latest().holding(readmeSeed, readmeSeed)
+					when.set(f)
+					return f
+				}
+				store := unreadable()
+				code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
+				require.Equal(t, 1, code, errs)
+				require.Equal(t, want+"\n", out)
+				require.Empty(t, errs)
+				require.Equal(t, when.calls, store.calls)
+				requireNoValue(t, store, out, errs)
 
-			line, err := seed.Verify(context.Background(), unreadable(), secretName, readmePublicKey)
-			require.ErrorIs(t, err, seed.ErrMismatch)
-			require.NotErrorIs(t, err, seed.ErrRefused)
-			require.Equal(t, want, line)
+				line, err := seed.Verify(context.Background(), unreadable(), secretName, readmePublicKey)
+				require.ErrorIs(t, err, seed.ErrMismatch)
+				require.NotErrorIs(t, err, seed.ErrRefused)
+				require.Equal(t, want, line)
+			})
+		}
+	}
+}
+
+// When Current fails for a store whose default is the newest version and describing the secret again
+// shows that version still served, or fails, the read's own failure is the refusal, exit 2.
+func TestVerifyRefusesAFailedReadOfAServedLatestVersion(t *testing.T) {
+	readFails := errors.New("access-secret-version " + secretName + "/versions/latest failed: PermissionDenied")
+	for _, row := range []struct {
+		name  string
+		store func(*fakeStore) *fakeStore
+	}{
+		{"still served", func(f *fakeStore) *fakeStore { f.currentErr = readFails; return f }},
+		{"describing again fails", func(f *fakeStore) *fakeStore {
+			f.unreadableAtCurrent = "DISABLED"
+			f.describeErrAfterCurrent = errors.New("get-secret " + secretName + " failed: Unavailable")
+			return f
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			store := row.store(newStore(t).latest().holding(readmeSeed))
+			code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
+			require.Equal(t, 2, code, errs)
+			require.Empty(t, out)
+			require.Equal(t, []string{"describe", "current", "describe"}, store.calls)
+			require.True(t, strings.HasPrefix(errs, "refused: access-secret-version "+secretName+"/versions/latest failed: "), errs)
+			requireNoValue(t, store, out, errs)
 		})
 	}
 }

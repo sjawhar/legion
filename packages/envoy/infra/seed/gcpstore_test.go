@@ -305,7 +305,7 @@ func (f *fakeGCP) AccessSecretVersion(_ context.Context, req *secretmanagerpb.Ac
 	if !proto.Equal(req, &secretmanagerpb.AccessSecretVersionRequest{Name: gcpLatestOf}) {
 		return nil, f.reject("AccessSecretVersion " + prototext.Format(req) + ": the latest version alone")
 	}
-	if f.lateWriter != nil && f.added > 0 {
+	if f.lateWriter != nil {
 		f.with(f.lateWriter.value, f.lateWriter.state)
 		f.lateWriter = nil
 	}
@@ -604,6 +604,18 @@ func TestGCPVerify(t *testing.T) {
 			require.Equal(t, []string{"GetSecret", "GetSecretVersion"}, f.recorded(), "verify reads no value of a version Secret Manager does not serve")
 		})
 	}
+	// The newest version can stop being served after GetSecretVersion reported it: here a disabled
+	// version lands just before AccessSecretVersion reads, which Secret Manager then refuses.
+	t.Run("a latest version disabled between describe and access", func(t *testing.T) {
+		f := newFakeGCP(t).with(seedValue, enabled)
+		f.lateWriter = &gcpVersion{value: seedValue, state: disabled}
+		serveGCP(t, f)
+		code, out, errs := runGCP(t, f, "verify", "--public-key", public)
+		require.Equal(t, 1, code, errs)
+		require.Equal(t, gcpSecret+": present; latest: version 2 is DISABLED\n", out)
+		require.Empty(t, errs)
+		require.Equal(t, []string{"GetSecret", "GetSecretVersion", "AccessSecretVersion", "GetSecret", "GetSecretVersion"}, f.recorded())
+	})
 	t.Run("no versions", func(t *testing.T) {
 		f := newFakeGCP(t)
 		serveGCP(t, f)
@@ -620,6 +632,8 @@ func TestGCPVerify(t *testing.T) {
 		require.Equal(t, 2, code)
 		require.Empty(t, out)
 		require.Equal(t, "refused: access-secret-version "+gcpLatestOf+" failed: PermissionDenied\n", errs)
+		require.Equal(t, []string{"GetSecret", "GetSecretVersion", "AccessSecretVersion", "GetSecret", "GetSecretVersion"}, f.recorded(),
+			"a failed read describes the secret again, which shows the latest version still served")
 	})
 }
 
@@ -665,6 +679,40 @@ func TestGCPRefusesANameThatIsNoGlobalSecret(t *testing.T) {
 			require.Equal(t, "refused: --name for --store gcp-secret-manager is a secret's name, projects/<project>/secrets/<secret>\n", errs)
 			require.Empty(t, f.recorded())
 		}
+	}
+}
+
+// A --name the store would refuse is refused before the store opens, so no refusal of the open
+// quotes it: a seed pasted there must not reach the terminal, whatever else is wrong.
+func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
+	pasted, _ := otherAWSUser(t)
+	for _, row := range []struct {
+		name  string
+		flags []string
+		env   map[string]string
+	}{
+		{"--region", []string{"--region", "us-central1"}, nil},
+		{"--expect-account", []string{"--expect-account", "000000000000"}, nil},
+		{"an empty access token", nil, map[string]string{"GOOGLE_OAUTH_ACCESS_TOKEN": ""}},
+		{"a malformed endpoint", nil, map[string]string{"SECRET_MANAGER_ENDPOINT": "http://127.0.0.1:1"}},
+		{"no credentials", nil, map[string]string{"GOOGLE_APPLICATION_CREDENTIALS": filepath.Join(t.TempDir(), "absent.json")}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			f := newFakeGCP(t)
+			serveGCP(t, f)
+			for key, value := range row.env {
+				t.Setenv(key, value)
+			}
+			if _, ok := row.env["GOOGLE_APPLICATION_CREDENTIALS"]; ok {
+				require.NoError(t, os.Unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN"))
+			}
+			code, out, errs := runGCPAs(t, f, pasted, append([]string{"check"}, row.flags...)...)
+			require.Equal(t, 2, code, errs)
+			require.Empty(t, out)
+			require.NotContains(t, errs, pasted)
+			require.Equal(t, "refused: --name for --store gcp-secret-manager is a secret's name, projects/<project>/secrets/<secret>\n", errs)
+			require.Empty(t, f.recorded())
+		})
 	}
 }
 

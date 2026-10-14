@@ -25,7 +25,8 @@ import (
 // and the secret.
 //
 // check makes one call, Describe, and verify two, Describe and Current, so reading a secret needs
-// no grant beyond its metadata and its value. Only generate counts versions.
+// no grant beyond its metadata and its value; when Current fails for a store whose default is the
+// newest version, verify describes the secret again. Only generate counts versions.
 type Store interface {
 	// Label names the version the store serves by default, in check's and verify's lines.
 	Label() string
@@ -204,7 +205,8 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 // Verify returns the line saying whether the seed the store serves by default derives
 // publicKey, with ErrMismatch when it does not or is no user seed. For a store whose default is the
 // newest version whatever its state, a newest version the store does not serve fails with Check's
-// line for it, before any value is read. publicKey is never echoed unless it is a user public key: a
+// line for it: before any value is read when Describe reports it, and after a failed Current when
+// describing the secret again does. publicKey is never echoed unless it is a user public key: a
 // seed pasted there by mistake must not reach the terminal twice.
 func Verify(ctx context.Context, s Store, name, publicKey string) (string, error) {
 	if !core.IsUserPublicKey(publicKey) {
@@ -226,6 +228,13 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 	}
 	version, stored, err := s.Current(ctx, name)
 	if err != nil {
+		// The newest version can stop being served between Describe and Current: describing the
+		// secret again tells that from a refused read, whose own error is the refusal otherwise.
+		if d.DefaultIsNewest {
+			if again, derr := s.Describe(ctx, name); derr == nil && again.NewestVersion != "" && again.CurrentVersion == "" {
+				return newestLine(name, label, again), ErrMismatch
+			}
+		}
 		return "", refuse("%v", err)
 	}
 	defer clear(stored)
@@ -332,6 +341,10 @@ func crc16(data []byte) uint16 {
 // regions or accounts refuses a region or an account.
 type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
 
+// nameRules refuse, before a store opens, a --name that store cannot hold, without quoting it: the
+// refusal of an open names the secret, and a seed may have been pasted there.
+var nameRules = map[string]func(name string) error{GCPSecretManager: gcpName}
+
 const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
 
   check     whether the secret exists and which version its store serves by default
@@ -406,6 +419,12 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("--public-key is required by verify")
 	case mode != "verify" && given["public-key"]:
 		return usage("--public-key is accepted by verify only")
+	}
+	if rule := nameRules[store]; rule != nil {
+		if err := rule(name); err != nil {
+			fmt.Fprintf(stderr, "refused: %v\n", err)
+			return 2
+		}
 	}
 
 	s, err := stores[store](ctx, region, account)

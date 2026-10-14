@@ -358,8 +358,9 @@ before any other call, unless they are that account's. Pass it whenever you name
 a seed is never written to, or read from, a secret of the same name in another account.
 
 With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
-store refuses `--region` and `--expect-account`, and refuses a name of any other form, such as a
-regional secret's. It runs under your
+store refuses `--region` and `--expect-account`. It checks the name's form before anything else and
+refuses a name of any other form, such as a regional secret's, without printing it, since a seed
+pasted there must not reach the terminal. It runs under your
 [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials):
 the key file `GOOGLE_APPLICATION_CREDENTIALS` names, then the credentials
 `gcloud auth application-default login` saved, then the service account of the Google Cloud
@@ -485,7 +486,7 @@ On Secret Manager it prints one of:
 | `<name> <label> (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
 | `<name> <label> (version <id>) derives <key>: no` | 1: it is the seed of another user. |
 | `<name> <label> (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
-| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check, and `verify` reads none. |
+| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked and the read fails, after it looks again. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal.
@@ -522,7 +523,7 @@ On Secret Manager, where each version call names `versions/latest`:
 | Mode | Calls | Permissions |
 | --- | --- | --- |
 | `check` | `GetSecret`, `GetSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get` |
-| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
+| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` fails, `GetSecret` and `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
 | `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AddSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
 
 Each permission is the one the API reference names for its call:
@@ -531,7 +532,9 @@ Each permission is the one the API reference names for its call:
 [ListSecretVersions](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/list),
 [AddSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/addVersion)
 and [AccessSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access).
-`verify` stops after `GetSecretVersion` when the newest version is not enabled. Of the
+`verify` stops after `GetSecretVersion` when the newest version is not enabled. When
+`AccessSecretVersion` fails, it looks at the newest version again: one disabled or destroyed since
+gets its `is <STATE>` line, exit 1, and otherwise the read's failure is refused, exit 2. Of the
 [predefined roles](https://cloud.google.com/secret-manager/docs/access-control), Secret Manager
 Viewer (`roles/secretmanager.viewer`) holds `check`'s permissions, `verify` also needs Secret
 Manager Secret Accessor (`roles/secretmanager.secretAccessor`), and `generate` needs both and Secret

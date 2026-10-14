@@ -94,6 +94,9 @@ discarding logger whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says (`seed/gcpstore.go
 seed finds nothing. `seed/seed_test.go` searches every byte the command writes, and every error and
 line it returns, for a canary seed. A new store implements `seed.Store`, whose `Label` names the
 version its lines call the default, and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+A store whose names have a form also joins `nameRules` in `seed/seed.go`: `Command` applies it
+before it opens the store, since the refusal of an open prints `--name`, where a seed may have been
+pasted.
 
 Each mode's calls are the grant an operator gives it, listed per store under "The calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
