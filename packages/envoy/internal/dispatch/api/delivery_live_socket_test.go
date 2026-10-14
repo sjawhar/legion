@@ -427,9 +427,11 @@ func TestABearerMayReadTheSocket(t *testing.T) {
 
 // A bearer revoked while its socket is open loses the socket at the next heartbeat's resolution, as
 // the document socket and the event stream do: the request's context ends, and the socket closes
-// with 1008.
+// with 1008. The heartbeat is a second, so the client's pong, which gorilla's default handler
+// writes, has a heartbeat to meet the pong deadline on a loaded runner: the socket must last until
+// the revocation, and a pong timeout would end it first.
 func TestARevokedBearerClosesItsSocketWithPolicyViolation(t *testing.T) {
-	const heartbeat = 200 * time.Millisecond
+	const heartbeat = time.Second
 	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	minted := mintAgentToken(t, rig.handler)
 	client := rig.dial(t, withBearer(minted.Token))
@@ -652,8 +654,12 @@ func TestTheTestHookClosesEveryDeliverySocket(t *testing.T) {
 	})
 }
 
+// A page that answers each ping keeps its socket, idle, across many heartbeats. The heartbeat is a
+// second, so the page's first pong has a heartbeat to arrive before the pong deadline, two
+// heartbeats after the socket opened, and a loaded runner that delays it most of a heartbeat still
+// meets it. A page that answers no ping, which a short heartbeat ends quickly, is the next test's.
 func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
-	const heartbeat = 200 * time.Millisecond
+	const heartbeat = time.Second
 	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	answering := rig.open(t, gws.DefaultDialer, asUser("alice"))
 	var pings atomic.Int32
@@ -662,6 +668,27 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 		return answering.conn.WriteControl(gws.PongMessage, []byte(data), time.Now().Add(time.Second))
 	})
 	answering.read()
+
+	// Four heartbeats is twice the pong deadline, so the page still holds its socket only through
+	// its pongs.
+	time.Sleep(4 * heartbeat)
+	if !answering.open() {
+		t.Fatalf("an idle page that answers every ping lost its socket: %v", answering.err)
+	}
+	if got := pings.Load(); got < 3 {
+		t.Fatalf("the idle page was pinged %d times in four heartbeats, want one each", got)
+	}
+	rig.sockets(t, 1)
+}
+
+// A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
+// stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
+// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
+// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
+// resolves.
+func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
+	const heartbeat = 200 * time.Millisecond
+	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	// Where a page that answers no ping ends with the wrong close, it does so through a race in the
 	// writer, so one silent page would show a regression only in some runs. Eight pages, each racing
 	// on its own, make it fail nearly every run: at an even race a run misses with odds of 1 in 256.
@@ -675,11 +702,6 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 		silent[i].read()
 	}
 
-	// A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
-	// stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
-	// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
-	// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
-	// resolves.
 	for i, page := range silent {
 		select {
 		case <-page.ended:
@@ -694,16 +716,7 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 			t.Errorf("silent page %d, which answers no ping, kept its socket", i)
 		}
 	}
-
-	// A page that answers each ping keeps its socket, idle, across many heartbeats.
-	time.Sleep(time.Until(opened[0].Add(6 * heartbeat)))
-	if !answering.open() {
-		t.Fatalf("an idle page that answers every ping lost its socket: %v", answering.err)
-	}
-	if got := pings.Load(); got < 4 {
-		t.Fatalf("the idle page was pinged %d times in six heartbeats, want one each", got)
-	}
-	rig.sockets(t, 1)
+	rig.sockets(t, 0)
 }
 
 func TestAnIdleDeliverySocketIsSentAHeartbeat(t *testing.T) {
