@@ -164,6 +164,27 @@ func withoutEnvs(r registration) map[string]any {
 	return in
 }
 
+// exampleContainer is the container the defaults record for exampleArgs, envs left out.
+var exampleContainer = map[string]any{
+	"name":                "envoy-listener",
+	"image":               "sha256:example-host-a-image",
+	"command":             []any{"/usr/local/bin/envoy-listener"},
+	"restart":             "unless-stopped",
+	"stopTimeout":         float64(30),
+	"destroyGraceSeconds": float64(30),
+	"networkMode":         "host",
+	"logOpts":             map[string]any{"max-file": "5", "max-size": "20m"},
+	"healthcheck": map[string]any{
+		"tests":       []any{"CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"},
+		"interval":    "10s",
+		"timeout":     "3s",
+		"retries":     float64(3),
+		"startPeriod": "30s",
+	},
+	"wait":        true,
+	"waitTimeout": float64(90),
+}
+
 func TestListenerDefaultsReproduceTheDockerHostContainer(t *testing.T) {
 	var containerName string
 	var port int
@@ -182,25 +203,7 @@ func TestListenerDefaultsReproduceTheDockerHostContainer(t *testing.T) {
 
 	container := m.one(t, containerType)
 	require.Equal(t, "example-host-a-container", container.name)
-	require.Equal(t, map[string]any{
-		"name":                "envoy-listener",
-		"image":               "sha256:example-host-a-image",
-		"command":             []any{"/usr/local/bin/envoy-listener"},
-		"restart":             "unless-stopped",
-		"stopTimeout":         float64(30),
-		"destroyGraceSeconds": float64(30),
-		"networkMode":         "host",
-		"logOpts":             map[string]any{"max-file": "5", "max-size": "20m"},
-		"healthcheck": map[string]any{
-			"tests":       []any{"CMD", "curl", "-f", "http://127.0.0.1:9020/healthz"},
-			"interval":    "10s",
-			"timeout":     "3s",
-			"retries":     float64(3),
-			"startPeriod": "30s",
-		},
-		"wait":        true,
-		"waitTimeout": float64(90),
-	}, withoutEnvs(container))
+	require.Equal(t, exampleContainer, withoutEnvs(container))
 	envs, secret := envsOf(t, container)
 	require.ElementsMatch(t, exampleEnvs, envs)
 	require.False(t, secret, "envs without a seed hold no secret")
