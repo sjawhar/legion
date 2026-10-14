@@ -93,8 +93,9 @@ versions. Never add the module to the root `go.work`.
 no output, log or error. A store's error names the call, the secret and the error's code, never
 the error's text, which can quote the request; the AWS SDK runs with its logger off
 (`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
-and every error and line it returns, for a canary seed. A new store implements `seed.Store` and
-joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+and every error and line it returns, for a canary seed. A new store implements `seed.Store`, its
+`Current` answering an error that matches `seed.ErrNotServed` when it serves no version, which
+`generate` waits out after its write, and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the

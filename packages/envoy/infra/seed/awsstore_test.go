@@ -68,6 +68,10 @@ type fakeAWS struct {
 	// only DescribeSecret and GetSecretValue, and a listing from either is a request the fake does
 	// not expect.
 	generating bool
+	// Eventual consistency: after the write, the next staleLists listings leave out the written
+	// version, and the next staleGets reads find no AWSCURRENT version, as a read just after a
+	// write may.
+	staleLists, staleGets int
 }
 
 func newFakeAWS(t *testing.T) *fakeAWS {
@@ -216,6 +220,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			}
 		}
 		versions := slices.Clone(f.versions)
+		if f.written() && f.staleLists > 0 {
+			f.staleLists--
+			versions = slices.DeleteFunc(versions, func(v awsVersion) bool { return v.id == f.tokens[0] })
+		}
 		if f.racing != nil && f.written() {
 			versions = append(versions, *f.racing)
 		}
@@ -280,6 +288,11 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 		}
 		if f.deletedAt != 0 {
 			f.jsonError(w, awsFailure{"InvalidRequestException", "the secret is scheduled for deletion"}, body)
+			return
+		}
+		if f.written() && f.staleGets > 0 {
+			f.staleGets--
+			f.jsonError(w, awsFailure{"ResourceNotFoundException", "no version has the staging label AWSCURRENT"}, body)
 			return
 		}
 		for _, v := range f.versions {
@@ -546,6 +559,37 @@ func TestAWSGenerateAfterItsWrite(t *testing.T) {
 	}
 }
 
+// Secrets Manager's reads are eventually consistent: just after the write, a listing can leave the
+// new version out and GetSecretValue can find no AWSCURRENT version. generate looks again rather
+// than calling either a race or a failed read-back.
+func TestAWSGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
+	saved := readBackWaits
+	readBackWaits = []time.Duration{0, 0, 0}
+	t.Cleanup(func() { readBackWaits = saved })
+	rows := []struct {
+		name                  string
+		staleLists, staleGets int
+		calls                 []string
+	}{
+		{"a stale listing", 1, 0, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue",
+			"ListSecretVersionIds", "ListSecretVersionIds", "GetSecretValue"}},
+		{"a stale read", 0, 1, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue",
+			"ListSecretVersionIds", "GetSecretValue", "ListSecretVersionIds", "GetSecretValue"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newFakeAWS(t)
+			f.staleLists, f.staleGets = row.staleLists, row.staleGets
+			serve(t, f)
+			code, out, errs := runAWS(t, f, "generate")
+			require.Equal(t, 0, code, errs)
+			require.Empty(t, errs)
+			require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: "+f.tokens[0]+"\n", out)
+			require.Equal(t, row.calls, f.recorded())
+		})
+	}
+}
+
 // A lost answer is retried with the same ClientRequestToken, so Secrets Manager writes one version.
 func TestAWSGenerateRetriesALostAnswerWithItsToken(t *testing.T) {
 	f := newFakeAWS(t)
@@ -614,6 +658,18 @@ func TestAWSVerify(t *testing.T) {
 		require.Equal(t, 2, code)
 		require.Empty(t, out)
 		require.Equal(t, "refused: get-secret-value "+awsSecret+" failed: AccessDeniedException\n", errs)
+	})
+	// generate waits on a store that serves no version yet; verify, which reads only after
+	// DescribeSecret named an AWSCURRENT version, refuses it at once, naming the AWS error.
+	t.Run("the read finds no AWSCURRENT version", func(t *testing.T) {
+		f := newFakeAWS(t).holding(seedValue)
+		f.failures = map[string]awsFailure{"GetSecretValue": {"ResourceNotFoundException", "no version has the staging label AWSCURRENT"}}
+		serve(t, f)
+		code, out, errs := runAWS(t, f, "verify", "--public-key", public)
+		require.Equal(t, 2, code)
+		require.Empty(t, out)
+		require.Equal(t, "refused: get-secret-value "+awsSecret+" failed: ResourceNotFoundException\n", errs)
+		require.Equal(t, []string{"DescribeSecret", "GetSecretValue"}, f.recorded())
 	})
 }
 

@@ -13,6 +13,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nkeys"
 
@@ -34,7 +35,7 @@ type Store interface {
 	// version id means that version was written; one without may follow a write that landed.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
-	// clears it once read.
+	// clears it once read. When the store serves no version, the error matches ErrNotServed.
 	Current(ctx context.Context, name string) (version string, value []byte, err error)
 }
 
@@ -56,6 +57,15 @@ var ErrRefused = errors.New("seed: refused")
 // ErrMismatch is Verify's when the value the store serves by default is no user seed or derives
 // another public key. The command exits 1.
 var ErrMismatch = errors.New("seed: the stored value does not derive the public key")
+
+// ErrNotServed is matched by a Store's Current error when the store serves no version of the
+// secret by default, as it may for a moment after a write.
+var ErrNotServed = errors.New("seed: the store serves no version")
+
+// readBackWaits are the pauses generate takes, in turn, while the store does not yet show the
+// version it wrote: Secrets Manager's reads are eventually consistent, so a listing or a read right
+// after a write can miss it.
+var readBackWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
 // defaultLabel names the version a store serves by default in Check's and Verify's lines: Secrets
 // Manager's staging label.
@@ -159,17 +169,9 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 		}
 		return publicKey, version, afterWritef("%v", err)
 	}
-	held, err = s.Versions(ctx, name)
+	read, stored, err := readBack(ctx, s, name, version)
 	if err != nil {
-		return publicKey, version, afterWritef("version %s was written, but listing versions afterwards failed: %v", version, err)
-	}
-	if held != 1 {
-		return publicKey, version, afterWritef("%s now holds %d version(s), not only version %s: another writer raced "+
-			"this one. Run verify with the public key above before committing it", name, held, version)
-	}
-	read, stored, err := s.Current(ctx, name)
-	if err != nil {
-		return publicKey, version, afterWritef("version %s was written, but reading it back failed: %v", version, err)
+		return publicKey, version, err
 	}
 	defer clear(stored)
 	if read != version {
@@ -184,6 +186,47 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 		return publicKey, version, afterWritef("version %s was written, but it does not derive the public key above", version)
 	}
 	return publicKey, version, nil
+}
+
+// readBack lists the secret's versions after generate wrote version, then reads the version the
+// store serves by default. A listing of no version, or a store serving none, is a store that has
+// not caught up with the write yet, so it looks again after each of readBackWaits. More than one
+// version is another writer's race at once; so is a version served by default other than the
+// written one, which the caller reports. Every error is an error after the write.
+func readBack(ctx context.Context, s Store, name, version string) (read string, stored []byte, err error) {
+	for attempt := 0; ; attempt++ {
+		held, err := s.Versions(ctx, name)
+		if err != nil {
+			return "", nil, afterWritef("version %s was written, but listing versions afterwards failed: %v", version, err)
+		}
+		if held > 1 {
+			return "", nil, afterWritef("%s now holds %d version(s), not only version %s: another writer raced "+
+				"this one. Run verify with the public key above before committing it", name, held, version)
+		}
+		if held == 1 {
+			read, stored, err = s.Current(ctx, name)
+			if err == nil {
+				return read, stored, nil
+			}
+			if !errors.Is(err, ErrNotServed) {
+				return "", nil, afterWritef("version %s was written, but reading it back failed: %v", version, err)
+			}
+		}
+		if attempt == len(readBackWaits) {
+			var waited time.Duration
+			for _, wait := range readBackWaits {
+				waited += wait
+			}
+			return "", nil, afterWritef("version %s was written, but %s did not show it within %s: the store has not "+
+				"caught up. Run check, then verify with the public key above", version, name, waited)
+		}
+		select {
+		case <-ctx.Done():
+			return "", nil, afterWritef("version %s was written, but looking for it again was stopped (%v). Run check, "+
+				"then verify with the public key above", version, ctx.Err())
+		case <-time.After(readBackWaits[attempt]):
+		}
+	}
 }
 
 // Verify returns the line saying whether the seed the store serves by default derives

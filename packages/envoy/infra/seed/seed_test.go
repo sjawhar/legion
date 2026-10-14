@@ -52,6 +52,9 @@ type fakeStore struct {
 	racing              *version // another writer's version, which lands with Put's
 	lateWriter          *version // another writer's version, which lands just before Current reads and is served
 	beforePut           func()   // runs as Put is called, before it writes
+	// An eventually consistent store: after the write, the next lagVersions listings count the
+	// versions as they were before it, and the next lagCurrent reads find no version served.
+	lagVersions, lagCurrent int
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
@@ -96,6 +99,10 @@ func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
 	if len(f.puts) > 0 && f.versionsErrAfterPut != nil {
 		return 0, f.versionsErrAfterPut
 	}
+	if len(f.puts) > 0 && f.lagVersions > 0 {
+		f.lagVersions--
+		return len(f.versions) - len(f.puts), nil
+	}
 	return len(f.versions), nil
 }
 
@@ -123,6 +130,10 @@ func (f *fakeStore) Current(_ context.Context, name string) (string, []byte, err
 	f.named(name)
 	if f.currentErr != nil {
 		return "", nil, f.currentErr
+	}
+	if len(f.puts) > 0 && f.lagCurrent > 0 {
+		f.lagCurrent--
+		return "", nil, fmt.Errorf("get-secret-value %s failed: ResourceNotFoundException (%w)", name, seed.ErrNotServed)
 	}
 	if len(f.puts) > 0 && f.lateWriter != nil {
 		f.versions = append(f.versions, *f.lateWriter)
@@ -468,6 +479,61 @@ func publicKeyOfSeed(t *testing.T, seed []byte) string {
 	public, err := kp.PublicKey()
 	require.NoError(t, err)
 	return public
+}
+
+// Right after the write, an eventually consistent store may list no version yet, or serve none by
+// default. generate looks again after each of its pauses, and is satisfied once it sees its own
+// version alone and reads it back; a store still lagging after the last pause fails as an error
+// after writing, naming no race.
+func TestGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
+	seed.SetReadBackWaits(t, 0, 0, 0)
+	rows := []struct {
+		name                    string
+		lagVersions, lagCurrent int
+		calls                   []string
+	}{
+		{"the listing lags", 2, 0, []string{"describe", "versions", "put", "versions", "versions", "versions", "current"}},
+		{"the read-back lags", 0, 2, []string{"describe", "versions", "put", "versions", "current", "versions", "current", "versions", "current"}},
+		{"both lag", 1, 1, []string{"describe", "versions", "put", "versions", "versions", "current", "versions", "current"}},
+		{"the last look sees it", 3, 0, []string{"describe", "versions", "put", "versions", "versions", "versions", "versions", "current"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			store := newStore(t)
+			store.lagVersions, store.lagCurrent = row.lagVersions, row.lagCurrent
+			code, out, errs, _ := run(t, store, mode("generate")...)
+			require.Equal(t, 0, code, errs)
+			require.Empty(t, errs)
+			require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\nversion id: v1\n", out)
+			require.Equal(t, row.calls, store.calls)
+		})
+	}
+	for _, lag := range []struct {
+		name              string
+		versions, current int
+	}{{"the listing", 4, 0}, {"the read-back", 0, 4}} {
+		t.Run(lag.name+" lags past the last pause", func(t *testing.T) {
+			store := newStore(t)
+			store.lagVersions, store.lagCurrent = lag.versions, lag.current
+			code, out, errs, _ := run(t, store, mode("generate")...)
+			require.Equal(t, 1, code, errs)
+			require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\nversion id: v1\n", out)
+			require.Equal(t, "error after writing: version v1 was written, but "+secretName+" did not show it within 0s: "+
+				"the store has not caught up. Run check, then verify with the public key above\n", errs)
+			afterPut := store.calls[slices.Index(store.calls, "put")+1:]
+			require.Equal(t, 4, countOf(afterPut, "versions"), "one look after the write and one after each of the three pauses: %v", afterPut)
+		})
+	}
+}
+
+func countOf(calls []string, call string) int {
+	n := 0
+	for _, c := range calls {
+		if c == call {
+			n++
+		}
+	}
+	return n
 }
 
 // generate prints the public key before it writes the seed, so the key is on the terminal whatever

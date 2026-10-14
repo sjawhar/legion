@@ -147,14 +147,24 @@ func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, 
 	return version, nil
 }
 
-// Current reads the AWSCURRENT version's SecretString.
+// Current reads the AWSCURRENT version's SecretString. Secrets Manager answers
+// ResourceNotFoundException when no version is AWSCURRENT, as just after a first write it may.
 func (s *awsStore) Current(ctx context.Context, name string) (string, []byte, error) {
 	out, err := s.client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(name)})
+	var notFound *types.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return "", nil, notServed{awsFailed("get-secret-value", name, err)}
+	}
 	if err != nil {
 		return "", nil, awsFailed("get-secret-value", name, err)
 	}
 	return aws.ToString(out.VersionId), []byte(aws.ToString(out.SecretString)), nil
 }
+
+// notServed is an error that reads as the store's own and matches ErrNotServed.
+type notServed struct{ error }
+
+func (notServed) Is(target error) bool { return target == ErrNotServed }
 
 // awsFailed is "<call> <secret> failed: <code>": an AWS error's code, or the SDK error's class.
 func awsFailed(call, name string, err error) error {

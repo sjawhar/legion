@@ -401,7 +401,10 @@ written to, or read from, a secret of the same name in another account.
    before the write, so the key is on your terminal whatever happens next, and the version id once
    the write answers. After the write it lists the versions again and reads back the version
    Secrets Manager serves by default (`AWSCURRENT`), which must be the one it wrote and derive the
-   public key it printed.
+   public key it printed. Secrets Manager's reads are eventually consistent, so while the listing
+   shows no version yet, or no version is `AWSCURRENT`, it looks again after pauses of 0.25, 0.5,
+   1, 2 and 4 seconds; if the write is still not shown, it stops with an error after writing. More
+   than one version, or another version served by default, is another writer's race.
 4. Put the public key into the NATS server's authorization as that user's `NKey`, with `HasSeed`
    set: see [NATS authorization](#nats-authorization). It is public, so it may sit in the stack's
    configuration in plain text.
@@ -457,7 +460,7 @@ exactly these permissions on the secret:
 | --- | --- | --- |
 | `check` | `DescribeSecret` | `secretsmanager:DescribeSecret` |
 | `verify` | `DescribeSecret`, `GetSecretValue` | `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue` |
-| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, `ListSecretVersionIds`, `GetSecretValue` | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
+| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, `ListSecretVersionIds`, `GetSecretValue`, the last two again after each pause while Secrets Manager has not caught up with the write | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
 
 So a read-only check of a deployment's seed, `check` and `verify`, needs only `DescribeSecret` and
 `GetSecretValue`. `--expect-account` adds `sts:GetCallerIdentity` before them, which needs no
