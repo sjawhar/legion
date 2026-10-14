@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-698",
-  "completed": "2026-10-14T07:04:11Z",
+  "completed": "2026-10-14T08:09:59Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1950",
-  "head": "70450b2b452f0c398993f8e614991f29e8372988",
+  "head": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
+  "round": 3,
   "proof": [
     {
       "criterion": "Acceptance 1: a reviewer's APPROVE of the head ends the round whatever CI says at that commit, a REQUEST_CHANGES sends the work back; a test in packages/daemon/internal/workflow/review_test.go is red on main before the fix.",
@@ -62,6 +63,15 @@
       "headSha": "70450b2b452f0c398993f8e614991f29e8372988",
       "negativeControl": "At the previous head 9fb30a6c the tester's test fails for testing, retro and merging ('after the late push completed the carry the issue is in testing, want implementing') and passes for reviewing, as .legion/LEGION-698/test.json records; and TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing's 'on the code head, carried to the READY head' row still moves nothing."
     }
+    ,
+    {
+      "criterion": "Acceptance 2 (round 3, the reviewer's two Important findings): the CI rule is applied by whichever fact makes a red stand for the head - a head arriving over a known handoff push that completes the carry, and a hold's retry from testing, retro or merging - as the settlement and the late push already do.",
+      "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54331 (LEGION_TEST_PG_DSN set), driven through intake.ApplyFact: a synchronize to the handoff head over a push already classified handoff-only with a red settlement at the code head; and ClaimFailed, a red settlement while held, then RetryOrEscalate retry, from testing, retro and merging.",
+      "command": "go -C packages/daemon test -count=1 ./internal/workflow -run 'TestAHeadArrivingOverAKnownPush|TestARetryOfAHoldFromAnyPhase|TestAPushClassifiedLate|TestARetryOfARound' -v ; go -C packages/daemon test -count=1 ./internal/workflow -skip 'Consume|Captured|RateLimited|BackwardMoveNoRow|LateEventOfAnEarlier|ScratchDispatch' ; go -C packages/daemon test -count=1 ./internal/prompts ./internal/classify",
+      "observed": "--- PASS: TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging: implementing, the implementer's start quiesced on tester / reviewer / nobody / merger, a checks-red naming the from-phase; awaiting_merge: the issue stays, nothing notified or started); --- PASS: TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack (testing, retro, merging: implementing, one implementer start quiesced on tester / nobody / merger, zero starts of the restored role); the tester's late-push test and the earlier retry test still pass; ok ./internal/workflow 135.316s, ok ./internal/prompts, ok ./internal/classify; check-private-names.sh clean.",
+      "headSha": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
+      "negativeControl": "At the reviewed head c8c33210 the same synchronize ordering leaves testing, retro and merging in place with HeadVerdict red (the reviewer's finding at pullrequest.go:118), and a hold retried from testing with a red settled meanwhile restarts the tester instead of sending back (engine.go:549)."
+    }
   ],
   "filesChanged": [
     "packages/daemon/internal/classify/decisions.go: RedSendsBack(pr) is HeadVerdict red && !PlannedRed (the handoff-head and review-workflows exceptions are gone); HeadPushKnown added; RedWithdrawsReady and FixAttemptCapHolds docs updated",
@@ -81,6 +91,8 @@
     "docs/site/src/content/docs/legion/concepts.md, running-legion.md (Upgrade note), troubleshooting.md; deploy/kubernetes/daemon/legion.yaml.example; AGENTS.md; docs/solutions/legion/…LEGION-631.md",
     ".legion/LEGION-698/plan.json: one word redacted at line 38 (the other deployment's project name), which .github/scripts/check-private-names.sh, run by the required lint job, refused",
     "round 2: packages/daemon/internal/workflow/pullrequest.go (push applies standingRed in every phase, re-asks the round only in reviewing), review.go (standingRed does not act in awaiting_merge), required_checks_test.go (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing)"
+    ,
+    "round 3: packages/daemon/internal/workflow/pullrequest.go (pullRequestSynchronized applies standingRed when the head moved, before the phase switch; the push handler's guard split into three exits), engine.go (retryOrEscalate applies standingRed from any held phase before the reviewing-only round work), review.go (standingRed's doc states the invariant), classify/decisions.go (FixAttemptCapHolds doc names standingRed), checks_red_test.go (implementerStart and checksRedNotice helpers; TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase), review_test.go (TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack); prompts/go/architect-common.md, worker-common.md, skills/legion-worker/SKILL.md (a retro completion that starts once the issue has moved is refused; one in flight when the red lands can be taken as the implementing completion)"
   ],
   "trickyParts": [
     "The plan's own TestAnApprovalEndsTheRoundWhateverCISays rows are unreachable under the plan's reviewRound ordering (roundApproved then roundSentBack): with a red standing, whichever half arrives first finds the round incomplete, falls through to RedSendsBack and sends the work back, and the second half is refused HANDOFF_NOT_CURRENT_PHASE (that is exactly the row's failure on main). So the round reads no CI at all; standingRed holds the CI rule and the push handler and the hold retry apply it before asking the round.",
@@ -88,6 +100,8 @@
     "retro → implementing is a same-role move: record.SuperviseRequest validation refuses a start whose Quiesce is its own role, so takenOver returns no quiesce when the leaving role is the starting one; the implementer keeps its turn and is handed the implementing task once it ends.",
     "The daemon's tests need Postgres: an embedded Postgres 16.4 from the zonky jar (docs/solutions/testing/…LEGION-668.md) at 127.0.0.1:54331; the NATS-backed tests are skipped by name (-skip 'Consume|Captured|RateLimited|BackwardMoveNoRow|LateEventOfAnEarlier|ScratchDispatch'), and ./internal/daemon runs by -run selection. CI's Tests run 38521728279 ran them all green.",
     "Round 2: the push handler's one guard served two rules - the CI rule and the round's re-ask - so a late push that completed a red's carry acted only in reviewing. standingRed now excludes awaiting_merge itself (a carried red must not withdraw a READY GitHub judged on the head's own CI; sendBack would otherwise find the awaiting_merge checks_red row), so every caller gets the one rule, and the re-ask alone stays reviewing's."
+    ,
+    "Round 3: the reviewer's two Important findings were the remaining facts that can make a red stand without applying the rule - the synchronize completing a carry (the push's mirror image) and a hold retried from a phase other than reviewing. Both now call standingRed first; the rule's doc states the invariant (whichever fact makes a red stand applies it, never a review or a completion) instead of listing facts, so the next such fact has a sentence to be measured against."
   ],
   "deviations": [
     "Plan §1/D1 kept a roundSentBack case inside reviewRound after roundApproved. The implementation takes the CI read out of reviewRound entirely (standingRed, applied by decideChecks, the push classification handler and the hold retry before the round is asked). On the review and completion facts D1 holds literally: a red already standing when the approval lands is unsent and the issue goes to retro (R1's window). The asymmetry, chosen with the architect (2026-10-14): a hold retry or a push classification that finds BOTH an approval and a standing red sends the work to implementing, where plan D1 said retro — Sami's two rules are independent and name no order, a red head would reach READY only to be refused, so implementing is the cheaper outcome. An oracle pass found no fact outside those four that can newly make a red sendable, so nothing the plan's roundSentBack caught is lost.",
