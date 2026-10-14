@@ -35,7 +35,7 @@
       {"finding": "Merging→implementing is the first merger takeover and nothing tests it.", "answer": "T2 adds a merging row asserting quiesce merger, phase implementing and ReadyPendingVersion cleared; T3 updates the Quiesce comments in record/outbox.go and supervise/quiesce.go."},
       {"finding": "The tester-planned-red exception is unreachable in retro/merging in production.", "answer": "T2 keeps a PlannedRed row for retro/merging with a comment saying it guards the predicate, not a live path."},
       {"finding": "Whether a CHANGELOG entry or an e2e change is owed.", "answer": "Neither: packages/daemon has no changelog and no changelog-carrying package changes behaviour; stage4b's review-stuck (COMMENT), tree-reviewed and ci-red-takeover checkpoints survive, cited in T7."},
-      {"finding": "Two live-state claims (gh pr checks at a handoff head; the agent-c deployment declaring a review bot) are unverified from the workspace.", "answer": "Section 1 quotes the gh pr checks measurement with command, repository, pull request, head and date; section 6 asks the deployment holder whether either daemon sets the key rather than asserting it."}
+      {"finding": "Two live-state claims (gh pr checks at a handoff head; the other deployment declaring a review bot) are unverified from the workspace.", "answer": "Section 1 quotes the gh pr checks measurement with command, repository, pull request, head and date; section 6 asks the deployment holder whether either daemon sets the key rather than asserting it."}
     ]
   },
   "planReview": {"verdict": "approved", "rounds": 1},
