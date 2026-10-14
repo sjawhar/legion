@@ -905,6 +905,18 @@ jobs:
       - name: Vet envoy-infra, its live-test tags included
         run: go vet -tags pulumilive,natslive ./...
         working-directory: packages/envoy/infra
+      # Vet and the tests compile for this runner's linux/amd64 only, and the notices step in
+      # pr-and-main.yaml loads packages without type-checking them, so this compiles every command
+      # of the module for each target release.yaml's envoy_infra job builds, with the release
+      # build's CGO_ENABLED and -buildvcs: a compile error on one platform only fails here rather
+      # than in the release after the merge.
+      - name: Compile envoy-infra's commands for every release target
+        run: |
+          for target in $(jq -r '.["envoy-infra"][]' ../../../.github/envoy-infra-targets.json); do
+            echo "$target"
+            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go build -buildvcs=false -o /dev/null ./cmd/...
+          done
+        working-directory: packages/envoy/infra
       - name: Unit test envoy-infra
         run: go test ./...
         working-directory: packages/envoy/infra
