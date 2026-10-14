@@ -45,6 +45,7 @@
   its database pool. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
   closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
   a bearer, one JSON line per frame, and compares what it applied with the GET routes.
+
 - Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
   comment thread, an issue message thread - where someone else has written since they last read
   it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact

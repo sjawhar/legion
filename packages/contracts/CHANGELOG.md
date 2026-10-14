@@ -27,6 +27,7 @@
   `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
   default branch, of a run with no pull request, and the generated Go `GithubJobSubject`
   (LEGION-690).
+
 - `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
   returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
   (LEGION-687).

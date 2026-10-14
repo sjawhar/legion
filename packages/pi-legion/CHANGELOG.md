@@ -62,6 +62,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   name nobody, and never asks for approval to deploy. `legion-architect`'s sign-off step,
   `legion-worker`'s merge-gate reference, `legion-retro`'s `Production check:` line and the
   daemon's implementer prompt say so in place of a deploy ask to a human.
+
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
   controller locator; a session whose plugin speaks another contract is relaunched onto the
