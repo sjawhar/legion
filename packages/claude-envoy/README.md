@@ -151,9 +151,10 @@ root). So the three executables ship as committed single-file Bun bundles, `dist
 `dist/session-hook.js` and `dist/dispatch.js` (the `dispatch` command, built from
 `@legion/envoy-client`'s `bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod` and theirs; the package version
-is inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one
-version). `dist/THIRD_PARTY_NOTICES` beside them carries the license of every third-party package
-they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at the repository root.
+is inlined from `package.json`, so the MCP server reports `package.json`'s version, which
+`.omp-plugin/plugin.json` repeats). `dist/THIRD_PARTY_NOTICES` beside them carries the license of
+every third-party package they inline, written from Bun's metafile by
+`scripts/third-party-notices.ts` at the repository root.
 
 - `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, `minify: false`, no sourcemap), notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
@@ -175,6 +176,22 @@ they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at 
   prepack of both Oh My Pi plugins) for npm; this plugin's distribution channel is
   the git repository, so its bundle lives in-tree. An npm-published plugin and a `dist` release
   branch were considered and rejected as more moving parts for the same result.
+
+## Updates
+
+Neither `.claude-plugin/plugin.json` nor the plugin's entry in the repository's
+`.claude-plugin/marketplace.json` declares a `version`, so Claude Code takes claude-envoy's version
+from the marketplace commit it installs from (the SHA's first 12 characters), and every commit on
+main is a new version, one that changes nothing in the plugin included.
+`claude plugin marketplace update legion-plugins` then
+`claude plugin update claude-envoy@legion-plugins` installs main's current tree, which the next
+Claude Code session loads. Claude Code's background auto-update does the same once it is on for
+`legion-plugins`, which it is not by default: **Enable auto-update** on the marketplace under
+`/plugin` **Marketplaces**, or set `"autoUpdate": true` beside `source` on the marketplace's
+`extraKnownMarketplaces` entry, in whichever settings file declares it. A `version` in either
+file would hold every install at the tree it was first installed from until someone changed the
+string, so a test holds both files to none.
+`package.json`'s version plays no part in an update.
 
 ## Enable the channel
 

@@ -74,8 +74,8 @@ const Cancelled = "cancelled"
 // since the listener settles a commit once every check it has seen is terminal and the commit is
 // quiet, which an aggregator job with needs: is not yet queued for, and which a run that
 // concurrency cancels has reached before its replacement shows; the next settlement of the head
-// decides it. It may never report, and a head with no verdict never reaches READY, so an approved
-// round whose own head settles this way is told stuck, naming the check (workflow's reviewRound).
+// decides it. It may never report: a head with no verdict is sent nowhere by the workflow and is
+// refused at READY (READY_CHECKS_NOT_GREEN), where the merger reads the head's checks on GitHub.
 // A workflow's result stands only when the daemon read it at the settlement's head (WorkflowHead),
 // and is Pending otherwise, until the daemon's next read: a run that succeeded passed, one still
 // running is Pending, one the head has no run of is Missing, and one that ended any other way
@@ -165,30 +165,6 @@ func HeadVerdict(pr record.PullRequest) string {
 // the daemon's last read of the runs, so in awaiting_merge only such a read withdraws a READY on it
 // (workflow's decideChecks).
 func RedOnlyByWorkflows(pr record.PullRequest) bool {
-	return redOnlyByWorkflows(pr, func(string) bool { return true })
-}
-
-// RedOnlyByReviewWorkflows says whether CI is red at the pull request's head only because review
-// workflows failed there: no required check is red (each passed, is pending or has no result), at
-// least one required workflow's run is red, and every red one is a workflow the project declares as
-// a review workflow (reviewWorkflows, its `review_workflows` paths). Such a workflow fails on its
-// own findings, which the reviewer adjudicates, so in testing and reviewing its red is the
-// reviewer's round's to decide (RedSendsBack). A red required workflow the project does not so
-// declare is a failing check like any other. With no review workflow declared, it is never true.
-func RedOnlyByReviewWorkflows(pr record.PullRequest, reviewWorkflows []string) bool {
-	return redOnlyByWorkflows(pr, func(path string) bool {
-		for _, review := range reviewWorkflows {
-			if review == path {
-				return true
-			}
-		}
-		return false
-	})
-}
-
-// redOnlyByWorkflows says whether no required check is red at the pull request's head, at least
-// one required workflow is, and counts holds for each red workflow's path.
-func redOnlyByWorkflows(pr record.PullRequest, counts func(path string) bool) bool {
 	checks, workflows, ok := headStandings(pr)
 	if !ok {
 		return false
@@ -198,14 +174,10 @@ func redOnlyByWorkflows(pr record.PullRequest, counts func(path string) bool) bo
 			return false
 		}
 	}
-	red := false
 	for _, workflow := range workflows {
 		if workflow.Red() {
-			if !counts(workflow.Name) {
-				return false
-			}
-			red = true
+			return true
 		}
 	}
-	return red
+	return false
 }

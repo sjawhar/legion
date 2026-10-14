@@ -161,8 +161,9 @@ func TestSignOffWaitsForTheRecordedProductionCheck(t *testing.T) {
 }
 
 // The reviewer usually approves the head it was just shown, before CI settles on it: every new
-// head clears the verdict. The approval stands, and green checks on that head advance to retro.
-func TestApprovalBeforeGreenChecksAdvancesWhenTheChecksSettle(t *testing.T) {
+// head clears the verdict. The approval ends the round all the same, and the green that settles
+// afterwards finds the issue in retro and moves nothing.
+func TestAnApprovalBeforeTheChecksSettleAdvancesWithoutThem(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
@@ -172,7 +173,7 @@ func TestApprovalBeforeGreenChecksAdvancesWhenTheChecksSettle(t *testing.T) {
 	if _, err := intake.ApplyFact(ctx, pool, "github", "approved", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact approval: %v", err)
 	}
-	assertPhase(t, pool, phase.Reviewing)
+	assertPhase(t, pool, phase.Retro)
 	if _, err := intake.ApplyFact(ctx, pool, "github", "checks-green", intake.PullRequestChecks{
 		Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{},
 	}, engine, admissionStub{}); err != nil {
