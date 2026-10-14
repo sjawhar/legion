@@ -212,7 +212,7 @@ jobs:
       (needs.pi_envoy.result == 'success' || needs.pi_envoy.result == 'skipped') &&
       (needs.pi_legion.result == 'success' || needs.pi_legion.result == 'skipped')
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`gh release create`, below); id-token and
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
     # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
@@ -263,22 +263,17 @@ jobs:
         run: |
           # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
           # HEAD, where the range below would be empty and skip the release it never finished.
-          # Release that tag again instead: "Tag release" accepts its own tag at this commit and
-          # "Create GitHub release" reuses a published release and publishes a draft one.
-          EXISTING_TAG=$(git tag --list 'legion-v*' --points-at HEAD --sort=-v:refname | head -1)
-          if [ -n "$EXISTING_TAG" ]; then
-            # A tag's name is chosen by whoever pushed it; release only a plain version.
-            if ! [[ ${EXISTING_TAG#legion-v} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              printf -v shown '%q' "$EXISTING_TAG"
-              echo "::error::$shown, the legion-v tag at HEAD, is not legion-vX.Y.Z; refusing it"
-              exit 1
-            fi
+          # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
+          # not legion-vX.Y.Z): "Tag release" accepts its own tag at this commit and "Create GitHub
+          # release" reuses a published release and publishes a draft one.
+          TAGGED=$(.github/scripts/release-push.sh tagged legion-v)
+          if [ -n "$TAGGED" ]; then
             {
-              echo "version=${EXISTING_TAG#legion-v}"
-              echo "release_tag=$EXISTING_TAG"
+              echo "version=${TAGGED#legion-v}"
+              echo "release_tag=$TAGGED"
               echo "skip=false"
             } >> "$GITHUB_OUTPUT"
-            echo "Releasing $EXISTING_TAG, already at HEAD"
+            echo "Releasing $TAGGED, already at HEAD"
             exit 0
           fi
           PREV_TAG=$(git tag -l 'legion-v*' --sort=-v:refname | head -1)
@@ -394,27 +389,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.release_tag }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          # A release found here is reused. A draft is one an earlier attempt's `gh release create`
-          # left between creating and publishing it: gh deletes that draft itself when an upload
-          # fails, so only a job cancelled or lost mid-upload leaves one, possibly short of assets.
-          # This run's assets go over it, then it is published.
-          if is_draft=$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
-            if [ "$is_draft" = true ]; then
-              gh release upload "$TAG" assets/* --repo "${{ github.repository }}" --clobber
-              gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
-              echo "Published the draft release $TAG with this run's assets"
-            else
-              echo "Release $TAG already exists; reusing it"
-            fi
-          else
-            gh release create "$TAG" \
-              assets/* \
-              --repo "${{ github.repository }}" \
-              --title "legion v$VERSION" \
-              --generate-notes \
-              --verify-tag
-          fi
+        # release-push.sh `release`: creates the release, reuses a published one, or publishes a
+        # draft an earlier attempt left, with this run's assets.
+        run: .github/scripts/release-push.sh release "$TAG" "legion v$VERSION" assets/*
 
   worker_image:
     needs: [changes, legion]
@@ -477,7 +454,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
     # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
@@ -506,10 +483,10 @@ jobs:
           # A re-run after "Commit and tag" pushed the tag checks out this same commit with that
           # tag, where the range below would be empty and skip the release it never finished.
           # Release that tag again instead (release-push.sh, `tagged`); every later step is safe to
-          # repeat: npm reuses a published version, the GitHub release step reuses a published
+          # repeat: npm reuses a published version, `release-push.sh release` reuses a published
           # release and publishes a draft one, `tag` accepts its own tag, and `push-main` pushes
           # nothing once main holds this version or a later one.
-          TAGGED=$(.github/scripts/release-push.sh tagged packages/envoy-plugin opencode-legion-envoy-v)
+          TAGGED=$(.github/scripts/release-push.sh tagged opencode-legion-envoy-v packages/envoy-plugin)
           if [ -n "$TAGGED" ]; then
             echo "version=${TAGGED#opencode-legion-envoy-v}" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -591,25 +568,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          tag="opencode-legion-envoy-v$VERSION"
-          # The legion job's "Create GitHub release" says why a draft found here is published.
-          if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
-            if [ "$is_draft" = true ]; then
-              gh release upload "$tag" packages/envoy-plugin/*.tgz --repo "${{ github.repository }}" --clobber
-              gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
-              echo "Published the draft release $tag with this run's assets"
-            else
-              echo "Release $tag already exists; reusing it"
-            fi
-          else
-            gh release create "$tag" \
-              packages/envoy-plugin/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "Envoy Plugin v$VERSION" \
-              --generate-notes \
-              --verify-tag
-          fi
+        run: .github/scripts/release-push.sh release "opencode-legion-envoy-v$VERSION" "Envoy Plugin v$VERSION" packages/envoy-plugin/*.tgz
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
@@ -625,7 +584,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
     # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
@@ -653,7 +612,7 @@ jobs:
         run: |
           # A re-run after "Commit and tag" pushed the tag: envoy_plugin's version step says why
           # this releases that tag again.
-          TAGGED=$(.github/scripts/release-push.sh tagged packages/pi-envoy pi-envoy-v)
+          TAGGED=$(.github/scripts/release-push.sh tagged pi-envoy-v packages/pi-envoy)
           if [ -n "$TAGGED" ]; then
             echo "version=${TAGGED#pi-envoy-v}" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -762,25 +721,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          tag="pi-envoy-v$VERSION"
-          # The legion job's "Create GitHub release" says why a draft found here is published.
-          if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
-            if [ "$is_draft" = true ]; then
-              gh release upload "$tag" packages/pi-envoy/*.tgz --repo "${{ github.repository }}" --clobber
-              gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
-              echo "Published the draft release $tag with this run's assets"
-            else
-              echo "Release $tag already exists; reusing it"
-            fi
-          else
-            gh release create "$tag" \
-              packages/pi-envoy/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "Pi Envoy v$VERSION" \
-              --generate-notes \
-              --verify-tag
-          fi
+        run: .github/scripts/release-push.sh release "pi-envoy-v$VERSION" "Pi Envoy v$VERSION" packages/pi-envoy/*.tgz
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
@@ -800,7 +741,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
     # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
@@ -828,7 +769,7 @@ jobs:
         run: |
           # A re-run after "Commit and tag" pushed the tag: envoy_plugin's version step says why
           # this releases that tag again.
-          TAGGED=$(.github/scripts/release-push.sh tagged packages/pi-legion pi-legion-v)
+          TAGGED=$(.github/scripts/release-push.sh tagged pi-legion-v packages/pi-legion)
           if [ -n "$TAGGED" ]; then
             echo "version=${TAGGED#pi-legion-v}" >> "$GITHUB_OUTPUT"
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -942,25 +883,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          tag="pi-legion-v$VERSION"
-          # The legion job's "Create GitHub release" says why a draft found here is published.
-          if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
-            if [ "$is_draft" = true ]; then
-              gh release upload "$tag" packages/pi-legion/*.tgz --repo "${{ github.repository }}" --clobber
-              gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
-              echo "Published the draft release $tag with this run's assets"
-            else
-              echo "Release $tag already exists; reusing it"
-            fi
-          else
-            gh release create "$tag" \
-              packages/pi-legion/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "Pi Legion v$VERSION" \
-              --generate-notes \
-              --verify-tag
-          fi
+        run: .github/scripts/release-push.sh release "pi-legion-v$VERSION" "Pi Legion v$VERSION" packages/pi-legion/*.tgz
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'

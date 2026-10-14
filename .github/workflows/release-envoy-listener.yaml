@@ -220,7 +220,7 @@ jobs:
     runs-on: ubuntu-24.04
     # packages: write moves the `latest` tag to the newest already-published image (`docker
     # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
-    # (`gh release create`/`upload`); id-token and attestations: write are for the agent-secrets
+    # (`release-push.sh release`); id-token and attestations: write are for the agent-secrets
     # provenance attestation. The git tag push uses the deploy key, not any of these scopes.
     permissions:
       contents: write
@@ -344,14 +344,10 @@ jobs:
             fi
           fi
 
-          EXISTING_TAG=$(git tag --list 'legion-envoy-v*' --points-at HEAD --sort=-v:refname | head -1)
+          # A re-run after "Tag release" pushed the tag finds it at HEAD and releases it again
+          # (release-push.sh, `tagged`, which refuses a tag that is not legion-envoy-vX.Y.Z).
+          EXISTING_TAG=$(.github/scripts/release-push.sh tagged legion-envoy-v)
           if [ -n "$EXISTING_TAG" ]; then
-            # A tag's name is chosen by whoever pushed it; release only a plain version.
-            if ! [[ ${EXISTING_TAG#legion-envoy-v} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              printf -v shown '%q' "$EXISTING_TAG"
-              echo "::error::$shown, the legion-envoy-v tag at HEAD, is not legion-envoy-vX.Y.Z; refusing it"
-              exit 1
-            fi
             {
               echo "tag=$EXISTING_TAG"
               echo "should_release=true"
@@ -374,7 +370,6 @@ jobs:
           fi
 
           CURRENT="${LATEST_TAG#legion-envoy-v}"
-          CURRENT="${CURRENT%%-*}"
           # Every notices script changes an artifact this release publishes: the web app in the
           # image, the Go archives, or the image assembly; and the target list decides the
           # archives. They therefore take a patch release.
@@ -529,24 +524,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.publish.outputs.tag }}
+        # release-push.sh `release`, as in release.yaml. --upload-to-published: a re-run puts this
+        # run's assets over a published release's own, which release.yaml's jobs leave as they are.
         run: |
-          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null); then
-            gh release upload "$TAG" --clobber \
-              ./legion-envoy-*/* \
-              ./agent-secrets-assets/* \
-              SHA256SUMS
-            # A draft is one an earlier attempt's `gh release create` left between creating and
-            # publishing it: gh deletes that draft itself when an upload fails, so only a job
-            # cancelled or lost mid-upload leaves one. With this run's assets over it, publish it.
-            if [ "$is_draft" = true ]; then
-              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
-              echo "Published the draft release $TAG with this run's assets"
-            fi
-          else
-            gh release create "$TAG" \
-              --title "$TAG" \
-              --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
-              ./legion-envoy-*/* \
-              ./agent-secrets-assets/* \
-              SHA256SUMS
-          fi
+          .github/scripts/release-push.sh release --upload-to-published \
+            --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
+            "$TAG" "$TAG" ./legion-envoy-*/* ./agent-secrets-assets/* SHA256SUMS

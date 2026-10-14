@@ -6,17 +6,31 @@
 #            the artifacts were built and published from. A pre-existing tag is
 #            reused only when it carries the same package version; any other
 #            collision fails loudly.
-# tagged:    print the release tag `tag` already pushed for this checkout, or
-#            nothing: the newest <tag-prefix> tag on HEAD itself (the manifest
-#            already held the version, so `tag` had nothing to commit) or on a
-#            child of HEAD that changes only <package-dir>/package.json, the
-#            bump commit `tag` makes. A re-run of a release job checks out the
-#            same commit, with every tag its first attempt pushed; its version
-#            step reads this to release that tag again, where computing the
-#            next version from the tag would find an empty range and skip.
-#            The version is the tag's name, which anyone who can push a tag
-#            chooses, so that tag must be <tag-prefix>X.Y.Z: any other name
-#            fails with an ::error:: on stderr naming it.
+# tagged:    print the release tag an earlier attempt pushed for this checkout,
+#            or nothing: the newest <tag-prefix> tag on HEAD itself, or, given
+#            <package-dir>, on a child of HEAD that changes only
+#            <package-dir>/package.json, the bump commit `tag` makes (the tag
+#            sits on HEAD itself when the manifest already held the version and
+#            `tag` had nothing to commit). Without <package-dir> only a tag on
+#            HEAD counts, as for a job that tags the commit it checked out. A
+#            re-run of a release job checks out the same commit, with every tag
+#            its first attempt pushed; its version step reads this to release
+#            that tag again, where computing the next version from the tag
+#            would find an empty range and skip. The version is the tag's name,
+#            which anyone who can push a tag chooses, so that tag must be
+#            <tag-prefix>X.Y.Z, each field a number without leading zeros: any
+#            other name fails with an ::error:: on stderr naming it.
+# release:   make the GitHub release of <tag>, in $GITHUB_REPOSITORY, carry
+#            this run's <asset>s and be published. A release that does not
+#            exist is created (`--verify-tag`, with generated notes, or the
+#            --notes given). A published one is reused as it is, or, with
+#            --upload-to-published, gets these assets over its own. A draft gets
+#            these assets over its own (`--clobber`) and is then published. A
+#            draft is one an earlier attempt's `gh release create` left between
+#            creating and publishing it: gh deletes that draft itself when an
+#            upload fails, so only a job cancelled or lost mid-upload leaves
+#            one, possibly short of assets. A failed upload leaves the draft
+#            unpublished; either failure fails the step, naming the release.
 # push-main: push the bump commit to main, fetching main and rebasing onto it
 #            between attempts, five attempts in all. This runs last, after the
 #            tag and GitHub release exist: a lost push only delays the metadata
@@ -41,16 +55,25 @@
 #            that the publish, tag and GitHub release already succeeded and
 #            only this push to main is outstanding.
 #
-#            push-main never lowers main's version. When main's manifest
-#            already holds the version being released or a later one, there is
-#            nothing to push: a re-run whose first attempt landed this bump, or
-#            a re-run of an older run after a later release of the package
-#            landed. It says so in a notice and exits 0, dropping the bump
-#            commit whole, which is right only because that commit changes
-#            nothing but the manifest's version.
+#            After a rejected push, push-main reads main's manifest before it
+#            rebases. When that manifest already holds the version being
+#            released or a later one, there is nothing to push: a re-run whose
+#            first attempt landed this bump, or a re-run of an older run after a
+#            later release of the package landed. It says so in a notice and
+#            exits 0, dropping the bump commit whole, which is right only
+#            because that commit changes nothing but the manifest's version. A
+#            first push that fast-forwards main is not checked: it can lower
+#            main's manifest only when main held a version above the newest
+#            tag, which only a hand edit makes, and the tags decide every next
+#            version anyway.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <package-dir> <tag-prefix> | release-push.sh push-main <package-dir> <version>}
+command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version>}
+
+# is_plain_version <value>: true when <value> is X.Y.Z, each field a number
+# without leading zeros (release-bump.sh does arithmetic on the fields, where a
+# leading zero reads as octal).
+is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
 
 # fail_outstanding <reason>: fail push-main after the release itself succeeded.
 # Writes the ::error:: annotation and, under GitHub Actions, the job summary.
@@ -88,8 +111,8 @@ case "$command" in
     fi
     ;;
   tagged)
-    package_dir=${2:?package dir}
-    prefix=${3:?tag prefix}
+    prefix=${2:?tag prefix}
+    package_dir=${3:-}
     head=$(git rev-parse HEAD)
     # The prefix's tags on HEAD and its descendants, newest version first. Ref
     # names hold no whitespace, so the list splits into one tag per word.
@@ -97,10 +120,11 @@ case "$command" in
     for candidate in $tags; do
       commit=$(git rev-parse "$candidate^{commit}")
       if [ "$commit" = "$head" ] || {
-        [ "$(git rev-parse -q --verify "$commit^")" = "$head" ] &&
+        [ -n "$package_dir" ] &&
+          [ "$(git rev-parse -q --verify "$commit^")" = "$head" ] &&
           [ "$(git diff --name-only "$head" "$commit")" = "$package_dir/package.json" ]
       }; then
-        if ! [[ ${candidate#"$prefix"} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if ! is_plain_version "${candidate#"$prefix"}"; then
           printf -v shown '%q' "$candidate"
           echo "::error::release-push.sh tagged: $shown, the release tag for this checkout, is not ${prefix}X.Y.Z; refusing it" >&2
           exit 1
@@ -109,6 +133,67 @@ case "$command" in
         exit 0
       fi
     done
+    ;;
+  release)
+    shift
+    usage='usage: release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>...'
+    notes=(--generate-notes)
+    upload_to_published=false
+    while [ $# -gt 0 ]; do
+      case $1 in
+        --notes)
+          if [ $# -lt 2 ]; then
+            echo "::error::release-push.sh release: --notes needs a text; $usage"
+            exit 2
+          fi
+          notes=(--notes "$2")
+          shift 2
+          ;;
+        --upload-to-published) upload_to_published=true; shift ;;
+        -*) echo "::error::release-push.sh release: unknown option $1; $usage"; exit 2 ;;
+        *) break ;;
+      esac
+    done
+    if [ $# -lt 3 ]; then
+      echo "::error::release-push.sh release: a tag, a title and at least one asset are needed; $usage"
+      exit 2
+    fi
+    tag=$1 title=$2
+    shift 2
+    repo=${GITHUB_REPOSITORY:?GITHUB_REPOSITORY must name the repository as owner/repo}
+    if ! is_draft=$(gh release view "$tag" --repo "$repo" --json isDraft -q .isDraft 2>/dev/null); then
+      gh release create "$tag" "$@" --repo "$repo" --title "$title" "${notes[@]}" --verify-tag
+      exit 0
+    fi
+    case $is_draft in
+      true)
+        gh release upload "$tag" "$@" --repo "$repo" --clobber || {
+          echo "::error::Uploading this run's assets to the draft release $tag failed; the draft is left unpublished."
+          exit 1
+        }
+        gh release edit "$tag" --repo "$repo" --draft=false || {
+          echo "::error::Publishing the draft release $tag failed; it holds this run's assets and is still a draft."
+          exit 1
+        }
+        echo "Published the draft release $tag with this run's assets"
+        ;;
+      false)
+        if [ "$upload_to_published" = true ]; then
+          gh release upload "$tag" "$@" --repo "$repo" --clobber || {
+            echo "::error::Uploading this run's assets to the published release $tag failed."
+            exit 1
+          }
+          echo "Release $tag already exists; uploaded this run's assets over its own"
+        else
+          echo "Release $tag already exists; reusing it"
+        fi
+        ;;
+      *)
+        printf -v shown '%q' "$is_draft"
+        echo "::error::gh release view $tag printed $shown for isDraft, not true or false"
+        exit 1
+        ;;
+    esac
     ;;
   push-main)
     package_dir=${2:?package dir}
@@ -125,7 +210,7 @@ case "$command" in
       # header's push-main paragraph). A manifest main deleted, or one without a
       # plain version, is left to the rebase below.
       main_version=$(git show "$upstream:$manifest" 2>/dev/null | jq -r .version 2>/dev/null) || main_version=""
-      if [[ $main_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+      if is_plain_version "$main_version" &&
         [ "$(printf '%s\n%s\n' "$version" "$main_version" | sort -V | tail -n 1)" = "$main_version" ]; then
         if [ "$main_version" = "$version" ]; then
           reason="main's $manifest already holds v$version, so this version bump has nothing to add."
