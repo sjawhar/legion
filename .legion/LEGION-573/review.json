@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-573",
+  "completed": "2026-10-14T03:25:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1944",
+  "headSha": "10b1d006ff827127039744a335fe8fb4e631c6e5",
+  "codeHeadSha": "0e14dc3e8615dce6171117cd0485179f0fe85084",
+  "round": 1,
+  "verdict": "changes_requested",
+  "critical": 1,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "critical",
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:44",
+      "description": "The carry decides whose approval to write from the tree's own `state`/`answered_by`/`answered_at` attributes (askBlockStates, :159-176) and never reads the `asks` rows. Those attributes are stripped only on markdown writes (docs/tree.go:146-149 -> StripServerOwnedAttrs, its one caller). A bearer session may open the document socket (/ws/doc/{room}: api/server.go:318-322; docs/websocket.go:300-317 accepts the shared agent token with a session actor; :277-284 makes it writable on an open issue), and Yjs attributes reach the tree verbatim (pmdoc/read.go:79-86). Settlement repairs server attributes only on a block parseAskBlock accepts; a block it rejects (an empty question, ask_blocks.go:651) gets only `invalid` (ask_blocks.go:252-267) and keeps the forged attributes into the tree the same transaction versions (service.go:1374-1415, :1504). withoutAskBlocks drops every ask node, invalid ones included, so the cut comparison passes; the per-block test at :104-111 passes because the forged block names the login it supplied; latestReviewBy finds the approver's approval; docs.WriteReview writes `approved` in his name, answers any open request `Approve` in his name, and the daemon opens the design gate (classify/decisions.go:360-377 reads no actor). Traced at every link in code; not driven against a running server. Fix: resolve the newly answered block's state and answerer from the `asks` rows the settlement already loads and locks (loadAskBlocks), and refuse to carry when the new version holds any ask node no row of this document backs (a copy included) or that carries `invalid`."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/doc/decision-blocks.ts:6",
+      "description": "The browser cut is lexical and reads inside code: a fenced ```markdown example holding `:::ask{...}` ... `:::` has its body cut, while the server's tree cut keeps the code block verbatim. Driven at the head: cutDecisionBlocks of two versions differing only inside such an example returns equal text, so the approver's Show diff shows no change for an edit the server correctly stales on. Fix: skip fenced (``` / ~~~) and indented code while scanning, add a shared fixture with a fenced example to packages/contracts/fixtures/decision-blocks so both cuts are pinned on it."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:108",
+      "description": "The per-block test accepts a copied block (copied_from set) added since the approved version when its source's answerer is the approver, while holdsAnsweredBlock and newlyAnsweredBlocks treat copies as nobody's decision in this document (the PR's own test comment, api/approval_carry_test.go:665-667). An agent can plant a copy of the approver's answered block from another document of the same owner and it rides into the carried version unread. A row-backed per-block test (finding 1) closes this: a copy has no row of its own in this document."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:287",
+      "description": "renderWithoutAskBlocks(nil) dereferences node.Type; storedVersionTree returns (nil, true, nil) for a version below 1. Unreachable today since both review writers refuse version 0, but askBlockStates handles nil and this sibling does not. Fast-follow with the hardening below."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:256",
+      "description": "answerApprovalAsk updates the ask row by id alone; the human route's transition locks and re-checks the open state. Safe today under OpenApprovalAsk's `for no key update ... state = 'open'` and the owner-row lock; add `and state = 'open'` so the two writers cannot disagree on the precondition. Fast-follow."
+    }
+  ],
+  "threads": [],
+  "ci": {
+    "codeHeadSha": "0e14dc3e8615dce6171117cd0485179f0fe85084",
+    "verdict": "green",
+    "runs": [
+      "Tests run 38497599125: lint, typecheck, test success",
+      "Legion Envoy and Contracts run 38497599127: every job success",
+      "Worker Image run 38497599136, Docs run 38497599139, PR Title runs 38497599101 and 38497703307 success"
+    ]
+  },
+  "proofLines": {
+    "implementer": "present in the PR body: Dispatch built from the branch at 51836f10 on an embedded Postgres, the carry, the stale control, the request fields, the card in a real Chromium tab, the departure-3 sequence at 9015003b; negative controls recorded",
+    "tester": "present in the PR body: round 3 at 0e14dc3e, PROOF-25..34 on a Dispatch rebuilt from the head, the browser card, the branch CLI; negative controls PROOF-32 and PROOF-34"
+  },
+  "thermonuclear": {
+    "head": "10b1d006ff827127039744a335fe8fb4e631c6e5",
+    "deepReview": "1 critical (finding 1), 1 important (finding 2), 1 minor (the previous version re-parsed on every version write of an approved document), 2 hardening (nil tree, id-less blocks)",
+    "codeQuality": "3 important (the copy rule missing from the per-block test; the predicate braided with its reads and writes and testable only through Postgres; the duplicate browser cut), 7 minor (style, the three optionals as one object, isText exported from a page component, the skill paragraph's length)"
+  },
+  "contractChangeCensus": "not required: the diff adds three optional fields to ask.approval, refuses nothing new, removes or renames no field, and moves no signature across a process or published-package boundary (canonicalLogin -> model.CanonicalLogin and writeReview -> docs.WriteReview are internal Go moves with every caller migrated; grep for the old names finds none)",
+  "notes": [
+    "The plan's and PR body's claim that answer attributes are server-owned and cannot be forged holds for markdown writes and for blocks settlement can parse; it does not hold for the live socket plus an unparseable block, which is finding 1.",
+    "The header-review/settlement race the Dispatch coordinator raised is closed by reading: both take the owner row for no key update (api/owner.go:104, docs/service.go:238/246, settlement at service.go:1188).",
+    "The docs.WriteReview move is behaviour-identical: documentAskEvent gives the old ownerForArtifact owner shape and broker.Append is what s.appendEvent delegated to.",
+    "Not run here: the Postgres-backed api carry tests (CI's envoy-go job ran them green at 0e14dc3e) and stage 3 (devbox-only)."
+  ]
+}
