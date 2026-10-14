@@ -71,10 +71,13 @@ func TestPyJSON(t *testing.T) {
 	}
 }
 
-// A Go map has no key order, so it is no Python dict; a float has no Go spelling that is always
-// Python's repr. Both are the caller's error, not data.
+// A Go map has no key order, so it is no Python dict, and the refusal names the type that is one; a
+// float has no Go spelling that is always Python's repr. Both are the caller's error, not data.
 func TestPyJSONRefusesWhatItCannotSpellAsPython(t *testing.T) {
-	requirePanicNaming(t, "map[string]interface {} is not a JSON value", func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{SortKeys: true}) })
+	requirePanicNaming(t, "core.PyJSON: map[string]interface {} has no key order; build a core.Object",
+		func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{SortKeys: true}) })
+	requirePanicNaming(t, "core.PyJSON: map[string]int has no key order; build a core.Object",
+		func() { core.PyJSON([]any{map[string]int{"a": 1}}, core.PyJSONOptions{}) })
 	requirePanicNaming(t, "float64", func() { core.PyJSON([]any{1.5}, core.PyJSONOptions{}) })
 }
 

@@ -30,9 +30,9 @@ type Object []Field
 // v is built from nil, bools, integers, strings, slices and arrays, and Objects, through
 // interfaces and pointers. A nil slice is an empty list.
 //
-// A float has no spelling that is always Python's repr, a string that is not valid UTF-8 has no
-// Python counterpart, and neither has an Object holding a key twice. Each of these panics: it is
-// the caller's error, never data.
+// A Go map has no key order, so it is no dict: build an Object. A float has no spelling that is
+// always Python's repr, a string that is not valid UTF-8 has no Python counterpart, and neither has
+// an Object holding a key twice. Each of these panics: it is the caller's error, never data.
 func PyJSON(v any, opts PyJSONOptions) string {
 	var b strings.Builder
 	writePyJSON(&b, reflect.ValueOf(v), opts)
@@ -72,6 +72,8 @@ func writePyJSON(b *strings.Builder, v reflect.Value, opts PyJSONOptions) {
 			writePyJSON(b, v.Index(i), opts)
 		}
 		b.WriteByte(']')
+	case reflect.Map:
+		panic(fmt.Sprintf("core.PyJSON: %s has no key order; build a core.Object, a dict in a known order", v.Type()))
 	case reflect.Float32, reflect.Float64:
 		panic(fmt.Sprintf("core.PyJSON: %s is not supported: Python's float repr is not Go's", v.Type()))
 	default:
