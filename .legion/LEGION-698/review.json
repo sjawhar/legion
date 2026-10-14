@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-698",
+  "completed": "2026-10-14T07:58:00Z",
+  "round": 1,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1950",
+  "reviewedHead": "1529c026e711f4b9d0e9804c67d725fdc4693de3",
+  "ciHead": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
+  "ci": "Required set from the main ruleset: lint, typecheck, test, pr-title (branch protection adds none). The branch's newest pull_request run is at fbd6393d (Tests 38526020000: lint, typecheck, test success; PR Title 38526019967 success); compare fbd6393d...1529c026 touches .legion/LEGION-698/test.json alone, and 1529c026 has 0 check runs. Read on GitHub, not from a handoff.",
+  "threads": "0 threads, 0 reviews on #1950 before this round (gh api graphql reviewThreads/reviews empty).",
+  "proofLines": "E2E (implementer) and E2E (tester) both present in the PR body, each with surface, command, observation, head and negative control; the tester verified the implementer's round-2 proof by re-running its go test selection on a Postgres of its own at fbd6393d.",
+  "thermonuclear": "task(agent=\"thermonuclear-deep-review\") and task(agent=\"thermonuclear-code-quality\") once at 1529c026: deep review 2 Important + 2 Minor, code quality 2 Important + 7 Minor; the two Important findings coincide (the synchronize and the non-reviewing hold retry apply no standingRed). Security: agent-def, authz, untrusted-input rows touched; no exploit path; one hardening item (pass GitHub-returned values as gh api -f parameters in the reviewer's read).",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 4,
+  "keyFindings": [
+    {"severity": "important", "file": "packages/daemon/internal/workflow/pullrequest.go:118", "description": "pullRequestSynchronized applies no standingRed: a synchronize that completes the carry of a code head's red to the handoff head (push known, head arriving) leaves the red standing in testing, retro or merging, where the push in the other delivery order sends back (round 2's fix). standingRed's doc (review.go:479-484) enumerates the non-CI facts that apply the rule and misses this one. Remedy: when moved, apply standingRed after headMoved and before the phase switch; a test row mirroring TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase with the push seeded and syncedTo(head) delivered."},
+    {"severity": "important", "file": "packages/daemon/internal/workflow/engine.go:549", "description": "retryOrEscalate applies standingRed only inside `if from == phase.Reviewing`; a red settled while the issue was held from testing, retro or merging (no held row, so the settlement moved nothing) is restored with the phase and nobody is told, though the PR adds retro and merging as sending phases and rewrites this comment to state the rule generally. Remedy: hoist the PullRequest read and standingRed above the reviewing-only block (safe: no row for other phases, a failed claim quiesces at once, awaiting_merge excluded in standingRed)."},
+    {"severity": "important", "file": "PR body", "description": "No `## Contract change census` though the PR adds a refusal (Unknown key projects.<KEY>.review_workflows), removes fields (config.Project.ReviewWorkflows, workflow.Config.ReviewWorkflows, the reviewer's `Review workflows` addressing line) and changes an exported signature across packages (classify.RedSendsBack). The acceptance-6 grep and the running-legion.md Upgrade note hold the content; the body needs the section with the search commands, each hit's disposition, and the rollout line (immediate refusal, mandated by acceptance 6; the legion-deploy holder drops the key with the pin, plan §6). A body edit, no commit."},
+    {"severity": "minor", "file": "packages/daemon/internal/prompts/go/architect-common.md:8", "description": "'a retro completion it reports after the move is refused' (also worker-common.md:6, skills/legion-worker/SKILL.md:126) overclaims: handoff_complete reads the record's phase, then finds the commit, then posts (pi-legion/src/tools.ts:234-243); a red committing in that window lets retro's @- be accepted as the implementing completion (engine.go:364 role match, :396 LastHandoff is the implementing handoff, :409-413 to testing). Narrow and bounded by the tester's CI read; make the sentences precise."},
+    {"severity": "minor", "file": "packages/daemon/internal/classify/decisions.go:321-322", "description": "FixAttemptCapHolds doc still cross-references `(workflow's decideChecks and reviewRound)`; reviewRound no longer reads the cap, standingRed is the one caller."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/pullrequest.go:164", "description": "The push handler's one guard folds three exits (err, moved, not reviewing); split so each invariant stands on its own, and it becomes the shape the synchronize fix shares."},
+    {"severity": "minor", "file": "packages/daemon/internal/workflow/checks_red_test.go:229", "description": "The file crosses 1000 lines (918 at the merge base, 1013 at head) while copy-pasting the implementer-start and checks-red outbox readers (lines 155, 162, 229, 233 and earlier copies); extract two helpers."}
+  ],
+  "fastFollow": "workflow test and comment hygiene: the outbox-reader helpers in checks_red_test.go, seedReviewUndecided as a wrapper over seedReviewRequiring, reviewRound's switch flattened now that !completed is its only gate, and the implementer's outbox_test.go:1463 seed comment."
+}
