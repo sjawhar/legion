@@ -94,6 +94,13 @@ func headPush(pushes []record.ClassifiedPush, previous, head string) *record.Cla
 	return found
 }
 
+// HeadPushKnown says whether the push that left head is recorded (headPush), so the pushes can say
+// what the move from previous to head changed. Until it is, the head's code is unknown: its push
+// may be on its way, with the paths an approval of previous is judged against (ApprovalStands).
+func HeadPushKnown(pr record.PullRequest, previous, head string) bool {
+	return headPush(pr.Pushes, previous, head) != nil
+}
+
 // keptPushes is what a head's arrival keeps: every push that changed only .legion/, did not
 // rewrite history and said which head it replaced - a fact about two commits, true whenever it is
 // learned, which an approval is carried across - and the pushes still on their way from the new

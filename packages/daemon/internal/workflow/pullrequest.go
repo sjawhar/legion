@@ -82,18 +82,26 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 
 // pullRequestSynchronized records the pull request's new head and what the move leaves standing
 // (classify.AdvancePullRequestHead, headMoved). In reviewing the head's arrival re-asks the round
-// (settleRound), since it is what the approval is judged against: the approved head arriving over a
-// handoff push lets the approval stand, and the new head of a code push that was on its way shows
-// the approval does not cover it (classify.ApprovalStands, classify.CodeOnItsWay). In implementing
-// a head that arrives once the implementer has completed is the pull request its completion waited
-// for.
+// (settleRound) once its push is known (classify.HeadPushKnown), since what the approval is judged
+// against is the push's paths: the approved head arriving over a handoff push lets the approval
+// stand, and the new head of a code push that was on its way shows the approval does not cover it
+// (classify.ApprovalStands, classify.CodeOnItsWay). GitHub delivers a push and its synchronize in
+// either order, so a head whose push is still on its way is left to the push's own handler (push),
+// which re-asks the round the moment the push is classified. Asked here, a round stuck at the
+// previous head would be told stuck again at the new one, which the push then shows to be the
+// handoff head its approval covers - a notice the architect acts on for nothing. A push lost
+// outright leaves the round reported as it was, stuck at the previous head, which is told once
+// either way. A synchronize that moves nothing - a redelivery, or one carrying no head - changes
+// nothing the round reads, and re-asks nothing. In implementing a head that arrives once the
+// implementer has completed is the pull request its completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
 	prior := *pr
-	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
+	moved := fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA
+	if moved {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
@@ -109,6 +117,9 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	}
 	switch issue.Phase {
 	case phase.Reviewing:
+		if !moved || !classify.HeadPushKnown(prior, prior.HeadSHA, pr.HeadSHA) {
+			return intake.Result{}, nil
+		}
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 		if err != nil {
 			return intake.Result{}, err

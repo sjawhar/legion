@@ -949,6 +949,67 @@ func TestARoundItsApprovalCannotEndTellsTheArchitect(t *testing.T) {
 	}
 }
 
+// GitHub delivers a branch's push and the pull request's synchronize in either order. A round
+// already stuck - its reviewer completed before its approval landed - is re-asked by a head's
+// arrival only once the head's push is known: asked before, the round would read stuck again at the
+// new head, a notice the architect acts on, though the push then proves the head handoff-only and
+// the approval ends the round. So the head arriving ahead of its push tells nothing, and the push's
+// own arrival settles the round; the approval between them still tells that it is of other code
+// than the head's, as it would at any head whose push is unknown. The push arriving ahead of its
+// head leaves the round stuck at the head it still has, and the head's arrival then tells once that
+// the decision must now be of the new head.
+func TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound(t *testing.T) {
+	// A step is a fact and how many review-stuck notices the outbox holds once it is applied.
+	type step struct {
+		fact intake.Fact
+		told int
+	}
+	complete := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Summary: "reviewed", Commit: "review-1"}
+	approve := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", Author: testReviewApp, Body: "approved"}
+	sync := intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-2"}
+	handoff, unforced, whole := ".legion/review.json", "false", "false"
+	push := intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: "head", After: "head-2",
+		ChangedPaths: &handoff, Truncated: &whole, Forced: &unforced, Pusher: "legion-reviewer[bot]"}
+	for _, tc := range []struct {
+		name  string
+		steps []step
+		// told is each review-stuck notice in the order written: the fact that wrote it, and what
+		// its reason names.
+		told []record.Notice
+	}{
+		{name: "the handoff head before its push", steps: []step{{complete, 1}, {sync, 1}, {approve, 2}, {push, 2}},
+			told: []record.Notice{{Summary: byCompletion, Reason: "APPROVE of head head or"}, {Summary: byOtherReview, Reason: "does not approve head head-2"}}},
+		{name: "the handoff push before its head", steps: []step{{complete, 1}, {push, 1}, {sync, 2}, {approve, 2}},
+			told: []record.Notice{{Summary: byCompletion, Reason: "APPROVE of head head or"}, {Summary: byPush, Reason: "APPROVE of head head-2 or"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedReviewOf(t, pool, "head", "green")
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			for i, s := range tc.steps {
+				if result := apply(fmt.Sprintf("step-%d", i), s.fact); result.Refusal != nil {
+					t.Fatalf("step %d (%T) was refused: %+v", i, s.fact, result.Refusal)
+				}
+				if got := reviewStuckNotices(t, pool); len(got) != s.told {
+					t.Fatalf("after step %d (%T) the architect was told %d times (%+v), want %d", i, s.fact, len(got), got, s.told)
+				}
+			}
+			if got := issuePhase(t, pool); got != phase.Retro {
+				t.Fatalf("the issue is in %s, want retro", got)
+			}
+			got := reviewStuckNotices(t, pool)
+			if len(got) != len(tc.told) {
+				t.Fatalf("the architect was told %d times (%+v), want %d", len(got), got, len(tc.told))
+			}
+			for i, want := range tc.told {
+				if got[i].Summary != want.Summary || !strings.Contains(got[i].Reason, want.Reason) {
+					t.Fatalf("notice %d was written by %q naming %q, want by %q naming %q", i, got[i].Summary, got[i].Reason, want.Summary, want.Reason)
+				}
+			}
+		})
+	}
+}
+
 // reviewStuckNotices is every review-stuck notice the outbox holds, in order.
 func reviewStuckNotices(t *testing.T, pool *pgxpool.Pool) []record.Notice {
 	t.Helper()
