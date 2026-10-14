@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,6 +32,7 @@ const (
 	awsSecret  = "example/envoy/nats-nkey-seed-example-host-a"
 	awsAccount = "000000000000"
 	awsRegion  = "us-east-1"
+	awsRoleARN = "arn:aws:iam::" + awsAccount + ":role/example"
 )
 
 type awsVersion struct {
@@ -313,13 +315,24 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 
 func (f *fakeAWS) sts(w http.ResponseWriter, body []byte) {
 	form, err := url.ParseQuery(string(body))
-	if err != nil || form.Encode() != "Action=GetCallerIdentity&Version=2011-06-15" {
+	if err != nil {
 		f.reject(w, fmt.Sprintf("STS %s (%v)", body, err))
 		return
 	}
-	f.calls = append(f.calls, "GetCallerIdentity")
+	// AssumeRole is a profile's credential source, which the fake only ever refuses, with the
+	// failure the test names: a test never needs a role's credentials.
+	call := form.Get("Action")
+	switch {
+	case form.Encode() == "Action=GetCallerIdentity&Version=2011-06-15":
+	case call == "AssumeRole" && form.Get("Version") == "2011-06-15" && form.Get("RoleArn") == awsRoleARN &&
+		form.Get("RoleSessionName") != "" && f.failures["AssumeRole"] != (awsFailure{}):
+	default:
+		f.reject(w, fmt.Sprintf("STS %s", body))
+		return
+	}
+	f.calls = append(f.calls, call)
 	w.Header().Set("Content-Type", "text/xml")
-	if failure, ok := f.failures["GetCallerIdentity"]; ok {
+	if failure, ok := f.failures[call]; ok {
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprintf(w, `<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Sender</Type>`+
 			`<Code>%s</Code><Message>%s</Message></Error><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ErrorResponse>`,
@@ -721,8 +734,10 @@ func TestAWSExpectAccountRunsFirstAndAlone(t *testing.T) {
 	})
 }
 
-// With no usable credentials, every mode is refused before any call, STS included, naming the
-// cause and the fix rather than the SDK's error class alone.
+// With no usable credentials, every mode is refused before any call, STS included, naming the fix.
+// A credential chain that finds nothing fails with a plain Go error whose type names nothing, so
+// the refusal names no class; an AWS answer, such as a profile's role refused for an expired
+// token, keeps its code.
 func TestAWSMissingCredentialsAreRefusedBeforeAnyCall(t *testing.T) {
 	_, public := testnats.User(t)
 	for _, args := range [][]string{{"check"}, {"generate"}, {"verify", "--public-key", public}, {"check", "--expect-account", awsAccount}} {
@@ -734,10 +749,31 @@ func TestAWSMissingCredentialsAreRefusedBeforeAnyCall(t *testing.T) {
 			code, out, errs := runAWS(t, f, args...)
 			require.Equal(t, 2, code)
 			require.Empty(t, out)
-			require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials (errorString); log in or set AWS_PROFILE\n", errs)
+			require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials; log in or set AWS_PROFILE\n", errs)
 			require.Empty(t, f.recorded())
 		})
 	}
+	t.Run("a profile whose role STS refuses for an expired token", func(t *testing.T) {
+		f := newFakeAWS(t)
+		f.failures = map[string]awsFailure{"AssumeRole": {"ExpiredToken", "The security token included in the request is expired"}}
+		server := serve(t, f)
+		config := filepath.Join(t.TempDir(), "config")
+		require.NoError(t, os.WriteFile(config, []byte("[profile expired]\nrole_arn = "+awsRoleARN+"\nsource_profile = base\n\n"+
+			"[profile base]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\n"), 0o600))
+		t.Setenv("AWS_CONFIG_FILE", config)
+		t.Setenv("AWS_PROFILE", "expired")
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+		t.Setenv("AWS_MAX_ATTEMPTS", "1")
+		// The SDK builds a profile's STS client before it reads AWS_ENDPOINT_URL (config.go:67, :76),
+		// so only the STS-specific variable keeps this request off the real STS (sts endpoints.go:210-220).
+		t.Setenv("AWS_ENDPOINT_URL_STS", server.URL)
+		code, out, errs := runAWS(t, f, "generate", "--expect-account", awsAccount)
+		require.Equal(t, 2, code)
+		require.Empty(t, out)
+		require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials (ExpiredToken); log in or set AWS_PROFILE\n", errs)
+		require.Equal(t, []string{"AssumeRole"}, f.recorded(), "the credentials' own call, then nothing")
+	})
 }
 
 func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {

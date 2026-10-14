@@ -42,9 +42,14 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	if cfg.Region == "" {
 		return nil, refuse("no AWS region: pass --region, or name one in AWS_REGION or the profile")
 	}
-	// The credentials cache keeps what this retrieves, so the calls below sign with it.
+	// The credentials cache keeps what this retrieves, so the calls below sign with it. A chain that
+	// finds no credentials fails with a plain error whose type names nothing, so only a named
+	// failure, such as an AWS error's code, is given.
 	if _, err := cfg.Credentials.Retrieve(ctx); err != nil {
-		return nil, refuse("no usable AWS credentials (%s); log in or set AWS_PROFILE", errorClass(err))
+		if name, ok := errorName(err); ok {
+			return nil, refuse("no usable AWS credentials (%s); log in or set AWS_PROFILE", name)
+		}
+		return nil, refuse("no usable AWS credentials; log in or set AWS_PROFILE")
 	}
 	if account != "" {
 		identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
@@ -180,18 +185,11 @@ func awsFailed(call, name string, err error) error {
 // and the smithy one are http.ResponseError) around the RequestSendError that says what happened.
 var sdkWrappers = []string{"*smithy.OperationError", "*retry.MaxAttemptsError", "*http.ResponseError", "*fmt.wrapError"}
 
-// errorClass names err without its text: an AWS error's code; for a context's end, that; otherwise
-// the type of the first error in its chain that is not one of the SDK's wrappers, such as
-// RequestSendError.
+// errorClass names err without its text: its name when it has one (errorName), otherwise the type
+// of the first error in its chain that is not one of the SDK's wrappers, such as RequestSendError.
 func errorClass(err error) string {
-	var api smithy.APIError
-	switch {
-	case errors.As(err, &api) && api.ErrorCode() != "":
-		return api.ErrorCode()
-	case errors.Is(err, context.Canceled):
-		return "canceled"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline exceeded"
+	if name, ok := errorName(err); ok {
+		return name
 	}
 	for e := err; ; {
 		name := reflect.TypeOf(e).String()
@@ -201,6 +199,21 @@ func errorClass(err error) string {
 		}
 		e = next
 	}
+}
+
+// errorName names err when it says what happened without its text: an AWS error's code, or a
+// context's end.
+func errorName(err error) (string, bool) {
+	var api smithy.APIError
+	switch {
+	case errors.As(err, &api) && api.ErrorCode() != "":
+		return api.ErrorCode(), true
+	case errors.Is(err, context.Canceled):
+		return "canceled", true
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded", true
+	}
+	return "", false
 }
 
 // pythonDate is t in loc as Python's str prints a datetime: microseconds only when there are some,
