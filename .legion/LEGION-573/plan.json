@@ -143,6 +143,14 @@
       "outcome": {
         "kind": "unchanged"
       }
+    },
+    {
+      "spec": "The comparison cuts every decision block out whole and tests each block's answer; a decided block's question and options are compared nowhere, and the plan's trigger read what was newly answered against the previous version.",
+      "plan": "Every row-backed block of the new version must show its row's state and, when its row is decided, ask the wording its row was decided on (settlement's own askBlock.asks test), else nothing carries; the changed set is decided against the approved version alone, must be non-empty and all his, with the candidates the version's answerers, so a block deleted and restored as the approved version held it carries nothing and the version before is read for nothing. Decided by the architect on the second review round (Envoy cad5cc3fba0b40b99cddbb31673e66da); plan.md version 4 records it as departure 5.",
+      "evidence": "The reviewer's round-2 Important on PR #1944 (thread PRRT_kwDORFy7ds6sP092): an agent's reword of an answered block through the edits route, landing in that route's own version inside the settle window, carried the human's approval of a version showing his choice under words nobody decided; TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry and TestADeletedAndRestoredAnsweredBlockCarriesNothing were red on the previous rule.",
+      "outcome": {
+        "kind": "unchanged"
+      }
     }
   ]
 }
