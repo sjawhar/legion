@@ -37,12 +37,13 @@ fixture() {
     return 1
   fi
   local envoy="$root/packages/envoy" infra="$root/packages/envoy/infra"
-  mkdir -p "$root/.github/scripts" "$root/.github/workflows" "$envoy/internal/bus" \
+  mkdir -p "$root/.github/scripts" "$root/.github/workflows" "$root/scripts" "$envoy/internal/bus" \
     "$envoy/internal/contracts" "$envoy/internal/other" "$infra/cmd/pulumi-resource-envoy-infra" \
     "$infra/core"
   ln -s "$check_script" "$root/.github/scripts/check-envoy-infra-release-paths.sh"
   ln -s "$script_dir/workflow_paths.py" "$root/.github/scripts/workflow_paths.py"
   printf '{\n  "envoy-infra": ["linux/amd64", "darwin/arm64"]\n}\n' > "$root/.github/envoy-infra-targets.json"
+  printf '#!/usr/bin/env bash\n' > "$root/scripts/go-third-party-notices.sh"
   printf 'module example.com/envoy\n\ngo 1.22\n' > "$envoy/go.mod"
   : > "$envoy/go.sum"
   printf 'package bus\n\nconst Subject = "bus"\n' > "$envoy/internal/bus/bus.go"
@@ -75,6 +76,7 @@ packages/envoy/internal/bus/
 packages/envoy/internal/contracts/
 packages/envoy/go.mod
 packages/envoy/go.sum
+scripts/go-third-party-notices.sh
 .github/envoy-infra-targets.json
 .github/envoy-infra-release-paths
 PATHS
@@ -89,6 +91,7 @@ on:
       - "packages/envoy/internal/contracts/**"
       - "packages/envoy/go.mod"
       - "packages/envoy/go.sum"
+      - "scripts/go-third-party-notices.sh"
       - ".github/envoy-infra-targets.json"
       - ".github/envoy-infra-release-paths"
   workflow_dispatch:
@@ -139,7 +142,7 @@ root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
-  "$(contains "$out" 'cover the 11 packages and files above, which the plugin and command build from across 2 targets')"
+  "$(contains "$out" 'cover the 14 packages and files above, which the plugin and command build from across 2 targets')"
 check "lists a package of packages/envoy the plugin compiles in" \
   "$(contains "$out" '  packages/envoy/internal/bus/ (example.com/envoy/internal/bus)')"
 check "lists the workspace file" "$(contains "$out" '  packages/envoy/infra/go.work (the workspace file)')"
@@ -147,6 +150,25 @@ check "lists a module's checksums" "$(contains "$out" "  packages/envoy/go.sum (
 check "lists the paths file itself" \
   "$(contains "$out" "  $release_paths (the paths a version is cut from)")"
 check "leaves out a package nothing imports" "$(is "$(contains "$out" 'internal/other')" false)"
+check "lists a line of the paths file the build does not name" \
+  "$(contains "$out" "  scripts/go-third-party-notices.sh (a line of $release_paths)")"
+
+echo "case: a line of the paths file, missing from the push paths"
+root=$(fixture paths-line-unpushed)
+edit "$root/$workflow" '      - "scripts/go-third-party-notices.sh"'$'\n' ""
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the line and the push paths" \
+  "$(contains "$out" "scripts/go-third-party-notices.sh (a line of $release_paths) $push_miss")"
+check "names it alone" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 1)"
+
+echo "case: a line of the paths file that names nothing"
+root=$(fixture paths-line-stale)
+edit "$root/$release_paths" "scripts/go-third-party-notices.sh" "scripts/no-such-script.sh"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the line" \
+  "$(contains "$out" "$release_paths: the line 'scripts/no-such-script.sh' names no file or directory")"
 
 echo "case: a package the plugin compiles in, missing from the push paths"
 root=$(fixture push-missing)
@@ -173,7 +195,9 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names a package" "$(contains "$out" "packages/envoy/infra/core/ (example.com/envoy/infra/core) $push_miss")"
 check "names a module file" "$(contains "$out" "packages/envoy/infra/go.mod (example.com/envoy/infra's go.mod) $push_miss")"
-check "names each of the 5 the command's glob leaves out" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 5)"
+check "names the directory line the glob narrows" \
+  "$(contains "$out" "packages/envoy/infra/ (a line of $release_paths) $push_miss")"
+check "names each of the 6 the command's glob leaves out" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 6)"
 
 echo "case: a negation in the push paths, read as GitHub reads it"
 root=$(fixture push-negated)
@@ -183,7 +207,9 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the package the negation drops" \
   "$(contains "$out" "packages/envoy/infra/core/ (example.com/envoy/infra/core) $push_miss: packages/envoy/infra/core/core.go is not covered")"
-check "names it alone" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 1)"
+check "names the directory line, every file under which it must cover" \
+  "$(contains "$out" "packages/envoy/infra/ (a line of $release_paths) $push_miss: packages/envoy/infra/core/core.go is not covered")"
+check "names those two alone" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 2)"
 
 echo "case: a file in a package's directory the push paths' glob leaves out"
 root=$(fixture push-glob)
@@ -236,7 +262,9 @@ run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "lists the second command's package" \
   "$(contains "$out" '  packages/envoy/infra/cmd/envoy-infra/ (example.com/envoy/infra/cmd/envoy-infra)')"
-check "counts it" "$(contains "$out" 'cover the 12 packages and files above')"
+check "lists the paths file's directory line that holds it" \
+  "$(contains "$out" "  packages/envoy/infra/ (a line of $release_paths)")"
+check "counts it beside the green fixture's 14" "$(contains "$out" 'cover the 15 packages and files above')"
 
 echo "case: a package only the second command compiles in"
 root=$(fixture second-command-import)
@@ -245,10 +273,13 @@ printf 'package main\n\nimport _ "example.com/envoy/internal/other"\n\nfunc main
   > "$root/packages/envoy/infra/cmd/envoy-infra/main.go"
 run_check "$root"
 check "exits 1: every command under cmd/ is read, not the plugin's alone" "$(is "$status" 1)"
-check "names the package missing from the push paths" \
-  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $push_miss")"
+check "names the package and the file the push paths miss" \
+  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $push_miss: packages/envoy/internal/other/other.go is not covered")"
 check "names it missing from the paths file" \
   "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $bump_miss")"
+check "names it alone in the push paths: they cover every file under the paths file's packages/envoy/infra/" \
+  "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 1)"
+check "names it alone in the paths file" "$(is "$(grep -c -- "$bump_miss" <<<"$out" || true)" 1)"
 
 echo "case: a package whose path extends a listed one"
 root=$(fixture extended-path)

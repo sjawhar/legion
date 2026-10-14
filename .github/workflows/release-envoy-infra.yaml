@@ -211,9 +211,8 @@ jobs:
           subject-path: |
             assets/pulumi-resource-envoy-infra-v*.tar.gz
             assets/envoy-infra-*.tar.gz
-      # The only step that holds the deploy key: it writes the key to a directory of its own,
-      # pushes the tag over SSH to GitHub's pinned host keys (`gh api meta`, `.ssh_keys`), and
-      # removes the key again.
+      # The only step that holds the deploy key. release-push.sh push-tag writes it to a directory
+      # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       - name: Tag release
         if: steps.version.outputs.skip != 'true'
         env:
@@ -225,16 +224,7 @@ jobs:
             exit 0
           fi
           git tag "$TAG"
-          ssh_dir=$(mktemp -d)
-          trap 'rm -f "$ssh_dir/key" "$ssh_dir/known_hosts" && rmdir "$ssh_dir"' EXIT
-          (umask 077 && printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key")
-          cat > "$ssh_dir/known_hosts" <<'KNOWN_HOSTS'
-          github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
-          github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
-          github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
-          KNOWN_HOSTS
-          GIT_SSH_COMMAND="ssh -i $ssh_dir/key -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$ssh_dir/known_hosts -o StrictHostKeyChecking=yes" \
-            git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$TAG"
+          .github/scripts/release-push.sh push-tag "$TAG"
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
