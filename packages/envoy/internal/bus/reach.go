@@ -35,7 +35,7 @@ func refuseRemoteNATS(urls []string, lookup func(string) (string, bool)) error {
 		return nil
 	}
 	for _, raw := range urls {
-		if localNATSURL(raw) {
+		if LocalNATSURL(raw) {
 			continue
 		}
 		return fmt.Errorf("%w: %s (set %s=1 to reach it)", ErrRemoteNATS, strings.TrimSpace(raw), AllowRemoteEnvVar)
@@ -43,11 +43,11 @@ func refuseRemoteNATS(urls []string, lookup func(string) (string, bool)) error {
 	return nil
 }
 
-// localNATSURL reports whether raw names a server on this machine. It reads the URL and never
+// LocalNATSURL reports whether raw names a server on this machine. It reads the URL and never
 // resolves it: a lookup would reach the network the refusal is about, and a name that resolves to
 // a loopback address on one machine resolves to a shared server on another - the devbox's own
 // envoy-nats is exactly such a name. A URL it cannot read names no server it can vouch for.
-func localNATSURL(raw string) bool {
+func LocalNATSURL(raw string) bool {
 	trimmed := strings.TrimSpace(raw)
 	if !strings.Contains(trimmed, "://") {
 		trimmed = "nats://" + trimmed
