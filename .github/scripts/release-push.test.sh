@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `release-push.sh push-main`: the version-bump push and its
 # same-package race resolution (LEGION-75), and its re-run cases; and for
-# `release-push.sh tagged`, which finds the tag an earlier attempt pushed.
+# `release-push.sh tagged`, which finds the tag an earlier attempt pushed and
+# refuses one whose name is not <prefix>X.Y.Z.
 #
 # Each case builds a bare origin holding one seed commit (packages/pkg at
 # 1.0.0 plus a README) and two clones, a and b. Clone a plays the release run
@@ -9,8 +10,8 @@
 # same package, whose checkout predates that bump — so b's push is rejected
 # and its rebase meets a's change on the same "version" line. In the re-run
 # cases, b plays a later attempt of a's run or of an older run. A pre-receive
-# hook that always rejects forces the exhaustion case. The `tagged` case builds
-# the commits and tags release runs leave in clone a and reads them from
+# hook that always rejects forces the exhaustion case. The `tagged` cases build
+# the commits and tags release runs leave in clone a and read them from
 # several checkouts.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
@@ -74,13 +75,15 @@ push_main() {
 }
 
 # tagged <clone> <package-dir> <tag-prefix>: runs the script under test's
-# `tagged` from <clone>; leaves its exit code in rc and its output in out.
+# `tagged` from <clone>; leaves its exit code in rc, its stdout (the tag the
+# version step reads) in out and its stderr in err.
 tagged() {
   local clone=$1 package_dir=$2 prefix=$3
   set +e
-  out=$(cd "$clone" && "$release_push" tagged "$package_dir" "$prefix" 2>&1)
+  out=$(cd "$clone" && "$release_push" tagged "$package_dir" "$prefix" 2>"$work/tagged.err")
   rc=$?
   set -e
+  err=$(<"$work/tagged.err")
 }
 
 origin_version() { git -C "$1/origin.git" show main:packages/pkg/package.json | jq -r .version; }
@@ -269,6 +272,40 @@ check "a tagged child changing another file is skipped" "$(is "$out" pkg-v1.0.1)
 git -C "$work/c9/b" tag pkg-v1.0.0
 tagged "$work/c9/b" packages/pkg pkg-v
 check "a tag on HEAD itself: printed" "$(is "$out" pkg-v1.0.0)"
+
+echo
+echo "Case 10: tagged refuses a release tag whose name is not <prefix>X.Y.Z"
+setup "$work/c10"
+clone="$work/c10/a"
+seed=$(git -C "$clone" rev-parse HEAD)
+bump "$clone" 1.0.1
+# shellcheck disable=SC2016 # literal $(…): git accepts it in a tag name
+git -C "$clone" tag 'pkg-v1.0.1$(id>pwned)'
+git -C "$clone" checkout -q --detach "$seed"
+tagged "$clone" packages/pkg pkg-v
+check "a command substitution on the bump commit: exits 1" "$(is "$rc" 1)"
+check "a command substitution on the bump commit: prints no tag" "$(is "$out" "")"
+check "a command substitution on the bump commit: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.1.*id.*pwned.*, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
+check "a command substitution on the bump commit: nothing in it ran" "$([ ! -e "$clone/pwned" ] && echo true || echo false)"
+# shellcheck disable=SC2016 # literal $(…), the tag's name
+git -C "$clone" tag -d 'pkg-v1.0.1$(id>pwned)' >/dev/null
+git -C "$clone" tag pkg-v1.0.0-rc.1
+tagged "$clone" packages/pkg pkg-v
+check "a pre-release on HEAD: exits 1" "$(is "$rc" 1)"
+check "a pre-release on HEAD: prints no tag" "$(is "$out" "")"
+check "a pre-release on HEAD: the error names the tag" "$(contains "$err" '^::error::release-push.sh tagged: pkg-v1\.0\.0-rc\.1, the release tag for this checkout, is not pkg-vX\.Y\.Z; refusing it$')"
+# Git refuses a tag name holding a space or a newline, and ignores a ref file
+# forged with one, so `tagged` is never handed either.
+git -C "$clone" tag -d pkg-v1.0.0-rc.1 >/dev/null
+for name in 'pkg-v1.0.2 x' $'pkg-v1.0.2\nx'; do
+  printf -v shown '%q' "$name"
+  check "git refuses to create the tag $shown" "$(git -C "$clone" tag "$name" 2>/dev/null && echo false || echo true)"
+  printf '%s\n' "$seed" > "$clone/.git/refs/tags/$name"
+done
+tagged "$clone" packages/pkg pkg-v
+check "forged refs with a space and a newline: exits 0" "$(is "$rc" 0)"
+check "forged refs with a space and a newline: prints no tag" "$(is "$out" "")"
+check "forged refs with a space and a newline: git ignores both" "$(is "$(printf '%s\n' "$err" | { grep -c '^warning: ignoring ref with broken name refs/tags/pkg-v1\.0\.2' || true; })" 2)"
 
 summary "release-push.sh push-main and tagged"
 

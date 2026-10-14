@@ -88,5 +88,5 @@ The remedy text for a failed image build must say `gh run rerun <run-id> --faile
 the failed jobs and keeps the succeeded jobs' recorded outputs. A whole-run rerun of a
 `release.yaml` invocation re-executes every job at the same commit: `legion` finds its own
 `legion-vX` tag at HEAD and releases it again, so the image job still gets `legion_version`, but
-the image is rebuilt and `vX` moves to the rebuild's digest, which the release body then lists
-beside the first one when the two differ.
+the image is rebuilt and `vX` moves to the rebuild's digest, which then replaces the first digest
+in the release body's "Worker image" section.

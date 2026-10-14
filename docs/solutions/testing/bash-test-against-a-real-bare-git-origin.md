@@ -34,7 +34,7 @@ one conflict shape. The script sees only exit codes from `git push`, `git fetch`
 `git show`, so a test that runs those same binaries against a `file://` origin exercises the same
 code path as the Actions step; only the transport differs. It needs git ≥ 2.32 and `jq`, runs in
 about one second on the runner, and is a step of the `Tests` workflow right after checkout (before
-Bun setup, since it needs neither). Ten cases, fifty-three checks, the last case covering
+Bun setup, since it needs neither). Eleven cases, sixty-five checks, the last two covering
 `release-push.sh tagged`. The patterns:
 
 ## 1. Bare origin plus two clones at different starting points
@@ -139,7 +139,10 @@ same green line on the runner.
 The re-run cases (7 to 9) were run against the script before them the same way: `Results: 40
 passed, 13 failed`. Case 8's failures include `origin/main keeps the later version`: that script
 rewrote main's manifest from 1.0.2 down to 1.0.1. Case 7 failed only on its notice, since that
-script's rebase already dropped the duplicate bump. Then `53 passed, 0 failed`.
+script's rebase already dropped the duplicate bump. Then `53 passed, 0 failed`. Case 10, `tagged`
+refusing a tag whose name is not `<prefix>X.Y.Z`, against the `tagged` before it: `Results: 59
+passed, 6 failed`, the six being its two refusals' exit code, stdout and error. Then `65 passed, 0
+failed`.
 
 ## Related
 

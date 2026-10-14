@@ -267,6 +267,12 @@ jobs:
           # "Create GitHub release" reuses a published release and publishes a draft one.
           EXISTING_TAG=$(git tag --list 'legion-v*' --points-at HEAD --sort=-v:refname | head -1)
           if [ -n "$EXISTING_TAG" ]; then
+            # A tag's name is chosen by whoever pushed it; release only a plain version.
+            if ! [[ ${EXISTING_TAG#legion-v} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              printf -v shown '%q' "$EXISTING_TAG"
+              echo "::error::$shown, the legion-v tag at HEAD, is not legion-vX.Y.Z; refusing it"
+              exit 1
+            fi
             {
               echo "version=${EXISTING_TAG#legion-v}"
               echo "release_tag=$EXISTING_TAG"
@@ -387,6 +393,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.release_tag }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           # A release found here is reused. A draft is one an earlier attempt's `gh release create`
           # left between creating and publishing it: gh deletes that draft itself when an upload
@@ -404,7 +411,7 @@ jobs:
             gh release create "$TAG" \
               assets/* \
               --repo "${{ github.repository }}" \
-              --title "legion v${{ steps.version.outputs.version }}" \
+              --title "legion v$VERSION" \
               --generate-notes \
               --verify-tag
           fi
@@ -444,17 +451,27 @@ jobs:
       REF: ${{ needs.worker_image.outputs.ref }}
       RELEASE_TAG: ${{ needs.legion.outputs.release_tag }}
     steps:
-      - name: Append the worker image reference to the legion release
+      - name: Name the worker image on the legion release
         run: |
           test -n "$REF"
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
-          if grep -qF "$REF" body.md; then
-            echo "Release $RELEASE_TAG already lists $REF"
-            exit 0
+          # A whole-run rerun rebuilds the image under the same version tag, so an existing
+          # "## Worker image" section is replaced rather than added to: the body names only the
+          # digest the tag points at now. The section runs to the next heading of level 1 or 2.
+          rest=$(awk '/^## Worker image[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' body.md)
+          if [ -n "$rest" ]; then
+            printf '%s\n\n' "$rest" > notes.md
+          else
+            : > notes.md
           fi
           # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
-          printf '\n\n## Worker image\n\n`%s`\n' "$REF" >> body.md
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
+          printf '## Worker image\n\n`%s`\n' "$REF" >> notes.md
+          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
+          if [ "$(<body.md)" = "$(<notes.md)" ]; then
+            echo "Release $RELEASE_TAG already names $REF"
+            exit 0
+          fi
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
 
   envoy_plugin:
     needs: changes
@@ -536,8 +553,10 @@ jobs:
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+          jq --arg v "$VERSION" '.version = $v' \
             packages/envoy-plugin/package.json > tmp.json \
             && mv tmp.json packages/envoy-plugin/package.json
 
@@ -548,9 +567,11 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@sjawhar/opencode-legion-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          if npm view "@sjawhar/opencode-legion-envoy@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
           fi
@@ -558,17 +579,20 @@ jobs:
 
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh tag packages/envoy-plugin \
-            "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]" \
-            "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+            "chore: release envoy-plugin v$VERSION [skip ci]" \
+            "opencode-legion-envoy-v$VERSION"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+          tag="opencode-legion-envoy-v$VERSION"
           # The legion job's "Create GitHub release" says why a draft found here is published.
           if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
             if [ "$is_draft" = true ]; then
@@ -582,14 +606,16 @@ jobs:
             gh release create "$tag" \
               packages/envoy-plugin/*.tgz \
               --repo "${{ github.repository }}" \
-              --title "Envoy Plugin v${{ steps.version.outputs.version }}" \
+              --title "Envoy Plugin v$VERSION" \
               --generate-notes \
               --verify-tag
           fi
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/envoy-plugin "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh push-main packages/envoy-plugin "$VERSION"
 
   pi_envoy:
     needs: [changes, envoy_plugin]
@@ -679,8 +705,10 @@ jobs:
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+          jq --arg v "$VERSION" '.version = $v' \
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
 
@@ -703,9 +731,11 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@sjawhar/pi-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          if npm view "@sjawhar/pi-envoy@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
           fi
@@ -720,17 +750,20 @@ jobs:
 
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh tag packages/pi-envoy \
-            "chore: release pi-envoy v${{ steps.version.outputs.version }} [skip ci]" \
-            "pi-envoy-v${{ steps.version.outputs.version }}"
+            "chore: release pi-envoy v$VERSION [skip ci]" \
+            "pi-envoy-v$VERSION"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tag="pi-envoy-v${{ steps.version.outputs.version }}"
+          tag="pi-envoy-v$VERSION"
           # The legion job's "Create GitHub release" says why a draft found here is published.
           if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
             if [ "$is_draft" = true ]; then
@@ -744,14 +777,16 @@ jobs:
             gh release create "$tag" \
               packages/pi-envoy/*.tgz \
               --repo "${{ github.repository }}" \
-              --title "Pi Envoy v${{ steps.version.outputs.version }}" \
+              --title "Pi Envoy v$VERSION" \
               --generate-notes \
               --verify-tag
           fi
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/pi-envoy "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh push-main packages/pi-envoy "$VERSION"
 
   pi_legion:
     # After pi_envoy, never beside it: both jobs end in `release-push.sh push-main`, whose rebase
@@ -848,8 +883,10 @@ jobs:
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+          jq --arg v "$VERSION" '.version = $v' \
             packages/pi-legion/package.json > tmp.json \
             && mv tmp.json packages/pi-legion/package.json
 
@@ -874,9 +911,11 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@sjawhar/pi-legion@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          if npm view "@sjawhar/pi-legion@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
           fi
@@ -891,17 +930,20 @@ jobs:
 
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh tag packages/pi-legion \
-            "chore: release pi-legion v${{ steps.version.outputs.version }} [skip ci]" \
-            "pi-legion-v${{ steps.version.outputs.version }}"
+            "chore: release pi-legion v$VERSION [skip ci]" \
+            "pi-legion-v$VERSION"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          tag="pi-legion-v${{ steps.version.outputs.version }}"
+          tag="pi-legion-v$VERSION"
           # The legion job's "Create GitHub release" says why a draft found here is published.
           if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
             if [ "$is_draft" = true ]; then
@@ -915,11 +957,13 @@ jobs:
             gh release create "$tag" \
               packages/pi-legion/*.tgz \
               --repo "${{ github.repository }}" \
-              --title "Pi Legion v${{ steps.version.outputs.version }}" \
+              --title "Pi Legion v$VERSION" \
               --generate-notes \
               --verify-tag
           fi
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/pi-legion "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh push-main packages/pi-legion "$VERSION"

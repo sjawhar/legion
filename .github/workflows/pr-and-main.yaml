@@ -207,6 +207,9 @@ jobs:
       - name: Test release scripts
         run: .github/scripts/release-push.test.sh
 
+      - name: Test the release version bump
+        run: .github/scripts/release-bump.test.sh
+
       - name: Test third-party notices
         run: bun test scripts/third-party-notices.test.ts
 

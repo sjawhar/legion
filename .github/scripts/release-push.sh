@@ -14,6 +14,9 @@
 #            same commit, with every tag its first attempt pushed; its version
 #            step reads this to release that tag again, where computing the
 #            next version from the tag would find an empty range and skip.
+#            The version is the tag's name, which anyone who can push a tag
+#            chooses, so that tag must be <tag-prefix>X.Y.Z: any other name
+#            fails with an ::error:: on stderr naming it.
 # push-main: push the bump commit to main, fetching main and rebasing onto it
 #            between attempts, five attempts in all. This runs last, after the
 #            tag and GitHub release exist: a lost push only delays the metadata
@@ -42,7 +45,9 @@
 #            already holds the version being released or a later one, there is
 #            nothing to push: a re-run whose first attempt landed this bump, or
 #            a re-run of an older run after a later release of the package
-#            landed. It says so in a notice and exits 0.
+#            landed. It says so in a notice and exits 0, dropping the bump
+#            commit whole, which is right only because that commit changes
+#            nothing but the manifest's version.
 set -euo pipefail
 
 command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <package-dir> <tag-prefix> | release-push.sh push-main <package-dir> <version>}
@@ -95,6 +100,11 @@ case "$command" in
         [ "$(git rev-parse -q --verify "$commit^")" = "$head" ] &&
           [ "$(git diff --name-only "$head" "$commit")" = "$package_dir/package.json" ]
       }; then
+        if ! [[ ${candidate#"$prefix"} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          printf -v shown '%q' "$candidate"
+          echo "::error::release-push.sh tagged: $shown, the release tag for this checkout, is not ${prefix}X.Y.Z; refusing it" >&2
+          exit 1
+        fi
         echo "$candidate"
         exit 0
       fi
