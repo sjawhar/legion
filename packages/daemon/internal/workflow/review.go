@@ -476,12 +476,16 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // rule runs before awaiting_merge: there only the head's own red withdraws the READY
 // (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case), never one carried to the READY
 // head from the code head a .legion/-only push replaced, since READY found the head's own CI green
-// on GitHub, which is what GitHub merges by. decideChecks applies the rule on a settlement or a
-// read of the required set, the facts that change the verdict; two facts that are no CI result can
-// find a red standing and apply it too: a push classified late, which can complete the carry of a
-// code head's settlement to the handoff head above it (classify.SettlementFor), and a hold's retry,
-// which restores reviewing after a settlement reached the issue while it was held, where nothing
-// moves. A review or a completion changes nothing about the verdict, and reads none.
+// on GitHub, which is what GitHub merges by. The invariant is that the rule is applied by whichever
+// fact makes a red stand for the head, in whatever phase the issue is when it does, and never by a
+// review or a completion, which change nothing about the verdict and read none. A red comes to
+// stand by a settlement or a read of the required set, the facts that change the verdict
+// (decideChecks); by a push classified late, or a head arriving over a push already known, either
+// of which can complete the carry of a code head's settlement to the handoff head above it
+// (classify.SettlementFor; push, pullRequestSynchronized); and by a hold's retry, which restores a
+// phase a settlement reached while the issue was held, where nothing moves (retryOrEscalate). A
+// fact that finds no red standing applies nothing, so each applies the rule before whatever else
+// it does.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
 	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil

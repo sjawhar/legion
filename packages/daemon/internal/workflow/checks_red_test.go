@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
@@ -151,20 +152,14 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 			if pending != nil {
 				t.Fatalf("the issue's pending READY version is %d, want none: a READY the gate refused belongs to the merging phase the red ended", *pending)
 			}
-			var task, quiesce string
-			if err := pool.QueryRow(context.Background(), "select payload->>'task', coalesce(payload->>'quiesce', '') from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task, &quiesce); err != nil {
-				t.Fatalf("read the implementer's start: %v", err)
-			}
-			if claim.Role(quiesce) != tc.quiesce {
+			task, quiesce := implementerStart(t, pool)
+			if quiesce != tc.quiesce {
 				t.Fatalf("the implementer's start waits for %q, want %q", quiesce, tc.quiesce)
 			}
-			var reason, noticePhase string
-			if err := pool.QueryRow(context.Background(), "select payload->>'reason', coalesce(payload->>'phase', '') from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &noticePhase); err != nil {
-				t.Fatalf("read the architect's checks-red notice: %v", err)
-			}
+			reason, noticePhase := checksRedNotice(t, pool)
 			want := "CI is red at head: python-cli-tests / test (pytest)"
 			rounds := implementerRounds(t, pool)
-			if !strings.Contains(task, want) || strings.Contains(task, "rename the widget") || !strings.Contains(reason, want) || phase.Phase(noticePhase) != tc.from || rounds != 1 {
+			if !strings.Contains(task, want) || strings.Contains(task, "rename the widget") || !strings.Contains(reason, want) || noticePhase != tc.from || rounds != 1 {
 				t.Fatalf("task %q, notice %q in %q and rounds %d; want both to say %q and nothing of the reviewer's body, the notice in %s, and the round counted", task, reason, noticePhase, rounds, want, tc.from)
 			}
 		})
@@ -225,17 +220,85 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 			if got := issuePhase(t, pool); got != phase.Implementing {
 				t.Fatalf("after the late push completed the carry the issue is in %s, want implementing: the red stands for the head as a settlement after the push would have left it", got)
 			}
-			var task, quiesce string
-			if err := pool.QueryRow(context.Background(), "select payload->>'task', coalesce(payload->>'quiesce', '') from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task, &quiesce); err != nil {
-				t.Fatalf("read the implementer's start: %v", err)
-			}
-			var reason, noticePhase string
-			if err := pool.QueryRow(context.Background(), "select payload->>'reason', coalesce(payload->>'phase', '') from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &noticePhase); err != nil {
-				t.Fatalf("read the architect's checks-red notice: %v", err)
-			}
+			task, quiesce := implementerStart(t, pool)
+			reason, noticePhase := checksRedNotice(t, pool)
 			want := "CI is red at head: ci"
-			if !strings.Contains(task, want) || !strings.Contains(reason, want) || phase.Phase(noticePhase) != tc.from || claim.Role(quiesce) != tc.quiesce {
+			if !strings.Contains(task, want) || !strings.Contains(reason, want) || noticePhase != tc.from || quiesce != tc.quiesce {
 				t.Fatalf("task %q, notice %q in %q, start waits for %q; want both to say %q, the notice in %s, the start waiting for %q", task, reason, noticePhase, quiesce, want, tc.from, tc.quiesce)
+			}
+		})
+	}
+}
+
+// The head's arrival completes the carry when GitHub delivered the push first: the push, classified
+// handoff-only while the record still said the code head, is kept for the head it made
+// (classify.AdvancePullRequestHead, keptPushes), and the synchronize that moves the head onto it
+// lets the code head's red stand for the new head (carriedBack) - the same carry the push completes
+// in the other order. So the arrival applies the CI rule in whatever phase the issue is, before
+// reviewing's re-ask: the work goes back from testing, reviewing, retro and merging, the
+// implementer's start waiting on the role the red took the phase from, and the architect told the
+// phase the red stopped. In awaiting_merge the READY head arriving over its handoff push withdraws
+// nothing, as the late push does not (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing):
+// READY found the head's own CI green on GitHub, so the issue stays, nobody is told and nothing is
+// started.
+func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
+	for _, tc := range []struct {
+		from    phase.Phase
+		status  string
+		quiesce claim.Role
+	}{
+		{from: phase.Testing, status: "testing", quiesce: claim.RoleTester},
+		{from: phase.Reviewing, status: "needs_review", quiesce: claim.RoleReviewer},
+		{from: phase.Retro, status: "retro"},
+		{from: phase.Merging, status: "retro", quiesce: claim.RoleMerger},
+		{from: phase.AwaitingMerge, status: "retro"},
+	} {
+		t.Run(string(tc.from), func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			// The push to the handoff head is known, classified handoff-only, and the head has not
+			// arrived: the record still says the code head, whose red settlement stands for it.
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "code", CheckedHead: "code", Required: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Failing: []string{"ci"},
+				Pushes: []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			for _, role := range []claim.Role{claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
+				if RoleFor(tc.from) == role {
+					seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
+				}
+			}
+			if tc.from == phase.AwaitingMerge {
+				// The merger's READY names the arriving head, so the move withdraws no READY of its own
+				// (withdrawMovedReady): only the carried red is in question.
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+			}
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			if result := apply("head-arrives", syncedTo("head")); result.Refusal != nil {
+				t.Fatalf("apply the head's arrival = %+v", result.Refusal)
+			}
+			if got := pullRequestAt(t, pool); got.head != "head" || got.verdict != "red" {
+				t.Fatalf("after the arrival the head is %q with verdict %q, want head with the code head's red carried to it", got.head, got.verdict)
+			}
+			if tc.from == phase.AwaitingMerge {
+				if got := issuePhase(t, pool); got != phase.AwaitingMerge {
+					t.Fatalf("after the arrival the issue is in %s, want awaiting_merge: a carried red withdraws no READY", got)
+				}
+				if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+					t.Fatalf("notices %v, want none", got)
+				}
+				assertOutboxCount(t, pool, "supervise", 0)
+				return
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the arrival completed the carry the issue is in %s, want implementing: the red stands for the head as it does when the push is the fact that completes the carry", got)
+			}
+			task, quiesce := implementerStart(t, pool)
+			reason, from := checksRedNotice(t, pool)
+			want := "CI is red at head: ci"
+			if !strings.Contains(task, want) || !strings.Contains(reason, want) || from != tc.from || quiesce != tc.quiesce {
+				t.Fatalf("task %q, notice %q in %q, start waits for %q; want both to say %q, the notice in %s, the start waiting for %q", task, reason, from, quiesce, want, tc.from, tc.quiesce)
 			}
 		})
 	}
@@ -302,14 +365,12 @@ func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) 
 				return
 			}
 			want := "CI is red at head: " + required
-			var reason, from, status string
-			if err := pool.QueryRow(context.Background(), "select payload->>'reason', payload->>'phase' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &from); err != nil {
-				t.Fatalf("read the architect's checks-red notice: %v", err)
-			}
+			reason, from := checksRedNotice(t, pool)
+			var status string
 			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
 				t.Fatalf("read the status write: %v", err)
 			}
-			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != string(phase.AwaitingMerge) || status != "in_progress" {
+			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
 				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
 			}
 			if rounds := implementerRounds(t, pool); rounds != 1 {
@@ -449,14 +510,12 @@ func TestAConflictingMergeabilityInAwaitingMergeSendsTheTreeBackToImplementing(t
 				return
 			}
 			want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
-			var reason, from, status string
-			if err := pool.QueryRow(context.Background(), "select payload->>'reason', payload->>'phase' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &from); err != nil {
-				t.Fatalf("read the architect's checks-red notice: %v", err)
-			}
+			reason, from := checksRedNotice(t, pool)
+			var status string
 			if err := pool.QueryRow(context.Background(), "select payload->>'status' from outbox where kind = 'dispatch_status'").Scan(&status); err != nil {
 				t.Fatalf("read the status write: %v", err)
 			}
-			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != string(phase.AwaitingMerge) || status != "in_progress" {
+			if task := implementerTask(t, pool); !strings.Contains(task, want) || !strings.Contains(reason, want) || from != phase.AwaitingMerge || status != "in_progress" {
 				t.Fatalf("task %q, notice %q from %q, status %q; want both to say %q, from awaiting_merge, and the issue in_progress", task, reason, from, status, want)
 			}
 			if rounds := implementerRounds(t, pool); rounds != 1 {
@@ -508,14 +567,11 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 		t.Fatalf("after the same conflicting read again the issue is in %s, want implementing: the record did not change, but the decision must still run on this first read in awaiting_merge", got)
 	}
 	want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
-	var reason string
 	var notices int
 	if err := pool.QueryRow(context.Background(), "select count(*) from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&notices); err != nil {
 		t.Fatalf("count the architect's checks-red notices: %v", err)
 	}
-	if err := pool.QueryRow(context.Background(), "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason); err != nil {
-		t.Fatalf("read the architect's checks-red notice: %v", err)
-	}
+	reason, _ := checksRedNotice(t, pool)
 	if notices != 1 || !strings.Contains(reason, want) {
 		t.Fatalf("checks-red notices = %d, reason %q; want exactly one saying %q", notices, reason, want)
 	}
@@ -954,6 +1010,28 @@ func pushedFromTo(from, to, paths, pusher string) intake.Fact {
 	unforced, whole := "false", "false"
 	return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
 		ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: pusher}
+}
+
+// implementerStart is the implementer's start the outbox holds: its task, and the role the start
+// waits for before it acts (record.SuperviseRequest's Quiesce), "" for none.
+func implementerStart(t *testing.T, pool *pgxpool.Pool) (task string, quiesce claim.Role) {
+	t.Helper()
+	var waits string
+	if err := pool.QueryRow(context.Background(), "select payload->>'task', coalesce(payload->>'quiesce', '') from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task, &waits); err != nil {
+		t.Fatalf("read the implementer's start: %v", err)
+	}
+	return task, claim.Role(waits)
+}
+
+// checksRedNotice is the architect's checks-red notice the outbox holds: its reason, and the phase
+// the red stopped.
+func checksRedNotice(t *testing.T, pool *pgxpool.Pool) (reason string, from phase.Phase) {
+	t.Helper()
+	var stopped string
+	if err := pool.QueryRow(context.Background(), "select payload->>'reason', coalesce(payload->>'phase', '') from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &stopped); err != nil {
+		t.Fatalf("read the architect's checks-red notice: %v", err)
+	}
+	return reason, phase.Phase(stopped)
 }
 
 // Checks can flap: red, then green on a re-run, then red again. Below the cap the first red sends

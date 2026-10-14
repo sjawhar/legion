@@ -123,7 +123,10 @@ built READY, moves the issue to `implementing` and interrupts your turn, and the
 only once that turn has ended. Do not resume the interrupted work afterward. While you ran retro
 the issue moves the same way, and nothing is interrupted: you are the implementer, so you are
 handed the implementing task once your turn ends, and the workspace is implementing's again, which
-is yours; a retro completion reported after the move is refused.
+is yours; a retro completion you start once the issue has moved is refused (the record names
+`implementing`, whose handoff is the one `handoff_complete` looks for), while one already in flight
+when the red lands can be taken as your implementing completion, which the tester's own CI read
+then catches.
 
 On every start, and especially after revival or re-creation, read the issue and then the
 committed predecessor handoffs in lifecycle order, with the `read` tool from

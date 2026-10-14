@@ -318,10 +318,10 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 // push landed on a green verdict (AdvancePullRequestHead). That attempt is the loop the cap bounds,
 // so its red no longer sends the work back from testing, reviewing, retro or merging by itself,
 // however often it returns - a re-run failing again, a red after the head read green, a second push
-// before CI settled - and the architect decides what follows (workflow's decideChecks and
-// reviewRound). A head pushed onto a green verdict is not that loop: it raised no count and left the
-// attempt, so its red is new. A head a handoff-only push left is in the attempt of the code head it
-// replaced, as its red is that head's (RedSendsBack). A green head is the fix that worked.
+// before CI settled - and the architect decides what follows (workflow's standingRed). A head
+// pushed onto a green verdict is not that loop: it raised no count and left the attempt, so its red
+// is new. A head a handoff-only push left is in the attempt of the code head it replaced, as its
+// red is that head's (RedSendsBack). A green head is the fix that worked.
 func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
 	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
 }

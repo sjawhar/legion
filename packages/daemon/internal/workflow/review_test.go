@@ -702,6 +702,69 @@ func TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack(t *testing.T) {
 	}
 }
 
+// The retry applies the CI rule from whatever phase the hold was from, not reviewing alone: a
+// settlement that reaches an issue held from testing, retro or merging moves nothing either (Table
+// has no held row), and the retry that restores the phase is the fact that lets its red stand
+// there. The work goes back to implementing with a checks-red naming the restored phase, the
+// implementer's start waiting on the role whose claim failed - the tester, the merger, and nobody
+// for retro, the implementer's own phase - and the restored phase's worker is not started: the red
+// left it no phase to work.
+func TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack(t *testing.T) {
+	for _, tc := range []struct {
+		from    phase.Phase
+		status  string
+		quiesce claim.Role
+	}{
+		{from: phase.Testing, status: "testing", quiesce: claim.RoleTester},
+		{from: phase.Retro, status: "retro"},
+		{from: phase.Merging, status: "retro", quiesce: claim.RoleMerger},
+	} {
+		t.Run(string(tc.from), func(t *testing.T) {
+			pool := migratedPool(t)
+			role := RoleFor(tc.from)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "c0ffee", Required: []string{"lint"}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			if role != claim.RoleImplementer {
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
+			}
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			for i, fact := range []intake.Fact{
+				intake.ClaimFailed{Issue: "LEGION-208", Role: role},
+				intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "c0ffee", CheckRuns: []record.AttemptRun{{Name: "lint", ID: 1}},
+					Generation: 1, Snapshot: "red-c0ffee", Failing: []string{"lint"}},
+				intake.RetryOrEscalate{Issue: "LEGION-208", Decision: intake.RetryDecision},
+			} {
+				if result := apply(fmt.Sprintf("held-red-%d", i), fact); result.Refusal != nil {
+					t.Fatalf("fact %d (%T) was refused: %+v", i, fact, result.Refusal)
+				}
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("the issue is in %s, want implementing: the head is red", got)
+			}
+			if reason, from := checksRedNotice(t, pool); from != tc.from || !strings.Contains(reason, "CI is red at c0ffee: lint") {
+				t.Fatalf("checks-red %q in %q, want it to name lint and the restored phase %s", reason, from, tc.from)
+			}
+			starts := func(role claim.Role) int {
+				var n int
+				if err := pool.QueryRow(t.Context(), `select count(*) from outbox where kind = 'supervise' and payload->>'op' = 'start'
+					and payload->>'role' = $1`, string(role)).Scan(&n); err != nil {
+					t.Fatalf("count the %s's starts: %v", role, err)
+				}
+				return n
+			}
+			if _, quiesce := implementerStart(t, pool); starts(claim.RoleImplementer) != 1 || quiesce != tc.quiesce {
+				t.Fatalf("implementer starts = %d waiting for %q, want one waiting for %q", starts(claim.RoleImplementer), quiesce, tc.quiesce)
+			}
+			if role != claim.RoleImplementer && starts(role) != 0 {
+				t.Fatalf("the retry started the %s %d times, want none: the red left it no phase to work", role, starts(role))
+			}
+		})
+	}
+}
+
 // The reviewer's approval submitted before its completion but delivered after it ends the round as
 // any approval does, and tells nothing beyond the completion's notice.
 func TestALateDeliveredApprovalEndsAStuckRound(t *testing.T) {

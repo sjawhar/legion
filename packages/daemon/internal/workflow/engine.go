@@ -536,24 +536,32 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	// A settlement that reached the issue while it was held from reviewing, where nothing moves,
-	// is acted on first: a red standing for the head sends the work back to implementing as it would
-	// have on arrival (standingRed), and no reviewer is started. Otherwise a review round held open
-	// may already have both of its halves - the reviewer completed before the hold, and its review
-	// was recorded while held - and ends here (reviewRound); the reviewer is started only if the
-	// round is still open, since a second completion of the same commit would be refused as not
-	// new. A round its reviewer completed that nothing would end is stuck: the reviewer's task says
-	// why, so the restarted reviewer decides it. The architect, who ordered the retry, is told
-	// nothing: a notice now would read as the reviewer's answer to its request.
+	// A settlement that reached the issue while it was held is acted on first, whatever phase the
+	// hold was from: held, the issue has no checks_red row (Table), so the settlement moved nothing,
+	// and the retry that restores the phase is the fact that lets its red stand there. A red
+	// standing for the head sends the work back to implementing as it would have on arrival
+	// (standingRed), and the restored phase's worker is not started: the implementer's start waits
+	// on the failed role's turn as any takeover does (takenOver), which is nothing to wait for when
+	// that claim is out of a turn (supervise.Machine.Quiesce answers nil at once), and retro back to
+	// implementing waits on nobody. A phase with no checks_red row - implementing, planning - moves
+	// nothing (sendBack), and a hold from before the pull request opened has none to read, on which
+	// standingRed moves nothing. Only when nothing moved is the restored phase's worker started. From
+	// reviewing a review round held open may already have both of its halves - the reviewer
+	// completed before the hold, and its review was recorded while held - and ends here
+	// (reviewRound); the reviewer is started only if the round is still open, since a second
+	// completion of the same commit would be refused as not new. A round its reviewer completed that
+	// nothing would end is stuck: the reviewer's task says why, so the restarted reviewer decides
+	// it. The architect, who ordered the retry, is told nothing: a notice now would read as the
+	// reviewer's answer to its request.
+	pr, err := e.store.PullRequest(ctx, tx, issue.Key)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
+		return intake.Result{}, err
+	}
 	reason := "retry held phase"
 	if from == phase.Reviewing {
-		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
-			return intake.Result{}, err
-		}
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 		if err != nil {
 			return intake.Result{}, err
