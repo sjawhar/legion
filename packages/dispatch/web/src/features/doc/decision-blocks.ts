@@ -7,10 +7,14 @@ const OPENING_FENCE = /^((?:[ \t]*>)*[ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(:{3,})ask
 
 /**
  * A code fence's opening line: the same prefix and optional list marker, then a run of three or
- * more backticks or tildes and the info string. A backtick fence's info string holds no backtick
- * (CommonMark), which keeps inline code such as ```` ``` ```` from opening one.
+ * more backticks or tildes and the info string. A rendering is the input here, and the renderer
+ * writes every code block fenced and escapes a paragraph that would read as one, so a line
+ * opening with such a run is a fence whatever its info string says: CommonMark's exception for a
+ * backtick in the info string is not applied, since a `code_block.language` holding one (which the
+ * markdown parser refuses, so only a live tree carries it) still renders as a fence, and reading
+ * its lines as prose would cut a block written inside them.
  */
-const CODE_FENCE = /^((?:[ \t]*>)*[ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/;
+const CODE_FENCE = /^((?:[ \t]*>)*[ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})/;
 
 /** A line that separates blocks: nothing, or only spaces and quote markers (`>` inside a quote). */
 const BLANK_LINE = /^[ \t>]*$/;
@@ -48,8 +52,7 @@ function closingFenceAfter(lines: readonly string[], start: number): number | un
 function codeFenceEnd(lines: readonly string[], start: number): number | undefined {
   const opening = CODE_FENCE.exec(lines[start]);
   if (opening === null) return undefined;
-  const [, quotePrefix, listMarker = "", fence, info] = opening;
-  if (fence[0] === "`" && info.includes("`")) return undefined;
+  const [, quotePrefix, listMarker = "", fence] = opening;
   const prefix = quotePrefix + " ".repeat(listMarker.length);
   const closing = new RegExp(`^ {0,3}${fence[0] === "`" ? "`" : "~"}{${fence.length},}[ \\t]*$`);
   for (let i = start + 1; i < lines.length; i += 1) {
