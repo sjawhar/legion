@@ -670,7 +670,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// worked toward READY (takenOver) - waits for that role's turn instead: the next role's start
 	// interrupts it and acts once it is over.
 	starting := RoleFor(row.To)
-	quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from, row.To)
+	quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from, starting)
 	if err != nil {
 		return err
 	}
@@ -713,15 +713,15 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 // completion's (the outgoing worker's turn reports it once its handoff is committed and pushed),
 // the outgoing role's own request (a backward move from inside its turn), or a reviewer's round it
 // already completed, and takes over from nobody. Nor does a move between two phases of one role -
-// retro back to implementing - take the phase from anyone: the implementer keeps its turn and is
-// handed the new phase's task once it ends, and a start may not wait on its own role
-// (record.SuperviseRequest's Quiesce).
-func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from, to phase.Phase) (claim.Role, error) {
+// retro back to implementing, where starting, the role the transition starts, is the one leaving -
+// take the phase from anyone: the implementer keeps its turn and is handed the new phase's task
+// once it ends, and a start may not wait on its own role (record.SuperviseRequest's Quiesce).
+func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from phase.Phase, starting claim.Role) (claim.Role, error) {
 	if trigger != TriggerChecksRed {
 		return "", nil
 	}
 	leaving := RoleFor(from)
-	if leaving == "" || leaving == RoleFor(to) {
+	if leaving == "" || leaving == starting {
 		return "", nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, leaving)

@@ -117,15 +117,10 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	}
 	switch issue.Phase {
 	case phase.Reviewing:
-		if !moved || !classify.HeadPushKnown(prior, prior.HeadSHA, pr.HeadSHA) {
+		if !moved || !classify.HeadPushKnown(prior, pr.HeadSHA) {
 			return intake.Result{}, nil
 		}
-		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
-		if err != nil {
-			return intake.Result{}, err
-		}
-		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byPush)
-		return intake.Result{}, err
+		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
 	case phase.Implementing:
 		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
 		if err != nil || row.HandoffCommit == "" {
@@ -164,12 +159,20 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
 		return intake.Result{}, err
 	}
+	return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
+}
+
+// reaskRound re-asks issue's review round (settleRound) after a push, or after the head it left
+// arrived, pr being the pull request as the fact left it and prior as the fact found it: the round
+// as prior had it is the before a round stuck the same way is deduped against (stuckAs), so a push
+// classified late at the head the round was already told stuck at tells nothing again.
+func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, prior record.PullRequest) error {
 	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
-		return intake.Result{}, err
+		return err
 	}
-	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byPush)
-	return intake.Result{}, err
+	_, err = e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush)
+	return err
 }
 
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that
