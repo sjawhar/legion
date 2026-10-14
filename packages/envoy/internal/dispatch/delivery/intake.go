@@ -46,8 +46,9 @@ type Intake struct {
 	github *githubapp.Client
 }
 
-// NewIntake builds an Intake. natsClient must already be connected (bus.ConnectOwningStream, as
-// cmd/dispatch wires its own publisher).
+// NewIntake builds an Intake. natsClient must already be connected and hold no other JetStream
+// subscription, which the intake's bind would replace (bus.Client.Subscribe): StartIntakes gives it
+// a client of its own.
 func NewIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *Intake {
 	return &Intake{nats: natsClient, pool: pool, github: github}
 }
