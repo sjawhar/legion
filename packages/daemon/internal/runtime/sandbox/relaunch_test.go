@@ -1384,9 +1384,17 @@ func supervisedSandboxMachine(
 	t *testing.T, g *rig, spec runtime.SpawnSpec,
 ) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
 	t.Helper()
-	c := supervise.Claim{
+	return restoredSandboxMachine(t, g, spec, supervise.Claim{
 		Token: spec.Claim, Project: spec.Project, Tree: spec.Tree, Issue: spec.Issue, Role: spec.Role, State: supervise.StateQueued,
-	}
+	})
+}
+
+// restoredSandboxMachine is supervisedSandboxMachine over c, a claim as a daemon reads it back from
+// its store at boot, on the rig's runtime as it is now.
+func restoredSandboxMachine(
+	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim,
+) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
+	t.Helper()
 	store := &supervisedSandboxStore{claim: c}
 	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{

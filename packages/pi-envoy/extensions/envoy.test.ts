@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject } from "@legion/contracts";
@@ -32,7 +33,11 @@ import type {
   PiApi,
   UserInputResult,
 } from "@legion/pi-shared/pi-types";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
+import {
+  claimEnvoyRole,
+  onEnvoyRoleRegained,
+  subscribeLegionNotice,
+} from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
@@ -144,7 +149,11 @@ const natsState = {
   onPublish: undefined as ((subject: string) => void) | undefined,
   failPublishes: 0,
   connectedNames: [] as string[],
+  /** What each connect was given: its servers, and whether it carried an nkey authenticator. */
+  connects: [] as { readonly servers: readonly string[]; readonly authenticated: boolean }[],
   failConnects: 0,
+  /** Hands each connect, once recorded, to nats.js itself, for a row that watches what it dials. */
+  realConnect: false,
   drainHangs: false,
   drainStarted: false,
 };
@@ -159,17 +168,28 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
+// that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
+// before the mock replaces it: a static import's live bindings would read the mock.
+const { connect: realConnect, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   nkeyAuthenticator,
   nkeys,
-  connect: async ({ name }: { readonly name: string }) => {
+  connect: async (options: {
+    readonly name: string;
+    readonly servers: readonly string[];
+    readonly authenticator?: unknown;
+  }) => {
+    const { name, servers, authenticator } = options;
     if (natsState.failConnects > 0) {
       natsState.failConnects -= 1;
       throw new Error("CONNECTION_REFUSED");
     }
     natsState.connectedNames.push(name);
+    natsState.connects.push({ servers, authenticated: authenticator !== undefined });
+    if (natsState.realConnect) {
+      return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
+    }
     return {
       isClosed: () => false,
       drain: async () => {
@@ -292,6 +312,20 @@ const originalTmuxPane = process.env.TMUX_PANE;
 const originalDispatchSessionId = process.env.DISPATCH_SESSION_ID;
 const originalDispatchHost = process.env.DISPATCH_HOST;
 const originalDispatchStateDir = process.env.DISPATCH_STATE_DIR;
+// What picks the envoy.json the extension reads, and the credentials a Legion pane carries beside
+// it: each test starts with none of them but a file that holds no section (`beforeEach`).
+const configVariables = [
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
+  "XDG_CONFIG_HOME",
+  "ENVOY_TOKEN",
+  "ENVOY_TOKEN_FILE",
+  "NATS_NKEY_SEED",
+  "NATS_NKEY_SEED_FILE",
+] as const;
+const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
+let configDirectory = "";
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
@@ -314,6 +348,13 @@ beforeEach(() => {
   delete process.env.TMUX_PANE;
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;
+  // The extension picks its envoy.json when its module loads, and each test loads it fresh: a file
+  // that holds no section, so Dispatch and Envoy come from the variables the test sets and never
+  // from the caller's own envoy.json or Oh My Pi profile.
+  for (const name of configVariables) delete process.env[name];
+  configDirectory = mkdtempSync(join(tmpdir(), "envoy-config-"));
+  process.env.ENVOY_CONFIG_FILE = join(configDirectory, "envoy.json");
+  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
 });
 
 afterEach(async () => {
@@ -347,11 +388,17 @@ afterEach(async () => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+  for (const [name, value] of originalConfigVariables) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  rmSync(configDirectory, { recursive: true, force: true });
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   natsState.connectedNames.length = 0;
+  natsState.connects.length = 0;
   natsState.published.length = 0;
   natsState.onPublish = undefined;
   natsState.failPublishes = 0;
@@ -359,6 +406,7 @@ afterEach(async () => {
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
+  natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
   hostBuiltins.length = 0;
@@ -3379,9 +3427,217 @@ describe("envoy OMP extension", () => {
         ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
       }
     );
-    expect(
-      notifications.filter((message) => message.startsWith("envoy: Dispatch disabled — "))
-    ).toEqual(["envoy: Dispatch disabled — dispatch.token must be a non-empty bearer token"]);
+    expect(notifications).toEqual([
+      `envoy: Dispatch is off: DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${process.env.ENVOY_CONFIG_FILE}`,
+    ]);
+  });
+
+  describe("the session's envoy.json", () => {
+    /** A context for `sessionID` whose notifications land in `notifications`. */
+    const notifying = (sessionID: string, notifications: string[]): SessionContext => ({
+      ...sessionContext(sessionID),
+      ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+    });
+    const userTurn = { messages: [{ role: "user", content: "Fix the bug.", timestamp: 1 }] };
+
+    test("envoy.json: a named profile with none keeps the old user file unread and says where it belongs", async () => {
+      const home = mkdtempSync(join(tmpdir(), "envoy-profile-home-"));
+      const agentDirectory = mkdtempSync(join(tmpdir(), "envoy-profile-"));
+      const marker = join(home, "old-token-ran");
+      const old = join(home, ".config", "opencode", "envoy.json");
+      process.env.HOME = home;
+      process.env.OMP_PROFILE = "work";
+      process.env.PI_CODING_AGENT_DIR = agentDirectory;
+      mkdirSync(dirname(old), { recursive: true });
+      writeFileSync(
+        old,
+        JSON.stringify({
+          dispatch: {
+            enabled: true,
+            serverUrl: "https://old.dispatch.example",
+            token: `!touch ${marker}; echo old-token`,
+          },
+        })
+      );
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const requests: string[] = [];
+      globalThis.fetch = async (input) => {
+        requests.push(input.toString());
+        return new Response("no request belongs here", { status: 500 });
+      };
+      try {
+        const { default: envoyExtension } = await import("./envoy.ts?envoy-json-profile");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const file = join(agentDirectory, "envoy.json");
+        const notifications: string[] = [];
+        const context = notifying("ses_profile", notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+
+        expect(process.env.ENVOY_CONFIG_FILE).toBe(file);
+        expect(fixture.tools).toEqual([]);
+        expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
+        expect(notifications).toEqual([
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
+        ]);
+        expect(existsSync(marker)).toBe(false);
+        // A Legion claim reaches the listener through the one accessor, which refuses it.
+        await expect(
+          claimEnvoyRole("ses_profile", "legion-omp-repo-1-implementer", context)
+        ).rejects.toThrow(
+          `Envoy is off for this session: no envoy.json at ${file}: Envoy is off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`
+        );
+        await fixture.handlers.get("session_shutdown")?.({}, context);
+        expect(requests).toEqual([]);
+        expect(natsState.connectedNames).toEqual([]);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        rmSync(agentDirectory, { recursive: true, force: true });
+      }
+    });
+
+    test("envoy.json: an envoy section on and dispatch off registers the Envoy tools and leaves dispatch-first out", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      writeFileSync(
+        process.env.ENVOY_CONFIG_FILE ?? "",
+        JSON.stringify({
+          dispatch: { enabled: false },
+          envoy: {
+            enabled: true,
+            url: "http://envoy-from-file.test",
+            natsUrls: ["nats://nats-under-test:4222"],
+          },
+        })
+      );
+      const hosts: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        hosts.push(new URL(input.toString()).host);
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-envoy-only");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, notifying("ses_envoy_only", notifications));
+
+      expect(fixture.tools.map((tool) => tool.name)).toEqual(
+        envoyToolSpecs.map((spec) => spec.name)
+      );
+      const contextHandler = fixture.handlers.get("context");
+      expect(
+        contextHandler === undefined ? undefined : await contextHandler(userTurn, sessionContext())
+      ).toBeUndefined();
+      expect(notifications).toEqual([]);
+      expect(hosts.length).toBeGreaterThan(0);
+      expect(new Set(hosts)).toEqual(new Set(["envoy-from-file.test"]));
+    });
+
+    // The listener's bearer and the NATS seed are resolved once and handed to the client and the
+    // connection: a plugin that dropped either would leave every pane unregistered or signed out.
+    test("envoy.json: the listener gets the file's envoy.token, and NATS the file's servers and seed", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const user = nkeys.createUser();
+      writeFileSync(
+        process.env.ENVOY_CONFIG_FILE ?? "",
+        JSON.stringify({
+          envoy: {
+            enabled: true,
+            url: "http://envoy-from-file.test",
+            natsUrls: ["nats://nats-from-file:4222"],
+            token: "file-listener-token",
+            natsSeed: new TextDecoder().decode(user.getSeed()),
+          },
+        })
+      );
+      const auth: (string | null)[] = [];
+      globalThis.fetch = async (input, init) => {
+        auth.push(new Headers(init?.headers).get("Authorization"));
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-credentials");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_credentials"));
+
+      expect(auth.length).toBeGreaterThan(0);
+      expect(new Set(auth)).toEqual(new Set(["Bearer file-listener-token"]));
+      expect(natsState.connects).toEqual([
+        { servers: ["nats://nats-from-file:4222"], authenticated: true },
+      ]);
+    });
+
+    test("envoy.json: a pane's ENVOY_TOKEN_FILE and NATS_NKEY_SEED_FILE reach the listener and NATS", async () => {
+      const user = nkeys.createUser();
+      const tokenFile = join(configDirectory, "envoy-token");
+      const seedFile = join(configDirectory, "nats-seed");
+      writeFileSync(tokenFile, "pane-listener-token\n");
+      writeFileSync(seedFile, `${new TextDecoder().decode(user.getSeed())}\n`);
+      process.env.ENVOY_TOKEN_FILE = tokenFile;
+      process.env.NATS_NKEY_SEED_FILE = seedFile;
+      const auth: (string | null)[] = [];
+      globalThis.fetch = async (input, init) => {
+        auth.push(new Headers(init?.headers).get("Authorization"));
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-pane-credentials");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pane_credentials"));
+
+      expect(auth.length).toBeGreaterThan(0);
+      expect(new Set(auth)).toEqual(new Set(["Bearer pane-listener-token"]));
+      expect(natsState.connects).toEqual([
+        { servers: ["nats://nats-under-test:4222"], authenticated: true },
+      ]);
+    });
+
+    test("envoy.json: without a profile, the file ENVOY_CONFIG_FILE names is read and stays the one handed on", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const handed = join(configDirectory, "handed.json");
+      writeFileSync(
+        handed,
+        JSON.stringify({
+          dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "handed-token" },
+        })
+      );
+      process.env.ENVOY_CONFIG_FILE = handed;
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-handed");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      expect(process.env.ENVOY_CONFIG_FILE).toBe(handed);
+      expect(fixture.tools).toEqual([]);
+      const contextHandler = fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("the handed file's Dispatch was not read");
+      expect(JSON.stringify(await contextHandler(userTurn, sessionContext()))).toContain(
+        "<dispatch-first-skill>"
+      );
+    });
+
+    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and the refusal said once", async () => {
+      delete process.env.ENVOY_CONFIG_FILE;
+      process.env.XDG_CONFIG_HOME = "relative/config";
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-relative-xdg");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, notifying("ses_relative", notifications));
+
+      expect(process.env.ENVOY_CONFIG_FILE).toBeUndefined();
+      expect(fixture.tools).toEqual([]);
+      expect(fixture.handlers.has("context")).toBe(false);
+      // What needs no configuration still registers.
+      expect(fixture.handlers.has("resources_discover")).toBe(true);
+      expect(fixture.renderers.has("envoy-message")).toBe(true);
+      expect(notifications).toEqual([
+        "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+      ]);
+      expect(natsState.connectedNames).toEqual([]);
+    });
   });
 
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {
@@ -7705,7 +7961,7 @@ describe("envoy OMP extension", () => {
     expect(notifications[0]).toContain("Could not copy");
   });
 
-  test("disables inbound messaging loudly when ENVOY_NATS_URL is unset", async () => {
+  test("an Envoy with no NATS server says once that inbound messages are off, and keeps its tools", async () => {
     delete process.env.ENVOY_NATS_URL;
     const notifications: string[] = [];
     const intervals: (() => void)[] = [];
@@ -7721,11 +7977,170 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, context);
 
-    expect(notifications[0]).toContain("ENVOY_NATS_URL is not set");
+    expect(notifications).toEqual([
+      "envoy: Envoy's inbound messages are off: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL); the Envoy tools still work",
+    ]);
     expect(natsState.connectedNames.length).toBe(0);
     expect(intervals.length).toBe(0);
     expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
   });
+
+  // A seed is for NATS alone: its refusal leaves the listener, its tools and /whoami.
+  test("a refused NATS seed turns off inbound messages alone, saying why once, and keeps the tools and /whoami", async () => {
+    const missing = join(configDirectory, "missing-seed");
+    process.env.NATS_NKEY_SEED_FILE = missing;
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_seed_refused" },
+      setInterval: (callback) => intervals.push(callback),
+      ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?seed-refused");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    expect(notifications).toEqual([
+      `envoy: Envoy's inbound messages are off: NATS_NKEY_SEED_FILE names ${missing}, which could not be read: ENOENT: no such file or directory, open '${missing}'; the Envoy tools still work`,
+    ]);
+    expect(natsState.connectedNames.length).toBe(0);
+    expect(intervals.length).toBe(0);
+    expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
+    expect(fixture.commands.map((command) => command.name)).toContain("whoami");
+  });
+
+  // nats.js dials 127.0.0.1:4222 when handed no server, so a subscription with inbound off must
+  // refuse before any connect: one that reached it would attach to whatever NATS this machine runs.
+  for (const { slug, name, configure, why } of [
+    {
+      slug: "seed-refused",
+      name: "its NATS seed refused (envoy.natsUrls other than ENVOY_NATS_URL's)",
+      configure: (file: string) => {
+        const seed = new TextDecoder().decode(nkeys.createUser().getSeed());
+        writeFileSync(
+          file,
+          JSON.stringify({ envoy: { natsUrls: ["nats://nats-from-file:4222"], natsSeed: seed } })
+        );
+      },
+      why: (file: string) =>
+        `ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+    },
+    {
+      slug: "no-nats",
+      name: "no NATS server",
+      configure: () => {
+        delete process.env.ENVOY_NATS_URL;
+      },
+      why: () => "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+    },
+  ]) {
+    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why, and no NATS is dialed`, async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      configure(file);
+      // A listener of the row's own on 127.0.0.1:4222 counts what dials it. Where something else
+      // already listens there (a local NATS, a CI service), only that count goes unchecked: every
+      // other assertion stands, and the mock records a connect without handing it to that server.
+      let dialed = 0;
+      const loopback = createServer((socket) => {
+        dialed += 1;
+        socket.destroy();
+      });
+      const listening = Promise.withResolvers<boolean>();
+      loopback.once("error", (error: Error & { readonly code?: string }) => {
+        if (error.code === "EADDRINUSE") listening.resolve(false);
+        else listening.reject(error);
+      });
+      loopback.listen(4222, "127.0.0.1", () => listening.resolve(true));
+      const watching = await listening.promise;
+      if (!watching) {
+        console.warn(
+          "127.0.0.1:4222 is already in use: this row leaves unchecked that nothing dialed it"
+        );
+      }
+      natsState.realConnect = watching;
+      try {
+        const { default: envoyExtension } = await import(`./envoy.ts?inbound-off-${slug}`);
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const context = sessionContext("ses_inbound_off");
+        await fixture.handlers.get("session_start")?.({}, context);
+        const refusal = `inbound messages are off for this session: ${why(file)}`;
+
+        const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+        if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+        const result = await subscribeTool.execute("", { topics: ["team.standup"] });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toBe(refusal);
+        await expect(
+          subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
+        ).rejects.toThrow(refusal);
+
+        // Each call above awaited its connect, so a dial would already have reached the listener.
+        if (watching) expect(dialed).toBe(0);
+        expect(natsState.connects).toEqual([]);
+      } finally {
+        if (watching) {
+          const closed = Promise.withResolvers<void>();
+          loopback.close(() => closed.resolve());
+          await closed.promise;
+        }
+      }
+    });
+  }
+
+  // The daemon sends a role's every task and notice to its role topic, which reaches a session only
+  // over NATS: a claim with inbound off would hold the role and report ready while every delivery
+  // to it goes nowhere. It refuses before any listener call, so nothing is registered or claimed.
+  for (const { slug, name, configure } of [
+    {
+      slug: "seed-refused",
+      name: "its NATS seed refused (NATS_NKEY_SEED_FILE names a missing file)",
+      configure: () => {
+        const missing = join(configDirectory, "missing-seed");
+        process.env.NATS_NKEY_SEED_FILE = missing;
+        return `NATS_NKEY_SEED_FILE names ${missing}, which could not be read: ENOENT: no such file or directory, open '${missing}'`;
+      },
+    },
+    {
+      slug: "no-nats",
+      name: "no NATS server",
+      configure: () => {
+        delete process.env.ENVOY_NATS_URL;
+        return "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+      },
+    },
+  ]) {
+    test(`with ${name}, the Legion claim refuses naming why, before any listener call`, async () => {
+      const why = configure();
+      const requests: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const { pathname } = new URL(input.toString());
+        requests.push(pathname);
+        if (pathname !== "/v1/roles/set") return responseWithRegistration(input, init, {});
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly role?: string };
+        return response({
+          session_id: "ses_claim_inbound_off",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${body.role ?? ""}`],
+        });
+      };
+      const { default: envoyExtension } = await import(`./envoy.ts?claim-inbound-off-${slug}`);
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionContext("ses_claim_inbound_off");
+      await fixture.handlers.get("session_start")?.({}, context);
+
+      await expect(
+        claimEnvoyRole("ses_claim_inbound_off", "legion-omp-repo-1-implementer", context)
+      ).rejects.toThrow(`inbound messages are off for this session: ${why}`);
+      expect(requests).toEqual([]);
+      expect(natsState.connects).toEqual([]);
+    });
+  }
 
   test("retries NATS in the background when the initial connection fails", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});

@@ -86,6 +86,7 @@ port_daemon='' port_listener='' port_dispatch='' port_worker_stream='' port_nats
 # shellcheck disable=SC2034
 timeout_hook=''
 prod_baseline='' prod_dispatch_url=''
+prod_token=''
 prod_envoy_url=${STAGE3_PRODUCTION_ENVOY_URL:-http://127.0.0.1:9020}
 audited=
 soft_failures="$evidence/soft-failures.txt"
@@ -110,6 +111,10 @@ soft() {
 . "$root/scripts/e2e/lib/omp-home.sh"
 # shellcheck source=/dev/null
 . "$root/scripts/e2e/lib/workflow.sh"
+# shellcheck source-path=SCRIPTDIR source=lib/operator-dispatch.sh
+. "$root/scripts/e2e/lib/operator-dispatch.sh"
+# Nothing the run starts inherits the operator's production bearer (lib/operator-dispatch.sh).
+operator_dispatch_hold_token
 # The daemon's database is this run's own in the shared Postgres container, read with the host psql.
 db_value() { PGPASSWORD=$(cat "$work/postgres-password") psql -h 127.0.0.1 -p "$port_pg" -U "$pg_user" -d "$legion_db" -tAc "$1"; }
 
@@ -217,8 +222,11 @@ start_dispatch() {
   for attempt in 1 2 3 4 5; do
     [ -n "$keep" ] || pick_port port_dispatch
     offset=$(log_size dispatch)
+    # HOME and XDG_CONFIG_HOME are the scratch home, so the server reads no envoy.json of the
+    # operator's: make_omp_home exports the operator's XDG_CONFIG_HOME.
     DATABASE_URL="postgres://$pg_user:$pg_password@127.0.0.1:$port_pg/$dispatch_db?sslmode=disable" \
       DISPATCH_AGENT_TOKEN="$dispatch_token" ENVOY_TOKEN="$envoy_token" HOME="$work/dispatch-home" \
+      XDG_CONFIG_HOME="$work/dispatch-home/.config" \
       DISPATCH_IDENTITY=header:X-Dispatch-User DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
       DISPATCH_LISTEN_HOST=127.0.0.1 DISPATCH_PORT="$port_dispatch" \
       DISPATCH_SERVER_URL="http://127.0.0.1:$port_dispatch" NATS_URLS="nats://127.0.0.1:$port_nats" \
@@ -372,26 +380,6 @@ unchecked_launches() {
 no_unchecked_launches() { [ -z "$(unchecked_launches)" ]; }
 report_unchecked_launches() { note "launched panes never endpoint-checked: $(unchecked_launches | tr '\n' ' ')"; }
 
-prod_header_file() {
-  local header=$work/production-dispatch-auth
-  (umask 077 && jq -r '"Authorization: Bearer " + .dispatch.token' "$HOME/.config/opencode/envoy.json" >"$header")
-  printf '%s\n' "$header"
-}
-production_baseline() {
-  local header since keys key id max=0
-  prod_dispatch_url=$(jq -r '.dispatch.serverUrl // empty' "$HOME/.config/opencode/envoy.json" 2>/dev/null || true)
-  [ -n "$prod_dispatch_url" ] || { prod_baseline=none; return 0; }
-  header=$(prod_header_file)
-  since=$(date -u -d '-24 hours' +%Y-%m-%dT%H:%M:%SZ)
-  keys=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues?updated_since=$since" | jq -r '.[:50][].key')
-  for key in $keys; do
-    id=$(curl -fsS --max-time 20 -H "@$header" "$prod_dispatch_url/api/v1/issues/$key/events?order=desc&limit=1" | jq -r '.[0].id // 0')
-    if [ "$id" -gt "$max" ]; then max=$id; fi
-  done
-  rm -f "$header"
-  [ "$max" -gt 0 ] || fail "could not read a production Dispatch baseline event id"
-  prod_baseline=$max
-}
 rig_sessions_json() {
   jq -R -s -c 'split("\n") | map(fromjson? | select(.msg == "api: claim registered") | .session) | unique' "$evidence/logs/daemon.log"
 }

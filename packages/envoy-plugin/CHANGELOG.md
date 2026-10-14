@@ -4,6 +4,26 @@
 
 ### Changed
 
+- The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
+  `$OPENCODE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the serve's file is missing, the logged notice says so and names the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for
+  `$OPENCODE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
+  `XDG_CONFIG_HOME` it says only that the old file is not read there. A top-level `natsUrls` is
+  refused, naming `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
+- The `shell.env` hook sets `ENVOY_CONFIG_FILE` to that file beside `DISPATCH_HOST=opencode`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the same one.
+- With Envoy off the plugin registers no Envoy tool and calls no listener; Dispatch keeps its instruction file and session title.
+- A `token` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone; its `.opencode/envoy.json` is not read, and while
+  `.envoy/envoy.json` is absent the logged notice and the `dispatch` command name the rename. A
+  checkout's file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset, and a
+  checkout's `dispatch.token` needs its own `dispatch.serverUrl` beside it. The serve opens no NATS
+  connection, so it never runs an `envoy.natsSeed` command.
+- `DISPATCH_URL` and `ENVOY_URL` take a file's token only for that file's own server.
+- One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- One logged notice replaces the `Dispatch disabled` and `Envoy disabled` warnings, and a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `OPENCODE_CONFIG_DIR` no longer stops the plugin loading.
 - Agents reach Dispatch through the `dispatch` command (LEGION-588). The `shell.env` hook puts
   the plugin's `bin/dispatch` first on every shell command's `PATH` and sets `DISPATCH_HOST`,
   `DISPATCH_SESSION_ID` and `DISPATCH_SESSION_TITLE`; the package ships `bin/` and builds the CLI

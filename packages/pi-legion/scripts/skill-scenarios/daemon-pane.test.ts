@@ -1,5 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DAEMON_MODULE, RIG_GH_TOKEN, workerPane } from "./daemon-pane";
@@ -11,9 +11,14 @@ afterAll(() => {
   rmSync(rig, { recursive: true, force: true });
 });
 
+// The caller's home, where the profile's agent directory and its envoy.json live: a scratch one, so
+// no envoy.json of the person running the test is read.
+const home = path.join(rig, "caller-home");
+
 // The pane's gh, git and jj are whatever its PATH resolves: the daemon pins none, so the inherited
 // PATH needs no tool on it for the pane to be built.
 const inherited = {
+  HOME: home,
   ANTHROPIC_API_KEY: "personal-key-must-not-reach-worker",
   GEMINI_API_KEY: "gemini-key",
   OPENAI_API_KEY: "openai-key",
@@ -66,4 +71,84 @@ test("strips an inherited Anthropic key and GitHub token, and gives the pane the
     `oauth_token: ${RIG_GH_TOKEN}`
   );
   expect(readFileSync(path.join(ghConfigDir, "config.yml"), "utf8")).toBe('version: "1"\n');
+}, 600_000);
+
+// The pane's own Envoy extension reads the profile's envoy.json, so the daemon is asked to name the
+// listener and NATS servers written there.
+test("names the listener and NATS servers the profile's envoy.json writes", () => {
+  const agent = path.join(home, ".omp", "profiles", "rig-envoy-profile", "agent");
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(
+    path.join(agent, "envoy.json"),
+    JSON.stringify({
+      envoy: {
+        enabled: true,
+        url: "http://rig-listener.internal.example:9020",
+        natsUrls: ["nats://rig-nats.internal.example:4222"],
+      },
+    })
+  );
+  const workerEnv = workerPane(
+    { rig, port: 13399, profile: "rig-envoy-profile" },
+    inherited,
+    { project: "skillsrig", issue: "LWEVAL-1", role: "tester" },
+    { daemonModule: DAEMON_MODULE }
+  ).env;
+
+  expect(workerEnv).toMatchObject({
+    OMP_PROFILE: "rig-envoy-profile",
+    PI_CODING_AGENT_DIR: agent,
+    ENVOY_URL: "http://rig-listener.internal.example:9020",
+    ENVOY_NATS_URL: "nats://rig-nats.internal.example:4222",
+  });
+}, 600_000);
+
+// A seed the profile's envoy.json pairs with other servers than ENVOY_NATS_URL leaves Envoy on with
+// inbound messages off, which the pane's own extension would meet; the rig refuses it, as it refuses
+// an Envoy that is off with an error, rather than ask the daemon for a pane with no NATS server.
+test("refuses a profile envoy.json whose NATS seed Envoy refuses", () => {
+  const agent = path.join(home, ".omp", "profiles", "rig-seed-profile", "agent");
+  mkdirSync(agent, { recursive: true });
+  const file = path.join(agent, "envoy.json");
+  writeFileSync(
+    file,
+    JSON.stringify({
+      envoy: {
+        url: "http://rig-listener.internal.example:9020",
+        natsUrls: ["nats://rig-nats.internal.example:4222"],
+        natsSeed: "rig-seed-placeholder",
+      },
+    })
+  );
+
+  expect(() =>
+    workerPane(
+      { rig, port: 13399, profile: "rig-seed-profile" },
+      { ...inherited, ENVOY_NATS_URL: "nats://other-nats.internal.example:4222" },
+      { project: "skillsrig", issue: "LWEVAL-1", role: "tester" },
+      { daemonModule: DAEMON_MODULE }
+    )
+  ).toThrow(
+    `envoy: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`
+  );
+}, 600_000);
+
+// An Envoy that is on with no NATS server takes no inbound messages either, and the pane's Legion
+// claim refuses then (pi-envoy's `requireInbound`), so the rig refuses it the same way.
+test("refuses a profile envoy.json whose Envoy has no NATS server", () => {
+  const agent = path.join(home, ".omp", "profiles", "rig-no-nats-profile", "agent");
+  mkdirSync(agent, { recursive: true });
+  writeFileSync(
+    path.join(agent, "envoy.json"),
+    JSON.stringify({ envoy: { url: "http://rig-listener.internal.example:9020" } })
+  );
+
+  expect(() =>
+    workerPane(
+      { rig, port: 13399, profile: "rig-no-nats-profile" },
+      inherited,
+      { project: "skillsrig", issue: "LWEVAL-1", role: "tester" },
+      { daemonModule: DAEMON_MODULE }
+    )
+  ).toThrow("envoy: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)");
 }, 600_000);

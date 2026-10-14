@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test"
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises"
-import { dirname } from "node:path"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import { sessionConfigFile } from "@legion/envoy-client/session-settings"
+import { nkeys } from "nats"
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
@@ -24,6 +27,7 @@ import {
   sessionOptions,
   settled,
 } from "./channel-session-harness"
+import { FakeNatsServer } from "./fake-nats-server"
 import { isolatePaneEnvironment } from "./pane-environment"
 
 isolatePaneEnvironment()
@@ -47,6 +51,7 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   await delivery.enqueue({ subject: directSubject, raw: deliveryRaw })
@@ -260,6 +265,7 @@ test("retains only the latest fifty inbound envelope summaries", async () => {
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   for (let index = 0; index < 51; index += 1) {
@@ -417,6 +423,7 @@ test("answers a rejected targeted frame on Dispatch instead of notifying the mod
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", process.cwd()),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   try {
@@ -525,6 +532,7 @@ test("answers a malformed targeted comment through its supplied comment reply ad
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", process.cwd()),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   try {
@@ -554,6 +562,7 @@ test("drops a malformed targeted frame that has no reply address", async () => {
   const delivery = createChannelDelivery({
     identity: new SessionIdentity("ses_claude", "/tmp"),
     notifier,
+    configFile: sessionConfigFile("claude", process.env),
   })
 
   await delivery.enqueue({
@@ -568,3 +577,340 @@ test("drops a malformed targeted frame that has no reply address", async () => {
   expect(notifier.notifications).toEqual([])
   expect(delivery.inbox()).toEqual([])
 })
+
+const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
+
+/**
+ * Runs the channel server as Claude Code does, in `env.HOME` with `env` as its whole environment:
+ * it initializes over MCP, lists the tools, calls `envoy_whoami`, then each of `calls` (request ids
+ * 4 and on), then closes stdin. Returns the exit code, each response by its request id, and stderr.
+ */
+async function runChannelServer(
+  env: Readonly<Record<string, string>> & { readonly HOME: string },
+  calls: readonly { readonly name: string; readonly arguments: object }[] = [],
+): Promise<{
+  readonly exitCode: number
+  readonly responses: ReadonlyMap<number, Record<string, unknown>>
+  readonly stderr: string
+}> {
+  const server = Bun.spawn(["bun", channelEntry], {
+    cwd: env.HOME,
+    env: { PATH: process.env["PATH"] ?? "", ...env },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const responses = new Map<number, Record<string, unknown>>()
+  const waiters = new Map<number, () => void>()
+  // A response, or the server's exit naming the request it never answered.
+  const answered = (id: number): Promise<void> => {
+    if (responses.has(id)) return Promise.resolve()
+    const waiting = Promise.withResolvers<void>()
+    waiters.set(id, waiting.resolve)
+    return Promise.race([
+      waiting.promise,
+      server.exited.then((code) => {
+        throw new Error(`the channel server exited ${code} before answering request ${id}`)
+      }),
+    ])
+  }
+  const reading = (async () => {
+    let buffered = ""
+    for await (const chunk of server.stdout.pipeThrough(new TextDecoderStream())) {
+      buffered += chunk
+      for (let newline = buffered.indexOf("\n"); newline !== -1; newline = buffered.indexOf("\n")) {
+        const message = JSON.parse(buffered.slice(0, newline)) as Record<string, unknown>
+        buffered = buffered.slice(newline + 1)
+        const id = message["id"]
+        if (typeof id !== "number") continue
+        responses.set(id, message)
+        waiters.get(id)?.()
+      }
+    }
+  })()
+  const send = (message: object) => server.stdin.write(`${JSON.stringify(message)}\n`)
+  try {
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-06-18",
+        capabilities: {},
+        clientInfo: { name: "test", version: "0" },
+      },
+    })
+    await answered(1)
+    send({ jsonrpc: "2.0", method: "notifications/initialized" })
+    send({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })
+    send({
+      jsonrpc: "2.0",
+      id: 3,
+      method: "tools/call",
+      params: { name: "envoy_whoami", arguments: {} },
+    })
+    for (const [index, call] of calls.entries()) {
+      send({ jsonrpc: "2.0", id: 4 + index, method: "tools/call", params: call })
+    }
+    await Promise.all([answered(2), answered(3), ...calls.map((_, index) => answered(4 + index))])
+    await server.stdin.end()
+    const [exitCode, stderr] = await Promise.all([
+      server.exited,
+      new Response(server.stderr).text(),
+      reading,
+    ])
+    return { exitCode, responses, stderr }
+  } finally {
+    server.kill("SIGKILL")
+  }
+}
+
+test("with CLAUDE_CONFIG_DIR holding no envoy.json the server names the unread old file, lists no tool, and exits 0 when stdin ends", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-off-"))
+  const configDirectory = join(home, "claude-config")
+  const old = join(home, ".config", "opencode", "envoy.json")
+  await mkdir(configDirectory)
+  await mkdir(dirname(old), { recursive: true })
+  await writeFile(
+    old,
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: "old-token",
+      },
+    }),
+  )
+  try {
+    const { exitCode, responses, stderr } = await runChannelServer({
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_off",
+      CLAUDE_PLUGIN_DATA: home,
+    })
+    const file = join(configDirectory, "envoy.json")
+    const notice = `${old} is not read for this profile; copy or link it to ${file}, or write that file`
+
+    expect(responses.get(2)?.["result"]).toEqual({ tools: [] })
+    expect(responses.get(3)?.["error"]).toMatchObject({
+      message: expect.stringContaining(
+        `Envoy is off for this session: no envoy.json at ${file}: Envoy is off; ${notice}`,
+      ),
+    })
+    expect(stderr).toContain(
+      `envoy-channel: no envoy.json at ${file}: Dispatch and Envoy are off; ${notice}`,
+    )
+    expect(exitCode).toBe(0)
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("an envoy.json that turns Envoy off opens no NATS connection and calls no listener, whatever the variables name", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-off-file-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({ envoy: { enabled: false } }),
+  )
+  const broker = new FakeNatsServer()
+  const listenerCalls: string[] = []
+  const listener = Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      listenerCalls.push(`${request.method} ${new URL(request.url).pathname}`)
+      return Response.json({ error: "no call belongs here" }, { status: 500 })
+    },
+  })
+  try {
+    const { exitCode, responses } = await runChannelServer({
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_off_file",
+      CLAUDE_PLUGIN_DATA: home,
+      ENVOY_URL: `http://127.0.0.1:${listener.port}`,
+      ENVOY_NATS_URL: broker.url,
+    })
+
+    expect(responses.get(2)?.["result"]).toEqual({ tools: [] })
+    expect(exitCode).toBe(0)
+    expect(broker.connections).toBe(0)
+    expect(listenerCalls).toEqual([])
+  } finally {
+    listener.stop(true)
+    await broker.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+// The listener's bearer and the NATS seed are resolved once and handed to the client and the
+// connection: a server that dropped either would leave the session unregistered or signed out.
+test("the server calls the listener with the file's envoy.token and signs in to NATS with its seed", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-credentials-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  const broker = new FakeNatsServer({ nonce: "fake-nonce" })
+  const user = nkeys.createUser()
+  const auth: Array<string | null> = []
+  const registered = Promise.withResolvers<void>()
+  const listener = Bun.serve({
+    port: 0,
+    fetch: async (request) => {
+      auth.push(request.headers.get("Authorization"))
+      const url = new URL(request.url)
+      if (request.method === "POST" && url.pathname === "/v1/interests/subscribe") {
+        const body = (await request.json()) as { session_id: string; topics: string[] }
+        registered.resolve()
+        return Response.json({
+          session_id: body.session_id,
+          machine_id: "test",
+          dir: "/tmp",
+          topics: body.topics,
+        })
+      }
+      if (request.method === "DELETE") return new Response(null, { status: 200 })
+      return Response.json({ error: "not found" }, { status: 404 })
+    },
+  })
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({
+      envoy: {
+        enabled: true,
+        url: `http://127.0.0.1:${listener.port}`,
+        natsUrls: [broker.url],
+        token: "file-token",
+        natsSeed: new TextDecoder().decode(user.getSeed()),
+      },
+    }),
+  )
+  const server = Bun.spawn(["bun", channelEntry], {
+    cwd: home,
+    env: {
+      PATH: process.env["PATH"] ?? "",
+      HOME: home,
+      CLAUDE_CONFIG_DIR: configDirectory,
+      CLAUDE_CODE_SESSION_ID: "ses_credentials",
+      CLAUDE_PLUGIN_DATA: home,
+    },
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  try {
+    await Promise.all([registered.promise, broker.until(() => broker.connects.length > 0)])
+    expect(broker.connects[0]).toMatchObject({ nkey: user.getPublicKey() })
+    expect(new Set(auth)).toEqual(new Set(["Bearer file-token"]))
+    server.kill("SIGTERM")
+    expect(await server.exited).toBe(0)
+  } finally {
+    server.kill("SIGKILL")
+    listener.stop(true)
+    await broker.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+/** A listener that answers `GET /v1/sessions` with no session and records every call. */
+function recordingListener(calls: string[]) {
+  return Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      const path = new URL(request.url).pathname
+      calls.push(`${request.method} ${path}`)
+      if (request.method === "GET" && path === "/v1/sessions") return Response.json([])
+      return Response.json({ error: "no call belongs here" }, { status: 500 })
+    },
+  })
+}
+
+// Inbound messages arrive over NATS; the tools call the listener. An Envoy with no NATS server
+// keeps its tools, as pi-envoy's does, and registers nothing a delivery would reach deaf.
+test("with Envoy on and no NATS server the server serves its listener tools with inbound off, and says so", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-no-nats-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  const calls: string[] = []
+  const listener = recordingListener(calls)
+  await writeFile(
+    join(configDirectory, "envoy.json"),
+    JSON.stringify({ envoy: { url: `http://127.0.0.1:${listener.port}` } }),
+  )
+  try {
+    const { exitCode, responses, stderr } = await runChannelServer(
+      {
+        HOME: home,
+        CLAUDE_CONFIG_DIR: configDirectory,
+        CLAUDE_CODE_SESSION_ID: "ses_no_nats",
+        CLAUDE_PLUGIN_DATA: home,
+      },
+      [
+        { name: "envoy_sessions", arguments: {} },
+        { name: "envoy_subscribe", arguments: { topics: ["notifications.role.reviewer"] } },
+      ],
+    )
+
+    const listed = responses.get(2)?.["result"] as { tools: { name: string }[] } | undefined
+    expect(listed?.tools.map((tool) => tool.name)).toContain("envoy_send")
+    expect(JSON.stringify(responses.get(3)?.["result"])).toContain("ses_no_nats")
+    expect(responses.get(4)?.["result"]).toEqual({ content: [{ type: "text", text: "[]" }] })
+    expect(responses.get(5)?.["error"]).toMatchObject({
+      message: expect.stringContaining(
+        "inbound messages are off for this session: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+      ),
+    })
+    expect(stderr).toContain(
+      "envoy-channel: Envoy's inbound messages are off: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL); the Envoy tools still work",
+    )
+    expect(calls).toEqual(["GET /v1/sessions"])
+    expect(exitCode).toBe(0)
+  } finally {
+    listener.stop(true)
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("a refused NATS seed leaves the listener tools on, opens no NATS connection, and says why", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-seed-refused-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  const calls: string[] = []
+  const listener = recordingListener(calls)
+  const broker = new FakeNatsServer()
+  const file = join(configDirectory, "envoy.json")
+  await writeFile(
+    file,
+    JSON.stringify({
+      envoy: {
+        url: `http://127.0.0.1:${listener.port}`,
+        natsUrls: ["nats://file.internal.example:4222"],
+        natsSeed: "SUFILESEED",
+      },
+    }),
+  )
+  try {
+    const { exitCode, responses, stderr } = await runChannelServer(
+      {
+        HOME: home,
+        CLAUDE_CONFIG_DIR: configDirectory,
+        CLAUDE_CODE_SESSION_ID: "ses_seed_refused",
+        CLAUDE_PLUGIN_DATA: home,
+        ENVOY_NATS_URL: broker.url,
+      },
+      [{ name: "envoy_sessions", arguments: {} }],
+    )
+
+    expect(responses.get(4)?.["result"]).toEqual({ content: [{ type: "text", text: "[]" }] })
+    expect(stderr).toContain(
+      `envoy-channel: Envoy's inbound messages are off: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them; the Envoy tools still work`,
+    )
+    expect(broker.connections).toBe(0)
+    expect(calls).toEqual(["GET /v1/sessions"])
+    expect(exitCode).toBe(0)
+  } finally {
+    listener.stop(true)
+    await broker.stop()
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)

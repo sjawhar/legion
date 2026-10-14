@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
@@ -8,6 +8,7 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
+import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -356,7 +357,12 @@ export default function legionExtension(pi: PiApi): void {
         // on it; PATH's jj, the one its shell runs.
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
         resolveDocument: async (issue, reference) => {
-          const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+          // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
+          const config = activeDispatchSettings(
+            sessionDispatchSettings(sessionConfigFile("omp", process.env), process.env, {
+              cwd: process.cwd(),
+            }).dispatch
+          );
           if (config === null) {
             throw new Error(
               `register_gate cannot look up document "${reference}" on ${issue}: this pane has no Dispatch configured; pass the document's id`

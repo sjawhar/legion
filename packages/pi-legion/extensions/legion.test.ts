@@ -106,6 +106,16 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   ...hostAgentRegistryMock,
 }));
 
+// The Envoy entry picks its envoy.json when its module loads: a file that holds no section, so
+// these panes take Dispatch and Envoy from the variables each test sets, never from the caller's
+// own envoy.json or Oh My Pi profile. `beforeEach` hands the same file on again.
+const envoyConfigDirectory = await mkdtemp(path.join(os.tmpdir(), "legion-envoy-config-"));
+const envoyConfigFile = path.join(envoyConfigDirectory, "envoy.json");
+await writeFile(envoyConfigFile, "{}\n");
+process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
+delete process.env.OMP_PROFILE;
+delete process.env.PI_CODING_AGENT_DIR;
+
 // The extension modules must load after their OMP and NATS host dependencies are mocked. The
 // Envoy entry is the sibling plugin's, reached by path: these panes run both, as a Legion pane does.
 const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy");
@@ -168,11 +178,15 @@ const environmentKeys = [
   "DISPATCH_TOKEN_FILE",
   "LEGION_WORKSPACE_RECREATED",
   "DISPATCH_STATE_DIR",
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
 ] as const;
 // The suite's baseline is "not a Legion pane": every key above except HOME starts unset and is
-// reset to unset after each test. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE,
-// DISPATCH_URL, and friends are live — the suite would otherwise boot fixtures with the pane's
-// own boot token and see a different environment from CI.
+// reset to unset after each test, and `beforeEach` hands on the Envoy entry's file again as
+// ENVOY_CONFIG_FILE. Run from inside a worker pane — whose LEGION_BOOT_TOKEN_FILE, DISPATCH_URL,
+// and friends are live — the suite would otherwise boot fixtures with the pane's own boot token
+// and see a different environment from CI.
 const baselineEnvironment: Record<(typeof environmentKeys)[number], string | undefined> =
   Object.fromEntries(
     environmentKeys.map((key) => [key, key === "HOME" ? process.env.HOME : undefined])
@@ -205,6 +219,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   await rm(jjTemplate, { force: true, recursive: true });
+  await rm(envoyConfigDirectory, { force: true, recursive: true });
 });
 
 beforeEach(async () => {
@@ -215,6 +230,7 @@ beforeEach(async () => {
   const dispatchState = await mkdtemp(path.join(os.tmpdir(), "legion-dispatch-state-"));
   temporaryPaths.push(dispatchState);
   process.env.DISPATCH_STATE_DIR = dispatchState;
+  process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
 });
 
 afterEach(async () => {
@@ -256,7 +272,12 @@ type AppendedEntry = {
 type HostTitle = { name?: string; source?: "auto" | "user"; readonly set: string[] };
 
 function createPi(
-  options: { readonly bindEnvoy?: boolean; readonly agentsExposed?: boolean } = {}
+  options: {
+    readonly bindEnvoy?: boolean;
+    readonly agentsExposed?: boolean;
+    /** The Envoy entry the pane binds; the one this file loaded unless a test loads another. */
+    readonly envoyEntry?: typeof envoyExtension;
+  } = {}
 ): {
   readonly commands: RegisteredCommand[];
   readonly handlers: Map<string, Handler>;
@@ -289,9 +310,7 @@ function createPi(
   const optional = property;
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   process.env.LEGION_STATE_DIR ??= "/tmp/legion-state";
-  // The envoy extension registers the dispatch tools whenever the developer's own
-  // ~/.config/opencode/envoy.json enables dispatch; this fixture's zod stub is not a real
-  // schema builder, so the resolution must see no user config.
+  // Nothing under the caller's own home reaches the fixture.
   process.env.HOME = "/nonexistent-home-for-legion-tests";
   const pi: TestPi = {
     zod: {
@@ -360,7 +379,7 @@ function createPi(
   };
   // `bindEnvoy: false` lets a test bind legion.ts before envoy.ts, so the two extensions'
   // handlers for one session event run in the opposite order to the manifest's.
-  if (options.bindEnvoy !== false) envoyExtension(pi as never);
+  if (options.bindEnvoy !== false) (options.envoyEntry ?? envoyExtension)(pi as never);
   return {
     commands,
     handlers,
@@ -591,6 +610,7 @@ async function claimPane(options: {
   readonly branch?: readonly unknown[];
   readonly title?: { readonly name: string; readonly source: "auto" | "user" };
   readonly bindEnvoy?: boolean;
+  readonly envoyEntry?: typeof envoyExtension;
 }): Promise<ClaimPane> {
   resetEnvoyPluginInterfaceForTests();
   const tree = options.tree ?? "REPO-42";
@@ -672,7 +692,11 @@ async function claimPane(options: {
   // reaches Oh My Pi's own modules and runs the pane's `gh` and `dispatch`.
   setLegionCapabilityHostForTests(options.capabilityHost ?? (() => fakeCapabilityHost()));
   const intervals: (() => void)[] = [];
-  const fixture = createPi({ bindEnvoy: options.bindEnvoy, agentsExposed: options.agentsExposed });
+  const fixture = createPi({
+    bindEnvoy: options.bindEnvoy,
+    agentsExposed: options.agentsExposed,
+    envoyEntry: options.envoyEntry,
+  });
   if (options.title !== undefined) {
     fixture.title.name = options.title.name;
     fixture.title.source = options.title.source;
@@ -1978,6 +2002,58 @@ describe("Legion OMP extension", () => {
     expect(pane.requests.some((request) => request.path === "/legion/v1/gates/register")).toBe(
       false
     );
+  });
+
+  // The two entries share one process and read one envoy.json: Oh My Pi's rule picks a named
+  // profile's file over the one an outer session handed down, the Envoy entry hands its choice on
+  // as ENVOY_CONFIG_FILE, and this entry's lookup reads that same file.
+  test("register_gate looks the document up in the Dispatch of the envoy.json the Envoy entry chose", async () => {
+    const profile = await mkdtemp(path.join(os.tmpdir(), "legion-profile-"));
+    temporaryPaths.push(profile);
+    const dispatchFile = (serverUrl: string) =>
+      JSON.stringify({ dispatch: { enabled: true, serverUrl, token: "file-token" } });
+    await writeFile(
+      path.join(profile, "envoy.json"),
+      dispatchFile("https://profile.dispatch.example")
+    );
+    const handed = path.join(profile, "handed.json");
+    await writeFile(handed, dispatchFile("https://handed.dispatch.example"));
+    process.env.OMP_PROFILE = "work";
+    process.env.PI_CODING_AGENT_DIR = profile;
+    process.env.ENVOY_CONFIG_FILE = handed;
+    // A fresh load of the Envoy entry, which picks its file as its module loads: the query makes
+    // the same entry a module of its own, which the type checker cannot resolve by name.
+    const freshEntry = "../../pi-envoy/extensions/envoy.ts?profile";
+    const { default: profileEnvoy }: { default: typeof envoyExtension } = await import(freshEntry);
+    expect(process.env.ENVOY_CONFIG_FILE).toBe(path.join(profile, "envoy.json"));
+    const pane = await bootPane({
+      role: "architect",
+      issue: "REPO-42",
+      sessionId: "ses_gate_profile",
+      envoyEntry: profileEnvoy,
+    });
+    const dispatchHosts: string[] = [];
+    const paneFetch = globalThis.fetch;
+    globalThis.fetch = (async (input, init) => {
+      const host = new URL(input.toString()).host;
+      if (host.endsWith("dispatch.example")) {
+        dispatchHosts.push(host);
+        throw new TypeError("Unable to connect. Is the computer able to access the url?");
+      }
+      return paneFetch(input, init);
+    }) as typeof fetch;
+    const legion = pane.tools.find((tool) => tool.name === "legion");
+    if (legion === undefined) throw new Error("the legion tool was not registered");
+
+    await legion.execute(
+      "register-gate",
+      { op: "register_gate", issue: "REPO-42", artifactId: "spec", version: 2 },
+      undefined,
+      undefined,
+      pane.context
+    );
+
+    expect(dispatchHosts).toEqual(["profile.dispatch.example"]);
   });
 
   test("subscribes no claim to an issue's notice topic", async () => {

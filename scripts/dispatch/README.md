@@ -19,10 +19,16 @@ bun scripts/dispatch/ask-census.ts \
 
 `--project` is required and repeats: name each Dispatch project the census reads.
 
-The script resolves Dispatch as the Envoy client does (`activeDispatchConfig` in
-`packages/envoy-client/src/dispatch-config.ts`): the URL from `DISPATCH_URL`, else
-`dispatch.serverUrl` in `~/.config/opencode/envoy.json` with `dispatch.enabled`; the token from
-`DISPATCH_TOKEN_FILE`, else `DISPATCH_TOKEN`, else `dispatch.token`. It prints total asks, decision
+The script resolves Dispatch as every command does, with `sessionDispatchSettings`
+(`packages/envoy-client/src/session-settings.ts`) over the envoy.json harness `command` reads: the
+file `ENVOY_CONFIG_FILE` names, else the omp profile's, `CLAUDE_CONFIG_DIR`'s (only under
+`CLAUDE_CODE_CHILD_SESSION=1`, as in a Claude Code shell) or `OPENCODE_CONFIG_DIR`'s, else
+`~/.config/legion/envoy.json`: the URL from `DISPATCH_URL`, else
+`dispatch.serverUrl` with `dispatch.enabled`; the token from `DISPATCH_TOKEN_FILE`, else
+`DISPATCH_TOKEN`, else `dispatch.token`. A checkout's `.opencode/envoy.json`, which is not read, is
+named on stderr with its rename while the checkout has no `.envoy/envoy.json`. With Dispatch off it
+stops with `Dispatch is not configured: <notice>`, the notice saying which file and why, or
+`dispatch config: <error>`. It prints total asks, decision
 blocks, standalone question asks, approval requests, per-issue counts, approval rounds, every
 standalone question with a blank `code` column, and a per-session table.
 

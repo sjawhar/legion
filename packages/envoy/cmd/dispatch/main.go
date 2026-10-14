@@ -161,7 +161,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -182,7 +182,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs, env.lookup)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -803,10 +803,18 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	return built
 }
 
-// loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, under the
-// DISPATCH_SERVER_URL and NATS_URLS rows of the settings table.
+// loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, the user file
+// under the XDG_CONFIG_HOME row, overridden by the DISPATCH_SERVER_URL and NATS_URLS rows of the
+// settings table. Each file config.Load found and did not read is logged at WARN once at start.
 func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
-	return config.Load(env.lookup, options)
+	cfg, err := config.Load(env.lookup, options)
+	if err != nil {
+		return nil, err
+	}
+	for _, warning := range cfg.Warnings {
+		slog.Warn(warning.Message, "path", warning.Path, "fix", warning.Fix)
+	}
+	return cfg, nil
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project

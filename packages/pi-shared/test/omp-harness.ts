@@ -81,6 +81,28 @@ export function serveStandin(
 }
 
 /**
+ * A NATS address that closes every connection as it opens, held for the case: the Envoy
+ * extension takes it as a NATS server, so its Legion claim goes ahead, and its every connect fails,
+ * so the session takes no inbound delivery. Returns the `nats://` URL.
+ */
+export function refusingNats(cleanup: Cleanup): string {
+  const listener = Bun.listen({
+    hostname: "127.0.0.1",
+    port: 0,
+    socket: {
+      open(socket) {
+        socket.end();
+      },
+      data() {},
+    },
+  });
+  cleanup.push(async () => {
+    listener.stop(true);
+  });
+  return `nats://127.0.0.1:${listener.port}`;
+}
+
+/**
  * Writes the profile under `home`: the stand-in at `base` as its one provider, keyed by a literal
  * like a plain API-key caller, every model role on it, and every provider a devbox or runner could
  * answer from without it disabled, so no turn reaches a real model. `config` lines are appended to
@@ -416,11 +438,12 @@ export interface LegionPane {
 /**
  * Runs one Legion pane on the real Oh My Pi until its run settles: the Legion and Envoy
  * extensions from this checkout, booted against a stand-in for the daemon's claim and grant
- * routes and the Envoy listener (no NATS: the Envoy extension then skips inbound delivery, and
- * the role claim is two listener calls), with a stand-in model gateway that answers the pane's
- * turns from `replies`. The daemon's assignment arrives as the RPC `prompt`. Nothing in a pane
- * runs `legion` from bash (LEGION-631), so no stand-in `legion` is on its PATH: `bin` holds what
- * `prepare` put there.
+ * routes and the Envoy listener, and a NATS address that refuses every connection
+ * (`refusingNats`: the Envoy extension then takes no inbound delivery, and the role claim, which a
+ * session with no NATS server refuses, is two listener calls), with a stand-in model gateway that
+ * answers the pane's turns from `replies`. The daemon's assignment arrives as the RPC `prompt`.
+ * Nothing in a pane runs `legion` from bash (LEGION-631), so no stand-in `legion` is on its PATH:
+ * `bin` holds what `prepare` put there.
  */
 export async function runLegionPane(
   binary: string,
@@ -534,6 +557,7 @@ export async function runLegionPane(
       bin,
       env: {
         ENVOY_URL: base,
+        ENVOY_NATS_URL: refusingNats(cleanup),
         ...(options.dispatch
           ? { DISPATCH_URL: base, DISPATCH_TOKEN: `${name}-dispatch-token` }
           : {}),

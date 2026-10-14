@@ -852,18 +852,11 @@ func sandboxLocator(token claim.Token, uid string) runtime.Locator {
 	}
 }
 
-// patchOps decodes a JSON patch body. A role's address record (recordAddresses) is the one merge
-// patch the runtime sends a Sandbox, and holds no operations.
-func patchOps(t *testing.T, body string) []map[string]any {
-	t.Helper()
-	if addressRecordPatch(body) {
-		return nil
-	}
-	var ops []map[string]any
-	if err := json.Unmarshal([]byte(body), &ops); err != nil {
-		t.Fatalf("patch %q: %v", body, err)
-	}
-	return ops
+// isMergePatch is whether a Sandbox patch body is a JSON merge patch, an object, rather than a JSON
+// patch, an array of operations: a role's address record (recordAddresses) or the suspension that
+// names a displaced pod (suspendDisplacing).
+func isMergePatch(body string) bool {
+	return strings.HasPrefix(strings.TrimSpace(body), "{")
 }
 
 // addressRecordPatch is whether a Sandbox patch body is a role's address record alone: a merge
@@ -884,9 +877,26 @@ func addressRecordPatch(body string) bool {
 	return false
 }
 
-// modePatched reports whether a patch body sets operatingMode to mode.
+// modePatched reports whether a patch body sets operatingMode to mode: a JSON patch's `add` at
+// /spec/operatingMode, or a merge patch's spec.operatingMode.
 func modePatched(t *testing.T, body, mode string) bool {
-	for _, op := range patchOps(t, body) {
+	t.Helper()
+	if isMergePatch(body) {
+		var patch struct {
+			Spec struct {
+				OperatingMode string `json:"operatingMode"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal([]byte(body), &patch); err != nil {
+			t.Fatalf("merge patch %q: %v", body, err)
+		}
+		return patch.Spec.OperatingMode == mode
+	}
+	var ops []map[string]any
+	if err := json.Unmarshal([]byte(body), &ops); err != nil {
+		t.Fatalf("patch %q: %v", body, err)
+	}
+	for _, op := range ops {
 		if op["path"] == "/spec/operatingMode" && op["value"] == mode {
 			return true
 		}

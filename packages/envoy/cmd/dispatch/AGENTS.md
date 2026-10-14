@@ -76,14 +76,31 @@ authoritative, and external issues fall back to `DISPATCH_DEFAULT_PROJECT` when
 configured. An unmapped repository without a default is rejected; issues that
 use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
 database and SSE paths available and makes `/healthz` report `nats: null`.
-Otherwise Dispatch loads config in this precedence order: user `envoy.json`,
-repository `envoy.json`, then environment overrides. A present `NATS_URLS`
-overrides merged `natsUrls` before `bus.ConnectOwningStream` and the outbox
-start; the server owns `ENVOY_NOTIFICATIONS` on whichever server that resolves
-to, and refuses one that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1`
-says the run means it (every deployment sets it). A present
-`DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an
-absolute `http` or `https` URL with no path, and is the exact browser origin
+Dispatch loads config at every start, `DISPATCH_NATS_DISABLED` set or not, in this precedence
+order: the user `envoy.json` (`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the `dispatch`
+section of the checkout's `.envoy/envoy.json` in the directory it starts in, then environment
+overrides. A `.envoy` that is a plain file counts as no checkout file. A checkout's
+`.opencode/envoy.json` is not read: while the checkout has no `.envoy/envoy.json`, Dispatch logs
+one WARN at start (`dispatch: a checkout's .opencode/envoy.json is not read`, with the rename as
+`fix`). Each refusal below stops startup whether or not NATS is disabled, naming the file: a
+checkout's file that holds an `envoy` section, naming `envoy` and the user file it belongs in (a
+cloned repository does not choose the NATS servers the server connects to; the session clients
+ignore such a section with a notice instead); a user file still at `~/.config/opencode/envoy.json`
+with none at the current path, naming both and the move, while that path is
+`~/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or `~/.config`), whatever
+`DISPATCH_SERVER_URL` and `NATS_URLS` say; an `XDG_CONFIG_HOME` that is not an absolute path,
+naming it; a file that carries a top-level `natsUrls`, naming `envoy.natsUrls` (a checkout's,
+saying a checkout's envoy.json holds only a `dispatch` section); a JSON `null` at the top level, as
+a section or as any key's value, naming the key; and JSON that does not parse, naming the line and
+the column and never the text it stopped at, which can be the start of a token or seed. The server
+reads `envoy.natsUrls` whatever `envoy.enabled` says: `enabled` switches a session's Envoy, not the
+server's.
+A present `NATS_URLS` overrides merged `envoy.natsUrls` before `bus.ConnectOwningStream` and the
+outbox start; the server
+owns `ENVOY_NOTIFICATIONS` on whichever server that resolves to, and refuses one that is not this
+machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the run means it (every deployment sets it). A
+present `DISPATCH_SERVER_URL` overrides merged `dispatch.serverUrl`; it must be an absolute `http`
+or `https` URL with no path, and is the exact browser origin
 used for sign-in. It must equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` listed on the sign-in pool's app client. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
@@ -106,6 +123,9 @@ GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_
 bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
 over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
 the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
+Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`)
+names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against a NATS that
+requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
@@ -440,7 +460,7 @@ the table says human only.
 
 Document events publish retained envelopes on
 `notifications.dispatch.document.<PROJECT>.<slug>.<type>`. `natstail` reads
-`natsUrls` from `envoy.json` and prints a matching envelope:
+`envoy.natsUrls` from `envoy.json` and prints a matching envelope:
 
 ```sh
 go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1
@@ -451,7 +471,9 @@ updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not this
 machine's, naming the URL. A machine whose `envoy.json` names a shared NATS
 (an agent devbox names production's) runs it with
 `ENVOY_ALLOW_REMOTE_NATS=1 go run ./cmd/natstail …`, which is the run saying it
-means that server.
+means that server. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or
+`NATS_NKEY_SEED`) names, never `envoy.natsSeed`, so a run against a NATS that
+requires a user sets `NATS_NKEY_SEED_FILE` too.
 
 ## Checks
 

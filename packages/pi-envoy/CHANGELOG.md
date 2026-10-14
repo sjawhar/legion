@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
+  profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the session's file is missing, the start notice says so and names the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for a
+  profile's own file, the file to copy or link it to; under a relocated `XDG_CONFIG_HOME` it says
+  only that the old file is not read there. A top-level `natsUrls` is refused, naming
+  `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
+- The extension hands the file it read to every shell command as `ENVOY_CONFIG_FILE`, so the `dispatch` command reads the same one.
+- Each section turns on and off on its own; a missing file contributes nothing, so a section is then on only when its variables name it, and with Envoy off the session has no Envoy tools, no `/whoami` and no NATS connection, and a listener call is refused with `Envoy is off for this session: <why>`.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone and cannot run one; its `.opencode/envoy.json` is
+  not read, and while `.envoy/envoy.json` is absent the start notice names the rename. A checkout's
+  file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset. A checkout's
+  `dispatch.token` needs its own `dispatch.serverUrl` beside it.
+- `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server; another server needs its own token or seed variable.
+- One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- A refused NATS seed (one that pairs with other servers than the file's, compared as normalised URLs, a failing `natsSeed` command, or a seed variable that cannot be read) turns off inbound messages alone: the tools and `/whoami` stay, and the start notice says `Envoy's inbound messages are off: <refusal>; the Envoy tools still work`. It turned all of Envoy off.
+- With inbound messages off (no NATS server, or a refused seed), `envoy_subscribe` and the Legion interface's `subscribe` refuse with `inbound messages are off for this session: <why>` and connect to nothing. They connected to `127.0.0.1:4222`, nats.js's default for an empty server list, and so attached the session to whatever NATS ran on that machine.
+- With inbound messages off, the Legion role claim refuses with the same `inbound messages are off for this session: <why>` before any listener call, so a Legion process fails its boot instead of holding a role whose every task and notice, sent to the role's topic over NATS, reaches nobody. With no NATS server it registered the session and took the role.
+- One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, what a checkout's files hold that is not read, or that inbound messages are off.
+- A relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR` no longer stops the extension loading: both sections are off and the notice says why.
+
 ### Added
 
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)

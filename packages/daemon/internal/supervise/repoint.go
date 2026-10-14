@@ -27,13 +27,27 @@ func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) 
 	return m.replaceProcess(ctx, "the process at a stale address is replaced mid-turn")
 }
 
-// replaceProcess is the recovery a stale process already found (repoint's stale address,
-// refreshPlugin's stale plugin contract) shares once logged: a task whose turn the process was
-// running goes back to waiting first (interrupted), the same recovery a death in a turn gets; a
-// held suspension ends here as it does for a death (endHeld), suspended rather than relaunched;
-// otherwise the claim is relaunched at once through the launch path a death uses (launch), a
-// Resume of its recorded session or a Spawn over its existing Sandbox when it has not registered
-// yet. interruption is the sentence the turn's recovery is logged with.
+// displaced is the claim's process found gone, or found to be some other process, because the
+// daemon itself replaced its pod while it ran, to launch another role there
+// (runtime.Observation.Displaced). The process did nothing wrong, so it is recovered as repoint
+// recovers a stale one: nothing is charged, neither a launch failure nor a death with work
+// outstanding, and the claim's session is relaunched at once into the new pod (replaceProcess). A
+// turn the process was in is lost, and its task goes back to waiting, sent again once the session
+// resumes; a held suspension ends in a suspension.
+func (m *Machine) displaced(ctx context.Context, observation runtime.Observation) error {
+	m.log.Warn("supervise: the process ended with a pod the daemon replaced; relaunching it uncharged",
+		"incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind), "detail", observation.Detail)
+	return m.replaceProcess(ctx, "the process ended mid-turn with a pod the daemon replaced")
+}
+
+// replaceProcess is the recovery a process ended or found stale through no fault of its own
+// (repoint's stale address, refreshPlugin's stale plugin contract, displaced's replaced pod) shares
+// once logged: a task whose turn the process was running goes back to waiting first (interrupted),
+// the same recovery a death in a turn gets; a held suspension ends here as it does for a death
+// (endHeld), suspended rather than relaunched; otherwise the claim is relaunched at once through
+// the launch path a death uses (launch), a Resume of its recorded session or a Spawn over its
+// existing Sandbox when it has not registered yet. interruption is the sentence the turn's recovery
+// is logged with.
 func (m *Machine) replaceProcess(ctx context.Context, interruption string) error {
 	if err := m.interrupted(ctx, interruption); err != nil {
 		return err

@@ -7,11 +7,12 @@ import type {
   DispatchEvent,
   Issue,
 } from "../../packages/contracts/src/dispatch-api";
-import {
-  type ActiveDispatchConfig,
-  activeDispatchConfig,
-} from "../../packages/envoy-client/src/dispatch-config";
+import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
 import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+} from "../../packages/envoy-client/src/session-settings";
 
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
 const EVENT_PAGE_SIZE = 200;
@@ -447,12 +448,21 @@ export async function censusIssues(
 }
 
 async function run(options: CensusOptions): Promise<void> {
-  const config = activeDispatchConfig(process.env);
-  if (config === null) {
+  const { dispatch: resolution, warnings } = sessionDispatchSettings(
+    sessionConfigFile("command", process.env),
+    process.env,
+    { cwd: process.cwd() }
+  );
+  // A checkout's OpenCode-era file, which is not read, is said on every run while it is there.
+  for (const warning of warnings) console.error(`dispatch: ${warning}`);
+  if (!resolution.enabled) {
     throw new Error(
-      "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in ~/.config/opencode/envoy.json"
+      resolution.error === null
+        ? `Dispatch is not configured: ${resolution.notice}`
+        : `dispatch config: ${resolution.error}`
     );
   }
+  const config = resolution;
   const codes =
     options.codesPath === undefined ? {} : parseCodes(await readFile(options.codesPath, "utf8"));
   // Without limit or offset the issues route answers every matching issue in one array, so this

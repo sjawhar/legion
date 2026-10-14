@@ -9,11 +9,6 @@
       "bun": "./src/delivery.ts",
       "default": "./dist/delivery.js"
     },
-    "./defaults": {
-      "types": "./src/defaults.ts",
-      "bun": "./src/defaults.ts",
-      "default": "./dist/defaults.js"
-    },
     "./dispatch-config": {
       "types": "./src/dispatch-config.ts",
       "bun": "./src/dispatch-config.ts",
@@ -69,6 +64,16 @@
       "bun": "./src/dispatch-first.ts",
       "default": "./dist/dispatch-first.js"
     },
+    "./envoy-config": {
+      "types": "./src/envoy-config.ts",
+      "bun": "./src/envoy-config.ts",
+      "default": "./dist/envoy-config.js"
+    },
+    "./envoy-settings": {
+      "types": "./src/envoy-settings.ts",
+      "bun": "./src/envoy-settings.ts",
+      "default": "./dist/envoy-settings.js"
+    },
     "./errors": {
       "types": "./src/errors.ts",
       "bun": "./src/errors.ts",
@@ -89,6 +94,11 @@
       "bun": "./src/secret-file.ts",
       "default": "./dist/secret-file.js"
     },
+    "./session-settings": {
+      "types": "./src/session-settings.ts",
+      "bun": "./src/session-settings.ts",
+      "default": "./dist/session-settings.js"
+    },
     "./tool-contract": {
       "types": "./src/tool-contract.ts",
       "bun": "./src/tool-contract.ts",
@@ -101,7 +111,7 @@
     }
   },
   "scripts": {
-    "build": "bun build src/defaults.ts src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
+    "build": "bun build src/delivery.ts src/dispatch-cli.ts src/dispatch-command.ts src/dispatch-config.ts src/dispatch-cwd.ts src/dispatch-execute.ts src/dispatch-first.ts src/dispatch-http.ts src/dispatch-picture-tools.ts src/dispatch-pictures.ts src/dispatch-session-state.ts src/dispatch-subscribe.ts src/envoy-config.ts src/envoy-settings.ts src/errors.ts src/machine.ts src/nats-auth.ts src/secret-file.ts src/session-settings.ts src/tool-contract.ts src/transport.ts --outdir dist --target bun --format esm",
     "typecheck": "bunx tsc --noEmit",
     "test": "bun test",
     "lint": "bunx biome check src/ bin/"

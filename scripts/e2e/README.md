@@ -13,7 +13,7 @@ through `scripts/e2e/.shellcheckrc`.
 | :--- | :--- |
 | `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state` with the 20-row capability report on it (`resource-limits` open under tmux, carrying the `capabilities.decided` line to write; `pool-capacity` present, since tmux runs no probe pod), registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's two plugins in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a profile without the Envoy plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the Hawk model gateway, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live pane; an orphan is reaped after the grace; the OMP process's environment is the isolated one. Devbox only |
-| `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; every container of its pod reserves its role's cpu and memory with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are the summed reservation; a second role joins the root's issue pod; suspend, resume, a same-agent refusal, a pod killed in place, and a relaunch before registration each hold; a new tree's root and child spawned at once each provision an issue pod and a volume of their own, neither able to read the other's workspace; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace and takes the swept issue's volume with its Sandbox; releasing one role leaves the issue's Sandbox and volume, and the namespace matches its snapshot. Devbox only |
+| `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; every container of its pod reserves its role's cpu and memory with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are the summed reservation; a second role joins the root's issue pod; suspend, resume, a same-agent refusal, a pod killed in place, and a relaunch before registration each hold; a new tree's root and child spawned at once each provision an issue pod and a volume of their own, neither able to read the other's workspace; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace and takes the swept issue's volume with its Sandbox; releasing one role leaves the issue's Sandbox and volume; a launch that replaces an issue pod another role still runs in names the replaced pod on its Sandbox, and the running role is observed displaced and resumes into the new pod; and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
@@ -250,12 +250,16 @@ NATS the GitHub bridge subscribes on by its fully-qualified name on the operator
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
 `prerequisites` refuses a run without
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
-neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
-`NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
+neither value. The bridge connects to that upstream as the nkey user a command run from the
+operator's shell resolves for it (`lib/operator-nats-seed.ts`, `envoySettings` with
+`ENVOY_NATS_URL` set to that upstream): `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the
+`envoy.natsSeed` of the operator's envoy.json when its `envoy.natsUrls` are exactly that upstream,
+and without a credential when none names one; a file's seed written for other servers, or a file
+that turns Envoy off, stops the bridge naming it. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
 server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
 `NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
 `NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
-users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, resolves the operator's seed the same way. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The shim routes `gh` to that App only from the operator's own Oh My Pi session, so the run
@@ -292,7 +296,12 @@ the end, a read-only audit replays production Dispatch events from a baseline re
 baseline event is the replay's positive control) and fails on any event a rig session authored or
 that names the rig's project key, then reads the operator's Envoy listener (`GET /v1/sessions`,
 `STAGE3_PRODUCTION_ENVOY_URL`, default `http://127.0.0.1:9020`) and fails on any rig session. The
-audit uses the Dispatch token already in `~/.config/opencode/envoy.json` and writes nothing.
+audit writes nothing. It reads the operator's Dispatch as a command run from the operator's shell
+resolves it ([`lib/operator-dispatch.sh`](#liboperator-dispatchsh)), with the `DISPATCH_TOKEN` the
+script read at start and took out of its environment, so nothing the run starts inherits it. A file,
+URL or token that prevents Dispatch fails the baseline read, naming it; with no Dispatch
+configured, there is none to audit. The scratch Dispatch runs with `HOME` and `XDG_CONFIG_HOME` in
+the run's work directory, so it reads no envoy.json of the operator's.
 
 It proves admission order and slotless children, then drives a root from `todo` through an
 architect's spec and gate registration, which the architect does on its own (the proof never
@@ -667,6 +676,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `re-adopt` | the listener and runtime closed, a separate issue pod deleted while none runs, then a fresh listener and `sandbox.New` with `ReconcileOrphans(known)`: the living claims are alive with their recorded processes and unchanged pods and Sandbox generations, the deleted issue is gone with its recorded process, and every living shim says hello again with its current token |
 | `orphan-sweep` | a running separate issue Sandbox left out of `known` survives a sweep with a 1-hour grace, and a sweep with a 1-second grace while its tree's lifecycle is open; once its tree's cleanup is recorded confirmed and the runtime and listener are replaced, a 1-second sweep deletes it, and the swept issue's PVC goes with it (`kubectl get pvc -l legion.dev/issue=<orphan>`: none). The suspended role and every known issue Sandbox survive |
 | `release-preserves-issue` | Release of one worker ends only its role process: the shared issue Sandbox remains `Running`, the root role remains Alive, and the issue's PVC remains `Bound`. Stage 4b, through the daemon's durable outbox effect, proves whole-tree cleanup |
+| `displaced` | a launch that replaces an issue pod another role still runs in (LEGION-729): its own issue `S4A-6`, whose architect runs when the operator deletes the implementer's launcher Secret (`<sandbox>-implementer-boot`), the fault, as `kill-launcher`'s `kill 1` is one. The implementer's Spawn then finds the pod no longer binds its launcher and replaces it under the restricted identity: a new pod uid, the same Sandbox uid `Running`, and the Sandbox annotated `legion.dev/displaced-pod` with the replaced pod's uid, by the merge patch that set it `Suspended`, which the cluster's admission admits for the daemon's identity. The architect's end is observed at its recorded locator as `Gone` or `NotRecordedProcess` with `Displaced` set and no lost workspace, the verdict the supervisor resumes charging nothing; the architect's Resume from its marker starts in the implementer's new pod, registers with its new generation's token, probes Alive, and the marker holds its replaced and resumed incarnations. Both roles are then suspended, the new pod kept |
 | `postgres-resume` | the listener and runtime replaced by one with `session_store: postgres` (`SessionDSNKey` `stage4a_sessions`); a new tree's root spawned under it registers, and its stub agent's environment carries `OMP_SESSION_STORAGE=sql`, `OMP_SESSION_SQL_DSN_FILE=/var/run/legion/providers/OMP_SESSION_SQL_DSN` and `LEGION_WORKSPACE_RECREATED=false`, and never the URL. The harness writes the root's session into the scratch database's table, as `legion sessions import` copies one, at a path the issue's volume holds no file at, dated an hour before the pod's workspace was created. Suspended, the root's Resume naming a path the table lacks is refused by its launcher with `the session table holds no such session` and registers nothing; its Resume from the copied path registers that generation's token, so the launcher found the session in the table through the pod's URL file, and the agent's environment (`LEGION_WORKSPACE_RECREATED=true`) says the workspace was recreated since the session was last written |
 | `namespace-clean` | the script's last step, after the teardown and outside the harness: the run's own Sandboxes, Secrets, PVCs, pods and ConfigMaps are exactly the snapshot taken before the run: those labelled with its project, and those with no project label whose name carries the run's label, as written or as a claim token carries it, which the teardown's label selector would leave behind. Another system's objects in the shared namespace, labelled or not, are not the run's and are not compared |
 
@@ -737,7 +747,7 @@ ServiceAccount token. The run puts it in place of the placeholder in its copy of
 `LEGION_E2E_DISPATCH_TOKEN_FILE` names a file only its owner can read (no group or other permission
 bits) holding a bearer of the Dispatch agents' client: the one an agent session's own Dispatch
 configuration resolves, `DISPATCH_TOKEN_FILE`, then `DISPATCH_TOKEN`, then `dispatch.token` in
-`~/.config/opencode/envoy.json` (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
+the envoy.json the session reads (`packages/envoy-client/src/dispatch-config.ts`). Dispatch answers
 that bearer as an agent session, the actor its HTTP routes and its document websocket require.
 `LEGION_E2E_ENVOY_TOKEN_SECRET_ID` is the Secrets Manager id of the production Envoy listener's API
 token, which `prerequisites` reads with the devbox admin role. Both bearers land in 0600 files under
@@ -1794,6 +1804,47 @@ container or process it would own, since pids are reused. Only processes in the 
 namespace are read, since a pid means nothing across namespaces (an agent box's run is its own).
 What a live run started is left alone, since Stages 2 and 3 take no lock and two lanes may run one
 at once.
+
+## lib/operator-dispatch.sh
+
+The operator's Dispatch, for a script run from the operator's shell. Stage 3 and
+`stage3-4b13b-acceptance.sh` read their production audit's server and bearer through it, and
+`packages/pi-envoy/scripts/smoke-btw.sh` the Dispatch it asks as an agent.
+
+```sh
+. "$root/scripts/e2e/lib/operator-dispatch.sh"     # sourced, never run
+operator_dispatch     # sets operator_dispatch_file, _url, _token and _notice
+operator_dispatch_hold_token     # moves DISPATCH_TOKEN into operator_token, out of the environment
+production_baseline     # sets prod_dispatch_url, prod_token, prod_baseline (`none` without Dispatch)
+```
+
+The two Stage 3 scripts call `operator_dispatch_hold_token` once at start, so nothing a run starts
+inherits the operator's production bearer, and `production_baseline` to open their audit's window:
+it resolves the operator's Dispatch with the held bearer and reads the newest event id of the
+issues updated in the last 24 hours, through a 0600 header file under the caller's `$work`
+(`prod_header_file`).
+
+`operator_dispatch` runs `bun scripts/e2e/lib/operator-dispatch.ts <bearer file>`, which resolves
+Dispatch with `@legion/envoy-client` as every command does, so no script keeps its own copy of the which-file or
+the same-server rule: the envoy.json `envoyConfigPath("command")` chooses (`ENVOY_CONFIG_FILE`,
+which the operator's own session sets, then a named omp profile's `PI_CODING_AGENT_DIR`,
+`CLAUDE_CONFIG_DIR` only under `CLAUDE_CODE_CHILD_SESSION=1` (a Claude Code shell), and
+`OPENCODE_CONFIG_DIR`, then `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the working
+directory's `.envoy/envoy.json`, and `dispatchSettings` over the environment as it is at
+the call (`DISPATCH_URL`, `DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`; a file's `dispatch.token` goes
+only with the server written beside it, and a `!` token runs). With Dispatch on it sets the
+envoy.json's path, the URL and the bearer; when nothing configures Dispatch or a file turns it off,
+the URL and bearer are empty and `operator_dispatch_notice` says why. A relative path the rule would
+use, a file that cannot be read, or a URL or token that does not resolve fails the call through the
+caller's `fail`, naming it and never the token. A checkout's `.opencode/envoy.json`, which is not
+read, is named on stderr with its rename while the working directory has no `.envoy/envoy.json`.
+The TypeScript entry never prints the bearer, so an agent that runs it directly puts none in its
+transcript: it prints `{"file","url"}` and writes the bearer to `<bearer file>`, which it creates
+owner-only (0600) and never over a file already there, and `operator_dispatch` passes a path in a
+private directory it makes with `mktemp -d`, reads the bearer from there and removes the directory.
+The bearer then stays in the caller's unexported variable, so it reaches no argv and no process's
+environment. The entry imports the checkout's `packages/envoy-client`, so the checkout's
+dependencies must be installed (`bun install`).
 
 ## lib/workflow.sh
 

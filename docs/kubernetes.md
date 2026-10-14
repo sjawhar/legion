@@ -928,11 +928,28 @@ every orphan sweep after it, names each pod still on another image —
 this daemon as the older release until the pod is relaunched` (`warnImageDrift` in
 `internal/runtime/sandbox/sandbox.go`) — and the daemon replaces such a pod at the next launch of
 any of its roles (`imageDrift` beside the moved-stream trigger in `relaunch.go`), which interrupts
-the roles live in it once: they are stopped and resumed in the new pod, as a moved worker stream
-already does. The daemon-launched controller's pod is in scope for both the warning and the
-replacement, which happens only when the controller's process is being started anyway. The boot
-action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and
-trigger nothing.
+the roles live in it once: they end with the pod and resume in the new one, as a moved worker
+stream already makes them (below). The daemon-launched controller's pod is in scope for both the
+warning and the replacement, which happens only when the controller's process is being started
+anyway. The boot action is the log line alone: refusing to adopt a drifted pod would stop
+observing a live pod and trigger nothing.
+
+A launch replaces a pod other roles of its issue still run in when the pod cannot run the launching
+role as a pod created now would: it runs another image; it holds a worker stream, a secrets broker
+enrollment or a session database URL key that a pod created now is not handed; or a role's
+launcher Secret no longer binds it. The replacement ends those roles' processes wherever their
+turns stood, and that end is the daemon's act, not theirs (LEGION-729). The patch that suspends
+the pod also names it on the Sandbox, as the `legion.dev/displaced-pod` annotation: one merge
+patch, so a suspension the API server refuses names nothing and every other annotation of the
+Sandbox stays. Once the named pod is being deleted or is gone, the runtime reports each role
+recorded in it as displaced. When its cached copy of the Sandbox does not name the pod yet, it
+reads the Sandbox from the API server before it reports the end, and reports it uncertain, to be
+read again, if that read fails. The supervisor then logs `supervise: the process ended with a pod
+the daemon replaced; relaunching it uncharged` and resumes the role's session in the new pod at
+once. It charges neither a launch failure nor a death. A turn the role was in is lost: its task
+goes back to waiting and is sent again once the session resumes, as a moved address's relaunch
+does. The annotation lives on the Sandbox, so a daemon restarted mid-replacement reads it as
+well.
 
 A route change the plugin calls is a contract bump by `version.go`'s rule, and since LEGION-164 a
 contract bump is brought in place at the daemon's first boot on it, with no pod replacement and
@@ -2770,7 +2787,7 @@ that was a daemon-machine path re-pointed at its pod location:
 | `LEGION_GRANT_FILE` | `/var/run/legion/grant/<role token>-grant` | the pi-legion extension (writes), `legion credential`/`gh`/`handoff complete` (read) |
 | `LEGION_STATE_DIR` | `/legion` | the pi-legion extension's jj attribution overlay |
 | `LEGION_CREDENTIAL_HELPER` | `!/opt/legion/bin/legion credential` | what `workspace-init` wrote into the clone's git config |
-| `DISPATCH_TOKEN_FILE` | `/var/run/legion/providers/DISPATCH_TOKEN` | `resolveDispatchConfig` (when the deployment sets `dispatch_url`) |
+| `DISPATCH_TOKEN_FILE` | `/var/run/legion/providers/DISPATCH_TOKEN` | `dispatchSettings` (when the deployment sets `dispatch_url`) |
 | `LEGION_ROOT_WORKSPACE` / `LEGION_WORKSPACE` | `/legion/workspaces/<owner>/<repo>/<key-lower>` | the extension; also the container's `workingDir` |
 | `LEGION_BOOT_TOKEN_FILE` | `/var/run/legion/boot/LEGION_BOOT_TOKEN` | the extension's boot handshake |
 | `LEGION_TERMINATION_GRACE_SECONDS` | the pod's `terminationGracePeriodSeconds` (`worker_stop_timeout_seconds`) | the shim, PID 1: on SIGTERM it gives OMP half of it to exit on its closed stdin before the fallback SIGTERM |

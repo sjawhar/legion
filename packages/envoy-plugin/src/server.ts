@@ -2,17 +2,16 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, zodSchemaApi } from "@legion/contracts";
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
-import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { dispatchFirstSkillFile } from "@legion/envoy-client/dispatch-first";
 import { machineID } from "@legion/envoy-client/machine";
+import { sessionConfigFile, sessionSettings } from "@legion/envoy-client/session-settings";
 import {
   envoyToolSpecs,
   type ToolSpec,
   toMessageMetadata,
 } from "@legion/envoy-client/tool-contract";
-import { createEnvoyClient } from "@legion/envoy-client/transport";
-import { tool } from "@opencode-ai/plugin/tool";
+import { createEnvoyClient, type EnvoyClient } from "@legion/envoy-client/transport";
+import { type ToolDefinition, tool } from "@opencode-ai/plugin/tool";
 import { logger } from "./log";
 import { resolvePort } from "./port";
 
@@ -73,22 +72,151 @@ const roleSetSpec = toolSpec("envoy_role_set");
 const whoamiSpec = toolSpec("envoy_whoami");
 const sessionsSpec = toolSpec("envoy_sessions");
 
+/** The Envoy tools, on the listener `client` reaches: what OpenCode registers while Envoy is on.
+ * `port` and `title` are read at each call, since both arrive after the plugin loads. */
+function envoyTools(
+  client: EnvoyClient,
+  port: () => number | null,
+  title: () => string | null
+): Record<string, ToolDefinition> {
+  return {
+    envoy_subscribe: tool({
+      description: subscribeSpec.description,
+      args: subscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(args, ctx) {
+        ctx.metadata({ title: "Envoy subscribe" });
+        return JSON.stringify(
+          await client.subscribe({
+            sessionID: ctx.sessionID,
+            directory: ctx.directory,
+            topics: args.topics as string[],
+            port: port() ?? 0,
+            title: title() ?? "",
+            driving: true,
+          })
+        );
+      },
+    }),
+    envoy_unsubscribe: tool({
+      description: unsubscribeSpec.description,
+      args: unsubscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(args, ctx) {
+        ctx.metadata({ title: "Envoy unsubscribe" });
+        await client.unsubscribe({
+          sessionID: ctx.sessionID,
+          topics: (args.topics as string[] | undefined) ?? [],
+        });
+        return "ok";
+      },
+    }),
+    envoy_list: tool({
+      description: listSpec.description,
+      args: listSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(_args, ctx) {
+        ctx.metadata({ title: "Envoy list" });
+        return JSON.stringify(await client.getInterest(ctx.sessionID));
+      },
+    }),
+    envoy_send: tool({
+      description: sendSpec.description,
+      args: sendSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(args, ctx) {
+        ctx.metadata({ title: "Envoy send" });
+        return JSON.stringify(
+          await client.send({
+            sourceSessionID: ctx.sessionID,
+            targetSessionID: args.session_id as string,
+            message: args.message as string,
+            ...toMessageMetadata(args as never),
+          })
+        );
+      },
+    }),
+    envoy_publish: tool({
+      description: publishSpec.description,
+      args: publishSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(args, ctx) {
+        ctx.metadata({ title: "Envoy publish" });
+        return JSON.stringify(
+          await client.publish({
+            sourceSessionID: ctx.sessionID,
+            topic: args.topic as string,
+            message: args.message as string,
+            ...toMessageMetadata(args as never),
+          })
+        );
+      },
+    }),
+    envoy_role_set: tool({
+      description: roleSetSpec.description,
+      args: roleSetSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(args, ctx) {
+        ctx.metadata({ title: "Set Envoy role" });
+        const result = await client.setRole({
+          sessionID: ctx.sessionID,
+          role: args.role as string,
+        });
+        // A hard claim always lands; the discriminant exists for soft claims.
+        if (!result.claimed) throw new Error(`role ${args.role} is held by ${result.holder}`);
+        return JSON.stringify(result.interest);
+      },
+    }),
+    envoy_whoami: tool({
+      description: whoamiSpec.description,
+      args: whoamiSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(_args, ctx) {
+        ctx.metadata({ title: "Envoy whoami" });
+        return JSON.stringify(
+          {
+            session_id: ctx.sessionID,
+            machine_id: machineID(),
+            port: port(),
+            dir: ctx.directory,
+          },
+          null,
+          2
+        );
+      },
+    }),
+    envoy_sessions: tool({
+      description: sessionsSpec.description,
+      args: sessionsSpec.arguments(zodSchemaApi(tool.schema)) as never,
+      async execute(args, ctx) {
+        ctx.metadata({ title: "Envoy sessions" });
+        const sessions = await client.listSessions({
+          ...(args.dir === undefined ? {} : { directory: args.dir as string }),
+          ...(args.title === undefined ? {} : { title: args.title as string }),
+        });
+        const machine = args.machine as string | undefined;
+        return JSON.stringify(
+          machine ? sessions.filter((session) => session.machine_id === machine) : sessions,
+          null,
+          2
+        );
+      },
+    }),
+  };
+}
+
 export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
-  // Dispatch configuration never prevents Envoy from loading. A Dispatch the configuration
-  // cannot reach is visible in the host log, including normal unconfigured installs.
-  const dispatchConfig = resolveDispatchConfig(process.env, { cwd });
-  if (!dispatchConfig.enabled) {
-    logger.warn(
-      `envoy: Dispatch disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
-    );
-  }
+  // The serve's envoy.json, by OpenCode's rule: `$OPENCODE_CONFIG_DIR/envoy.json`, else the file
+  // ENVOY_CONFIG_FILE names, else the neutral file; every shell command is handed the same file
+  // (`shell.env`). Dispatch and Envoy are each resolved on their own from it, and why a section is
+  // off is logged once. Neither section, nor a file location that cannot be worked out, stops the
+  // plugin from loading. OpenCode opens no NATS connection, so no NATS server or seed is resolved.
+  const configFile = sessionConfigFile("opencode", process.env);
+  const { dispatch, envoy, notice } = sessionSettings(configFile, process.env, {
+    cwd,
+    nats: false,
+  });
+  if (notice !== null) logger.warn(`envoy: ${notice}`);
   // With Dispatch configured, every session carries the dispatch-first skill as an instruction
   // file: OpenCode reads instruction files into the main loop's system prompt on every request
   // and leaves them out of title and compaction requests. A package without the skill fails
   // here, naming the file, rather than serving sessions that silently lack it.
   let dispatchFirst: string | undefined;
-  if (dispatchConfig.enabled) {
+  if (dispatch.enabled) {
     if (skillsDirectory === undefined) {
       throw new Error(`envoy: no skills directory beside ${moduleDirectory}`);
     }
@@ -97,8 +225,18 @@ export default async (input: { serverUrl: URL }) => {
       throw new Error(`envoy: the dispatch-first skill ${dispatchFirst} is missing`);
     }
   }
-  const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
-  const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
+  // The listener client exists only while Envoy is on: without it no tool is registered, nothing
+  // registers a session, and no listener is reached.
+  const envoyOn = envoy.enabled
+    ? {
+        heartbeatMs: envoy.heartbeatMs,
+        client: createEnvoyClient({
+          baseUrl: envoy.url,
+          fetch: globalThis.fetch,
+          token: envoy.token,
+        }),
+      }
+    : undefined;
   let activeSessionID: string | null = null;
   let activeSessionTitle: string | null = null;
   // All sessions that have become busy in this serve instance. The heartbeat
@@ -150,28 +288,18 @@ export default async (input: { serverUrl: URL }) => {
     }
   };
 
-  // Defer port resolution to background — never block plugin init.
-  // The port sync loop retries every second until resolved.
-  const timer = setInterval(() => {
-    syncPort().then((resolved) => {
-      if (resolved) clearInterval(timer);
-    });
-  }, 1000);
-  timer.unref(); // Don't prevent graceful shutdown if port never resolves
-  // Fire an immediate async attempt (non-blocking)
-  syncPort().catch(() => {});
-
   // driving = this process is the one running the session (it has gone busy
   // here), as opposed to a sibling re-adopted from shared on-disk state after a
   // serve restart. Envoy uses it to keep a live driver's route from being stolen
   // by another process that merely holds the same session.
   const subscribeSession = (
+    client: EnvoyClient,
     sessionID: string,
     title: string | null,
     port: number,
     driving: boolean
   ) =>
-    envoy
+    client
       .subscribe({
         sessionID,
         directory: cwd,
@@ -193,23 +321,37 @@ export default async (input: { serverUrl: URL }) => {
   // knows the serve port and the session IDs it dispatched — not something a
   // stranger process may arrange by adopting routes.
 
-  // Heartbeat: re-subscribe every tracked session to refresh the envoy_sessions
-  // TTL (5-min). Refreshes ALL sessions that have been busy in this serve, not
-  // just the most recently active one. Interval is env-tunable for tests/tuning.
-  const heartbeatMs = envoyDefaults.heartbeatMs;
-  const heartbeatInterval = setInterval(() => {
-    const port = currentPort();
-    if (!port) return;
-    for (const [sessionID, info] of trackedSessions) {
-      subscribeSession(sessionID, info.title, port, info.driving);
-    }
-  }, heartbeatMs);
-  heartbeatInterval.unref?.();
+  // Envoy's background work, started only while Envoy is on, and what stops it.
+  let stopEnvoy = (): void => {};
+  if (envoyOn !== undefined) {
+    // Defer port resolution to background — never block plugin init.
+    // The port sync loop retries every second until resolved.
+    const portTimer = setInterval(() => {
+      syncPort().then((resolved) => {
+        if (resolved) clearInterval(portTimer);
+      });
+    }, 1000);
+    portTimer.unref(); // Don't prevent graceful shutdown if port never resolves
+    // Fire an immediate async attempt (non-blocking)
+    syncPort().catch(() => {});
 
-  process.on("exit", () => {
-    clearInterval(timer);
-    clearInterval(heartbeatInterval);
-  });
+    // Heartbeat: re-subscribe every tracked session to refresh the envoy_sessions
+    // TTL (5-min). Refreshes ALL sessions that have been busy in this serve, not
+    // just the most recently active one. Interval is env-tunable for tests/tuning.
+    const heartbeatTimer = setInterval(() => {
+      const port = currentPort();
+      if (!port) return;
+      for (const [sessionID, info] of trackedSessions) {
+        subscribeSession(envoyOn.client, sessionID, info.title, port, info.driving);
+      }
+    }, envoyOn.heartbeatMs);
+    heartbeatTimer.unref?.();
+    stopEnvoy = () => {
+      clearInterval(portTimer);
+      clearInterval(heartbeatTimer);
+    };
+  }
+  process.on("exit", stopEnvoy);
 
   return {
     config: (
@@ -228,14 +370,15 @@ export default async (input: { serverUrl: URL }) => {
         if (!cfg.instructions.includes(dispatchFirst)) cfg.instructions.push(dispatchFirst);
       }
     },
-    // The `dispatch` command in every shell command: first on PATH, and told which OpenCode
-    // session runs it and that session's title.
+    // The `dispatch` command in every shell command: first on PATH, handed the serve's envoy.json,
+    // and told which OpenCode session runs it and that session's title.
     "shell.env": async (
       input: { cwd: string; sessionID?: string; callID?: string },
       output: { env: Record<string, string> }
     ) => {
       output.env.PATH = `${PLUGIN_BIN}${path.delimiter}${output.env.PATH ?? process.env.PATH ?? ""}`;
       output.env.DISPATCH_HOST = "opencode";
+      if (configFile.path !== null) output.env.ENVOY_CONFIG_FILE = configFile.path;
       // OpenCode spreads output.env over its own process.env, so an absent key keeps the inherited value.
       output.env.DISPATCH_SESSION_ID = "";
       output.env.DISPATCH_SESSION_TITLE = "";
@@ -250,7 +393,7 @@ export default async (input: { serverUrl: URL }) => {
     }: {
       event: { type?: string; properties?: Record<string, unknown> };
     }) => {
-      if (activeSessionID) syncPort().catch(() => {});
+      if (envoy.enabled && activeSessionID) syncPort().catch(() => {});
 
       if (
         event.type === "session.status" &&
@@ -263,28 +406,39 @@ export default async (input: { serverUrl: URL }) => {
           if (!trackedSessions.has(sessionID)) {
             trackedSessions.set(sessionID, { title: null, driving: true });
           }
-          await syncPort();
-          const port = currentPort();
-          // Fetch title — best-effort, non-blocking for initial subscribe
-          const titlePromise = fetchTitle(sessionID).then((t) => {
+          // The title names the session to the `dispatch` command (`shell.env`) and, while Envoy
+          // is on, in its registration. Best-effort, and the first registration does not wait on it.
+          const titlePromise = fetchTitle(sessionID).then((title) => {
+            if (!title) return null;
+            // Update tracked metadata even if this session is no longer the
+            // active one (another session may have become busy meanwhile).
+            const tracked = trackedSessions.get(sessionID);
+            if (tracked !== undefined) {
+              trackedSessions.set(sessionID, { title, driving: tracked.driving });
+            }
             // Guard: only update if this session is still active (prevents race on fast switches)
-            if (t && activeSessionID === sessionID) activeSessionTitle = t;
-            return t;
+            if (activeSessionID === sessionID) activeSessionTitle = title;
+            return title;
           });
-          if (port) {
-            await subscribeSession(sessionID, activeSessionTitle, port, true);
-            // After the title arrives, send one follow-up subscribe with it.
-            titlePromise.then((title) => {
-              if (!title) return;
-              // Update tracked metadata even if this session is no longer the
-              // active one (another session may have become busy meanwhile).
-              if (trackedSessions.has(sessionID)) {
-                const driving = trackedSessions.get(sessionID)?.driving ?? true;
-                trackedSessions.set(sessionID, { title, driving });
-                subscribeSession(sessionID, title, currentPort() ?? 0, driving);
-              }
-              if (activeSessionID === sessionID) activeSessionTitle = title;
-            });
+          if (envoyOn !== undefined) {
+            await syncPort();
+            const port = currentPort();
+            if (port) {
+              await subscribeSession(envoyOn.client, sessionID, activeSessionTitle, port, true);
+              // After the title arrives, send one follow-up subscribe with it.
+              titlePromise.then((title) => {
+                const tracked = trackedSessions.get(sessionID);
+                if (title && tracked !== undefined) {
+                  subscribeSession(
+                    envoyOn.client,
+                    sessionID,
+                    title,
+                    currentPort() ?? 0,
+                    tracked.driving
+                  );
+                }
+              });
+            }
           }
         }
       }
@@ -304,133 +458,15 @@ export default async (input: { serverUrl: URL }) => {
             activeSessionTitle = null;
           }
           // Best-effort: drop the deleted session's interests so routing stops.
-          envoy.unsubscribe({ sessionID: deletedID, topics: [] }).catch(() => {});
+          envoyOn?.client.unsubscribe({ sessionID: deletedID, topics: [] }).catch(() => {});
         }
       }
     },
     // Cleanup hook (used by tests; production relies on process 'exit').
-    dispose: () => {
-      clearInterval(timer);
-      clearInterval(heartbeatInterval);
-    },
-    tool: {
-      envoy_subscribe: tool({
-        description: subscribeSpec.description,
-        args: subscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Envoy subscribe" });
-          return JSON.stringify(
-            await envoy.subscribe({
-              sessionID: ctx.sessionID,
-              directory: ctx.directory,
-              topics: args.topics as string[],
-              port: currentPort() ?? 0,
-              title: activeSessionTitle ?? "",
-              driving: true,
-            })
-          );
-        },
-      }),
-      envoy_unsubscribe: tool({
-        description: unsubscribeSpec.description,
-        args: unsubscribeSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Envoy unsubscribe" });
-          await envoy.unsubscribe({
-            sessionID: ctx.sessionID,
-            topics: (args.topics as string[] | undefined) ?? [],
-          });
-          return "ok";
-        },
-      }),
-      envoy_list: tool({
-        description: listSpec.description,
-        args: listSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(_args, ctx) {
-          ctx.metadata({ title: "Envoy list" });
-          return JSON.stringify(await envoy.getInterest(ctx.sessionID));
-        },
-      }),
-      envoy_send: tool({
-        description: sendSpec.description,
-        args: sendSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Envoy send" });
-          return JSON.stringify(
-            await envoy.send({
-              sourceSessionID: ctx.sessionID,
-              targetSessionID: args.session_id as string,
-              message: args.message as string,
-              ...toMessageMetadata(args as never),
-            })
-          );
-        },
-      }),
-      envoy_publish: tool({
-        description: publishSpec.description,
-        args: publishSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Envoy publish" });
-          return JSON.stringify(
-            await envoy.publish({
-              sourceSessionID: ctx.sessionID,
-              topic: args.topic as string,
-              message: args.message as string,
-              ...toMessageMetadata(args as never),
-            })
-          );
-        },
-      }),
-      envoy_role_set: tool({
-        description: roleSetSpec.description,
-        args: roleSetSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Set Envoy role" });
-          const result = await envoy.setRole({
-            sessionID: ctx.sessionID,
-            role: args.role as string,
-          });
-          // A hard claim always lands; the discriminant exists for soft claims.
-          if (!result.claimed) throw new Error(`role ${args.role} is held by ${result.holder}`);
-          return JSON.stringify(result.interest);
-        },
-      }),
-      envoy_whoami: tool({
-        description: whoamiSpec.description,
-        args: whoamiSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(_args, ctx) {
-          ctx.metadata({ title: "Envoy whoami" });
-          const sessionID = ctx.sessionID;
-          const port = currentPort();
-          return JSON.stringify(
-            {
-              session_id: sessionID,
-              machine_id: machineID(),
-              port,
-              dir: ctx.directory,
-            },
-            null,
-            2
-          );
-        },
-      }),
-      envoy_sessions: tool({
-        description: sessionsSpec.description,
-        args: sessionsSpec.arguments(zodSchemaApi(tool.schema)) as never,
-        async execute(args, ctx) {
-          ctx.metadata({ title: "Envoy sessions" });
-          const sessions = await envoy.listSessions({
-            ...(args.dir === undefined ? {} : { directory: args.dir as string }),
-            ...(args.title === undefined ? {} : { title: args.title as string }),
-          });
-          const machine = args.machine as string | undefined;
-          return JSON.stringify(
-            machine ? sessions.filter((session) => session.machine_id === machine) : sessions,
-            null,
-            2
-          );
-        },
-      }),
-    },
+    dispose: stopEnvoy,
+    tool:
+      envoyOn === undefined
+        ? {}
+        : envoyTools(envoyOn.client, currentPort, () => activeSessionTitle),
   };
 };

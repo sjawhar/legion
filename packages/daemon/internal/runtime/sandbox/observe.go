@@ -8,6 +8,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 
@@ -41,14 +42,22 @@ func (r *Runtime) view(name string) (view, error) {
 		}
 	}
 	s, err := r.storedSandbox(name)
-	if err != nil || s == nil {
+	if err != nil {
 		return view{}, err
+	}
+	return r.viewOf(name, s), nil
+}
+
+// viewOf is the view of s, the Sandbox named name, beside the pod the pod store holds by that name.
+func (r *Runtime) viewOf(name string, s *sandbox) view {
+	if s == nil {
+		return view{}
 	}
 	v := view{sandbox: s, pod: r.storedPod(name)}
 	if v.pod != nil && !ownedBy(v.pod, s.UID) {
 		v.stranger, v.pod = v.pod, nil
 	}
-	return v, nil
+	return v
 }
 
 // Probe is one observation of loc now, from the stores. A Sandbox the store holds but the runtime
@@ -60,9 +69,91 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 	return r.evaluate(ctx, loc), nil
 }
 
-// evaluate is the observation mapping for one recorded role process. Pod loss applies to every
-// role in the issue, but a live pod is judged through the recorded role container: Ready changes
-// during a neighbour's container restart and is never a whole-pod death verdict.
+// evaluate is one observation of loc's process from the stores: Uncertain while they cannot answer
+// (view), otherwise the verdict the mapping reads from them, said Displaced when the daemon's own
+// replacement of the recorded pod is what ended the process (displaced).
+//
+// The pod store and the Sandbox store are fed by two informers nothing orders, so a pod's end can
+// reach the runtime before the Suspended patch that named it does. A final verdict (ends) whose
+// cached Sandbox does not name the recorded pod is therefore confirmed with one read of the
+// Sandbox from the API server: a store that has not seen a write proves nothing about it, the rule
+// awaitPodGone keeps. The patch is applied before the controller deletes the pod, so a read made
+// once the pod store shows the end sees the name. When that read names the pod, the verdict is
+// read again from it, its detail included; when the read fails the observation is Uncertain, so the
+// claim stays watched and is evaluated again.
+func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
+	uncertain := func(format string, args ...any) runtime.Observation {
+		return runtime.Observation{Locator: loc, Kind: runtime.Uncertain, At: r.now(), Detail: fmt.Sprintf(format, args...)}
+	}
+	name := loc.Sandbox.Name
+	v, err := r.view(name)
+	if err != nil {
+		return uncertain("%v", err)
+	}
+	obs := r.verdict(ctx, loc, v)
+	if ends(obs) && !names(v.sandbox, loc) {
+		current, err := r.readSandbox(ctx, name)
+		if err != nil {
+			return uncertain("the stores report %s (%s); reading sandbox %s to learn whether the daemon replaced pod %s failed: %v",
+				obs.Kind, obs.Detail, name, loc.Sandbox.PodUID, err)
+		}
+		if names(current, loc) {
+			v = r.viewOf(name, current)
+			obs = r.verdict(ctx, loc, v)
+		}
+	}
+	if displaced(v, loc, obs) {
+		obs.Displaced = true
+		obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role there", loc.Sandbox.PodUID)
+	}
+	return obs
+}
+
+// readSandbox is the Sandbox named name as the API server holds it now, or nil when it holds none.
+func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error) {
+	u, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return decodeSandbox(u)
+}
+
+// ends reports whether obs is a final verdict the daemon's own replacement of a pod can account
+// for: a Gone or NotRecordedProcess, never a lost workspace, which no replacement causes.
+func ends(obs runtime.Observation) bool {
+	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.WorkspaceLost
+}
+
+// names reports whether s names loc's recorded pod as the live pod a relaunch replaced
+// (displacedAnnotation).
+func names(s *sandbox, loc runtime.Locator) bool {
+	if s == nil {
+		return false
+	}
+	named, ok := s.Annotations[displacedAnnotation]
+	return ok && named == loc.Sandbox.PodUID
+}
+
+// displaced reports whether obs, the verdict on loc's process from v, is an end the daemon made:
+// a final verdict (ends) on a process whose recorded pod the Sandbox names as the live pod a
+// relaunch replaced, once that pod is being deleted or is gone. A role that ends while its pod
+// still runs undeleted ended on its own, and so did one whose pod the Sandbox does not name: the
+// name is written in the patch that suspends the pod, so a suspension that never applied names
+// nothing.
+func displaced(v view, loc runtime.Locator, obs runtime.Observation) bool {
+	if !ends(obs) || !names(v.sandbox, loc) {
+		return false
+	}
+	return v.pod == nil || string(v.pod.UID) != loc.Sandbox.PodUID || v.pod.DeletionTimestamp != nil
+}
+
+// verdict is the observation mapping for one recorded role process, from the stores' view of its
+// Sandbox and pod. Pod loss applies to every role in the issue, but a live pod is judged through
+// the recorded role container: Ready changes during a neighbour's container restart and is never a
+// whole-pod death verdict.
 //
 // A live pod that holds, for the recorded role, something fixed for its life that a pod created now
 // is not handed (movedInPod: the stream its launcher dials, or the secrets broker's enrollment the
@@ -74,15 +165,12 @@ func (r *Runtime) Probe(ctx context.Context, loc runtime.Locator) (runtime.Obser
 // A role running its recorded generation whose Sandbox records it was started with other addresses
 // than a generation started now is handed (movedEnvironment) is StaleAddress too. Either names each
 // moved address, never its credentials.
-func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Observation {
+func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runtime.Observation {
 	observe := func(kind runtime.ObservationKind, format string, args ...any) runtime.Observation {
 		return runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
 	}
 	name := loc.Sandbox.Name
-	v, err := r.view(name)
 	switch {
-	case err != nil:
-		return observe(runtime.Uncertain, "%v", err)
 	case v.sandbox == nil:
 		return observe(runtime.Gone, "sandbox %s/%s is absent", r.namespace, name)
 	case v.pod == nil:

@@ -1,5 +1,5 @@
 import { commandHelp, commandsHelp, type ParsedCommand, parseCommand } from "./dispatch-command";
-import { type ActiveDispatchConfig, activeDispatchConfig } from "./dispatch-config";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { executeDispatchTool } from "./dispatch-execute";
 import {
@@ -15,6 +15,7 @@ import {
 } from "./dispatch-session-state";
 import { dispatchFollowNotice } from "./dispatch-subscribe";
 import { messageFor } from "./errors";
+import { handedConfigFile, sessionConfigFile, sessionDispatchSettings } from "./session-settings";
 import { ToolInputError } from "./tool-input-errors";
 
 export interface DispatchCliIo {
@@ -31,7 +32,7 @@ const OK = 0;
 const REFUSED = 1;
 const USAGE = 2;
 
-const HOSTS: Record<string, DispatchHost> = { omp: "omp", claude: "claude", opencode: "opencode" };
+const HOSTS = ["omp", "claude", "opencode"] as const satisfies readonly DispatchHost[];
 
 /** Claude Code reads back at most 30,000 characters of a command's output by default
  *  (`BASH_MAX_OUTPUT_LENGTH`). The whole output stays under this, with room to spare, every line
@@ -95,9 +96,19 @@ export function fitOutput(
 /**
  * One `dispatch` command: parses `argv` into a Dispatch tool's arguments, runs that tool once as
  * the host session the environment names, and prints what the model reads. The host plugin sets
- * `DISPATCH_HOST` and the session's id in the agent's shell (`CLAUDE_CODE_SESSION_ID` under
- * Claude Code, `DISPATCH_SESSION_ID` elsewhere); an empty variable counts as unset. Memory a
- * long-lived host kept across calls lives in the session's state directory.
+ * `DISPATCH_HOST`, `ENVOY_CONFIG_FILE` (the envoy.json it chose) and the session's id in the
+ * agent's shell (`CLAUDE_CODE_SESSION_ID` under Claude Code, `DISPATCH_SESSION_ID` elsewhere); an
+ * empty variable counts as unset. With `DISPATCH_HOST` unset, `CLAUDE_CODE_CHILD_SESSION=1`, which
+ * Claude Code sets in every Bash and hook process it runs, is host `claude`: a Claude Code
+ * subagent's Bash can lack what the bridge's `SessionStart` hook writes to `CLAUDE_ENV_FILE`
+ * (anthropics/claude-code#46696).
+ *
+ * The envoy.json it reads is the one its session's plugin chose: with `DISPATCH_HOST` set, the file
+ * `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host's own rule
+ * (`envoyConfigPath(host)`); with `DISPATCH_HOST` unset and `CLAUDE_CODE_CHILD_SESSION=1`, Claude
+ * Code's rule. Recomputing the file from a shell's other variables would follow ones a launcher or
+ * an outer session left there. Memory a long-lived host kept across calls lives in the session's
+ * state directory.
  */
 export async function runDispatchCli(
   argv: readonly string[],
@@ -130,8 +141,9 @@ export async function runDispatchCli(
     return REFUSED;
   }
 
-  const hostName = env.DISPATCH_HOST;
-  const host = hostName === undefined ? undefined : HOSTS[hostName];
+  const hostName =
+    env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
+  const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
     print(
       hostName === undefined
@@ -161,19 +173,27 @@ export async function runDispatchCli(
     return OK;
   }
 
-  let config: ActiveDispatchConfig | null;
-  try {
-    config = activeDispatchConfig(env, { cwd: io.cwd });
-  } catch (error) {
-    print(`dispatch: ${messageFor(error)}`);
+  // The file the session's plugin handed its shell (each plugin sets DISPATCH_HOST and
+  // ENVOY_CONFIG_FILE together), else the host's own rule.
+  const file =
+    (env.DISPATCH_HOST === undefined ? null : handedConfigFile(env)) ??
+    sessionConfigFile(host, env);
+  if (file.path === null) {
+    print(`dispatch: ${file.error}`);
     return USAGE;
   }
-  if (config === null) {
+  const { dispatch: resolution, warnings } = sessionDispatchSettings(file, env, { cwd: io.cwd });
+  // A checkout's OpenCode-era file, which is not read, is said on every call while it is there.
+  for (const warning of warnings) print(`dispatch: ${warning}`);
+  if (!resolution.enabled) {
     print(
-      "dispatch: Dispatch is not configured (DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or envoy.json)"
+      resolution.error === null
+        ? `dispatch: ${resolution.notice}`
+        : `dispatch: dispatch config: ${resolution.error}`
     );
     return USAGE;
   }
+  const config: ActiveDispatchConfig = resolution;
 
   let follows: Set<string>;
   try {

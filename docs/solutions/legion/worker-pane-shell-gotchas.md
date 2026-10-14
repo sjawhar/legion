@@ -212,7 +212,7 @@ whenever the code under test can take one; the pane's shape is then irrelevant t
 
 The same leak hit `packages/pi-envoy`, whose extension entry points read `process.env` themselves, on LEGION-29
 (fixed in sjawhar/legion#970): `envoy.test.ts` cleared `DISPATCH_TOKEN` but not `DISPATCH_TOKEN_FILE`, which
-`resolveDispatchConfig` reads *ahead* of the token (see
+`dispatchSettings` reads *ahead* of the token (see
 [secret-file-pointer-precedence](../integration-patterns/secret-file-pointer-precedence.md)), so three Dispatch-tool
 tests registered real tools against the fixture's stub zod; `legion.test.ts` inherited the pane's
 `LEGION_TREE`/`LEGION_ROLE`/`LEGION_ISSUE` markers, so nine tests died on `Legion session has both controller and
