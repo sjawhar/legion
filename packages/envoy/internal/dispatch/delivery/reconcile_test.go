@@ -77,7 +77,8 @@ func TestReconcileCatchesAMissedPullRequest(t *testing.T) {
 }
 
 // TestReconcileCatchesAMissedDeployRun proves the same for a deploy run intake never saw: it is
-// found by the deploy workflow's run listing and upserted with its jobs.
+// found by the deploy workflow's run listing and upserted with its jobs, and with GitHub's
+// created_at beside run_started_at, which a re-run moves past it.
 func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
@@ -93,7 +94,7 @@ func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 				{
 					"id": 900, "head_sha": "cafef00d", "html_url": "https://github.com/acme/widgets/actions/runs/900",
 					"status": "completed", "conclusion": "success",
-					"run_started_at": "2024-01-01T02:00:00Z", "created_at": "2024-01-01T02:00:00Z",
+					"run_started_at": "2024-01-01T02:30:00Z", "created_at": "2024-01-01T02:00:00Z",
 					"updated_at":    "2024-01-01T02:10:00Z",
 					"head_commit":   map[string]any{"timestamp": "2024-01-01T01:55:00Z"},
 					"pull_requests": []any{},
@@ -122,6 +123,9 @@ func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 	}
 	if run.Kind != DeliveryRunKindDeploy || run.Conclusion == nil || *run.Conclusion != DeliveryRunConclusionSuccess {
 		t.Fatalf("reconciled run = %+v", run)
+	}
+	if run.CreatedAt == nil || !run.CreatedAt.Equal(time.Date(2024, 1, 1, 2, 0, 0, 0, time.UTC)) || !run.StartedAt.Equal(time.Date(2024, 1, 1, 2, 30, 0, 0, time.UTC)) {
+		t.Fatalf("reconciled run created_at %v, started_at %v, want GitHub's created_at 02:00 and run_started_at 02:30", run.CreatedAt, run.StartedAt)
 	}
 	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 900)
 	if err != nil || len(jobs) != 1 || jobs[0].Name != "widgets-release / widgets-release" {

@@ -528,12 +528,7 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliveryS
 		return fmt.Errorf("verify run %d against GitHub: %w", runID, err)
 	}
 
-	if err := UpsertRun(ctx, in.pool, DeliveryRun{
-		Repo: repoFull, RunID: runID, Kind: kind, PRNumber: fetched.PRNumber, HeadSHA: fetched.HeadSHA,
-		HeadCommitAt: fetched.HeadCommitAt, StartedAt: fetched.StartedAt, CompletedAt: fetched.CompletedAt,
-		Conclusion: mapRunConclusionPtr(fetched.Conclusion), URL: fetched.URL,
-		HeadBranch: fetched.HeadBranch, Event: fetched.Event,
-	}); err != nil {
+	if err := UpsertRun(ctx, in.pool, StoredRun(repoFull, kind, fetched)); err != nil {
 		return fmt.Errorf("upsert run %d: %w", runID, err)
 	}
 

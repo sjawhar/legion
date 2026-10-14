@@ -124,13 +124,15 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
 		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now))
 	}
-	// The runs backfill logs and resumes its own failures and never reaches record(): a rate limit
-	// it meets must not hold last_reconcile_at or set last_error while every regular step
-	// succeeded. It walks at most backfillWindowsPerPass hours a pass.
-	r.backfillRuns(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now)
+	// The runs backfills log and resume their own failures and never reach record(): a rate limit
+	// one meets must not hold last_reconcile_at or set last_error while every regular step
+	// succeeded. Each walks at most backfillWindowsPerPass hours a pass. The created_at backfill
+	// reads deploy runs alone, since containment is the one reader of a run's creation.
+	r.backfillRuns(ctx, backfillStep(DeliveryRunKindDeploy), owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now)
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		r.backfillRuns(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now)
+		r.backfillRuns(ctx, backfillStep(DeliveryRunKindPRChecks), owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now)
 	}
+	r.backfillRuns(ctx, createdAtBackfillStep, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now)
 	// The attribution backfill runs last, within its own call budget: it is the one step whose
 	// work can wait a pass, so the timeline's own facts take the rate limit first.
 	record("read attribution inputs of stored pull requests", r.reconcileAttributionInputs(ctx))
@@ -697,12 +699,7 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 // pass's permanent 404) is skipped rather than re-fetched: the same treatment
 // completePartialPullRequest gives an already-unfetchable pull request.
 func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, run FetchedRun, jobsUnfetchable map[int64]bool) error {
-	if err := UpsertRun(ctx, r.pool, DeliveryRun{
-		Repo: repoFull, RunID: run.RunID, Kind: kind, PRNumber: run.PRNumber, HeadSHA: run.HeadSHA,
-		HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt,
-		Conclusion: mapRunConclusionPtr(run.Conclusion), URL: run.URL,
-		HeadBranch: run.HeadBranch, Event: run.Event,
-	}); err != nil {
+	if err := UpsertRun(ctx, r.pool, StoredRun(repoFull, kind, run)); err != nil {
 		return fmt.Errorf("upsert run: %w", err)
 	}
 	if run.CompletedAt == nil {

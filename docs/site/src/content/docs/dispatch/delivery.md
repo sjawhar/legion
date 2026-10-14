@@ -75,8 +75,11 @@ newest day first; a day the window only partly covers is marked partial.
   on the day it started. Runs on other branches count in no figure.
 - **Deploys a day**: deploys in the window divided by the window's length in days.
 - **Lead time**: from a pull request's merge to the first successful production deploy that
-  contains it. The cards show the median and the longest; the fold adds the 90th percentile and
-  the time from the first commit and from opening the pull request.
+  contains it: the earliest to finish of the deploys whose run GitHub created after the merge. A
+  merge queue writes its merge commit before GitHub records the merge, so the run's creation, not
+  its commit's time, says which deploy holds a pull request. The cards show the median and the
+  longest; the fold adds the 90th percentile and the time from the first commit and from opening
+  the pull request.
 - **Pull request open → merge**: the median and 90th percentile, over every pull request merged in
   the window.
 - **Change failure rate**: confirmed failed changes over deploys (and, in the fold, over pull

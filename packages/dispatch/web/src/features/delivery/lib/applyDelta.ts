@@ -18,8 +18,8 @@ type Item = { readonly id: string | number };
 
 /** The order Dispatch lists each live list in, ties broken by id so a merge of upserts always
  *  lands in one order: pull requests by merge time (`ListPullRequestsInWindow`), runs by their head
- *  commit's time (`ListRuns`, `order by head_commit_at`), session groups by name, case aside
- *  (`ListSessionGroups`, `order by lower(g.name), g.id`). */
+ *  commit's time, then id (`deliveryTimelineCompute`'s sort of `runs`), session groups by name,
+ *  case aside (`ListSessionGroups`, `order by lower(g.name), g.id`). */
 const ORDERS = {
   prs: (a: DeliveryPR, b: DeliveryPR) =>
     compareNullableTimestamps(a.merged_at, b.merged_at) || compareText(a.id, b.id),
