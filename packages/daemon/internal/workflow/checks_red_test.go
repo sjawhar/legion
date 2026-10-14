@@ -171,6 +171,76 @@ func TestARedVerdictSendsTheTreeBackToImplementing(t *testing.T) {
 	}
 }
 
+// The CI rule acts on whichever fact makes a red stand for the head (standingRed): a settlement, a
+// read of the required set, or a push classified late that completes the carry of a code head's
+// red to the handoff head that replaced it (classify.SettlementFor, carriedBack). GitHub delivers a
+// push webhook and its synchronize in either order, so the head can move before its push is
+// classified: a red settled at the code head stands for nothing until the push shows the new head
+// changed only .legion/, and the issue may have entered testing meanwhile - the implementer's
+// completion waits on no webhook, only on its push reaching origin - or retro or merging. The push
+// that completes the carry then sends the work back from every phase the rule names, as the
+// settlement would have had it arrived after the push, and takes the phase from the role at work
+// in it: not from reviewing alone.
+func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
+	for _, tc := range []struct {
+		from    phase.Phase
+		status  string
+		quiesce claim.Role
+	}{
+		{from: phase.Testing, status: "testing", quiesce: claim.RoleTester},
+		{from: phase.Reviewing, status: "needs_review", quiesce: claim.RoleReviewer},
+		{from: phase.Retro, status: "retro"},
+		{from: phase.Merging, status: "retro", quiesce: claim.RoleMerger},
+	} {
+		t.Run(string(tc.from), func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			// The head has moved to the handoff head, the red settlement stands recorded at the code
+			// head it replaced, and the push between the two is not yet known: no verdict stands.
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "code", Required: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Failing: []string{"ci"}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			for _, role := range []claim.Role{claim.RoleTester, claim.RoleReviewer, claim.RoleMerger} {
+				if RoleFor(tc.from) == role {
+					seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: claim.Token(string(role) + "-claim")})
+				}
+			}
+			apply := applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))
+			if result := apply("late-push", pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]")); result.Refusal != nil {
+				t.Fatalf("apply the late push = %+v", result.Refusal)
+			}
+			var verdict string
+			seedRecord(t, pool, func(tx pgx.Tx) error {
+				pr, err := record.NewStore().PullRequest(t.Context(), tx, "LEGION-208")
+				if err == nil {
+					verdict = classify.HeadVerdict(*pr)
+				}
+				return err
+			})
+			if verdict != "red" {
+				t.Fatalf("after the push the head's verdict is %q, want the code head's red carried to it", verdict)
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the late push completed the carry the issue is in %s, want implementing: the red stands for the head as a settlement after the push would have left it", got)
+			}
+			var task, quiesce string
+			if err := pool.QueryRow(context.Background(), "select payload->>'task', coalesce(payload->>'quiesce', '') from outbox where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'").Scan(&task, &quiesce); err != nil {
+				t.Fatalf("read the implementer's start: %v", err)
+			}
+			var reason, noticePhase string
+			if err := pool.QueryRow(context.Background(), "select payload->>'reason', coalesce(payload->>'phase', '') from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'").Scan(&reason, &noticePhase); err != nil {
+				t.Fatalf("read the architect's checks-red notice: %v", err)
+			}
+			want := "CI is red at head: ci"
+			if !strings.Contains(task, want) || !strings.Contains(reason, want) || phase.Phase(noticePhase) != tc.from || claim.Role(quiesce) != tc.quiesce {
+				t.Fatalf("task %q, notice %q in %q, start waits for %q; want both to say %q, the notice in %s, the start waiting for %q", task, reason, noticePhase, quiesce, want, tc.from, tc.quiesce)
+			}
+		})
+	}
+}
+
 // An issue in awaiting_merge has every worker suspended and a READY a human was told to merge. A
 // red that then stands for its head by the head's own CI - a required check failing on a rerun,
 // or a newly required one - keeps GitHub from merging it, and no worker would hear of it: the
