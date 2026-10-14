@@ -620,7 +620,8 @@ func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 }
 
 // runAdoptionCommand runs one adoption command within the adoption's budget and returns its
-// trimmed standard output.
+// trimmed standard output. A failure's report ends with a note on each stale git lock it names
+// (staleGitLockNote).
 func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.Time, env, args []string) (string, error) {
 	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Env = env
@@ -633,6 +634,9 @@ func runAdoptionCommand(ctx context.Context, budget time.Duration, started time.
 	}
 	command := strings.Join(args, " ")
 	report := strings.TrimSpace(stderr.String())
+	if note := staleGitLockNote(report, time.Now()); note != "" {
+		report += "\n" + note
+	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		message := fmt.Sprintf("Command timed out after %s s (ran %.1f s): %s",
 			strconv.FormatFloat(budget.Seconds(), 'f', -1, 64), time.Since(started).Seconds(), command)

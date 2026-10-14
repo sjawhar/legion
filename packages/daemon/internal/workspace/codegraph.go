@@ -59,10 +59,9 @@ const codegraphEmptyLockGrace = 5 * time.Second
 // both run `init`. codegraphLockHeldByLiveProcess judges liveness by PID, which another
 // container's PID namespace makes meaningless; it stays as it is for the one-process case. The
 // contenders are the six role containers of one issue pod, which share the issue's workspace and
-// each warm it once their Oh My Pi starts (`legion worker-shim --warm-codegraph`), and a draining
-// pod overlapping its replacement. flock would not do: under gVisor a pod's flock never reaches
-// another pod (initWaitSeconds, internal/runtime/sandbox/manifest.go), where a file's existence
-// and mtime on the shared volume do. So the lease is an exclusive create its holder keeps fresh,
+// each warm it once their Oh My Pi starts (`legion worker-shim --warm-codegraph`); no other pod
+// mounts the issue's volume. The lease is a file judged by its existence and mtime on that
+// volume: an exclusive create its holder keeps fresh,
 // and the only exclusive step on this filesystem is that create: a stale lease is removed under a
 // second exclusive create, the takeover marker (takeOverWarmLease), so two contenders that both
 // judged one lease stale cannot both remove it and both build — a rename would not do, since a

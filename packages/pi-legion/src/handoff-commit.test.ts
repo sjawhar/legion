@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { findHandoffCommit, type JjRunner, pathJj } from "./handoff-commit";
@@ -272,6 +272,35 @@ test.skipIf(jjOnPath === null)(
     await expect(
       findHandoffCommit({ phase: "retro", role: "implementer", env: paneEnv, jj: pathJj })
     ).resolves.toBe(carrying);
+  },
+  60_000
+);
+
+// A git lock an interrupted git or jj left in the workspace fails every jj that snapshots a change
+// into the working copy (jj rewrites the git index then, as in LEGION-731), and nothing under a
+// running pod removes it. The failure names the lock and its age, and the lock stays.
+test.skipIf(jjOnPath === null)(
+  "a jj that fails on a stale git lock names it, its age, and when it goes",
+  async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "legion-handoff-lock-"));
+    scratch.push(root);
+    const workspace = path.join(root, "workspace");
+    const identity = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
+    await jj(root, identity, "git", "init", "--colocate", workspace);
+    await writeFile(path.join(workspace, "main.py"), 'print("hi")\n');
+    const lock = path.join(workspace, ".git", "index.lock");
+    await writeFile(lock, "");
+    const written = new Date(Date.now() - 31 * 60 * 1000);
+    await utimes(lock, written, written);
+
+    const failure = pathJj(["diff", "-r", "@", "--name-only"], workspace);
+    await expect(failure).rejects.toThrow("Could not acquire lock for index file");
+    await expect(failure).rejects.toThrow(
+      new RegExp(
+        `git lock ${lock.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")} was last written 31m\\d+s ago and blocks this command\\. Do not remove it while the issue's pod runs: .* Replacing the issue's pod removes it\\. Under the tmux runtime nothing removes it`
+      )
+    );
+    expect((await lstat(lock)).isFile()).toBe(true);
   },
   60_000
 );

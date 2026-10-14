@@ -153,8 +153,11 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 // workspaceInit validates everything before it touches the volume, --repo first, and refuses to
 // run where the provisioning token is pointed at: this is the process that runs git and jj against
 // what every agent of the issue can write. Then it creates the directories the main container
-// mounts, holds a resume to the same agent, and provisions from the feed. No lock guards the clone:
-// it is the issue's own, on the issue's own volume, and no other pod mounts it.
+// mounts, holds a resume to the same agent, removes the git locks an interrupted git or jj left,
+// and provisions from the feed. No lock guards the clone: it is the issue's own, on the issue's own
+// volume, and no other pod mounts it. For the same reason, and because no role container of the
+// pod has started, no process holds a git lock on the volume while this runs, so every one there
+// is stale and would fail each later write of what it locks (LEGION-731).
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
@@ -210,10 +213,14 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 		return fmt.Errorf("create %s: %w", filepath.Join(root, "sessions"), err)
 	}
 
+	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }
+	if err := workspace.RemoveStaleGitLocks(located, time.Now(), log); err != nil {
+		return err
+	}
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
-		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) },
+		Log: log,
 	})
 	if err != nil {
 		return err

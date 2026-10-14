@@ -466,9 +466,9 @@ func stubCalls(t *testing.T, callLog string) []string {
 	return argv
 }
 
-// TestWarmCodegraphIndexHoldsACrossProcessLease: the six role shims of one issue pod, and a
-// draining pod beside its replacement, each warm the one workspace they share, and only one may
-// build. `.codegraph/legion-warm.lock` settles it across processes, where `warming` cannot: a
+// TestWarmCodegraphIndexHoldsACrossProcessLease: the six role shims of one issue pod each warm the
+// one workspace they share, and only one may build. `.codegraph/legion-warm.lock` settles it across
+// processes, where `warming` cannot: a
 // fresh lease (its holder's heartbeat within warmLeaseStale) makes a warm-up skip without even
 // running `status`, and leaves the file to its holder; one older than warmLeaseStale is a dead
 // holder's, taken over and built behind, with nothing of the takeover left in the directory; and a

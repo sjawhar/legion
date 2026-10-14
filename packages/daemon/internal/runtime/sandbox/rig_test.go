@@ -28,8 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -247,6 +249,14 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
+	// limit, when set, is the client-side rate limiter the runtime's requests wait on
+	// (withClientLimiter); secretGetsAsked counts each Secret get the runtime asked for, by name,
+	// whether or not the limiter let it through.
+	limit           flowcontrol.RateLimiter
+	secretGetsAsked map[string]int
+	// clients are the runtime's clients: the fakes themselves for its informers, and for its
+	// requests the fakes behind whatever hooks and limiter the options asked for.
+	clients runtimeClients
 	// prober builds the runtime with newProber, the probe's configuration and the informers alone
 	// (asProber); p is that Prober, whose runtime r also is.
 	prober bool
@@ -277,18 +287,19 @@ type sandboxHooks struct {
 // withSandboxHooks hands the runtime a dynamic client that runs h around its Sandbox calls.
 func withSandboxHooks(h *sandboxHooks) rigOption { return func(g *rig, _ *Options) { g.hooks = h } }
 
-// hookedDynamic embeds the fake itself, not dynamic.Interface, so the informers still see the
-// fake's IsWatchListSemanticsUnSupported and list and watch rather than stream a watch-list.
+// hookedDynamic is a dynamic client that runs hooks around its Sandbox calls. Only a runtime's
+// requests go through it: its informers list and watch on the fake itself, whose
+// IsWatchListSemanticsUnSupported keeps them from streaming a watch-list.
 type hookedDynamic struct {
-	*dynamicfake.FakeDynamicClient
+	dynamic.Interface
 	hooks *sandboxHooks
 }
 
 func (d hookedDynamic) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
 	if gvr != sandboxGVR {
-		return d.FakeDynamicClient.Resource(gvr)
+		return d.Interface.Resource(gvr)
 	}
-	return hookedResource{d.FakeDynamicClient.Resource(gvr), d.hooks}
+	return hookedResource{d.Interface.Resource(gvr), d.hooks}
 }
 
 type hookedResource struct {
@@ -349,11 +360,16 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	g.store, _ = opts.Store.(*fakeStore)
 	g.opts = opts
 	var dyn dynamic.Interface = g.dyn
+	var kube kubernetes.Interface = g.kube
 	if g.hooks != nil {
-		dyn = hookedDynamic{g.dyn, g.hooks}
+		dyn = hookedDynamic{dyn, g.hooks}
 	}
+	if g.limit != nil {
+		dyn, kube = limitedDynamic{dyn, g.limit}, limitedKube{kube, g.limit, g.askedSecret}
+	}
+	g.clients = runtimeClients{informers: kubeClients{dyn: g.dyn, kube: g.kube}, requests: kubeClients{dyn: dyn, kube: kube}}
 	if g.prober {
-		p, err := newProber(ctx, dyn, g.kube, opts)
+		p, err := newProber(ctx, g.clients, opts)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -363,7 +379,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := r.start(ctx, dyn, g.kube); err != nil {
+		if err := r.start(ctx, g.clients); err != nil {
 			t.Fatal(err)
 		}
 		g.r = r
