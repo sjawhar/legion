@@ -12,14 +12,16 @@
 # .github/envoy-infra-targets.json lists (GOOS and GOARCH decide which files, and so which imports,
 # a build compiles in); the go.mod and go.sum of each of those modules and the go.work and
 # go.work.sum that bind them, which set the versions it builds with; and
-# .github/envoy-infra-release-paths itself, which the version step reads. It fails, naming each
-# directory or file and each list that misses it.
+# .github/envoy-infra-release-paths itself, which the version step reads, and every line of it, so
+# the push paths start a run for each path a version is cut from. It fails, naming each directory
+# or file and each list that misses it.
 #
 # The push paths are read as GitHub reads them, with workflow_paths.py, the path model
-# check-image-trigger-paths.sh uses: a package is covered when every file in its directory is. A
-# line of .github/envoy-infra-release-paths covers a path when it is that path or a directory above
-# it; a glob or a `:(...)` pathspec is refused rather than guessed at. So is a version step that
-# does not pass release-bump.sh exactly the file's lines.
+# check-image-trigger-paths.sh uses: a package is covered when every file in its directory is, and
+# a directory the paths file lists when every file under it is. A line of
+# .github/envoy-infra-release-paths covers a path when it is that path or a directory above it; a
+# glob, a `:(...)` pathspec or a line naming nothing in the tree is refused rather than guessed at.
+# So is a version step that does not pass release-bump.sh exactly the file's lines.
 #
 # Run from anywhere: .github/scripts/check-envoy-infra-release-paths.sh
 # CI runs it in the required lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -39,7 +41,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from workflow_paths import Filter, events, unread_patterns
+from workflow_paths import Filter, events, unread_patterns, walk
 
 WORKFLOW = Path(".github/workflows/release-envoy-infra.yaml")
 RELEASE_PATHS = Path(".github/envoy-infra-release-paths")
@@ -131,6 +133,10 @@ for line in release_paths:
             f"{RELEASE_PATHS}: cannot read the line {line!r}; each line is a path or a directory, "
             "with no glob, `:(...)` pathspec or surrounding whitespace"
         )
+    if not Path(line).exists():
+        refuse(f"{RELEASE_PATHS}: the line {line!r} names no file or directory in the tree")
+    # A line the build already names keeps the build's account of it.
+    required.setdefault(line, f"a line of {RELEASE_PATHS}")
 
 # The version step must pass release-bump.sh exactly those lines.
 steps = [s for job in document.get("jobs", {}).values() for s in job.get("steps", []) if s.get("id") == "version"]
@@ -154,7 +160,11 @@ if words.count("--") != 1 or words[words.index("--") + 1 :] != ["${paths[@]}"]:
 
 
 def files_of(path: str) -> list[str]:
-    """The files a required path stands for: a package directory's own files, or the file."""
+    """The files a required path stands for: every file under a directory the paths file lists,
+    since a change anywhere below it cuts a version; a package directory's own files; or the
+    file."""
+    if path.endswith("/") and path in release_paths:
+        return walk(Path(path))
     if path.endswith("/"):
         return sorted(entry.as_posix() for entry in Path(path).iterdir() if entry.is_file())
     return [path]
