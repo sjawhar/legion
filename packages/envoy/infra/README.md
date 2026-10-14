@@ -344,17 +344,30 @@ A NATS client authenticates as an nkey user with that user's seed, and the serve
 by its public key alone. `envoy-infra seed` keeps the two apart: it writes a new user's seed
 straight into a secret store and prints the public key, so the stack that runs the NATS server
 holds public keys only. The seed is never an argument, an environment variable, an output, a log
-line or part of an error. This version has one store, AWS Secrets Manager:
+line or part of an error. It has two stores, AWS Secrets Manager and Google Cloud Secret Manager:
 
 ```text
 envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
+envoy-infra seed {check|generate|verify} --store gcp-secret-manager --name projects/<project>/secrets/<secret> [--public-key U…]
 ```
 
-The command runs under your own AWS configuration, as the AWS SDK loads it: the environment, then
-the shared configuration and credentials files. `--region` overrides the region it names. With
-`--expect-account`, it first asks STS whose credentials they are and refuses, before any other
-call, unless they are that account's. Pass it whenever you name a secret, so that a seed is never
-written to, or read from, a secret of the same name in another account.
+With `aws-secrets-manager`, the command runs under your own AWS configuration, as the AWS SDK loads
+it: the environment, then the shared configuration and credentials files. `--region` overrides the
+region it names. With `--expect-account`, it first asks STS whose credentials they are and refuses,
+before any other call, unless they are that account's. Pass it whenever you name a secret, so that
+a seed is never written to, or read from, a secret of the same name in another account.
+
+With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
+store refuses `--region` and `--expect-account`, and refuses a name of any other form, such as a
+regional secret's. It runs under your
+[Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials):
+the key file `GOOGLE_APPLICATION_CREDENTIALS` names, then the credentials
+`gcloud auth application-default login` saved, then the service account of the Google Cloud
+machine it runs on. When `GOOGLE_OAUTH_ACCESS_TOKEN` is set, it runs under that access token
+instead, such as one `gcloud auth print-access-token` prints. It calls Secret Manager's gRPC API at
+`secretmanager.googleapis.com`, or at the endpoint `SECRET_MANAGER_ENDPOINT` names as
+`https://<host>[:<port>]`, a test or private endpoint, whose TLS certificate this machine must
+trust.
 
 ### Making a seed
 
@@ -409,12 +422,44 @@ written to, or read from, a secret of the same name in another account.
    example/envoy/nats-nkey-seed-example-host-a AWSCURRENT (version <version id>) derives <the public key>: yes
    ```
 
+On Secret Manager the steps are the same. Declare the secret with no secret version:
+
+```yaml
+resources:
+  nats-seed-example-host-a:
+    type: gcp:secretmanager:Secret
+    properties:
+      project: example-project
+      secretId: envoy-nats-seed-example-host-a
+      replication:
+        auto: {}
+```
+
+and name it in full in each command:
+
+```sh
+envoy-infra seed check --store gcp-secret-manager --name projects/example-project/secrets/envoy-nats-seed-example-host-a
+envoy-infra seed generate --store gcp-secret-manager --name projects/example-project/secrets/envoy-nats-seed-example-host-a
+envoy-infra seed verify --store gcp-secret-manager --name projects/example-project/secrets/envoy-nats-seed-example-host-a --public-key <the public key generate printed>
+```
+
+```text
+projects/example-project/secrets/envoy-nats-seed-example-host-a: present, no versions
+public key: U<55 more characters>
+version id: 1
+projects/example-project/secrets/envoy-nats-seed-example-host-a latest (version 1) derives <the public key>: yes
+```
+
+`generate` refuses a secret that holds any version, whatever its state, destroyed ones included.
+It reads back `versions/latest`, the version Secret Manager serves by default, which must be the
+one it added.
+
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.
 
 ### What `check` and `verify` print
 
-`check` reads the secret's metadata and no value. It prints one of:
+`check` reads the secret's metadata and no value. On AWS Secrets Manager it prints one of:
 
 | Line | The secret |
 | --- | --- |
@@ -423,13 +468,24 @@ The client reads the seed from the store when it is deployed, such as into `host
 | `<name>: present; AWSCURRENT: no` | exists and serves no version by default. `generate` writes to it unless it holds another version, which `check` does not list. |
 | `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. |
 
-`verify` reads the `AWSCURRENT` version and prints one of:
+On Secret Manager it prints one of:
+
+| Line | The secret |
+| --- | --- |
+| `<name>: absent` | does not exist. |
+| `<name>: present, no versions` | exists and holds no version. `generate` writes to it. |
+| `<name>: present; latest: version <n>` | serves version `<n>`, its newest, by default. |
+| `<name>: present; latest: version <n> is <STATE>` | its newest version, `<n>`, is `DISABLED` or `DESTROYED`. Secret Manager's default, `versions/latest`, names the newest version whatever its state, so the secret serves no value by default, even when an older version is enabled. |
+
+`verify` reads the version the store serves by default, whose label `<label>` is `AWSCURRENT` or
+`latest`, and prints one of:
 
 | Line | Exit |
 | --- | --- |
-| `<name> AWSCURRENT (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
-| `<name> AWSCURRENT (version <id>) derives <key>: no` | 1: it is the seed of another user. |
-| `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
+| `<name> <label> (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
+| `<name> <label> (version <id>) derives <key>: no` | 1: it is the seed of another user. |
+| `<name> <label> (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
+| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check, and `verify` reads none. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal.
@@ -439,13 +495,13 @@ pasted there must not reach the terminal.
 | Code | Meaning |
 | --- | --- |
 | 0 | Done: `check` printed its line, `generate` wrote the seed and read it back, or `verify` found the stored seed derives the key. |
-| 1 | `verify` found another key or no seed; or `generate` failed after its write. A version may then exist: `generate` prints the public key and version id when it has them, then `error after writing: <what failed>`. Run `check`, and `verify` with that key, before anything else. |
-| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the AWS error code, as `refused: describe-secret <name> failed: AccessDeniedException`. |
+| 1 | `verify` found another key, no seed, or a newest Secret Manager version that is not enabled; or `generate` failed after its write. A version may then exist: `generate` prints the public key and version id when it has them, then `error after writing: <what failed>`. Run `check`, and `verify` with that key, before anything else. |
+| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the error's code, AWS's or Secret Manager's gRPC status code, as `refused: describe-secret <name> failed: AccessDeniedException` or `refused: get-secret <name> failed: PermissionDenied`. |
 
-### The AWS calls each mode makes
+### The calls each mode makes
 
 A run that is not refused makes exactly these calls, in this order, so its credentials need
-exactly these permissions on the secret:
+exactly these permissions on the secret. On AWS Secrets Manager:
 
 | Mode | Calls | Permissions |
 | --- | --- | --- |
@@ -460,6 +516,26 @@ A secret encrypted with a customer managed KMS key, rather than `aws/secretsmana
 `kms:Decrypt` on that key to read it (`verify`, `generate`) and `kms:GenerateDataKey` to write it
 (`generate`), as [Secrets Manager's encryption](https://docs.aws.amazon.com/secretsmanager/latest/userguide/security-encryption.html)
 describes.
+
+On Secret Manager, where each version call names `versions/latest`:
+
+| Mode | Calls | Permissions |
+| --- | --- | --- |
+| `check` | `GetSecret`, `GetSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get` |
+| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
+| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AddSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
+
+Each permission is the one the API reference names for its call:
+[GetSecret](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get),
+[GetSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/get),
+[ListSecretVersions](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/list),
+[AddSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/addVersion)
+and [AccessSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access).
+`verify` stops after `GetSecretVersion` when the newest version is not enabled. Of the
+[predefined roles](https://cloud.google.com/secret-manager/docs/access-control), Secret Manager
+Viewer (`roles/secretmanager.viewer`) holds `check`'s permissions, `verify` also needs Secret
+Manager Secret Accessor (`roles/secretmanager.secretAccessor`), and `generate` needs both and Secret
+Manager Secret Version Adder (`roles/secretmanager.secretVersionAdder`).
 
 ## NATS authorization
 

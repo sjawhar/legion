@@ -85,3 +85,16 @@ func TestHelpNamesVersion(t *testing.T) {
 		t.Errorf("--help reports a usage error: %q", stderr.String())
 	}
 }
+
+// TestTheCommandKnowsBothStores: the stores main hands the seed command are AWS Secrets Manager and
+// GCP Secret Manager, as its usage error for another --store names them.
+func TestTheCommandKnowsBothStores(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"seed", "check", "--store", "elsewhere", "--name", "example"}, &stdout, &stderr, stores)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if want := "envoy-infra seed: --store is one of: aws-secrets-manager, gcp-secret-manager\n"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr %q lacks %q", stderr.String(), want)
+	}
+}

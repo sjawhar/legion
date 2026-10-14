@@ -33,7 +33,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
 | `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
-| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
+| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`), the AWS Secrets Manager store (`awsstore.go`) and the GCP Secret Manager store (`gcpstore.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
@@ -87,25 +87,32 @@ versions. Never add the module to the root `go.work`.
 
 `envoy-infra seed` takes no seed argument and reads none from the environment, and a seed reaches
 no output, log or error. A store's error names the call, the secret and the error's code, never
-the error's text, which can quote the request; the AWS SDK runs with its logger off
-(`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
-and every error and line it returns, for a canary seed. A new store implements `seed.Store` and
-joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+the error's text, which can quote the request. Each store's client logs nothing: the AWS SDK runs
+with its logger off (`seed/awsstore.go`, `loadAWSConfig`), and the Secret Manager client with a
+discarding logger whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says (`seed/gcpstore.go`,
+`gcpClientOptions`), since at debug it prints each payload base64-encoded, where a search for the
+seed finds nothing. `seed/seed_test.go` searches every byte the command writes, and every error and
+line it returns, for a canary seed. A new store implements `seed.Store`, whose `Label` names the
+version its lines call the default, and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
-Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
+Each mode's calls are the grant an operator gives it, listed per store under "The calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
-same commit. `seed/seed_test.go` pins each mode's `Store` calls, and `seed/awsstore_test.go`'s
-fake endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`.
+same commit. `seed/seed_test.go` pins each mode's `Store` calls; `seed/awsstore_test.go`'s fake
+endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`, and
+`seed/gcpstore_test.go`'s fake fails any call outside the mode's.
 
 ## Tests
 
 The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
 (`host/listener_test.go`, `internal/providers/`), the plugin in process through pulumi-go-provider's
 `integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`), the seed command
-against a fake `Store` (`seed/seed_test.go`) and the AWS SDK against an `httptest` endpoint speaking
+against a fake `Store` (`seed/seed_test.go`), the AWS SDK against an `httptest` endpoint speaking
 Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test on any request it does not
-expect (`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
-`--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests start nats-server
+expect (`seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over
+TLS, which fails a test on any call outside the mode's or any request it does not expect
+(`seed/gcpstore_test.go`; the package's `TestMain` makes the fake's certificate a root the whole
+test process trusts, through `SSL_CERT_FILE`), and the command built as the release job stamps it,
+for its `--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests start nats-server
 containers on this machine's Docker through `testnats`, as do the `natslive` tests
 (`seed/seed_live_test.go`: a generated seed connects, and a client without it is refused, on
 `testnats.Image` and `testnats.HubImage`). The `envoy-infra-go` job in

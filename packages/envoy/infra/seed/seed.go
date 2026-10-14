@@ -27,6 +27,8 @@ import (
 // check makes one call, Describe, and verify two, Describe and Current, so reading a secret needs
 // no grant beyond its metadata and its value. Only generate counts versions.
 type Store interface {
+	// Label names the version the store serves by default, in check's and verify's lines.
+	Label() string
 	// Describe reports, from the secret's metadata alone, whether it exists, whether it is
 	// scheduled for deletion and when, and which version the store serves by default.
 	Describe(ctx context.Context, name string) (Description, error)
@@ -46,8 +48,10 @@ type Description struct {
 	Exists, ScheduledForDeletion bool
 	DeletionDate                 string
 	CurrentVersion               string // "" when the store serves none
-	// The newest version's id and state, for a store whose default names the newest version
-	// whatever its state (GCP's versions/latest); "" for a store without such a default.
+	// DefaultIsNewest is set by a store whose default is the newest version whatever its state
+	// (GCP's versions/latest). It then reports that version's id and state, "" when the secret holds
+	// none, and names it in CurrentVersion only when that state lets it be read.
+	DefaultIsNewest            bool
 	NewestVersion, NewestState string
 }
 
@@ -58,13 +62,10 @@ type Description struct {
 // is checked before anything else is done. The command exits 1 on them, and on ErrMismatch.
 var ErrRefused = errors.New("seed: refused")
 
-// ErrMismatch is Verify's when the value the store serves by default is no user seed or derives
-// another public key. The command exits 1.
+// ErrMismatch is Verify's when the version the store serves by default does not confirm the public
+// key: its value is no user seed or derives another key, or the store does not serve the newest
+// version it names. The command exits 1.
 var ErrMismatch = errors.New("seed: the stored value does not derive the public key")
-
-// defaultLabel names the version a store serves by default in Check's and Verify's lines: Secrets
-// Manager's staging label.
-const defaultLabel = awsCurrent
 
 type refusal struct{ msg string }
 
@@ -85,22 +86,38 @@ func afterWritef(format string, args ...any) error {
 	return &afterWrite{msg: fmt.Sprintf(format, args...)}
 }
 
-// Check returns the report line for the secret: absent, scheduled for deletion, or present with or
-// without a version the store serves by default. It reads no value.
+// Check returns the report line for the secret: absent, scheduled for deletion, or present with the
+// version the store serves by default, in that store's terms. It reads no value.
 func Check(ctx context.Context, s Store, name string) (string, error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", refuse("%v", err)
 	}
+	label := s.Label()
 	switch {
 	case !d.Exists:
 		return name + ": absent", nil
 	case d.ScheduledForDeletion:
 		return fmt.Sprintf("%s: present, scheduled for deletion (%s)", name, d.DeletionDate), nil
+	case d.DefaultIsNewest:
+		return newestLine(name, label, d), nil
 	case d.CurrentVersion == "":
-		return fmt.Sprintf("%s: present; %s: no", name, defaultLabel), nil
+		return fmt.Sprintf("%s: present; %s: no", name, label), nil
 	}
-	return fmt.Sprintf("%s: present; %s: yes (version %s)", name, defaultLabel, d.CurrentVersion), nil
+	return fmt.Sprintf("%s: present; %s: yes (version %s)", name, label, d.CurrentVersion), nil
+}
+
+// newestLine is Check's line for a secret of a store whose default is the newest version whatever
+// its state: that the secret holds no version, or the newest one, with its state when the store does
+// not serve it.
+func newestLine(name, label string, d Description) string {
+	switch {
+	case d.NewestVersion == "":
+		return name + ": present, no versions"
+	case d.CurrentVersion == "":
+		return fmt.Sprintf("%s: present; %s: version %s is %s", name, label, d.NewestVersion, d.NewestState)
+	}
+	return fmt.Sprintf("%s: present; %s: version %s", name, label, d.NewestVersion)
 }
 
 // existing refuses a secret that is absent or scheduled for deletion.
@@ -185,8 +202,10 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 }
 
 // Verify returns the line saying whether the seed the store serves by default derives
-// publicKey, with ErrMismatch when it does not or is no user seed. publicKey is never echoed unless
-// it is a user public key: a seed pasted there by mistake must not reach the terminal twice.
+// publicKey, with ErrMismatch when it does not or is no user seed. For a store whose default is the
+// newest version whatever its state, a newest version the store does not serve fails with Check's
+// line for it, before any value is read. publicKey is never echoed unless it is a user public key: a
+// seed pasted there by mistake must not reach the terminal twice.
 func Verify(ctx context.Context, s Store, name, publicKey string) (string, error) {
 	if !core.IsUserPublicKey(publicKey) {
 		return "", refuse("%s: --public-key is not an nkey user public key (U and 55 base32 characters with a valid checksum)", name)
@@ -198,8 +217,12 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 	if err := existing(d, name); err != nil {
 		return "", err
 	}
+	label := s.Label()
+	if d.DefaultIsNewest && d.NewestVersion != "" && d.CurrentVersion == "" {
+		return newestLine(name, label, d), ErrMismatch
+	}
 	if d.CurrentVersion == "" {
-		return "", refuse("%s has no %s version; nothing to verify", name, defaultLabel)
+		return "", refuse("%s has no %s version; nothing to verify", name, label)
 	}
 	version, stored, err := s.Current(ctx, name)
 	if err != nil {
@@ -208,12 +231,12 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 	defer clear(stored)
 	derived, err := publicKeyOf(stored)
 	if err != nil {
-		return fmt.Sprintf("%s %s (version %s) is not an nkey user seed: %v", name, defaultLabel, version, err), ErrMismatch
+		return fmt.Sprintf("%s %s (version %s) is not an nkey user seed: %v", name, label, version, err), ErrMismatch
 	}
 	if derived != publicKey {
-		return fmt.Sprintf("%s %s (version %s) derives %s: no", name, defaultLabel, version, publicKey), ErrMismatch
+		return fmt.Sprintf("%s %s (version %s) derives %s: no", name, label, version, publicKey), ErrMismatch
 	}
-	return fmt.Sprintf("%s %s (version %s) derives %s: yes", name, defaultLabel, version, publicKey), nil
+	return fmt.Sprintf("%s %s (version %s) derives %s: yes", name, label, version, publicKey), nil
 }
 
 // seedLength is a user seed's decoded length: two prefix bytes, the 32 bytes of the ed25519 seed and
@@ -305,7 +328,8 @@ func crc16(data []byte) uint16 {
 
 // Stores opens each store the command's --store names: in region when it is not "", and, when
 // account is not "" (--expect-account), refusing with ErrRefused unless the store's credentials are
-// that account's, with no call before that check but the one reading them.
+// that account's, with no call before that check but the one reading them. A store that has no
+// regions or accounts refuses a region or an account.
 type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
 
 const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
@@ -316,8 +340,9 @@ const usageText = `usage: envoy-infra seed {check|generate|verify} --store <stor
   verify    whether the seed the store serves by default derives --public-key
 
 The seed is never an argument, an output or a log line. Exit codes: 0 done (verify: the seed
-derives the key); 1 verify found another key or no seed, or generate failed after its write,
-so check the secret before anything else; 2 refused before any write, or a usage error.
+derives the key); 1 verify found another key, no seed or a latest version its store does not
+serve, or generate failed after its write, so check the secret before anything else; 2 refused
+before any write, or a usage error.
 
 `
 
@@ -333,9 +358,9 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	fs.SetOutput(stderr)
 	var store, name, region, account, publicKey string
 	fs.StringVar(&store, "store", "", "the secret store: "+strings.Join(names, ", "))
-	fs.StringVar(&name, "name", "", "the secret's id")
-	fs.StringVar(&region, "region", "", "the store's region (default: the one its configuration names)")
-	fs.StringVar(&account, "expect-account", "", "refuse, before any other call, unless the credentials are this account's")
+	fs.StringVar(&name, "name", "", "the secret's id; for "+GCPSecretManager+", projects/<project>/secrets/<secret>")
+	fs.StringVar(&region, "region", "", AWSSecretsManager+" only: its region (default: the one its configuration names)")
+	fs.StringVar(&account, "expect-account", "", AWSSecretsManager+" only: refuse, before any other call, unless the credentials are this account's")
 	fs.StringVar(&publicKey, "public-key", "", "verify only: the U… public key the stored seed must derive")
 	fs.Usage = func() {
 		fmt.Fprint(stderr, usageText)

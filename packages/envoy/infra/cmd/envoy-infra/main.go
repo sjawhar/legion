@@ -14,8 +14,10 @@ import (
 
 var version = "0.0.0-dev" // -ldflags "-X main.version=<X.Y.Z>" in the release job
 
+// stores are the secret stores `envoy-infra seed --store` names.
+var stores = seed.Stores{seed.AWSSecretsManager: seed.OpenAWS, seed.GCPSecretManager: seed.OpenGCP}
+
 func main() {
-	stores := seed.Stores{seed.AWSSecretsManager: seed.OpenAWS}
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr, stores))
 }
 

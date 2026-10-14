@@ -52,6 +52,10 @@ type fakeStore struct {
 	current  string
 	calls    []string
 	puts     [][]byte
+	// newest makes the store's default the newest version whatever its state, as GCP's
+	// versions/latest is; unreadable is then that version's state when it is not served.
+	newest     bool
+	unreadable string
 
 	describeErr         error    // every Describe fails
 	versionsErr         error    // every Versions fails
@@ -65,6 +69,19 @@ type fakeStore struct {
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
+
+// latest gives f the default GCP's Secret Manager has: the newest version, labelled latest.
+func (f *fakeStore) latest() *fakeStore {
+	f.newest = true
+	return f
+}
+
+func (f *fakeStore) Label() string {
+	if f.newest {
+		return "latest"
+	}
+	return "AWSCURRENT"
+}
 
 func (f *fakeStore) holding(values ...string) *fakeStore {
 	for i, v := range values {
@@ -93,6 +110,17 @@ func (f *fakeStore) Describe(_ context.Context, name string) (seed.Description, 
 		return seed.Description{}, nil
 	case f.deleted:
 		return seed.Description{Exists: true, ScheduledForDeletion: true, DeletionDate: "2026-09-30 00:00:00+00:00"}, nil
+	case f.newest:
+		d := seed.Description{Exists: true, DefaultIsNewest: true}
+		if len(f.versions) > 0 {
+			d.NewestVersion, d.NewestState = f.versions[len(f.versions)-1].id, "ENABLED"
+			if f.unreadable != "" {
+				d.NewestState = f.unreadable
+			} else {
+				d.CurrentVersion = d.NewestVersion
+			}
+		}
+		return d, nil
 	}
 	return seed.Description{Exists: true, CurrentVersion: f.current}, nil
 }
@@ -279,6 +307,8 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 			func(f *fakeStore) *fakeStore { f.deleted = true; return f.holding(readmeSeed) }, "is scheduled for deletion"},
 		{"verify: no default version", mode("verify", "--public-key", readmePublicKey), func(f *fakeStore) *fakeStore { return f },
 			"has no AWSCURRENT version; nothing to verify"},
+		{"verify: no latest version", mode("verify", "--public-key", readmePublicKey), func(f *fakeStore) *fakeStore { return f.latest() },
+			"has no latest version; nothing to verify"},
 		{"verify: describe fails", mode("verify", "--public-key", otherPublic), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f.holding(readmeSeed) },
 			"AccessDeniedException"},
 		{"verify: reading fails", mode("verify", "--public-key", otherPublic), func(f *fakeStore) *fakeStore {
@@ -355,6 +385,90 @@ func TestVerify(t *testing.T) {
 		require.NotErrorIs(t, err, seed.ErrRefused)
 		require.Equal(t, secretName+" AWSCURRENT (version v1) derives "+otherPublic+": no", line)
 	})
+}
+
+// A store whose default is the newest version whatever its state (GCP's versions/latest) gets
+// check's latest lines: no versions, the newest version, or the newest version and the state it is
+// in when the store does not serve it.
+func TestCheckPrintsTheLatestLines(t *testing.T) {
+	rows := []struct {
+		name  string
+		store func(*fakeStore) *fakeStore
+		want  string
+	}{
+		{"absent", func(f *fakeStore) *fakeStore { f.exists = false; return f.latest() }, secretName + ": absent"},
+		{"no versions", func(f *fakeStore) *fakeStore { return f.latest() }, secretName + ": present, no versions"},
+		{"enabled", func(f *fakeStore) *fakeStore { return f.latest().holding(readmeSeed, readmeSeed) },
+			secretName + ": present; latest: version v2"},
+		{"disabled", func(f *fakeStore) *fakeStore {
+			f.unreadable = "DISABLED"
+			return f.latest().holding(readmeSeed, readmeSeed)
+		},
+			secretName + ": present; latest: version v2 is DISABLED"},
+		{"destroyed", func(f *fakeStore) *fakeStore { f.unreadable = "DESTROYED"; return f.latest().holding(readmeSeed) },
+			secretName + ": present; latest: version v1 is DESTROYED"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			store := row.store(newStore(t))
+			code, out, errs, _ := run(t, store, mode("check")...)
+			require.Equal(t, 0, code, errs)
+			require.Equal(t, row.want+"\n", out)
+			require.Empty(t, errs)
+			require.Equal(t, []string{"describe"}, store.calls)
+			requireNoValue(t, store, out, errs)
+
+			line, err := seed.Check(context.Background(), row.store(newStore(t)), secretName)
+			require.NoError(t, err)
+			require.Equal(t, row.want, line)
+		})
+	}
+}
+
+func TestVerifyOfTheLatestVersion(t *testing.T) {
+	_, otherPublic := otherUser(t)
+	for _, row := range []struct {
+		key, want string
+		code      int
+	}{
+		{readmePublicKey, secretName + " latest (version v2) derives " + readmePublicKey + ": yes", 0},
+		{otherPublic, secretName + " latest (version v2) derives " + otherPublic + ": no", 1},
+	} {
+		store := newStore(t).latest().holding(readmeSeed, readmeSeed)
+		code, out, errs, _ := run(t, store, mode("verify", "--public-key", row.key)...)
+		require.Equal(t, row.code, code, errs)
+		require.Equal(t, row.want+"\n", out)
+		require.Empty(t, errs)
+		require.Equal(t, []string{"describe", "current"}, store.calls)
+		requireNoValue(t, store, out, errs)
+	}
+}
+
+// A latest version the store does not serve fails verify with check's line for it, exit 1, before
+// any read of its value: a failed check, not a refusal, though nothing was written.
+func TestVerifyOfAnUnreadableLatestVersionFailsWithItsState(t *testing.T) {
+	for _, state := range []string{"DISABLED", "DESTROYED"} {
+		t.Run(state, func(t *testing.T) {
+			want := secretName + ": present; latest: version v2 is " + state
+			unreadable := func() *fakeStore {
+				f := newStore(t).latest().holding(readmeSeed, readmeSeed)
+				f.unreadable = state
+				return f
+			}
+			store := unreadable()
+			code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
+			require.Equal(t, 1, code, errs)
+			require.Equal(t, want+"\n", out)
+			require.Empty(t, errs)
+			require.Equal(t, []string{"describe"}, store.calls, "verify reads no value of a version the store does not serve")
+			requireNoValue(t, store, out, errs)
+
+			line, err := seed.Verify(context.Background(), unreadable(), secretName, readmePublicKey)
+			require.ErrorIs(t, err, seed.ErrMismatch)
+			require.NotErrorIs(t, err, seed.ErrRefused)
+			require.Equal(t, want, line)
+		})
+	}
 }
 
 // A stored value that is no user seed gets verify's not-a-seed line and exit 1, with the reason
@@ -480,6 +594,8 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 		"malformed":          func(f *fakeStore) *fakeStore { return f.holding(readmeSeed[:5] + "A" + readmeSeed[6:]) },
 		"reads back canary":  func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed); return f },
 		"reads back garbled": func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed + "\n"); return f },
+		"latest":             func(f *fakeStore) *fakeStore { return f.latest().holding(readmeSeed) },
+		"latest disabled":    func(f *fakeStore) *fakeStore { f.unreadable = "DISABLED"; return f.latest().holding(readmeSeed) },
 	}
 	invocations := [][]string{
 		mode("check"),

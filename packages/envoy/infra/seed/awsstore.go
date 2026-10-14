@@ -73,6 +73,9 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 // code (or the SDK error's class), never the error's own message, which can quote the request.
 type awsStore struct{ client *secretsmanager.Client }
 
+// Label is AWSCURRENT.
+func (s *awsStore) Label() string { return awsCurrent }
+
 // Describe reads DescribeSecret alone.
 func (s *awsStore) Describe(ctx context.Context, name string) (Description, error) {
 	out, err := s.client.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(name)})
