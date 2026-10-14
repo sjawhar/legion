@@ -241,7 +241,7 @@ approval that the human has not answered (open or waived), a block the approved 
 someone else answered or that was waived since, a removed block, a request for changes
 newer than the approval, or a document they never approved leaves the approval stale, and the next
 request shows them the diff: a request on a document a human approved earlier carries
-`approved_version`, `approved_at` and `approved_by` in `ask.approval`, and its Inbox card puts
+`approved` (`{version, at, by}`) in `ask.approval`, and its Inbox card puts
 `Approved at version N on <date> by <who>.` and a `Show diff` control under the question, which
 shows what changed between the two versions with every decision block cut out. So that request's
 `--summary` is one sentence naming what changed since that approval, and repeats nothing the diff

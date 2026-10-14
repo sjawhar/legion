@@ -17,22 +17,20 @@ import (
 
 // A human's approval is what a request to approve again follows. A request opened on a document
 // with an earlier approval names that approval's version, time and approver in its approval
-// (approved_version, approved_at, approved_by), so the human reads what he is approving since the
-// version he approved rather than from nothing; a first request names none. And his answer to a
-// decision block carries his approval forward: when that answer is the whole change since the
-// version he approved, the version it writes gets an approved review in his name, in the same
-// transaction (docs.carryApproval, LEGION-573).
+// (approval.approved: version, at, by), so the human reads what he is approving since the version
+// he approved rather than from nothing; a first request names none. And his answer to a decision
+// block carries his approval forward: when that answer is the whole change since the version he
+// approved, the version it writes gets an approved review in his name, in the same transaction
+// (docs.carryApproval, LEGION-573).
 
 // carriedAsk is an approval ask as the carry tests read it: the document version it names and the
-// earlier approval it carries, each of the three absent when the document was never approved.
+// earlier approval it carries, absent when the document was never approved.
 type carriedAsk struct {
 	ID       string `json:"id"`
 	Approval struct {
-		Version          int          `json:"version"`
-		RequestedVersion int          `json:"requested_version"`
-		ApprovedVersion  *int         `json:"approved_version"`
-		ApprovedAt       *string      `json:"approved_at"`
-		ApprovedBy       *model.Actor `json:"approved_by"`
+		Version          int                        `json:"version"`
+		RequestedVersion int                        `json:"requested_version"`
+		Approved         *model.AskApprovalApproved `json:"approved"`
 	} `json:"approval"`
 }
 
@@ -115,22 +113,22 @@ func readCarriedAsk(t *testing.T, handler http.Handler, askID string) carriedAsk
 // RFC 3339 text, and its actor.
 func requireCarriedApproval(t *testing.T, ask carriedAsk, review model.ArtifactReview) {
 	t.Helper()
-	carried := ask.Approval
-	if carried.ApprovedVersion == nil || *carried.ApprovedVersion != review.Version {
-		t.Fatalf("approved_version = %v, want %d", carried.ApprovedVersion, review.Version)
+	carried := ask.Approval.Approved
+	if carried == nil {
+		t.Fatalf("approval = %#v, want approved", ask.Approval)
 	}
-	if carried.ApprovedAt == nil {
-		t.Fatalf("approval = %#v, want approved_at", carried)
+	if carried.Version != review.Version {
+		t.Fatalf("approved.version = %d, want %d", carried.Version, review.Version)
 	}
-	approvedAt, err := time.Parse(time.RFC3339, *carried.ApprovedAt)
+	approvedAt, err := time.Parse(time.RFC3339, carried.At)
 	if err != nil {
-		t.Fatalf("approved_at %q is not RFC 3339: %v", *carried.ApprovedAt, err)
+		t.Fatalf("approved.at %q is not RFC 3339: %v", carried.At, err)
 	}
 	if !approvedAt.Equal(review.CreatedAt) {
-		t.Fatalf("approved_at = %s, want the review's created_at %s", approvedAt.Format(time.RFC3339Nano), review.CreatedAt.Format(time.RFC3339Nano))
+		t.Fatalf("approved.at = %s, want the review's created_at %s", approvedAt.Format(time.RFC3339Nano), review.CreatedAt.Format(time.RFC3339Nano))
 	}
-	if carried.ApprovedBy == nil || !reflect.DeepEqual(*carried.ApprovedBy, review.Actor) {
-		t.Fatalf("approved_by = %#v, want the approving actor %#v", carried.ApprovedBy, review.Actor)
+	if !reflect.DeepEqual(carried.By, review.Actor) {
+		t.Fatalf("approved.by = %#v, want the approving actor %#v", carried.By, review.Actor)
 	}
 }
 
@@ -153,8 +151,8 @@ func TestARequestOnAnApprovedDocumentCarriesTheApproval(t *testing.T) {
 	requireCarriedApproval(t, readCarriedAsk(t, handler, ask.ID), review)
 }
 
-// A first request, on a document nobody has approved, carries none of the three keys: not null
-// values, no keys at all.
+// A first request, on a document nobody has approved, carries no approved key: not a null value,
+// no key at all.
 func TestAFirstRequestCarriesNoEarlierApproval(t *testing.T) {
 	handler := approvalCarryHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve me", "A spec")
@@ -170,10 +168,8 @@ func TestAFirstRequestCarriesNoEarlierApproval(t *testing.T) {
 	if string(approval["version"]) != "1" || string(approval["requested_version"]) != "1" {
 		t.Fatalf("approval = %s, want version and requested_version 1", requested.Body.String())
 	}
-	for _, key := range []string{"approved_version", "approved_at", "approved_by"} {
-		if raw, present := approval[key]; present {
-			t.Fatalf("a first request carries %s = %s, want the key absent", key, raw)
-		}
+	if raw, present := approval["approved"]; present {
+		t.Fatalf("a first request carries approved = %s, want the key absent", raw)
 	}
 }
 
@@ -692,6 +688,45 @@ func TestACopiedBlockAnsweredThroughItsSourceCarriesOnTheSourceOnly(t *testing.T
 	requireNoCarry(t, handler, copied, 1, "stale")
 }
 
+// Stale: a copy planted since his approval. Another document of the issue holds a block the human
+// answered; the agent inserts into the spec he approved a block with that block's id and wording,
+// which settlement shows as a copy answered by him, then adds a question of its own, which he
+// answers. The copy is answered in his name and is no row of the spec's, so the spec carries
+// nothing: a block no row of this document backs is a decision the carry cannot read.
+func TestACopiedBlockPlantedSinceHisApprovalDoesNotCarry(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Planted copy", "Context\n")
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	uploaded := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]any{
+		"actor": sessionActor(), "name": "decisions.md", "content": "Decisions\n\n" + waveAsk,
+	})
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the other document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	other := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact.ID
+	asks := indexedDecisionBlocks(t, handler, issue.Key, other, map[string]string{"wave": "How many regions take the first wave?"})
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	awaitDocumentText(t, handler, other, "alice's answer", contains(`state="answered" answered_by="alice"`), nil)
+
+	planted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": waveAsk}},
+	})
+	if planted.Code != http.StatusOK {
+		t.Fatalf("plant the copy: status=%d body=%s", planted.Code, planted.Body.String())
+	}
+	awaitDocumentText(t, handler, issue.PrimaryArtifactID, "the planted copy", contains(`state="answered" answered_by="alice"`, `copied_from="`+asks["wave"]+`"`), nil)
+	versions := documentVersions(t, handler, issue.PrimaryArtifactID)
+	latest := versions[len(versions)-1].Number
+	regions := insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, regionAsk, latest+1, map[string]string{"region": "Which region goes first?"})
+
+	answerDecisionBlock(t, handler, regions["region"], "alice", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, latest+2)
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}
+
 // An approval request is open when the answer settles: the request follows the version first, and
 // the carry then answers it Approve in the human's name with the carry's reason, so the review
 // names it and nothing reopens or rewords it afterwards.
@@ -701,7 +736,7 @@ func TestAnOpenApprovalRequestIsAnsweredByTheCarry(t *testing.T) {
 	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
 	asks := insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 2, map[string]string{"wave": "How many regions take the first wave?"})
 	request := requestApproval(t, handler, issue.PrimaryArtifactID)
-	if request.Approval.Version != 2 || request.Approval.ApprovedVersion == nil || *request.Approval.ApprovedVersion != 1 {
+	if request.Approval.Version != 2 || request.Approval.Approved == nil || request.Approval.Approved.Version != 1 {
 		t.Fatalf("request = %#v, want one at version 2 following the approval of version 1", request.Approval)
 	}
 

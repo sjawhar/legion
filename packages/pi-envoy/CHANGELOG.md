@@ -101,8 +101,8 @@
   and emits `artifact.approved`, so the agent requests nothing; when the answer changes text
   outside the block, the agent rewrites that text, runs the fresh reader on the new version and
   requests approval again with a one-sentence `--summary` naming what changed since the earlier
-  approval, which the request names in `ask.approval` (`approved_version`, `approved_at`,
-  `approved_by`) and the card shows with its `Show diff` control. The reference lists what still
+  approval, which the request names in `ask.approval.approved` (`{version, at, by}`) and the card
+  shows with its `Show diff` control. The reference lists what still
   leaves an approval stale: a change outside the blocks, a block added or answered since the approval
   without the human's own answer, a removed block, a newer request for changes, or a document they never approved.
 

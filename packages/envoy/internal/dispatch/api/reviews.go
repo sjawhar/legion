@@ -24,7 +24,7 @@ import (
 // approval is an ask of kind "approval" with fixed options, so it reaches the
 // human through the Inbox like any question; one opened on a document with an
 // earlier approval carries that approval's version, time and approver
-// (approved_version, approved_at, approved_by). Answering it, or reviewing from
+// (approval.approved: version, at, by). Answering it, or reviewing from
 // the document header, writes the review (docs.WriteReview) and emits
 // artifact.approved / artifact.changes_requested on the document's owner.
 
@@ -424,8 +424,8 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 
 // openApprovalAsk inserts the document's approval request at version, asking question, and appends
 // its ask.opened event; the requester follows it. A document a human approved before carries that
-// approval's version, time and approver on the request (approved_version, approved_at,
-// approved_by), so the human reads what the re-approval follows; a first request carries none.
+// approval's version, time and approver on the request (approval.approved), so the human reads
+// what the re-approval follows; a first request carries none.
 func (s *server) openApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -447,9 +447,7 @@ func (s *server) openApprovalAsk(
 		return nil, model.Event{}, err
 	}
 	if approved != nil {
-		approval.ApprovedVersion = new(approved.Version)
-		approval.ApprovedAt = new(timestampValue(approved.CreatedAt))
-		approval.ApprovedBy = new(approved.Actor)
+		approval.Approved = &model.AskApprovalApproved{Version: approved.Version, At: timestampValue(approved.CreatedAt), By: approved.Actor}
 	}
 	ask := model.Ask{
 		ID:         rowID,

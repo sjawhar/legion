@@ -85,6 +85,43 @@ func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*m
 	`, artifactID)
 }
 
+// latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical
+// login (model.CanonicalLogin), or nil when he has reviewed the document at no version.
+func latestReviewBy(ctx context.Context, q Queryer, artifactID, login string) (*model.ArtifactReview, error) {
+	return newestReview(ctx, q, fmt.Sprintf("latest review by %q", login), `
+		select `+ReviewColumns+`
+		from artifact_reviews
+		where artifact_id = $1 and actor->>'kind' = 'user' and lower(trim(actor->>'id')) = $2
+		order by created_at desc, id desc
+		limit 1
+	`, artifactID, login)
+}
+
+// changesRequestedSince reports whether anyone requested changes on review's document after
+// review was given.
+func changesRequestedSince(ctx context.Context, q Queryer, review model.ArtifactReview) (bool, error) {
+	var requested bool
+	if err := q.QueryRow(ctx, `
+		select exists(
+			select 1 from artifact_reviews
+			where artifact_id = $1 and state = 'changes_requested' and (created_at, id) > ($2, $3::uuid)
+		)
+	`, review.ArtifactID, review.CreatedAt, review.ID).Scan(&requested); err != nil {
+		return false, fmt.Errorf("read reviews since the approval: %w", err)
+	}
+	return requested, nil
+}
+
+// reviewedArtifact reads the document a review names as WriteReview takes it: its id, name and
+// issue.
+func reviewedArtifact(ctx context.Context, q Queryer, artifactID string) (model.Artifact, error) {
+	artifact := model.Artifact{ID: artifactID}
+	if err := q.QueryRow(ctx, `select name, issue_key from artifacts where id = $1`, artifactID).Scan(&artifact.Name, &artifact.IssueKey); err != nil {
+		return model.Artifact{}, fmt.Errorf("read the document for its review: %w", err)
+	}
+	return artifact, nil
+}
+
 // newestReview runs a query selecting ReviewColumns of at most one row and returns that review,
 // nil when the query selects none; what names the read in the error any other failure wraps.
 func newestReview(ctx context.Context, q Queryer, what, query string, args ...any) (*model.ArtifactReview, error) {
