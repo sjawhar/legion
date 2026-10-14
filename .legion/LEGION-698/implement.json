@@ -116,6 +116,5 @@
   "discoveredComplexity": [
     "byPush is now the only fact other than the reviewer's own completion and review that writes a review-stuck notice (byChecks and byRequired are gone); the architect prompt lists the four survivors.",
     "The deploy ordering (plan §6): the other deployment's legion.yaml sets review_workflows and the new daemon refuses to boot on it; the architect settled on the plan thread that the legion-deploy holder drops the key in the same pull request as the pin after the release. The production check's deploy request names it."
-  ],
-  "round": 2
+  ]
 }
