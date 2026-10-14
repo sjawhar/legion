@@ -238,6 +238,15 @@ func (c *socketClient) closeCode(t *testing.T, within time.Duration) (code, mess
 	}
 }
 
+// untilTestDeadline is how long a wait may run: up to the test binary's deadline, less a margin
+// to fail by name, rather than a fixed bound a loaded machine outruns.
+func untilTestDeadline(t *testing.T) time.Duration {
+	if deadline, bounded := t.Deadline(); bounded {
+		return time.Until(deadline) - 2*time.Second
+	}
+	return time.Minute
+}
+
 // open reports whether the socket has not ended.
 func (c *socketClient) open() bool {
 	select {
@@ -445,19 +454,50 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 
 func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 	rig := newDeliverySocketRig(t, testServerOptions{}, nil)
-	client := rig.dial(t, asUser("alice"))
+	// A write buffer larger than either message sends each as one frame, as Firefox sends a message.
+	dialer := *gws.DefaultDialer
+	dialer.WriteBufferSize = 10 << 20
+	client := rig.open(t, &dialer, asUser("alice")).read()
 
 	// A resume's revisions may run to megabytes: a frame under 8 MiB is read, and this one is answered
-	// for its view, which names no kind.
+	// for its view, which names no kind. The answer comes only once all 7 MiB have arrived and been
+	// parsed, which takes as long as the machine takes, so the wait runs to the test's deadline.
 	revisions := strings.Repeat("0", 7<<20)
 	client.sendText(t, []byte(`{"type":"subscribe","sub":"r","view":{"kind":"bogus"},"resume":{"seq":"0","revs":{"items":{},"maps":{},"counts":{},"fields":{"f":"`+revisions+`"}}}}`))
-	client.refusal(t, 10*time.Second, "r", "INVALID_FRAME")
+	client.refusal(t, untilTestDeadline(t), "r", "INVALID_FRAME")
 
-	// One over it closes the socket with 1009.
+	// One over it closes the socket with 1009. gorilla compares a frame's declared length with the
+	// limit as it reads the frame's header, so Dispatch answers before reading any of the 9 MiB.
 	oversized := []byte(`{"type":"unsubscribe","sub":"` + strings.Repeat("a", 9<<20) + `"}`)
 	go func() { _ = client.conn.WriteMessage(gws.TextMessage, oversized) }()
 	if code, _ := client.closeCode(t, 10*time.Second); code != gws.CloseMessageTooBig {
 		t.Fatalf("a 9 MiB frame closed the socket with %d, want 1009", code)
+	}
+	rig.sockets(t, 0)
+}
+
+// Chrome on desktop sends a message over 64 KiB in frames of at most 131,000 bytes, the capacity of
+// the data pipe its renderer fills for the network service (services/network/websocket.cc). The read
+// limit counts a message's frames together: the frame that takes the message past 8 MiB closes the
+// socket with 1009, though the message never finishes.
+func TestAMessageOverTheReadLimitInChromesFramesClosesTheSocket(t *testing.T) {
+	rig := newDeliverySocketRig(t, testServerOptions{}, nil)
+	const frame = 131000
+	dialer := *gws.DefaultDialer
+	dialer.WriteBufferSize = frame
+	client := rig.open(t, &dialer, asUser("alice")).read()
+
+	// 65 frames and a byte: the writer sends a full frame once the next byte needs its buffer, so
+	// the byte sends the 65th frame, which takes the message past the limit. No last frame follows.
+	writer, err := client.conn.NextWriter(gws.TextMessage)
+	if err != nil {
+		t.Fatalf("open a message: %v", err)
+	}
+	go func() { _, _ = writer.Write(bytes.Repeat([]byte("a"), 65*frame+1)) }()
+	// Dispatch reads the 64 frames under the limit before the 65th's header, which takes as long as
+	// the machine takes, so the wait runs to the test's deadline.
+	if code, _ := client.closeCode(t, untilTestDeadline(t)); code != gws.CloseMessageTooBig {
+		t.Fatalf("65 frames of 131,000 bytes closed the socket with %d, want 1009", code)
 	}
 	rig.sockets(t, 0)
 }
