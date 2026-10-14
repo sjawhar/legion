@@ -268,7 +268,10 @@ func throughputWait(t *testing.T) time.Duration {
 const (
 	// throughputWaitCap is above the slowest run of these tests measured (17.9 s, with the client's
 	// writes throttled to 512 KiB/s) and the slowest loopback transfer of 8.5 MB measured on the
-	// development machine (54 s, through 16 KiB socket buffers).
+	// development machine (54 s, through 16 KiB socket buffers). A test that waits on it builds its
+	// rig with it as the heartbeat: a frame holds the client's write lock until it is written, and
+	// the client's ping handler waits 1 s for that lock before it drops the pong, so a slow transfer
+	// answers no ping, and the server's pong deadline, twice the heartbeat, must outlast the wait.
 	throughputWaitCap = 2 * time.Minute
 	// throughputWaitMargin is what throughputWait leaves of the test binary's deadline for the
 	// failed test's cleanups: the socket rig's took at most 26 ms after a wait that timed out.
@@ -481,7 +484,7 @@ func TestAMalformedFrameIsAnErrorFrameNotAClose(t *testing.T) {
 }
 
 func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
-	rig := newDeliverySocketRig(t, testServerOptions{}, nil)
+	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: throughputWaitCap}, nil)
 	// A write buffer larger than either message sends each as one frame, as Firefox sends a message.
 	dialer := *gws.DefaultDialer
 	dialer.WriteBufferSize = 10 << 20
@@ -509,7 +512,7 @@ func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 // limit counts a message's frames together: the frame that takes the message past 8 MiB closes the
 // socket with 1009, though the message never finishes.
 func TestAMessageOverTheReadLimitInChromesFramesClosesTheSocket(t *testing.T) {
-	rig := newDeliverySocketRig(t, testServerOptions{}, nil)
+	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: throughputWaitCap}, nil)
 	const frame = 131000
 	dialer := *gws.DefaultDialer
 	dialer.WriteBufferSize = frame
