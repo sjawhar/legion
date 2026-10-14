@@ -32,6 +32,8 @@ type ListenerConfig struct {
 // (internal/config/config.go), and splits NATS_URLS on commas, so a URL holding a comma or nothing
 // is refused here, by its index. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a
 // server bus.LocalNATSURL does not vouch for, since the listener refuses such a server without it.
+// The listener reads ENVOY_HOST_BRIDGE untrimmed into every local delivery's URL
+// (internal/session/session.go), so a host bridge with surrounding whitespace is refused.
 func ListenerEnv(c ListenerConfig) ([]string, error) {
 	if strings.TrimSpace(c.MachineID) == "" {
 		return nil, errors.New("machineId is required")
@@ -57,6 +59,9 @@ func ListenerEnv(c ListenerConfig) ([]string, error) {
 	}
 	if port < 1 || port > 65535 {
 		return nil, fmt.Errorf("port %d is outside 1-65535", c.Port)
+	}
+	if strings.TrimSpace(c.HostBridge) != c.HostBridge {
+		return nil, fmt.Errorf("hostBridge has leading or trailing whitespace: %q", c.HostBridge)
 	}
 	env := []string{
 		"PORT=" + strconv.Itoa(port),

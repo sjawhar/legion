@@ -38,6 +38,8 @@ func TestListenerEnv(t *testing.T) {
 		{name: "a refused URL is named by its index", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222", ""}}, err: "natsUrls[1] is empty"},
 		{name: "a negative port is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, Port: -1}, err: "port -1 is outside 1-65535"},
 		{name: "a port above 65535 is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, Port: 65536}, err: "port 65536 is outside 1-65535"},
+		{name: "a blank host bridge is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, HostBridge: " "}, err: "hostBridge has leading or trailing whitespace"},
+		{name: "a host bridge with trailing whitespace is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, HostBridge: "127.0.0.1 "}, err: "hostBridge has leading or trailing whitespace"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
