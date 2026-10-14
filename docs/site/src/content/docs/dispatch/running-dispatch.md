@@ -57,15 +57,21 @@ start, naming what is wrong.
   that email, lowercased. Anyone else reaches a page saying why: not in the domain, email not
   verified, or no email. No AWS account is involved.
 
+  Set `DISPATCH_SIGNIN_DOMAIN` to the organization's **primary** domain: Google puts the primary
+  domain in `hd` for every account of the organization, whichever domain its address is on. A
+  secondary domain in the setting admits nobody, and a member whose address is on a secondary
+  domain signs in, named by that address.
+
 The Google client to create, in the Google Cloud console of the organization whose Workspace it
 is, is a **web application** OAuth client with `<DISPATCH_SERVER_URL>/auth/callback` as an
-authorized redirect URI. Google accepts an `https` redirect whose host ends in a public suffix, or
-plain `http` to a loopback address such as `http://127.0.0.1:8766/auth/callback` for a server on
-your own machine. Its client ID and secret are `DISPATCH_SIGNIN_CLIENT_ID` and
-`DISPATCH_SIGNIN_CLIENT_SECRET`. Dispatch asks Google for offline access, with consent on every
-sign-in, so each sign-in returns the refresh token Dispatch confirms the person with, and names
-the domain to Google's account chooser as a hint; the check that admits a person is Dispatch's
-own.
+authorized redirect URI. Set its OAuth consent screen's user type to **Internal**, so that only the
+organization's own accounts can complete the sign-in at Google. Google accepts an `https` redirect
+whose host ends in a public suffix, or plain `http` to a loopback address such as
+`http://127.0.0.1:8766/auth/callback` for a server on your own machine. Its client ID and secret
+are `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET`. Dispatch asks Google for
+offline access, with consent on every sign-in, so each sign-in returns the refresh token Dispatch
+confirms the person with, and names the domain to Google's account chooser as a hint; the check
+that admits a person is Dispatch's own.
 
 Either way, Dispatch keeps the issuer's refresh token, sealed, and confirms the person with it at
 least hourly: the first request after the hour refreshes the sign-in and applies the same rule to
@@ -81,8 +87,16 @@ same address, as when a Workspace admin gives a deleted account's address to a n
 ends every session of the address before it signs the new account in, and the hourly confirmation
 ends them should the refreshed sign-in name another account. Through a Cognito pool there is no
 such record: the old holder of a reassigned address keeps the sessions they already have until
-their cookie expires, 30 days after it was issued, unless an hourly confirmation runs for them
-before the new holder first signs in.
+their cookie expires, 30 days after it was issued, unless the pool user is removed from
+`DISPATCH_SIGNIN_GROUP` or disabled.
+
+To move a deployment from one way of signing in to the other, in either direction, end the old
+issuer's sign-ins first: revoke the refresh tokens at the old issuer (sign people out at the
+Cognito pool, or remove the client's access at Google), then clear them in Dispatch's database,
+`update people set refresh_token = null, confirmed_at = null`, and start Dispatch with the new
+settings. Everyone then signs in again under the new issuer; a refresh token left from the old one
+would be refused at the first hourly confirmation, and is still redeemable at the old issuer until
+it is revoked there.
 
 ## Running it on your machine
 

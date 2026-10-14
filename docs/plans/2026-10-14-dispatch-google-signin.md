@@ -85,7 +85,7 @@ directory.
   - both: `DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set; set one: a Cognito pool's group, or a Google Workspace domain`;
   - a domain with another issuer: `DISPATCH_SIGNIN_DOMAIN needs DISPATCH_SIGNIN_ISSUER https://accounts.google.com, since only Google's tokens carry hd; DISPATCH_SIGNIN_ISSUER is <issuer>`;
   - a group with Google's issuer: `DISPATCH_SIGNIN_GROUP is a Cognito pool's group, and a token from https://accounts.google.com carries none; set DISPATCH_SIGNIN_DOMAIN instead`;
-  - a malformed domain: `DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got <value>`;
+  - a malformed domain: `DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got a value of <n> characters` (the value itself is never echoed, so a secret pasted into the wrong variable stays out of the boot log);
   - `requireCookieSignIn` and `signInUnconfigured`'s 503 (`routes/router.go:380`): their lists name `one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN` where they name the group today;
   - header identity names `DISPATCH_SIGNIN_DOMAIN` when it is the setting it finds. Dev sign-in's fence checks only the issuer and runs after `checkSignInSettings` (`main.go:541`, then `:622-623`), so a domain beside dev sign-in is refused first by the checks below, and the fence refuses only a complete domain set.
 
@@ -149,8 +149,8 @@ directory.
   `settings_test.go:246`, takes `signInEnvironment`, whose group is `main_test.go:42`) and assert
   the boot field, then point `boot.SignInIssuer` at the fake issuer's URL before the router
   subtest, so no test calls Google; plus a refusal, and a router sign-in with Google-shaped claims
-  and an aged confirmation (that subtest lands with Task 3, the first commit where a domain
-  sign-in can pass). Run, see them fail.
+  and an aged confirmation (a domain sign-in first passes with Task 2; the subtest landed in Task
+  3's commit). Run, see them fail.
 - [x] Add the row; update the issuer row's "all four … or none" (`settings.go:50`), the group row's
   Required column (`:55`) and the refusal sentence at `:112`; implement the checks; thread the
   `SignInRule` to the router and membership.

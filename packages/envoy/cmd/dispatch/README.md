@@ -229,8 +229,8 @@ lowercase email:
   at WARN with the email, and the hourly confirmation ends them when the
   refreshed token's `sub` is not the recorded one. Group mode neither reads nor
   writes `sub`, so there the old holder of a reassigned address keeps the
-  cookies they have until they expire, 30 days after issue, unless a
-  confirmation runs for them before the new holder first signs in.
+  cookies they have until their cookie expires, 30 days after it was issued,
+  unless the pool user is removed from `DISPATCH_SIGNIN_GROUP` or disabled.
 
   The refresh token is stored sealed (`people.refresh_token`): AES-256-GCM
   under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose
