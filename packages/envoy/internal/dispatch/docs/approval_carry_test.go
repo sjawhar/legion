@@ -144,47 +144,23 @@ func TestCutDecisionBlocksOfADocumentWithoutBlocksIsItsRendering(t *testing.T) {
 }
 
 // answerers names each person who answered a block of the version once, by canonical login, in
-// sorted order: one answerer under two spellings is one, two people are two, and a version whose
-// blocks are all open or resolved names nobody. The states are read from the fixtures' blocks
-// wherever they stand.
+// sorted order, from the rows of its blocks: one answerer under two spellings is one, two people
+// are two, and a version whose blocks are all open or resolved names nobody.
 func TestAnswerersNamesEachAnswererOfTheVersionOnce(t *testing.T) {
-	approvedTree, err := pmdoc.Parse(decisionBlockFixture(t, "approved.md"))
-	if err != nil {
-		t.Fatal(err)
+	at := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	answeredBy := func(by string, at time.Time) model.Ask {
+		return model.Ask{State: "answered", Answer: &model.AskAnswer{User: by, At: at}}
 	}
-	answeredTree, err := pmdoc.Parse(decisionBlockFixture(t, "answered.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	approved, answered := askBlockStates(approvedTree), askBlockStates(answeredTree)
-	for _, id := range []string{"wave-size", "rollback", "regions", "budget"} {
-		if _, held := approved[id]; !held {
-			t.Fatalf("approved fixture states = %#v, want block %q read wherever it stands", approved, id)
-		}
-	}
-	if approved["wave-size"].state != "answered" || approved["wave-size"].answeredBy != "alice" || approved["rollback"].state != "open" {
-		t.Fatalf("approved fixture states = %#v", approved)
-	}
-	if got := answerers(answered); !reflect.DeepEqual(got, []string{"alice"}) {
-		t.Fatalf("answerers(answered) = %q, want alice, who answered both answered blocks", got)
-	}
-	if got := answerers(approved); !reflect.DeepEqual(got, []string{"alice"}) {
-		t.Fatalf("answerers(approved) = %q, want alice, who answered its one answered block", got)
-	}
-
-	answeredBy := func(by, at string) askBlockState {
-		return askBlockState{state: "answered", answeredBy: by, answeredAt: at}
-	}
-	twoAnswerers := map[string]askBlockState{
-		"one":   answeredBy("Bob", "2026-10-02T10:00:00Z"),
-		"two":   answeredBy("alice", "2026-10-02T10:01:00Z"),
-		"three": answeredBy(" Alice ", "2026-10-02T10:02:00Z"),
-		"four":  {state: "open"},
+	twoAnswerers := map[string]model.Ask{
+		"one":   answeredBy("Bob", at),
+		"two":   answeredBy("alice", at.Add(time.Minute)),
+		"three": answeredBy(" Alice ", at.Add(2*time.Minute)),
+		"four":  {State: "open"},
 	}
 	if got := answerers(twoAnswerers); !reflect.DeepEqual(got, []string{"alice", "bob"}) {
 		t.Fatalf("answerers(two people, one under two spellings) = %q, want alice and bob, sorted", got)
 	}
-	if got := answerers(map[string]askBlockState{"one": {state: "open"}, "two": {state: "resolved"}}); got != nil {
+	if got := answerers(map[string]model.Ask{"one": {State: "open"}, "two": {State: "resolved"}}); got != nil {
 		t.Fatalf("answerers(open and resolved) = %q, want nobody", got)
 	}
 	if got := answerers(nil); got != nil {
@@ -213,51 +189,52 @@ func withAttr(node *pmdoc.Node, name string, value any) *pmdoc.Node {
 	return node
 }
 
-// The version just written is trusted for nothing: each block's state is its row's, read as the
-// attributes settlement writes from the row, so a block a stored version holds unchanged compares
-// equal to its row; and the block itself must be as settlement's own writer leaves it from the
-// row. A node no row of this document backs - forged on the socket, or not yet indexed - refuses
-// the carry outright; so does a node whose server attributes the writer would change - a copy,
-// one settlement could not read, a state, answerer, time, selection or answer other than the
-// row's, with or without the answer - and the block of a decided row that asks other wording than
-// the row was decided on or that settlement cannot read. A block holding the row's answer, and
-// one without it, as settlement leaves a withheld answer, are both as the row has it. An open
-// row's body is free.
-func TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testing.T) {
-	answeredAt := time.Date(2026, 10, 2, 10, 0, 0, 123456000, time.UTC)
+// The blocks the pure tests of the carry's row test read: own, a decided block as settlement
+// writes it from its row (ownDecided; ownWithheld without the answer settlement withholds for
+// room), and open, the block of an open row.
+const (
+	ownAnswered   = `:::ask{#own urgency="low" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-02T10:00:00.123456Z"`
+	ownDecided    = ownAnswered + ` selected="[&#x22;East&#x22;]" answer="The quiet one first."}` + "\n"
+	ownWithheld   = ownAnswered + "}\n"
+	ownBody       = "Which region goes first?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"
+	openDirective = `:::ask{#open urgency="med" multiple="false" state="open"}` + "\n"
+	openBody      = "How many regions take the first wave?\n:::\n"
+)
+
+// ownAndOpenRows is the asks rows of the blocks above: own, answered by alice as ownDecided shows
+// it, and open, still open.
+func ownAndOpenRows() map[string]model.Ask {
 	text := "The quiet one first."
-	rows := map[string]model.Ask{
+	return map[string]model.Ask{
 		"own": {
 			State: "answered", Urgency: "low", Question: "Which region goes first?",
 			Options: []model.AskOption{{Label: "East", Description: "The quiet one."}, {Label: "West", Description: "The busy one."}},
-			Answer:  &model.AskAnswer{User: "alice", Selected: []string{"East"}, Text: &text, At: answeredAt},
+			Answer:  &model.AskAnswer{User: "alice", Selected: []string{"East"}, Text: &text, At: time.Date(2026, 10, 2, 10, 0, 0, 123456000, time.UTC)},
 		},
 		"open": {State: "open", Urgency: "med", Question: "How many regions take the first wave?", Options: []model.AskOption{}},
 	}
-	const (
-		ownAnswered   = `:::ask{#own urgency="low" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-02T10:00:00.123456Z"`
-		ownDecided    = ownAnswered + ` selected="[&#x22;East&#x22;]" answer="The quiet one first."}` + "\n"
-		ownWithheld   = ownAnswered + "}\n"
-		ownBody       = "Which region goes first?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"
-		openDirective = `:::ask{#open urgency="med" multiple="false" state="open"}` + "\n"
-		openBody      = "How many regions take the first wave?\n:::\n"
-	)
+}
+
+// The version just written is trusted for nothing: each block of N travels as its row, and the
+// block itself must be as settlement's own writer leaves it from the row - the one test the
+// approved version's blocks are held to as well (blockAsSettlementLeavesIt). A node no row of
+// this document backs - forged on the socket, or not yet indexed - refuses the carry outright; so
+// does a node whose server attributes the writer would change - a copy, one settlement could not
+// read, a state, answerer, time, selection or answer other than the row's, with or without the
+// answer - and the block of a decided row that asks other wording than the row was decided on or
+// that settlement cannot read. A block holding the row's answer, and one without it, as
+// settlement leaves a withheld answer, are both as the row has it. An open row's body is free.
+func TestRowBackedBlocksReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testing.T) {
+	rows := ownAndOpenRows()
 	own := askNodeOf(t, ownDecided+ownBody)
 	open := askNodeOf(t, openDirective+openBody)
-	states, backed := rowBackedStates(map[string]*pmdoc.Node{"own": own, "open": open}, rows)
-	want := map[string]askBlockState{
-		"own":  {state: "answered", answeredBy: "alice", answeredAt: "2026-10-02T10:00:00.123456Z"},
-		"open": {state: "open"},
-	}
-	if !backed || !reflect.DeepEqual(states, want) {
-		t.Fatalf("row-backed states = %#v, %v; want %#v from the rows", states, backed, want)
+	blocks, backed := rowBackedBlocks(map[string]*pmdoc.Node{"own": own, "open": open}, rows)
+	if !backed || !reflect.DeepEqual(blocks, rows) {
+		t.Fatalf("row-backed blocks = %#v, %v; want the rows %#v", blocks, backed, rows)
 	}
 	for id, ask := range rows {
 		node := &pmdoc.Node{Type: "ask", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: id, "urgency": ask.Urgency, "multiple": false}}
 		setAskServerAttributes(node, ask, "", false)
-		if written := askBlockStates(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{node}})[id]; written != states[id] {
-			t.Fatalf("block %q as settlement writes it = %#v, its row reads %#v; want them equal", id, written, states[id])
-		}
 		if !blockAsItsRowHasIt(node, ask) {
 			t.Fatalf("block %q as settlement writes it = %#v, want it as its row has it", id, node.Attrs)
 		}
@@ -268,8 +245,8 @@ func TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testi
 		// Settlement leaves an answer the document has no room for out of its block.
 		"a decided row whose node holds its answer withheld": {"own": askNodeOf(t, ownWithheld+ownBody), "open": open},
 	} {
-		if states, backed := rowBackedStates(nodes, rows); !backed || !reflect.DeepEqual(states, want) {
-			t.Errorf("%s: states = %#v, %v; want %#v, backed", name, states, backed, want)
+		if blocks, backed := rowBackedBlocks(nodes, rows); !backed || !reflect.DeepEqual(blocks, rows) {
+			t.Errorf("%s: blocks = %#v, %v; want the rows, backed", name, blocks, backed)
 		}
 	}
 
@@ -317,17 +294,52 @@ func TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testi
 			"own": own, "open": askNodeOf(t, `:::ask{#open urgency="med" multiple="false" state="open" selected="[&#x22;Two&#x22;]"}`+"\n"+openBody),
 		},
 	} {
-		if states, backed := rowBackedStates(nodes, rows); backed || states != nil {
-			t.Errorf("%s: row-backed states = %#v, %v; want the carry refused", name, states, backed)
+		if blocks, backed := rowBackedBlocks(nodes, rows); backed || blocks != nil {
+			t.Errorf("%s: row-backed blocks = %#v, %v; want the carry refused", name, blocks, backed)
 		}
 	}
-	if states, backed := rowBackedStates(nil, rows); !backed || len(states) != 0 {
-		t.Fatalf("no nodes: states = %#v, %v; want none, backed", states, backed)
+	if blocks, backed := rowBackedBlocks(nil, rows); !backed || len(blocks) != 0 {
+		t.Fatalf("no nodes: blocks = %#v, %v; want none, backed", blocks, backed)
 	}
 }
 
-// askNodes reads every ask node of the live tree wherever it stands, each id once; a tree that
-// repeats a block id, which settlement reads no block under, is not read at all.
+// The version he approved is held to the rows of N's blocks by the test N's own blocks pass: a
+// stored block that is as its row has it - a decided block as settlement wrote it, with or
+// without the answer it withholds for room, or the block of a row still open - is held as its
+// row; one that shows a selection the row never had, asks other wording than the row was decided
+// on, or shows open where the row has since been answered is not; nor is a block under an id no
+// row of N backs. A version holding no block holds none.
+func TestAnApprovedVersionsBlocksAreHeldAsTheirRows(t *testing.T) {
+	rows := ownAndOpenRows()
+	held := heldAsItsRow(map[string]*pmdoc.Node{"own": askNodeOf(t, ownDecided+ownBody), "open": askNodeOf(t, openDirective+openBody)}, rows)
+	if want := map[string]bool{"own": true, "open": true}; !reflect.DeepEqual(held, want) {
+		t.Fatalf("blocks held as their rows = %#v, want %#v", held, want)
+	}
+	for name, test := range map[string]struct {
+		id   string
+		node *pmdoc.Node
+		held bool
+	}{
+		"a decided block as settlement wrote it":                {"own", askNodeOf(t, ownDecided+ownBody), true},
+		"a decided block with its answer withheld":              {"own", askNodeOf(t, ownWithheld+ownBody), true},
+		"the block of a row still open":                         {"open", askNodeOf(t, openDirective+openBody), true},
+		"a decided block showing a selection the row never had": {"own", askNodeOf(t, ownAnswered+` selected="[&#x22;West&#x22;]" answer="The quiet one first."}`+"\n"+ownBody), false},
+		"a decided block asking other wording":                  {"own", askNodeOf(t, ownDecided+"Which region goes last?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"), false},
+		"an open block whose row has since been answered":       {"own", askNodeOf(t, `:::ask{#own urgency="low" multiple="false" state="open"}`+"\n"+ownBody), false},
+		"a block under an id no row of the new version backs":   {"gone", askNodeOf(t, `:::ask{#gone urgency="low" multiple="false" state="open"}`+"\nWhich region is gone?\n:::\n"), false},
+	} {
+		if held := heldAsItsRow(map[string]*pmdoc.Node{test.id: test.node}, rows); !reflect.DeepEqual(held, map[string]bool{test.id: test.held}) {
+			t.Errorf("%s: held as its row = %#v, want %q %v", name, held, test.id, test.held)
+		}
+	}
+	if held := heldAsItsRow(nil, rows); len(held) != 0 {
+		t.Fatalf("no blocks: held as their rows = %#v, want none", held)
+	}
+}
+
+// askNodes reads every ask node of a tree wherever it stands, each id once - the live tree of N
+// and the stored tree of the version he approved are both read through it; a tree that repeats a
+// block id, which settlement reads no block under, is not read at all.
 func TestAskNodesOfTheCarriedVersionReadEveryBlockOnceAndRefuseARepeatedID(t *testing.T) {
 	tree, err := pmdoc.Parse(decisionBlockFixture(t, "answered.md"))
 	if err != nil {
@@ -363,16 +375,18 @@ func TestAskNodesOfTheCarriedVersionReadEveryBlockOnceAndRefuseARepeatedID(t *te
 	}
 }
 
-// The rule over in-memory states: N carries H's approval of A when the two cut to the same text,
-// every block of N not as A held it is H's answer given after his approval, at least one is not
-// as A held it, and every block of A still stands.
+// The rule over the rows alone: N carries H's approval of A when the two cut to the same text,
+// every block of N that A did not hold as its row has it (heldAsItsRow) is H's answer given after
+// his approval, at least one block is such, and every block of A still stands. A block A held
+// other than its row has it is a change of N's whoever made it: it carries when H answered it
+// again since his approval, and nothing carries otherwise.
 func TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion(t *testing.T) {
 	approvedAt := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	answered := func(by string, at time.Time) askBlockState {
-		return askBlockState{state: "answered", answeredBy: by, answeredAt: at.Format(time.RFC3339Nano)}
+	answered := func(by string, at time.Time) model.Ask {
+		return model.Ask{State: "answered", Answer: &model.AskAnswer{User: by, At: at}}
 	}
 	before, after, later := approvedAt.Add(-time.Hour), approvedAt.Add(time.Minute), approvedAt.Add(2*time.Minute)
-	open, resolved := askBlockState{state: "open"}, askBlockState{state: "resolved"}
+	open, resolved := model.Ask{State: "open"}, model.Ask{State: "resolved"}
 	const text = "Context\n"
 	for _, test := range []struct {
 		name  string
@@ -380,59 +394,62 @@ func TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion(t *testing.T) {
 		carry bool
 	}{
 		{"his answer to a block added since his approval", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", after)}, approvedCut: text, cut: text,
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", after)}, approvedCut: text, cut: text,
 		}, true},
 		{"his answer to a block the approved version held open", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": open}, blocks: map[string]askBlockState{"wave": answered("alice", after)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": false}, blocks: map[string]model.Ask{"wave": answered("alice", after)}, approvedCut: text, cut: text,
 		}, true},
 		{"his changed answer to a block he answered before his approval", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": answered("alice", before)}, blocks: map[string]askBlockState{"wave": answered("alice", after)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": false}, blocks: map[string]model.Ask{"wave": answered("alice", after)}, approvedCut: text, cut: text,
 		}, true},
 		{"another's answer he approved, unchanged, beside his own", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": answered("bob", before)},
-			blocks: map[string]askBlockState{"wave": answered("bob", before), "region": answered("Alice", after)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": true},
+			blocks: map[string]model.Ask{"wave": answered("bob", before), "region": answered("Alice", after)}, approvedCut: text, cut: text,
 		}, true},
 		{"another's answer since his approval to a block it held open", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": open},
-			blocks: map[string]askBlockState{"wave": answered("bob", after), "region": answered("alice", later)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": false},
+			blocks: map[string]model.Ask{"wave": answered("bob", after), "region": answered("alice", later)}, approvedCut: text, cut: text,
 		}, false},
 		{"a block he approved resolved since", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": open},
-			blocks: map[string]askBlockState{"wave": resolved, "region": answered("alice", after)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": false},
+			blocks: map[string]model.Ask{"wave": resolved, "region": answered("alice", after)}, approvedCut: text, cut: text,
 		}, false},
 		{"a block he approved removed", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": open, "region": open},
-			blocks: map[string]askBlockState{"wave": answered("alice", after)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": false, "region": false},
+			blocks: map[string]model.Ask{"wave": answered("alice", after)}, approvedCut: text, cut: text,
 		}, false},
 		{"a block added since left open", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", after), "region": open}, approvedCut: text, cut: text,
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", after), "region": open}, approvedCut: text, cut: text,
 		}, false},
 		{"a block added since answered by someone else", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", after), "region": answered("bob", later)}, approvedCut: text, cut: text,
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", after), "region": answered("bob", later)}, approvedCut: text, cut: text,
 		}, false},
 		{"an edit outside the blocks", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", after)}, approvedCut: text, cut: "Context changed.\n",
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", after)}, approvedCut: text, cut: "Context changed.\n",
 		}, false},
 		{"nothing of his changed: every block as the approved version held it", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": answered("alice", before), "region": answered("bob", before)},
-			blocks: map[string]askBlockState{"wave": answered("alice", before), "region": answered("bob", before)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": true, "region": true},
+			blocks: map[string]model.Ask{"wave": answered("alice", before), "region": answered("bob", before)}, approvedCut: text, cut: text,
 		}, false},
 		{"a block he answered before his approval, removed since and restored as it was", carryInput{
-			login: "alice", approved: map[string]askBlockState{"wave": answered("alice", before)},
-			blocks: map[string]askBlockState{"wave": answered("alice", before)}, approvedCut: text, cut: text,
+			login: "alice", approved: map[string]bool{"wave": true},
+			blocks: map[string]model.Ask{"wave": answered("alice", before)}, approvedCut: text, cut: text,
 		}, false},
 		{"a block the approved version did not hold, back with an answer he gave before his approval", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", before)}, approvedCut: text, cut: text,
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", before)}, approvedCut: text, cut: text,
 		}, false},
 		{"a restored block answered before his approval beside his answer since", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", before), "region": answered("alice", after)}, approvedCut: text, cut: text,
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", before), "region": answered("alice", after)}, approvedCut: text, cut: text,
 		}, false},
 		{"his answer at the approval's own instant", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", approvedAt)}, approvedCut: text, cut: text,
+			login: "alice", blocks: map[string]model.Ask{"wave": answered("alice", approvedAt)}, approvedCut: text, cut: text,
 		}, false},
-		{"a changed block whose answered_at does not read as a time", carryInput{
-			login: "alice", blocks: map[string]askBlockState{"wave": {state: "answered", answeredBy: "alice", answeredAt: "t1"}}, approvedCut: text, cut: text,
+		{"a block he approved whose stored block is not as its row has it, answered before his approval", carryInput{
+			login: "alice", approved: map[string]bool{"wave": false}, blocks: map[string]model.Ask{"wave": answered("alice", before)}, approvedCut: text, cut: text,
 		}, false},
+		{"a block he approved whose stored block is not as its row has it, which he answered again since his approval", carryInput{
+			login: "alice", approved: map[string]bool{"wave": false}, blocks: map[string]model.Ask{"wave": answered("alice", after)}, approvedCut: text, cut: text,
+		}, true},
 		{"no block on either side", carryInput{login: "alice", approvedCut: text, cut: text}, false},
 	} {
 		test.input.approvedAt = approvedAt
