@@ -515,11 +515,12 @@ the input:
 - `aws:NatsService`: an `authorization` refused under [NATS authorization](#nats-authorization); an
   empty `configPath` with `authorization`; a `configHeader` line holding a line break, with
   `authorization`; an empty `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
-- `aws:WebhookListener`: a webhook's input missing while `webhooks` lists it (a blank
-  `reviewerAppId` or `mentionTrigger` counts as missing) or given while it does not, each input
-  checked before the list; then a `webhooks` other than `[]` or exactly `["github", "slack"]`; a
-  blank `machineId`; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
-  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
+- `aws:WebhookListener`: a `webhooks` not given at all (give `[]` for a listener with no webhook);
+  a webhook's input missing while `webhooks` lists it (a blank `reviewerAppId` or `mentionTrigger`
+  counts as missing) or given while it does not, each input checked before the list; then a
+  `webhooks` other than `[]` or exactly `["github", "slack"]`; a blank `machineId`; a `hostBridge`
+  with leading or trailing whitespace; a blank `listenHost`; a `natsReplicas` below 1; an empty
+  `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's

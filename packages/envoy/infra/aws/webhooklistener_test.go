@@ -510,6 +510,16 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 		mutate func(*envoyaws.WebhookListenerArgs)
 		err    string
 	}{
+		// webhooks itself is required: a listener with no webhook gives [], and an omitted list is
+		// never read as one.
+		{
+			name: "webhooks omitted",
+			mutate: func(a *envoyaws.WebhookListenerArgs) {
+				noWebhooks(a)
+				a.Webhooks = nil
+			},
+			err: `webhooks is required: give [] for a listener with no webhook`,
+		},
 		// The webhooks lists this version takes: none, or github then slack.
 		{
 			name: "github alone",
@@ -871,17 +881,31 @@ func TestWebhookListenerConstructTakesSecretArnsWithNoDependency(t *testing.T) {
 
 // A consumer's `webhooks: []` reaches the component through Construct as an empty list, not as a
 // missing input, and with none of a webhook's inputs the listener registers the empty list's
-// container, every other child as with both webhooks.
-func TestWebhookListenerConstructTakesAnEmptyWebhooksList(t *testing.T) {
-	in := listenerInputs(t, fromUpstream)
-	for _, name := range []string{"githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger"} {
-		delete(in, name)
+// container, every other child as with both webhooks. A consumer that leaves webhooks out is
+// refused before anything registers: an omitted list is not read as [].
+func TestWebhookListenerConstructTakesAnEmptyWebhooksListButNotAnOmittedOne(t *testing.T) {
+	withoutWebhookInputs := func() map[string]property.Value {
+		in := listenerInputs(t, fromUpstream)
+		for _, name := range []string{"githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger"} {
+			delete(in, name)
+		}
+		return in
 	}
-	in["webhooks"] = property.New(property.NewArray(nil))
-	require.True(t, in["webhooks"].IsArray())
-	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
-	require.NoError(t, err)
-	requireChildren(t, listenerChildren(t, "listener-no-webhooks-seed.golden", true), m.children(t))
+	t.Run("webhooks []", func(t *testing.T) {
+		in := withoutWebhookInputs()
+		in["webhooks"] = property.New(property.NewArray(nil))
+		require.True(t, in["webhooks"].IsArray())
+		m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
+		require.NoError(t, err)
+		requireChildren(t, listenerChildren(t, "listener-no-webhooks-seed.golden", true), m.children(t))
+	})
+	t.Run("webhooks omitted", func(t *testing.T) {
+		in := withoutWebhookInputs()
+		delete(in, "webhooks")
+		m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
+		require.ErrorContains(t, err, "envoy-infra:aws:WebhookListener example-listener: webhooks is required: give [] for a listener with no webhook")
+		require.Empty(t, m.types())
+	})
 }
 
 // A stack output a consumer builds from a component output would preview as changed if the output

@@ -32,8 +32,8 @@ type WebhookListenerArgs struct {
 	ApiTokenSecretArn       pulumi.StringInput    `pulumi:"apiTokenSecretArn"`
 	ApiTokenSecretVersionId pulumi.StringInput    `pulumi:"apiTokenSecretVersionId"` // orders the task definition after the token's version
 	SeedSecretArn           pulumi.StringPtrInput `pulumi:"seedSecretArn,optional"`  // the NATS user's seed; unset injects none
-	// The ENVOY_WEBHOOKS list; this version takes [] or exactly ["github", "slack"]. Each webhook's
-	// inputs are required while it is listed and refused while it is not.
+	// The ENVOY_WEBHOOKS list; this version takes [] or exactly ["github", "slack"], and refuses it
+	// omitted. Each webhook's inputs are required while it is listed and refused while it is not.
 	Webhooks               []string              `pulumi:"webhooks"`
 	GitHubWebhookSecretArn pulumi.StringPtrInput `pulumi:"githubWebhookSecretArn,optional"`
 	SlackSigningSecretArn  pulumi.StringPtrInput `pulumi:"slackSigningSecretArn,optional"`
@@ -296,9 +296,14 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 }
 
 // validate refuses the inputs NewWebhookListener cannot build a working listener from, each error
-// naming its input: each webhook's secret ARN against webhooks, then the environment's plain
-// inputs (rendering.ListenerEnv.Check), then the service's.
+// naming its input: an omitted webhooks, then each webhook's secret ARN against webhooks, then the
+// environment's plain inputs (rendering.ListenerEnv.Check), then the service's.
 func (args *WebhookListenerArgs) validate() error {
+	// ListenerEnv.Check reads a nil list as [], which `render webhook-listener-env` relies on for no
+	// --webhook; webhooks is a required input, so the component refuses one never given.
+	if args.Webhooks == nil {
+		return errors.New("webhooks is required: give [] for a listener with no webhook")
+	}
 	if err := rendering.CheckWebhookInputs(args.Webhooks, []rendering.WebhookInput{
 		{Webhook: "github", Field: "githubWebhookSecretArn", Given: args.GitHubWebhookSecretArn != nil, Set: args.GitHubWebhookSecretArn != nil},
 		{Webhook: "slack", Field: "slackSigningSecretArn", Given: args.SlackSigningSecretArn != nil, Set: args.SlackSigningSecretArn != nil},
