@@ -864,10 +864,10 @@ jobs:
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
   # the Envoy binaries and the daemon build with, and every go command below runs in that
-  # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too; tests
-  # that start NATS take testnats.Image and testnats.HubImage, pulled first for the reason
-  # envoy-go's own pull step gives. It also runs on a change to what its release path check reads
-  # (envoy_infra_release).
+  # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too, and the
+  # natslive files run here against real nats-server; tests that start NATS take testnats.Image and
+  # testnats.HubImage, pulled first for the reason envoy-go's own pull step gives. It also runs on
+  # a change to what its release path check reads (envoy_infra_release).
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true' || needs.changes.outputs.envoy_infra_release == 'true'
@@ -914,6 +914,9 @@ jobs:
         working-directory: packages/envoy/infra
       - name: Unit test envoy-infra
         run: go test ./...
+        working-directory: packages/envoy/infra
+      - name: Live tests of envoy-infra against nats-server (natslive)
+        run: go test -tags natslive ./core/ ./seed/
         working-directory: packages/envoy/infra
 
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under

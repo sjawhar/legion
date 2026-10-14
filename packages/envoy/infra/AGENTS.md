@@ -1,7 +1,8 @@
 # envoy-infra
 
-The Go module `github.com/sjawhar/envoy/infra`, which builds `pulumi-resource-envoy-infra`: the
-Pulumi plugin whose components deploy Envoy. What it deploys, each component's inputs and
+The Go module `github.com/sjawhar/envoy/infra`, which builds `pulumi-resource-envoy-infra`, the
+Pulumi plugin whose components deploy Envoy, and `envoy-infra`, the command whose `seed` writes a
+NATS user's nkey seed into a secret store. What the plugin deploys, each component's inputs and
 refusals, how an operator installs it and how an existing deployment moves onto it are in
 `packages/envoy/infra/README.md`. This file is what changing the module needs on top of that.
 
@@ -29,8 +30,10 @@ versions. Never add the module to the root `go.work`.
 | Path | What it holds |
 | --- | --- |
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
+| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment. |
+| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
+| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store`, and the AWS Secrets Manager store (`awsstore.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
@@ -68,18 +71,33 @@ versions. Never add the module to the root `go.work`.
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
 
+## The seed command
+
+`envoy-infra seed` takes no seed argument and reads none from the environment, and a seed reaches
+no output, log or error. A store's error names the call, the secret and the error's code, never
+the error's text, which can quote the request; the AWS SDK runs with its logger off
+(`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
+and every error and line it returns, for a canary seed. A new store implements `seed.Store` and
+joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+
 ## Tests
 
-The unit tests need neither the Pulumi CLI nor Docker. They run components under
-`pulumi.WithMocks` (`host/listener_test.go`, `internal/providers/`) and the plugin in process
-through pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`,
-`host/construct_test.go`). The `envoy-infra-go` job in `.github/workflows/envoy-and-contracts.yaml`
-runs, from `packages/envoy/infra`:
+The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
+(`host/listener_test.go`, `internal/providers/`), the plugin in process through pulumi-go-provider's
+`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`), and the seed
+command against a fake `Store` (`seed/seed_test.go`) and the AWS SDK against an `httptest`
+endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test on any
+request it does not expect (`seed/awsstore_test.go`). `core`'s real-server tests start nats-server
+containers on this machine's Docker through `testnats`, as do the `natslive` tests
+(`seed/seed_live_test.go`: a generated seed connects, and a client without it is refused, on
+`testnats.Image` and `testnats.HubImage`). The `envoy-infra-go` job in
+`.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
 go vet -tags pulumilive,natslive ./...
 go test ./...
+go test -tags natslive ./core/ ./seed/
 ```
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the

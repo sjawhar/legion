@@ -73,7 +73,7 @@ func (a Authorization) Validate() error {
 			continue
 		}
 		keyed++
-		if !isUserPublicKey(u.NKey) {
+		if !IsUserPublicKey(u.NKey) {
 			return fmt.Errorf("%s: nkey is not a user public key (U and 55 base32 characters with a valid checksum); give the public key, never a seed", where)
 		}
 		if u.Publish == nil {
@@ -120,11 +120,11 @@ func (a Authorization) Validate() error {
 	return fmt.Errorf("noAuthUser %q names no user", a.NoAuthUser)
 }
 
-// isUserPublicKey reports whether key is a user public key: U and 55 base32 characters, whose 35
+// IsUserPublicKey reports whether key is a user public key: U and 55 base32 characters, whose 35
 // bytes are the user prefix byte, the key and a valid CRC-16/XMODEM checksum. nkeys alone
 // (IsValidPublicUserKey) reads more than that: its base32 decoder skips line breaks, it takes a key
 // of any length, and it masks the prefix byte's low three bits.
-func isUserPublicKey(key string) bool {
+func IsUserPublicKey(key string) bool {
 	if !userKeyText.MatchString(key) || !nkeys.IsValidPublicUserKey(key) {
 		return false
 	}
