@@ -349,6 +349,16 @@ func TestListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			edit: func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(65536) },
 			err:  []string{"port 65536 is outside 1-65535"},
 		},
+		{
+			name: "a blank machineId",
+			edit: func(a *host.ListenerArgs) { a.MachineID = " " },
+			err:  []string{"machineId is required"},
+		},
+		{
+			name: "a host bridge with surrounding whitespace",
+			edit: func(a *host.ListenerArgs) { a.HostBridge = pulumi.StringRef(" 127.0.0.1") },
+			err:  []string{"hostBridge has leading or trailing whitespace", `" 127.0.0.1"`},
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

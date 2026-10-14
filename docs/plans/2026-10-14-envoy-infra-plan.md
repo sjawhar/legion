@@ -159,7 +159,14 @@ Rejected, with the reason:
 | 1 | sjawhar/legion#1946 | `pulumi package add envoy-infra@<v> --server '<url>'` installs a released plugin, and `envoy-infra:host:Listener` runs a healthy listener on a Docker host | none |
 | 2 | a new PR stacked on #1946 (gh-stack), branch `envoy-infra-core` | `envoy-infra seed check` and `verify --store aws-secrets-manager` read an existing deployment's live seed and print the reference script's lines | Task 1.1 on `envoy-infra` |
 | 3 | a new PR stacked on slice 2's (gh-stack, linear: `envoy-infra` ← `envoy-infra-core` ← `envoy-infra-aws`) | the existing AWS deployment's staging, production and dispatch previews show no diff with its NATS service and webhook listener built by `envoy-infra:aws:NatsService` and `aws:WebhookListener` | Tasks 2.1 and 2.2 |
-| 4 | a plain PR based on `envoy-infra-core`, outside the gh-stack (gh-stack is strictly linear), rebased onto `main` by hand once slice 2 merges; branch `envoy-infra-gcp` | `envoy-infra seed generate --store gcp-secret-manager` writes a seed; `envoy-infra:gcp:NatsHub` serves NATS on GCE over a tailnet | Tasks 2.1 and 2.2 |
+| 4 | a plain PR based on `envoy-infra-core`, outside the gh-stack (gh-stack is strictly linear), which merges `main` once slice 2 merges and is then retargeted; branch `envoy-infra-gcp` | `envoy-infra seed generate --store gcp-secret-manager` writes a seed; `envoy-infra:gcp:NatsHub` serves NATS on GCE over a tailnet | Tasks 2.1 and 2.2 |
+| 1.7 (only under the dotfiles plan's seed option A) | a plain PR on `main` after #1946 merges, released as the next minor version (a new input) | `host:Listener` runs a healthy listener whose seed it reads from a host file through a read-only bind mount | slice 1 merged and released |
+
+A stacked branch takes its lower layer's later commits by merging it (`git merge origin/<lower>`,
+then a fast-forward push), never by a rebase and a force push: each PR squash-merges, so the merge
+commits never reach `main`, and no published branch is rewritten. After a lower layer merges, the
+branch above it merges `origin/main` the same way before its PR is retargeted. `gh stack` is used
+to link the PRs, not to rebase or push them.
 
 (The consumers' changes have their own plans in their own repositories.)
 
@@ -504,8 +511,9 @@ v3.268.0 from `https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar
 SHA-256 `903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b` before extracting;
 download `pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz` from pulumi-docker's v4.11.0 release,
 verify it against the SHA-256 in that release's checksums file (written into the workflow as a
-literal), and `pulumi plugin install resource docker v4.11.0 --file <tarball>`; then in
-`packages/envoy/infra`: `go test -tags pulumilive -v -timeout 15m ./host/`, and
+literal), and set `ENVOY_INFRA_DOCKER_PLUGIN` to that tarball: the live harness installs it into
+a temporary `PULUMI_HOME` of its own per test binary, and fails naming the variable when it is
+unset. Then in `packages/envoy/infra`: `go test -tags pulumilive -v -timeout 15m ./host/`, and
 `go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'`.
 Run `.github/scripts/check-image-trigger-paths.sh` and `.github/scripts/check-action-pins.sh`.
 
@@ -540,6 +548,10 @@ VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "$RANGE" \
   --patch-path scripts/go-third-party-notices.sh --patch-path .github/envoy-infra-targets.json \
   -- <the paths of Step 1>)
 ```
+
+With no `envoy-infra-v*` tag the first release is seeded at `0.1.0`, as `release-envoy-listener.yaml`
+seeds its first tag: the breaking commits in the paths' earlier history predate the plugin and say
+nothing about its API. From the second release on, the formula above runs over `PREV_TAG..HEAD`.
 
 On `empty` or `none` it skips with the same `::notice` and step-summary line the `legion` job
 writes (`:286-297`). Build per target with `CGO_ENABLED=0` and `-ldflags "-X main.version=$VERSION"`,
@@ -586,6 +598,17 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
   one `envoy-infra:host:Listener` plans creates of exactly the stack, that provider, the component,
   its `docker:index/remoteImage:RemoteImage` and its `docker:index/container:Container`. Record the
   commands and output on #1946.
+
+### Task 1.7: `host:Listener`'s `seedFile` input (only if Sami chooses option A of the dotfiles plan's seed decision)
+
+A follow-on minor release (a new input), in its own PR after #1946 merges. `seedFile` (plain, optional) names an
+absolute host path; the component bind-mounts it read-only (a `bind` mount, so a missing source
+fails the container's create rather than creating a directory) at a fixed path in the container
+and sets `NATS_NKEY_SEED_FILE` to it. It is refused together with `seed`, and together with
+`watchdog` (whose recreate would come back without the mount, as R10 refuses `seed`). Unit tests
+pin the mount and the environment; a live test proves a listener reaches "healthy" with a seed read
+through the mount (a 0444 file inside a 0700 directory) and, as its negative control, refuses the
+create with the file missing. The README documents the input.
 
 ---
 
@@ -734,9 +757,13 @@ These semantics are ported from the reference implementation, and the unit tests
 
 ```go
 type Store interface {
-	// Describe reports whether the secret exists, whether it is scheduled for deletion, and how
-	// many versions it holds, deprecated ones included.
+	// Describe reports whether the secret exists, whether it is scheduled for deletion, and the
+	// version it serves by default, with the store's one metadata read (DescribeSecret, GetSecret),
+	// so check and verify need no grant the reference did not.
 	Describe(ctx context.Context, name string) (Description, error)
+	// Versions counts every version the secret holds, deprecated ones included; generate alone
+	// calls it.
+	Versions(ctx context.Context, name string) (int, error)
 	// Put writes value as the secret's first version and returns its version id.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default.
@@ -746,7 +773,6 @@ type Store interface {
 type Description struct {
 	Exists, ScheduledForDeletion bool
 	DeletionDate                 string
-	Versions                     int
 	CurrentVersion               string // "" when the store serves none
 	// The newest version's id and state, for a store whose default names the newest version
 	// whatever its state (GCP's versions/latest); "" for a store without such a default.
@@ -755,7 +781,7 @@ type Description struct {
 
 func Check(ctx context.Context, s Store, name string) (string, error) // the report line
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error)
-func Verify(ctx context.Context, s Store, name, publicKey string) error
+func Verify(ctx context.Context, s Store, name, publicKey string) (line string, err error) // the report line in every case
 
 var ErrRefused = errors.New("seed: refused") // nothing was written: exit 2
 // A Verify mismatch, and any error after Put returned, exit 1.
@@ -809,7 +835,9 @@ starts, and record the version.
 - [ ] **README.** Document the seed workflow: the consumer declares an empty secret,
   `envoy-infra seed generate` writes it, and the public key goes into the authorization. Also
   document `check` and `verify`, the exit codes, and `core.Authorization`'s rules, and tell an
-  operator to run `gh attestation verify <archive> --repo sjawhar/legion` before installing the CLI.
+  operator to run `gh attestation verify <archive> --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main --source-ref refs/heads/main --deny-self-hosted-runners`
+  before installing the CLI (`--repo` alone accepts an attestation from any workflow run in the
+  repository; docs/kubernetes.md pins the same three flags).
   Commit `docs(envoy-infra): NATS authorization and seeds`.
 - [ ] **Pre-merge proof (E10).** On the devbox, run the branch's CLI read-only against the existing
   deployment's one live seed: `envoy-infra seed check` and
@@ -915,7 +943,9 @@ type NatsService struct {
   for the Cloud Map service. The ECS service's `dependsOn` covers every mount target.
   `waitForSteadyState` reaches the service only when set.
 - [ ] **Container definitions.** Build them with `core.PyJSON`, no `SortKeys`, `EnsureASCII` on, in the
-  reference's dict order. The NATS launch is `{"entryPoint": ["/bin/sh", "-c"], "command":
+  reference's dict order. `PyJSON` refuses a Go map without `SortKeys` (map order is random), so
+  this task adds `core.Object`, an ordered list of key/value pairs that `PyJSON` writes in order, with
+  its own `pyfmt_test.go` cases against fixed Python outputs. The NATS launch is `{"entryPoint": ["/bin/sh", "-c"], "command":
   [<StartScript>]}` when `authorization` is set, and the reference's plain launch when it is not.
   The sidecar's script is exactly as in the inventory. Goldens are rendered by the reference
   implementation from placeholder inputs. Its start script embeds the config text, whose first two
@@ -1058,8 +1088,10 @@ are gone, they read them from this command.
     own flags can meet, each with its own test row: `--webhook github` without `--reviewer-app-id`
     or `--mention-trigger`; either of those flags without `--webhook github`; and, under the
     deployment plan's decision (b), any list other than `github` and `slack`.
-  - `render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --json`
-    prints each filter's logical name, pattern, metric name and namespace.
+  - `render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --logical-name-prefix <p> --json`
+    prints each filter's logical name, pattern, metric name and namespace; `<p>` is the component's
+    `metricFilterLogicalNamePrefix` (Task 3.1 added the input: the reference names its filters with a
+    literal prefix, not from the component's own name).
 
   A test pins each subcommand's output against the component's recorded inputs under mocks for the
   same arguments. That keeps one source.
@@ -1108,8 +1140,11 @@ func HostPermissions(machineID string) Permissions     // their union: one NATS 
 ```
 
 Built from Envoy's exported names: `bus.Stream`, `bus.StreamSubjects()`, `bus.ListenerDurable`,
-`bus.ListenerQueue`, `store.Bucket`, `store.RoleBucket`, `session.SessionBucket`, `cistore.Bucket`,
-`contracts.AgentStreamFramesSubject` and `AgentStreamControlSubject` with `*` for the session id.
+`bus.ListenerQueue`, the KV bucket names `bus.InterestBucket`, `bus.RoleClaimBucket`,
+`bus.SessionBucket` and `bus.CIStateBucket` (moved into `bus` from `store`, `session` and
+`cistore`, so `core` compiles in no Envoy package beyond `bus` and `contracts` and a change to those
+stores cuts no plugin release), `contracts.AgentStreamFramesSubject` and `AgentStreamControlSubject`
+with `*` for the session id.
 The listener's set: publish the stream subjects, `notifications.role.>`,
 `notifications.envoy.exceptions.notifications.>`, `$JS.API.STREAM.{INFO,CREATE,UPDATE}.<stream>`,
 `$JS.API.CONSUMER.{INFO,CREATE}.<stream>.<durable>`, `$JS.ACK.<stream>.<durable>.>`, `$JS.API.INFO`,
@@ -1144,8 +1179,9 @@ deployment; the live test below re-proves it against this branch's listener.)
 
 - [ ] The store implements Task 2.2's `Store` over `cloud.google.com/go/secretmanager/apiv1`
   v1.22.0 (confirm the method names in that version's source first):
-  - `Describe` uses `GetSecret` and `ListSecretVersions`, counting every state, destroyed ones
-    included.
+  - `Describe` uses `GetSecret`, then `GetSecretVersion` on `versions/latest` for the newest
+    version's number and state (metadata, no value read).
+  - `Versions` uses `ListSecretVersions`, counting every state, destroyed ones included.
   - `Put` uses `AddSecretVersion`.
   - `Current` reads `versions/latest` with `AccessSecretVersion`.
 
@@ -1158,7 +1194,10 @@ deployment; the live test below re-proves it against this branch's listener.)
   `<name> latest (version <n>) derives <key>: yes`, exit 0, or `…: no`, exit 1. When the latest
   version is unreadable, `verify` fails with the `is <STATE>` line, exit 1 (it wrote nothing, but it
   is a failed check, not a refused input). `Check` and `Verify` read the newest version's number and
-  state from `Description.NewestVersion` and `NewestState`.
+  state from `Description.NewestVersion` and `NewestState`, and a `latest` with no version
+  (`NewestVersion` empty) is the `no versions` line. Task 2.2 wrote the label as a constant
+  (`seed.go` `defaultLabel = "AWSCURRENT"`); this task moves it onto the store (`Store.Label()`:
+  `AWSCURRENT` or `latest`), so each store's lines take their own label and shape.
 - [ ] Its unit test runs against a gRPC fake server that implements those RPCs, and repeats Task
   2.2's refusal, read-back and canary cases through this store, plus one whose newest version is
   disabled and one whose newest version is destroyed.
@@ -1175,7 +1214,7 @@ deployment; the live test below re-proves it against this branch's listener.)
 type NatsHubArgs struct {
 	Users          []NATSUserArgs     `pulumi:"users"`
 	TailnetAuthKey pulumi.StringInput `pulumi:"tailnetAuthKey" provider:"secret"`
-	Hostname       string             `pulumi:"hostname"`    // ^[a-z][a-z0-9-]{1,25}$
+	Hostname       string             `pulumi:"hostname"`    // ^[a-z][a-z0-9-]{0,24}[a-z0-9]$ (a DNS label: no trailing hyphen)
 	Tags           []string           `pulumi:"tags"`        // "tag:<name>"
 	Zone           string             `pulumi:"zone"`
 	MachineType    *string            `pulumi:"machineType,optional"` // default "e2-small"
@@ -1244,7 +1283,7 @@ Cloud-config (`cloudconfig.go`, `gopkg.in/yaml.v3`, re-run on every COS boot): `
 finds no filesystem; mount it at `/mnt/disks/data`; create `nats/` and `tailscale/` under it;
 create `/run/envoy` (mode 0700) and an empty `/run/envoy/tailnet-auth-key` (mode 0600), so the
 container's bind mount is always a file.
-`write_files`: `/etc/nats/nats-server.conf`; `/usr/local/bin/fetch-tailnet-key` writing the key to
+`write_files`: `/etc/nats/nats-server.conf`; `/etc/envoy/fetch-tailnet-key` (COS mounts `/` read-only; `/etc` is writable and executable) writing the key to
 `/run/envoy/tailnet-auth-key` (mode 0600) from Secret Manager with the metadata server's token,
 taking the metadata host from `GCE_METADATA_HOST` and the Secret Manager base URL from
 `SECRET_MANAGER_ENDPOINT` (defaults `metadata.google.internal` and
@@ -1259,7 +1298,11 @@ and `nats`
 `tailscaled` also has `After=` and `Wants=fetch-tailnet-key.service` (not `Requires=`: a node
 whose tailnet state is on the disk never reads the key, so a failed fetch on a later boot must not
 keep it down); `fetch-tailnet-key` retries up to five times, ten seconds apart, and has
-`RemainAfterExit=yes`.
+`RemainAfterExit=yes`. COS's host firewall accepts incoming connections only for SSH, so a oneshot
+`nats-firewall` (`RemainAfterExit=yes`) adds, idempotently (`iptables -w -C … || iptables -w -A …`),
+`INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` for Google's health checks;
+`nats` has `Wants=` and `After=` it. The tailnet path needs no rule: tailscaled accepts inbound on
+`tailscale0` in its own chain (tailscale v1.104.1 `util/linuxfw/iptables_runner.go:229-233`).
 `runcmd`: `systemctl daemon-reload`, then `systemctl start` each unit (never `enable`: COS's `/etc`
 is stateless). The golden pins the bootcmd lines and the ordering.
 
@@ -1291,7 +1334,20 @@ Items to verify, each with the row that settles it and where its result goes:
 - `maxSurgeFixed: 0` with `maxUnavailableFixed: 1` on a zonal group of one (E9; the first GCP
   deployment's PR).
 - `/dev/net/tun` on COS without `modprobe` (E9; same).
+- The health check turns HEALTHY through COS's host firewall and the `nats-firewall` rule (E9; same).
 - The stateful policy end to end (E9; same).
+- The fetch script on COS (its `/bin/sh`, `curl`, `jq`, `base64`, `mktemp`), and the account's
+  Secret Manager grant taking effect inside the fetch's retry window on first boot (E9; same).
+- `/dev/disk/by-id/google-data` present when `bootcmd` runs, no reformat on a recreate (`blkid -p`
+  exits 0), and `waitForInstances: STABLE` within the provider's timeout given autohealing's 300 s
+  initial delay (E9; same).
+- `NamePrefix` on the instance template under pulumi-gcp's autonaming (E9; same).
+- The containerised tailscaled's own accept rule reaching the host, so 4222 is reachable over the
+  tailnet through COS's firewall: the tailscale v1.104.1 image writes its `ts-input` accept with
+  iptables-legacy, and COS M133 may filter with nft, in which case the legacy accept does not
+  override COS's drop policy. E9's first command on the VM is `iptables -V`; under nft, the
+  `nats-firewall` unit also accepts tcp/4222 on `tailscale0`, or the tailscale container runs with
+  `TS_DEBUG_FIREWALL_MODE=nftables` (E9; same).
 - A v4 docker provider diffing unset v5-only inputs (E3 in CI, E4 on the existing deployment).
 
 ## End-to-end verification plan
@@ -1309,6 +1365,7 @@ Items to verify, each with the row that settles it and where its result goes:
 | E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by Jason or Rajashree, and Sami's tailnet, policy and OAuth-client steps | Task 4.4 |
 | E10. The CLI checks and verifies the existing AWS deployment's live seed read-only, printing the reference script's lines | 2 | infrastructure | that deployment's staging Secrets Manager, from the devbox, with the branch-built CLI | the devbox's `staging` profile (`--expect-account` refuses any other) | Task 2.3 |
 | E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, from the devbox, with this branch's plugin by path | the devbox's `staging` profile for staging, its instance identity for production and dispatch | Task 3.3; the deployment's own plan |
+| E12. (Task 1.7, only under option A) `host:Listener` with `seedFile` reaches "healthy" reading its seed through the mount; a missing file refuses the create | 1.7 | infrastructure | `pulumi up` of a YAML program against the runner's Docker, as E2 | CI runner | Task 1.7 live test |
 
 Legion's own end-to-end stages (`scripts/e2e/stage*.sh`) exercise none of the changed paths. The
 Envoy changes (`bus.LocalNATSURL`, `bus.ListenerDurable`/`ListenerQueue`,
@@ -1324,7 +1381,7 @@ dotfiles skills (`opening-a-pr`, `landing-a-pr`, `using-docker`, `updating-docs`
 
 | Step | Worker | Required skills |
 | --- | --- | --- |
-| Tasks 1.1-1.4, 2.1-2.2, 3.1-3.2, 4.1-4.3 | `deep` (implementer) | `test-driven-development`, `using-docker`, `verification-before-completion`, `systematic-debugging` when a test fails unexpectedly |
+| Tasks 1.1-1.4, 1.7, 2.1-2.2, 3.1-3.2, 4.1-4.3 | `deep` (implementer) | `test-driven-development`, `using-docker`, `verification-before-completion`, `systematic-debugging` when a test fails unexpectedly |
 | Tasks 1.5, 2.3, 3.3, 4.4 (docs) | `deep` | `updating-docs` |
 | Opening and landing each PR; Task 1.6 | `deep` (implementer) | `opening-a-pr`, `landing-a-pr`, `gh-stack` (slices 2-3) |
 | Slice acceptance | `deep` (tester) | `verification-before-completion`, `using-docker` |

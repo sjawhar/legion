@@ -46,13 +46,18 @@ cloud credentials, so check the archive's provenance before you install it. For 
 
 ```sh
 gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
-gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion
+gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
 tar -xzf envoy-infra-linux-amd64.tar.gz
 envoy-infra-linux-amd64/envoy-infra --version
 ```
 
-`gh attestation verify` passes only for an archive that this repository's release workflow built
-and attested. `--version` prints the release's version, `<version>`. Put the binary on your
+`--cert-identity` pins the signer to this repository's `release.yaml` read from `main`,
+`--source-ref` to a run started on `main`, and `--deny-self-hosted-runners` to a GitHub-hosted
+runner, so an archive attested by any other workflow, branch or runner in the repository fails;
+`--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
+explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
 `PATH`; the commands under [NATS seeds](#nats-seeds) call it `envoy-infra`.
 
 ## What `host:Listener` deploys
@@ -124,19 +129,18 @@ listener's NATS client then refuses to connect rather than connect without the s
 
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
+- a blank `machineId`;
 - a `port` outside 1-65535;
+- a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
 - a missing provider (see [Providers](#providers)).
 
-It refuses these when it computes the container's environment, which is at preview unless
-`natsUrls` is not known until the update:
-
-- a blank `machineId`;
-- an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas separate the URLs
-  in `NATS_URLS`);
-- a `hostBridge` with leading or trailing whitespace.
+`natsUrls` may come from another resource or stack, so the listener checks it only when it
+computes the container's environment. That happens at preview, unless `natsUrls` is not known until
+the update. It refuses an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas
+separate the URLs in `NATS_URLS`).
 
 ## Providers
 

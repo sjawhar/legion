@@ -4,6 +4,7 @@ import { tmpdir } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import { nkeys } from "nats"
+import marketplace from "../../../.claude-plugin/marketplace.json" with { type: "json" }
 import plugin from "../.claude-plugin/plugin.json" with { type: "json" }
 import ompPlugin from "../.omp-plugin/plugin.json" with { type: "json" }
 import pkg from "../package.json" with { type: "json" }
@@ -340,8 +341,15 @@ test("registers aside capability and soft-reclaims the role persisted for a resu
   }
 })
 
-test("the plugin manifest, package, and MCP server all report one version", () => {
-  expect(plugin.version).toBe(pkg.version)
+test("Claude Code versions the plugin by its commit; omp and the MCP server report package.json's", () => {
+  // Claude Code updates an installed plugin only when its computed version changes. With no
+  // version in plugin.json or the marketplace entry it takes the version of a relative-path plugin
+  // from the marketplace commit it installs from, so every merge to main reaches an update; a
+  // declared version nothing bumps holds every install at the tree it was first installed from.
+  expect(plugin).not.toHaveProperty("version")
+  const entries = marketplace.plugins.filter((entry) => entry.name === plugin.name)
+  expect(entries).toHaveLength(1)
+  expect(entries[0]).not.toHaveProperty("version")
   expect(ompPlugin.version).toBe(pkg.version)
   expect(MCP_SERVER_INFO).toEqual({ name: "envoy", version: pkg.version })
 })

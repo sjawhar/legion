@@ -22,9 +22,9 @@ import (
 )
 
 // rulesetsStandIn is GitHub's REST API for acme/widgets as the required-checks read sees it: pull
-// request 86 on base main, whose rulesets require pr-checks-result and whose branch protection
+// request 86 on base main, whose rulesets require the one check named and whose branch protection
 // requires nothing. While failing is set, the rulesets read answers 502.
-func rulesetsStandIn(t *testing.T, failing *atomic.Bool) *httptest.Server {
+func rulesetsStandIn(t *testing.T, failing *atomic.Bool, requires string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer outbox-token" {
@@ -39,7 +39,7 @@ func rulesetsStandIn(t *testing.T, failing *atomic.Bool) *httptest.Server {
 				http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
 				return
 			}
-			w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
+			w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"` + requires + `"}]}}]`))
 		case "/repos/acme/widgets/branches/main":
 			w.Write([]byte(`{"name":"main","protected":false}`))
 		default:
@@ -75,11 +75,11 @@ func mergeableStandIn(t *testing.T, state string) *httptest.Server {
 	return server
 }
 
-// seedStuckRound records the round a live tree got stuck in before the daemon read required sets:
-// the reviewer approved its own handoff head and completed, and the code head's settlement that
-// stands for it is red only on two workflow_dispatch lanes and an advisory review check, beside a
-// required gate that passed. No required set is recorded.
-func seedStuckRound(t *testing.T, pool *pgxpool.Pool) {
+// seedUnjudgedRound records a round as a live tree had one before the daemon read required sets:
+// the reviewer's round open at its own handoff head, and the code head's settlement that stands
+// for it red only on two workflow_dispatch lanes and an advisory review check, beside a required
+// gate that passed. No required set is recorded, so no verdict stands for the head.
+func seedUnjudgedRound(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	records := record.NewStore()
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
@@ -98,17 +98,16 @@ func seedStuckRound(t *testing.T, pool *pgxpool.Pool) {
 		if err := records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"}); err != nil {
 			return err
 		}
-		return records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "handoff",
-			Summary: "approved", Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "handoff"}})
+		return records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim"})
 	}); err != nil {
-		t.Fatalf("seed the stuck round: %v", err)
+		t.Fatalf("seed the unjudged round: %v", err)
 	}
 }
 
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
-// to log, for a project that declares reviewWorkflows.
-func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger, reviewWorkflows ...string) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", ReviewWorkflows: reviewWorkflows}, log)
+// to log.
+func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
@@ -132,33 +131,54 @@ func capturePhase(t *testing.T, pool *pgxpool.Pool) (phase.Phase, *record.PullRe
 	return issue.Phase, pr
 }
 
-// The daemon's first read of required sets, at boot, ends a round a red the base branch never
-// required left stuck, with no new push: it reads the pull request's base, then the base's rulesets
-// and protection, with the implement App's token, records the set, and the approved round moves on.
-func TestTheBootReadOfRequiredChecksEndsARoundStuckOnRedsTheBaseDoesNotRequire(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	seedStuckRound(t, pool)
-	w := requiredRuntime(pool, rulesetsStandIn(t, &atomic.Bool{}).URL, quietLogger())
-	w.readRequiredChecks(context.Background())
-	got, pr := capturePhase(t, pool)
-	if got != phase.Retro {
-		t.Fatalf("after the boot read the issue is in %s, want retro", got)
-	}
-	if strings.Join(pr.Required, ",") != "pr-checks-result" {
-		t.Fatalf("the recorded required set = %#v, want the rulesets' pr-checks-result", pr.Required)
+// The daemon's first read of required sets, at boot, gives a pull request recorded before any was
+// read its first verdict: it reads the pull request's base, then the base's rulesets and protection,
+// with the implement App's token, records the set, and judges the head by it alone. A set that
+// requires only the gate that passed leaves a head red on other checks where it is, with nothing
+// sent back and nobody told; a set that requires one of the reds brings a red that stands for the
+// head, which sends the work back to implementing from under the open round, naming the check.
+func TestTheBootReadOfRequiredChecksJudgesTheHeadByTheSetItRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name, requires string
+		want           phase.Phase
+	}{
+		{"the base requires the gate alone", "pr-checks-result", phase.Reviewing},
+		{"the base requires a check that failed", "review", phase.Implementing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedUnjudgedRound(t, pool)
+			w := requiredRuntime(pool, rulesetsStandIn(t, &atomic.Bool{}, tc.requires).URL, quietLogger())
+			w.readRequiredChecks(context.Background())
+			got, pr := capturePhase(t, pool)
+			if got != tc.want {
+				t.Fatalf("after the boot read the issue is in %s, want %s", got, tc.want)
+			}
+			if strings.Join(pr.Required, ",") != tc.requires {
+				t.Fatalf("the recorded required set = %#v, want the rulesets' %s", pr.Required, tc.requires)
+			}
+			reasons := noticeReasons(t, pool, "checks-red")
+			if tc.want == phase.Reviewing && len(reasons) != 0 {
+				t.Fatalf("checks-red notices %q, want none: no required check is red", reasons)
+			}
+			if want := "CI is red at handoff: review"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
+				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+			}
+		})
 	}
 }
 
-// A read GitHub fails counts as neither green nor red: the pull request keeps no required set, the
-// round stays where it was, and the failure is logged with the repository and GitHub's HTTP
-// status. The next pass that reads the set decides the round.
-func TestAnUnreadableRulesetLeavesTheRoundUndecided(t *testing.T) {
+// A read GitHub fails counts as neither green nor red: the pull request keeps no required set, no
+// verdict stands for its head, nothing is sent back, and the failure is logged with the repository
+// and GitHub's HTTP status. The next pass that reads the set judges the head: a failed required
+// check it brings sends the work back to implementing.
+func TestAnUnreadableRulesetLeavesTheHeadUndecided(t *testing.T) {
 	pool := isolatedOutboxPool(t)
-	seedStuckRound(t, pool)
+	seedUnjudgedRound(t, pool)
 	var logged bytes.Buffer
 	failing := &atomic.Bool{}
 	failing.Store(true)
-	w := requiredRuntime(pool, rulesetsStandIn(t, failing).URL, slog.New(slog.NewJSONHandler(&logged, nil)))
+	w := requiredRuntime(pool, rulesetsStandIn(t, failing, "review").URL, slog.New(slog.NewJSONHandler(&logged, nil)))
 	w.readRequiredChecks(context.Background())
 	got, pr := capturePhase(t, pool)
 	if got != phase.Reviewing || pr.Required != nil {
@@ -176,8 +196,11 @@ func TestAnUnreadableRulesetLeavesTheRoundUndecided(t *testing.T) {
 	}
 	failing.Store(false)
 	w.readRequiredChecks(context.Background())
-	if got, _ := capturePhase(t, pool); got != phase.Retro {
-		t.Fatalf("after the next pass read the set the issue is in %s, want retro", got)
+	if got, _ := capturePhase(t, pool); got != phase.Implementing {
+		t.Fatalf("after the next pass read the set the issue is in %s, want implementing: the required review check is red", got)
+	}
+	if reasons := noticeReasons(t, pool, "checks-red"); len(reasons) != 1 || reasons[0] != "CI is red at handoff: review" {
+		t.Fatalf("checks-red notices %q, want one naming the required review check", reasons)
 	}
 }
 
@@ -202,7 +225,7 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
-			seedStuckRound(t, pool)
+			seedUnjudgedRound(t, pool)
 			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 				records := record.NewStore()
 				if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-2", Tree: "CAPTURE-2", Project: "CAPTURE", Title: "second",
@@ -330,34 +353,30 @@ func noticeReasons(t *testing.T, pool *pgxpool.Pool, kind string) []string {
 }
 
 // The daemon's pass judges a ruleset's required workflow by its latest run on the head, as it
-// judges a required check by the settlement: a failed run is CI red at the head. In testing, where
-// the required checks passed, a red only a review workflow the project declares makes is the
-// reviewer's round's to decide, so the tester goes on; the same workflow undeclared is a failing
-// check, and sends the work back to implementing. In awaiting_merge, where every worker is
-// suspended, a failed run sends the work back to implementing whether declared or not, so a READY
-// head that turns red wakes the implementer instead of stranding the tree. A run still going, or one
-// that succeeded, moves nothing. The pull request's required checks were read before and passed at
-// the head, so only the workflow can decide anything.
-func TestAFailedRequiredWorkflowSendsTheWorkBackUnlessTheReviewRoundDecidesIt(t *testing.T) {
-	const declared = ".github/workflows/claude-pr-review.yml"
+// judges a required check by the settlement: a failed run is CI red at the head, and sends the work
+// back to implementing from testing, from retro (where the implementer keeps its turn and is handed
+// the task) and from awaiting_merge, where every worker is suspended and a READY head that turns
+// red would otherwise strand the tree. A run still going, or one that succeeded, moves nothing. The
+// pull request's required checks were read before and passed at the head, so only the workflow can
+// decide anything.
+func TestAFailedRequiredWorkflowSendsTheWorkBack(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		from     phase.Phase
-		status   string
-		runs     string
-		declared []string
-		want     phase.Phase
+		name   string
+		from   phase.Phase
+		status string
+		runs   string
+		want   phase.Phase
 	}{
-		{"failed, declared, in testing", phase.Testing, "testing", reviewRuns(1, "completed", `"failure"`), []string{declared}, phase.Testing},
-		{"failed, undeclared, in testing", phase.Testing, "testing", reviewRuns(1, "completed", `"failure"`), nil, phase.Implementing},
-		{"failed, declared, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "completed", `"failure"`), []string{declared}, phase.Implementing},
-		{"still running, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "in_progress", "null"), []string{declared}, phase.AwaitingMerge},
-		{"succeeded, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "completed", `"success"`), []string{declared}, phase.AwaitingMerge},
+		{"failed, in testing", phase.Testing, "testing", reviewRuns(1, "completed", `"failure"`), phase.Implementing},
+		{"failed, in retro", phase.Retro, "retro", reviewRuns(1, "completed", `"failure"`), phase.Implementing},
+		{"failed, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "completed", `"failure"`), phase.Implementing},
+		{"still running, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "in_progress", "null"), phase.AwaitingMerge},
+		{"succeeded, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "completed", `"success"`), phase.AwaitingMerge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			seedCapture(t, pool, tc.from, tc.status)
-			requiredRuntime(pool, requiredWorkflowStandIn(t, func() string { return tc.runs }).URL, quietLogger(), tc.declared...).readRequiredChecks(context.Background())
+			requiredRuntime(pool, requiredWorkflowStandIn(t, func() string { return tc.runs }).URL, quietLogger()).readRequiredChecks(context.Background())
 			if got, _ := capturePhase(t, pool); got != tc.want {
 				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
 			}
@@ -369,32 +388,6 @@ func TestAFailedRequiredWorkflowSendsTheWorkBackUnlessTheReviewRoundDecidesIt(t 
 				t.Fatalf("checks-red notices %q, want none", reasons)
 			}
 		})
-	}
-}
-
-// A re-run of a declared review workflow keeps its run's id and raises its attempt, so the pass
-// reads a re-run that ended red as a change even when no pass read it running: the approved round
-// stuck on the first red is told again, naming the re-run's red, and the architect sees the re-run
-// that stayed red. A pass that finds the same attempt again tells nothing more.
-func TestARerunThatEndsRedBetweenTwoPassesIsToldAgain(t *testing.T) {
-	const declared = ".github/workflows/claude-pr-review.yml"
-	pool := isolatedOutboxPool(t)
-	seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim",
-		HandoffCommit: "code", Summary: "approved", Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "code"}})
-	attempt := 1
-	w := requiredRuntime(pool, requiredWorkflowStandIn(t, func() string { return reviewRuns(attempt, "completed", `"failure"`) }).URL, quietLogger(), declared)
-	for _, pass := range []struct {
-		attempt, told int
-	}{{1, 1}, {2, 2}, {2, 2}} {
-		attempt = pass.attempt
-		w.readRequiredChecks(context.Background())
-		stuck := noticeReasons(t, pool, "review-stuck")
-		if len(stuck) != pass.told || !strings.Contains(stuck[len(stuck)-1], "CI is red at code: "+declared+"; only declared review workflows are red") {
-			t.Fatalf("after the pass that read attempt %d, review-stuck notices %q, want %d naming the review workflow", pass.attempt, stuck, pass.told)
-		}
-	}
-	if got, _ := capturePhase(t, pool); got != phase.Reviewing {
-		t.Fatalf("the issue is in %s, want reviewing", got)
 	}
 }
 

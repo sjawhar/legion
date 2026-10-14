@@ -21,11 +21,22 @@
 # tarballs, so a docs: commit there still releases. A feat: or breaking commit
 # there bumps minor or major as anywhere else. Each --patch-path must also be one
 # of <paths>, since only commits touching <paths> are read.
+#
+# <prev-version> must be a plain X.Y.Z, each field a number without leading
+# zeros, which the arithmetic below would read as octal. It comes from a release
+# tag's name, which anyone who can push a tag chooses, so anything else is
+# refused: exit 2, with an ::error:: on stderr naming the value and the range.
 set -euo pipefail
 
 usage='usage: release-bump.sh <prev-version> <range> [--patch-path <path>]... [-- <paths...>]'
 prev_version=${1:?$usage}
 range=${2:?commit range (e.g. tag..HEAD, or HEAD for full history)}
+if ! [[ $prev_version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+  printf -v shown_version '%q' "$prev_version"
+  printf -v shown_range '%q' "$range"
+  echo "::error::release-bump.sh: previous version $shown_version (range $shown_range) is not a plain X.Y.Z version; refusing it" >&2
+  exit 2
+fi
 shift 2
 
 patch_paths=()

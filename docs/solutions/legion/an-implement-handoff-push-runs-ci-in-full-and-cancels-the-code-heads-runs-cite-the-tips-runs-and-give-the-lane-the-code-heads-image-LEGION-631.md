@@ -17,9 +17,11 @@ related_issues:
 ---
 # An implement handoff push runs CI in full and cancels the code head's runs: cite the tip's runs, and give the lane the code head's image
 
-- Only three handoff pushes skip CI (the planner's `plan.json`, the tester's `test.json`, a
-  reviewer's `changes_requested` `review.json`): their phase guarantees a later push. An
-  implementer's `implement.json` push runs every workflow in full, and `pr-and-main.yaml`'s
+- The push rule since sjawhar/legion#1843: every push that changes only `.legion/` carries
+  `skip-checks: true` and starts no workflow; a push that carries code and a handoff together, or a
+  handoff commit pushed without the trailer, carries no trailer and runs CI at its head, which is a
+  handoff commit (as sjawhar/legion#1944's plan commit 3b5c8f78 did on 2026-10-14: 33 check runs
+  at a `plan.json`-only commit). Such a push runs every workflow in full, and `pr-and-main.yaml`'s
   concurrency group (`tests-<ref>`, `cancel-in-progress` on `pull_request`) cancels the code head's
   `Tests`, `Docs` and `Legion Envoy and Contracts` runs still in flight. The green runs for that
   code are the handoff head's; they stand for the code head only because the handoff commit's
@@ -42,3 +44,7 @@ Image` runs completed (`sha-382934956bf3@sha256:4368aa92…`, `sha-72e7b053fd06@
 the coordinator ran Stage 4a and 4b on the code head's `4368aa92…` and asked for the tip's digest
 too. The tester's round 8 confirmed the handoff commit's diff over the merge is `.legion/` alone
 before taking 72e7b053's runs as the merge's CI (`.legion/LEGION-631/test.json`, round 8).
+
+sjawhar/legion#1944, round 4: the plan commit 3b5c8f78, a `.legion/LEGION-573/plan.json`-only
+commit pushed without the trailer on 2026-10-14, has 33 check runs: CI runs in full at a handoff
+head whenever the push carries no `skip-checks: true`.
