@@ -2,66 +2,71 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-573",
-  "completed": "2026-10-14T09:40:00Z",
+  "completed": "2026-10-14T12:05:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1944",
-  "headSha": "d5dce91696dcdb8612d884cc1da3c7d3bc916791",
-  "codeHeadSha": "3b5c8f786287",
-  "round": 2,
+  "headSha": "44c037913a09f48772c4d303c5b96ded23fa0a16",
+  "codeHeadSha": "53636b4eda4b",
+  "round": 3,
   "verdict": "changes_requested",
   "critical": 0,
   "important": 1,
   "minor": 2,
   "rounds": [
-    "Round 1 (handoff 0220b94f, code head 0e14dc3e): REQUEST_CHANGES - 1 Critical (the carry decided whose approval to write from the version tree's own state/answered_by attributes, which a bearer session writes over /ws/doc/{room} and settlement leaves on a block it cannot parse), 2 Important (the browser cut read inside code fences; a copied block passed the per-block test), 2 hardening Minors.",
-    "Round 2 (handoff on this commit, code head 3b5c8f78): the round-4 fixes read and accepted - who answered what comes from the asks rows alone (askBlockRows, rowBackedStates), any unbacked, copied or invalid node refuses the carry, the fence-aware browser cut with the shared fenced-example.md fixture, ask.approval.approved as one object, the two hardening Minors taken; the tester drove the socket forgery against the round-3 binary (carried) and this one (stale). Every round-1 thread answered by me (accepted, fixed in 8885bcd3 / 59e80d01). REQUEST_CHANGES on one Important that the row authority leaves open: a decided block's body is outside every comparison."
+    "Round 1 (handoff 0220b94f, code head 0e14dc3e): REQUEST_CHANGES - 1 Critical (the carry trusted the version tree's state/answered_by attributes), 2 Important (browser cut inside code fences; a copied block passed), 2 hardening Minors.",
+    "Round 2 (handoff d2ae2c53, code head 3b5c8f78): round-1 fixes accepted; REQUEST_CHANGES - 1 Important (a decided block's body outside every comparison; the edits route's in-window version carries it), 2 Minor (N-1 restore trigger; backtick-info-string fence).",
+    "Round 3 (handoff on this commit, code head 53636b4e): round-2 fixes read and accepted (row-held state tuple and decided wording in rowBackedStates; comparison with the approved version alone, at least one change required; loadAskBlocks as the one reader; the fence rule), the tester drove them live (PROOF-67/68/69/72), every round-2 thread carries my acceptance. REQUEST_CHANGES on one Important: the block-vs-row check is incomplete in two places that share one door (a live tree versioned by POST /artifacts/{id}/versions before settlement repairs it) - the answer payload (selected/answer) is not held to the row, and only the first node of a repeated id is checked."
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:293",
-      "description": "A decided block's body is outside every comparison: CutDecisionBlocks drops the whole ask node from both sides (:385) and carryVerdict skips a block whose row state equals the approved version's attributes (:293), so the question and options of an answered block are never compared. Settlement restores a decided ask's wording (ask_blocks.go:324-338) but only at settlement; the edits route (routes_table.go:154, authAny) refuses an edited ask only for readability (validateEditedAskBlocks, ask_blocks.go:419-427) - ASK_NOT_OPEN guards PATCH /asks alone (api/asks.go:399) - and writes its version in its own transaction before settlement (api/artifacts.go:893-908 -> NamedVersion/SnapshotVersion -> writeVersionTx -> carryApproval), which the branch's own TestAnAnswerCarriesWhenAnAgentEditInsideAnotherBlockLandsInItsVersion (api/approval_carry_test.go:433-450) shows carries a human's pending answer. So an agent that rewords an answered block's body through POST /edits inside the answer's settle window gets an approved review and artifact.approved in the approver's name over a version whose decided block shows his selected option under wording nobody decided; settlement restores the wording seconds later as a stale N+1. Combined with the Minor below (a deleted-then-restored answered block counts as newly answered) it needs no human action in the window at all. Bounded: text outside blocks still equals A, the answerer and answer text are row-backed, and the gate it can reopen is one the agent's own edit closed. Traced in code; not driven (no Postgres in this pane). Fix: for every ask node of N backed by a decided row (answered or resolved), require the node to ask the row's wording (block.asks(model.NewAskEditPrevious(ask)), the test settlement itself uses) and to show the row's state, else carry nothing; add the server test (approve with an answered block, answer another block, reword the answered block through the edits route in the window -> stale, one review)."
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:275",
+      "description": "rowBackedStates holds a block of N to its row by shownAskState (state, answered_by, answered_at; :61-66) and, for a decided row, by wording (:278-282). Two server-owned attributes settlement writes from the row are not held: selected and answer (askServerAttributeNames, ask_blocks.go:767; written at :792-800). A document-socket peer (any resolving caller, api/server.go:318-322; the file's own threat model at :28-29) overwrites a decided block's selected/answer, leaving the tuple and wording as the server wrote them; settlement's repair runs only at settlement; POST /artifacts/{id}/versions (authAny, routes_table.go:153) versions the live tree before it (NamedVersion -> captureLiveTextAndAuthors, no repair) and writeVersionTx runs the carry; with a human's answer to another block pending in the same window the verdict passes and an approved review in his name is pinned to a version whose block shows a selection and answer text he never gave, which the browser renders from those attributes (web/src/features/doc/ask-block.ts:171,192-193) and Show diff cannot expose (blocks cut). Second door at the same check: askNodes keeps the FIRST node of a repeated id (:249-253) and every check reads node.node, so a second ask node under a decided id with other wording passes - observed at the head with a throwaway docs test: a live-shaped tree holding two nodes under id `own` (the second asking 'Which region goes LAST?') gave rowBackedStates backed=true, the cut dropped both, and pmdoc.Render emitted the second body. Settlement renames repeats (stampBlockIDs) and restores attributes, so a settled version never has either; only the pre-settlement window does. Bounded as before: text outside blocks pinned, the row stays true, only a self-closed gate reopens; the record is wrong in the one place a reader takes for his decision. Fix in this pull request, one remedy for both: in rowBackedStates refuse a repeated id outright (askNodes already sees it; settlement calls it unreadable, ask_blocks.go:570-576), and hold the whole server-attribute set to the row with settlement's own writer - clone node.Attrs, run setAskServerAttributes(clone, ask, \"\", withhold) for withhold in {false, true}, accept only when one of the two reports changed == false (which keeps the legitimately withheld-answer block, ask_answers.go:50-63, carrying) - and replace the three-field shownAskState comparison with it. Unit cases in TestRowBackedStates... (forged selected; forged answer text; withheld answer accepted; repeated id refused) need no Postgres; an HTTP case through editLiveTree + POST /versions pins the door."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:271",
-      "description": "newlyAnsweredBlocks decides the trigger against version N-1's stored attributes. Deleting an answered block leaves its row answered (only open asks are retracted, ask_blocks.go:390-397) and writes N-1 without it; re-inserting a block with that id makes the row back it again, so the block is absent from N-1 and answered in the rows, newlyAnsweredBlocks names the human, and the carry fires with no human action. The approved content equals A (the cut pins the text; settlement writes the decided wording back), so the record and the artifact.approved event are wrong, not the content. Option: ignore, as newly answered, a block whose row answer.at predates the approval being carried; or decide the changed set against A alone and require it non-empty. The architect may take it as a fast-follow if the Important's fix does not already cover it."
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:339",
+      "description": "A block the approved version A did not hold, restored by the agent with the answer the human gave before A (the row stays answered across a deletion; settlement writes the answer back), is a block not as A held it and his, so the carry fires at settlement's version with no human action in the window. Content is his own question and answer; the companion case (A held it) now carries nothing and the CHANGELOG says so. Decide it: accept explicitly in the rule's comment and CHANGELOG, or require the changed block's row answer to be newer than the approval being carried (review.CreatedAt)."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/doc/decision-blocks.ts:52",
-      "description": "codeFenceEnd returns undefined for a backtick fence whose info string holds a backtick (correct per CommonMark: it opens no fence), after which the ask scanner reads the lines it encloses and cuts a :::ask block written inside them - the hidden direction. Reachable only from a live tree whose code_block language holds a backtick (the markdown parser refuses it, so the Go carry fails closed on such a version); consume that one line as text instead of letting the scanner see past it."
+      "file": "packages/envoy/internal/dispatch/docs/approval_carry.go:151",
+      "description": "'Two candidates whose approvals both pass cannot happen by the rule's shape' (also packages/envoy/AGENTS.md) is not true: two candidates whose approved versions straddle a block's absence can both pass against different A's. Harmless at runtime (the guard at :199-201 carries nothing), but a future simplification trusting the sentence would drop the guard. Reword to 'should two pass, nothing is carried'."
     }
   ],
   "threads": [
-    {"id": "PRRT_kwDORFy7ds6sJXuP", "disposition": "accepted - fixed in 8885bcd3 (row authority; forged-socket test); replied in round 2"},
-    {"id": "PRRT_kwDORFy7ds6sJXuR", "disposition": "accepted - fixed in 8885bcd3 (copies refused by construction); replied in round 2"},
-    {"id": "PRRT_kwDORFy7ds6sJXuU", "disposition": "accepted - fixed in 59e80d01 (fence-aware cut, shared fixture); replied in round 2"},
-    {"id": "PRRT_kwDORFy7ds6sJXuW", "disposition": "accepted - fixed in 8885bcd3 (version below 1 unreadable); replied in round 2"},
-    {"id": "PRRT_kwDORFy7ds6sJXub", "disposition": "accepted - fixed in 8885bcd3 (state = 'open' on the request's answer); replied in round 2"}
+    {"id": "PRRT_kwDORFy7ds6sJXuP", "disposition": "accepted (round 2) - fixed in 8885bcd3"},
+    {"id": "PRRT_kwDORFy7ds6sJXuR", "disposition": "accepted (round 2) - fixed in 8885bcd3"},
+    {"id": "PRRT_kwDORFy7ds6sJXuU", "disposition": "accepted (round 2) - fixed in 59e80d01"},
+    {"id": "PRRT_kwDORFy7ds6sJXuW", "disposition": "accepted (round 2) - fixed in 8885bcd3"},
+    {"id": "PRRT_kwDORFy7ds6sJXub", "disposition": "accepted (round 2) - fixed in 8885bcd3"},
+    {"id": "PRRT_kwDORFy7ds6sP092", "disposition": "accepted (round 3) - fixed in c93467a4 (row-held wording and state)"},
+    {"id": "PRRT_kwDORFy7ds6sP09_", "disposition": "accepted (round 3) - fixed in c93467a4 (comparison with A alone)"},
+    {"id": "PRRT_kwDORFy7ds6sP0-E", "disposition": "accepted (round 3) - fixed in 363ae889 (fence rule)"}
   ],
   "ci": {
-    "codeHeadSha": "3b5c8f786287",
+    "codeHeadSha": "53636b4eda4b",
     "verdict": "green",
     "runs": [
-      "Tests run 38508579327: lint, typecheck, test success",
-      "Legion Envoy and Contracts run 38508579268: every job success",
-      "Worker Image run 38508579307, Docs run 38508579342, PR Title run 38508702467 success"
+      "Tests run 38548038253: lint, typecheck, test success",
+      "Legion Envoy and Contracts run 38548038279: every job success (envoy-go and dispatch included)",
+      "Worker Image run 38548038246, Docs run 38548038259, PR Title run 38548038251 success; no non-success check run at the head"
     ]
   },
   "proofLines": {
-    "implementer": "present: round 4 at 3b5c8f78 on a Dispatch built from the branch (PROOF-1/2/4, the request's approved object, the fenced-example card in a real Chromium tab) with negative controls",
-    "tester": "present: round 4 at 3b5c8f78 (PROOF-36..53), the socket forgery driven with the dashboard's own yjs + hocuspocus provider against the round-3 and round-4 binaries, the planted copy, the approved object, the fence, the round-1..3 scenarios re-run; CI green at the head"
+    "implementer": "present: round 5 at 53636b4e (the reword in the window, the deleted-and-restored block, the fence) with negative controls",
+    "tester": "present: round 5 at 53636b4e (PROOF-54..72), the departure-5 cases driven live - the edits-route reword in the window (v4 stale, v5 carried), the deleted-and-restored block (stale throughout), the in-block edit of an open block carrying, the fences - plus the round-1..4 criteria re-run; CI green at the head"
   },
   "thermonuclear": {
-    "head": "d5dce91696dcdb8612d884cc1da3c7d3bc916791",
-    "deepReview": "1 Important (decided block body outside the comparison; the edits route's in-window version), 2 Minor (restore trigger without human action; backtick-info-string fence), 3 hardening (answerApprovalAsk's error aborts the write; artifact_reviews has no uniqueness key; CHANGELOG rewrap); round-1 Critical verified closed end to end, including that the forged-socket test runs in CI with Postgres",
-    "codeQuality": "row authority verified sound; carryVerdict pure and table-tested; 1 Important duplication (askBlockRows copies loadAskBlocks without its lock); the three-tree comparison (rows for N, stored attributes for N-1 and A) as the remaining structure; the body-blindness raised as its own finding, which I carry as the Important above"
+    "head": "44c037913a09f48772c4d303c5b96ded23fa0a16",
+    "deepReview": "1 Important (selected/answer not held to the row; the socket + POST /versions window), 2 Minor (the A-did-not-hold restore carries with no human action; the two-candidates justification); round-2 fixes, the lock order of loadAskBlocks in every writeVersionTx caller, the shown-state equality on the ordinary carry, the decided-wording check for resolved rows, the candidate trust root and the fence rule verified sound",
+    "codeQuality": "the N-1 read, askBlockRows and newlyAnsweredBlocks deleted (improved); 1 Important (the same payload gap, probed with a compiled throwaway), 2 Minor (askNodes' split authority over a repeated id; carriedReview's loop interleaving eligibility, two lazies and the verdict), 1 nit (carriedReview's first doc line)"
   },
-  "fastFollow": "askBlockRows -> loadAskBlocks (one reader of the block rows; the lock is the same order settlement uses); decide the changed set against A alone and drop the N-1 read once the Important is fixed; the three-tree comparison then collapses to two.",
-  "contractChangeCensus": "not required: ask.approval.approved is new on this branch (the three flat fields it replaces never shipped), optional, and read only by EarlierApproval.tsx; nothing refuses anew, nothing is removed or renamed at a shipped boundary",
+  "fastFollow": "carriedReview: extract candidateApproval (the three eligibility checks) and memoise the cut with sync.OnceValues; fix the doc line 'the approval version number ... or nil'.",
+  "contractChangeCensus": "not required: unchanged since round 2 (no new refusal, required, removed or renamed field at a shipped boundary)",
   "notes": [
-    "The spec's own trade-off stands and is not a finding: an edit inside an OPEN block before the answer does not stale (the in-window test pins it); the Important is about DECIDED blocks, whose wording settlement itself holds fixed.",
-    "The PR body's `CI:` line still reads `pending at 3b5c8f786287`; the runs are green (the tester's line cites them) - the implementer's line to bring up to date before READY.",
-    "Not run here: the Postgres-backed suites (CI's envoy-go and envoy-go-race jobs ran them green at 3b5c8f78) and stage 3 (devbox-only, dispatch://LEGION-718)."
+    "Every residual of rounds 2 and 3 lives in one window: a version written from the live tree before settlement repairs it (POST /artifacts/{id}/versions, the edits route, SnapshotVersion). Holding every ask node to its row with settlement's own writer closes the class rather than one attribute at a time.",
+    "An open row's body staying free is the spec's trade-off and is not a finding (PROOF-69 pins it).",
+    "The PR body's `CI:` line still reads `pending at 53636b4eda4b`; the runs are green - the implementer's line to bring up to date before READY.",
+    "Not run here: the Postgres-backed suites (CI ran them green at 53636b4e) and stage 3 (devbox-only, dispatch://LEGION-718)."
   ]
 }
