@@ -230,14 +230,15 @@ state; `stale` means it was approved and changed since, other than as the next p
 
 A human's own answer to a decision block in a document they approved can carry the approval to
 the version it writes. Dispatch compares that version with the version they approved, every
-decision block cut out of both; when the text outside the blocks is the same and every block added
-since has their answer, it records an `approved` review in their name pinned to the new version and
+decision block cut out of both; when the text outside the blocks is the same and every block added or
+answered since has their answer, it records an `approved` review in their name pinned to the new version and
 emits `artifact.approved`, in the transaction that writes the version, and answers an approval
 request open on the document `Approve` in their name. The answer was the whole change since the
 version they approved, so request nothing: `dispatch doc-read` shows `Approval: approved vN` at
 the new version. An edit inside the block before the answer does not stop this. A change
 outside the blocks, whoever wrote it (an upload or a typed edit included), a block added since the
-approval that the human has not answered (open or waived), a removed block, a request for changes
+approval that the human has not answered (open or waived), a block the approved version held that
+someone else answered or that was waived since, a removed block, a request for changes
 newer than the approval, or a document they never approved leaves the approval stale, and the next
 request shows them the diff: a request on a document a human approved earlier carries
 `approved_version`, `approved_at` and `approved_by` in `ask.approval`, and its Inbox card puts

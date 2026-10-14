@@ -17,9 +17,10 @@ import (
 
 // A human's answer to a decision block carries his approval forward. He approved the document at
 // version A; the version his answer writes, N, differs from A only in its ask blocks, and every
-// block N holds that A did not is one he answered: nothing he has not agreed to is in N, so
-// Dispatch records his approval of N in his name, in the transaction that writes N, rather than
-// leaving his approval stale and asking him to approve again what he just decided (LEGION-573).
+// block of N that is not as A held it - added since, answered or re-answered since, or resolved
+// since - is one he answered: nothing he has not agreed to is in N, so Dispatch records his
+// approval of N in his name, in the transaction that writes N, rather than leaving his approval
+// stale and asking him to approve again what he just decided (LEGION-573).
 
 // carryReason is the reason a carried review records, naming the approval it follows.
 const carryReason = "Carried forward from the approval of version %d: the answer to a decision block was the whole change since it."
@@ -96,8 +97,12 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if approved != previous {
 		approvedBlocks = askBlockStates(approved)
 	}
+	// A block A held unchanged, whoever answered it before his approval, is content he approved
+	// and stays out of the test; every other block of N - added since A, answered or re-answered
+	// since by anyone, or resolved since, which is nobody's answer - must be his answer, or the
+	// version holds a decision he did not make.
 	for id, block := range blocks {
-		if _, held := approvedBlocks[id]; held {
+		if before, held := approvedBlocks[id]; held && before == block {
 			continue
 		}
 		if block.state != "answered" || model.CanonicalLogin(block.answeredBy) != login {

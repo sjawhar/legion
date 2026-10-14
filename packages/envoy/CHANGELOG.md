@@ -15,7 +15,9 @@
   at the carry is answered `Approve` in his name (`ask.answered`) and the review's `ask_id` names
   it, null otherwise. The comparison is `docs.CutDecisionBlocks`, the markdown rendered again with
   every ask block left out wherever it stands, on both sides. An edit outside the blocks, a block
-  he did not answer (open, resolved, or answered by someone else), a block of the approved version
+  he did not answer (open, resolved, or answered by someone else, whether added since his approval
+  or held open by the approved version and answered or resolved since; a block answered before his
+  approval and untouched since is content he approved), a block of the approved version
   the agent removed, two people's answers in one version, an approval by someone else only, his own
   later request for changes or anyone's newer one, and a copy's document when its source is
   answered carry nothing, as before. An approval request on a document a human approved earlier

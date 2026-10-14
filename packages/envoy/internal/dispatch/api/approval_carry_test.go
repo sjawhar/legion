@@ -588,6 +588,58 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 }
 
+// Stale: a block the approved version held open was answered by another human after his
+// approval, and his own answer to a block added since would carry that decision into his name.
+// The cut text is the same and every added block is his, so only the comparison of each block
+// with the approved version's state keeps the carry from approving the other answer unread.
+func TestAnAnswerBesideABlockAnotherHumanAnsweredSinceHisApprovalDoesNotCarry(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Other answer since approval", "Context\n\n"+regionAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 2, map[string]string{"wave": "How many regions take the first wave?"}) {
+		asks[id] = ask
+	}
+	answerDecisionBlock(t, handler, asks["region"], "bob", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}
+
+// Carry: a block the approved version held open, answered by the approver himself with nothing
+// else changed, is his answer to a block of the version he approved.
+func TestHisAnswerToABlockTheApprovedVersionHeldOpenCarries(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Approved block answered", "Context\n\n"+regionAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+
+	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 2, 1, nil)
+}
+
+// Carry: a block another human answered before his approval, untouched since, is content he
+// approved; his answer to a block added since is still the whole change.
+func TestAnotherHumansAnswerHeApprovedStaysOutOfTheCarrysTest(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Other answer before approval", "Context\n\n"+regionAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	answerDecisionBlock(t, handler, asks["region"], "bob", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 3, map[string]string{"wave": "How many regions take the first wave?"}) {
+		asks[id] = ask
+	}
+
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 4, 2, nil)
+}
+
 // Stale: two humans answered two blocks in one version, so the version is not one person's
 // answer and carries nobody's approval.
 func TestTwoHumansAnswersInOneVersionDoNotCarry(t *testing.T) {
