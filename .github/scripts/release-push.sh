@@ -6,6 +6,14 @@
 #            the artifacts were built and published from. A pre-existing tag is
 #            reused only when it carries the same package version; any other
 #            collision fails loudly.
+# tagged:    print the release tag `tag` already pushed for this checkout, or
+#            nothing: the newest <tag-prefix> tag on HEAD itself (the manifest
+#            already held the version, so `tag` had nothing to commit) or on a
+#            child of HEAD that changes only <package-dir>/package.json, the
+#            bump commit `tag` makes. A re-run of a release job checks out the
+#            same commit, with every tag its first attempt pushed; its version
+#            step reads this to release that tag again, where computing the
+#            next version from the tag would find an empty range and skip.
 # push-main: push the bump commit to main, fetching main and rebasing onto it
 #            between attempts, five attempts in all. This runs last, after the
 #            tag and GitHub release exist: a lost push only delays the metadata
@@ -21,19 +29,23 @@
 #            same base and the rebase conflicts. One rule resolves it: when the
 #            only conflicted path is the released package's package.json, take
 #            main's copy of that file, set its .version to the version being
-#            released (each run derives its version from the newest tag, so the
-#            release in flight is always the newest for its package), continue
-#            the rebase, and push again. Any other conflicted path — or the
-#            manifest deleted on main — is a real divergence: the rebase is
-#            aborted and the step fails naming the paths. Exhausting the
-#            attempts fails the step too. Every failure here — a rejected push,
-#            an unreachable origin, a rebase that stops for any other reason —
-#            says, in the log and in the job summary, that the publish, tag and
-#            GitHub release already succeeded and only this push to main is
-#            outstanding.
+#            released, continue the rebase, and push again. Any other
+#            conflicted path — or the manifest deleted on main — is a real
+#            divergence: the rebase is aborted and the step fails naming the
+#            paths. Exhausting the attempts fails the step too. Every failure
+#            here — a rejected push, an unreachable origin, a rebase that stops
+#            for any other reason — says, in the log and in the job summary,
+#            that the publish, tag and GitHub release already succeeded and
+#            only this push to main is outstanding.
+#
+#            push-main never lowers main's version. When main's manifest
+#            already holds the version being released or a later one, there is
+#            nothing to push: a re-run whose first attempt landed this bump, or
+#            a re-run of an older run after a later release of the package
+#            landed. It says so in a notice and exits 0.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh push-main <package-dir> <version>}
+command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <package-dir> <tag-prefix> | release-push.sh push-main <package-dir> <version>}
 
 # fail_outstanding <reason>: fail push-main after the release itself succeeded.
 # Writes the ::error:: annotation and, under GitHub Actions, the job summary.
@@ -70,6 +82,24 @@ case "$command" in
       git push origin "refs/tags/$tag"
     fi
     ;;
+  tagged)
+    package_dir=${2:?package dir}
+    prefix=${3:?tag prefix}
+    head=$(git rev-parse HEAD)
+    # The prefix's tags on HEAD and its descendants, newest version first. Ref
+    # names hold no whitespace, so the list splits into one tag per word.
+    tags=$(git tag --list "$prefix*" --contains HEAD --sort=-v:refname)
+    for candidate in $tags; do
+      commit=$(git rev-parse "$candidate^{commit}")
+      if [ "$commit" = "$head" ] || {
+        [ "$(git rev-parse -q --verify "$commit^")" = "$head" ] &&
+          [ "$(git diff --name-only "$head" "$commit")" = "$package_dir/package.json" ]
+      }; then
+        echo "$candidate"
+        exit 0
+      fi
+    done
+    ;;
   push-main)
     package_dir=${2:?package dir}
     version=${3:?released version}
@@ -81,6 +111,23 @@ case "$command" in
       fi
       git fetch origin main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD)
+      # Main's manifest at or past this version needs nothing pushed (the
+      # header's push-main paragraph). A manifest main deleted, or one without a
+      # plain version, is left to the rebase below.
+      main_version=$(git show "$upstream:$manifest" 2>/dev/null | jq -r .version 2>/dev/null) || main_version=""
+      if [[ $main_version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] &&
+        [ "$(printf '%s\n%s\n' "$version" "$main_version" | sort -V | tail -n 1)" = "$main_version" ]; then
+        if [ "$main_version" = "$version" ]; then
+          reason="main's $manifest already holds v$version, so this version bump has nothing to add."
+        else
+          reason="main's $manifest holds v$main_version, a later release than v$version, so this version bump is superseded."
+        fi
+        echo "::notice title=Version bump not pushed::$reason"
+        if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+          printf '**Version bump for %s v%s not pushed.** %s\n' "$package_dir" "$version" "$reason" >> "$GITHUB_STEP_SUMMARY"
+        fi
+        exit 0
+      fi
       if git rebase "$upstream"; then
         continue
       fi

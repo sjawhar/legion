@@ -285,7 +285,8 @@ pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); chec
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
 (`--failed` keeps the `legion` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes
-`legion` against its own tag and empties `legion_version`) or by pushing the branch again.
+`legion`, which releases its own tag again, so the rebuilt image takes that version tag) or by pushing the
+branch again.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is

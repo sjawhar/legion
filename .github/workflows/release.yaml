@@ -261,6 +261,20 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
+          # HEAD, where the range below would be empty and skip the release it never finished.
+          # Release that tag again instead: "Tag release" accepts its own tag at this commit and
+          # "Create GitHub release" reuses a published release and publishes a draft one.
+          EXISTING_TAG=$(git tag --list 'legion-v*' --points-at HEAD --sort=-v:refname | head -1)
+          if [ -n "$EXISTING_TAG" ]; then
+            {
+              echo "version=${EXISTING_TAG#legion-v}"
+              echo "release_tag=$EXISTING_TAG"
+              echo "skip=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "Releasing $EXISTING_TAG, already at HEAD"
+            exit 0
+          fi
           PREV_TAG=$(git tag -l 'legion-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # The first Go release continues the version line of the TypeScript CLI it replaces
@@ -374,8 +388,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.release_tag }}
         run: |
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; reusing it"
+          # A release found here is reused. A draft is one an earlier attempt's `gh release create`
+          # left between creating and publishing it: gh deletes that draft itself when an upload
+          # fails, so only a job cancelled or lost mid-upload leaves one, possibly short of assets.
+          # This run's assets go over it, then it is published.
+          if is_draft=$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$is_draft" = true ]; then
+              gh release upload "$TAG" assets/* --repo "${{ github.repository }}" --clobber
+              gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
+              echo "Published the draft release $TAG with this run's assets"
+            else
+              echo "Release $TAG already exists; reusing it"
+            fi
           else
             gh release create "$TAG" \
               assets/* \
@@ -462,6 +486,19 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Commit and tag" pushed the tag checks out this same commit with that
+          # tag, where the range below would be empty and skip the release it never finished.
+          # Release that tag again instead (release-push.sh, `tagged`); every later step is safe to
+          # repeat: npm reuses a published version, the GitHub release step reuses a published
+          # release and publishes a draft one, `tag` accepts its own tag, and `push-main` pushes
+          # nothing once main holds this version or a later one.
+          TAGGED=$(.github/scripts/release-push.sh tagged packages/envoy-plugin opencode-legion-envoy-v)
+          if [ -n "$TAGGED" ]; then
+            echo "version=${TAGGED#opencode-legion-envoy-v}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, which an earlier attempt pushed for this commit"
+            exit 0
+          fi
           # The package's prepack copies skills/ into the tarball (package.json "prepack"), where
           # OpenCode loads it as the plugin's skills, so a commit there releases whatever its type.
           # Its notices generator is another shipped build input, so it gets the same patch release.
@@ -532,8 +569,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
+          # The legion job's "Create GitHub release" says why a draft found here is published.
+          if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$is_draft" = true ]; then
+              gh release upload "$tag" packages/envoy-plugin/*.tgz --repo "${{ github.repository }}" --clobber
+              gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
+              echo "Published the draft release $tag with this run's assets"
+            else
+              echo "Release $tag already exists; reusing it"
+            fi
           else
             gh release create "$tag" \
               packages/envoy-plugin/*.tgz \
@@ -581,6 +625,15 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Commit and tag" pushed the tag: envoy_plugin's version step says why
+          # this releases that tag again.
+          TAGGED=$(.github/scripts/release-push.sh tagged packages/pi-envoy pi-envoy-v)
+          if [ -n "$TAGGED" ]; then
+            echo "version=${TAGGED#pi-envoy-v}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, which an earlier attempt pushed for this commit"
+            exit 0
+          fi
           # scripts/pi-plugin-prepack.sh copies this plugin's four skills into dist/skills, which
           # every Oh My Pi session loads as the plugin's skills, so a commit there releases whatever
           # its type. Its notices generator and the prepack itself are shipped build inputs too, so
@@ -678,8 +731,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="pi-envoy-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
+          # The legion job's "Create GitHub release" says why a draft found here is published.
+          if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$is_draft" = true ]; then
+              gh release upload "$tag" packages/pi-envoy/*.tgz --repo "${{ github.repository }}" --clobber
+              gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
+              echo "Published the draft release $tag with this run's assets"
+            else
+              echo "Release $tag already exists; reusing it"
+            fi
           else
             gh release create "$tag" \
               packages/pi-envoy/*.tgz \
@@ -731,6 +791,15 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Commit and tag" pushed the tag: envoy_plugin's version step says why
+          # this releases that tag again.
+          TAGGED=$(.github/scripts/release-push.sh tagged packages/pi-legion pi-legion-v)
+          if [ -n "$TAGGED" ]; then
+            echo "version=${TAGGED#pi-legion-v}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, which an earlier attempt pushed for this commit"
+            exit 0
+          fi
           # scripts/pi-plugin-prepack.sh copies this plugin's eight skills into dist/skills, which
           # a Legion pane's prompts load, so a commit there releases whatever its type. Its notices
           # generator and the prepack itself are shipped build inputs too, so they get the same
@@ -833,8 +902,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="pi-legion-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
+          # The legion job's "Create GitHub release" says why a draft found here is published.
+          if is_draft=$(gh release view "$tag" --repo "${{ github.repository }}" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$is_draft" = true ]; then
+              gh release upload "$tag" packages/pi-legion/*.tgz --repo "${{ github.repository }}" --clobber
+              gh release edit "$tag" --repo "${{ github.repository }}" --draft=false
+              echo "Published the draft release $tag with this run's assets"
+            else
+              echo "Release $tag already exists; reusing it"
+            fi
           else
             gh release create "$tag" \
               packages/pi-legion/*.tgz \

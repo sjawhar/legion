@@ -84,8 +84,9 @@ Declare `secrets:` explicitly or omit it.
 
 ## Rerun the failed jobs, not the run
 
-The remedy text for a failed image build must say `gh run rerun <run-id> --failed`. A whole-run
-rerun of a `release.yaml` invocation re-executes the `legion` job at the same commit, which now sees
-its own `legion-vX` tag, computes an empty bump range, skips, and hands the image job an empty
-`legion_version` — the retried image publishes `sha-` only, with no version tag and no release-body
-append. `--failed` keeps the succeeded jobs' recorded outputs.
+The remedy text for a failed image build must say `gh run rerun <run-id> --failed`, which re-runs
+the failed jobs and keeps the succeeded jobs' recorded outputs. A whole-run rerun of a
+`release.yaml` invocation re-executes every job at the same commit: `legion` finds its own
+`legion-vX` tag at HEAD and releases it again, so the image job still gets `legion_version`, but
+the image is rebuilt and `vX` moves to the rebuild's digest, which the release body then lists
+beside the first one when the two differ.

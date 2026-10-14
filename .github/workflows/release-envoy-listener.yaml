@@ -524,11 +524,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.publish.outputs.tag }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null); then
             gh release upload "$TAG" --clobber \
               ./legion-envoy-*/* \
               ./agent-secrets-assets/* \
               SHA256SUMS
+            # A draft is one an earlier attempt's `gh release create` left between creating and
+            # publishing it: gh deletes that draft itself when an upload fails, so only a job
+            # cancelled or lost mid-upload leaves one. With this run's assets over it, publish it.
+            if [ "$is_draft" = true ]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
+              echo "Published the draft release $TAG with this run's assets"
+            fi
           else
             gh release create "$TAG" \
               --title "$TAG" \
