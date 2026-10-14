@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-698",
-  "completed": "2026-10-14T08:09:59Z",
+  "completed": "2026-10-14T08:23:16Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1950",
-  "head": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
-  "round": 3,
+  "head": "f871a90f72462c7c152d0b497987dcee6b4bdc26",
+  "round": 4,
   "proof": [
     {
       "criterion": "Acceptance 1: a reviewer's APPROVE of the head ends the round whatever CI says at that commit, a REQUEST_CHANGES sends the work back; a test in packages/daemon/internal/workflow/review_test.go is red on main before the fix.",
@@ -72,6 +72,15 @@
       "headSha": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
       "negativeControl": "At the reviewed head c8c33210 the same synchronize ordering leaves testing, retro and merging in place with HeadVerdict red (the reviewer's finding at pullrequest.go:118), and a hold retried from testing with a red settled meanwhile restarts the tester instead of sending back (engine.go:549)."
     }
+    ,
+    {
+      "criterion": "Round 4 (the tester's round 3 failure): the repository's own test suite is green on the head's code - skills/legion-worker/SKILL.md stays under the skills guard's 500 lines (packages/pi-shared/test/skills-guard.ts longSkillBodies, split('\\n').length >= 500 fails), which round 3's retro-completion sentence had crossed.",
+      "surface": "The pi-legion package's skills-guard test run with bun in the workspace, and the file's line count.",
+      "command": "wc -l skills/legion-worker/SKILL.md ; cd packages/pi-legion && bun test src/skills-guard.test.ts",
+      "observed": "498 skills/legion-worker/SKILL.md (501 at the round-3 head f0b5430b; the guard counts one more than wc -l for the trailing newline, so 502 failed and 499 passes); bun test: 9 pass, 0 fail, 23 expect() calls, 'every skill body stays under 500 lines, its detail in references' among them. The sentence (SKILL.md:123-126) says the same in four lines: from retro the issue moves the same way with nothing interrupted, the implementer is handed the implementing task after its turn, a retro completion started after the move is refused, one in flight when the red lands can be taken as the implementing completion. The rest of the pi-legion suite needs bun install in this pod (7 'Cannot find module' errors unrelated to the change); CI's Legion Envoy and Contracts job at this head is the read.",
+      "headSha": "f871a90f72462c7c152d0b497987dcee6b4bdc26",
+      "negativeControl": "At f0b5430b the guard test fails on legion-worker/SKILL.md with 502 lines (Legion Envoy and Contracts run 38533000318, job pi-legion), as the tester recorded; main e4ec5a20 is 495 lines by wc -l."
+    }
   ],
   "filesChanged": [
     "packages/daemon/internal/classify/decisions.go: RedSendsBack(pr) is HeadVerdict red && !PlannedRed (the handoff-head and review-workflows exceptions are gone); HeadPushKnown added; RedWithdrawsReady and FixAttemptCapHolds docs updated",
@@ -93,6 +102,8 @@
     "round 2: packages/daemon/internal/workflow/pullrequest.go (push applies standingRed in every phase, re-asks the round only in reviewing), review.go (standingRed does not act in awaiting_merge), required_checks_test.go (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing)"
     ,
     "round 3: packages/daemon/internal/workflow/pullrequest.go (pullRequestSynchronized applies standingRed when the head moved, before the phase switch; the push handler's guard split into three exits), engine.go (retryOrEscalate applies standingRed from any held phase before the reviewing-only round work), review.go (standingRed's doc states the invariant), classify/decisions.go (FixAttemptCapHolds doc names standingRed), checks_red_test.go (implementerStart and checksRedNotice helpers; TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase), review_test.go (TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack); prompts/go/architect-common.md, worker-common.md, skills/legion-worker/SKILL.md (a retro completion that starts once the issue has moved is refused; one in flight when the red lands can be taken as the implementing completion)"
+    ,
+    "round 4: skills/legion-worker/SKILL.md (the retro-completion sentence in four lines; 498 lines, under the skills guard)"
   ],
   "trickyParts": [
     "The plan's own TestAnApprovalEndsTheRoundWhateverCISays rows are unreachable under the plan's reviewRound ordering (roundApproved then roundSentBack): with a red standing, whichever half arrives first finds the round incomplete, falls through to RedSendsBack and sends the work back, and the second half is refused HANDOFF_NOT_CURRENT_PHASE (that is exactly the row's failure on main). So the round reads no CI at all; standingRed holds the CI rule and the push handler and the hold retry apply it before asking the round.",
