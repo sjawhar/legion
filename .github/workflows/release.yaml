@@ -899,11 +899,21 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # Anyone who can push a tag names one (no ruleset guards envoy-infra-v*), and git accepts
+          # shell syntax in a tag name, so a version taken from one is used only when it is a plain
+          # X.Y.Z. Every later step reads the version and the tag through env:, never pasted into
+          # its script.
+          plain_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
+
           # A tag already at this commit is a re-run of a run that pushed it, perhaps without its
           # release: rebuild and release that version, as release-envoy-listener.yaml does, so the
           # tag and release steps below take their reuse branches rather than the run skipping.
           EXISTING_TAG=$(git tag --list 'envoy-infra-v*' --points-at HEAD --sort=-v:refname | head -1)
           if [ -n "$EXISTING_TAG" ]; then
+            if ! plain_version "${EXISTING_TAG#envoy-infra-v}"; then
+              echo "::error::The tag $EXISTING_TAG at this commit is not envoy-infra-v<X.Y.Z>; refusing to release it"
+              exit 1
+            fi
             {
               echo "version=${EXISTING_TAG#envoy-infra-v}"
               echo "release_tag=$EXISTING_TAG"
@@ -927,6 +937,10 @@ jobs:
             exit 0
           fi
           PREV_VERSION="${PREV_TAG#envoy-infra-v}"
+          if ! plain_version "$PREV_VERSION"; then
+            echo "::error::The newest envoy-infra-v* tag, $PREV_TAG, is not envoy-infra-v<X.Y.Z>; refusing to version from it"
+            exit 1
+          fi
           # The plugin renders grants from the Envoy packages it compiles in, so a commit to one of
           # them releases it; .github/scripts/check-envoy-infra-release-paths.sh holds these paths
           # to `go list -deps`. The notices script and the target list are runtime inputs of the
