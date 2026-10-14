@@ -12,6 +12,21 @@ import (
 
 const Stream = "ENVOY_NOTIFICATIONS"
 
+// The JetStream KV buckets Envoy's stores keep, each named for what it holds.
+const (
+	// InterestBucket holds each session's interests, the topics it subscribes to, keyed by session
+	// id (internal/store).
+	InterestBucket = "envoy_interests"
+	// RoleClaimBucket holds each role lane's claim, its holder session, keyed by role
+	// (internal/store).
+	RoleClaimBucket = "envoy_roles"
+	// SessionBucket holds each live session's registration, keyed by session id
+	// (internal/session).
+	SessionBucket = "envoy_sessions"
+	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
+	CIStateBucket = "envoy_ci_state"
+)
+
 // NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
 // role lanes and the exception lanes.
 const NotificationTopicPrefix = "notifications."

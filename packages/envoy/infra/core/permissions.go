@@ -6,10 +6,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/sjawhar/envoy/internal/bus"
-	"github.com/sjawhar/envoy/internal/cistore"
 	"github.com/sjawhar/envoy/internal/contracts"
-	"github.com/sjawhar/envoy/internal/session"
-	"github.com/sjawhar/envoy/internal/store"
 )
 
 // Permissions are one NATS user's publish and subscribe rules, as a User takes them.
@@ -31,9 +28,9 @@ const (
 const inboxes = nats.InboxPrefix + ">"
 
 // listenerBuckets are the KV buckets a listener opens, in the order its grant lists them: the
-// interest and role buckets, the session registry, and the CI store, which only a listener with the
-// GitHub webhook route opens.
-var listenerBuckets = []string{store.Bucket, store.RoleBucket, session.SessionBucket, cistore.Bucket}
+// interest and role-claim buckets, the session registry, and the CI state bucket, which only a
+// listener with the GitHub webhook route opens.
+var listenerBuckets = []string{bus.InterestBucket, bus.RoleClaimBucket, bus.SessionBucket, bus.CIStateBucket}
 
 // ListenerPermissions is the grant envoy-listener needs as machine machineID, built from Envoy's own
 // names. Publish, in this order:
@@ -73,7 +70,7 @@ func ListenerPermissions(machineID string) Permissions {
 			jsFlow+stream+".>",
 		)
 	}
-	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+store.Bucket)
+	publish = append(publish, jsAPI+"STREAM.PURGE."+kvStream+bus.InterestBucket)
 	return Permissions{
 		Publish:   Rules{Allow: publish},
 		Subscribe: Rules{Allow: []string{inboxes, contracts.RoleTopicPrefix + "> " + bus.ListenerQueue(machineID)}},
