@@ -160,7 +160,6 @@ Rejected, with the reason:
 | 2 | a new PR stacked on #1946 (gh-stack), branch `envoy-infra-core` | `envoy-infra seed check` and `verify --store aws-secrets-manager` read an existing deployment's live seed and print the reference script's lines | Task 1.1 on `envoy-infra` |
 | 3 | a new PR stacked on slice 2's (gh-stack, linear: `envoy-infra` ← `envoy-infra-core` ← `envoy-infra-aws`) | the existing AWS deployment's staging, production and dispatch previews show no diff with its NATS service and webhook listener built by `envoy-infra:aws:NatsService` and `aws:WebhookListener` | Tasks 2.1 and 2.2 |
 | 4 | a plain PR based on `envoy-infra-core`, outside the gh-stack (gh-stack is strictly linear), which merges `main` once slice 2 merges and is then retargeted; branch `envoy-infra-gcp` | `envoy-infra seed generate --store gcp-secret-manager` writes a seed; `envoy-infra:gcp:NatsHub` serves NATS on GCE over a tailnet | Tasks 2.1 and 2.2 |
-| 1.7 (only under the dotfiles plan's seed option A) | a plain PR on `main` after #1946 merges, released as the next minor version (a new input) | `host:Listener` runs a healthy listener whose seed it reads from a host file through a read-only bind mount | slice 1 merged and released |
 
 A stacked branch takes its lower layer's later commits by merging it (`git merge origin/<lower>`,
 then a fast-forward push), never by a rebase and a force push: each PR squash-merges, so the merge
@@ -600,17 +599,6 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
   one `envoy-infra:host:Listener` plans creates of exactly the stack, that provider, the component,
   its `docker:index/remoteImage:RemoteImage` and its `docker:index/container:Container`. Record the
   commands and output on #1946.
-
-### Task 1.7: `host:Listener`'s `seedFile` input (only if Sami chooses option A of the dotfiles plan's seed decision)
-
-A follow-on minor release (a new input), in its own PR after #1946 merges. `seedFile` (plain, optional) names an
-absolute host path; the component bind-mounts it read-only (a `bind` mount, so a missing source
-fails the container's create rather than creating a directory) at a fixed path in the container
-and sets `NATS_NKEY_SEED_FILE` to it. It is refused together with `seed`, and together with
-`watchdog` (whose recreate would come back without the mount, as R10 refuses `seed`). Unit tests
-pin the mount and the environment; a live test proves a listener reaches "healthy" with a seed read
-through the mount (a 0444 file inside a 0700 directory) and, as its negative control, refuses the
-create with the file missing. The README documents the input.
 
 ---
 
@@ -1372,7 +1360,6 @@ Items to verify, each with the row that settles it and where its result goes:
 | E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by Jason or Rajashree, and Sami's tailnet, policy and OAuth-client steps | Task 4.4 |
 | E10. The CLI checks and verifies the existing AWS deployment's live seed read-only, printing the reference script's lines | 2 | infrastructure | that deployment's staging Secrets Manager, from the devbox, with the branch-built CLI | the devbox's `staging` profile (`--expect-account` refuses any other) | Task 2.3 |
 | E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, from the devbox, with this branch's plugin by path | the devbox's `staging` profile for staging, its instance identity for production and dispatch | Task 3.3; the deployment's own plan |
-| E12. (Task 1.7, only under option A) `host:Listener` with `seedFile` reaches "healthy" reading its seed through the mount; a missing file refuses the create | 1.7 | infrastructure | `pulumi up` of a YAML program against the runner's Docker, as E2 | CI runner | Task 1.7 live test |
 
 Legion's own end-to-end stages (`scripts/e2e/stage*.sh`) exercise none of the changed paths. The
 Envoy changes (`bus.LocalNATSURL`, `bus.ListenerDurable`/`ListenerQueue`,
@@ -1388,7 +1375,7 @@ dotfiles skills (`opening-a-pr`, `landing-a-pr`, `using-docker`, `updating-docs`
 
 | Step | Worker | Required skills |
 | --- | --- | --- |
-| Tasks 1.1-1.4, 1.7, 2.1-2.2, 3.1-3.2, 4.1-4.3 | `deep` (implementer) | `test-driven-development`, `using-docker`, `verification-before-completion`, `systematic-debugging` when a test fails unexpectedly |
+| Tasks 1.1-1.4, 2.1-2.2, 3.1-3.2, 4.1-4.3 | `deep` (implementer) | `test-driven-development`, `using-docker`, `verification-before-completion`, `systematic-debugging` when a test fails unexpectedly |
 | Tasks 1.5, 2.3, 3.3, 4.4 (docs) | `deep` | `updating-docs` |
 | Opening and landing each PR; Task 1.6 | `deep` (implementer) | `opening-a-pr`, `landing-a-pr`, `gh-stack` (slices 2-3) |
 | Slice acceptance | `deep` (tester) | `verification-before-completion`, `using-docker` |
