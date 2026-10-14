@@ -12,11 +12,12 @@ import (
 // Every want below is Python 3.12's own output for the same value: json.dumps with the options
 // named, or shlex.quote and shlex.join.
 func TestPyJSON(t *testing.T) {
-	nested := map[string]any{
-		"b":      map[string]any{"z": 1, "a": []any{"x", true, nil, -7}},
-		"a":      "v",
-		"c":      map[string]any{},
-		"\u00e9": "\u00e9",
+	// Built out of sorted order, so the sort_keys rows show the sort at every depth.
+	nested := core.Object{
+		{Key: "b", Value: core.Object{{Key: "z", Value: 1}, {Key: "a", Value: []any{"x", true, nil, -7}}}},
+		{Key: "a", Value: "v"},
+		{Key: "c", Value: core.Object{}},
+		{Key: "\u00e9", Value: "\u00e9"},
 	}
 	quoting := "q\"b\\<>&\u00e9\u2028\U0001F600"
 	controls := "a\nb\tc\x01\x1f\x7f\b\f\r"
@@ -27,13 +28,13 @@ func TestPyJSON(t *testing.T) {
 		want string
 	}{
 		{
-			name: "nested maps with sort_keys",
+			name: "nested objects with sort_keys",
 			in:   nested,
 			opts: core.PyJSONOptions{SortKeys: true},
 			want: "{\"a\": \"v\", \"b\": {\"a\": [\"x\", true, null, -7], \"z\": 1}, \"c\": {}, \"\u00e9\": \"\u00e9\"}",
 		},
 		{
-			name: "nested maps with sort_keys and ensure_ascii",
+			name: "nested objects with sort_keys and ensure_ascii",
 			in:   nested,
 			opts: core.PyJSONOptions{SortKeys: true, EnsureASCII: true},
 			want: `{"a": "v", "b": {"a": ["x", true, null, -7], "z": 1}, "c": {}, "\u00e9": "\u00e9"}`,
@@ -70,11 +71,64 @@ func TestPyJSON(t *testing.T) {
 	}
 }
 
-// A Go map has no key order, so without SortKeys there is no Python dict order to reproduce; and a
-// float has no Go spelling that is always Python's repr. Both are the caller's error, not data.
+// A Go map has no key order, so it is no Python dict; a float has no Go spelling that is always
+// Python's repr. Both are the caller's error, not data.
 func TestPyJSONRefusesWhatItCannotSpellAsPython(t *testing.T) {
-	requirePanicNaming(t, "SortKeys", func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{}) })
-	requirePanicNaming(t, "float64", func() { core.PyJSON([]any{1.5}, core.PyJSONOptions{SortKeys: true}) })
+	requirePanicNaming(t, "map[string]interface {} is not a JSON value", func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{SortKeys: true}) })
+	requirePanicNaming(t, "float64", func() { core.PyJSON([]any{1.5}, core.PyJSONOptions{}) })
+}
+
+// An Object is a Python dict built in a known order: PyJSON writes its keys in that order, or
+// sorted under SortKeys, as json.dumps writes a dict. Every want is Python 3.12's own output for the
+// dict with the same insertion order.
+func TestPyJSONObject(t *testing.T) {
+	ordered := core.Object{
+		{Key: "z", Value: 1},
+		{Key: "a", Value: []any{core.Object{{Key: "y", Value: "\u00e9"}, {Key: "b", Value: nil}}, true, []string{"x"}}},
+		{Key: "\u00e9", Value: "\u2028\U0001F600"},
+		{Key: "c", Value: core.Object{}},
+	}
+	unsorted := core.Object{
+		{Key: "b", Value: core.Object{{Key: "d", Value: 1}, {Key: "c", Value: 2}}},
+		{Key: "a", Value: 2},
+	}
+	cases := []struct {
+		name string
+		in   any
+		opts core.PyJSONOptions
+		want string
+	}{
+		{
+			name: "insertion order, non-ASCII raw",
+			in:   ordered,
+			want: "{\"z\": 1, \"a\": [{\"y\": \"\u00e9\", \"b\": null}, true, [\"x\"]], \"\u00e9\": \"\u2028\U0001F600\", \"c\": {}}",
+		},
+		{
+			name: "insertion order, with ensure_ascii",
+			in:   ordered,
+			opts: core.PyJSONOptions{EnsureASCII: true},
+			want: `{"z": 1, "a": [{"y": "\u00e9", "b": null}, true, ["x"]], "\u00e9": "\u2028\ud83d\ude00", "c": {}}`,
+		},
+		{
+			name: "sort_keys sorts an object at every depth",
+			in:   unsorted,
+			opts: core.PyJSONOptions{SortKeys: true},
+			want: `{"a": 2, "b": {"c": 2, "d": 1}}`,
+		},
+		{name: "an empty object", in: core.Object{}, want: "{}"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, core.PyJSON(c.in, c.opts))
+		})
+	}
+}
+
+// A dict holds each key once, so an Object naming a key twice has no Python counterpart.
+func TestPyJSONRefusesAnObjectWithARepeatedKey(t *testing.T) {
+	requirePanicNaming(t, `"name"`, func() {
+		core.PyJSON(core.Object{{Key: "name", Value: "a"}, {Key: "name", Value: "b"}}, core.PyJSONOptions{})
+	})
 }
 
 // requirePanicNaming requires f to panic with a value whose text contains want.

@@ -190,9 +190,9 @@ func (a Authorization) Render(header []string) (string, error) {
 		if u.Name == a.NoAuthUser {
 			fallback = u.NKey
 		}
-		user := map[string]any{
-			"nkey":        u.NKey,
-			"permissions": map[string]any{"publish": u.Publish.object(), "subscribe": u.Subscribe.object()},
+		user := Object{
+			{"nkey", u.NKey},
+			{"permissions", Object{{"publish", u.Publish.object()}, {"subscribe", u.Subscribe.object()}}},
 		}
 		b.WriteString("    # " + u.Name + "\n")
 		b.WriteString("    " + PyJSON(user, PyJSONOptions{SortKeys: true}) + "\n")
@@ -206,10 +206,10 @@ func (a Authorization) Render(header []string) (string, error) {
 }
 
 // object is the rules as the block writes them: deny only when it names an entry.
-func (r *Rules) object() map[string]any {
-	object := map[string]any{"allow": r.Allow}
+func (r *Rules) object() Object {
+	object := Object{{"allow", r.Allow}}
 	if len(r.Deny) > 0 {
-		object["deny"] = r.Deny
+		object = append(object, Field{"deny", r.Deny})
 	}
 	return object
 }

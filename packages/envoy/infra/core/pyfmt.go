@@ -3,7 +3,7 @@ package core
 import (
 	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -15,14 +15,24 @@ type PyJSONOptions struct {
 	EnsureASCII bool // ensure_ascii=True
 }
 
+// Field is one key of an Object and its value.
+type Field struct {
+	Key   string
+	Value any
+}
+
+// Object is a Python dict built in a known order. PyJSON writes its keys in the order given, as
+// json.dumps writes a dict in insertion order, or sorted under SortKeys, as it writes any dict.
+type Object []Field
+
 // PyJSON returns v as Python's json.dumps writes it with its default separators (", " and ": ")
 // and the options given, so text a Python program rendered can be rendered again byte for byte.
-// v is built from nil, bools, integers, strings, slices and arrays, and maps with string keys,
-// through interfaces and pointers. A nil slice is an empty list.
+// v is built from nil, bools, integers, strings, slices and arrays, and Objects, through
+// interfaces and pointers. A nil slice is an empty list.
 //
-// A Go map has no key order, so a map is written only with SortKeys. A float has no spelling that
-// is always Python's repr, and a string that is not valid UTF-8 has no Python counterpart. Each of
-// these panics: it is the caller's error, never data.
+// A float has no spelling that is always Python's repr, a string that is not valid UTF-8 has no
+// Python counterpart, and neither has an Object holding a key twice. Each of these panics: it is
+// the caller's error, never data.
 func PyJSON(v any, opts PyJSONOptions) string {
 	var b strings.Builder
 	writePyJSON(&b, reflect.ValueOf(v), opts)
@@ -32,6 +42,10 @@ func PyJSON(v any, opts PyJSONOptions) string {
 func writePyJSON(b *strings.Builder, v reflect.Value, opts PyJSONOptions) {
 	if !v.IsValid() {
 		b.WriteString("null")
+		return
+	}
+	if v.Type() == objectType {
+		writePyObject(b, v.Interface().(Object), opts)
 		return
 	}
 	switch v.Kind() {
@@ -58,34 +72,39 @@ func writePyJSON(b *strings.Builder, v reflect.Value, opts PyJSONOptions) {
 			writePyJSON(b, v.Index(i), opts)
 		}
 		b.WriteByte(']')
-	case reflect.Map:
-		if v.Type().Key().Kind() != reflect.String {
-			panic(fmt.Sprintf("core.PyJSON: %s has keys that are not strings", v.Type()))
-		}
-		if !opts.SortKeys {
-			panic("core.PyJSON: a Go map has no key order; set SortKeys")
-		}
-		keys := make([]string, 0, v.Len())
-		for _, key := range v.MapKeys() {
-			keys = append(keys, key.String())
-		}
-		// Python sorts str keys by code point; UTF-8 bytes sort the same way.
-		sort.Strings(keys)
-		b.WriteByte('{')
-		for i, key := range keys {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			writePyString(b, key, opts.EnsureASCII)
-			b.WriteString(": ")
-			writePyJSON(b, v.MapIndex(reflect.ValueOf(key).Convert(v.Type().Key())), opts)
-		}
-		b.WriteByte('}')
 	case reflect.Float32, reflect.Float64:
 		panic(fmt.Sprintf("core.PyJSON: %s is not supported: Python's float repr is not Go's", v.Type()))
 	default:
 		panic(fmt.Sprintf("core.PyJSON: %s is not a JSON value", v.Type()))
 	}
+}
+
+var objectType = reflect.TypeFor[Object]()
+
+// writePyObject writes o as json.dumps writes a dict: its keys in o's order, or sorted under
+// SortKeys. Python sorts str keys by code point, and UTF-8 bytes sort the same way.
+func writePyObject(b *strings.Builder, o Object, opts PyJSONOptions) {
+	seen := make(map[string]bool, len(o))
+	for _, field := range o {
+		if seen[field.Key] {
+			panic(fmt.Sprintf("core.PyJSON: an Object holds the key %q twice; a dict holds each key once", field.Key))
+		}
+		seen[field.Key] = true
+	}
+	if opts.SortKeys {
+		o = slices.Clone(o)
+		slices.SortFunc(o, func(x, y Field) int { return strings.Compare(x.Key, y.Key) })
+	}
+	b.WriteByte('{')
+	for i, field := range o {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		writePyString(b, field.Key, opts.EnsureASCII)
+		b.WriteString(": ")
+		writePyJSON(b, reflect.ValueOf(field.Value), opts)
+	}
+	b.WriteByte('}')
 }
 
 // pyEscapes are the short escapes json.dumps writes; every other character below U+0020 is \u00XX.
