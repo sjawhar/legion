@@ -111,9 +111,7 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 
 // readSandbox is the Sandbox named name as the API server holds it now, or nil when it holds none.
 func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error) {
-	reading, cancel := call(ctx)
-	defer cancel()
-	u, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
+	u, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		return nil, nil
 	}

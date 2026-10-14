@@ -614,9 +614,7 @@ func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.U
 	if err != nil {
 		return err
 	}
-	patching, cancel := call(ctx)
-	defer cancel()
-	_, err = r.sandboxClient().Patch(patching, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
+	_, err = r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
 	return err
 }
 
