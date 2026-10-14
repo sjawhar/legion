@@ -1,11 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo, useState } from "react";
 
+import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
 import type { AskApproval } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { dangerText, textMutedOnSurface } from "../../theme/classes";
-import { isText } from "../artifacts/ArtifactDetails";
 import { cutDecisionBlocks } from "../doc/decision-blocks";
 import { VersionDiff } from "../doc/VersionDiff";
 import { actorLabel } from "../refs/actor";
@@ -58,22 +58,22 @@ function ApprovedVersionDiff({
 /**
  * The approval an approval request follows, when the document has one: `Approved at version N
  * on <date> by <who>.` and a **Show diff** control that reveals `ApprovedVersionDiff`. Renders
- * nothing for a first request, whose `approval` carries no earlier approval.
+ * nothing for a first request, whose `approval` carries no `approved`.
  */
 export function EarlierApproval({ approval }: { approval: AskApproval }): ReactNode {
   const [diffOpen, setDiffOpen] = useState(false);
-  const { approved_at, approved_by, approved_version } = approval;
-  if (approved_version === undefined || approved_at === undefined || approved_by === undefined) {
+  const { approved } = approval;
+  if (approved === undefined) {
     return null;
   }
   return (
     <div className={`mt-1 text-xs ${textMutedOnSurface}`}>
       <p>
-        Approved at version {approved_version} on{" "}
-        <time dateTime={approved_at} title={approved_at}>
-          {approved_at.slice(0, 10)}
+        Approved at version {approved.version} on{" "}
+        <time dateTime={approved.at} title={approved.at}>
+          {approved.at.slice(0, 10)}
         </time>{" "}
-        by {actorLabel(approved_by)}.
+        by {actorLabel(approved.by)}.
       </p>
       <DisclosureToggle
         expanded={diffOpen}
@@ -83,7 +83,7 @@ export function EarlierApproval({ approval }: { approval: AskApproval }): ReactN
       />
       {diffOpen ? (
         <ApprovedVersionDiff
-          approvedVersion={approved_version}
+          approvedVersion={approved.version}
           artifactId={approval.artifact_id}
           version={approval.version}
         />

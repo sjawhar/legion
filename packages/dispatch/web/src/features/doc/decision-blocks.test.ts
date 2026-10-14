@@ -82,3 +82,31 @@ test("a block no line closes is left as it is", () => {
   const open = "Before.\n\n:::ask{#open}\nWhich?\n";
   expect(cutDecisionBlocks(open)).toBe(open);
 });
+
+test("a decision block written as an example inside a code fence is text and stays", () => {
+  const fenced = fixture("fenced-example.md");
+  const cut = cutDecisionBlocks(fenced);
+  expect(cut).toContain(
+    '```markdown\n:::ask{urgency="high" multiple="false"}\nWhich region goes first?'
+  );
+  expect(cut).toContain("- West: The busy one.\n:::\n```");
+  expect(cut).not.toContain("How many regions take the first wave?");
+  expect(cut).not.toContain("#rollout");
+  const editedInsideTheFence = fenced.replace(
+    "Which region goes first?",
+    "Which region goes last?"
+  );
+  expect(cutDecisionBlocks(editedInsideTheFence)).not.toBe(cut);
+  expect(cutDecisionBlocks(editedInsideTheFence)).toContain("Which region goes last?");
+});
+
+test("a tilde fence, a fence inside a quote and a fence nothing closes are kept whole too", () => {
+  const tilde = "Before.\n\n~~~\n:::ask{#x}\nQ?\n:::\n~~~\n\nAfter.\n";
+  expect(cutDecisionBlocks(tilde)).toBe(tilde);
+  const quoted = "> ```\n> :::ask{#x}\n> Q?\n> :::\n> ```\n";
+  expect(cutDecisionBlocks(quoted)).toBe(quoted);
+  const unclosed = "Before.\n\n```\n:::ask{#x}\nQ?\n:::\n";
+  expect(cutDecisionBlocks(unclosed)).toBe(unclosed);
+  const inlineCode = "``` `:::ask{` ``` is inline code, not a fence\n\n:::ask{#x}\nQ?\n:::\n";
+  expect(cutDecisionBlocks(inlineCode)).toBe("``` `:::ask{` ``` is inline code, not a fence\n");
+});

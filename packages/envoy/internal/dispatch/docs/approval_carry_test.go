@@ -66,6 +66,29 @@ func TestCutDecisionBlocksEqualsAcrossAnswersAndDiffersOnAParagraph(t *testing.T
 	}
 }
 
+// A decision block written as an example inside a code fence is code, which the parser keeps as
+// text: the cut leaves it in place and takes out only the real block, and an edit inside the
+// example changes the cut text. The browser's line-based cut (`decision-blocks.test.ts`) reads
+// the same fixture.
+func TestCutDecisionBlocksKeepsADecisionBlockWrittenInsideACodeFence(t *testing.T) {
+	fenced := decisionBlockFixture(t, "fenced-example.md")
+	cut := cutDecisionBlocks(t, fenced)
+	for _, kept := range []string{"```markdown\n:::ask{urgency=\"high\" multiple=\"false\"}\nWhich region goes first?", "- West: The busy one.\n:::\n```"} {
+		if !strings.Contains(cut, kept) {
+			t.Fatalf("cut lost the fenced example %q:\n%s", kept, cut)
+		}
+	}
+	for _, gone := range []string{"How many regions take the first wave?", "#rollout"} {
+		if strings.Contains(cut, gone) {
+			t.Fatalf("cut kept the real block (%q):\n%s", gone, cut)
+		}
+	}
+	edited := cutDecisionBlocks(t, strings.Replace(fenced, "Which region goes first?", "Which region goes last?", 1))
+	if edited == cut || !strings.Contains(edited, "Which region goes last?") {
+		t.Fatalf("an edit inside the fenced example did not change the cut:\n%s", edited)
+	}
+}
+
 // The cut leaves out every ask block wherever it stands - at the top level, in a blockquote, in a
 // list item, inside a callout - and keeps the container that held it.
 func TestCutDecisionBlocksLeavesOutEveryAskBlockAndKeepsItsContainer(t *testing.T) {

@@ -5,6 +5,13 @@
  */
 const OPENING_FENCE = /^((?:[ \t]*>)*[ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(:{3,})ask\{/;
 
+/**
+ * A code fence's opening line: the same prefix and optional list marker, then a run of three or
+ * more backticks or tildes and the info string. A backtick fence's info string holds no backtick
+ * (CommonMark), which keeps inline code such as ```` ``` ```` from opening one.
+ */
+const CODE_FENCE = /^((?:[ \t]*>)*[ \t]*)((?:[-*+]|\d+[.)])[ \t]+)?(`{3,}|~{3,})(.*)$/;
+
 /** A line that separates blocks: nothing, or only spaces and quote markers (`>` inside a quote). */
 const BLANK_LINE = /^[ \t>]*$/;
 
@@ -29,6 +36,30 @@ function closingFenceAfter(lines: readonly string[], start: number): number | un
 }
 
 /**
+ * The index of the last line of the fenced code block opening at `start`, or `undefined` when
+ * the line opens none. Code is text, whatever it spells: a decision block written as an example
+ * inside a fence is not a decision block, and the server keeps it as code too. The block closes
+ * at the first later line that, after the opening's prefix and up to three spaces, is a run of
+ * the same character at least as long as the opening's; one nothing closes runs to the end of
+ * the document, as CommonMark reads it. The renderer writes every code block fenced
+ * (`packages/envoy/internal/dispatch/pmdoc/render.go`, `codeBlockFence`), so a stored version
+ * holds no indented code for this to read.
+ */
+function codeFenceEnd(lines: readonly string[], start: number): number | undefined {
+  const opening = CODE_FENCE.exec(lines[start]);
+  if (opening === null) return undefined;
+  const [, quotePrefix, listMarker = "", fence, info] = opening;
+  if (fence[0] === "`" && info.includes("`")) return undefined;
+  const prefix = quotePrefix + " ".repeat(listMarker.length);
+  const closing = new RegExp(`^ {0,3}${fence[0] === "`" ? "`" : "~"}{${fence.length},}[ \\t]*$`);
+  for (let i = start + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.startsWith(prefix) && closing.test(line.slice(prefix.length))) return i;
+  }
+  return lines.length - 1;
+}
+
+/**
  * `markdown` with every decision block cut out, on lines, so two versions of a document that
  * differ only in their decision blocks - an answer recorded in a block's attributes, a block
  * added or removed - cut to the same text, and a diff of the two shows only what changed
@@ -38,7 +69,8 @@ function closingFenceAfter(lines: readonly string[], start: number): number | un
  * it stands: at the top level, inside a blockquote, a list item or another typed block. The one
  * blank line after the closing fence goes with it, or the one before the opening fence when the
  * block ends the document, so the text around it closes up as if the block had never been
- * written. A block no later line closes is left as it is. The Go server cuts the parsed tree
+ * written. A block no later line closes is left as it is, and a fenced code block is kept whole
+ * (`codeFenceEnd`): what it spells is text, not a block. The Go server cuts the parsed tree
  * (`packages/envoy/internal/dispatch/docs/approval_carry.go`, `CutDecisionBlocks`); the two need
  * not agree byte for byte, but over the fixtures in `packages/contracts/fixtures/decision-blocks`
  * both give the same answer to whether two versions differ outside their blocks.
@@ -49,6 +81,12 @@ export function cutDecisionBlocks(markdown: string): string {
   const kept: string[] = [];
   let i = 0;
   while (i < lines.length) {
+    const codeEnd = codeFenceEnd(lines, i);
+    if (codeEnd !== undefined) {
+      kept.push(...lines.slice(i, codeEnd + 1));
+      i = codeEnd + 1;
+      continue;
+    }
     const end = closingFenceAfter(lines, i);
     if (end === undefined) {
       kept.push(lines[i]);

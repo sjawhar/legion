@@ -396,9 +396,7 @@ function decisionBlockFixture(name: string): string {
 }
 
 const earlierApproval = {
-  approved_at: "2026-10-05T14:30:00Z",
-  approved_by: { id: "alice", kind: "user" },
-  approved_version: 11,
+  approved: { at: "2026-10-05T14:30:00Z", by: { id: "alice", kind: "user" }, version: 11 },
 } satisfies Partial<NonNullable<Ask["approval"]>>;
 
 /** An open approval request for version 12 of `spec.md`, carrying `approval` as given. */
