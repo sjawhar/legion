@@ -47,9 +47,12 @@ type NatsServiceArgs struct {
 	// Values a consumer feeds from other resources are Inputs: a remote component's construct
 	// refuses a plain field whose input carries a dependency (Pulumi SDK v3.265.0
 	// go/pulumi/provider.go:765-766), and infer marks a plain field `plain` in the schema.
+	// subnetIds is a slice, so the component knows how many mount targets to register: subnet i's
+	// are <N>-efs-mt-<i> and <N>-tsnet-efs-mt-<i>, so a consumer adopting an existing deployment
+	// passes its subnets in their original order.
 	Region           string               `pulumi:"region"` // the containers' awslogs-region
 	VpcId            pulumi.StringInput   `pulumi:"vpcId"`
-	SubnetIds        []pulumi.StringInput `pulumi:"subnetIds"`       // a slice, so the component knows how many mount targets to register
+	SubnetIds        []pulumi.StringInput `pulumi:"subnetIds"`
 	SecurityGroupId  pulumi.StringInput   `pulumi:"securityGroupId"` // the NATS task's group, built by the consumer
 	ClusterArn       pulumi.StringInput   `pulumi:"clusterArn"`
 	ExecutionRoleArn pulumi.StringInput   `pulumi:"executionRoleArn"`

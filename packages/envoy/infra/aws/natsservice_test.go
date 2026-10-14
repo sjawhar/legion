@@ -5,6 +5,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -585,124 +586,62 @@ var upstream = resource.URN("urn:pulumi:s::p::example:index:Network::network")
 // names every resource in its own stack and project.
 const constructedURN = "urn:pulumi:stack::project::" + natsServiceType + "::example-nats"
 
-// inputFields are exampleArgs' Input fields, as plain values; subnetIds is a list of them.
-var inputFields = map[string]string{
-	"tailnetClientSecretArn": secretArn,
-	"vpcId":                  "example-vpc",
-	"securityGroupId":        "example-nats-sg",
-	"clusterArn":             "example-cluster-arn",
-	"executionRoleArn":       "example-execution-role-arn",
-	"taskRoleArn":            "example-task-role-arn",
-	"cloudMapNamespaceId":    "example-namespace-id",
-	"cloudMapNamespaceName":  "example-namespace.internal.example",
+var stringInputType = reflect.TypeFor[pulumi.StringInput]()
+
+// literal returns the string an Input field of exampleArgs holds.
+func literal(t *testing.T, in pulumi.StringInput) string {
+	t.Helper()
+	s, ok := in.(pulumi.String)
+	require.True(t, ok, "an example Input field holds a pulumi.String, not %T", in)
+	return string(s)
 }
 
-var exampleSubnets = []string{"example-subnet-a", "example-subnet-b"}
-
-// value converts a plain Go value into a property value.
-func value(t *testing.T, v any) property.Value {
+// inputs returns args as a consumer sends them to Construct: each field under its pulumi name, a
+// field at its zero value left out as unset, and each Input field's string made a value by input.
+func inputs(t *testing.T, args *envoyaws.NatsServiceArgs, input func(string) property.Value) map[string]property.Value {
 	t.Helper()
-	switch v := v.(type) {
-	case string:
-		return property.New(v)
-	case bool:
-		return property.New(v)
-	case int:
-		return property.New(float64(v))
-	case []string:
-		items := make([]property.Value, len(v))
-		for i, s := range v {
-			items[i] = property.New(s)
+	return propertyValue(t, reflect.ValueOf(args), input).AsMap().AsMap()
+}
+
+func propertyValue(t *testing.T, v reflect.Value, input func(string) property.Value) property.Value {
+	t.Helper()
+	if v.Type() == stringInputType {
+		return input(literal(t, v.Interface().(pulumi.StringInput)))
+	}
+	switch v.Kind() {
+	case reflect.Pointer:
+		return propertyValue(t, v.Elem(), input)
+	case reflect.String:
+		return property.New(v.String())
+	case reflect.Bool:
+		return property.New(v.Bool())
+	case reflect.Int:
+		return property.New(float64(v.Int()))
+	case reflect.Slice:
+		items := make([]property.Value, v.Len())
+		for i := range items {
+			items[i] = propertyValue(t, v.Index(i), input)
 		}
 		return property.New(property.NewArray(items))
-	case []any:
-		items := make([]property.Value, len(v))
-		for i, e := range v {
-			items[i] = value(t, e)
-		}
-		return property.New(property.NewArray(items))
-	case map[string]string:
-		m := make(map[string]property.Value, len(v))
-		for k, s := range v {
-			m[k] = property.New(s)
+	case reflect.Map:
+		m := make(map[string]property.Value, v.Len())
+		for iter := v.MapRange(); iter.Next(); {
+			m[iter.Key().String()] = propertyValue(t, iter.Value(), input)
 		}
 		return property.New(property.NewMap(m))
-	case map[string]any:
-		m := make(map[string]property.Value, len(v))
-		for k, e := range v {
-			m[k] = value(t, e)
+	case reflect.Struct:
+		m := map[string]property.Value{}
+		for i := range v.NumField() {
+			if v.Field(i).IsZero() {
+				continue
+			}
+			name, _, _ := strings.Cut(v.Type().Field(i).Tag.Get("pulumi"), ",")
+			m[name] = propertyValue(t, v.Field(i), input)
 		}
 		return property.New(property.NewMap(m))
 	}
-	t.Fatalf("no property value for %T", v)
+	t.Fatalf("no property value for a %s", v.Type())
 	return property.Value{}
-}
-
-// plainInputs are exampleArgs' plain fields, as a consumer sends them.
-func plainInputs(t *testing.T) map[string]property.Value {
-	t.Helper()
-	plain := map[string]any{
-		"authorization": map[string]any{
-			"users": []any{
-				map[string]any{
-					"name": "example-listener", "nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO",
-					"publish":   map[string]any{"allow": []string{"envoy.example.>"}, "deny": []string{"envoy.example.private"}},
-					"subscribe": map[string]any{"allow": []string{"_INBOX.>", "notifications.café.>"}},
-					"hasSeed":   true,
-				},
-				map[string]any{
-					"name": "example-daemon", "nkey": "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG",
-					"publish":   map[string]any{"allow": []string{"$JS.API.>"}},
-					"subscribe": map[string]any{"allow": []string{"_INBOX.>", "legion.work workers"}},
-					"hasSeed":   true,
-				},
-				map[string]any{
-					"name": "example-fallback", "nkey": "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD",
-					"publish":   map[string]any{"allow": []string{">"}},
-					"subscribe": map[string]any{"allow": []string{">"}},
-				},
-				map[string]any{"name": "example-pending", "hasSeed": true},
-			},
-			"noAuthUser": "example-fallback",
-		},
-		"configHeader":                  []string{"Rendered by envoy-infra from placeholder inputs.", "Public keys only."},
-		"serverArgs":                    []string{"--jetstream", "--store_dir", "/data", "--port", "4222", "--http_port", "8222"},
-		"configPath":                    "/tmp/nats-server.conf",
-		"natsImage":                     "example.registry/nats:placeholder",
-		"tailscaleImage":                "example.registry/tailscale@sha256:" + strings.Repeat("0", 64),
-		"tailnetHostname":               "envoy-nats",
-		"tailnetTags":                   []string{"tag:example-a", "tag:example-b"},
-		"region":                        "example-region-1",
-		"cloudMapServiceName":           "example-bus",
-		"cloudMapServiceLogicalName":    "example-nats-cloudmap",
-		"family":                        "example-nats-family",
-		"logGroupName":                  "/ecs/envoy-nats",
-		"logRetentionDays":              7,
-		"cpu":                           "256",
-		"memory":                        "1024",
-		"platformVersion":               "LATEST",
-		"baseTags":                      map[string]string{"project": "example-project", "env": "example-env"},
-		"metricNamespace":               "example/NATS",
-		"metricFilterLogicalNamePrefix": "example-bus",
-	}
-	inputs := make(map[string]property.Value, len(plain))
-	for k, v := range plain {
-		inputs[k] = value(t, v)
-	}
-	return inputs
-}
-
-// withInputFields adds the Input fields to inputs, each made by field from its plain value.
-func withInputFields(inputs map[string]property.Value, field func(string) property.Value) map[string]property.Value {
-	for k, v := range inputFields {
-		inputs[k] = field(v)
-	}
-	subnets := make([]property.Value, len(exampleSubnets))
-	for i, s := range exampleSubnets {
-		subnets[i] = field(s)
-	}
-	inputs["subnetIds"] = property.New(property.NewArray(subnets))
-	return inputs
 }
 
 // fromUpstream is a known value carrying a dependency on upstream.
@@ -738,7 +677,7 @@ func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*mo
 }
 
 func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
-	m, _, err := construct(t, withInputFields(plainInputs(t), fromUpstream), false)
+	m, _, err := construct(t, inputs(t, exampleArgs(), fromUpstream), false)
 	require.NoError(t, err)
 
 	children := m.children(t)
@@ -767,7 +706,7 @@ func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
 }
 
 func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {
-	m, _, err := construct(t, withInputFields(plainInputs(t), unknownFromUpstream), true)
+	m, _, err := construct(t, inputs(t, exampleArgs(), unknownFromUpstream), true)
 	require.NoError(t, err)
 
 	children := m.children(t)
@@ -796,7 +735,7 @@ func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {
 // A stack output a consumer builds from a component output would preview as changed if the output
 // were unknown, so in a preview whose inputs are known every output is known.
 func TestConstructOutputsAreKnownInAPreviewWithKnownInputs(t *testing.T) {
-	_, resp, err := construct(t, withInputFields(plainInputs(t), fromUpstream), true)
+	_, resp, err := construct(t, inputs(t, exampleArgs(), fromUpstream), true)
 	require.NoError(t, err)
 
 	want := map[string]string{
@@ -819,9 +758,10 @@ func TestConstructOutputsAreKnownInAPreviewWithKnownInputs(t *testing.T) {
 // A plain field is for a literal: Construct refuses one whose input carries a dependency, before
 // the component registers anything.
 func TestConstructRefusesAPlainFieldFromAnotherResource(t *testing.T) {
-	inputs := withInputFields(plainInputs(t), fromUpstream)
-	inputs["region"] = fromUpstream("example-region-1")
-	m, _, err := construct(t, inputs, false)
+	args := exampleArgs()
+	in := inputs(t, args, fromUpstream)
+	in["region"] = fromUpstream(args.Region)
+	m, _, err := construct(t, in, false)
 	require.ErrorContains(t, err, "region")
 	require.Empty(t, m.types())
 }
