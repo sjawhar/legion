@@ -46,13 +46,18 @@ cloud credentials, so check the archive's provenance before you install it. For 
 
 ```sh
 gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
-gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion
+gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
 tar -xzf envoy-infra-linux-amd64.tar.gz
 envoy-infra-linux-amd64/envoy-infra --version
 ```
 
-`gh attestation verify` passes only for an archive that this repository's release workflow built
-and attested. `--version` prints the release's version, `<version>`. Put the binary on your
+`--cert-identity` pins the signer to this repository's `release.yaml` read from `main`,
+`--source-ref` to a run started on `main`, and `--deny-self-hosted-runners` to a GitHub-hosted
+runner, so an archive attested by any other workflow, branch or runner in the repository fails;
+`--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
+explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
 `PATH`; the commands under [NATS seeds](#nats-seeds) call it `envoy-infra`.
 
 ## What `host:Listener` deploys
