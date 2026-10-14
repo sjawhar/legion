@@ -47,12 +47,22 @@ func approvalCarryHandler(t *testing.T) http.Handler {
 // window wide enough that both land in it.
 func settlingCarryHandler(t *testing.T, settle time.Duration) http.Handler {
 	t.Helper()
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
-		documentService := docs.New(docs.Deps{Store: database, Settle: settle})
-		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
-		return documentService
-	})
+	handler, _, _ := settlingCarryDocuments(t, settle)
 	return handler
+}
+
+// settlingCarryDocuments is settlingCarryHandler with the store and the document service it
+// serves, for a test that writes a document as the server's own code does, beside the routes.
+func settlingCarryDocuments(t *testing.T, settle time.Duration) (http.Handler, *store.Store, docs.API) {
+	t.Helper()
+	var documentService docs.API
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
+		service := docs.New(docs.Deps{Store: database, Settle: settle})
+		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+		documentService = service
+		return service
+	})
+	return handler, database, documentService
 }
 
 // reviewDocument reviews the document's latest settled version from its header as login and
@@ -493,6 +503,103 @@ func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
 	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 5, 2, nil)
 }
 
+// Stale: a server-owned attribute forged on a decided block in the version the human's answer
+// writes - each attribute settlement writes from the row (askServerAttributeNames), forged alone.
+// The human answered the first block and approved; the agent added a second, which the human
+// answers, and at once a write through the server's own live attribute path - the one the answer
+// route writes an answer with - puts another value on the first block, leaving every other
+// attribute as the row has it; the agent then names a version, in the route's own transaction,
+// while the answer still waits for its settlement, so one version holds both. The cut leaves both
+// blocks out and every block is his, but the first is not as settlement would write it from its
+// row: a block's whole server-attribute set must be as settlement's writer leaves it, so nothing
+// is carried. Settlement then writes the row back over the forgery, and that version - the one he
+// approved plus his answer to the second block - carries; for `invalid`, which no rendering writes,
+// settlement's repair changes no markdown and versions nothing, so the approval stays stale.
+func TestAForgedServerAttributeOnADecidedBlockCarriesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		attribute string
+		forged    any
+		rendered  string // what version 4's markdown shows for the forgery; "" for an attribute no rendering writes
+	}{
+		{"state", "resolved", `state="resolved"`},
+		{"answered_by", "mallory", `answered_by="mallory"`},
+		{"answered_at", "2026-01-01T00:00:00Z", `answered_at="2026-01-01T00:00:00Z"`},
+		{"selected", []string{"West"}, `selected="[&#x22;West&#x22;]"`},
+		{"answer", "Pick West.", `answer="Pick West."`},
+		{"invalid", "forged", ""},
+		{"copied_from", "00000000-0000-0000-0000-000000000000", `copied_from="00000000-0000-0000-0000-000000000000"`},
+		{"copied_from_document", "dispatch://TEST/artifact/other", `copied_from_document="dispatch://TEST/artifact/other"`},
+	} {
+		t.Run(tc.attribute, func(t *testing.T) {
+			handler, database, documents := settlingCarryDocuments(t, time.Second)
+			issue := createInteractionIssue(t, handler, "TEST", "Forged "+tc.attribute+" under the answer", "Context\n\n"+regionAsk)
+			asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+			answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
+			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+			reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+			for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 3, map[string]string{"wave": "How many regions take the first wave?"}) {
+				asks[id] = ask
+			}
+
+			answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+			setLiveBlockAttributes(t, database, documents, issue.PrimaryArtifactID, "region", map[string]any{tc.attribute: tc.forged})
+			named := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]any{"summary": "Name the forged " + tc.attribute, "actor": sessionActor()})
+			if named.Code != http.StatusCreated {
+				t.Fatalf("name the version holding the forged %s: status=%d body=%s", tc.attribute, named.Code, named.Body.String())
+			}
+			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+			markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4)
+			if !strings.Contains(markdown, "How many regions take the first wave?") || !strings.Contains(markdown, `selected="[&#x22;Two&#x22;]"`) {
+				t.Fatalf("version 4 = %s, want it to hold the answer to the second block", markdown)
+			}
+			if tc.rendered != "" && !strings.Contains(markdown, tc.rendered) {
+				t.Fatalf("version 4 = %s, want it to show the forged %s", markdown, tc.attribute)
+			}
+			requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+
+			if tc.rendered == "" {
+				// Settlement takes the forged attribute off the live block, but a repair no rendering
+				// writes changes no markdown, so it versions nothing: the approval stays stale and the
+				// forgery costs the carry, which the human's next approval replaces. Nothing is approved.
+				time.Sleep(3 * time.Second)
+				if latest := readApproval(t, handler, issue.PrimaryArtifactID).Approval.LatestVersion; latest != 4 {
+					t.Fatalf("latest version = %d, want settlement's repair of %s to write none", latest, tc.attribute)
+				}
+				requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+				return
+			}
+			waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+			restored := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5)
+			if strings.Count(restored, `answered_by="alice"`) != 2 || !strings.Contains(restored, `selected="[&#x22;East&#x22;]"`) || (tc.rendered != "" && strings.Contains(restored, tc.rendered)) {
+				t.Fatalf("version 5 = %s, want settlement to have written the row back over the forged %s under both answers", restored, tc.attribute)
+			}
+			requireCarriedReview(t, handler, issue.PrimaryArtifactID, 5, 2, nil)
+		})
+	}
+}
+
+// setLiveBlockAttributes writes attributes onto the typed block blockID of the document through
+// the server's own live attribute write, as the answer route writes an answer into its block:
+// inside a transaction joined with Docs.Join, committed through its ledger, as the agent's
+// session.
+func setLiveBlockAttributes(t *testing.T, database *store.Store, documents docs.API, artifactID, blockID string, attributes map[string]any) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the attribute write: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	documentCtx, ledger := documents.Join(ctx, tx)
+	defer ledger.Discard()
+	if err := documents.SetBlockAttributes(documentCtx, artifactID, blockID, attributes, model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+		t.Fatalf("set block %q attributes %v: %v", blockID, attributes, err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit the attribute write: %v", err)
+	}
+}
+
 // The human changes his answer. The block's answered_at moves, so the block is newly answered
 // again, and the version he approved is now the carried one: the change carries again.
 func TestAChangedAnswerByTheSameHumanCarriesAgain(t *testing.T) {
@@ -667,6 +774,56 @@ func TestADeletedAndRestoredAnsweredBlockCarriesNothing(t *testing.T) {
 		contains(`:::ask{#region urgency="low" multiple="false" state="answered" answered_by="alice"`), nil)
 	if ask := readBlockAsk(t, handler, asks["region"]); ask.State != "answered" || ask.Answer == nil || ask.Answer.User != "alice" {
 		t.Fatalf("the block's ask after the delete and the insert = state %q answer %#v, want alice's answer kept", ask.State, ask.Answer)
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}
+
+// Stale: a block the human answered before his approval, which the approved version did not
+// hold. The human answered the block; the agent deleted it; the human approved the document
+// without it; the agent inserts the block's markdown again. Its row stayed answered - settlement
+// retracts only an open ask - so settlement writes his answer back into the inserted block, and
+// the version it writes holds a block the approved version did not, answered by him: not as the
+// approved version held it, and his. But the answer predates his approval, so no action of his
+// since it put the block there: a changed block's answer must be newer than the approval it would
+// carry. Neither the insert's version, showing the block open, nor settlement's carries.
+func TestARestoredBlockAnsweredBeforeTheApprovalCarriesNothing(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Restored block answered before the approval", "Context\n\n"+regionAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	deleted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "delete", "block": "region"}},
+	})
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete the answered block: status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
+	review := reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	if review.Version != 3 {
+		t.Fatalf("review = %#v, want an approval of version 3, without the block", review)
+	}
+
+	restored := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": regionAsk}},
+	})
+	if restored.Code != http.StatusOK {
+		t.Fatalf("insert the answered block again: status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+	if markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4); !strings.Contains(markdown, `:::ask{#region urgency="low" multiple="false" state="open"}`) {
+		t.Fatalf("version 4 = %s, want the block inserted again, showing open", markdown)
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+	if markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5); !strings.Contains(markdown, `:::ask{#region urgency="low" multiple="false" state="answered" answered_by="alice"`) {
+		t.Fatalf("version 5 = %s, want settlement to have written his answer back into the restored block", markdown)
+	}
+	if ask := readBlockAsk(t, handler, asks["region"]); ask.Answer == nil || !ask.Answer.At.Before(review.CreatedAt) {
+		t.Fatalf("the block's answer = %#v, want one given before the approval at %s", ask.Answer, review.CreatedAt.Format(time.RFC3339Nano))
 	}
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 }
