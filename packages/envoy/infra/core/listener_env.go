@@ -12,9 +12,10 @@ import (
 // (cmd/listener/main.go: config.Load(9020)).
 const defaultListenerPort = 9020
 
-// EnvNATSSeed names the variable holding the nkey seed of the NATS user the listener connects as.
-// Its value is a secret, so ListenerEnv never renders it: the component appends it.
-const EnvNATSSeed = "NATS_NKEY_SEED"
+// EnvNATSSeed names the variable holding the nkey seed of the NATS user the listener connects as,
+// the one its bus client reads the seed from. Its value is a secret, so ListenerEnv never renders
+// it: the component appends it.
+const EnvNATSSeed = bus.NkeySeedEnvVar
 
 // ListenerConfig is what a listener's environment is built from.
 type ListenerConfig struct {

@@ -122,8 +122,13 @@ summary of what the tree will do. You approve from the document's header or from
 question in your Dispatch Inbox; **Request changes** sends it back with your reason.
 
 Approval is pinned to a version: a later edit to the spec closes the gate again until someone
-approves the new version. Work already in flight carries on, but the merger's `READY` waits for that
-approval. The daemon only reads approvals; nothing in Legion approves a spec on a person's behalf. A
+approves the new version. Your own answer to a decision block in the approved spec is the one
+exception: when that answer is the whole change since the version you approved, Dispatch records
+your approval at the new version and the gate reopens, so the architect asks you for nothing; when
+the answer means the spec's text changes too, the architect rewrites it and asks you to approve
+again, naming what changed since your approval. Work already in flight carries on, but the merger's
+`READY` waits for that approval. The daemon only reads approvals; nothing in Legion approves a spec
+on a person's behalf, and the approval Dispatch records at your answer is yours, in your name. A
 deployment that does not want the gate sets `gates.design: off`, and the tree starts as soon as the
 architect has written its spec.
 

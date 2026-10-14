@@ -230,9 +230,7 @@ func TestLiveAdoptionPreviewsClean(t *testing.T) {
 	steps := s.Preview()
 
 	component := s.URN("envoy-infra:host:Listener", "live")
-	childURN := func(typ, name string) string {
-		return "urn:pulumi:test::adopt-live::envoy-infra:host:Listener$" + typ + "::" + name
-	}
+	childURN := func(typ, name string) string { return s.URN("envoy-infra:host:Listener$"+typ, name) }
 	ops := map[string]string{}
 	for _, step := range steps {
 		t.Logf("preview step: %-6s %s", step.Op, step.URN)

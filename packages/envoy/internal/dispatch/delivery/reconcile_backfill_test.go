@@ -158,7 +158,7 @@ func startBackfill(t *testing.T, reconcile *Reconcile, through, beganAt time.Tim
 
 func (r *Reconcile) backfillDeploys(t *testing.T, now time.Time) {
 	t.Helper()
-	r.backfillRuns(t.Context(), "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, now)
+	r.backfillRuns(t.Context(), backfillStep(DeliveryRunKindDeploy), "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, now)
 }
 
 // TestBackfillRunsAdvancesOneFinishedHourAtATime: GitHub lists a window newest first, so the
@@ -229,7 +229,8 @@ func TestBackfillRunsAdvancesOneFinishedHourAtATime(t *testing.T) {
 }
 
 // TestBackfillRunsKeepsItsFailuresOutOfTheHealthState: a pass whose backfill hits a rate limit
-// while every regular step succeeds records the reconcile as healthy.
+// while every regular step succeeds records the reconcile as healthy. The pass runs both deploy
+// backfills, the branch-and-event one and the created_at one, each recording its progress row.
 func TestBackfillRunsKeepsItsFailuresOutOfTheHealthState(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
@@ -272,6 +273,10 @@ func TestBackfillRunsKeepsItsFailuresOutOfTheHealthState(t *testing.T) {
 	through, beganAt, found := deployBackfill(t, reconcile)
 	if !found || through.Before(before.Add(-BackfillWindow-time.Second)) || beganAt.Before(before.Add(-time.Second)) || beganAt.After(after.Add(time.Second)) {
 		t.Fatalf("backfill row = {%v, %v, %t}, want began at this pass and through 28 days before it", through, beganAt, found)
+	}
+	created, err := readBackfillProgress(ctx, pool, createdAtBackfillStep, runsProgressScope("acme/widgets", backfillWorkflow))
+	if err != nil || !created.found || created.beganAt.Before(before.Add(-time.Second)) || created.beganAt.After(after.Add(time.Second)) {
+		t.Fatalf("created_at backfill row = %+v, %v, want one begun at this pass", created, err)
 	}
 }
 
@@ -543,5 +548,58 @@ func TestBackfillRunsLeavesTheRegularStepAlone(t *testing.T) {
 	}
 	if got := fake.jobCalls(); !slices.Equal(slices.Sorted(slices.Values(got)), []int64{400, 401}) {
 		t.Fatalf("the regular step listed jobs for %v, want every concluded run, 400 and 401", got)
+	}
+}
+
+// TestCreatedAtBackfillFillsDeployRunsAfterTheRunsBackfillFinished: a database whose head_branch and
+// event backfill finished before created_at was stored still walks the window under the created_at
+// step, and stores GitHub's created_at on a row that had none: here a re-run's, whose started_at
+// is the re-run's start, 40 minutes after its creation.
+func TestCreatedAtBackfillFillsDeployRunsAfterTheRunsBackfillFinished(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	seedDeliverySettings(t, ctx, pool)
+	hourA := time.Date(2026, 9, 1, 10, 0, 0, 0, time.UTC)
+	created, rerun := hourA.Add(5*time.Minute), hourA.Add(45*time.Minute)
+	served := backfillRun(100, created)
+	served["run_started_at"] = rerun.Format(time.RFC3339)
+	completed := rerun.Add(10 * time.Minute)
+	if err := UpsertRun(ctx, pool, DeliveryRun{
+		Repo: "acme/widgets", RunID: 100, Kind: DeliveryRunKindDeploy, HeadSHA: "sha100",
+		HeadCommitAt: created, StartedAt: rerun, CompletedAt: &completed,
+		Conclusion: new(DeliveryRunConclusionSuccess), URL: "https://github.com/acme/widgets/actions/runs/100",
+		HeadBranch: new("main"), Event: new("push"),
+	}); err != nil {
+		t.Fatalf("seed a run stored before created_at: %v", err)
+	}
+	scope := runsProgressScope("acme/widgets", backfillWorkflow)
+	if err := StartBackfillProgress(ctx, pool, backfillStep(DeliveryRunKindDeploy), scope, hourA.Add(time.Hour), hourA.Add(time.Hour)); err != nil {
+		t.Fatalf("finish the runs backfill: %v", err)
+	}
+	if err := StartBackfillProgress(ctx, pool, createdAtBackfillStep, scope, hourA, hourA.Add(time.Hour)); err != nil {
+		t.Fatalf("start the created_at backfill: %v", err)
+	}
+	fake, github := newBackfillFake(t, []map[string]any{served}, 10)
+	reconcile := NewReconcile(pool, github.newTestClient())
+
+	reconcile.backfillDeploys(t, hourA.Add(time.Hour))
+	if calls := fake.listingCalls(); len(calls) != 0 {
+		t.Fatalf("the finished runs backfill listed %v, want nothing", calls)
+	}
+	before, err := ScanRun(pool.QueryRow(ctx, `select `+RunColumns+` from delivery_runs where repo = 'acme/widgets' and run_id = 100`))
+	if err != nil || before.CreatedAt != nil || !before.Created().Equal(rerun) {
+		t.Fatalf("run before the created_at backfill = %+v, %v: want no created_at, read as its started_at", before, err)
+	}
+
+	reconcile.backfillRuns(ctx, createdAtBackfillStep, "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, hourA.Add(time.Hour))
+	if calls := fake.listingCalls(); !slices.Equal(calls, []string{hourWindow(hourA) + " page 1"}) {
+		t.Fatalf("the created_at backfill listed %v, want hour A once", calls)
+	}
+	after, err := ScanRun(pool.QueryRow(ctx, `select `+RunColumns+` from delivery_runs where repo = 'acme/widgets' and run_id = 100`))
+	if err != nil || after.CreatedAt == nil || !after.CreatedAt.Equal(created) || !after.StartedAt.Equal(rerun) {
+		t.Fatalf("run after the created_at backfill = %+v, %v: want created_at %v beside started_at %v", after, err, created, rerun)
+	}
+	row, err := readBackfillProgress(ctx, pool, createdAtBackfillStep, scope)
+	if err != nil || !row.found || row.through.Before(row.beganAt) {
+		t.Fatalf("created_at backfill progress = %+v, %v, want finished", row, err)
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 
@@ -323,11 +324,7 @@ so check the secret before anything else; 2 refused before any write, or a usage
 
 // Command runs `envoy-infra seed` on args, the words after "seed", and returns its exit code.
 func Command(ctx context.Context, args []string, stdout, stderr io.Writer, stores Stores) int {
-	names := make([]string, 0, len(stores))
-	for name := range stores {
-		names = append(names, name)
-	}
-	slices.Sort(names)
+	names := slices.Sorted(maps.Keys(stores))
 
 	fs := flag.NewFlagSet("envoy-infra seed", flag.ContinueOnError)
 	fs.SetOutput(stderr)

@@ -4,6 +4,17 @@
 
 ### Added
 
+- `ArtifactReview` and `ArtifactReviewEventPayload` document a third provenance, the carried
+  review: an `approved` review Dispatch records in a human's name at the version his answer to a
+  decision block writes, when that answer is the whole change since the version he approved, with
+  a `reason` naming the carry and the version it follows and an `ask_id` that is null unless a
+  request was open at the carry, which it answers. Who answered what is the document's asks rows,
+  so an ask block no row of the document backs, a copy, or one settlement could not read carries
+  nothing. `AskApproval.approved`, an object of `version`, `at` and `by`, names the document's
+  newest approval when a request opens; the key is absent on a first request. The
+  `dispatch_request_approval` tool description says the same rule: an edit outside the decision
+  blocks stales the approval and the request after it carries a one-sentence summary of what
+  changed, and the human's own answer carries it when it is the whole change (LEGION-573).
 - The Delivery and Pipeline pages' live frames on `GET /ws/delivery` (LEGION-690):
   `DeliveryLiveView` and `DeliveryLiveWindow` (a preset, whose end stays at the present, or a
   custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and

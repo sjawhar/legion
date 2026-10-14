@@ -8,8 +8,8 @@ import (
 
 // TestListRunsStartedInIsHalfOpenAndOrderedByStart seeds four deploy runs started one second
 // before from, at from, one second before to and at to, every head commit before from: the
-// measures count the middle two, oldest start first. ListRuns, which filters on head_commit_at,
-// would return none of them.
+// measures count the middle two, oldest start first. ListRuns, which filters on a run's creation
+// (its start here, since none carries created_at), would return the three started at or after from.
 func TestListRunsStartedInIsHalfOpenAndOrderedByStart(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	from := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
@@ -112,7 +112,7 @@ func TestUpsertRunRoundTripsBranchAndEvent(t *testing.T) {
 	}
 }
 
-// TestListRunsNarrowsContainmentToOneBranch: the head-commit listing containment reads passes
+// TestListRunsNarrowsContainmentToOneBranch: the creation-time listing containment reads passes
 // "main", so a successful deploy on another branch never ships a pull request.
 func TestListRunsNarrowsContainmentToOneBranch(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)

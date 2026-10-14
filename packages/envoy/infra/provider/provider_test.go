@@ -15,16 +15,20 @@ import (
 	"github.com/sjawhar/envoy/infra/provider"
 )
 
-func TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath(t *testing.T) {
+// schemaJSON serves the plugin in process and returns the schema it answers GetSchema with.
+func schemaJSON(t *testing.T) string {
+	t.Helper()
 	prov, err := provider.New()
 	require.NoError(t, err)
 	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
 		integration.WithProvider(prov))
 	require.NoError(t, err)
-
 	resp, err := server.GetSchema(p.GetSchemaRequest{})
 	require.NoError(t, err)
+	return resp.Schema
+}
 
+func TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath(t *testing.T) {
 	var schema struct {
 		PluginDownloadURL string `json:"pluginDownloadURL"`
 		Language          struct {
@@ -33,22 +37,13 @@ func TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath(t *testing.T) {
 			} `json:"go"`
 		} `json:"language"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(resp.Schema), &schema))
+	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
 	require.Equal(t, "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}",
 		schema.PluginDownloadURL)
 	require.Equal(t, "github.com/sjawhar/envoy/infra/sdk/go/envoyinfra", schema.Language.Go.ImportBasePath)
 }
 
 func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
-	prov, err := provider.New()
-	require.NoError(t, err)
-	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
-		integration.WithProvider(prov))
-	require.NoError(t, err)
-
-	resp, err := server.GetSchema(p.GetSchemaRequest{})
-	require.NoError(t, err)
-
 	var schema struct {
 		Resources map[string]struct {
 			IsComponent     bool `json:"isComponent"`
@@ -59,7 +54,7 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 		} `json:"resources"`
 		Types map[string]json.RawMessage `json:"types"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(resp.Schema), &schema))
+	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
 	listener, ok := schema.Resources["envoy-infra:host:Listener"]
 	require.True(t, ok, "the schema lists envoy-infra:host:Listener")
 	require.True(t, listener.IsComponent)

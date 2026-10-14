@@ -89,9 +89,10 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 
 	runSuccess := delivery.DeliveryRunConclusionSuccess
 	jobSuccess := delivery.DeliveryJobConclusionSuccess
+	// GitHub created the run a minute after #1's merge, before #2's; it started two hours later.
 	if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
 		Repo: "acme/widgets", RunID: 100, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "deadbeef",
-		HeadCommitAt: merged, StartedAt: deployedAt, CompletedAt: &deployedAt, Conclusion: &runSuccess,
+		HeadCommitAt: merged, StartedAt: deployedAt, CreatedAt: new(merged.Add(time.Minute)), CompletedAt: &deployedAt, Conclusion: &runSuccess,
 		URL: "https://github.com/acme/widgets/actions/runs/100", HeadBranch: new("main"), Event: new("push"),
 	}); err != nil {
 		t.Fatalf("seed run: %v", err)
@@ -187,8 +188,8 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 // repository's pull requests that merged before the window and had not shipped by its start, with
 // when they shipped afterwards, under the request's facets. One a deploy shipped before `from` is
 // not there, nor is one of another repository, nor one merged inside the window. The run that
-// ships a waiter after `from` has its head commit before `from`, so the window's own runs (heads
-// at or after `from`) do not hold it.
+// ships a waiter after `from` was created before `from`, so the window's own runs (created at or
+// after `from`) do not hold it.
 func TestGetDeliveryTimelineAnswersThePullRequestsStillWaitingAtFrom(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	pool := database.Pool
@@ -270,6 +271,67 @@ func waitingEqual(got, want []delivery.DeliveryWaitingPRView) bool {
 		}
 	}
 	return true
+}
+
+// TestGetDeliveryTimelineCreditsAMergeQueueMergeToTheDeployCreatedAfterIt is LEGION-730's history,
+// through the stored rows and the timeline's own read: a repository that merges through GitHub's
+// merge queue writes the merge commit before GitHub records the merge, so run 700, the push of #1's
+// merge commit, has a head commit timed 20 minutes before #1's merged_at and was created a minute
+// after it. Run 701, a later push, has its head after the merge. #1 ships with run 700: crediting
+// a deploy by its head commit's time instead hands #1 to run 701, 40 minutes later. Run 699, a
+// re-run whose start moved past #1's merge, was created before it and ships nothing of it. The
+// window starts after run 700's head commit and before its creation, so the run read must select
+// by creation to hold the run that shipped #1 at all.
+func TestGetDeliveryTimelineCreditsAMergeQueueMergeToTheDeployCreatedAfterIt(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	pool := database.Pool
+	ctx := t.Context()
+	if _, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
+		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+		ProductionJobName: "release / release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		PopulationAuthors: []string{"octocat"},
+	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	merged := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	opened := merged.Add(-time.Hour)
+	if err := delivery.UpsertPullRequest(ctx, pool, delivery.DeliveryPullRequest{
+		Repo: "acme/widgets", Number: 1, Title: "feat: through the merge queue", URL: "https://github.com/acme/widgets/pull/1",
+		Author: "octocat", CreatedAt: &opened, MergedAt: &merged,
+	}); err != nil {
+		t.Fatalf("seed PR: %v", err)
+	}
+	runSuccess, jobSuccess := delivery.DeliveryRunConclusionSuccess, delivery.DeliveryJobConclusionSuccess
+	for _, run := range []struct {
+		id                           int64
+		head, created, started, done time.Time
+	}{
+		{id: 699, head: merged.Add(-50 * time.Minute), created: merged.Add(-40 * time.Minute), started: merged.Add(5 * time.Minute), done: merged.Add(15 * time.Minute)},
+		{id: 700, head: merged.Add(-20 * time.Minute), created: merged.Add(time.Minute), started: merged.Add(time.Minute), done: merged.Add(30 * time.Minute)},
+		{id: 701, head: merged.Add(10 * time.Minute), created: merged.Add(11 * time.Minute), started: merged.Add(11 * time.Minute), done: merged.Add(70 * time.Minute)},
+	} {
+		if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
+			Repo: "acme/widgets", RunID: run.id, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + strconv.FormatInt(run.id, 10),
+			HeadCommitAt: run.head, StartedAt: run.started, CreatedAt: &run.created, CompletedAt: &run.done, Conclusion: &runSuccess,
+			URL: "https://github.com/acme/widgets/actions/runs/" + strconv.FormatInt(run.id, 10), HeadBranch: new("main"), Event: new("push"),
+		}); err != nil {
+			t.Fatalf("seed run %d: %v", run.id, err)
+		}
+		if err := delivery.UpsertRunJobs(ctx, pool, "acme/widgets", run.id, []delivery.DeliveryRunJob{
+			{Repo: "acme/widgets", RunID: run.id, Name: "release / release", StartedAt: &run.started, CompletedAt: &run.done, Conclusion: &jobSuccess},
+		}, true); err != nil {
+			t.Fatalf("seed run %d's job: %v", run.id, err)
+		}
+	}
+
+	window := "from=" + merged.Add(-10*time.Minute).Format(time.RFC3339) + "&to=" + merged.Add(24*time.Hour).Format(time.RFC3339)
+	body := getDeliveryTimeline(t, handler, window)
+	if len(body.PRs) != 1 || body.PRs[0].DeployRun == nil || *body.PRs[0].DeployRun != 700 ||
+		body.PRs[0].DeployedAt == nil || !body.PRs[0].DeployedAt.Equal(merged.Add(30*time.Minute)) {
+		t.Fatalf("prs = %+v, want #1 shipped by run 700 at %s", body.PRs, merged.Add(30*time.Minute))
+	}
+	measured := getDeliveryMeasures(t, handler, window)
+	assertMeasuresSpread(t, "merge_to_production", measured.Measures.LeadTime.MergeToProduction, 30, 30, 30)
 }
 
 // seedDeliveryIssueFacts seeds what the timeline joins a pull request's issue against: project
