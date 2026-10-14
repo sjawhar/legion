@@ -273,7 +273,7 @@ A hub whose `hostname` is `<h>` registers these resources, each a child of the h
 | `<h>-health-checks` | `gcp:compute/firewall:Firewall` | The hub's one firewall rule: tcp/8222 from Google's health-check ranges, `130.211.0.0/22` and `35.191.0.0/16`, to the VM's network tag `<h>-hub`. |
 | `<h>-healthz` | `gcp:compute/healthCheck:HealthCheck` | An HTTP check of NATS's `/healthz` on port 8222, every 10 seconds, unhealthy after 6 failures. |
 | `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet, the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
-| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from 300 seconds after the VM is created, and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, which the VM reads at its first boot, and `pulumi up` waits until it is `STABLE`. |
+| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from 300 seconds after the VM is created, and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, since its first VM fetches the key when it boots, and `pulumi up` waits until it is `STABLE`. |
 
 Every resource is in the gcp provider's project. The template's name is `<h>-` and a suffix the
 provider adds, and the network, the firewall rule, the health check and the group are named after
@@ -291,7 +291,7 @@ and `instanceGroup`, the group's name.
 | `tailnetAuthKey` | required | A secret: the Tailscale auth key the VM joins the tailnet with. The tailnet must let it advertise `tags`. May come from another resource or stack. |
 | `hostname` | required | The VM's name on the tailnet and `natsUrl`'s host: 2 to 26 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen (`^[a-z][a-z0-9-]{0,24}[a-z0-9]$`). It also names every child. |
 | `tags` | required | The tailnet tags the VM advertises when it joins, each `tag:<name>`. At least one. |
-| `zone` | required | The zone of the VM and its data disk, such as `us-central1-a`. |
+| `zone` | required | The zone of the VM and its data disk, such as `us-central1-a`. Changing it makes a new group, with a new data disk: see [Updating a hub](#updating-a-hub). |
 | `machineType` | `e2-small` | The VM's machine type. |
 | `diskSizeGb` | `20` | The size, in GB, of the data disk the group creates for the hub's first VM. |
 | `natsImage` | required | The NATS server image, pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Its entrypoint takes nats-server's arguments, as the official `nats` image's does. |
@@ -409,39 +409,53 @@ disk holds both containers' state:
   the node's keys and its login.
 
 Keeping the tailnet state there is what lets a recreated VM rejoin the tailnet as the same node,
-under the same name, without a key. With `TS_AUTH_ONCE=true`, containerboot logs in with
-`TS_AUTHKEY` only when the state holds no login (tailscale v1.104.1
-`cmd/containerboot/main.go:604-682`), so the VM reads `tailnetAuthKey` at its first boot alone,
-and a key that is single-use, or has expired since, serves. The same is why `tailscaled.service`
-does not require the fetch: on a later boot the key file may stay empty, and the node comes up
-from its state anyway.
+under the same name, without logging in again. With `TS_AUTH_ONCE=true`, containerboot logs in
+with `TS_AUTHKEY` only when the state holds no login (tailscale v1.104.1
+`cmd/containerboot/main.go:583-682`), so the VM fetches `tailnetAuthKey` at every boot but logs in
+with it only at the first, and a key that is single-use, or has expired since, serves. The same is
+why `tailscaled.service` does not require the fetch: on a later boot the fetch may fail and leave
+the key file empty, and the node comes up from its state anyway.
 
-The group gives every later VM the same disk, at the size it was created with: a later
-`diskSizeGb` does not grow it. Deleting the hub leaves the disk, detached, in `zone`, and the
-hub's node on the tailnet; remove both yourself once you no longer need them.
+The group reattaches the same disk to every later VM, so a later `diskSizeGb`, which changes only
+the template, should leave the disk at the size it was created with. Google Cloud's documentation
+implies this without saying it, and a first deployment confirms it (see
+[What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
+Deleting the hub leaves the disk, detached, in `zone`, as the preserved-state page documents, and
+leaves the hub's node on the tailnet; remove both yourself once you no longer need them.
 
 ## Updating a hub
 
 An instance template cannot change once it is created
 ([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
 holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`tags`, `natsImage`, `tailscaleImage`) or to `machineType` or `diskSizeGb` makes a new template.
-The group then replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting it before
-it creates the next (`RECREATE`, no surge, at most one unavailable). NATS is down from the old
-VM's stop until the new one's `nats` unit starts, and its clients reconnect then. The new VM gets
-the same data disk, so it keeps the stream and rejoins the tailnet as the same node.
+`tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskSizeGb`, `network` or
+`subnetwork` makes a new template. The group then replaces its VM at once (`PROACTIVE`, minimal
+action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
+unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
+clients reconnect then. The new VM gets the same data disk, so it keeps the stream and rejoins the
+tailnet as the same node.
 
-Two inputs work otherwise:
+Three inputs work otherwise:
 
 - `tags` reach the tailnet only when the node first logs in. containerboot runs `tailscale up`,
-  with `--advertise-tags`, for a node that is not logged in, and otherwise `tailscale set` with
-  the hostname alone (tailscale v1.104.1 `cmd/containerboot/main.go:604-682`,
-  `cmd/containerboot/tailscaled.go:111-198`). A change to `tags` still replaces the VM; change a
-  joined node's tags on the tailnet itself.
-- `hostname` names every child, so a new one is a new hub: Pulumi creates a new account, secret,
-  group and VM, and with them a new data disk, so a new tailnet node and an empty stream, then
-  deletes the old ones, all but the old disk. The new node logs in with `tailnetAuthKey`, which
-  must then be a key the tailnet still accepts.
+  with `--advertise-tags`, for a node that is not logged in, and otherwise `tailscale set`, which
+  passes `--accept-dns=false` and `--hostname` and never `TS_EXTRA_ARGS` (tailscale v1.104.1
+  `cmd/containerboot/main.go:583-682`, `cmd/containerboot/tailscaled.go:145-146` and `:169-185`).
+  A change to `tags` still replaces the VM; change a joined node's tags on the tailnet itself.
+- `hostname` names every child, so a new one is a new hub: Pulumi creates a new set of children,
+  whose VM gets a new data disk, so a new tailnet node and an empty stream, then deletes the old
+  children, all but the old disk; the old node stays on the tailnet. The new node logs in with
+  `tailnetAuthKey`, which must then be a key the tailnet still accepts.
+- `zone` replaces the group itself, whose zone cannot change (pulumi-gcp v10.1.0's upstream
+  `resource_compute_instance_group_manager.go:120-126`). The group's name is generated, so Pulumi
+  creates the new group, under a new name, before it deletes the old one. The new group's VM gets
+  a new, empty data disk, so the stream starts empty, and logs in with `tailnetAuthKey`, which must
+  then be a key the tailnet still accepts. It asks for `<h>` while the old node still holds it, so
+  Tailscale names it `<h>-1` ([machine names](https://tailscale.com/docs/concepts/machine-names)),
+  and `natsUrl` names the old node, which goes offline when the old group is deleted. The old disk
+  is left detached in the old zone. To move a hub to another zone, remove its node from the tailnet
+  before the update, so that the new node takes `<h>`, and set a `tailnetAuthKey` the tailnet
+  accepts.
 
 ## What a first Google Cloud deployment proves
 
@@ -455,6 +469,9 @@ or a tailnet, so the first deployment is where these hold or fail. Watch them on
 - The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and after
   `gcloud compute instance-groups managed recreate-instances` the new VM finds its filesystem
   (`blkid -p` exits 0) rather than formatting it, and keeps the stream and its tailnet node.
+- Two statements this README takes from Google Cloud's documentation: a later `diskSizeGb` leaves
+  the kept data disk at the size it was created with, and deleting the hub leaves that disk
+  behind, detached (see [The hub's data disk](#the-hubs-data-disk)).
 - The health check turns `HEALTHY` through COS's host firewall once `nats-firewall` has run, and
   `pulumi up`'s wait for `STABLE` ends within the provider's timeout despite autohealing's
   300-second initial delay. Google Cloud accepts `maxSurgeFixed: 0` with `maxUnavailableFixed: 1`
@@ -939,13 +956,9 @@ subscribes to `notifications.>` and `agentstream.*.control`.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
 session on the host share: in each direction the listener's entries, then each of the session's
-the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. `core`'s tests pin each set
-entry by entry for `example-host-a` (`core/permissions_test.go`), and the hub's golden
-cloud-config holds that user rendered. `core/permissions_live_test.go` runs this repository's
-listener and a session as one user holding it, on nats-server 2.10 and 2.15.1: the listener
-reaches `"status":"healthy"`, a direct and a role message reach the session, and the server
-refuses nothing the set allows. Without its durable's `$JS.API.CONSUMER.CREATE`, the listener
-never reaches `"status":"healthy"`.
+the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. This repository's listener
+and a session, connected as one user holding it, are checked against real nats-server 2.10 and
+2.15.1 servers; `AGENTS.md` in this directory says how.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
