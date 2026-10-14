@@ -200,23 +200,41 @@ people through `Identity.Login`, which names a person by lowercase email, and
 write identity errors with `identity.WriteError`.
 
 - `DISPATCH_IDENTITY=cookie` is the default. Cookie identity signs people in
-  with Google Workspace through the shared sign-in pool (OpenID Connect
-  authorization code, `internal/oidc/codeflow.go`) and requires all four of
-  `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`,
-  `DISPATCH_SIGNIN_CLIENT_SECRET` and `DISPATCH_SIGNIN_GROUP`; setting some of
-  them is refused naming the missing ones, and the authorization and token
-  endpoints come from the issuer's discovery document, read at boot under
-  `oidc.DiscoveryTimeout`. Those boot checks, the discovery and the request
-  identity main builds live in `cmd/dispatch/signin.go`. The callback names
-  the person by the email in the pool username (`<provider>_<email>`, the
-  provider one the ID token's `identities` names; `identity.Person`), never by
-  the `email` claim, which a person can write, and signs in only a member of
-  `DISPATCH_SIGNIN_GROUP` (`cognito:groups`); anyone else gets a 403 page
-  naming them. It records the person in `people` with the pool's refresh
-  token, and `identity.Membership` renews that sign-in at least hourly: a
-  refresh the pool refuses, or one whose ID token no longer puts the person in
-  the group, advances their session generation and forgets the token, ending
-  every session they hold. `store.PgPeopleStore` seals that token at rest
+  with Google Workspace (OpenID Connect authorization code,
+  `internal/oidc/codeflow.go`) and requires `DISPATCH_SIGNIN_ISSUER`,
+  `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET` and exactly one
+  of `DISPATCH_SIGNIN_GROUP` (through a shared Cognito sign-in pool) or
+  `DISPATCH_SIGNIN_DOMAIN` (with Google directly, under the issuer
+  `https://accounts.google.com`). `checkSignInSettings` refuses, in this order,
+  both set, some without the others (naming the missing ones), a domain under
+  another issuer, a domain that is not a lowercase DNS name, and a group under
+  Google's issuer; a deployment with the four Cognito settings reaches none of
+  them. The authorization and token endpoints come from the issuer's discovery
+  document, read at boot under `oidc.DiscoveryTimeout`. Those boot checks, the
+  discovery and the request identity main builds live in
+  `cmd/dispatch/signin.go`, and `identity.SignInRule` (the group or the domain)
+  carries the choice to the router and `identity.Membership`.
+  `identity.Person` reads only its rule's issuer's claims. Under a group it
+  names the person by the email in the pool username (`<provider>_<email>`, the
+  provider one the ID token's `identities` names), never by the `email` claim,
+  which a person can write, and admits only a member of `DISPATCH_SIGNIN_GROUP`
+  (`cognito:groups`); anyone else gets a 403 page naming them. Under a domain
+  the code flow, built with the domain (`oidc.NewCodeFlow`'s hosted domain),
+  asks Google for offline access with `prompt=consent` and `hd`, and reads
+  `email`, `email_verified` and `hd` from the verified ID token itself
+  (`readWorkspaceClaims`; `Verify`, shared with pods' tokens and the listener,
+  reads none of them); `Person` admits the lowercased `email` of a token whose
+  `hd` is the domain and whose email is verified, and refuses anyone else with
+  a reason on the 403 page (`ErrNotInDomain`, `ErrEmailNotVerified`,
+  `ErrNoEmail`). The callback records the person in `people` with the issuer's
+  refresh token, and under a domain the Google account's `sub` (`people.sub`,
+  migration 0109): `PgPeopleStore.SignIn` ends every session of the address in
+  the transaction that records a `sub` other than the stored one, so a failed
+  revoke records nothing. `identity.Membership` renews that sign-in at least
+  hourly: a refresh the issuer refuses, or one whose ID token no longer passes
+  the rule, names another email, or (under a domain) another `sub`, advances
+  their session generation and forgets the token, ending every session they
+  hold. `store.PgPeopleStore` seals that token at rest
   (`store/refresh_token_seal.go`; the format is in the README's Identity
   section) under a key derived from the session signing key, which main hands
   it with the cookie key (`openPeople`, `signin.go`). A stored value that does
@@ -370,8 +388,8 @@ the table says human only.
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
-| `/auth/start` | GET | public | Start Google sign-in through the sign-in pool; `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, sign in a member of `DISPATCH_SIGNIN_GROUP` (a 403 page naming anyone else), record them in `people` with the refresh token sealed, and issue the session cookie. |
+| `/auth/start` | GET | public | Start Google sign-in at the sign-in issuer (the Cognito pool, or Google for `DISPATCH_SIGNIN_DOMAIN`, with offline access, `prompt=consent` and `hd`); `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
+| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `identity.Person` admits under `SignInRule`: a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. |
 | `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the pool's own session is left alone. |
 | `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no pool exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |

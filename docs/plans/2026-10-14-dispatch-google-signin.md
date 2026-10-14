@@ -199,11 +199,11 @@ at `:373-374`), `packages/envoy/AGENTS.md:1824`, the comment at `router.go:269-2
 `deploy/compose/dispatch.env.example`, `deploy/README.md:148`, `skills/dispatch/references/api.md:30-31`,
 and `packages/dispatch/e2e/run-server.sh:89` if its settings need the new name.
 
-- [ ] Document the two sign-in modes, the Google client to create (a web client, the redirect URI
+- [x] Document the two sign-in modes, the Google client to create (a web client, the redirect URI
   `<origin>/auth/callback`, whose host must be https and end in a public suffix, or loopback http
   for local use), the domain setting, D2's `sub` rule and its group-mode residual, and D7's outage
   behaviour. Placeholders only (`example.com`).
-- [ ] Build the docs site, which generates the configuration reference.
+- [x] Build the docs site, which generates the configuration reference.
 
 ### Task 5: live proof
 
