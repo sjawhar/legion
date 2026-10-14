@@ -23,6 +23,10 @@ func New() (p.Provider, error) {
 		WithPluginDownloadURL(downloadURL).
 		// The default, <repository>/sdk/go/<package>, is not a path Go accepts as a module.
 		WithGoImportPath("github.com/sjawhar/envoy/infra/sdk/go/envoyinfra").
-		WithComponents(infer.ComponentF(host.NewListener), infer.ComponentF(aws.NewNatsService)).
+		WithComponents(
+			infer.ComponentF(host.NewListener),
+			infer.ComponentF(aws.NewNatsService),
+			infer.ComponentF(aws.NewWebhookListener),
+		).
 		Build()
 }

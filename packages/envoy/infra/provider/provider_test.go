@@ -109,9 +109,48 @@ func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
 
 	// Generated SDKs append Args to an object type's name for its input type.
 	require.Equal(t, "#/types/envoy-infra:aws:Authorization", nats.InputProperties["authorization"].Ref)
-	// The schema's types are exactly the two components' own.
+	// The schema's types are exactly the components' own.
 	require.ElementsMatch(t, []string{
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:aws:Rules",
 	}, slices.Collect(maps.Keys(schema.Types)))
+}
+
+func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) {
+	prov, err := provider.New()
+	require.NoError(t, err)
+	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
+		integration.WithProvider(prov))
+	require.NoError(t, err)
+
+	resp, err := server.GetSchema(p.GetSchemaRequest{})
+	require.NoError(t, err)
+
+	var schema struct {
+		Resources map[string]struct {
+			IsComponent     bool `json:"isComponent"`
+			InputProperties map[string]struct {
+				Secret bool `json:"secret"`
+			} `json:"inputProperties"`
+			RequiredInputs []string `json:"requiredInputs"`
+		} `json:"resources"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.Schema), &schema))
+	listener, ok := schema.Resources["envoy-infra:aws:WebhookListener"]
+	require.True(t, ok, "the schema lists envoy-infra:aws:WebhookListener")
+	require.True(t, listener.IsComponent)
+	// A consumer owns its secrets; the component takes references to them.
+	for name, input := range listener.InputProperties {
+		require.False(t, input.Secret, "%s is not a secret input", name)
+	}
+	// Every input is required but the seed, each webhook's inputs and adopt.
+	var optional []string
+	for name := range listener.InputProperties {
+		if !slices.Contains(listener.RequiredInputs, name) {
+			optional = append(optional, name)
+		}
+	}
+	require.ElementsMatch(t, []string{
+		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger", "adopt",
+	}, optional)
 }

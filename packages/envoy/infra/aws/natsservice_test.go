@@ -103,7 +103,7 @@ func (m *mocks) children(t *testing.T) map[string]registration {
 	defer m.mu.Unlock()
 	children := map[string]registration{}
 	for _, r := range m.registered {
-		if r.typ == awsProviderType || r.typ == natsServiceType {
+		if r.typ == awsProviderType || strings.HasPrefix(r.typ, "envoy-infra:") {
 			continue
 		}
 		_, dup := children[r.name]
@@ -586,9 +586,12 @@ var upstream = resource.URN("urn:pulumi:s::p::example:index:Network::network")
 // names every resource in its own stack and project.
 const constructedURN = "urn:pulumi:stack::project::" + natsServiceType + "::example-nats"
 
-var stringInputType = reflect.TypeFor[pulumi.StringInput]()
+var (
+	stringInputType    = reflect.TypeFor[pulumi.StringInput]()
+	stringPtrInputType = reflect.TypeFor[pulumi.StringPtrInput]()
+)
 
-// literal returns the string an Input field of exampleArgs holds.
+// literal returns the string an Input field of an example holds.
 func literal(t *testing.T, in pulumi.StringInput) string {
 	t.Helper()
 	s, ok := in.(pulumi.String)
@@ -596,19 +599,22 @@ func literal(t *testing.T, in pulumi.StringInput) string {
 	return string(s)
 }
 
-// inputs returns args as a consumer sends them to Construct: each field under its pulumi name, a
-// field at its zero value left out as unset, and each Input field's string made a value by input.
-func inputs(t *testing.T, args *envoyaws.NatsServiceArgs, input func(string) property.Value) map[string]property.Value {
+// inputs returns args, a component's args struct, as a consumer sends them to Construct: each
+// field under its pulumi name, a field at its zero value left out as unset, and each Input field's
+// string made a value by input.
+func inputs(t *testing.T, args any, input func(string) property.Value) map[string]property.Value {
 	t.Helper()
 	return propertyValue(t, reflect.ValueOf(args), input).AsMap().AsMap()
 }
 
 func propertyValue(t *testing.T, v reflect.Value, input func(string) property.Value) property.Value {
 	t.Helper()
-	if v.Type() == stringInputType {
+	if v.Type() == stringInputType || v.Type() == stringPtrInputType {
 		return input(literal(t, v.Interface().(pulumi.StringInput)))
 	}
 	switch v.Kind() {
+	case reflect.Interface: // an Input of a collection, such as a pulumi.StringArray
+		return propertyValue(t, v.Elem(), input)
 	case reflect.Pointer:
 		return propertyValue(t, v.Elem(), input)
 	case reflect.String:
@@ -654,10 +660,10 @@ func unknownFromUpstream(string) property.Value {
 	return property.New(property.Computed).WithDependencies([]resource.URN{upstream})
 }
 
-// construct serves the plugin in process with the mocks behind it, constructs a component named
-// example-nats from inputs with an aws provider, and returns what the mocks saw, the response and
-// Construct's error.
-func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*mocks, p.ConstructResponse, error) {
+// construct serves the plugin in process with the mocks behind it, constructs a component of type
+// typ named name from inputs with an aws provider, and returns what the mocks saw, the response
+// and Construct's error.
+func construct(t *testing.T, typ, name string, inputs map[string]property.Value, dryRun bool) (*mocks, p.ConstructResponse, error) {
 	t.Helper()
 	prov, err := provider.New()
 	require.NoError(t, err)
@@ -666,7 +672,7 @@ func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*mo
 		integration.WithProvider(prov), integration.WithMocks(m))
 	require.NoError(t, err)
 	resp, err := server.Construct(p.ConstructRequest{
-		Urn:    resource.NewURN("s", "p", "", tokens.Type(natsServiceType), "example-nats"),
+		Urn:    resource.NewURN("s", "p", "", tokens.Type(typ), name),
 		DryRun: dryRun,
 		Inputs: property.NewMap(inputs),
 		Providers: map[tokens.Package]p.ProviderReference{
@@ -677,7 +683,7 @@ func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*mo
 }
 
 func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
-	m, _, err := construct(t, inputs(t, exampleArgs(), fromUpstream), false)
+	m, _, err := construct(t, natsServiceType, "example-nats", inputs(t, exampleArgs(), fromUpstream), false)
 	require.NoError(t, err)
 
 	children := m.children(t)
@@ -706,7 +712,7 @@ func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
 }
 
 func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {
-	m, _, err := construct(t, inputs(t, exampleArgs(), unknownFromUpstream), true)
+	m, _, err := construct(t, natsServiceType, "example-nats", inputs(t, exampleArgs(), unknownFromUpstream), true)
 	require.NoError(t, err)
 
 	children := m.children(t)
@@ -735,7 +741,7 @@ func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {
 // A stack output a consumer builds from a component output would preview as changed if the output
 // were unknown, so in a preview whose inputs are known every output is known.
 func TestConstructOutputsAreKnownInAPreviewWithKnownInputs(t *testing.T) {
-	_, resp, err := construct(t, inputs(t, exampleArgs(), fromUpstream), true)
+	_, resp, err := construct(t, natsServiceType, "example-nats", inputs(t, exampleArgs(), fromUpstream), true)
 	require.NoError(t, err)
 
 	want := map[string]string{
@@ -761,7 +767,7 @@ func TestConstructRefusesAPlainFieldFromAnotherResource(t *testing.T) {
 	args := exampleArgs()
 	in := inputs(t, args, fromUpstream)
 	in["region"] = fromUpstream(args.Region)
-	m, _, err := construct(t, in, false)
+	m, _, err := construct(t, natsServiceType, "example-nats", in, false)
 	require.ErrorContains(t, err, "region")
 	require.Empty(t, m.types())
 }

@@ -8,9 +8,13 @@ import "github.com/sjawhar/envoy/infra/core"
 // Core is the authorization as core.Authorization takes it.
 func (a *AuthorizationArgs) Core() *core.Authorization { return a.core() }
 
-type ContainerConfig = containerConfig
+type (
+	ContainerConfig   = containerConfig
+	ListenerContainer = listenerContainer
+)
 
 var (
-	ContainerDefinitions = containerDefinitions
-	NatsLaunch           = natsLaunch
+	ContainerDefinitions         = containerDefinitions
+	NatsLaunch                   = natsLaunch
+	ListenerContainerDefinitions = listenerContainerDefinitions
 )
