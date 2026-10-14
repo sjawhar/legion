@@ -529,7 +529,11 @@ or a tailnet, so the first deployment is where these hold or fail. Watch them on
   that is `DISABLED` or `DESTROYED`, that `GetSecretVersion` on `latest` answers `NOT_FOUND` for a
   secret with no version, and that `ListSecretVersions` with no filter lists `DESTROYED` versions.
   The store's lines under [What `check` and `verify` print](#what-check-and-verify-print) rest on
-  these.
+  these. Also that, after `generate`'s write, `AccessSecretVersion` on a `latest` that names no
+  version yet answers `NOT_FOUND`, and how often the listing and `latest` show the write within
+  `generate`'s pauses, 7.75 seconds in all. Google documents both as eventually consistent, and
+  such operations as converging typically within minutes; a write they do not show in time ends as
+  an error after writing, and `check` and `verify` then confirm it.
 
 ## Examples
 
@@ -821,9 +825,12 @@ projects/example-project/secrets/envoy-nats-seed-example-host-a latest (version 
 
 `generate` refuses a secret that holds any version, whatever its state, destroyed ones included.
 It reads back `versions/latest`, the version Secret Manager serves by default, which must be the
-one it added. Secret Manager's listings are eventually consistent with a new version
-([resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)), so
-while the listing shows no version yet, it waits as it does on Secrets Manager.
+one it added. Secret Manager's listings and `latest` are eventually consistent with a new version
+(only an access by version number is not:
+[resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)), so
+while the listing shows no version yet, or `latest` names none, it waits as it does on Secrets
+Manager. A `latest` that names a version it will not serve, such as a disabled one, is no wait but
+an error after writing.
 
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.

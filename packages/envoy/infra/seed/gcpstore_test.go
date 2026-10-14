@@ -150,6 +150,10 @@ type fakeGCP struct {
 	racing       *gcpVersion // another writer's version, added right after the store's
 	lateWriter   *gcpVersion // another writer's version, added just before AccessSecretVersion reads
 	echoRequests bool        // every error message quotes the request
+	// Secret Manager's listings and its latest alias are eventually consistent: after a version is
+	// added, the next lagList listings leave it out and the next lagAccess reads of latest answer
+	// NOT_FOUND, as they do for a secret with no version.
+	lagList, lagAccess int
 }
 
 func newFakeGCP(t *testing.T) *fakeGCP {
@@ -268,6 +272,10 @@ func (f *fakeGCP) ListSecretVersions(_ context.Context, req *secretmanagerpb.Lis
 	}
 	// Secret Manager lists the newest version first.
 	versions := slices.Clone(f.versions)
+	if f.added > 0 && f.lagList > 0 {
+		f.lagList--
+		versions = versions[:len(versions)-f.added]
+	}
 	slices.Reverse(versions)
 	end := len(versions)
 	if f.pageSize > 0 {
@@ -313,6 +321,10 @@ func (f *fakeGCP) AccessSecretVersion(_ context.Context, req *secretmanagerpb.Ac
 		f.lateWriter = nil
 	}
 	if !f.exists || len(f.versions) == 0 {
+		return nil, f.notFound()
+	}
+	if f.added > 0 && f.lagAccess > 0 {
+		f.lagAccess--
 		return nil, f.notFound()
 	}
 	newest := f.versions[len(f.versions)-1]
@@ -533,6 +545,12 @@ func TestGCPGenerateAfterItsWrite(t *testing.T) {
 			return f
 		}, "error after writing: version 1 was written, but reading it back failed: access-secret-version " + gcpLatestOf +
 			" failed: PermissionDenied"},
+		// latest names a version it will not serve: a failure, not a store still catching up.
+		{"another writer's disabled version is latest at the read-back", func(f *fakeGCP) *fakeGCP {
+			f.lateWriter = &gcpVersion{value: theirs, state: disabled}
+			return f
+		}, "error after writing: version 1 was written, but reading it back failed: access-secret-version " + gcpLatestOf +
+			" failed: FailedPrecondition"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -564,6 +582,41 @@ func TestGCPGenerateCallsAFailedWriteUnknownNotRefused(t *testing.T) {
 		"whether a version was written is unknown, run check\n", errs)
 	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}, f.recorded(),
 		"one AddSecretVersion, not retried, and no call after it")
+}
+
+// Secret Manager's listings and its latest alias are eventually consistent: only an access by
+// version number is strongly consistent with the add
+// (https://cloud.google.com/secret-manager/docs/access-secret-version, "Resource consistency"). So
+// generate looks again while neither shows its write yet, and a write the store never shows is an
+// error after the write.
+func TestGCPGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
+	SetReadBackWaits(t, time.Millisecond, time.Millisecond, time.Millisecond)
+	before := []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}
+	t.Run("caught up", func(t *testing.T) {
+		f := newFakeGCP(t)
+		f.lagList, f.lagAccess = 1, 2
+		serveGCP(t, f)
+		code, out, errs := runGCP(t, f, "generate")
+		require.Equal(t, 0, code, errs)
+		require.Empty(t, errs)
+		require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: 1\n", out)
+		require.Equal(t, slices.Concat(before, []string{
+			"ListSecretVersions",                        // the listing leaves the write out
+			"ListSecretVersions", "AccessSecretVersion", // latest is not found yet
+			"ListSecretVersions", "AccessSecretVersion", // nor now
+			"ListSecretVersions", "AccessSecretVersion",
+		}), f.recorded())
+	})
+	t.Run("never caught up", func(t *testing.T) {
+		f := newFakeGCP(t)
+		f.lagAccess = 4
+		serveGCP(t, f)
+		code, out, errs := runGCP(t, f, "generate")
+		require.Equal(t, 1, code, errs)
+		require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: 1\n", out)
+		require.Equal(t, "error after writing: version 1 was written, but "+gcpSecret+" did not show it within 3ms: "+
+			"the store has not caught up. Run check, then verify with the public key above\n", errs)
+	})
 }
 
 // A status message can quote the request, and a write's request carries the seed: an error is

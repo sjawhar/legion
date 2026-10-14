@@ -173,11 +173,6 @@ func (s *awsStore) Current(ctx context.Context, name string) (string, []byte, er
 	return aws.ToString(out.VersionId), []byte(aws.ToString(out.SecretString)), nil
 }
 
-// notServed is an error that reads as the store's own and matches ErrNotServed.
-type notServed struct{ error }
-
-func (notServed) Is(target error) bool { return target == ErrNotServed }
-
 // awsFailed is "<call> <secret> failed: <code>": an AWS error's code, or the SDK error's class.
 func awsFailed(call, name string, err error) error {
 	return fmt.Errorf("%s %s failed: %s", call, name, errorClass(err))

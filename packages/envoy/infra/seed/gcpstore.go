@@ -180,13 +180,18 @@ func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, 
 	return number, nil
 }
 
-// Current reads versions/latest with AccessSecretVersion.
+// Current reads versions/latest with AccessSecretVersion. Secret Manager answers NOT_FOUND when
+// latest names no version, as just after a first write it may: an access through latest is
+// eventually consistent with the write.
 func (s *gcpStore) Current(ctx context.Context, name string) (string, []byte, error) {
 	if err := gcpName(name); err != nil {
 		return "", nil, err
 	}
 	latest := name + "/versions/" + gcpLatest
 	read, err := s.client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})
+	if status.Code(err) == codes.NotFound {
+		return "", nil, notServed{gcpFailed("access-secret-version", latest, err)}
+	}
 	if err != nil {
 		return "", nil, gcpFailed("access-secret-version", latest, err)
 	}

@@ -124,7 +124,7 @@ discarding logger whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says (`seed/gcpstore.go
 seed finds nothing. `seed/seed_test.go` searches every byte the command writes, and every error and
 line it returns, for a canary seed. A new store implements `seed.Store`, whose `Label` names the
 version its lines call the default and whose `Current` answers an error that matches
-`seed.ErrNotServed` when it serves no version, which `generate` waits out after its write,
+`seed.ErrNotServed` when it finds no version to serve, which `generate` waits out after its write,
 and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`. A store whose names have a form also
 joins `nameRules` in `seed/seed.go`: `Command` applies it before it opens the store, since the
 refusal of an open prints `--name`, where a seed may have been pasted.

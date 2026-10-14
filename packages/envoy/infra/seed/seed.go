@@ -38,7 +38,8 @@ type Store interface {
 	// version id means that version was written; one without may follow a write that landed.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
-	// clears it once read. When the store serves no version, the error matches ErrNotServed.
+	// clears it once read. When the store finds no version to serve, the error matches
+	// ErrNotServed.
 	Current(ctx context.Context, name string) (version string, value []byte, err error)
 }
 
@@ -67,13 +68,19 @@ var ErrRefused = errors.New("seed: refused")
 // version it names. The command exits 1.
 var ErrMismatch = errors.New("seed: the stored value does not derive the public key")
 
-// ErrNotServed is matched by a Store's Current error when the store serves no version of the
-// secret by default, as it may for a moment after a write.
+// ErrNotServed is matched by a Store's Current error when the store finds no version of the secret
+// to serve by default, as it may for a moment after a write. A version the store finds and will not
+// serve, such as a disabled newest version on Secret Manager, is a failure of its own.
 var ErrNotServed = errors.New("seed: the store serves no version")
 
+// notServed is a store's error that reads as its own and matches ErrNotServed.
+type notServed struct{ error }
+
+func (notServed) Is(target error) bool { return target == ErrNotServed }
+
 // readBackWaits are the pauses generate takes, in turn, while the store does not yet show the
-// version it wrote: Secrets Manager's reads are eventually consistent, so a listing or a read right
-// after a write can miss it.
+// version it wrote: both stores' reads are eventually consistent, Secrets Manager's and Secret
+// Manager's listings and its latest alias, so a listing or a read right after a write can miss it.
 var readBackWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
 type refusal struct{ msg string }
