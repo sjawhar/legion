@@ -1,0 +1,43 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-698",
+  "completed": "2026-10-14T04:18:12Z",
+  "plan": "dispatch://LEGION-698/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase-worker contract this change edits (push rule, handoff, PR body with the E2E (implementer) proof and the CI: line in references/pr-body.md, merge-gate.md); the change is daemon Go, prompts, skills and docs with no UI",
+      "ce-simplify-code: the settled-code simplify pass references/pr-body.md names before the implementer completes"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md says what the tester verifies and that CI is read, not re-run; the tester drives the plan's surfaces (legion start --check-config, the acceptance greps, the daemon suites with the embedded Postgres per docs/solutions/testing/an-embedded-postgres-from-the-zonky-jar-...-LEGION-668.md) and the break cases in plan section 5"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md is the round order this change rewrites, and the reviewer of this pull request follows the plan's section 4 read of the code's checks on GitHub, which is the live proof of acceptance 4; references/review-threads.md for the threads"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The review rule and the CI rule meet at one fact (an approval landing on an already-red head); the provisional red-first order would send back where the spec says the approval moves the issue to retro.", "answer": "D1: roundApproved stays first, with only the verdict==green condition dropped; roundSentBack second for the push-fact and hold-retry paths. Test rows for approve-then-red and red-then-approve."},
+      {"finding": "A red already standing is not re-read on entry to retro or merging, so an approval on a red head sits in retro until the next CI fact.", "answer": "Accepted and recorded (R1): bounded by retro's own push (a code push that runs CI) and READY's refusal of a non-green head; no entry-time re-read is built."},
+      {"finding": "Retro→implementing is a same-role move; a start that quiesces its own role is refused by record.SuperviseRequest validation; option A (interrupt) buys no safety and the stale-completion race attributed to option B does not exist.", "answer": "D2: takenOver returns \"\" when RoleFor(from)==RoleFor(row.To); record/outbox.go L507 stays; a retro completion after the move is refused by pi-legion's phase-fresh handoff lookup (implement.json missing) or HANDOFF_NOT_NEW. Merging stays a merger quiesce."},
+      {"finding": "The two new Table rows fail workflow/table_test.go's workflowTransitionRequired allow-list.", "answer": "T2 extends the TriggerChecksRed case with Retro and Merging; the table tests run without Postgres."},
+      {"finding": "Dropping the carries-approval exception flips four checks_red_test rows and changes testing too (a code head's late red carried to the implementer's handoff head now sends back).", "answer": "T1/T2 flip the four rows to implementing, rewrite decisions_export_test's table without a declared column, collapse redOnlyByWorkflows into RedOnlyByWorkflows; the carry itself stays."},
+      {"finding": "No definition of 'the code commit', no command for its checks, no source for the required set, and no rule for what the reviewer does on red.", "answer": "Plan section 4: required set from the rulesets API (and branch protection), CI head from the runs API (event=pull_request), its check-runs, and a compare proving only .legion/ changed since; D3: red → REQUEST_CHANGES; gh pr checks measured to show only pr-title at a handoff head."},
+      {"finding": "checksVerdict should stay in the wire shape; removing it is a contract break.", "answer": "Kept (api/state.go, projection, contracts, fixture untouched; no DaemonAPIVersion bump); only prompts/go/reviewer.md stops naming it; troubleshooting.md's checksVerdict paragraphs stay."},
+      {"finding": "A legion.yaml that still sets review_workflows fails to load, so legion start refuses to boot, and nobody owns dropping the key from the deployments.", "answer": "T7 adds an Upgrade note to running-legion.md with the exact refusal; section 6 makes the deploy request name it and asks the architect to coordinate the key's removal with the legion-deploy holder before or with the pin (section 10)."},
+      {"finding": "'A test is red on main' is not machine-checkable: the workflow suite skips without LEGION_TEST_PG_DSN.", "answer": "Section 5 names the embedded Postgres recipe (LEGION-668 learning), the exact test names and -run commands, run on main and on the branch, with a SKIP line counted as a failed proof."},
+      {"finding": "Acceptance 7 ('head unchanged since the approval') is true only until retro's first push, and depends on the deploy.", "answer": "Section 6 restates the proof: the approval review's commit_id equals the parent of retro's first commit, no review-stuck between needs_review and retro, and the daemon runs the release carrying the merge; flagged to the architect (section 10)."},
+      {"finding": "Other texts state the old phase set (worker-common.md L6, architect-common.md checks-red/pr-blocked, legion-architect SKILL.md pr-blocked row, legion-worker SKILL.md) with no acceptance check.", "answer": "T5/T6 rewrite each; section 3 row 4's grep is read by hand and row 6's grep is case-insensitive."},
+      {"finding": "The acceptance grep as written misses camelCase reviewWorkflows.", "answer": "Section 3 row 6 uses grep -rniE 'review[_ ]?workflows' over the listed directories."},
+      {"finding": "Deleting stuckApprovedPending moves the never-reporting-check case from a review-stuck notice to READY_CHECKS_NOT_GREEN.", "answer": "Recorded as R3; TestARoundItsApprovalCannotEndTellsTheArchitect keeps only the other-code case; the reviewer procedure treats a check with no result as not green."},
+      {"finding": "A red in retro or merging costs a full round and counts against review_round_cap; retro's push onto a red counts a fix attempt.", "answer": "Recorded as R2 and written into architect-common.md's checks-red text; the round counter is not special-cased."},
+      {"finding": "Merging→implementing is the first merger takeover and nothing tests it.", "answer": "T2 adds a merging row asserting quiesce merger, phase implementing and ReadyPendingVersion cleared; T3 updates the Quiesce comments in record/outbox.go and supervise/quiesce.go."},
+      {"finding": "The tester-planned-red exception is unreachable in retro/merging in production.", "answer": "T2 keeps a PlannedRed row for retro/merging with a comment saying it guards the predicate, not a live path."},
+      {"finding": "Whether a CHANGELOG entry or an e2e change is owed.", "answer": "Neither: packages/daemon has no changelog and no changelog-carrying package changes behaviour; stage4b's review-stuck (COMMENT), tree-reviewed and ci-red-takeover checkpoints survive, cited in T7."},
+      {"finding": "Two live-state claims (gh pr checks at a handoff head; the agent-c deployment declaring a review bot) are unverified from the workspace.", "answer": "Section 1 quotes the gh pr checks measurement with command, repository, pull request, head and date; section 6 asks the deployment holder whether either daemon sets the key rather than asserting it."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
