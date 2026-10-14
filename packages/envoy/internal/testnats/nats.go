@@ -39,6 +39,11 @@ import (
 // mid-run; keep it a single-line string constant.
 const Image = "mirror.gcr.io/library/nats:2.10"
 
+// HubImage is the NATS server image the GCP hub runs, pinned by digest. The envoy-go and
+// envoy-infra-go CI jobs read this declaration and pull the image before their tests run; keep it
+// a single-line string constant.
+const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
+
 var (
 	mainRuns   bool
 	sharedOnce sync.Once
@@ -217,7 +222,7 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 // and returns its client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+	_, uri := StartNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
 	return uri
 }
 
@@ -235,7 +240,7 @@ type NkeyGrant struct {
 // change the grant.
 func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
 	t.Helper()
-	ctr, uri := startNkeyConfig(t, publishGrantConfig(user, allow))
+	ctr, uri := StartNkeyConfig(t, publishGrantConfig(user, allow))
 	return &NkeyGrant{URL: uri, user: user, ctr: ctr}
 }
 
@@ -312,7 +317,10 @@ func nkeyConfig(entry string) string {
 	return fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
 }
 
-func startNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
+// StartNkeyConfig runs a NATS test container on Image, with JetStream, whose configuration is
+// config, removed when the test ends (even when its start fails), and returns it with its client
+// URL once the server answers there (answering): config must declare the users it enforces.
+func StartNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
@@ -350,6 +358,67 @@ func answering(t testing.TB, uri string) {
 		time.Sleep(retryInterval)
 	}
 	t.Fatalf("NATS at %s did not answer within %s: %v", uri, connectTimeout, err)
+}
+
+// imageConfigPath is where StartImageConfig puts a server's configuration: the path the alpine
+// images' default command reads its configuration from.
+const imageConfigPath = "/etc/nats/nats-server.conf"
+
+// StartImageConfig runs image as a NATS test container whose whole configuration is config, at
+// /etc/nats/nats-server.conf, with the arguments -c /etc/nats/nats-server.conf and then serverArgs
+// (so -js for JetStream), removed when the test ends (even when its start fails). It returns the
+// container with its client URL once the server answers there: with anonymous false, once it
+// refuses a client with no credential (answering); with anonymous true, once it admits one
+// (admitting), as a configuration naming a no_auth_user makes it. Both official image variants
+// take arguments that start with a flag as nats-server's own.
+func StartImageConfig(t testing.TB, image, config string, serverArgs []string, anonymous bool) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, image,
+		testcontainers.WithCmd(append([]string{"-c", imageConfigPath}, serverArgs...)...),
+		testcontainers.WithFiles(testcontainers.ContainerFile{
+			Reader:            strings.NewReader(config),
+			ContainerFilePath: imageConfigPath,
+			FileMode:          0o644,
+		}),
+	)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start NATS on %s: %v", image, err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	if anonymous {
+		admitting(t, uri)
+	} else {
+		answering(t, uri)
+	}
+	return ctr, uri
+}
+
+// admitting waits, within connectTimeout, for the server at uri to admit a connection with no
+// credential, as a server with a no_auth_user does: the proof it speaks the client protocol.
+// Testcontainers can report a mapped port before the NATS protocol handshake, so a dial that ends
+// in EOF is retried. A server that refuses the connection with its authorization violation is up
+// and has no such user, so that fails the test at once rather than at the deadline.
+func admitting(t testing.TB, uri string) {
+	t.Helper()
+	deadline := time.Now().Add(connectTimeout)
+	var err error
+	for time.Now().Before(deadline) {
+		var conn *natsgo.Conn
+		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
+			conn.Close()
+			return
+		}
+		if errors.Is(err, natsgo.ErrAuthorization) {
+			t.Fatalf("NATS at %s refused a client with no credential: it has no no_auth_user", uri)
+		}
+		time.Sleep(retryInterval)
+	}
+	t.Fatalf("NATS at %s did not admit a client with no credential within %s: %v", uri, connectTimeout, err)
 }
 
 // StartRestartable runs a NATS test container a test can stop and start as a server restarts, and

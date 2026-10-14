@@ -1,0 +1,110 @@
+package core_test
+
+import (
+	"fmt"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/sjawhar/envoy/infra/core"
+)
+
+// Every want below is Python 3.12's own output for the same value: json.dumps with the options
+// named, or shlex.quote and shlex.join.
+func TestPyJSON(t *testing.T) {
+	nested := map[string]any{
+		"b":      map[string]any{"z": 1, "a": []any{"x", true, nil, -7}},
+		"a":      "v",
+		"c":      map[string]any{},
+		"\u00e9": "\u00e9",
+	}
+	quoting := "q\"b\\<>&\u00e9\u2028\U0001F600"
+	controls := "a\nb\tc\x01\x1f\x7f\b\f\r"
+	cases := []struct {
+		name string
+		in   any
+		opts core.PyJSONOptions
+		want string
+	}{
+		{
+			name: "nested maps with sort_keys",
+			in:   nested,
+			opts: core.PyJSONOptions{SortKeys: true},
+			want: "{\"a\": \"v\", \"b\": {\"a\": [\"x\", true, null, -7], \"z\": 1}, \"c\": {}, \"\u00e9\": \"\u00e9\"}",
+		},
+		{
+			name: "nested maps with sort_keys and ensure_ascii",
+			in:   nested,
+			opts: core.PyJSONOptions{SortKeys: true, EnsureASCII: true},
+			want: `{"a": "v", "b": {"a": ["x", true, null, -7], "z": 1}, "c": {}, "\u00e9": "\u00e9"}`,
+		},
+		{
+			name: "quotes, backslash, HTML characters and non-ASCII, raw",
+			in:   quoting,
+			want: "\"q\\\"b\\\\<>&\u00e9\u2028\U0001F600\"",
+		},
+		{
+			name: "quotes, backslash, HTML characters and non-ASCII, with ensure_ascii",
+			in:   quoting,
+			opts: core.PyJSONOptions{EnsureASCII: true},
+			want: `"q\"b\\<>&\u00e9\u2028\ud83d\ude00"`,
+		},
+		{
+			name: "control characters, raw",
+			in:   controls,
+			want: `"a\nb\tc\u0001\u001f` + "\x7f" + `\b\f\r"`,
+		},
+		{
+			name: "control characters, with ensure_ascii",
+			in:   controls,
+			opts: core.PyJSONOptions{EnsureASCII: true},
+			want: `"a\nb\tc\u0001\u001f\u007f\b\f\r"`,
+		},
+		{name: "an empty list", in: []any{}, want: "[]"},
+		{name: "a typed list", in: []string{"a", "b"}, want: `["a", "b"]`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			require.Equal(t, c.want, core.PyJSON(c.in, c.opts))
+		})
+	}
+}
+
+// A Go map has no key order, so without SortKeys there is no Python dict order to reproduce; and a
+// float has no Go spelling that is always Python's repr. Both are the caller's error, not data.
+func TestPyJSONRefusesWhatItCannotSpellAsPython(t *testing.T) {
+	requirePanicNaming(t, "SortKeys", func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{}) })
+	requirePanicNaming(t, "float64", func() { core.PyJSON([]any{1.5}, core.PyJSONOptions{SortKeys: true}) })
+}
+
+// requirePanicNaming requires f to panic with a value whose text contains want.
+func requirePanicNaming(t *testing.T, want string, f func()) {
+	t.Helper()
+	defer func() {
+		r := recover()
+		require.NotNil(t, r, "no panic; want one naming %q", want)
+		require.Contains(t, fmt.Sprint(r), want)
+	}()
+	f()
+}
+
+func TestShellQuote(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "''"},
+		{"a-b_c", "a-b_c"},
+		{"@%+=:,./-", "@%+=:,./-"},
+		{"a b", "'a b'"},
+		{"it's", `'it'"'"'s'`},
+		{"line\nbreak", "'line\nbreak'"},
+		{"caf\u00e9", "'caf\u00e9'"},
+		{"$JS", "'$JS'"},
+	}
+	for _, c := range cases {
+		require.Equal(t, c.want, core.ShellQuote(c.in), "ShellQuote(%q)", c.in)
+	}
+}
+
+func TestShellJoin(t *testing.T) {
+	require.Equal(t, `nats-server --config '/tmp/x y' -js ''`,
+		core.ShellJoin([]string{"nats-server", "--config", "/tmp/x y", "-js", ""}))
+}

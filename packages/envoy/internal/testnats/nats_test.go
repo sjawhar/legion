@@ -13,6 +13,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 	"github.com/testcontainers/testcontainers-go"
 )
 
@@ -318,4 +319,88 @@ func TestASecondGrantWaitsForItsOwnReload(t *testing.T) {
 		!strings.Contains(refused.message, `subject "not..a.subject" is not a valid subject`) {
 		t.Fatalf("a second Grant the server refused ended with %q, want the server's refusal", refused.message)
 	}
+}
+
+// testImages are the two images StartImageConfig's tests run on, by a short name.
+var testImages = []struct{ name, ref string }{{"2.10", Image}, {"hub", HubImage}}
+
+// StartImageConfig gives the server config as its whole configuration and serverArgs after it, on
+// either image: the server refuses a client with no credential, as config's one nkey user makes it,
+// admits that user by its seed, and answers JetStream, which only the -js among serverArgs turns
+// on.
+func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
+	for _, image := range testImages {
+		t.Run(image.name, func(t *testing.T) {
+			seed, public := User(t)
+			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
+			_, uri := StartImageConfig(t, image.ref, config, []string{"-js"}, false)
+			conn := connectWithSeed(t, uri, seed)
+			defer conn.Close()
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("JetStream context: %v", err)
+			}
+			waitForJetStream(t, func() error {
+				_, err := js.AccountInfo()
+				return err
+			})
+		})
+	}
+}
+
+// With anonymous set, StartImageConfig returns once the server admits a client with no
+// credential, as a configuration naming a no_auth_user makes it, and that client stays admitted.
+func TestStartImageConfigWaitsForAnAnonymousServerToAdmitAClient(t *testing.T) {
+	for _, image := range testImages {
+		t.Run(image.name, func(t *testing.T) {
+			_, public := User(t)
+			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\nno_auth_user: %q\n", public, public)
+			_, uri := StartImageConfig(t, image.ref, config, nil, true)
+			conn, err := natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
+			if err != nil {
+				t.Fatalf("a client with no credential was refused after the wait: %v", err)
+			}
+			conn.Close()
+		})
+	}
+}
+
+// The anonymous wait ends at once, failing the test, on a server that refuses a client with no
+// credential: that server is up and has no no_auth_user, so waiting out the deadline would only
+// report the same refusal later.
+func TestTheAnonymousWaitRefusesAServerThatRefusesAnyone(t *testing.T) {
+	_, public := User(t)
+	uri := StartNkeyAuthorized(t, public)
+	wait := &fatalRecorder{TB: t}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		admitting(wait, uri)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the anonymous wait is still waiting on a server that refuses anyone")
+	}
+	if want := "refused a client with no credential"; !strings.Contains(wait.message, want) {
+		t.Errorf("the anonymous wait ended with %q, want it to say %q", wait.message, want)
+	}
+}
+
+// connectWithSeed connects to uri as the nkey user whose seed is seed.
+func connectWithSeed(t *testing.T, uri, seed string) *natsgo.Conn {
+	t.Helper()
+	user, err := nkeys.FromSeed([]byte(seed))
+	if err != nil {
+		t.Fatalf("read the seed: %v", err)
+	}
+	public, err := user.PublicKey()
+	if err != nil {
+		t.Fatalf("public key: %v", err)
+	}
+	conn, err := natsgo.Connect(uri, natsgo.Nkey(public, user.Sign), natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
+	if err != nil {
+		t.Fatalf("connect as %s: %v", public, err)
+	}
+	return conn
 }

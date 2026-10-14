@@ -4,6 +4,8 @@ go 1.26.8
 
 require (
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/nats-io/nats.go v1.50.0
+	github.com/nats-io/nkeys v0.4.15
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-docker/sdk/v5 v5.2.0
 	github.com/pulumi/pulumi-go-provider v1.7.0
@@ -97,8 +99,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/natefinch/atomic v1.0.1 // indirect
-	github.com/nats-io/nats.go v1.50.0 // indirect
-	github.com/nats-io/nkeys v0.4.15 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/opencontainers/image-spec v1.1.1 // indirect

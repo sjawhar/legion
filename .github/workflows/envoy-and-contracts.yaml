@@ -790,15 +790,17 @@ jobs:
       # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
       # reports a registry connection reset as an internal error that testcontainers does not
       # retry, so one reset failed every test sharing that container. Pull the image every test
-      # here starts (testnats.Image) instead, with the bounded retry the runner gives its own
-      # service images.
+      # here starts (testnats.Image, and testnats.HubImage, which testnats's own tests start)
+      # instead, with the bounded retry the runner gives its own service images.
       - name: Pull test container images
         run: |
           nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
           [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
+          hub_image=$(sed -n 's/^const HubImage = "\(.*\)"$/\1/p' internal/testnats/nats.go)
+          [ -n "$hub_image" ] || { echo "::error::no const HubImage in internal/testnats/nats.go"; exit 1; }
           s3_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/tests3/seaweedfs.go)
           [ -n "$s3_image" ] || { echo "::error::no const Image in internal/tests3/seaweedfs.go"; exit 1; }
-          for image in "$nats_image" "$s3_image"; do
+          for image in "$nats_image" "$hub_image" "$s3_image"; do
             for attempt in 1 2 3; do
               docker pull "$image" && break
               [ "$attempt" -lt 3 ] || exit 1
@@ -847,8 +849,8 @@ jobs:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
   # the Envoy binaries and the daemon build with, and every go command below runs in that
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too; tests
-  # that start NATS take testnats.Image, pulled first for the reason envoy-go's own pull step
-  # gives.
+  # that start NATS take testnats.Image and testnats.HubImage, pulled first for the reason
+  # envoy-go's own pull step gives.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -863,14 +865,18 @@ jobs:
         with:
           go-version-file: packages/envoy/infra/go.mod
           cache-dependency-path: packages/envoy/infra/go.sum
-      - name: Pull the NATS test container image
+      - name: Pull the NATS test container images
         run: |
           nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
           [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$nats_image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
+          hub_image=$(sed -n 's/^const HubImage = "\(.*\)"$/\1/p' internal/testnats/nats.go)
+          [ -n "$hub_image" ] || { echo "::error::no const HubImage in internal/testnats/nats.go"; exit 1; }
+          for image in "$nats_image" "$hub_image"; do
+            for attempt in 1 2 3; do
+              docker pull "$image" && break
+              [ "$attempt" -lt 3 ] || exit 1
+              sleep 10
+            done
           done
         working-directory: packages/envoy
       - name: Check Go formatting
