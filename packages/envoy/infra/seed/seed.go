@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base32"
+	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -215,43 +216,91 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 	return fmt.Sprintf("%s %s (version %s) derives %s: yes", name, defaultLabel, version, publicKey), nil
 }
 
+// seedLength is a user seed's decoded length: two prefix bytes, the 32 bytes of the ed25519 seed and
+// a CRC-16.
+const seedLength = 2 + 32 + 2
+
 // publicKeyOf returns the public key of value, which must be a user seed spelled exactly as nkeys
-// writes one. nkeys' own decoder skips line breaks and ignores the last character's two unused
-// bits, so a value is taken only when its seed encodes back to the same text. Its errors say why
-// value is no user seed, never quoting it.
+// writes one. It decides why a value is none in this order: not base32, not 36 bytes once decoded,
+// a checksum that does not match, not a seed's prefix byte, a seed of another type than a user's,
+// and a spelling nkeys would not write for its bytes. Its errors never quote value.
 func publicKeyOf(value []byte) (string, error) {
-	prefix, raw, err := nkeys.DecodeSeed(value)
-	var corrupt base32.CorruptInputError
-	switch {
-	case errors.As(err, &corrupt):
-		return "", errors.New("it is not base32")
-	case errors.Is(err, nkeys.ErrInvalidEncoding):
-		return "", errors.New("it is too short to be one")
-	case errors.Is(err, nkeys.ErrInvalidChecksum):
-		return "", errors.New("its checksum does not match")
-	case errors.Is(err, nkeys.ErrInvalidSeed):
-		return "", errors.New("it is not a seed (wrong prefix byte)")
-	case err != nil:
-		return "", errors.New("it does not decode as an nkey seed")
+	raw, ok := decodeBase32(value)
+	if !ok {
+		return "", errors.New("the value is not base32")
 	}
 	defer clear(raw)
-	if prefix != nkeys.PrefixByteUser {
-		return "", errors.New("it is a seed, but not a user's")
+	if len(raw) != seedLength {
+		return "", fmt.Errorf("the value decodes to %d bytes, not the 36 of a seed", len(raw))
 	}
-	canonical, err := nkeys.EncodeSeed(nkeys.PrefixByteUser, raw)
+	if crc16(raw[:seedLength-2]) != binary.LittleEndian.Uint16(raw[seedLength-2:]) {
+		return "", errors.New("the value's checksum does not match")
+	}
+	if nkeys.PrefixByte(raw[0]&0xF8) != nkeys.PrefixByteSeed {
+		return "", errors.New("the value is not a seed (wrong prefix byte)")
+	}
+	if nkeys.PrefixByte((raw[0]&0x07)<<5|(raw[1]&0xF8)>>3) != nkeys.PrefixByteUser {
+		return "", errors.New("the value is a seed, but not a user's")
+	}
+	private := raw[2 : seedLength-2]
+	canonical, err := nkeys.EncodeSeed(nkeys.PrefixByteUser, private)
 	if err != nil {
-		return "", fmt.Errorf("it holds %d seed bytes, not the 32 of an ed25519 seed", len(raw))
+		return "", err
 	}
 	defer clear(canonical)
+	// The last character carries two bits no byte uses, so two spellings decode alike; only the
+	// one nkeys writes is taken, which makes every one-character change a refusal.
 	if !bytes.Equal(canonical, value) {
-		return "", errors.New("it is not the canonical encoding of its seed")
+		return "", errors.New("the value is not the canonical encoding of its seed")
 	}
-	user, err := nkeys.FromSeed(canonical)
+	user, err := nkeys.FromRawSeed(nkeys.PrefixByteUser, private)
 	if err != nil {
-		return "", errors.New("it does not decode as an nkey seed")
+		return "", err
 	}
 	defer user.Wipe()
 	return user.PublicKey()
+}
+
+const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+
+// decodeBase32 decodes value as RFC 4648 base32 after padding it to a multiple of eight
+// characters, and reports false for anything else: a byte outside the alphabet and '=' (a line
+// break, which Go's decoder alone would skip, or a lowercase letter), or padding out of place.
+func decodeBase32(value []byte) ([]byte, bool) {
+	for _, b := range value {
+		if b != '=' && strings.IndexByte(base32Alphabet, b) < 0 {
+			return nil, false
+		}
+	}
+	padded := make([]byte, len(value), len(value)+7)
+	copy(padded, value)
+	for len(padded)%8 != 0 {
+		padded = append(padded, '=')
+	}
+	raw := make([]byte, base32.StdEncoding.DecodedLen(len(padded)))
+	n, err := base32.StdEncoding.Decode(raw, padded)
+	clear(padded)
+	if err != nil {
+		clear(raw)
+		return nil, false
+	}
+	return raw[:n], true
+}
+
+// crc16 is CRC-16/XMODEM, the checksum nkeys appends to a key, little-endian.
+func crc16(data []byte) uint16 {
+	var crc uint16
+	for _, b := range data {
+		crc ^= uint16(b) << 8
+		for range 8 {
+			if crc&0x8000 != 0 {
+				crc = crc<<1 ^ 0x1021
+			} else {
+				crc <<= 1
+			}
+		}
+	}
+	return crc
 }
 
 // Stores opens each store the command's --store names: in region when it is not "", and, when

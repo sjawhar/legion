@@ -357,37 +357,49 @@ func TestVerify(t *testing.T) {
 	})
 }
 
-// A user seed one character changed, or a value of another kind: each is reported as no user seed,
-// naming why, and none is echoed.
+// A stored value that is no user seed gets verify's not-a-seed line and exit 1, with the reason
+// decided in this order: not base32 (strict: no line break, lowercase or misplaced padding), not 36
+// bytes, a wrong checksum, not a seed's prefix, not a user's type, not the canonical spelling. Every
+// want is the line the reference script printed for the same value, under the same secret name and
+// version; its value is never echoed.
 func TestVerifyReportsAStoredValueThatIsNoUserSeed(t *testing.T) {
-	kp, err := nkeys.CreateAccount()
-	require.NoError(t, err)
-	accountSeed, err := kp.Seed()
-	require.NoError(t, err)
-	require.True(t, strings.HasSuffix(readmeSeed, "Y"), "the spelling row below changes a final Y")
-	rows := []struct{ name, value, why string }{
-		// Still base32, checksum wrong.
-		{"one character changed", readmeSeed[:5] + "A" + readmeSeed[6:], "checksum"},
+	const notASeed = secretName + " AWSCURRENT (version v1) is not an nkey user seed: "
+	rows := []struct{ name, value, want string }{
+		{"a user public key", readmePublicKey, notASeed + "the value decodes to 35 bytes, not the 36 of a seed"},
+		{"empty", "", notASeed + "the value decodes to 0 bytes, not the 36 of a seed"},
+		{"a trailing line break", readmeSeed + "\n", notASeed + "the value is not base32"},
+		{"a trailing carriage return and line break", readmeSeed + "\r\n", notASeed + "the value is not base32"},
+		{"lowercase", strings.ToLower(readmeSeed), notASeed + "the value is not base32"},
+		{"not base32", "SU!!!not-base32", notASeed + "the value is not base32"},
+		{"padding inside", readmeSeed[:8] + "=" + readmeSeed[9:], notASeed + "the value is not base32"},
+		{"a truncated seed", readmeSeed[:56], notASeed + "the value decodes to 35 bytes, not the 36 of a seed"},
+		{"one character changed", readmeSeed[:5] + "A" + readmeSeed[6:], notASeed + "the value's checksum does not match"},
+		// The README seed's 32 bytes behind other prefix bytes, each with a valid checksum: (0, 0);
+		// a seed's prefix with type 8, which nkeys knows no key of; a seed's prefix with the account
+		// type (nkeys' account seed).
+		{"another prefix byte", "AAAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43I5I",
+			notASeed + "the value is not a seed (wrong prefix byte)"},
+		{"a seed of no known type", "SBAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD442ME",
+			notASeed + "the value is a seed, but not a user's"},
+		{"an account seed", "SAAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD443AI",
+			notASeed + "the value is a seed, but not a user's"},
 		// Y -> Z changes only the last character's two unused bits: the same bytes, another spelling.
-		{"another spelling", strings.TrimSuffix(readmeSeed, "Y") + "Z", "canonical"},
-		{"a public key", readmePublicKey, "not a seed"},
-		{"an account seed", string(accountSeed), "not a user's"},
-		{"not base32", "SU!!!not-base32", "base32"},
-		{"empty", "", "too short"},
-		// nkeys' decoder skips line breaks; the seed is taken only as nkeys spells it.
-		{"a trailing line break", readmeSeed + "\n", "canonical"},
+		{"another spelling", strings.TrimSuffix(readmeSeed, "Y") + "Z", notASeed + "the value is not the canonical encoding of its seed"},
+		{"padded", readmeSeed + "======", notASeed + "the value is not the canonical encoding of its seed"},
 	}
+	require.True(t, strings.HasSuffix(readmeSeed, "Y"), "the spelling row changes a final Y")
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			store := newStore(t).holding(row.value)
 			code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
 			require.Equal(t, 1, code, errs)
-			require.True(t, strings.HasPrefix(out, secretName+" AWSCURRENT (version v1) is not an nkey user seed: "), out)
-			require.Contains(t, out, row.why)
-			if row.value != "" {
-				require.NotContains(t, out+errs, row.value)
-			}
+			require.Equal(t, row.want+"\n", out)
+			require.Empty(t, errs)
 			requireNoValue(t, store, out, errs)
+
+			line, err := seed.Verify(context.Background(), newStore(t).holding(row.value), secretName, readmePublicKey)
+			require.ErrorIs(t, err, seed.ErrMismatch)
+			require.Equal(t, row.want, line)
 		})
 	}
 }
@@ -431,7 +443,7 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 		{"it reads back as another seed", func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed); return f },
 			"version v1 was written, but it does not derive the public key above", true},
 		{"it reads back as no seed", func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed[:5] + "A" + readmeSeed[6:]); return f },
-			"version v1 was written, but it reads back as no user seed: ", true},
+			"version v1 was written, but it reads back as no user seed: the value's checksum does not match", true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
