@@ -2,24 +2,27 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-698",
-  "completed": "2026-10-14T08:21:00Z",
-  "round": 3,
+  "completed": "2026-10-14T08:34:00Z",
+  "round": 4,
   "pullRequest": "https://github.com/sjawhar/legion/pull/1950",
-  "head": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
-  "ciHead": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
-  "ci": "At f0b5430b: Tests run 38533000317 (lint, typecheck, test success), PR Title run 38533000360 (pr-title success), Docs 38533000336 and Worker Image 38533000433 success, and Legion Envoy and Contracts run 38533000318 FAILURE in job pi-legion (src/skills-guard.test.ts, 'every skill body stays under 500 lines, its detail in references': legion-worker/SKILL.md 502). The two handoff commits above it (72d1d28c, 490441e9) are .legion/-only with the trailer and have 0 check runs; compare f0b5430b...490441e9 is implement.json alone. The PR body's CI line names the required runs and omits the failed workflow. Read, not re-run.",
+  "head": "e934c002cffc98d0171a5c8d9773f4c45c33c7e9",
+  "ciHead": "e934c002cffc98d0171a5c8d9773f4c45c33c7e9",
+  "ci": "At e934c002 itself (the round-4 push carried skills/legion-worker/SKILL.md and implement.json together, no trailer): Tests run 38534803074 (lint, typecheck, test success), PR Title run 38534802855 (pr-title success), Legion Envoy and Contracts run 38534803045 success with job pi-legion success (the skills guard round 3 failed), Docs 38534802930 and Worker Image 38534802852 success. The PR body's CI line names the required runs and the recovered workflow. Read, not re-run.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3's proof entry: re-ran its go test selection at 490441e9 on the embedded Postgres at 127.0.0.1:54332: --- PASS for every row of TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging to implementing with the start quiesced on tester / reviewer / nobody / merger and a checks-red naming the phase; awaiting_merge stays with nothing told or started), TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack (testing, retro, merging), TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack, TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound, my TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase and TestAnApprovalEndsTheRoundWhateverCISays; ok. The census's invoked entry re-driven: the legion CLI rebuilt at 490441e9 refuses review_workflows as a list, [], a bare key and reviewWorkflows (exit 1, Unknown key) and accepts the control file (Config OK, exit 0). The proof's claims hold; what it does not cover is the pi-legion suite the same head turned red (failures)."
+    "how": "Round 4's proof entry names wc -l and bun test src/skills-guard.test.ts. Re-counted the file at e934c002: wc -l 498, the guard's split count 499 (< 500); read the diff c3398fea...f871a90f: the retro-completion sentence at SKILL.md:123-126 in four lines carrying the same four facts as round 3's seven. CI's pi-legion job at this head (run 38534803045) is the same bun suite green, which corroborates the implementer's local 9 pass / 0 fail. The diff since 490441e9 is SKILL.md and the handoffs alone (GitHub compare), so round 3's daemon verification stands for this head unchanged."
   },
-  "failed": 1,
-  "failures": [
-    {
-      "criterion": "The repository's own test suite is green on the head's code (every CI lane the pull request runs; the PR body's CI line cites the lanes read on GitHub). Round 3's edit to skills/legion-worker/SKILL.md breaks packages/pi-legion/src/skills-guard.test.ts.",
-      "evidence": "Legion Envoy and Contracts run 38533000318 at f0b5430b5e7b56a96bfb37049e9ce689adc1b693, job pi-legion: (fail) every skill body stays under 500 lines, its detail in references — expected [] received [{file: legion-worker/SKILL.md, lines: 502}] (packages/pi-shared/test/skills-guard.ts longSkillBodies: split('\\n').length >= 500). The file is 501 lines by wc -l at this head (496 by the guard's count on main e4ec5a20, 498 at the round-2 head fbd6393d, whose run 38526019936 has pi-legion success); round 3's +4/-1 edit at SKILL.md:123-129 (the retro-completion sentence) crossed the guard. Not a required check (the ruleset names lint, typecheck, test, pr-title), so checksVerdict reads green and READY would not refuse it, but the suite is red because of this change. Remedy: bring skills/legion-worker/SKILL.md to at most 498 lines by wc -l (the guard needs split count < 500) — fold the new sentence into the existing one or move the detail to a reference — then the pi-legion job is green again; the existing test is the pin, no new red test written."
-    }
-  ],
+  "failed": 0,
+  "failures": [],
   "proof": [
+    {
+      "criterion": "The repository's own test suite is green on the head's code: skills/legion-worker/SKILL.md stays under the skills guard's 500 lines (round 3's failure).",
+      "surface": "The skill file in the workspace at e934c002 and GitHub's CI for that head.",
+      "command": "wc -l skills/legion-worker/SKILL.md; python3 -c \"print(len(open('skills/legion-worker/SKILL.md').read().split('\\n')))\"; gh run view 38534803045 --json conclusion,jobs",
+      "observed": "498; 499; Legion Envoy and Contracts conclusion success, job pi-legion success at e934c002 (with changes, pi-shared, envoy-plugin, pi-envoy success and the rest skipped).",
+      "headSha": "e934c002cffc98d0171a5c8d9773f4c45c33c7e9",
+      "negativeControl": "At f0b5430b: wc -l 501, guard count 502, run 38533000318 job pi-legion failure on 'every skill body stays under 500 lines'; main e4ec5a20 is 495."
+    },
     {
       "criterion": "Acceptance 2 (round 3): the CI rule is applied by whichever fact makes a red stand — a head arriving over a known handoff push, and a hold's retry from testing, retro or merging — in every phase before awaiting_merge.",
       "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54332, driven through intake.ApplyFact.",
@@ -38,9 +41,8 @@
     }
   ],
   "risks": [
-    "D2's daemon side is now stated precisely in worker-common.md and SKILL.md (a retro completion already in flight when the red lands can be taken as the implementing completion); the race itself is unchanged and bounded by the tester's CI read.",
-    "The PR body's CI line for round 3 names the required runs at f0b5430b and omits the failed Legion Envoy and Contracts run; the implementer should cite it once green.",
-    "Local lanes: the NATS-backed tests skipped by name per the LEGION-668 recipe; CI's Tests run 38533000317 ran them at f0b5430b."
+    "Unchanged from round 3: D2's daemon-side race on a retro completion in flight when the red lands (now stated in worker-common.md and SKILL.md); D4's accepted entry-with-standing-red window.",
+    "Local lanes: the NATS-backed tests skipped by name per the LEGION-668 recipe; CI's Tests run 38534803074 ran them at e934c002."
   ],
   "previousRounds": [
     {
@@ -154,6 +156,48 @@
       ],
       "completed": "2026-10-14T07:17:00Z",
       "verdict": "pass"
+    },
+    {
+      "round": 3,
+      "head": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
+      "ciHead": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
+      "ci": "At f0b5430b: Tests run 38533000317 (lint, typecheck, test success), PR Title run 38533000360 (pr-title success), Docs 38533000336 and Worker Image 38533000433 success, and Legion Envoy and Contracts run 38533000318 FAILURE in job pi-legion (src/skills-guard.test.ts, 'every skill body stays under 500 lines, its detail in references': legion-worker/SKILL.md 502). The two handoff commits above it (72d1d28c, 490441e9) are .legion/-only with the trailer and have 0 check runs; compare f0b5430b...490441e9 is implement.json alone. The PR body's CI line names the required runs and omits the failed workflow. Read, not re-run.",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Round 3's proof entry: re-ran its go test selection at 490441e9 on the embedded Postgres at 127.0.0.1:54332: --- PASS for every row of TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging to implementing with the start quiesced on tester / reviewer / nobody / merger and a checks-red naming the phase; awaiting_merge stays with nothing told or started), TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack (testing, retro, merging), TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack, TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound, my TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase and TestAnApprovalEndsTheRoundWhateverCISays; ok. The census's invoked entry re-driven: the legion CLI rebuilt at 490441e9 refuses review_workflows as a list, [], a bare key and reviewWorkflows (exit 1, Unknown key) and accepts the control file (Config OK, exit 0). The proof's claims hold; what it does not cover is the pi-legion suite the same head turned red (failures)."
+      },
+      "failed": 1,
+      "failures": [
+        {
+          "criterion": "The repository's own test suite is green on the head's code (every CI lane the pull request runs; the PR body's CI line cites the lanes read on GitHub). Round 3's edit to skills/legion-worker/SKILL.md breaks packages/pi-legion/src/skills-guard.test.ts.",
+          "evidence": "Legion Envoy and Contracts run 38533000318 at f0b5430b5e7b56a96bfb37049e9ce689adc1b693, job pi-legion: (fail) every skill body stays under 500 lines, its detail in references — expected [] received [{file: legion-worker/SKILL.md, lines: 502}] (packages/pi-shared/test/skills-guard.ts longSkillBodies: split('\\n').length >= 500). The file is 501 lines by wc -l at this head (496 by the guard's count on main e4ec5a20, 498 at the round-2 head fbd6393d, whose run 38526019936 has pi-legion success); round 3's +4/-1 edit at SKILL.md:123-129 (the retro-completion sentence) crossed the guard. Not a required check (the ruleset names lint, typecheck, test, pr-title), so checksVerdict reads green and READY would not refuse it, but the suite is red because of this change. Remedy: bring skills/legion-worker/SKILL.md to at most 498 lines by wc -l (the guard needs split count < 500) — fold the new sentence into the existing one or move the detail to a reference — then the pi-legion job is green again; the existing test is the pin, no new red test written."
+        }
+      ],
+      "proof": [
+        {
+          "criterion": "Acceptance 2 (round 3): the CI rule is applied by whichever fact makes a red stand — a head arriving over a known handoff push, and a hold's retry from testing, retro or merging — in every phase before awaiting_merge.",
+          "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54332, driven through intake.ApplyFact.",
+          "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable go -C packages/daemon test -count=1 ./internal/workflow -run 'TestAHeadArrivingOverAKnownPush|TestARetryOfAHoldFromAnyPhase|TestAPushClassifiedLate|TestARetryOfARound|TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound|TestAnApprovalEndsTheRoundWhateverCISays' -v",
+          "observed": "Every row --- PASS, ok github.com/sjawhar/legion/daemon/internal/workflow 4.855s: the synchronize over a known handoff push sends back from testing, reviewing, retro and merging with the start quiesced on tester / reviewer / nobody / merger and a checks-red naming the phase, and leaves awaiting_merge with nothing told or started; the hold retry from testing, retro and merging sends back with one implementer start and zero starts of the restored role; the round-1 late-push test and the approval table still pass.",
+          "headSha": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
+          "negativeControl": "At the reviewed head c8c33210 the reviewer's two findings stand (its review.json: the synchronize ordering leaves testing, retro and merging in place with HeadVerdict red; a hold retried from testing restarts the tester), and at 9fb30a6c my late-push test failed three of four rows."
+        },
+        {
+          "criterion": "Contract change census, the invoked entry: legion.yaml projects.<KEY>.review_workflows is refused at load.",
+          "surface": "The legion CLI rebuilt from 490441e9 (go build -o /tmp/legion-bin3 ./cmd/legion) on the /tmp/cfg files.",
+          "command": "/tmp/legion-bin3 start --check-config --config /tmp/cfg/rw.yaml; rw-empty.yaml; rw-null.yaml; rw-camel.yaml",
+          "observed": "legion start: Unknown key \"projects.LEGION.review_workflows\", exit 1 for rw, rw-empty and rw-null; Unknown key \"projects.LEGION.reviewWorkflows\", exit 1 for rw-camel.",
+          "headSha": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
+          "negativeControl": "/tmp/cfg/ok.yaml without the key: Config OK: project=LEGION, exit 0."
+        }
+      ],
+      "risks": [
+        "D2's daemon side is now stated precisely in worker-common.md and SKILL.md (a retro completion already in flight when the red lands can be taken as the implementing completion); the race itself is unchanged and bounded by the tester's CI read.",
+        "The PR body's CI line for round 3 names the required runs at f0b5430b and omits the failed Legion Envoy and Contracts run; the implementer should cite it once green.",
+        "Local lanes: the NATS-backed tests skipped by name per the LEGION-668 recipe; CI's Tests run 38533000317 ran them at f0b5430b."
+      ],
+      "completed": "2026-10-14T08:21:00Z",
+      "verdict": "fail"
     }
   ]
 }
