@@ -41,7 +41,7 @@ func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
 	}
 
 	confirmed := signedIn.Add(90 * time.Minute)
-	if err := people.Confirm(ctx, email, "refresh-2", confirmed); err != nil {
+	if err := people.Confirm(ctx, email, "", "refresh-2", confirmed); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 	membership, _, err = people.Membership(ctx, email)
@@ -155,7 +155,7 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 		write func(token string) error
 	}{
 		{"sign-in", func(token string) error { return people.SignIn(ctx, email, "", token, confirmed) }},
-		{"confirmation", func(token string) error { return people.Confirm(ctx, email, token, confirmed) }},
+		{"confirmation", func(token string) error { return people.Confirm(ctx, email, "", token, confirmed) }},
 	} {
 		token := "refresh-" + write.name + "-" + randomDatabaseSuffix(t)
 		if err := write.write(token); err != nil {
@@ -571,5 +571,101 @@ func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
 	}
 	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
 		t.Fatalf("the retry left the generation at %d, want %d", got, generation+1)
+	}
+}
+
+// Two first sign-ins to one address at once, each under its own Google account: the second waits
+// for the first to commit and then ends the first's sessions, as it would had the first committed
+// before it began. The first is held mid-transaction, its row written and not committed.
+func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	first, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Rollback(ctx)
+	if _, err := first.Exec(ctx, `insert into people (email, refresh_token, confirmed_at, sub) values ($1, 'v1:first', now(), 'subject-1')`, email); err != nil {
+		t.Fatal(err)
+	}
+	second := make(chan error, 1)
+	go func() { second <- people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := database.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and cardinality(pg_blocking_pids(pid)) > 0`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		select {
+		case err := <-second:
+			t.Fatalf("the second sign-in finished while the first was uncommitted: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second sign-in never waited on the first")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("the second sign-in: %v", err)
+	}
+	if generation, found := sessionGeneration(t, sessions, email); !found || generation != 1 {
+		t.Fatalf("session generation %d (row %t) after a second account's concurrent first sign-in, want 1: the first account's sessions ended", generation, found)
+	}
+	if membership, _, err := people.Membership(ctx, email); err != nil || membership.Subject != "subject-2" || membership.RefreshToken != "refresh-2" {
+		t.Fatalf("membership = %#v err=%v, want subject-2 with refresh-2", membership, err)
+	}
+}
+
+// A confirmation under a Google account writes only while the row still records that account: a
+// refresh that began before another account signed in to the address cannot overwrite the new
+// holder's refresh token. A Cognito confirmation, with no subject, writes whatever the row holds.
+func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	const email = "a.person@example.com"
+	signedIn := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	later := signedIn.Add(90 * time.Minute)
+	if err := people.SignIn(ctx, email, "subject-1", "refresh-1", signedIn); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", signedIn); err != nil {
+		t.Fatal(err)
+	}
+	membership := func() auth.PersonMembership {
+		t.Helper()
+		membership, _, err := people.Membership(ctx, email)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return membership
+	}
+	if err := people.Confirm(ctx, email, "subject-1", "refresh-stale", later); err != nil {
+		t.Fatalf("a stale confirmation: %v", err)
+	}
+	if got := membership(); got.RefreshToken != "refresh-2" || got.Subject != "subject-2" || !got.ConfirmedAt.Equal(signedIn) {
+		t.Fatalf("after subject-1's stale confirmation: %#v, want subject-2's refresh-2 confirmed %s", got, signedIn)
+	}
+	if err := people.Confirm(ctx, email, "subject-2", "refresh-3", later); err != nil {
+		t.Fatal(err)
+	}
+	if got := membership(); got.RefreshToken != "refresh-3" || !got.ConfirmedAt.Equal(later) {
+		t.Fatalf("after subject-2's confirmation: %#v, want refresh-3 confirmed %s", got, later)
+	}
+	if err := people.Confirm(ctx, email, "", "refresh-4", later); err != nil {
+		t.Fatal(err)
+	}
+	if got := membership(); got.RefreshToken != "refresh-4" {
+		t.Fatalf("after a confirmation with no subject: %#v, want refresh-4", got)
 	}
 }

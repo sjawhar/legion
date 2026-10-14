@@ -152,7 +152,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("the member's membership: found %t, %v", found, err)
 			}
-			if err := rig.people.Confirm(context.Background(), rig.email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+			if err := rig.people.Confirm(context.Background(), rig.email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
 				t.Fatalf("date the confirmation two hours back: %v", err)
 			}
 		},

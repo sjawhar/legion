@@ -80,6 +80,12 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	if m.fresh(membership) {
 		return nil
 	}
+	// Under a domain the refreshed token is checked against the account the address's sign-in
+	// recorded; a row that records none (a sign-in under a group, before the column, or any other
+	// way) has nothing to check it against, so it ends without asking Google.
+	if m.Rule.Domain != "" && membership.Subject == "" {
+		return m.end(ctx, email, "the address's sign-in recorded no Google account to confirm")
+	}
 	session, err := m.SignIn.Refresh(ctx, membership.RefreshToken)
 	if err != nil {
 		return m.end(ctx, email, err.Error())
@@ -91,10 +97,14 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	if person != email {
 		return m.end(ctx, email, "the refreshed sign-in names "+person)
 	}
-	if m.Rule.Domain != "" && session.Claims.Subject != membership.Subject {
-		return m.end(ctx, email, fmt.Sprintf("the refreshed sign-in is Google account %q, and the address's sign-in recorded %q", session.Claims.Subject, membership.Subject))
+	var subject string
+	if m.Rule.Domain != "" {
+		if session.Claims.Subject != membership.Subject {
+			return m.end(ctx, email, fmt.Sprintf("the refreshed sign-in is Google account %q, and the address's sign-in recorded %q", session.Claims.Subject, membership.Subject))
+		}
+		subject = membership.Subject
 	}
-	return m.People.Confirm(ctx, email, session.RefreshToken, m.now())
+	return m.People.Confirm(ctx, email, subject, session.RefreshToken, m.now())
 }
 
 // end revokes every session of email and forgets their refresh token.

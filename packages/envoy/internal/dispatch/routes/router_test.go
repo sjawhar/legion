@@ -112,7 +112,7 @@ func (s *memoryPeopleStore) Membership(_ context.Context, email string) (auth.Pe
 	return membership, found, nil
 }
 
-func (s *memoryPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+func (s *memoryPeopleStore) Confirm(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership := s.people[email]
@@ -584,12 +584,17 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 }
 
 func TestAuthStartWithoutSignInIsUnavailable(t *testing.T) {
+	const want = "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)"
 	handler, _ := newTestRouter(t)
 	for _, target := range []string{"/auth/start", "/auth/callback?code=c&state=s"} {
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://dispatch.test"+target, nil))
-		if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"code":"SIGNIN_UNCONFIGURED"`) {
-			t.Errorf("%s with no sign-in: status %d body %s, want 503 SIGNIN_UNCONFIGURED", target, response.Code, response.Body.String())
+		var body struct {
+			Code  string `json:"code"`
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil || response.Code != http.StatusServiceUnavailable || body.Code != "SIGNIN_UNCONFIGURED" || body.Error != want {
+			t.Errorf("%s with no sign-in: status %d body %s (%v), want 503 SIGNIN_UNCONFIGURED with %q", target, response.Code, response.Body.String(), err, want)
 		}
 	}
 }

@@ -157,7 +157,7 @@ func TestResolveBootConfigRefusesSignInSettingsItCannotUse(t *testing.T) {
 	}
 	for _, domain := range []string{"Example.com", "example", "exa_mple.com", "https://example.com", "alice@example.com", "-example.com", "example-.com", "example..com", ".example.com", "example.com.", "ex ample.com", strings.Repeat("a", 64) + ".com", strings.Repeat(strings.Repeat("a", 63)+".", 4) + "com"} {
 		_, err := resolveBootConfig(envGetter(googleSignInEnvironment(map[string]string{"DISPATCH_SIGNIN_DOMAIN": domain})))
-		if want := "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got " + domain; err == nil || err.Error() != want {
+		if want := "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got a value of " + strconv.Itoa(len(domain)) + " characters"; err == nil || err.Error() != want {
 			t.Errorf("DISPATCH_SIGNIN_DOMAIN=%q: err = %v, want %q", domain, err, want)
 		}
 	}

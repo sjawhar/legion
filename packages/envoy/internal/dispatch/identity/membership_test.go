@@ -151,7 +151,8 @@ func TestDomainMembershipEndsTheSessionWhenTheRefreshedAccountNoLongerQualifies(
 }
 
 // A row whose refresh token no domain sign-in recorded holds no subject to compare: the domain rule
-// ends its sessions at the confirmation rather than admitting whichever account the token names.
+// ends its sessions at the confirmation without asking Google, rather than refreshing with a token
+// whose account it cannot check.
 func TestDomainMembershipEndsTheSessionOfARowWithNoSubject(t *testing.T) {
 	rig := newDomainMembershipRig(t)
 	membership, _ := rig.people.get(memberEmail)
@@ -162,8 +163,12 @@ func TestDomainMembershipEndsTheSessionOfARowWithNoSubject(t *testing.T) {
 	rig.people.people[memberEmail] = auth.PersonMembership{RefreshToken: membership.RefreshToken, ConfirmedAt: membership.ConfirmedAt}
 	rig.people.mu.Unlock()
 	rig.now = rig.now.Add(2 * time.Hour)
+	refreshes := rig.issuer.Refreshes()
 	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
 		t.Fatalf("Confirm of a row with no subject: err = %v, want ErrNoIdentity", err)
+	}
+	if got := rig.issuer.Refreshes(); got != refreshes {
+		t.Fatalf("Confirm of a row with no subject refreshed at the issuer (%d refreshes, want %d)", got, refreshes)
 	}
 	assertSessionEnded(t, rig)
 }

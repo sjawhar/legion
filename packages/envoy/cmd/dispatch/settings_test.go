@@ -447,7 +447,7 @@ func ageConfirmation(t *testing.T, people auth.PeopleStore, email string) {
 	if err != nil || !found || membership.RefreshToken == "" {
 		t.Fatalf("the membership of %s: %+v, found %t, %v; want a refresh token", email, membership, found, err)
 	}
-	if err := people.Confirm(context.Background(), email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+	if err := people.Confirm(context.Background(), email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -683,7 +683,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot.SignInDomain != "example.com" || boot.SignInGroup != "" {
 				t.Errorf("SignInDomain = %q, SignInGroup = %q", boot.SignInDomain, boot.SignInGroup)
 			}
-			refusedWith(t, domain("Example.com"), "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got Example.com")
+			refusedWith(t, domain("Example.com"), "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got a value of 11 characters")
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set")
 			// The domain the code flow main discovers names to Google and the router's sign-in
 			// admits, against a fake issuer in Google's place so no test calls Google: the domain

@@ -97,10 +97,13 @@ func (s *testPeopleStore) Membership(_ context.Context, email string) (auth.Pers
 	return membership, found, nil
 }
 
-func (s *testPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+func (s *testPeopleStore) Confirm(_ context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership := s.people[email]
+	if subject != "" && membership.Subject != subject {
+		return nil
+	}
 	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
 	s.people[email] = membership
 	return nil

@@ -33,8 +33,12 @@ type PeopleStore interface {
 	SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
 	// Membership reads email's membership; found is false for a person who never signed in.
 	Membership(ctx context.Context, email string) (membership PersonMembership, found bool, err error)
-	// Confirm records a refresh that confirmed email's membership, with the refresh token to use next.
-	Confirm(ctx context.Context, email, refreshToken string, confirmedAt time.Time) error
+	// Confirm records a refresh that confirmed email's membership, with the refresh token to use
+	// next. subject is the Google account a domain-mode refresh confirmed: the write happens only
+	// while the row still records that account, so a refresh that began before another account
+	// signed in to the address cannot overwrite the new holder's token. A Cognito pool's
+	// confirmation passes an empty subject and writes whatever the row's subject.
+	Confirm(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
 	// End forgets email's refresh token and confirmation, keeping the person and their subject.
 	End(ctx context.Context, email string) error
 }

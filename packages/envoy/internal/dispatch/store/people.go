@@ -78,9 +78,11 @@ func (s *PgPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken
 	return nil
 }
 
-// signInSubject records a sign-in for a Workspace domain in one transaction: it locks email's row,
-// and when the row holds a subject other than subject (Google gave the address to another account)
-// it ends every session of email (revokeSessionsSQL) before it records subject with the refresh
+// signInSubject records a sign-in for a Workspace domain in one transaction. It creates email's
+// row when there is none and then locks it, so two sign-ins to one address take turns, two first
+// sign-ins included: the second waits on the first's insert, then reads the subject it committed.
+// When the row holds a subject other than subject (Google gave the address to another account) it
+// ends every session of email (revokeSessionsSQL) before it records subject with the refresh
 // token. A revoke that fails rolls the sign-in back, leaving the old subject for the next sign-in
 // to revoke again; one that commits is logged at WARN with the address.
 func (s *PgPeopleStore) signInSubject(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
@@ -89,8 +91,11 @@ func (s *PgPeopleStore) signInSubject(ctx context.Context, email, subject, refre
 		return fmt.Errorf("record sign-in of %q: %w", email, err)
 	}
 	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `insert into people (email) values ($1) on conflict (email) do nothing`, email); err != nil {
+		return fmt.Errorf("record sign-in of %q: %w", email, err)
+	}
 	var stored *string
-	if err := tx.QueryRow(ctx, `select sub from people where email = $1 for update`, email).Scan(&stored); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `select sub from people where email = $1 for update`, email).Scan(&stored); err != nil {
 		return fmt.Errorf("read the subject the sign-in of %q replaces: %w", email, err)
 	}
 	revoked := stored != nil && *stored != subject
@@ -148,9 +153,11 @@ func (s *PgPeopleStore) Membership(ctx context.Context, email string) (auth.Pers
 	return membership, true, nil
 }
 
-// Confirm records a refresh that confirmed email's membership.
-func (s *PgPeopleStore) Confirm(ctx context.Context, email, refreshToken string, confirmedAt time.Time) error {
-	if _, err := s.pool.Exec(ctx, `update people set refresh_token = $2, confirmed_at = $3 where email = $1`, email, s.seal.seal(email, refreshToken), confirmedAt); err != nil {
+// Confirm records a refresh that confirmed email's membership. With subject set, a domain-mode
+// confirmation, it writes only while the row still records that Google account
+// (auth.PeopleStore.Confirm); a row another account signed in to since is left as it is.
+func (s *PgPeopleStore) Confirm(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	if _, err := s.pool.Exec(ctx, `update people set refresh_token = $2, confirmed_at = $3 where email = $1 and ($4::text = '' or sub is not distinct from $4::text)`, email, s.seal.seal(email, refreshToken), confirmedAt, subject); err != nil {
 		return fmt.Errorf("confirm membership of %q: %w", email, err)
 	}
 	return nil
