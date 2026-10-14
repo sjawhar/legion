@@ -2,9 +2,10 @@
 
 The Go module `github.com/sjawhar/envoy/infra`, which builds `pulumi-resource-envoy-infra`, the
 Pulumi plugin whose components deploy Envoy, and `envoy-infra`, the command whose `seed` writes a
-NATS user's nkey seed into a secret store. What the plugin deploys, each component's inputs and
-refusals, how an operator installs it and how an existing deployment moves onto it are in
-`packages/envoy/infra/README.md`. This file is what changing the module needs on top of that.
+NATS user's nkey seed into a secret store and whose `render` prints what the AWS components
+register. What the plugin deploys, each component's inputs and refusals, how an operator installs
+it and how an existing deployment moves onto it are in `packages/envoy/infra/README.md`. This file
+is what changing the module needs on top of that.
 
 ## Its own workspace
 
@@ -30,11 +31,14 @@ versions. Never add the module to the root `go.work`.
 | Path | What it holds |
 | --- | --- |
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
-| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
+| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
+| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); and `InputError`, a refusal naming the input it refuses. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
+| `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
+| `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. |
+| `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its tests are `aws/`'s, which build each component and its renderings from one example. |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
 
@@ -86,6 +90,13 @@ versions. Never add the module to the root `go.work`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
+- **One source for a rendering.** What an AWS component writes into a resource and a program may
+  need outside Pulumi lives in `aws/rendering`, which imports neither Pulumi nor the AWS provider's
+  SDK, so `envoy-infra` links neither. The component and the `render` subcommand call the same
+  function; a subcommand never rebuilds a rendering. `render/render_test.go` runs each component
+  under mocks and pins each subcommand's output to the inputs the component registers for the same
+  values. A refusal both share is a `core.InputError` naming the component's input, and the
+  subcommand maps that input to its flag (`refusedInput`, which panics on an input no flag sets).
 
 ## The seed command
 

@@ -1,13 +1,21 @@
 # envoy-infra
 
-Pulumi components that deploy Envoy, and a command for the NATS seeds they use. The components
-ship as an executable Pulumi plugin, `pulumi-resource-envoy-infra`, so a program in any Pulumi
-language needs only the Pulumi CLI. The command, `envoy-infra`, writes a NATS user's nkey seed into
-a secret store and checks the seed stored there: see [NATS seeds](#nats-seeds).
+Pulumi components that deploy Envoy, and a command for what they need outside Pulumi. The
+components ship as an executable Pulumi plugin, `pulumi-resource-envoy-infra`, so a program in any
+Pulumi language needs only the Pulumi CLI:
 
-This version has one component, `envoy-infra:host:Listener`: an `envoy-listener` container on a
-Docker host. It does not run NATS. The listener creates the `ENVOY_NOTIFICATIONS` stream and its
-key-value buckets itself when it starts, so it needs only a NATS server with JetStream to reach.
+| Component | What it deploys |
+| --- | --- |
+| `envoy-infra:host:Listener` | An `envoy-listener` container on a Docker host: see [host:Listener](#hostlistener). |
+| `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
+| `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
+
+The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
+starts, so it needs only a NATS server with JetStream to reach.
+
+The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
+stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
+that needs it outside Pulumi ([`envoy-infra render`](#envoy-infra-render)).
 
 ## Install
 
@@ -35,7 +43,8 @@ packages:
 
 It also generates an SDK for the project's language under `sdks/` and prints how to import it. A
 TypeScript program imports `@sjawhar/envoy-infra`, which `package add` adds to `package.json`. A Go
-program imports `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra/host`.
+program imports `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra/host` and `.../envoyinfra/aws`. A
+Python program imports `sjawhar_envoy_infra`, the generated `sjawhar-envoy-infra` package.
 
 ### The command
 
@@ -58,9 +67,11 @@ envoy-infra-linux-amd64/envoy-infra --version
 runner, so an archive attested by any other workflow, branch or runner in the repository fails;
 `--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
 explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
-`PATH`; the commands under [NATS seeds](#nats-seeds) call it `envoy-infra`.
+`PATH`; the commands below call it `envoy-infra`.
 
-## What `host:Listener` deploys
+## host:Listener
+
+### What `host:Listener` deploys
 
 A listener named `<name>` registers these resources, each a child of the listener:
 
@@ -100,7 +111,7 @@ no API token and no webhook routes. The listener's other settings are on the doc
 
 The listener's outputs are `containerName` and `port`.
 
-## Inputs
+### Inputs
 
 | Input | Default | What it is |
 | --- | --- | --- |
@@ -142,7 +153,7 @@ computes the container's environment. That happens at preview, unless `natsUrls`
 the update. It refuses an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas
 separate the URLs in `NATS_URLS`).
 
-## Providers
+### Providers
 
 The listener creates its resources only with providers you pass it in its `providers` resource
 option: a `docker` provider always, and a `command` provider too when `watchdog` is set. Its
@@ -154,7 +165,7 @@ default provider of its own. Without one, the listener fails before it registers
 envoy-infra:host:Listener needs a "docker" provider in its providers option
 ```
 
-## Readiness
+### Readiness
 
 By default the docker provider waits up to 90 seconds for the container's health check to pass,
 and `pulumi up` fails if it does not. The check passes once `/healthz` answers `200`, which it does
@@ -166,7 +177,7 @@ from `starting` on, before the listener has connected to NATS. A listener is con
 listener that cannot reach its NATS server when the stack is applied: Docker restarts the listener
 until it connects.
 
-## The watchdog
+### The watchdog
 
 `watchdog: {host: <address>}` installs a systemd timer on the host that checks the
 `envoy-listener` container 30 seconds after boot and every 60 seconds after that. When the
@@ -200,7 +211,7 @@ come back without its seed.
 The create command's text holds the listener's environment, image, port and name, so changing any
 of them is an update that runs the create command on the host again.
 
-## Moving an existing deployment onto it
+### Moving an existing deployment onto it
 
 `adopt` names resources at the root of the stack that this listener's resources take over:
 
@@ -232,30 +243,14 @@ YAML program, the listener that takes both over reads:
         - ${docker-example-host-a}
 ```
 
-A preview proves the move. Apply it only when the preview:
+[A preview proves the move](#proving-a-move-with-a-preview).
 
-- shows every adopted resource as `same`, and no step for its old root-level name;
-- updates, replaces and deletes nothing;
-- creates only what exists only in Pulumi state: the listener itself, and provider resources
-  (`pulumi:providers:*`) such as the plugin's own default provider,
-  `pulumi:providers:envoy-infra`;
-- changes no stack output.
-
-This lists every step that is not `same`:
-
-```sh
-pulumi preview --json --show-sames | jq -r '.steps[] | select(.op != "same") | "\(.op) \(.urn)"'
-```
-
-It does not show a changed stack output, since that leaves the stack's own step `same`. A plain
-`pulumi preview` lists each changed output under `Outputs:`.
-
-## Examples
+### Examples
 
 The examples use placeholders: `example-host-a`, the `*.internal.example` hosts and each `<...>`
 stand for your own values.
 
-### YAML
+#### YAML
 
 The whole `Pulumi.yaml` of a project with one listener, reading its seed from a secret config
 value:
@@ -309,7 +304,7 @@ listener `example-host-a`, and the listener's `example-host-a-image` (a `RemoteI
 `example-host-a-container` (a `Container`). Its outputs are `containerName: "envoy-listener"` and
 `port: 9020`. `pulumi up` then applies it.
 
-### TypeScript
+#### TypeScript
 
 A listener with a watchdog, taking its NATS URLs from another stack's output. It has no seed,
 since a watchdog cannot have one:
@@ -340,6 +335,499 @@ const listener = new envoyInfra.host.Listener(
 );
 
 export const containerName = listener.containerName;
+```
+
+## The AWS components
+
+`aws:NatsService` and `aws:WebhookListener` run Envoy on ECS Fargate in a VPC you already have.
+Your network, ECS cluster, roles, security groups, private DNS namespace, load balancer and alarm
+topic stay in your program; the components take them as inputs. A program usually runs both, the
+listener connecting to the NATS service's `internalUrl`, as the [Python example](#python-example)
+does.
+
+### What `aws:NatsService` deploys
+
+A NATS service named `<N>` registers these resources, each a child of the component:
+
+| Resource | Type | What it is |
+| --- | --- | --- |
+| `<N>-efs` | `aws:efs/fileSystem:FileSystem` | JetStream's store: encrypted, `generalPurpose`, `elastic` throughput. |
+| `<N>-efs-sg` | `aws:ec2/securityGroup:SecurityGroup` | Its mount targets' group, in `vpcId`. |
+| `<N>-efs-ingress`, `<N>-nfs-egress` | `aws:ec2/securityGroupRule:SecurityGroupRule` | NFS (TCP 2049) from `securityGroupId` into that group, and out of `securityGroupId` to it. |
+| `<N>-efs-mt-<i>` | `aws:efs/mountTarget:MountTarget` | One in each subnet of `subnetIds`, `<i>` its index there. |
+| `<N>-efs-ap` | `aws:efs/accessPoint:AccessPoint` | `/nats-data`, owned by uid and gid 1000 (the `nats` image's user), mode 755. |
+| `<N>-log-group` | `aws:cloudwatch/logGroup:LogGroup` | `logGroupName`, kept `logRetentionDays` days. |
+| `<N>-tsnet-efs`, `-tsnet-efs-sg`, `-tsnet-efs-ingress`, `-tsnet-nfs-egress`, `-tsnet-efs-mt-<i>`, `-tsnet-efs-ap` | as above | The sidecar's tailnet state, so its node keeps its identity across tasks: the same shape, with the access point at `/tsnet-state`, owned by root, mode 700. |
+| `<N>-task` | `aws:ecs/taskDefinition:TaskDefinition` | `family`, `cpu` and `memory` on Fargate (`awsvpc`), with the two containers below and both file systems mounted through their access points with transit encryption. |
+| `cloudMapServiceLogicalName` | `aws:servicediscovery/service:Service` | `cloudMapServiceName` in the namespace: an `A` record, TTL 10 s, `MULTIVALUE`. |
+| `<N>-service` | `aws:ecs/service:Service` | One task on Fargate `platformVersion`, in `subnetIds` with `securityGroupId` and no public address, registered in Cloud Map, with ECS Exec on, created after every mount target. It deploys at 0% minimum and 100% maximum, so the old task stops before the new one starts: two tasks would share the JetStream store and the tailnet node. |
+| `<prefix>-route-disconnect-filter`, `-slow-consumer-filter`, `-jetstream-error-filter`, `-auth-error-filter` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | `<prefix>` is `metricFilterLogicalNamePrefix`; see below. |
+
+Each tagged child carries `baseTags` and a `service` tag: `<N>` on the JetStream file system and
+its access point, the log group, the task definition, the Cloud Map service and the ECS service;
+`<N>-efs` on the JetStream group; `<N>-tsnet`, `<N>-tsnet-efs` and `<N>-tsnet-ap` on the
+tailnet-state file system, group and access point. The rules, mount targets and filters carry none.
+
+The task runs two containers, both logging to the log group through `awslogs` in `region`:
+
+- `nats`, `natsImage`: clients on 4222, cluster routes on 6222 and monitoring on 8222, JetStream's
+  store at `/data`, and a health check fetching `http://localhost:8222/healthz`. Without
+  `authorization` the image's entrypoint runs `nats-server` with `serverArgs`. With it, `/bin/sh -c`
+  runs a start script that writes the rendered configuration, public keys only
+  ([NATS authorization](#nats-authorization)), to `configPath` and execs
+  `nats-server --config <configPath>` with `serverArgs`.
+  [`envoy-infra render nats-start-script`](#nats-start-script) prints that script.
+- `tailscale-sidecar`, `tailscaleImage`: serves the NATS client port on the tailnet as
+  `tailnetHostname`, advertising `tailnetTags`, with its state at `/var/lib/tailscale`. Its auth key
+  is the OAuth client secret at `tailnetClientSecretArn`, which ECS injects, with
+  `?ephemeral=<tailnetEphemeral>&preauthorized=true` appended.
+
+The filters count nats-server's own log lines into metrics in `metricNamespace`, 1 for each
+matching line and 0 for a period whose lines all miss:
+
+| Filter | Pattern | Metric |
+| --- | --- | --- |
+| `route-disconnect` | `"Router connection closed"` | `RouteDisconnections` |
+| `slow-consumer` | `"Slow Consumer Detected"` | `SlowConsumers` |
+| `jetstream-error` | `?"JetStream out of" ?"JetStream failed to store" ?"JetStream being DISABLED" ?"NO quorum, stalled"` | `JetStreamErrors` |
+| `auth-error` | `?"authentication error" ?"Subscription Violation" ?"Publish Violation"` | `AuthErrors` |
+
+Its outputs are `serviceArn` (the ECS service's ARN), `serviceName`, `efsId` (JetStream's file
+system), `logGroupName`, `taskDefinitionArn`, `metricNamespace` and `internalUrl`,
+`nats://<cloudMapServiceName>.<cloudMapNamespaceName>:4222`.
+
+### `aws:NatsService`'s inputs
+
+| Input | Default | What it is |
+| --- | --- | --- |
+| `authorization` | unset | The server's nkey authorization, an `aws:Authorization` ([NATS authorization](#nats-authorization)). Unset, NATS runs with no authorization block. |
+| `configHeader` | required | The rendered configuration's header lines, each written as a `# ` comment. |
+| `serverArgs` | required | `nats-server`'s arguments: JetStream, its store directory, the ports. With `authorization` they follow `--config <configPath>`. |
+| `configPath` | required | Where the start script writes the configuration in the container. Read only with `authorization`. |
+| `natsImage`, `tailscaleImage` | required | The two containers' images. |
+| `tailnetHostname` | required | The sidecar's node name, `TS_HOSTNAME`. |
+| `tailnetTags` | required | The tags the node advertises, joined with `,` into `--advertise-tags`: at least one, since an auth key made from an OAuth client must advertise one. |
+| `tailnetClientSecretArn` | required | The secret holding the tailnet OAuth client secret. |
+| `tailnetEphemeral` | `false` | Whether the node's auth key is ephemeral. |
+| `region` | required | The containers' `awslogs-region`. |
+| `vpcId` | required | The VPC the file systems' groups are in. |
+| `subnetIds` | required | The task's subnets, at least one. Each file system has a mount target in each, named by its index. |
+| `securityGroupId` | required | The NATS task's group, which you build. |
+| `clusterArn`, `executionRoleArn`, `taskRoleArn` | required | The ECS cluster and the task's two roles. |
+| `cloudMapNamespaceId`, `cloudMapNamespaceName` | required | The private DNS namespace the service registers in. |
+| `cloudMapServiceName` | required | The service's name in it. |
+| `cloudMapServiceLogicalName` | required | The Cloud Map service's logical name. |
+| `family`, `cpu`, `memory`, `platformVersion` | required | The task definition's family and size, and the service's Fargate platform version. |
+| `logGroupName`, `logRetentionDays` | required | The log group. |
+| `baseTags` | required | Tags on every tagged child, beside `service`, which the component sets. |
+| `metricNamespace` | required | The namespace of the filters' metrics. |
+| `metricFilterLogicalNamePrefix` | required | What the filters' logical names start with. |
+| `waitForSteadyState` | unset | The ECS service's `waitForSteadyState`, set only when given. |
+| `adopt` | `false` | See [Moving an existing deployment onto them](#moving-an-existing-deployment-onto-them). |
+
+### What `aws:WebhookListener` deploys
+
+A listener named `<N>` registers these resources, each a child of the component:
+
+| Resource | Type | What it is |
+| --- | --- | --- |
+| `<N>-log-group` | `aws:cloudwatch/logGroup:LogGroup` | `logGroupName`, kept `logRetentionDays` days. |
+| `cloudMapServiceLogicalName` | `aws:servicediscovery/service:Service` | `cloudMapServiceName` in the namespace: an `A` record, TTL 10 s, `MULTIVALUE`. |
+| `<N>-execution-api-token-read` | `aws:iam/rolePolicy:RolePolicy` | On `executionRoleName`: `secretsmanager:GetSecretValue` on `apiTokenSecretArn`. |
+| `<N>-execution-nats-nkey-seed-read` | `aws:iam/rolePolicy:RolePolicy` | The same on `seedSecretArn`, only when it is given. |
+| `<N>-task` | `aws:ecs/taskDefinition:TaskDefinition` | `family`, `cpu` and `memory` on Fargate (`awsvpc`), with the one container below, created after both policies and after `apiTokenSecretVersionId`'s resource. |
+| `<N>-service` | `aws:ecs/service:Service` | One task in `subnetIds` with `securityGroupId` and no public address, its port 9020 in `targetGroupArn`, registered in Cloud Map, with ECS Exec on, created after `natsServiceArn`'s resource. It deploys at 100% minimum and 200% maximum, so a healthy target stays in the target group; the circuit breaker rolls back a replacement that keeps failing to start, the service waits for steady state, ECS ignores load-balancer health for 120 s while a task starts, and create and update time out after 15 minutes. |
+| `<N>-<filter>` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | Eight, on the log group; `envoy-infra render metric-filters` prints them. |
+| `<N>-<alarm>` | `aws:cloudwatch/metricAlarm:MetricAlarm` | Five, below. |
+
+The log group, the Cloud Map service, the task definition, the service and the alarms carry
+`baseTags` and `service: <N>`; the policies and the filters carry none.
+
+The container, `envoy-listener`, runs `/usr/local/bin/envoy-listener` from `image` on port 9020.
+Its health check fetches `/healthz` on the task's own address, the one the target group probes. Its
+environment, in this order:
+
+| Variable | Value |
+| --- | --- |
+| `PORT` | `9020` |
+| `ENVOY_LISTEN_HOST` | `listenHost` |
+| `ENVOY_MACHINE_ID` | `machineId` |
+| `NATS_URLS` | `natsUrls`, joined with commas |
+| `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
+| `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
+| `ENVOY_NATS_REPLICAS` | `natsReplicas` |
+| `ENVOY_WEBHOOKS` | `webhooks`, joined with commas |
+| `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId` |
+
+ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET`, `ENVOY_SLACK_SIGNING_SECRET`,
+`ENVOY_API_TOKEN` and, with `seedSecretArn`, `NATS_NKEY_SEED`.
+
+Each alarm pages `alarmTopicArn` on one matching line in five minutes (`Sum` over 300 s at least 1,
+missing data not breaching) and sends the OK transition there too, so the channel sees the signal
+stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-webhook-refused` (a
+delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
+another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
+durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its durable
+subscription). Each description names `logGroupName` as the log to read, and assumes the wiring of
+the deployment the alarms were written for: that GitHub deliveries come from Dispatch's GitHub App
+(`legion-envoy`), whose redelivery sweep retries them, and that Slack retries an event three times.
+A listener fed otherwise pages the same way, with descriptions that overstate what is retried.
+
+Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn` and
+`internalUrl`, `http://<cloudMapServiceName>.<cloudMapNamespaceName>:9020`.
+
+### `aws:WebhookListener`'s inputs
+
+| Input | Default | What it is |
+| --- | --- | --- |
+| `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name; its durable consumer is `listener-<machineId>`. |
+| `natsUrls` | required | The NATS servers. May come from another resource as an output of the whole list, such as `nats.internal_url.apply(lambda url: [url])`. |
+| `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy@sha256:<digest>`. |
+| `region` | required | The container's `awslogs-region`. |
+| `apiTokenSecretArn` | required | The secret holding the listener's API token. |
+| `apiTokenSecretVersionId` | required | The token's secret version. The component only orders the task definition after it, so pass your `SecretVersion`'s `versionId` output: a literal orders nothing. |
+| `seedSecretArn` | unset | The secret holding the seed of the NATS user the listener connects as. Unset, it connects with none. |
+| `webhooks` | required | The webhooks the listener serves. This version takes exactly `["github", "slack"]`. |
+| `githubWebhookSecretArn`, `reviewerAppId`, `mentionTrigger` | with `github` | Required while `webhooks` lists `github`, refused while it does not. |
+| `slackSigningSecretArn` | with `slack` | Required while `webhooks` lists `slack`, refused while it does not. |
+| `clusterArn`, `executionRoleArn`, `taskRoleArn` | required | The ECS cluster and the task's two roles. |
+| `executionRoleName` | required | The execution role's name, which the read policies attach to. |
+| `subnetIds` | required | The task's subnets, at least one. |
+| `securityGroupId` | required | The listener task's group, which you build. |
+| `targetGroupArn` | required | Your load balancer's target group. |
+| `cloudMapNamespaceId`, `cloudMapNamespaceName`, `cloudMapServiceName`, `cloudMapServiceLogicalName` | required | As for `aws:NatsService`. |
+| `family`, `cpu`, `memory` | required | The task definition's family and size. |
+| `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
+| `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
+| `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
+| `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
+| `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
+| `adopt` | `false` | See [Moving an existing deployment onto them](#moving-an-existing-deployment-onto-them). |
+
+### What the AWS components refuse
+
+Each component refuses these before it registers anything, with an error naming the component and
+the input:
+
+- `aws:NatsService`: an `authorization` refused under [NATS authorization](#nats-authorization); an
+  empty `configPath` with `authorization`; a `configHeader` line holding a line break; an empty
+  `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
+- `aws:WebhookListener`: a webhook's input missing while `webhooks` lists it (a blank
+  `reviewerAppId` or `mentionTrigger` counts as missing) or given while it does not, each input
+  checked before the list; then a `webhooks` other than exactly `["github", "slack"]`; a blank
+  `machineId`; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
+  `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
+- Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
+
+`natsUrls` may come from another resource, so the listener checks it when the container's
+definitions are computed, at preview unless it is not known until the update: it refuses an empty
+list, and a URL that is blank or holds a comma. An optional secret ARN that is given but resolves to
+no value is refused the same way.
+
+### Inputs that take an output
+
+The inputs a program takes from its other resources are Pulumi inputs: the IDs, ARNs and names of
+your resources, the optional secret ARNs and `natsUrls`. Every other input takes a value the
+program knows when it runs, and the plugin refuses another resource's output there, naming the
+input, before the component registers anything. The schema marks those inputs `plain`, but only
+partly: pulumi-go-provider's inference marks a list's or a map's elements and not the list or map,
+and nothing in an object type. So a generated SDK takes an output for `authorization`,
+`configHeader`, `serverArgs`, `tailnetTags`, `webhooks` and `baseTags`, and the plugin refuses it:
+
+```text
+envoy-infra:aws:NatsService resource 'example-nats' has a problem: failed to copy inputs for example-nats (envoy-infra:aws:NatsService): copying input "configHeader": expected destination type to implement pulumi.Input or pulumi.Output, got []string
+```
+
+### Secrets stay yours
+
+The components take each secret as the ARN of a Secrets Manager secret you declare: the
+listener's API token, the NATS user's seed, the webhook secrets and the tailnet OAuth client. They
+create no secret and no random value, and no secret's value passes through their inputs or Pulumi
+state: ECS injects each into its container from the ARN. The listener's policies let its execution
+role read the token and, with `seedSecretArn`, the seed. The execution roles must already be able to
+read the others: the tailnet OAuth client and the GitHub and Slack secrets.
+
+### Every deployment value is an input
+
+The components hold no deployment's names. Each child's logical name comes from the component's
+name, the Cloud Map services' from `cloudMapServiceLogicalName` and the NATS filters' from
+`metricFilterLogicalNamePrefix`; physical names, tags, metric namespaces and the configuration's
+header lines are inputs. What Envoy fixes stays fixed in the component: the ports, the containers'
+names, commands and health checks, the volumes and mount paths, the sidecar's script, the filters'
+patterns and the alarms' shape and text.
+
+The AWS provider normalises the order and whitespace of a task definition's
+`containerDefinitions`, but compares each string in them byte for byte. The components write the
+container definitions as Python's `json.dumps` writes them, and the start script, the sidecar's
+script and the health checks exactly as the deployment they were written for writes them, so that
+deployment's task definitions preview as `same` once it moves onto them.
+
+### Providers and transformations
+
+Each component creates its resources with the `aws` provider you pass it in its `providers`
+option, at the version and with the configuration you give it, and never falls back to a default
+provider of the plugin's own SDK version. Without one, it fails before it registers anything:
+
+```text
+envoy-infra:aws:NatsService needs a "aws" provider in its providers option
+```
+
+A component's children are registered by the plugin, not by your program. `protect` on the
+component reaches each of them, since a child inherits it, and so does a resource transform
+(`transforms`, or `register_resource_transform` in Python). A stack transformation registered with
+the legacy API (`transformations`, `register_stack_transformation`) runs only on your program's
+own resources, so write an option meant for a child as a transform or on the component.
+
+### Moving an existing deployment onto them
+
+With `adopt: true`, each child gets an alias to the root-level resource of its own name and type,
+with no parent, so Pulumi moves that resource's state onto the child instead of deleting one and
+creating the other. The move changes nothing in AWS only when:
+
+- each child's logical name is the existing resource's: the component's name, and
+  `cloudMapServiceLogicalName` and `metricFilterLogicalNamePrefix`, reproduce the existing names;
+- `subnetIds` lists the subnets in their existing order, since subnet `<i>`'s mount targets are
+  `<N>-efs-mt-<i>` and `<N>-tsnet-efs-mt-<i>`;
+- every input reproduces the existing resources, the container definitions byte for byte;
+- the `aws` provider you pass is configured exactly as the one that manages them now. Moving a
+  resource from the default provider to an explicit one is decided by the explicit provider's diff
+  of its configuration, so give it every setting the default provider has, its region included.
+  The preview then also creates that provider, which exists only in Pulumi state.
+
+[A preview proves the move](#proving-a-move-with-a-preview).
+
+### Python example
+
+A program running both components, with its own API token. The `example-*` values and the
+`*.internal.example` hosts stand for your own; each string standing for one of your network's,
+cluster's, roles' or load balancer's resources would be that resource's output:
+
+```python
+import pulumi
+import pulumi_aws as aws
+import sjawhar_envoy_infra as envoy_infra
+
+config = pulumi.Config()
+region = pulumi.Config("aws").require("region")
+
+# Configure this provider as your default aws provider is configured.
+aws_provider = aws.Provider("envoy-aws", region=region)
+components = pulumi.ResourceOptions(providers=[aws_provider])
+
+arn = f"arn:aws:secretsmanager:{region}:000000000000:secret:example/envoy/"
+cluster_arn = f"arn:aws:ecs:{region}:000000000000:cluster/example-cluster"
+execution_role_arn = "arn:aws:iam::000000000000:role/example-execution"
+task_role_arn = "arn:aws:iam::000000000000:role/example-task"
+subnet_ids = ["subnet-0example0000000a", "subnet-0example0000000b"]
+base_tags = {"project": "example-project", "env": "example-env"}
+
+api_token = aws.secretsmanager.Secret("example-api-token", name="example/envoy/api-token")
+api_token_version = aws.secretsmanager.SecretVersion(
+    "example-api-token-version",
+    secret_id=api_token.id,
+    secret_string=config.require_secret("apiToken"),
+)
+
+nats = envoy_infra.aws.NatsService(
+    "example-nats",
+    authorization=envoy_infra.aws.AuthorizationArgs(
+        users=[
+            envoy_infra.aws.UserArgs(
+                name="example-listener",
+                nkey="UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO",
+                publish=envoy_infra.aws.RulesArgs(allow=[">"]),
+                subscribe=envoy_infra.aws.RulesArgs(allow=[">"]),
+                has_seed=True,
+            ),
+        ],
+    ),
+    config_header=["Rendered by envoy-infra.", "Public keys only."],
+    server_args=["--jetstream", "--store_dir", "/data", "--port", "4222", "--http_port", "8222"],
+    config_path="/tmp/nats-server.conf",
+    nats_image="example.registry/nats:<tag>",
+    tailscale_image="example.registry/tailscale:<tag>",
+    tailnet_hostname="example-bus",
+    tailnet_tags=["tag:example-bus"],
+    tailnet_client_secret_arn=arn + "tailnet-oauth",
+    region=region,
+    vpc_id="example-vpc",
+    subnet_ids=subnet_ids,
+    security_group_id="example-nats-sg",
+    cluster_arn=cluster_arn,
+    execution_role_arn=execution_role_arn,
+    task_role_arn=task_role_arn,
+    cloud_map_namespace_id="example-namespace-id",
+    cloud_map_namespace_name="example-namespace.internal.example",
+    cloud_map_service_name="example-bus",
+    cloud_map_service_logical_name="example-nats-cloudmap",
+    family="example-nats",
+    log_group_name="/ecs/example-nats",
+    log_retention_days=30,
+    cpu="256",
+    memory="1024",
+    platform_version="LATEST",
+    base_tags=base_tags,
+    metric_namespace="example/NATS",
+    metric_filter_logical_name_prefix="example-nats",
+    opts=components,
+)
+
+listener = envoy_infra.aws.WebhookListener(
+    "example-listener",
+    machine_id="example-fargate",
+    nats_urls=nats.internal_url.apply(lambda url: [url]),
+    image="example.registry/envoy@sha256:<digest>",
+    region=region,
+    api_token_secret_arn=api_token.arn,
+    api_token_secret_version_id=api_token_version.version_id,
+    seed_secret_arn=arn + "nats-nkey-seed-example-listener",
+    webhooks=["github", "slack"],
+    github_webhook_secret_arn=arn + "github-webhook",
+    slack_signing_secret_arn=arn + "slack-signing",
+    reviewer_app_id="1234567",
+    mention_trigger="@legion",
+    cluster_arn=cluster_arn,
+    execution_role_arn=execution_role_arn,
+    execution_role_name="example-execution",
+    task_role_arn=task_role_arn,
+    subnet_ids=subnet_ids,
+    security_group_id="example-listener-sg",
+    target_group_arn=f"arn:aws:elasticloadbalancing:{region}:000000000000:targetgroup/example-hooks/0123456789abcdef",
+    cloud_map_namespace_id="example-namespace-id",
+    cloud_map_namespace_name="example-namespace.internal.example",
+    cloud_map_service_name="example-hooks",
+    cloud_map_service_logical_name="example-listener-cloudmap",
+    family="example-listener",
+    log_group_name="/ecs/example-listener",
+    log_retention_days=30,
+    cpu="256",
+    memory="512",
+    listen_host="0.0.0.0",
+    host_bridge="127.0.0.1",
+    nats_replicas=1,
+    alarm_topic_arn=f"arn:aws:sns:{region}:000000000000:example-alarms",
+    base_tags=base_tags,
+    metric_namespace="example/EnvoyListener",
+    nats_service_arn=nats.service_arn,
+    opts=components,
+)
+
+pulumi.export("natsUrl", nats.internal_url)
+pulumi.export("listenerUrl", listener.internal_url)
+```
+
+With `aws:region` and the secret `apiToken` set, `pulumi preview` plans `+ 47 to create`: the stack,
+the explicit provider, the token's secret and version, the two components and their 22 and 19
+children. Its outputs are `natsUrl: "nats://example-bus.example-namespace.internal.example:4222"`
+and `listenerUrl: "http://example-hooks.example-namespace.internal.example:9020"`.
+
+## Proving a move with a preview
+
+A preview proves a move onto a component. Apply it only when the preview:
+
+- shows every adopted resource as `same`, and no step for its old root-level name;
+- updates, replaces and deletes nothing;
+- creates only what exists only in Pulumi state: the components themselves, and provider resources
+  (`pulumi:providers:*`) such as an explicit provider you pass a component and the plugin's own
+  default provider, `pulumi:providers:envoy-infra`;
+- changes no stack output.
+
+This lists every step that is not `same`:
+
+```sh
+pulumi preview --json --show-sames | jq -r '.steps[] | select(.op != "same") | "\(.op) \(.urn)"'
+```
+
+It does not show a changed stack output, since that leaves the stack's own step `same`. A plain
+`pulumi preview` lists each changed output under `Outputs:`.
+
+## `envoy-infra render`
+
+`envoy-infra render` prints what the AWS components register, for a program that needs it outside
+Pulumi, such as a check that runs a real NATS server on the start script or one that tests the
+filters' patterns against log lines. Each subcommand builds its output with the function the
+component builds it with, and a flag sets the component's input its `--help` names. A value the
+component refuses is refused, naming the flag, as `refused: --<flag>: <reason>` with exit 2; a usage
+error prints the usage and exits 2. It reads only its flags and the file `--authorization-file`
+names, and calls no API.
+
+### nats-start-script
+
+```text
+envoy-infra render nats-start-script --authorization-file <json> [--config-header <line>]... [--server-arg <arg>]... --config-path <path>
+```
+
+Prints the script `aws:NatsService`'s `nats` container runs under `/bin/sh -c`, exactly as the
+component registers it, with no newline after it. The file holds the component's `authorization`
+input as JSON, keyed as the schema spells it (`users`, each with `name`, `nkey`, `publish` and
+`subscribe` with `allow` and `deny`, and `hasSeed`; `noAuthUser`); a key it does not have, or
+anything after the one JSON value, is refused. Give `--config-header` once per line and
+`--server-arg` once per argument, in order. For a file with one user:
+
+```json
+{"users": [{"name": "example-listener", "nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "publish": {"allow": [">"]}, "subscribe": {"allow": [">"]}, "hasSeed": true}]}
+```
+
+```text
+$ envoy-infra render nats-start-script --authorization-file authorization.json --config-header 'Rendered by envoy-infra.' --server-arg --jetstream --server-arg --store_dir --server-arg /data --config-path /tmp/nats-server.conf
+set -eu; printf '%s' '# Rendered by envoy-infra.
+authorization {
+  users: [
+    # example-listener
+    {"nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "permissions": {"publish": {"allow": [">"]}, "subscribe": {"allow": [">"]}}}
+  ]
+}
+' > /tmp/nats-server.conf; exec nats-server --config /tmp/nats-server.conf --jetstream --store_dir /data
+```
+
+### webhook-listener-env
+
+```text
+envoy-infra render webhook-listener-env --machine-id <id> [--nats-url <url>]... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>
+```
+
+Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
+container's order. The secrets ECS injects are not printed. It refuses what the component refuses of
+these inputs, and a value holding a line break, which no line could carry:
+
+```text
+$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --host-bridge 127.0.0.1 --nats-replicas 1
+PORT=9020
+ENVOY_LISTEN_HOST=0.0.0.0
+ENVOY_MACHINE_ID=example-fargate
+NATS_URLS=nats://example-bus.example-namespace.internal.example:4222
+ENVOY_ALLOW_REMOTE_NATS=1
+ENVOY_HOST_BRIDGE=127.0.0.1
+ENVOY_NATS_REPLICAS=1
+ENVOY_WEBHOOKS=github,slack
+ENVOY_GITHUB_MENTION_TRIGGER=@legion
+ENVOY_REVIEWER_APP_ID=1234567
+```
+
+Without `--reviewer-app-id`, it prints
+`refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.
+
+### metric-filters
+
+```text
+envoy-infra render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --logical-name-prefix <p> --json
+```
+
+Prints a component's log metric filters as a JSON array, in the order the component registers
+them, each with its `logicalName`, `pattern`, `metricName` and `metricNamespace`.
+`--logical-name-prefix` is what their logical names start with: an `aws:NatsService`'s
+`metricFilterLogicalNamePrefix`, an `aws:WebhookListener`'s own name. `--json` is required: JSON is
+the one output format. The listener's first filter, for a listener named `example-listener`:
+
+```json
+{
+  "logicalName": "example-listener-publish-failure-filter",
+  "pattern": "{ $.level = \"ERROR\" && $.msg = \"listener exception publish failed\" }",
+  "metricName": "PublishFailures",
+  "metricNamespace": "example/EnvoyListener"
+}
 ```
 
 ## NATS seeds
@@ -469,8 +957,10 @@ describes.
 
 `core.Authorization` is a NATS server's nkey authorization: the users it knows by public key, what
 each may publish and subscribe to, and the user a client presenting no credential becomes. A NATS
-server's configuration is rendered from it, so it holds public keys only. This version's one
-component, `host:Listener`, runs no NATS server and takes none.
+server's configuration is rendered from it, so it holds public keys only. `aws:NatsService` takes
+it as its `authorization` input, an `aws:Authorization`, whose properties are these fields in
+camelCase (`users[].name`, `nkey`, `publish`, `subscribe`, `allow`, `deny`, `hasSeed`,
+`noAuthUser`); `envoy-infra render nats-start-script` reads the same from its file.
 
 | Field | What it is |
 | --- | --- |
