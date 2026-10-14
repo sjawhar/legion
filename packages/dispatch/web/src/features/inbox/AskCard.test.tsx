@@ -432,6 +432,8 @@ function mockVersions(versions: Record<number, string>) {
   }));
 }
 
+// The suite's preload registers no testing-library cleanup, so a render another file never
+// unmounts stays in the shared document; these tests read their own card alone (`within`).
 for (const variant of ["full", "compact"] as const) {
   test(`a ${variant} approval card names the earlier approval and diffs the two versions only when asked`, async () => {
     const ask = approvalAsk(earlierApproval);
@@ -443,33 +445,34 @@ for (const variant of ["full", "compact"] as const) {
         <AskCard ask={ask} documentLink={false} initialThread={thread(ask)} variant="compact" />
       )
     );
+    const card = within(view.container);
     try {
-      const line = view.getByText(/^Approved at version 11 on/);
+      const line = card.getByText(/^Approved at version 11 on/);
       expect(line.textContent).toBe("Approved at version 11 on 2026-10-05 by alice.");
       const time = line.querySelector("time");
       expect(time?.getAttribute("datetime")).toBe("2026-10-05T14:30:00Z");
       expect(time?.getAttribute("title")).toBe("2026-10-05T14:30:00Z");
-      expect(view.getByText("Approve spec.md (version 12)?")).toBeTruthy();
-      expect(view.queryByTestId("version-diff")).toBeNull();
+      expect(card.getByText("Approve spec.md (version 12)?")).toBeTruthy();
+      expect(card.queryByTestId("version-diff")).toBeNull();
       expect(getArtifactVersion).not.toHaveBeenCalled();
 
-      const show = view.getByRole("button", { name: "Show diff" });
+      const show = card.getByRole("button", { name: "Show diff" });
       expect(show.getAttribute("aria-expanded")).toBe("false");
       fireEvent.click(show);
-      const diff = await view.findByTestId("version-diff");
+      const diff = await card.findByTestId("version-diff");
       expect(getArtifactVersion.mock.calls).toEqual([
         ["artifact-1", 11],
         ["artifact-1", 12],
       ]);
       expect(diff.querySelector("del")?.textContent).toBe("Before\n");
       expect(diff.querySelector("ins")?.textContent).toBe("After\n");
-      expect(view.queryByRole("button", { name: "Show diff" })).toBeNull();
+      expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
 
-      const hide = view.getByRole("button", { name: "Hide diff" });
+      const hide = card.getByRole("button", { name: "Hide diff" });
       expect(hide.getAttribute("aria-expanded")).toBe("true");
       fireEvent.click(hide);
-      expect(view.queryByTestId("version-diff")).toBeNull();
-      expect(view.getByRole("button", { name: "Show diff" })).toBeTruthy();
+      expect(card.queryByTestId("version-diff")).toBeNull();
+      expect(card.getByRole("button", { name: "Show diff" })).toBeTruthy();
     } finally {
       view.unmount();
       getArtifactVersion.mockRestore();
@@ -480,11 +483,12 @@ for (const variant of ["full", "compact"] as const) {
 test("a first approval request shows no earlier approval and no diff control", async () => {
   const ask = approvalAsk();
   const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
+  const card = within(view.container);
   try {
-    await view.findByRole("radio", { name: "Approve" });
-    expect(view.getByText("Approval requested")).toBeTruthy();
-    expect(view.queryByText(/Approved at version/)).toBeNull();
-    expect(view.queryByRole("button", { name: "Show diff" })).toBeNull();
+    await card.findByRole("radio", { name: "Approve" });
+    expect(card.getByText("Approval requested")).toBeTruthy();
+    expect(card.queryByText(/Approved at version/)).toBeNull();
+    expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
   } finally {
     view.unmount();
   }
@@ -497,9 +501,10 @@ test("the diff cuts every decision block, so answers alone leave nothing changed
     12: decisionBlockFixture("answered.md"),
   });
   const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
+  const card = within(view.container);
   try {
-    fireEvent.click(view.getByRole("button", { name: "Show diff" }));
-    const diff = await view.findByTestId("version-diff");
+    fireEvent.click(card.getByRole("button", { name: "Show diff" }));
+    const diff = await card.findByTestId("version-diff");
     expect(diff.querySelector("ins, del")).toBeNull();
     expect(diff.textContent).toContain("The platform team asked for a rollback path.");
     expect(diff.textContent).not.toContain("ask{");
@@ -516,9 +521,10 @@ test("the diff keeps a paragraph changed beside the decision blocks", async () =
     12: decisionBlockFixture("paragraph-changed.md"),
   });
   const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
+  const card = within(view.container);
   try {
-    fireEvent.click(view.getByRole("button", { name: "Show diff" }));
-    const diff = await view.findByTestId("version-diff");
+    fireEvent.click(card.getByRole("button", { name: "Show diff" }));
+    const diff = await card.findByTestId("version-diff");
     expect(diff.querySelector("del")?.textContent).toBe("The service ships behind a flag.\n");
     expect(diff.querySelector("ins")?.textContent).toBe(
       "The service ships behind a flag and a canary.\n"
