@@ -61,6 +61,7 @@
   "contractChangeCensus": "not required: unchanged since round 2",
   "notes": [
     "The PR body's `CI:` line still reads `pending at 74808044c4e6`; the runs are green (the tester's line cites them) - the implementer's line to bring up to date before READY (retro recomputes the body before its push).",
-    "Not run here: the Postgres-backed suites (CI ran them green at 74808044) and stage 3 (devbox-only, dispatch://LEGION-718)."
+    "Not run here: the Postgres-backed suites (CI ran them green at 74808044) and stage 3 (devbox-only, dispatch://LEGION-718).",
+    "Round 4's approval at 9e442ffa stood on a handoff head whose push carried `skip-checks: true`; the PR Title run the approval itself started settled that head without lint, typecheck and test, replacing the verdict carried from the green code head 74808044 (dispatch://LEGION-698, fix in retro, not deployed). The architect's ruled workaround: this `.legion/`-only commit is pushed without the trailer so CI runs at its head, and a second APPROVE names that head by SHA once lint, typecheck and test are green there; the completion recorded at 9e442ffa stands and is not repeated."
   ]
 }
