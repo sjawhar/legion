@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-752",
+  "completed": "2026-10-14T16:07:25Z",
+  "plan": "dispatch://LEGION-752/artifact/plan-md",
+  "summary": "Hold the approved version A's decision blocks to the same row test as N's (blockAsItsRowHasIt over the whole server-owned set plus the decided wording, against the row at N's write), refuse a repeated block id on A as on N, delete the three-attribute reading (askBlockState, askBlockStateOf, shownAskState, askBlockStates), and carry N's blocks as their rows. Dispatch server only: packages/envoy/internal/dispatch/docs/approval_carry.go and its two test files, plus the LEGION-573 learning's last paragraph, the packages/envoy/AGENTS.md approval bullet and a CHANGELOG entry.",
+  "base": {
+    "codeIsOn": "legion/LEGION-573@origin (sjawhar/legion#1944, head 65996f2e, unmerged at planning); main@origin 9164612c holds no approval_carry.go",
+    "firstAct": "If #1944 has merged, forward-merge main@origin into legion/LEGION-752 (jj new legion/LEGION-752@origin main@origin) and open the PR against main; else forward-merge legion/LEGION-573@origin the same way, open the PR with --base legion/LEGION-573, and when #1944 merges forward-merge main@origin, retarget to main, compare the fingerprint per skill://legion-worker/references/conflicts-and-rewrites.md and re-run the test commands. Never a rebase."
+  },
+  "codeShapes": {
+    "file": "packages/envoy/internal/dispatch/docs/approval_carry.go",
+    "delete": ["askBlockState", "askBlockStateOf", "shownAskState", "askBlockStates"],
+    "add": ["blockAsSettlementLeavesIt(node, ask) bool (blockAsItsRowHasIt + decided wording; shared by N and A)", "heldAsItsRow(approvedNodes map[string]*pmdoc.Node, blocks map[string]model.Ask) map[string]bool (a missing row yields false without calling the writer)"],
+    "change": ["rowBackedStates -> rowBackedBlocks returning map[string]model.Ask", "approvedVersion{nodes map[string]*pmdoc.Node, cut}; readApprovedVersion uses askNodes and is not readable on a repeated id", "carryInput{blocks map[string]model.Ask, approved map[string]bool}; carryVerdict excludes a block only when approved[id]; answerers reads rows", "carriedReview passes approved: heldAsItsRow(approved.nodes, blocks)"],
+    "docCommentSites": ["file comment :21-43", "approvedVersion", "readApprovedVersion", "rowBackedBlocks", "blockAsSettlementLeavesIt", "heldAsItsRow", "carryVerdict"]
+  },
+  "tests": {
+    "newRedBeforeGreenAfter": [
+      "api/approval_carry_approved_test.go: TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing (table: selected, answer, copied_from, copied_from_document; row-true control subtest carries at 4 from 2)",
+      "api/approval_carry_approved_test.go: TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing (agent reword through the edits route lands in the version the human approves)",
+      "docs (own file, base-compatible helpers): TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing"
+    ],
+    "rewritten": ["TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion", "TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode (renamed for rowBackedBlocks)", "TestAnswerersNamesEachAnswererOfTheVersionOnce", "new TestAnApprovedVersionsBlocksAreHeldAsTheirRows"],
+    "regressionProofForRowTrueA": ["TestAForgedServerAttributeOnADecidedBlockCarriesNothing", "TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry", "TestAChangedAnswerByTheSameHumanCarriesAgain", "TestAnotherHumansAnswerHeApprovedStaysOutOfTheCarrysTest", "TestHisAnswerToABlockTheApprovedVersionHeldOpenCarries", "TestACopiedBlockAnsweredThroughItsSourceCarriesOnTheSourceOnly", "TestAnOpenApprovalRequestIsAnsweredByTheCarry", "TestAVersionHoldingARepeatedBlockIDCarriesNothing"],
+    "commands": [
+      "cd packages/envoy && test -z \"$(gofmt -l ./internal/dispatch)\" && go vet ./internal/dispatch/...",
+      "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/docs/ -run 'Carr|RowBacked|Answerers|AskNodes|HeldAsTheirRows|RepeatedBlockID' -count=1 -v",
+      "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/api/ -run 'Carr' -count=1 -v",
+      "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/... -count=1"
+    ],
+    "redOnBase": "Export the base tree from the jj git store and copy in only the new test files; the three new tests must show --- FAIL (not SKIP) there and --- PASS at the head (docs/solutions/testing/red-on-main-for-a-go-daemon-test-is-a-git-archive-of-main-from-the-jj-git-store-plus-the-branchs-test-files-LEGION-698.md)."
+  },
+  "trickyParts": [
+    "storetest.Open skips without DISPATCH_TEST_DATABASE_URL; the pod has no Docker/Postgres and Dispatch migrations need the vector extension: build a Postgres under /tmp from Debian packages per docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-...-LEGION-695.md (lines 37-42), leave it running, record PATH, LD_LIBRARY_PATH, port and URL in the implement handoff for the tester.",
+    "POST /artifacts/{id}/reviews pins the latest version and every live write re-arms the settle timer: the new api tests use a 2 s window and assert the review's Version and the approved version's markdown, so a lost race fails as setup rather than passing on a row-true A.",
+    "The selected case is not reachable over HTTP (edits route and uploads discard server-owned ask attributes); the Go test uses the server's in-process live attribute path (setLiveBlockAttributes) as the sibling does; the live HTTP proof drives the decided-wording case (reword through the edits route) with DISPATCH_TEST_HOOKS=1 DISPATCH_TEST_SETTLE_DELAY=4s. Narrate no document-socket forgery as a procedure anywhere (plan, tests, PR body)."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract, the PR body and what a proof is, the forward-merge rule for the stacked base",
+      "dispatch: references/api.md for the routes the live drive calls; the Dispatch surfaces this code serves",
+      "ce-simplify-code: the simplify pass on the settled approval_carry.go before handoff, as the parent ran"
+    ],
+    "test": [
+      "legion-worker: the tester drives the changed surface and records its proof; references/pr-body.md says what it verifies",
+      "dispatch: reading approval state, reviews and events over the API during the live drive"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md and references/review-threads.md",
+      "thermonuclear-deep-review: a rule that records approvals in a human's name is a trust boundary; check plan section 1 against the code case by case and the seven comment sites"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The A-side row test cannot be computed where A is read today (rows never reach readApprovedVersion); once A is held to the row, the three-attribute 'before == block' comparison is dead weight; the plan must state the new shapes.", "answer": "Plan 2.1-2.6: rows are N's row-backed blocks; carriedReview computes approved: heldAsItsRow(approved.nodes, blocks); approvedVersion holds A's nodes; carryInput.approved is map[string]bool over A's ids, so the still-stands loop keeps A's id set; askBlockState and the node readers are deleted."},
+      {"finding": "The comparison can only use the row as it stands at N's write; a forged A value coinciding with the current row would read unchanged (residual).", "answer": "Plan section 1: the rule names the row at N's write and shows the residual is empty by the row's own transitions - a decided row's wording is frozen (api/asks.go:398 ASK_NOT_OPEN), its selection/text move only with a new answered_at, its state only with a resolution - so a stored block matching the current row over the whole set was as the row stood at A. Stated in heldAsItsRow's doc comment."},
+      {"finding": "'Treated as changed' forgives a non-row-true A block when the approver re-answered it after approving, and that block may be the one change; the alternative is refusing the carry.", "answer": "Plan follows the spec's words (treated as changed) and states the consequence in carryVerdict's doc comment and pins it in TestCarryVerdict… ('…which he answered again since his approval' -> true). Named to the architect as a confirmation in the completion summary."},
+      {"finding": "A stored A holding a repeated block id is not covered by the spec's bullets; today first node wins on A, N refuses.", "answer": "Plan section 1 and 3.2: 'the same rule as N' includes askNodes' refusal; A is not readable, nothing carries; pinned by the new TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing. Named to the architect."},
+      {"finding": "The red/green test races settlement for the version the human approves; POST /reviews pins the latest version; a lost race gives a false green.", "answer": "Plan 3.1: order set live attribute -> name version -> approve, a 2 s settle window, guards that the review's Version is 3 and version 3's markdown shows the written value, waitForArtifactVersion(4) for settlement's write-back before the next insert; the red run must show FAIL at the base, not SKIP."},
+      {"finding": "The control the spec names ('TestCarry…') does not exist under that name in the api package.", "answer": "Plan 6.2 names the controls: the new test's row-true subtest and TestAnAnswerThatIsTheWholeChangeSinceHisApprovalCarriesIt (api :389), plus the sibling's settlement-repaired tail; the spec stays as written (the architect's)."},
+      {"finding": "The selected case is not reachable over the HTTP surface the spec names; the HTTP-reachable case of the same check is a reword of a decided block through the edits route landing in the approved version.", "answer": "Plan 3.1 adds TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing and 6.5 makes the reword-into-A sequence the live HTTP drive (DISPATCH_TEST_HOOKS=1 DISPATCH_TEST_SETTLE_DELAY=4s), with the base build as the negative control; the selected half is proven by the Go test through the server's own live attribute path; the PR body says exactly this."},
+      {"finding": "The A side now runs the attribute writer over attributes parsed back from stored markdown; the plan must bound this regression explicitly.", "answer": "Plan 3.4 names the existing carries with a decided block inside A that must stay green as the regression proof, and cites askServerAttributeEqual's []any tolerance and the pure test that already passes a parsed decided block through blockAsItsRowHasIt."},
+      {"finding": "Deleting the three-attribute reading breaks three tests the spec never mentions.", "answer": "Plan 3.3 names TestCarryVerdict…, TestRowBackedStates… and TestAnswerers… with exactly how each is rewritten, and adds TestAnApprovedVersionsBlocksAreHeldAsTheirRows."},
+      {"finding": "askBlockState/askBlockStateOf survive for N unless replaced; the spec leaves an either/or for the node readers.", "answer": "Plan section 1: nothing survives - N's blocks travel as model.Ask rows, answerers and carryVerdict read the rows, the RFC 3339 round trip goes; shownAskState/askBlockStates deleted outright; check: grep -rn lists nothing."},
+      {"finding": "An A node whose block id has no row of this document needs a defined answer; a zero-value model.Ask must never reach setAskServerAttributes.", "answer": "Plan 2.4: heldAsItsRow yields false for a missing row without calling the writer, and the doc comment says why that id cannot decide a carry either way (N refused first if the id stands in N; the still-stands loop refuses if not)."},
+      {"finding": "main holds none of the code; the implementer's first act is a base decision (stacked PR on the parent branch, or wait for the merge).", "answer": "Plan section 5: check #1944; forward-merge main@origin or legion/LEGION-573@origin into the issue branch (jj new with two parents, never a rebase); PR base accordingly; on the parent's merge forward-merge main, retarget, fingerprint, re-run tests."},
+      {"finding": "The repository ships this kind of change with the Envoy CHANGELOG [Unreleased] entry and the packages/envoy/AGENTS.md approval bullet, both on the parent branch; and #1944's Fast-follow line names the residual.", "answer": "Plan section 4: a separate CHANGELOG entry under [Unreleased] naming LEGION-752 (right whether or not #1944 ships in the same release), one clause in the AGENTS.md bullet; the parent PR's Fast-follow line is the architect's to strike, named in the completion summary."},
+      {"finding": "Two acceptance bullets are prose judgements (doc comments state A beside N; the node reader's comment says why); the learning bullet needs a command.", "answer": "Plan 2.7 lists the seven comment sites the reviewer checks as a list; section 4 gives the learning's grep (LEGION-752 present, 'not closed' absent); 6.3 gives the grep that the node readers are gone."},
+      {"finding": "The proof cannot run in the pod as the Surface describes: dev-postgres.sh needs Docker; Dispatch needs pgvector; a skipped Go run is not red.", "answer": "Plan section 3 (opening) assigns the /tmp Postgres build to the implementer per the LEGION-695 learning, records its coordinates for the tester in the handoff, and states that red-before evidence must show FAIL, not SKIP."},
+      {"finding": "The spec's Problem paragraph reads as if only a document-socket peer reaches the hole; an agent's HTTP reword of a decided block reaches the same A-side hole.", "answer": "Plan section 9 names it for the architect, who owns the spec's words; the plan's tests and PR body claim the right reach (the wording test and the live HTTP drive)."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": []
+}
