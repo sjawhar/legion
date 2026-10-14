@@ -156,17 +156,17 @@ jobs:
           done
           wc -l "$notices"/*
 
-      # release-envoy-infra.yaml releases the envoy-infra plugin only for a commit to a path it
-      # names, so its push paths and .github/envoy-infra-release-paths must cover every package the
-      # plugin compiles in.
-      - name: Check release-envoy-infra.yaml's paths cover every package the plugin compiles in
+      # release-envoy-infra.yaml releases the envoy-infra plugin and command only for a commit to a
+      # path it names, so its push paths and .github/envoy-infra-release-paths must cover every
+      # package either compiles in.
+      - name: Check release-envoy-infra.yaml's paths cover every package the plugin and command compile in
         run: .github/scripts/check-envoy-infra-release-paths.sh
 
-      # The notices step above loads the plugin's packages without type-checking them, and
-      # envoy-infra-go's vet and tests compile for the runner's linux/amd64 only, so this compiles
-      # every command of the envoy-infra module for each target release-envoy-infra.yaml builds,
-      # with that build's CGO_ENABLED and -buildvcs: a compile error on one platform only fails the
-      # pull request rather than the release after the merge.
+      # The notices step above loads the plugin's and the command's packages without type-checking
+      # them, and envoy-infra-go's vet and tests compile for the runner's linux/amd64 only, so this
+      # compiles every command of the envoy-infra module for each target release-envoy-infra.yaml
+      # builds, with that build's CGO_ENABLED and -buildvcs: a compile error on one platform only
+      # fails the pull request rather than the release after the merge.
       - name: Compile envoy-infra's commands for every release target
         run: |
           for target in $(jq -r '.["envoy-infra"][]' ../../../.github/envoy-infra-targets.json); do

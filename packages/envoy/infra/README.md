@@ -68,13 +68,13 @@ cloud credentials, so check the archive's provenance before you install it. For 
 ```sh
 gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
 gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 tar -xzf envoy-infra-linux-amd64.tar.gz
 envoy-infra-linux-amd64/envoy-infra --version
 ```
 
-`--cert-identity` pins the signer to this repository's `release.yaml` read from `main`,
+`--cert-identity` pins the signer to this repository's `release-envoy-infra.yaml` read from `main`,
 `--source-ref` to a run started on `main`, and `--deny-self-hosted-runners` to a GitHub-hosted
 runner, so an archive attested by any other workflow, branch or runner in the repository fails;
 `--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
