@@ -97,7 +97,7 @@ with the approval state:
 | --- | --- |
 | `Awaiting approval` | Approval was requested and nobody has reviewed this version yet. |
 | `Approved v12` | Version 12 is approved, and it is the latest version. |
-| `Approved v12 · changed since` | Version 12 was approved, then the document changed. |
+| `Approved v12 · changed since` | Version 12 was approved, then the document changed, other than by your own answer to a decision block (below). |
 | `Changes requested` | A reviewer asked for changes. |
 
 Choose the chip to see the review history. Beside it:
@@ -107,8 +107,23 @@ Choose the chip to see the review history. Beside it:
 - **Request changes** asks you for a reason, which goes back to the agent.
 
 The request also reaches your Inbox as an **Approval requested** card. Answering either one is the
-same review. When Legion's design gate is on, Legion waits for this approval before it builds what
-a root issue's spec describes.
+same review. When you approved an earlier version of the document, the card puts
+`Approved at version N on <date> by <who>.` under the question, with a **Show diff** control that
+shows what changed between that version and the one you are asked to approve, with every decision
+block left out of both, so you read what changed outside the decisions you already made; the
+agent's summary names it in a sentence.
+
+Your own answer to a decision block in a document you approved carries your approval forward when
+that answer is the whole change since the version you approved: Dispatch records an approval in
+your name at the version your answer writes, the chip reads `Approved` at that version, and the
+review history shows it, so nobody asks you to approve again what you just decided. A change
+outside the decision blocks, a block added or answered since your approval without your own answer
+(someone else's answer, or a block waived), a decided block whose question or options were
+changed, a removed block, or a request for changes newer than your approval leaves the document
+`changed since`, and the next request shows you the diff.
+
+When Legion's design gate is on, Legion waits for this approval before it builds what a root
+issue's spec describes.
 
 ## Block links
 

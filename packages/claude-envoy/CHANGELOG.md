@@ -4,6 +4,11 @@
 
 ### Changed
 
+- The `dispatch` command's approval texts, and the `dispatch` skill this plugin ships, state the
+  carried approval (LEGION-573): a human's own answer to a decision block carries their approval
+  to the version it writes when that answer is the whole change since the version they approved,
+  so nothing is requested for it; a change outside the decision blocks makes the approval stale,
+  and the next request's `--summary` names what changed since the earlier approval.
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
   `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and

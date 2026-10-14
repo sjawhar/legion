@@ -4599,7 +4599,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again once the human has agreed to every point in this version"
+      "# Spec\n\nApproval: approved v2 by sjawhar, changed since (now v4) - the human's own answer to a decision block carries the approval when that answer is the whole change since v2; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v2"
     );
   });
 

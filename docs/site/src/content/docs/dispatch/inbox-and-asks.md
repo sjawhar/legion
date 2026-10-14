@@ -170,6 +170,12 @@ view, instead of the issue's Conversation turn. If the document has moved past t
 request named, the link still opens the current document, and the card keeps saying which version
 the request was for.
 
+When you approved the document before, the card says so under the question:
+`Approved at version N on <date> by <who>.` with a **Show diff** control. Pressing it shows what
+changed between the version you approved and the one you are asked to approve, with every
+decision block left out of both, since the answers in those blocks are your own. A first request,
+on a document nobody has approved, shows neither.
+
 Answering this card is the same review as the **Approve** and **Request changes** buttons on the
 document itself. [Documents](/legion/dispatch/documents/#approvals) covers approval states and what
 a later version does to an approval.
