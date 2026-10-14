@@ -905,9 +905,10 @@ jobs:
             exit 1
           fi
         working-directory: packages/envoy/infra
-      # release.yaml's envoy_infra job releases the plugin only for a commit to a path it names,
-      # so its push paths, filter and bump paths must cover every package the plugin compiles in.
-      - name: Check release.yaml's envoy_infra paths cover every package the plugin compiles in
+      # release.yaml's envoy_infra job releases the plugin and the envoy-infra command only for a
+      # commit to a path it names, so its push paths, filter and bump paths must cover every
+      # package either compiles in.
+      - name: Check release.yaml's envoy_infra paths cover every package the plugin and command compile in
         run: .github/scripts/check-envoy-infra-release-paths.sh
       - name: Vet envoy-infra, its live-test tags included
         run: go vet -tags pulumilive,natslive ./...

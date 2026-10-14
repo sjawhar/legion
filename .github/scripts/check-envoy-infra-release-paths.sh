@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# release.yaml's envoy_infra job releases the envoy-infra Pulumi plugin only for a commit that
-# touches one of the paths it names, in three places: the workflow's push paths (whether the run
-# starts), the `changes` job's envoy_infra filter (whether the job runs) and the paths after `--`
-# of the job's release-bump.sh call (whether a version is cut). The plugin compiles in packages of
-# packages/envoy as well as of its own module, and renders grants from Envoy's exported subject
-# names, so a commit to one of those packages must release it, and a list that misses one leaves
-# that change unreleased with no error anywhere.
+# release.yaml's envoy_infra job releases the envoy-infra Pulumi plugin and the envoy-infra command
+# only for a commit that touches one of the paths it names, in three places: the workflow's push
+# paths (whether the run starts), the `changes` job's envoy_infra filter (whether the job runs) and
+# the paths after `--` of the job's release-bump.sh call (whether a version is cut). Both compile in
+# packages of packages/envoy as well as of their own module, and the plugin renders grants from
+# Envoy's exported subject names, so a commit to one of those packages must release them, and a
+# list that misses one leaves that change unreleased with no error anywhere.
 #
 # So this check derives the set from the build itself: every package of this repository's own Go
 # modules that `go list -deps ./cmd/...` names from packages/envoy/infra, for each target
@@ -179,9 +179,9 @@ for path, origin in sorted(required.items()):
 if problems:
     print("\n".join(problems), file=sys.stderr)
     print(
-        f"\nThe envoy-infra plugin builds from every path above (go list in {MODULE_DIR}, for each "
-        f"target {TARGETS} lists), so a commit to one must release it: add each to the list that "
-        "misses it.",
+        f"\nThe envoy-infra plugin and command build from every path above (go list in "
+        f"{MODULE_DIR}, for each target {TARGETS} lists), so a commit to one must release them: "
+        "add each to the list that misses it.",
         file=sys.stderr,
     )
     sys.exit(1)
@@ -189,6 +189,7 @@ for path, origin in sorted(required.items()):
     print(f"  {path} ({origin})")
 print(
     f"release.yaml's envoy_infra push paths, filter and bump paths cover the {len(required)} "
-    f"packages and module files above, which the plugin builds from across {len(targets)} targets"
+    f"packages and module files above, which the plugin and command build from across "
+    f"{len(targets)} targets"
 )
 PY

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `check-envoy-infra-release-paths.sh`: release.yaml's envoy_infra push paths, filter and
-# bump paths must cover every package of the repository's own Go modules the plugin compiles in,
-# for each target the target list names, and the module and workspace files that set its versions.
+# bump paths must cover every package of the repository's own Go modules a command under the
+# module's cmd/ compiles in, for each target the target list names, and the module and workspace
+# files that set their versions.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs. The miniature holds a Go workspace
@@ -133,7 +134,7 @@ root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
-  "$(contains "$out" 'cover the 10 packages and module files above, which the plugin builds from across 2 targets')"
+  "$(contains "$out" 'cover the 10 packages and module files above, which the plugin and command build from across 2 targets')"
 check "lists a package of packages/envoy the plugin compiles in" \
   "$(contains "$out" '  packages/envoy/internal/bus/ (example.com/envoy/internal/bus)')"
 check "lists the workspace file" "$(contains "$out" '  packages/envoy/infra/go.work (the workspace file)')"
@@ -194,6 +195,30 @@ printf '//go:build windows\n\npackage core\n\nimport _ "example.com/envoy/intern
   > "$root/packages/envoy/infra/core/other_windows.go"
 run_check "$root"
 check "exits 0: the targets decide which files are compiled in" "$(is "$status" 0)"
+
+echo "case: a second command under cmd/"
+root=$(fixture second-command)
+mkdir -p "$root/packages/envoy/infra/cmd/envoy-infra"
+printf 'package main\n\nimport "example.com/envoy/infra/core"\n\nfunc main() { println(core.Describe()) }\n' \
+  > "$root/packages/envoy/infra/cmd/envoy-infra/main.go"
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "lists the second command's package" \
+  "$(contains "$out" '  packages/envoy/infra/cmd/envoy-infra/ (example.com/envoy/infra/cmd/envoy-infra)')"
+check "counts it" "$(contains "$out" 'cover the 11 packages and module files above')"
+
+echo "case: a package only the second command compiles in"
+root=$(fixture second-command-import)
+mkdir -p "$root/packages/envoy/infra/cmd/envoy-infra"
+printf 'package main\n\nimport _ "example.com/envoy/internal/other"\n\nfunc main() {}\n' \
+  > "$root/packages/envoy/infra/cmd/envoy-infra/main.go"
+run_check "$root"
+check "exits 1: every command under cmd/ is read, not the plugin's alone" "$(is "$status" 1)"
+check "names the package missing from the filter" \
+  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $filter_miss")"
+check "names it missing from the bump paths" \
+  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $bump_miss")"
+check "the push paths' packages/envoy/** covers it" "$(is "$(contains "$out" "$push_miss")" false)"
 
 echo "case: a package whose path extends a listed one"
 root=$(fixture extended-path)
