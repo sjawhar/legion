@@ -28,9 +28,9 @@ const awsCurrent = "AWSCURRENT"
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
 // OpenAWS opens Secrets Manager under the caller's own AWS configuration (the environment, then the
-// shared files), in region when it is not "". With account, it first refuses unless
-// sts:GetCallerIdentity answers that account, so a seed never lands in, or is read from, another
-// account's secret of the same name.
+// shared files), in region when it is not "". It refuses credentials it cannot retrieve before any
+// call, naming the fix. With account, it then refuses unless sts:GetCallerIdentity answers that
+// account, so a seed never lands in, or is read from, another account's secret of the same name.
 func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	if account != "" && !awsAccountID.MatchString(account) {
 		return nil, refuse("--expect-account is a 12-digit AWS account id")
@@ -41,6 +41,10 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	}
 	if cfg.Region == "" {
 		return nil, refuse("no AWS region: pass --region, or name one in AWS_REGION or the profile")
+	}
+	// The credentials cache keeps what this retrieves, so the calls below sign with it.
+	if _, err := cfg.Credentials.Retrieve(ctx); err != nil {
+		return nil, refuse("no usable AWS credentials (%s); log in or set AWS_PROFILE", errorClass(err))
 	}
 	if account != "" {
 		identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})

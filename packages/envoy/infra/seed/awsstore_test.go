@@ -721,6 +721,25 @@ func TestAWSExpectAccountRunsFirstAndAlone(t *testing.T) {
 	})
 }
 
+// With no usable credentials, every mode is refused before any call, STS included, naming the
+// cause and the fix rather than the SDK's error class alone.
+func TestAWSMissingCredentialsAreRefusedBeforeAnyCall(t *testing.T) {
+	_, public := testnats.User(t)
+	for _, args := range [][]string{{"check"}, {"generate"}, {"verify", "--public-key", public}, {"check", "--expect-account", awsAccount}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			f := newFakeAWS(t)
+			serve(t, f)
+			t.Setenv("AWS_ACCESS_KEY_ID", "")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+			code, out, errs := runAWS(t, f, args...)
+			require.Equal(t, 2, code)
+			require.Empty(t, out)
+			require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials (errorString); log in or set AWS_PROFILE\n", errs)
+			require.Empty(t, f.recorded())
+		})
+	}
+}
+
 func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 	f := newFakeAWS(t)
 	serve(t, f)
