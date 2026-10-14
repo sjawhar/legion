@@ -44,9 +44,6 @@ type Description struct {
 	Exists, ScheduledForDeletion bool
 	DeletionDate                 string
 	CurrentVersion               string // "" when the store serves none
-	// The newest version's id and state, for a store whose default names the newest version
-	// whatever its state (GCP's versions/latest); "" for a store without such a default.
-	NewestVersion, NewestState string
 }
 
 // ErrRefused is every refusal's: nothing was written, so fixing the precondition its message names
@@ -219,6 +216,26 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 // that account's, with no call before that check but the one reading them.
 type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
 
+// mode is one of the command's modes: it returns the line the command prints on stdout, "" for
+// none, and its error.
+type mode func(ctx context.Context, s Store, name, publicKey string) (string, error)
+
+var modes = map[string]mode{
+	"check":    func(ctx context.Context, s Store, name, _ string) (string, error) { return Check(ctx, s, name) },
+	"generate": generateMode,
+	"verify":   Verify,
+}
+
+// generateMode is Generate as the command reports it: the public key and the version id, once a
+// version was written, before any error that followed.
+func generateMode(ctx context.Context, s Store, name, _ string) (string, error) {
+	public, version, err := Generate(ctx, s, name)
+	if version == "" {
+		return "", err
+	}
+	return fmt.Sprintf("public key: %s\nversion id: %s", public, version), err
+}
+
 const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
 
   check     whether the secret exists and which version its store serves by default
@@ -258,12 +275,12 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("a mode is required")
 	}
 	mode := args[0]
-	switch mode {
-	case "-h", "-help", "--help":
+	if mode == "-h" || mode == "-help" || mode == "--help" {
 		fs.Usage()
 		return 0
-	case "check", "generate", "verify":
-	default:
+	}
+	run, ok := modes[mode]
+	if !ok {
 		// Not echoed: a seed pasted in its place must not reach the terminal.
 		return usage("the mode is check, generate or verify")
 	}
@@ -292,43 +309,25 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 
 	s, err := stores[store](ctx, region, account)
 	if err != nil {
-		fmt.Fprintf(stderr, "refused: %s: %v\n", name, err)
-		return 2
+		return exitCode(stderr, refuse("%s: %v", name, err))
 	}
-	switch mode {
-	case "check":
-		line, err := Check(ctx, s, name)
-		if err != nil {
-			return report(stderr, err)
-		}
+	line, err := run(ctx, s, name, publicKey)
+	if line != "" {
 		fmt.Fprintln(stdout, line)
-	case "generate":
-		public, version, err := Generate(ctx, s, name)
-		if version != "" {
-			fmt.Fprintf(stdout, "public key: %s\nversion id: %s\n", public, version)
-		}
-		if err != nil {
-			return report(stderr, err)
-		}
-	default:
-		line, err := Verify(ctx, s, name, publicKey)
-		if line != "" {
-			fmt.Fprintln(stdout, line)
-		}
-		if errors.Is(err, ErrMismatch) {
-			return 1
-		}
-		if err != nil {
-			return report(stderr, err)
-		}
 	}
-	return 0
+	return exitCode(stderr, err)
 }
 
-// report writes err on stderr and returns its exit code: 2 for a refusal, 1 for an error after a
-// write.
-func report(stderr io.Writer, err error) int {
-	if errors.Is(err, ErrRefused) {
+// exitCode writes err on stderr and returns the command's exit code: 0 for none; 1 for ErrMismatch,
+// whose line is already on stdout, so it writes nothing; 2 for a refusal; and 1 for any other error,
+// which comes after a write.
+func exitCode(stderr io.Writer, err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, ErrMismatch):
+		return 1
+	case errors.Is(err, ErrRefused):
 		fmt.Fprintf(stderr, "refused: %v\n", err)
 		return 2
 	}
