@@ -101,6 +101,7 @@ restarts only `dispatch`.
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The listener owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback `NATS_URLS`, naming the URL. `compose/listener.compose.yml` sets it. |
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
+| `ENVOY_NATS_SOCKS5_PROXY` | no | A SOCKS5 proxy, as `host:port`, every NATS connection goes through (reconnects included), each server's host name handed to it unresolved. A value that is not `host:port` refuses startup naming the variable; a set proxy also needs `ENVOY_ALLOW_REMOTE_NATS=1`. Unset dials NATS directly. |
 | `ENVOY_LISTENER_PORT` | no | Defaults to `9020`. |
 | `ENVOY_LISTEN_HOST` | no | Defaults to `127.0.0.1`. |
 | `ENVOY_API_TOKEN` | conditional | Required when `ENVOY_LISTEN_HOST` is not loopback and no OIDC pair is set; matching bearer token for Listener API requests. Empty no longer opens `/v1` while a verifier is configured. |

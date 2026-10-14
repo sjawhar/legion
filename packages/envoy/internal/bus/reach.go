@@ -9,9 +9,10 @@ import (
 )
 
 // AllowRemoteEnvVar names the variable a run sets to "1" to reach a NATS server that is not this
-// machine's. Every connect refuses one otherwise, whether or not it owns the stream: a process
-// that reaches another machine's bus publishes into an event stream every agent consumes, and one
-// that owns the stream reconfigures a resource several deployments read.
+// machine's, or any NATS through a SOCKS5 proxy (SOCKS5ProxyEnvVar). Every connect refuses one
+// otherwise, whether or not it owns the stream: a process that reaches another machine's bus
+// publishes into an event stream every agent consumes, and one that owns the stream reconfigures a
+// resource several deployments read.
 //
 // Nothing infers the reach, because nothing can tell the deployed Dispatch from the same binary
 // run out of a checkout: both read envoy.natsUrls from the user envoy.json
@@ -29,10 +30,15 @@ var ErrRemoteNATS = errors.New("bus: refusing a NATS server that is not this mac
 
 // refuseRemoteNATS reports the first url naming another machine, unless the run opted in through
 // lookup (the connect's environment, WithEnvironment). An empty urls is nats.go's own default,
-// this machine's server, and passes.
+// this machine's server, and passes. A set SOCKS5ProxyEnvVar is remote reach whatever the URLs
+// say: the proxy chooses the server a connection reaches, so a loopback URL no longer names this
+// machine's.
 func refuseRemoteNATS(urls []string, lookup func(string) (string, bool)) error {
 	if allow, _ := lookup(AllowRemoteEnvVar); allow == "1" {
 		return nil
+	}
+	if proxy, set := lookup(SOCKS5ProxyEnvVar); set {
+		return fmt.Errorf("%w: %s=%s sends every connection through a proxy, which chooses the server (set %s=1 to reach it)", ErrRemoteNATS, SOCKS5ProxyEnvVar, proxy, AllowRemoteEnvVar)
 	}
 	for _, raw := range urls {
 		if LocalNATSURL(raw) {

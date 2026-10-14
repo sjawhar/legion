@@ -56,9 +56,9 @@ func WithReplicas(n int) ConnectOption {
 }
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
-// NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of the process environment (os.LookupEnv):
-// envoy-dispatch hands it the lookup over its settings table, which lists all three. Dial takes
-// the same lookup as its environment parameter.
+// ENVOY_NATS_SOCKS5_PROXY (SOCKS5ProxyEnvVar), NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of
+// the process environment (os.LookupEnv): envoy-dispatch hands it the lookup over its settings
+// table, which lists all four. Dial takes the same lookup as its environment parameter.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 	return func(o *connectOpts) { o.environment = lookup }
 }
@@ -105,6 +105,7 @@ type Client struct {
 	js                          nats.JetStreamContext
 	urls                        []string
 	credential                  nats.Option
+	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
@@ -151,7 +152,7 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.Servers = urls
 	opts.Name = name
 	opts.NoRandomize = true
-	opts.Timeout = 5 * time.Second
+	opts.Timeout = connectTimeout
 	opts.MaxReconnect = -1
 	// A publish while reconnecting waits for the reconnect (ensureConnWithContext), so the wait
 	// between attempts is how long it waits after NATS is back.
@@ -208,13 +209,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	return opts
 }
 
-func connect(name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, credential, reconnectCB, closedCB)
+// connectTimeout bounds each dial of a NATS server and its handshake: nats.go's own for a direct
+// dial (options), the bus's SOCKS5 dialer's for one through a proxy (socks5Proxy).
+const connectTimeout = 5 * time.Second
+
+func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+	return connectWithContext(context.Background(), name, urls, credential, dialer, reconnectCB, closedCB)
 }
 
-// connectWithContext dials urls with envoy's options and, when credential is not nil, as the NATS
-// user it names (nkeyCredential).
-func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+// connectWithContext dials urls with envoy's options, when credential is not nil as the NATS user
+// it names (nkeyCredential), and when dialer is not nil through the SOCKS5 proxy it names
+// (socks5Proxy): every connection then, the first and each one nats.go dials to reconnect, goes
+// through the proxy, handed the server's host name as the URL spells it.
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
 	var lastErr error
 	for range 10 {
 		if err := ctx.Err(); err != nil {
@@ -225,6 +232,12 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 			if err := credential(&next); err != nil {
 				return nil, err
 			}
+		}
+		if dialer != nil {
+			next.CustomDialer = dialer
+			// nats.go otherwise resolves the host itself and hands the dialer an address, which the
+			// proxy cannot reach when only its resolver knows the name.
+			next.SkipHostLookup = true
 		}
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
@@ -269,16 +282,22 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 		case <-timer.C:
 		}
 	}
+	// nats.go answers a refused dial with ErrNoServers alone, which names no address; the error the
+	// proxy's dial returned names the proxy and the refusal.
+	if dialer != nil && errors.Is(lastErr, nats.ErrNoServers) {
+		return nil, fmt.Errorf("bus: no NATS server reached through the SOCKS5 proxy %s=%s: %w", SOCKS5ProxyEnvVar, dialer.Address(), cmp.Or(dialer.LastError(), lastErr))
+	}
 	return nil, lastErr
 }
 
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
 // infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user
-// environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
-// uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
-// Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
-// on the same terms as Connect, reading ENVOY_ALLOW_REMOTE_NATS from environment too, which
-// answers as os.LookupEnv does (WithEnvironment).
+// environment names (nkeyCredential), through the SOCKS5 proxy it names (socks5Proxy). A caller
+// that needs core pub/sub on a connection of its own uses it: nats.go re-subscribes core
+// subscriptions on reconnect by itself, so it needs none of Client's recovery, and it touches no
+// stream. It refuses a NATS server that is not this machine's on the same terms as Connect,
+// reading ENVOY_ALLOW_REMOTE_NATS from environment too, which answers as os.LookupEnv does
+// (WithEnvironment).
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
@@ -290,7 +309,11 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
-	return connect(name, urls, credential, nil, nil)
+	dialer, err := socks5Proxy(environment)
+	if err != nil {
+		return nil, err
+	}
+	return connect(name, urls, credential, dialer, nil, nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -300,8 +323,10 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 //
 // Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
 // names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
-// before any dial; neither variable set connects without a credential. Every connection the client
-// dials later, to recover, is the same user's.
+// before any dial; neither variable set connects without a credential. It connects through the
+// SOCKS5 proxy the environment names (ENVOY_NATS_SOCKS5_PROXY, socks5Proxy), or directly when it
+// names none. Every connection the client dials later, to recover, is the same user's, through
+// the same proxy.
 //
 // For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
@@ -324,13 +349,18 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if err != nil {
 		return nil, err
 	}
+	dialer, err := socks5Proxy(opts.environment)
+	if err != nil {
+		return nil, err
+	}
 	c := &Client{
 		urls:                        urls,
 		credential:                  credential,
+		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect("envoy", urls, credential, c.onReconnect, c.onClosed)
+	nc, err := connect("envoy", urls, credential, dialer, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -659,7 +689,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 	}
 
-	nc, err := connectWithContext(ctx, "envoy", c.urls, c.credential, c.onReconnect, c.onClosed)
+	nc, err := connectWithContext(ctx, "envoy", c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed)
 	if err != nil {
 		return err
 	}
