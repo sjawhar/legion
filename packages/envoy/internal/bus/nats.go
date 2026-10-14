@@ -20,6 +20,7 @@ import (
 type ConnectOption func(*connectOpts)
 
 type connectOpts struct {
+	name                        string
 	replicas                    int
 	publishAcknowledgementClock AcknowledgementClock
 	environment                 func(string) (string, bool)
@@ -27,7 +28,7 @@ type connectOpts struct {
 
 // parseConnectOptions applies options over the defaults every connect starts from.
 func parseConnectOptions(options []ConnectOption) connectOpts {
-	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
+	opts := connectOpts{name: "envoy", replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -61,6 +62,13 @@ func WithReplicas(n int) ConnectOption {
 // the same lookup as its environment parameter.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 	return func(o *connectOpts) { o.environment = lookup }
+}
+
+// WithName names the client to the NATS server, in place of "envoy": the name the server's
+// connection listings (its /connz endpoint, `nats server report connections`) show for the
+// connection the client dials first and for each one it dials to replace a closed one.
+func WithName(name string) ConnectOption {
+	return func(o *connectOpts) { o.name = name }
 }
 
 type subscriptionTransport uint8
@@ -109,6 +117,7 @@ type Client struct {
 	Conn                        *nats.Conn
 	js                          nats.JetStreamContext
 	urls                        []string
+	name                        string
 	credential                  nats.Option
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
@@ -331,11 +340,12 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	c := &Client{
 		urls:                        urls,
+		name:                        opts.name,
 		credential:                  credential,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect("envoy", urls, credential, c.onReconnect, c.onClosed)
+	nc, err := connect(c.name, urls, credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +674,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 	}
 
-	nc, err := connectWithContext(ctx, "envoy", c.urls, c.credential, c.onReconnect, c.onClosed)
+	nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return err
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -17,10 +18,10 @@ import (
 )
 
 // TestBothIntakesKeepTheirSubscriptions starts the two intakes as cmd/dispatch does (StartIntakes,
-// beside a client of its own that owns the stream and publishes) and holds that each keeps its
-// durable push-bound and handles what is published to it. A bus.Client keeps one JetStream
-// subscription, so two intakes binding through one client leave whichever bound first with its
-// durable unbound: its messages stay pending and its handler never runs.
+// beside a client of its own that owns the stream and publishes) and holds that each connects under
+// its own name, keeps its durable push-bound and handles what is published to it. A bus.Client
+// keeps one JetStream subscription, so two intakes binding through one client leave whichever bound
+// first with its durable unbound: its messages stay pending and its handler never runs.
 func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
@@ -30,8 +31,10 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 	fake := newJobsFake(t)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	stop, err := StartIntakes(runCtx, func() (*bus.Client, error) {
-		return bus.Connect([]string{natsURL})
+	var names []string
+	stop, err := StartIntakes(runCtx, func(name string) (*bus.Client, error) {
+		names = append(names, name)
+		return bus.Connect([]string{natsURL}, bus.WithName(name))
 	}, pool, fake.newTestClient())
 	if err != nil {
 		cancel()
@@ -43,6 +46,9 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 		cancel()
 		stop()
 	})
+	if want := []string{"dispatch-intake", "dispatch-job-intake"}; !slices.Equal(names, want) {
+		t.Fatalf("StartIntakes connected as %q, want %q", names, want)
+	}
 
 	durables := []string{deliveryConsumerName, jobConsumerName}
 	consumers := func() string {
@@ -129,7 +135,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 	t.Cleanup(release)
 
 	runCtx, cancel := context.WithCancel(ctx)
-	stop, err := StartIntakes(runCtx, func() (*bus.Client, error) {
+	stop, err := StartIntakes(runCtx, func(string) (*bus.Client, error) {
 		return bus.Connect([]string{natsURL})
 	}, pool, github)
 	if err != nil {
@@ -193,7 +199,7 @@ func TestAMessageInItsHandlerAtShutdownIsAcknowledged(t *testing.T) {
 // TestIntakesWithoutTheAppConnectNothing: with no GitHub App neither intake reads anything, so
 // StartIntakes opens no connection and its stop returns at once.
 func TestIntakesWithoutTheAppConnectNothing(t *testing.T) {
-	stop, err := StartIntakes(t.Context(), func() (*bus.Client, error) {
+	stop, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		t.Error("connected a client for intakes that have no GitHub App")
 		return nil, errors.New("no connection here")
 	}, nil, nil)
@@ -219,7 +225,7 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 	natsURL := testnats.URL(t)
 	var first *bus.Client
 	refused := errors.New("refused")
-	_, err := StartIntakes(t.Context(), func() (*bus.Client, error) {
+	_, err := StartIntakes(t.Context(), func(string) (*bus.Client, error) {
 		if first != nil {
 			return nil, refused
 		}
