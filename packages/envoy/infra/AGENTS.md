@@ -30,7 +30,7 @@ versions. Never add the module to the root `go.work`.
 | Path | What it holds |
 | --- | --- |
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
-| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows. |
+| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
 | `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
@@ -70,12 +70,15 @@ versions. Never add the module to the root `go.work`.
   them.
 - **Release contract.** `provider.go`'s `downloadURL` names the release the release job publishes:
   tag `envoy-infra-v<version>`, asset `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz`
-  with the binary at the archive root. Changing one side breaks every consumer's install. A commit
-  releases the plugin only when it touches a path `release.yaml` names for it, in its push paths,
-  its `changes` job's `envoy_infra` filter and the bump paths after `--`, so a `packages/envoy`
-  package the plugin starts compiling in, directly or through another import, goes into all three.
-  `.github/scripts/check-envoy-infra-release-paths.sh` derives that set from `go list -deps` for
-  every target and fails naming each path and list that misses it.
+  with the binary at the archive root. The same release carries the command as
+  `envoy-infra-<os>-<arch>.tar.gz`, holding `envoy-infra-<os>-<arch>/envoy-infra` and its
+  `THIRD_PARTY_NOTICES`, the one directory a mise `github:` pin strips. Changing either side
+  breaks every consumer's install. A commit releases both only when it touches a path
+  `release.yaml` names for them, in its push paths, its `changes` job's `envoy_infra` filter and
+  the bump paths after `--`, so a `packages/envoy` package either command starts compiling in,
+  directly or through another import, goes into all three.
+  `.github/scripts/check-envoy-infra-release-paths.sh` derives that set from `go list -deps` of
+  every command under `cmd/` for every target and fails naming each path and list that misses it.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
@@ -89,21 +92,20 @@ the error's text, which can quote the request; the AWS SDK runs with its logger 
 and every error and line it returns, for a canary seed. A new store implements `seed.Store` and
 joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
-`check` and `verify` read a secret's metadata and value and nothing else: `check` calls `Describe`
-(Secrets Manager's `DescribeSecret`), `verify` calls `Describe` and `Current` (`GetSecretValue`),
-so a read-only check of a deployment's seed needs no grant beyond those. Only `generate` calls
-`Versions` (`ListSecretVersionIds`), for its refusal of a secret that holds any version and for
-its re-list after the write. `seed/awsstore_test.go`'s fake endpoint fails a `check` or `verify`
-that sends `ListSecretVersionIds`.
+Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
+makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
+same commit. `seed/seed_test.go` pins each mode's `Store` calls, and `seed/awsstore_test.go`'s
+fake endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`.
 
 ## Tests
 
 The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
 (`host/listener_test.go`, `internal/providers/`), the plugin in process through pulumi-go-provider's
-`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`), and the seed
-command against a fake `Store` (`seed/seed_test.go`) and the AWS SDK against an `httptest`
-endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test on any
-request it does not expect (`seed/awsstore_test.go`). `core`'s real-server tests start nats-server
+`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`), the seed command
+against a fake `Store` (`seed/seed_test.go`) and the AWS SDK against an `httptest` endpoint speaking
+Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test on any request it does not
+expect (`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
+`--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests start nats-server
 containers on this machine's Docker through `testnats`, as do the `natslive` tests
 (`seed/seed_live_test.go`: a generated seed connects, and a client without it is refused, on
 `testnats.Image` and `testnats.HubImage`). The `envoy-infra-go` job in
