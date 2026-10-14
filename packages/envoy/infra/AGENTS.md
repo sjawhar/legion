@@ -30,7 +30,7 @@ versions. Never add the module to the root `go.work`.
 | --- | --- |
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment. |
+| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
@@ -47,12 +47,16 @@ versions. Never add the module to the root `go.work`.
   resources with, so a missing provider fails naming the component and the package, and no
   resource falls back to a default provider of the plugin's own SDK version. Its unit test runs it
   without each provider and asserts nothing registered.
-- **Refusals.** Every refusal names the input. `NewListener` refuses what it can check from its
-  arguments alone (the port range, the watchdog's three refusals) and a missing provider before it
-  registers anything (`host/listener.go:87-114`). What `core.ListenerEnv` checks (`machineId`, each
-  of `natsUrls`, `hostBridge`) is refused later, by the `ApplyT` over `natsUrls` that computes the
-  container's environment (`:141-145`), after the component and its image have registered: the
-  error fails the preview or update when the container's `envs` resolve, not the constructor.
+- **Refusals.** Every refusal names the input. A component refuses every input it holds as a plain
+  value before it registers anything, and its unit test asserts nothing but the test's providers
+  registered. `NewListener` refuses an explicit `port` 0, then calls
+  `core.ListenerConfig.CheckPlain` (a blank `machineId`, a `port` outside 1-65535, a `hostBridge`
+  with surrounding whitespace), then the watchdog's three refusals and a missing provider
+  (`host/listener.go:90-124`). Only `natsUrls`, which may be another resource's output, is checked
+  later: `core.ListenerEnv` runs `CheckPlain` again and then checks each URL, inside the `ApplyT`
+  over `natsUrls` that computes the container's environment (`:147-151`). A bad URL therefore fails
+  the preview or update when the container's `envs` resolve, after the component and its image have
+  registered, not the constructor.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go:395`, `:764-766`). A

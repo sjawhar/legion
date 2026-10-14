@@ -53,3 +53,30 @@ func TestListenerEnv(t *testing.T) {
 		})
 	}
 }
+
+// CheckPlain checks only the fields a component knows at construct, so it passes a config whose
+// natsUrls are not known yet and refuses what ListenerEnv would refuse of the others.
+func TestListenerConfigCheckPlain(t *testing.T) {
+	cases := []struct {
+		name string
+		in   core.ListenerConfig
+		err  string
+	}{
+		{name: "no natsUrls yet", in: core.ListenerConfig{MachineID: "m", HostBridge: "127.0.0.1"}},
+		{name: "the default port", in: core.ListenerConfig{MachineID: "m"}},
+		{name: "a blank machine id", in: core.ListenerConfig{MachineID: " "}, err: "machineId is required"},
+		{name: "a port above 65535", in: core.ListenerConfig{MachineID: "m", Port: 65536}, err: "port 65536 is outside 1-65535"},
+		{name: "a negative port", in: core.ListenerConfig{MachineID: "m", Port: -1}, err: "port -1 is outside 1-65535"},
+		{name: "a host bridge with leading whitespace", in: core.ListenerConfig{MachineID: "m", HostBridge: " 127.0.0.1"}, err: `hostBridge has leading or trailing whitespace: " 127.0.0.1"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := c.in.CheckPlain()
+			if c.err != "" {
+				require.ErrorContains(t, err, c.err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
