@@ -99,17 +99,25 @@ listener's NATS client then refuses to connect rather than connect without the s
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
 - a blank `machineId`;
+- a `machineId` or `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
 - a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
+- `watchdog` on a listener whose name contains `"`, `$`, a backtick, `\` or a line break, since the
+  watchdog's script echoes the name in double quotes;
 - a missing provider (see [Providers](#providers)).
 
-`natsUrls` may come from another resource or stack, so the listener checks it only when it
-computes the container's environment. That happens at preview, unless `natsUrls` is not known until
-the update. It refuses an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas
-separate the URLs in `NATS_URLS`).
+`natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
+it computes the container's environment. That happens at preview, unless they are not known until
+the update. It refuses an empty `natsUrls`, a URL in it that is blank, contains a comma (commas
+separate the URLs in `NATS_URLS`) or holds a control character, and a blank `seed`.
+
+The watchdog writes the environment, one variable per line, into a heredoc of a script it runs as
+root on the host, so a line break in a value could end the heredoc and run what follows as a
+command. That is why no value may hold a control character, even one the program reads from
+another stack.
 
 ## Providers
 

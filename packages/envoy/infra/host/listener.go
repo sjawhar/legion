@@ -2,6 +2,7 @@
 package host
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -113,6 +114,12 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 			return nil, fmt.Errorf("%s %s: watchdog.host must be the bare SSH address, with no user or "+
 				"scheme (pulumi-command logs in as root): %q", listenerType, name, args.Watchdog.Host)
 		}
+		// The create script echoes the name inside double quotes, where the shell expands $, a
+		// backtick and \, and where a line break would end the command.
+		if strings.ContainsAny(name, "\"$`\\\n") {
+			return nil, fmt.Errorf("%s %q: with a watchdog the name may not contain \", $, a backtick, \\ or a "+
+				"newline, since the watchdog's script echoes it in double quotes", listenerType, name)
+		}
 	}
 	if err := providers.Require(ctx.Context(), listenerType, "docker", opts...); err != nil {
 		return nil, err
@@ -151,8 +158,12 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 	}).(pulumi.StringArrayOutput)
 	envs := listenerEnv
 	if args.Seed != nil {
-		envs = pulumi.ToSecret(pulumi.All(listenerEnv, args.Seed).ApplyT(func(v []any) []string {
-			return append(slices.Clone(v[0].([]string)), core.EnvNATSSeed+"="+v[1].(string))
+		envs = pulumi.ToSecret(pulumi.All(listenerEnv, args.Seed).ApplyT(func(v []any) ([]string, error) {
+			seed := v[1].(string)
+			if strings.TrimSpace(seed) == "" {
+				return nil, errors.New("seed is blank")
+			}
+			return append(slices.Clone(v[0].([]string)), core.EnvNATSSeed+"="+seed), nil
 		})).(pulumi.StringArrayOutput)
 	}
 

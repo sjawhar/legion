@@ -8,6 +8,10 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 )
 
+// heredocEscape is a URL that, written raw into the watchdog's env-file heredoc, would end the
+// heredoc and run a command of its own in the create script, which runs as root on the host.
+const heredocEscape = "nats://hub.internal.example:4222\nENVEOF\ntouch /root/injected\ncat > /dev/null << 'ENVEOF'"
+
 func TestListenerEnv(t *testing.T) {
 	cases := []struct {
 		name string
@@ -40,6 +44,10 @@ func TestListenerEnv(t *testing.T) {
 		{name: "a port above 65535 is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, Port: 65536}, err: "port 65536 is outside 1-65535"},
 		{name: "a blank host bridge is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, HostBridge: " "}, err: "hostBridge has leading or trailing whitespace"},
 		{name: "a host bridge with trailing whitespace is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, HostBridge: "127.0.0.1 "}, err: "hostBridge has leading or trailing whitespace"},
+		{name: "a URL with a newline is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{heredocEscape}}, err: "natsUrls[0] contains a control character"},
+		{name: "a URL with any control character is refused, by its index", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222", "nats://hub.internal.example:4222\r"}}, err: "natsUrls[1] contains a control character"},
+		{name: "a machine id with a newline is refused", in: core.ListenerConfig{MachineID: "a\nENVEOF\nid", NATSURLs: []string{"nats://127.0.0.1:4222"}}, err: `machineId contains a control character: "a\nENVEOF\nid"`},
+		{name: "a host bridge with a newline inside is refused", in: core.ListenerConfig{MachineID: "m", NATSURLs: []string{"nats://127.0.0.1:4222"}, HostBridge: "127.0.0.1\nENVEOF"}, err: `hostBridge contains a control character: "127.0.0.1\nENVEOF"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -68,6 +76,8 @@ func TestListenerConfigCheckPlain(t *testing.T) {
 		{name: "a port above 65535", in: core.ListenerConfig{MachineID: "m", Port: 65536}, err: "port 65536 is outside 1-65535"},
 		{name: "a negative port", in: core.ListenerConfig{MachineID: "m", Port: -1}, err: "port -1 is outside 1-65535"},
 		{name: "a host bridge with leading whitespace", in: core.ListenerConfig{MachineID: "m", HostBridge: " 127.0.0.1"}, err: `hostBridge has leading or trailing whitespace: " 127.0.0.1"`},
+		{name: "a machine id with a control character", in: core.ListenerConfig{MachineID: "example\thost"}, err: `machineId contains a control character: "example\thost"`},
+		{name: "a host bridge with a control character inside", in: core.ListenerConfig{MachineID: "m", HostBridge: "127.0.0.1\nENVEOF"}, err: `hostBridge contains a control character: "127.0.0.1\nENVEOF"`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
