@@ -29,6 +29,10 @@
 - `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
 - `envoy-send`, a command, counts `CLAUDE_CONFIG_DIR` only under Claude Code (`CLAUDE_CODE_CHILD_SESSION=1`): run from a plain terminal whose shell exports it, it does not read `$CLAUDE_CONFIG_DIR/envoy.json`. The hook and the channel server read `CLAUDE_CONFIG_DIR` whenever it is set.
 
+### Fixed
+
+- `claude plugin marketplace update legion-plugins`, then `claude plugin update claude-envoy@legion-plugins`, installs main's current tree: `.claude-plugin/plugin.json` declares no `version`, so Claude Code versions the plugin by its commit. Its fixed `1.0.0` held every install at the tree it was first installed from (`claude-envoy is already at the latest version (1.0.0)`).
+
 ## [1.0.0]
 
 ### Changed

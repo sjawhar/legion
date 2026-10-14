@@ -102,62 +102,61 @@ func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
 	}
 }
 
-// A green settlement at an exhausted count is the fix that worked, not a blocked pull request: only
-// a red one reports the count, and only a red that stands for the head (HeadVerdict): a red a code
-// push left behind reports nothing.
-// A red sends the tree back only while it stands for the head: a red a code push left behind, whose
-// head no longer carries it, sends nothing back.
+// A red sends the tree back only while it stands for the head (HeadVerdict): the head's own red, or
+// a code head's carried to the handoff-only head above it, whose code is the same; a red a code push
+// left behind, whose head no longer carries it, sends nothing back. The tester's planned red (its
+// own failing tests) is the one exception, and a head with no verdict - no settlement, or a required
+// set never read - sends nothing.
 func TestRedSendsBackOnlyOnTheRedThatStandsForTheHead(t *testing.T) {
-	if !RedSendsBack(record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}, nil) {
-		t.Fatal("the head's own red did not send the tree back")
-	}
-	if RedSendsBack(record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}, nil) {
-		t.Fatal("a red that no longer stands for the head sent the tree back")
+	for _, tc := range []struct {
+		name string
+		pr   record.PullRequest
+		back bool
+	}{
+		{"the head's own red", record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}, true},
+		{"the code head's red carried to the handoff-only head above it", record.PullRequest{HeadSHA: "head", CheckedHead: "code", Failing: []string{"ci"}, Required: []string{"ci"},
+			Pushes: []record.ClassifiedPush{{SHA: "head", Before: "code", HandoffOnly: true}}}, true},
+		{"a red the tester planned", record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}, PlannedRed: true}, false},
+		{"a green head", record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{}, CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Required: []string{"ci"}}, false},
+		{"a red that no longer stands for the head", record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}, false},
+		{"a head with no settlement", record.PullRequest{HeadSHA: "head", Required: []string{"ci"}}, false},
+		{"a red with the required set unread", record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{"ci"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedSendsBack(tc.pr); got != tc.back {
+				t.Fatalf("RedSendsBack = %t, want %t", got, tc.back)
+			}
+		})
 	}
 }
 
-// A red that only the review workflows the project declares make is the reviewer's round's to
-// decide, so it sends nothing back; a red required workflow the project does not declare - a test
-// or lint workflow - is a failing check, and sends the tree back as a red required check does,
-// alone or beside a declared one. With no review workflow declared, every red required workflow
-// sends it back. A required check still pending or with no result is not red, so a review
-// workflow's red beside it is still the review workflows' alone.
-func TestRedSendsBackLeavesOnlyADeclaredReviewWorkflowsRedToTheReviewer(t *testing.T) {
+// A red only required workflows make is one no required check makes: every required check passed,
+// is pending or has no result, and at least one required workflow's run ended red. A red required
+// check beside a red workflow is not that, and a workflow still running is not red.
+func TestRedOnlyByWorkflowsNamesARedNoRequiredCheckMakes(t *testing.T) {
 	const review, tests = ".github/workflows/review.yml", ".github/workflows/tests.yml"
-	declared := []string{review}
 	code := func(failing []string, cancelled []string, runs []record.AttemptRun, workflows ...record.RequiredWorkflow) record.PullRequest {
 		return record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: failing, Cancelled: cancelled, CheckRuns: runs, Required: []string{"ci"},
 			Workflows: workflows, WorkflowsHead: "head"}
 	}
 	green := []record.AttemptRun{{Name: "ci", ID: 1}}
 	for _, tc := range []struct {
-		name                            string
-		pr                              record.PullRequest
-		declared                        []string
-		onlyWorkflows, onlyReview, back bool
+		name          string
+		pr            record.PullRequest
+		onlyWorkflows bool
 	}{
-		{"the review workflow failed beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), declared, true, true, false},
-		{"the review workflow timed out beside a check with no result", code([]string{}, nil, nil, record.RequiredWorkflow{Path: review, Result: "timed_out"}), declared, true, true, false},
-		{"the review workflow failed beside a cancelled check", code([]string{}, []string{"ci"}, nil, record.RequiredWorkflow{Path: review, Result: "failure"}), declared, true, true, false},
-		{"the review workflow failed beside a green undeclared one", code([]string{}, nil, green,
-			record.RequiredWorkflow{Path: review, Result: "failure"}, record.RequiredWorkflow{Path: tests, Result: Success}), declared, true, true, false},
-		{"an undeclared required workflow failed beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: tests, Result: "failure"}), declared, true, false, true},
-		{"the review workflow and an undeclared one failed", code([]string{}, nil, green,
-			record.RequiredWorkflow{Path: review, Result: "failure"}, record.RequiredWorkflow{Path: tests, Result: "failure"}), declared, true, false, true},
-		{"the review workflow failed with none declared", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), nil, true, false, true},
-		{"the required check failed beside a green review workflow", code([]string{"ci"}, nil, green, record.RequiredWorkflow{Path: review, Result: Success}), declared, false, false, true},
-		{"the required check and the review workflow failed", code([]string{"ci"}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), declared, false, false, true},
-		{"the review workflow still running beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: Pending}), declared, false, false, false},
+		{"a workflow failed beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), true},
+		{"a workflow timed out beside a check with no result", code([]string{}, nil, nil, record.RequiredWorkflow{Path: review, Result: "timed_out"}), true},
+		{"a workflow failed beside a cancelled check", code([]string{}, []string{"ci"}, nil, record.RequiredWorkflow{Path: review, Result: "failure"}), true},
+		{"one workflow failed beside a green one", code([]string{}, nil, green,
+			record.RequiredWorkflow{Path: review, Result: "failure"}, record.RequiredWorkflow{Path: tests, Result: Success}), true},
+		{"the required check failed beside a green workflow", code([]string{"ci"}, nil, green, record.RequiredWorkflow{Path: review, Result: Success}), false},
+		{"the required check and a workflow failed", code([]string{"ci"}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), false},
+		{"a workflow still running beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: Pending}), false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := RedOnlyByWorkflows(tc.pr); got != tc.onlyWorkflows {
-				t.Errorf("RedOnlyByWorkflows = %t, want %t", got, tc.onlyWorkflows)
-			}
-			if got := RedOnlyByReviewWorkflows(tc.pr, tc.declared); got != tc.onlyReview {
-				t.Errorf("RedOnlyByReviewWorkflows = %t, want %t", got, tc.onlyReview)
-			}
-			if got := RedSendsBack(tc.pr, tc.declared); got != tc.back {
-				t.Errorf("RedSendsBack = %t, want %t", got, tc.back)
+				t.Fatalf("RedOnlyByWorkflows = %t, want %t", got, tc.onlyWorkflows)
 			}
 		})
 	}

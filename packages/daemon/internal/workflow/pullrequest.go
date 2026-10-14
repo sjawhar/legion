@@ -80,12 +80,39 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, &pr, "")
 }
 
+// pullRequestSynchronized records the pull request's new head and what the move leaves standing
+// (classify.AdvancePullRequestHead, headMoved), and applies the CI rule to the new head first, in
+// whatever phase the issue is (standingRed). GitHub delivers a push and its synchronize in either
+// order, and either can complete the carry of a code head's red to the handoff head that replaced
+// it (classify.SettlementFor, carriedBack): the push's handler does when the head arrived first
+// (push), and the head's arrival does here when its push was classified handoff-only before the
+// head was known - the record then says the code head, red, and the arrival of the head above it
+// lets the red stand for it. The issue may be in testing, retro or merging by then, as the
+// implementer's completion waits on no webhook, so a red that stands sends the work back from
+// whichever phase, as the settlement would have had it arrived after both, and nothing below runs.
+// The rule is safe in every phase: a phase with no checks_red row - implementing, planning - moves
+// nothing (sendBack), in awaiting_merge the rule does not act (standingRed), and a code push between
+// the two heads carries nothing. In reviewing the head's arrival then re-asks the round
+// (settleRound) once its push is known (classify.HeadPushKnown), since what the approval is judged
+// against is the push's paths: the approved head arriving over a handoff push lets the approval
+// stand, and the new head of a code push that was on its way shows the approval does not cover it
+// (classify.ApprovalStands, classify.CodeOnItsWay). A head whose push is still on its way is left
+// to the push's own handler, which re-asks the round the moment the push is classified. Asked
+// here, a round stuck at the previous head would be told stuck again at the new one, which the
+// push then shows to be the handoff head its approval covers - a notice the architect acts on for
+// nothing. A push lost outright leaves the round reported as it was, stuck at the previous head,
+// which is told once either way. A synchronize that moves nothing - a redelivery, or one carrying
+// no head - changes nothing the verdict or the round reads, and applies and re-asks nothing. In
+// implementing a head that arrives once the implementer has completed is the pull request its
+// completion waited for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
-	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
+	prior := *pr
+	moved := fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA
+	if moved {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
 	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.UpdatedAt)
@@ -99,14 +126,25 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if err := e.headMoved(ctx, tx, *issue, pr); err != nil {
 		return intake.Result{}, err
 	}
-	if issue.Phase != phase.Implementing {
-		return intake.Result{}, nil
+	if moved {
+		if sent, err := e.standingRed(ctx, tx, *issue, pr); err != nil || sent {
+			return intake.Result{}, err
+		}
 	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
-	if err != nil || row.HandoffCommit == "" {
-		return intake.Result{}, err
+	switch issue.Phase {
+	case phase.Reviewing:
+		if !moved || !classify.HeadPushKnown(prior, pr.HeadSHA) {
+			return intake.Result{}, nil
+		}
+		return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
+	case phase.Implementing:
+		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
+		if err != nil || row.HandoffCommit == "" {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
+	return intake.Result{}, nil
 }
 
 func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.Result, error) {
@@ -125,19 +163,40 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
-	// A push classified after its head arrived can be what lets an approval of an earlier head
-	// stand, or what shows the current head carries code the approved one does not, so the round
-	// is settled again.
+	// A push classified after its head arrived can complete the carry of a code head's red to the
+	// handoff head that replaced it (classify.SettlementFor), which sends the work back as the
+	// settlement would have (standingRed), in whatever phase the issue is: GitHub delivers a push
+	// webhook and its synchronize in either order, and the implementer's completion waits on no
+	// webhook, so the head can move and the issue enter testing, retro or merging before the push is
+	// classified. A phase with no checks_red row - implementing, planning - moves nothing (sendBack),
+	// and in awaiting_merge the rule does not act (standingRed). In reviewing the push can otherwise
+	// be what lets an approval of an earlier head stand, or what shows the current head carries code
+	// the approved one does not, so the round is settled again; the round's re-ask is reviewing's
+	// alone.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
+	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
+		return intake.Result{}, err
+	}
+	if issue.Phase != phase.Reviewing {
+		return intake.Result{}, nil
+	}
+	return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)
+}
+
+// reaskRound re-asks issue's review round (settleRound) after a push, or after the head it left
+// arrived, pr being the pull request as the fact left it and prior as the fact found it: the round
+// as prior had it is the before a round stuck the same way is deduped against (stuckAs), so a push
+// classified late at the head the round was already told stuck at tells nothing again.
+func (e *Engine) reaskRound(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, prior record.PullRequest) error {
 	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
-		return intake.Result{}, err
+		return err
 	}
-	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byPush)
-	return intake.Result{}, err
+	_, err = e.settleRound(ctx, tx, issue, reviewer, pr, e.reviewRound(issue, reviewer, &prior), byPush)
+	return err
 }
 
 // merged records the pull request merged, whatever the issue's phase, and advances an issue that

@@ -406,9 +406,9 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
   counted head and every head pushed on top of it until a push lands on a head CI judged green) no
-  longer sends the work back by itself, so the issue waits in testing or review for the architect,
-  or for a worker's own decision such as a reviewer's request for changes. A `READY` is still
-  withdrawn on red CI.
+  longer sends the work back by itself, so the issue waits in testing, review, retro or merging for
+  the architect, or for a worker's own decision such as a reviewer's request for changes. A `READY`
+  is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -448,19 +448,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
   for a pull request that deletes it.
 
-An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
-or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no
-merge ref for a conflicting head and runs no checks on it at all): the daemon sent it back to the
-implementer, told the architect which checks or that the head conflicts, and posted on the issue,
-and told the project's `merge_queue_role` when one is set, that the `READY` is withdrawn; the work
-comes back through testing, review and a new `READY`.
-
-An issue that stays in `needs_review` while a review workflow the project declares
-(`projects.<KEY>.review_workflows`) is red: only declared review workflows are red, so the reviewer
-is adjudicating their findings, resolving the threads it accepted and re-running the failed run. If
-the re-run stays red after that, the architect asks you to decide, naming the pull request, the
-head and the workflow. A red required workflow the project does not declare sends the issue back to
-the implementer instead, as a red required check does.
+An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
+on the head: the daemon sent it back to the implementer and told the architect which checks. From
+`retro` the implementer kept its turn and was handed the implementing task once that turn ended;
+from `merging` the merger's turn was interrupted. One back in `in_progress` after its `READY`,
+while it awaited its merge, had a required check or workflow turn red on the head itself, or its
+head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
+checks on it at all): the daemon sent it back to the implementer, told the architect which checks
+or that the head conflicts, and posted on the issue, and told the project's `merge_queue_role` when
+one is set, that the `READY` is withdrawn; the work comes back through testing, review and a new
+`READY`.
 
 The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
 workflows the base branch requires:

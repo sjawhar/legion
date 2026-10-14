@@ -284,8 +284,10 @@ host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is n
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps the `legion` job's recorded outputs; a whole-run rerun of a `release.yaml` call re-executes
-`legion` against its own tag and empties `legion_version`) or by pushing the branch again.
+(`--failed` keeps the `legion` job's recorded outputs) or by pushing the branch again. A whole-run rerun of a
+`release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a `legion-v` tag, re-executes
+`legion`, which releases that tag again: the image is rebuilt, the `<legion version>` tag moves to the rebuild's
+digest, and the release body's "Worker image" names that digest.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is

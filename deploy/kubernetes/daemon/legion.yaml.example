@@ -39,9 +39,6 @@ nats_urls: [nats://nats.example.com:4222]
 projects:
   WIDGETS:                             # each Dispatch project the daemon runs, and its repository
     repo: acme/widgets
-    # review_workflows:                # opt-in: required workflows that review the code and fail on
-    #   - .github/workflows/review.yml #   their own findings; in testing and review a red only they
-    #                                  #   make goes to the reviewer, not back to the implementer
     # merge:                           # optional: a pull request touching a by_hand path is merged by a
     #   by_hand: ['^migrations/versions/'] # person; each pattern matches anywhere in a path, so anchor it
 gates:

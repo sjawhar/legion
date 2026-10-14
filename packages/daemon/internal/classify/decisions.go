@@ -94,6 +94,14 @@ func headPush(pushes []record.ClassifiedPush, previous, head string) *record.Cla
 	return found
 }
 
+// HeadPushKnown says whether the push that left head is recorded (headPush), as the push that
+// replaced pr's head when the branch has one, so the pushes can say what the move from pr's head to
+// head changed. Until it is, the head's code is unknown: its push may be on its way, with the paths
+// an approval of pr's head is judged against (ApprovalStands).
+func HeadPushKnown(pr record.PullRequest, head string) bool {
+	return headPush(pr.Pushes, pr.HeadSHA, head) != nil
+}
+
 // keptPushes is what a head's arrival keeps: every push that changed only .legion/, did not
 // rewrite history and said which head it replaced - a fact about two commits, true whenever it is
 // learned, which an approval is carried across - and the pushes still on their way from the new
@@ -261,30 +269,17 @@ func carriedBack(pushes []record.ClassifiedPush, head, earlier string) bool {
 }
 
 // RedSendsBack says whether the verdict that stands for the pull request's head (HeadVerdict) sends
-// an issue in testing or reviewing back to implementing: it is red, not only by the review
-// workflows the project declares (RedOnlyByReviewWorkflows, reviewWorkflows), the review App did
-// not plan it (its failing tests), and the head was not reached by a push that carries an approval
-// across (carriesApproval). Such a push changed only .legion/, so the head's code is that of the
-// head it replaced, and a red there is either that code's second run or the code head's own,
-// carried to the handoff head (SettlementFor). The round in progress decides it, since the reviewer
-// waits for the settled verdict at its own handoff head; acting on it would stop a reviewer
-// mid-round and spend a fix attempt with no code changed. A head whose push is not recorded yet is
-// read as one that may change code. A red that only declared review workflows make goes to the
-// reviewer's round too, at any head: such a workflow fails on its findings and stays red on a
-// finding the implementer cannot make go away, since a bot's thread is the reviewer's to adjudicate
-// and resolve, so sending it back would spend fix attempts on a verdict only the reviewer can
-// answer. Any other red required workflow is a failing check like any other, and sends the work
-// back.
-func RedSendsBack(pr record.PullRequest, reviewWorkflows []string) bool {
-	if HeadVerdict(pr) != "red" || pr.PlannedRed || RedOnlyByReviewWorkflows(pr, reviewWorkflows) {
-		return false
-	}
-	for _, p := range pr.Pushes {
-		if p.SHA == pr.HeadSHA && carriesApproval(p) {
-			return false
-		}
-	}
-	return true
+// an issue in testing, reviewing, retro or merging back to implementing: it is red, and the review
+// App did not plan it (PlannedRed, the tester's own failing tests, which the implementer is meant
+// to make pass). HeadVerdict carries a code commit's settlement to the handoff heads above it
+// (SettlementFor, carriedBack): a head a handoff-only push reached changed only .legion/, so its
+// code is the head before it, and a red standing for it is that code's red, whether the code head's
+// own or the handoff head's second run of it. Such a head is no exception, and neither is a red a
+// required workflow alone makes: CI is the daemon's own rule, read beside the review round and
+// never by it (workflow's decideChecks), so the reviewer's approval and a red at its head are two
+// facts, each acted on as it arrives. The fix-attempt cap is the caller's (FixAttemptCapHolds).
+func RedSendsBack(pr record.PullRequest) bool {
+	return HeadVerdict(pr) == "red" && !pr.PlannedRed
 }
 
 // RedWithdrawsReady says whether the verdict that stands for the pull request's head is red against
@@ -293,10 +288,9 @@ func RedSendsBack(pr record.PullRequest, reviewWorkflows []string) bool {
 // merger's READY found the head's own checks and runs green on GitHub, which is what GitHub merges
 // by, so a red carried to it from the head a .legion/-only push replaced (SettlementFor) contradicts
 // that and sends nothing back; the head's own red - a required check failing on a rerun, a newly
-// required one, a required workflow re-run red - keeps GitHub from merging it. Unlike RedSendsBack
-// in testing and reviewing, a head a .legion/-only push reached is no exception, and neither is a
-// red only review workflows make: every worker is suspended in awaiting_merge and no round is open
-// to decide its red, so only the implementer can change it. PlannedRed is a red the tester's own
+// required one, a required workflow re-run red - keeps GitHub from merging it. As with RedSendsBack
+// before READY, a head a .legion/-only push reached is no exception: every worker is suspended in
+// awaiting_merge, and only the implementer can change the red. PlannedRed is a red the tester's own
 // tests planned for the review round, and READY found the head green since, so it is not read. The
 // caller decides when such a red is read: a red only required workflows make (RedOnlyByWorkflows)
 // withdraws the READY on a read of their runs, never on a CI settlement, which reads no run and
@@ -322,12 +316,12 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 // holds: the pull request's fix attempts are at cap, and the head belongs to the attempt the count
 // last counted (HeadCounted): the counted head itself, or a head pushed on top of it before any
 // push landed on a green verdict (AdvancePullRequestHead). That attempt is the loop the cap bounds,
-// so its red no longer sends the work back from testing or reviewing by itself, however often it
-// returns - a re-run failing again, a red after the head read green, a second push before CI
-// settled - and the architect decides what follows (workflow's decideChecks and reviewRound). A
-// head pushed onto a green verdict is not that loop: it raised no count and left the attempt, so its
-// red is new. A head a handoff-only push left sends nothing back of its own (RedSendsBack). A green
-// head is the fix that worked.
+// so its red no longer sends the work back from testing, reviewing, retro or merging by itself,
+// however often it returns - a re-run failing again, a red after the head read green, a second push
+// before CI settled - and the architect decides what follows (workflow's standingRed). A head
+// pushed onto a green verdict is not that loop: it raised no count and left the attempt, so its red
+// is new. A head a handoff-only push left is in the attempt of the code head it replaced, as its
+// red is that head's (RedSendsBack). A green head is the fix that worked.
 func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
 	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
 }

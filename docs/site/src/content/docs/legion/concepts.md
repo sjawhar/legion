@@ -82,23 +82,19 @@ comes back, with everything it knew, the next time its role is needed.
 | `awaiting_merge` | none | Waits for a person to merge the pull request. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
-A failed test, red CI on the head, or a review that requests changes sends the issue back to
-`implementing`, and the change goes through the tester again before the reviewer sees it. In
-testing and review, a red that only review workflows make is the exception, with every required
-check passing or still undecided: a project can declare, in `projects.<KEY>.review_workflows`, the
-required workflows that review the code, such as a review bot that fails while any thread it
-opened stands, which the implementer cannot answer, so the reviewer's round decides it. The
-reviewer answers each of the bot's threads (accepting it with a reason, or requesting changes), has
-the daemon resolve the ones it accepted, and re-runs the failed run; its approval of the head ends
-the round once the head reads green. Any other red required workflow, a test or lint workflow, sends
-the issue back as a red required check does, and so does every red required workflow when the
-project declares none. The other exception is red CI in testing or review within the fix attempt
+A failed test, red CI on the head in testing, review, retro or merging (a check or workflow the
+base branch requires), or a review that requests changes sends the issue back to `implementing`,
+and the change goes through the tester again before the reviewer sees it. Two reds are the
+exception: one the tester planned, with its own failing tests, and red CI within the fix attempt
 that ran out the project's `max_fix_attempts`, which waits for the architect
-([review signalling](#review-signalling)). Red CI on the head of an issue in `awaiting_merge` sends
-it back too, at any fix-attempt count, when the head's own checks or required workflow runs are red,
-review workflows included: the work returns through testing, review and `READY`, since GitHub will
-not merge the head it was ready for, and the issue, and the project's merge-queue role when one is
-set, are told the `READY` is withdrawn.
+([review signalling](#review-signalling)). The review round and CI are two rules, each read on its
+own: the reviewer's approval of the head ends the round whatever CI says at that commit, since the
+reviewer reads the code commit's checks on GitHub before it approves, and a red the daemon reads
+later sends the work back to the implementer from wherever the issue stands. Red CI on the head of
+an issue in `awaiting_merge` sends it back too, at any fix-attempt count, when the head's own checks
+or required workflow runs are red: the work returns through testing, review and `READY`, since
+GitHub will not merge the head it was ready for, and the issue, and the project's merge-queue role
+when one is set, are told the `READY` is withdrawn.
 
 ## Admission and the `legion` label
 
@@ -160,35 +156,38 @@ Legion uses GitHub's own review mechanisms rather than labels:
   no round is open (the work is being implemented or tested) decides no later round when the daemon
   reads it before the next round opens. One it first hears of after that round opened can still
   decide it, as a webhook delivered late can.
-- **CI** on the pull request's head counts: red checks while testing or reviewing, or once the
-  issue awaits its merge, send the issue back to the implementer, naming the failing checks. Once
-  the issue awaits its merge, only a red of the head's own counts: `READY` found the head's own
-  checks and runs green on GitHub, so a red carried from the head before it moves nothing. Only
-  what the base branch requires counts, the same set the merger's `READY` checks: its rulesets'
-  required status checks and required workflows, and its branch protection's required status
-  checks. CI is red when one of those checks failed, or when the latest pull-request run of a
-  required workflow on the head did not pass (it failed, was cancelled or timed out; a run that
+- **CI** on the pull request's head counts: red checks while testing, reviewing, in retro or
+  merging, or once the issue awaits its merge, send the issue back to the implementer, naming the
+  failing checks. The tester, a reviewer whose round is not yet completed, or the merger has its
+  turn interrupted; from retro the implementer keeps its turn and is handed the implementing task
+  after it. Once the issue awaits its merge, only a red of the head's own counts: `READY` found the
+  head's own checks and runs green on GitHub, so a red carried from the head before it moves
+  nothing. Only what the base branch requires counts, the same set the merger's `READY` checks: its
+  rulesets' required status checks and required workflows, and its branch protection's required
+  status checks. CI is red when one of those checks failed, or when the latest pull-request run of
+  a required workflow on the head did not pass (it failed, was cancelled or timed out; a run that
   ended neutral or skipped passes). A required check that was cancelled, or that the head's checks
   settled without, leaves the head with no verdict until a later settlement decides it, since a
   settlement can come before an aggregator job is queued or just after a run is cancelled. The
-  check may never run again, and a head with no verdict never reaches `READY`, so when that is the
-  reviewer's own head and its approval is in, the architect is told the round is stuck, naming the
-  check. A required workflow still running leaves no verdict until the daemon's next read of its
-  runs, and one with no run on the head is named `(no result)` in the same stuck notice. A failing
-  check the base branch does not require, such as a lane started by hand or an advisory review
-  check, never makes CI red, and on a base branch that requires nothing, nothing does. The daemon
-  judges the check runs GitHub reports, so a required check that only a commit status reports
-  never reports to it: the head never reads green, and an approved round is told stuck on it,
-  where `READY` reads the status. Legion matches a required workflow to a run by its path and the
-  repository that defines it, and a run belongs to the repository it ran for, so a required
-  workflow another repository defines (an organization ruleset) never matches a run: the head never
-  reads green, and `READY` is refused naming the repository that defines the workflow. A head that
-  a push changing only `.legion/` made carries the checks and workflow runs of the head before it,
-  except a workflow run cancelled there, which the new head's own run superseded: it leaves no
-  verdict until that head's own CI settles. The daemon reads each open pull request's required set
-  with the implement App as it starts and every two minutes after, with the required workflows'
-  runs on the head; until a read succeeds, no verdict stands for the head, and a read GitHub
-  refuses is logged with the repository and the HTTP status.
+  check may never run again: a head with no verdict is sent nowhere, and never reaches `READY`,
+  which is refused `READY_CHECKS_NOT_GREEN` naming the check. A required workflow still running
+  leaves no verdict until the daemon's next read of its runs, and one with no run on the head
+  leaves none either, and `READY` is refused naming it. A failing check the base branch does not
+  require, such as a lane started by hand or an advisory review check, never makes CI red, and on
+  a base branch that requires nothing, nothing does. The daemon judges the check runs GitHub
+  reports, so a required check that only a commit status reports never reports to it: the head
+  has no verdict and is sent nowhere, and `READY`, which reads the commit statuses too, decides it.
+  Legion matches a required workflow to a run by its path and the repository that defines it, and
+  a run belongs to the repository it ran for, so a required workflow another repository defines
+  (an organization ruleset) never matches a run: the head never reads green, and `READY` is
+  refused naming the repository that defines the workflow. A head that a push changing only
+  `.legion/` made carries the checks and workflow runs of the head before it, except a workflow run
+  cancelled there, which the new head's own run superseded: it leaves no verdict until that head's
+  own CI settles, and a red carried that way is that code's red and sends the work back as the
+  code head's own would. The daemon reads each open pull request's required set with the implement
+  App as it starts and every two minutes after, with the required workflows' runs on the head;
+  until a read succeeds, no verdict stands for the head, and a read GitHub refuses is logged with
+  the repository and the HTTP status.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
 - Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
@@ -198,13 +197,14 @@ Legion uses GitHub's own review mechanisms rather than labels:
   daemon's own move when CI turns red or the head starts conflicting with its base. Once
   `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
   counted, and every head pushed on top of it until a push lands on a head CI judged green - no
-  longer sends the work back from testing or review by itself: the issue stays in its phase through
-  every red in that attempt until the architect moves it, or a worker's own decision does (a
-  tester's fail, a review's request for changes). A head pushed onto green CI raises no count and
-  leaves the attempt, so its red sends the work back as usual. Every other push stays in the
-  attempt, whether it is counted or not: one onto a head CI has not judged yet, and one onto the
-  held red that counts nothing, such as the tester's red tests or its handoff. The next push onto a
-  red raises the count and is told again. A `READY` is withdrawn on red CI at any count (below).
+  longer sends the work back from testing, review, retro or merging by itself: the issue stays in
+  its phase through every red in that attempt until the architect moves it, or a worker's own
+  decision does (a tester's fail, a review's request for changes). A head pushed onto green CI
+  raises no count and leaves the attempt, so its red sends the work back as usual. Every other push
+  stays in the attempt, whether it is counted or not: one onto a head CI has not judged yet, and
+  one onto the held red that counts nothing, such as the tester's red tests or its handoff. The
+  next push onto a red raises the count and is told again. A `READY` is withdrawn on red CI at any
+  count (below).
 
 ## READY and the merge
 
