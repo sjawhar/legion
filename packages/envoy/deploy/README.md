@@ -1,10 +1,10 @@
 # Deploy
 
-Compose definitions run the on-prem Envoy listener, Dispatch server, its
-Postgres database, and the daily Postgres backup worker. All services use host
-networking. The listener serves `127.0.0.1:9020` for local OpenCode session
-registration and webhook ingress; Dispatch serves `127.0.0.1:8766` by default
-for the SPA, Google sign-in through the shared sign-in pool, and the native Dispatch API.
+Compose definitions run the on-prem Envoy listener, the Dispatch server against an external
+database, and a single-node Envoy with its own NATS. All services use host networking. The
+listener serves `127.0.0.1:9020` for local session registration and webhook ingress; Dispatch
+serves `127.0.0.1:8766` by default for the SPA, Google sign-in through the shared sign-in pool,
+and the native Dispatch API.
 
 ## Host configuration lives in `compose/.env`
 
@@ -13,7 +13,7 @@ Docker Compose reads `compose/.env` next to the compose files on every
 in a shell session. A `docker compose up` run by anyone (or any agent) then
 reproduces the same deployment; exported variables only override it.
 `compose/.env` holds secrets and is git-ignored; `compose/dispatch.env.example`
-is the template:
+is the template for Dispatch, `compose/single-node.env.example` the one for a single node:
 
 ```bash
 cp compose/dispatch.env.example compose/.env
@@ -43,6 +43,9 @@ every interface.
 ## Layout
 
 - `compose/listener.compose.yml` — host-network listener container.
+- `compose/single-node.compose.yml` — Envoy on one machine: a JetStream NATS of its own and the
+  listener, both on loopback, for sessions that need to reach only each other. The site's Envoy
+  page ("Running Envoy on one machine") walks through it.
 - `compose/dispatch.compose.yml` — the production Dispatch server against an external database
   (`DATABASE_URL`).
 - `compose/dispatch.acceptance.compose.yml` — isolated Postgres and Dispatch services for a

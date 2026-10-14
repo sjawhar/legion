@@ -4,6 +4,10 @@
 
 ### Added
 
+- `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
+  (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
+  `compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
+  Envoy on one machine") walks through starting it and pointing a machine's sessions at it.
 - A human's answer to a decision block carries his approval forward (LEGION-573). When the
   version his answer writes differs from the version he approved only in its ask blocks, every
   block it holds that is not as the approved version held it is one he answered, and at least one

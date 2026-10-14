@@ -1,6 +1,6 @@
 ---
 title: "Envoy: how events reach Dispatch, Legion and the agents"
-description: The Envoy listener and NATS under it, how GitHub webhooks and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, and running the listener.
+description: The Envoy listener and NATS under it, how GitHub webhooks and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
 sidebar:
   label: Envoy
   order: 9
@@ -155,3 +155,87 @@ and takes the consumer within two seconds of the old one exiting.
 
 Give the listener about 30 seconds to stop after `SIGTERM`. It stops taking requests, lets
 deliveries in progress finish, then exits with a non-zero code so a restart policy brings it back.
+
+## Running Envoy on one machine
+
+`packages/envoy/deploy/compose/single-node.compose.yml` runs Envoy for one machine: a NATS server
+with JetStream of its own and the listener in front of it, both listening on `127.0.0.1` only. The
+agent sessions on that machine register, subscribe, claim roles and send each other messages
+through it. Nothing on another machine can reach it, and no GitHub or Slack webhook arrives, so
+no pull request or check events reach the sessions.
+
+You need Docker Engine with the Compose plugin (`docker compose version` answers) and a checkout
+of this repository. The images are public, so pulling them needs no `docker login`. It listens on
+`4222` (NATS, `NATS_PORT` in `.env`), `8222` (NATS monitoring, `NATS_MONITOR_PORT`) and `9020`
+(the listener, `ENVOY_LISTENER_PORT`); when something else on the machine already uses one, set
+its variable, and use that port wherever a command below names the default.
+
+1. Write the machine's settings:
+
+   ```sh
+   cd packages/envoy/deploy/compose
+   cp -n single-node.env.example .env
+   ```
+
+   Set `ENVOY_MACHINE_ID` in `.env` to the machine's name. The other settings are optional; the
+   file says what each does. Docker Compose reads `.env` from this directory every time it runs,
+   and git ignores it. The other compose files here read the same `.env`, so when it already
+   exists, `cp -n` leaves it alone: copy the settings from `single-node.env.example` into it.
+
+2. Start it:
+
+   ```sh
+   docker compose -f single-node.compose.yml up -d --wait
+   curl http://127.0.0.1:9020/healthz
+   ```
+
+   `--wait` returns once both containers are healthy, and `/healthz` then answers `healthy`.
+   Both restart with Docker unless you stop them. `up` itself refuses, naming the setting, when
+   `ENVOY_MACHINE_ID` is unset or `ENVOY_IMAGE_TAG` names an image that was never published; when
+   a container stays unhealthy instead (a port already in use, say),
+   `docker compose -f single-node.compose.yml logs --tail 50` says why.
+
+3. Point the sessions at it in `~/.config/legion/envoy.json`:
+
+   ```json
+   {
+     "dispatch": { "enabled": false },
+     "envoy": {
+       "enabled": true,
+       "url": "http://127.0.0.1:9020",
+       "natsUrls": ["nats://127.0.0.1:4222"]
+     }
+   }
+   ```
+
+   `"dispatch": { "enabled": false }` is for a machine with no Dispatch server; one that has a
+   server keeps its `dispatch` section as it is. When `.env` sets `ENVOY_API_TOKEN`, put the same
+   value in `envoy.token`. A session under its own profile directory reads the `envoy.json` there
+   instead, and any session reads the file `ENVOY_CONFIG_FILE` names when it is set, as
+   [Connecting an agent](/legion/dispatch/for-agents/#connecting-an-agent) describes.
+
+4. Start an agent session with the Envoy plugin for its host: for Oh My Pi, `@sjawhar/pi-envoy`
+   10.0.0 or later (`omp plugin install @sjawhar/pi-envoy`), then `omp`. Check that it
+   registered:
+
+   ```sh
+   curl http://127.0.0.1:9020/v1/sessions
+   ```
+
+   With `ENVOY_API_TOKEN` set, add `-H "Authorization: Bearer <token>"`. The answer lists each
+   live session with its `session_id`. Start a second session, and the two can message each other
+   with `envoy_send`.
+
+NATS keeps the event stream and Envoy's key-value buckets in the `envoy-single-node_nats-data`
+volume, so a restart keeps every registration and every event still within its 72 hours.
+
+| Task | Command, from `packages/envoy/deploy/compose` |
+| --- | --- |
+| Upgrade to the newest published image | `docker compose -f single-node.compose.yml pull && docker compose -f single-node.compose.yml up -d --wait` |
+| Read the logs | `docker compose -f single-node.compose.yml logs -f` |
+| Stop it, keeping its data | `docker compose -f single-node.compose.yml down` |
+| Stop it and delete its data | `docker compose -f single-node.compose.yml down -v` |
+
+The listener image is always pulled, never built here. `ENVOY_IMAGE_TAG=latest` follows main's
+newest published image; to stay on one build, set it to that build's full commit sha on main. A
+tag that was never published is refused when Compose pulls it.
