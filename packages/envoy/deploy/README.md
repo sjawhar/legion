@@ -31,7 +31,7 @@ DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 ```
 
 The origin humans open in the browser is the sign-in callback origin: the server builds
-`<dispatch.serverUrl>/auth/callback` from `dispatch.serverUrl` in the mounted `envoy.json`, and
+`<DISPATCH_SERVER_URL>/auth/callback` from `DISPATCH_SERVER_URL` in `compose/.env`, and
 the sign-in pool's app client must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
 (recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
 stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after

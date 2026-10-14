@@ -53,8 +53,9 @@ import (
 
 var _ runtime.Runtime = (*Runtime)(nil)
 
-// apiTimeout bounds one API call the runtime makes outside a relaunch's own budget: a log or
-// event read for an observation's detail, a patch, a delete.
+// apiTimeout bounds one call the runtime makes: each request of its requests' Kubernetes client,
+// from the moment the client's rate limiter lets it go (requestConfig), and any call its clients do
+// not bound whole (call).
 const apiTimeout = 30 * time.Second
 
 // recheckInterval is how often a wait re-reads what it waits on even when no informer event
@@ -97,6 +98,9 @@ type Runtime struct {
 	now                            func() time.Time
 	log                            *slog.Logger
 
+	// lifetime is the informers' context; a read no single caller waits for
+	// (readLauncherCredential) ends with it.
+	lifetime  context.Context
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
 	sandboxes cache.SharedIndexInformer
@@ -127,27 +131,14 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	dyn, kube, err := clients(rc)
+	c, err := clients(rc)
 	if err != nil {
 		return nil, err
 	}
-	if err := r.start(ctx, dyn, kube); err != nil {
+	if err := r.start(ctx, c); err != nil {
 		return nil, err
 	}
 	return r, nil
-}
-
-// clients are the dynamic and typed clients of rc.
-func clients(rc *rest.Config) (dynamic.Interface, kubernetes.Interface, error) {
-	dyn, err := dynamic.NewForConfig(rc)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox runtime: dynamic client: %w", err)
-	}
-	kube, err := kubernetes.NewForConfig(rc)
-	if err != nil {
-		return nil, nil, fmt.Errorf("sandbox runtime: kubernetes client: %w", err)
-	}
-	return dyn, kube, nil
 }
 
 // configure checks opts and fills their defaults, touching no cluster: everything the runtime reads
@@ -322,28 +313,30 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 // start runs both informers (startInformers) and then the GitHub credential refresher
 // (refreshGitHubCredentials) on ctx, the informers' lifetime, so it stops with the informers whose
 // pod store it walks.
-func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
-	if err := r.startInformers(ctx, dyn, kube); err != nil {
+func (r *Runtime) start(ctx context.Context, c runtimeClients) error {
+	if err := r.startInformers(ctx, c); err != nil {
 		return err
 	}
 	go r.refreshGitHubCredentialsEvery(ctx, gitHubRefreshInterval)
 	return nil
 }
 
-// startInformers runs both informers, selected on the project label, until ctx ends, and waits for
-// both stores to sync.
-func (r *Runtime) startInformers(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
-	r.dyn, r.kube = dyn, kube
-	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
+// startInformers runs both informers over c's informers' clients, selected on the project label,
+// until ctx ends, and waits for both stores to sync; every other request of the runtime goes
+// through c's requests' clients.
+func (r *Runtime) startInformers(ctx context.Context, c runtimeClients) error {
+	r.dyn, r.kube, r.lifetime = c.requests.dyn, c.requests.kube, ctx
+	sandboxes := c.informers.dyn.Resource(sandboxGVR).Namespace(r.namespace)
+	pods := c.informers.kube.CoreV1().Pods(r.namespace)
 	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
-	r.sandboxes = r.informer(&r.sandboxFeed, dyn, &unstructured.Unstructured{},
+	r.sandboxes = r.informer(&r.sandboxFeed, c.informers.dyn, &unstructured.Unstructured{},
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) {
 			return sandboxes.List(ctx, o)
 		},
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) {
 			return sandboxes.Watch(ctx, o)
 		})
-	r.pods = r.informer(&r.podFeed, kube, &corev1.Pod{},
+	r.pods = r.informer(&r.podFeed, c.informers.kube, &corev1.Pod{},
 		func(ctx context.Context, o metav1.ListOptions) (k8sruntime.Object, error) { return pods.List(ctx, o) },
 		func(ctx context.Context, o metav1.ListOptions) (watch.Interface, error) { return pods.Watch(ctx, o) })
 	for _, informer := range []cache.SharedIndexInformer{r.sandboxes, r.pods} {
@@ -444,7 +437,10 @@ func (f *feed) check() error {
 		f.resource, f.since.UTC().Format(time.RFC3339), f.failed)
 }
 
-// call is ctx bounded for one API request.
+// call is ctx bounded for one call no client of the runtime bounds whole: a GitHub App token mint,
+// and a pod log Stream, which client-go bounds by the client's timeout per attempt and not across
+// its Retry-After retries (rest/request.go, Request.Stream), so a log read fails fast rather than
+// hold its caller.
 func call(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }
@@ -908,10 +904,8 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 // PVC. In the foreground the Sandbox stays, Terminating, until both are gone, so a launch that
 // waits out a Sandbox being deleted (ensureSandbox) waits for its volume too.
 func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
-	deleting, cancel := call(ctx)
-	defer cancel()
 	policy := metav1.DeletePropagationForeground
-	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})
+	err := r.sandboxClient().Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})
 	switch {
 	case err == nil:
 		r.forgetLauncherCredentials(name)

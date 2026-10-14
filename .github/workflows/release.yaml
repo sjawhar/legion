@@ -212,7 +212,7 @@ jobs:
       (needs.pi_envoy.result == 'success' || needs.pi_envoy.result == 'skipped') &&
       (needs.pi_legion.result == 'success' || needs.pi_legion.result == 'skipped')
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`gh release create`, below); id-token and
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
     # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
@@ -261,6 +261,21 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
+          # HEAD, where the range below would be empty and skip the release it never finished.
+          # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
+          # not legion-vX.Y.Z): "Tag release" accepts its own tag at this commit and "Create GitHub
+          # release" reuses a published release and publishes a draft one.
+          TAGGED=$(.github/scripts/release-push.sh tagged legion-v)
+          if [ -n "$TAGGED" ]; then
+            {
+              echo "version=${TAGGED#legion-v}"
+              echo "release_tag=$TAGGED"
+              echo "skip=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, already at HEAD"
+            exit 0
+          fi
           PREV_TAG=$(git tag -l 'legion-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # The first Go release continues the version line of the TypeScript CLI it replaces
@@ -373,17 +388,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.release_tag }}
-        run: |
-          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; reusing it"
-          else
-            gh release create "$TAG" \
-              assets/* \
-              --repo "${{ github.repository }}" \
-              --title "legion v${{ steps.version.outputs.version }}" \
-              --generate-notes \
-              --verify-tag
-          fi
+          VERSION: ${{ steps.version.outputs.version }}
+        # release-push.sh `release`: creates the release, reuses a published one, or publishes a
+        # draft an earlier attempt left, with this run's assets.
+        run: .github/scripts/release-push.sh release "$TAG" "legion v$VERSION" assets/*
 
   worker_image:
     needs: [changes, legion]
@@ -420,23 +428,33 @@ jobs:
       REF: ${{ needs.worker_image.outputs.ref }}
       RELEASE_TAG: ${{ needs.legion.outputs.release_tag }}
     steps:
-      - name: Append the worker image reference to the legion release
+      - name: Name the worker image on the legion release
         run: |
           test -n "$REF"
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body > body.md
-          if grep -qF "$REF" body.md; then
-            echo "Release $RELEASE_TAG already lists $REF"
-            exit 0
+          # A whole-run rerun rebuilds the image under the same version tag, so an existing
+          # "## Worker image" section is replaced rather than added to: the body names only the
+          # digest the tag points at now. The section runs to the next heading of level 1 or 2.
+          rest=$(awk '/^## Worker image[ \t\r]*$/ { skip = 1; next } skip && /^##? / { skip = 0 } !skip' body.md)
+          if [ -n "$rest" ]; then
+            printf '%s\n\n' "$rest" > notes.md
+          else
+            : > notes.md
           fi
           # shellcheck disable=SC2016 # literal Markdown backticks, no expansion wanted
-          printf '\n\n## Worker image\n\n`%s`\n' "$REF" >> body.md
-          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file body.md
+          printf '## Worker image\n\n`%s`\n' "$REF" >> notes.md
+          # $(<…) drops trailing newlines, so a body differing only in those is unchanged.
+          if [ "$(<body.md)" = "$(<notes.md)" ]; then
+            echo "Release $RELEASE_TAG already names $REF"
+            exit 0
+          fi
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
 
   envoy_plugin:
     needs: changes
     if: needs.changes.outputs.envoy_plugin == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
     # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
@@ -462,6 +480,19 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Commit and tag" pushed the tag checks out this same commit with that
+          # tag, where the range below would be empty and skip the release it never finished.
+          # Release that tag again instead (release-push.sh, `tagged`); every later step is safe to
+          # repeat: npm reuses a published version, `release-push.sh release` reuses a published
+          # release and publishes a draft one, `tag` accepts its own tag, and `push-main` pushes
+          # nothing once main holds this version or a later one.
+          TAGGED=$(.github/scripts/release-push.sh tagged opencode-legion-envoy-v packages/envoy-plugin)
+          if [ -n "$TAGGED" ]; then
+            echo "version=${TAGGED#opencode-legion-envoy-v}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, which an earlier attempt pushed for this commit"
+            exit 0
+          fi
           # The package's prepack copies skills/ into the tarball (package.json "prepack"), where
           # OpenCode loads it as the plugin's skills, so a commit there releases whatever its type.
           # Its notices generator is another shipped build input, so it gets the same patch release.
@@ -499,8 +530,10 @@ jobs:
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+          jq --arg v "$VERSION" '.version = $v' \
             packages/envoy-plugin/package.json > tmp.json \
             && mv tmp.json packages/envoy-plugin/package.json
 
@@ -511,9 +544,11 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@sjawhar/opencode-legion-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          if npm view "@sjawhar/opencode-legion-envoy@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
           fi
@@ -521,31 +556,25 @@ jobs:
 
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh tag packages/envoy-plugin \
-            "chore: release envoy-plugin v${{ steps.version.outputs.version }} [skip ci]" \
-            "opencode-legion-envoy-v${{ steps.version.outputs.version }}"
+            "chore: release envoy-plugin v$VERSION [skip ci]" \
+            "opencode-legion-envoy-v$VERSION"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          tag="opencode-legion-envoy-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
-          else
-            gh release create "$tag" \
-              packages/envoy-plugin/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "Envoy Plugin v${{ steps.version.outputs.version }}" \
-              --generate-notes \
-              --verify-tag
-          fi
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh release "opencode-legion-envoy-v$VERSION" "Envoy Plugin v$VERSION" packages/envoy-plugin/*.tgz
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/envoy-plugin "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh push-main packages/envoy-plugin "$VERSION"
 
   pi_envoy:
     needs: [changes, envoy_plugin]
@@ -555,7 +584,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
     # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
@@ -581,6 +610,15 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Commit and tag" pushed the tag: envoy_plugin's version step says why
+          # this releases that tag again.
+          TAGGED=$(.github/scripts/release-push.sh tagged pi-envoy-v packages/pi-envoy)
+          if [ -n "$TAGGED" ]; then
+            echo "version=${TAGGED#pi-envoy-v}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, which an earlier attempt pushed for this commit"
+            exit 0
+          fi
           # scripts/pi-plugin-prepack.sh copies this plugin's four skills into dist/skills, which
           # every Oh My Pi session loads as the plugin's skills, so a commit there releases whatever
           # its type. Its notices generator and the prepack itself are shipped build inputs too, so
@@ -626,8 +664,10 @@ jobs:
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+          jq --arg v "$VERSION" '.version = $v' \
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
 
@@ -650,9 +690,11 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@sjawhar/pi-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          if npm view "@sjawhar/pi-envoy@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
           fi
@@ -667,31 +709,25 @@ jobs:
 
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh tag packages/pi-envoy \
-            "chore: release pi-envoy v${{ steps.version.outputs.version }} [skip ci]" \
-            "pi-envoy-v${{ steps.version.outputs.version }}"
+            "chore: release pi-envoy v$VERSION [skip ci]" \
+            "pi-envoy-v$VERSION"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          tag="pi-envoy-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
-          else
-            gh release create "$tag" \
-              packages/pi-envoy/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "Pi Envoy v${{ steps.version.outputs.version }}" \
-              --generate-notes \
-              --verify-tag
-          fi
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh release "pi-envoy-v$VERSION" "Pi Envoy v$VERSION" packages/pi-envoy/*.tgz
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/pi-envoy "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh push-main packages/pi-envoy "$VERSION"
 
   pi_legion:
     # After pi_envoy, never beside it: both jobs end in `release-push.sh push-main`, whose rebase
@@ -705,7 +741,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       version: ${{ steps.version.outputs.version }}
-    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write is
     # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
     # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
     # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
@@ -731,6 +767,15 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A re-run after "Commit and tag" pushed the tag: envoy_plugin's version step says why
+          # this releases that tag again.
+          TAGGED=$(.github/scripts/release-push.sh tagged pi-legion-v packages/pi-legion)
+          if [ -n "$TAGGED" ]; then
+            echo "version=${TAGGED#pi-legion-v}" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "Releasing $TAGGED, which an earlier attempt pushed for this commit"
+            exit 0
+          fi
           # scripts/pi-plugin-prepack.sh copies this plugin's eight skills into dist/skills, which
           # a Legion pane's prompts load, so a commit there releases whatever its type. Its notices
           # generator and the prepack itself are shipped build inputs too, so they get the same
@@ -779,8 +824,10 @@ jobs:
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+          jq --arg v "$VERSION" '.version = $v' \
             packages/pi-legion/package.json > tmp.json \
             && mv tmp.json packages/pi-legion/package.json
 
@@ -805,9 +852,11 @@ jobs:
 
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if npm view "@sjawhar/pi-legion@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
-            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          if npm view "@sjawhar/pi-legion@$VERSION" version >/dev/null 2>&1; then
+            echo "npm already has $VERSION; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
           fi
@@ -822,28 +871,22 @@ jobs:
 
       - name: Commit and tag
         if: steps.version.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           .github/scripts/release-push.sh tag packages/pi-legion \
-            "chore: release pi-legion v${{ steps.version.outputs.version }} [skip ci]" \
-            "pi-legion-v${{ steps.version.outputs.version }}"
+            "chore: release pi-legion v$VERSION [skip ci]" \
+            "pi-legion-v$VERSION"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          tag="pi-legion-v${{ steps.version.outputs.version }}"
-          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
-            echo "Release $tag already exists; reusing it"
-          else
-            gh release create "$tag" \
-              packages/pi-legion/*.tgz \
-              --repo "${{ github.repository }}" \
-              --title "Pi Legion v${{ steps.version.outputs.version }}" \
-              --generate-notes \
-              --verify-tag
-          fi
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh release "pi-legion-v$VERSION" "Pi Legion v$VERSION" packages/pi-legion/*.tgz
 
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
-        run: .github/scripts/release-push.sh push-main packages/pi-legion "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: .github/scripts/release-push.sh push-main packages/pi-legion "$VERSION"

@@ -311,9 +311,7 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 	for _, role := range l.roles {
 		name := roleSecretName(s.Name, role)
 		read := func() (*corev1.Secret, error) {
-			reading, cancel := call(ctx)
-			defer cancel()
-			secret, err := secrets.Get(reading, name, metav1.GetOptions{})
+			secret, err := secrets.Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
 				return nil, fmt.Errorf("bind launcher secret %s: %w", name, err)
 			}
@@ -331,9 +329,7 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 				secret.Annotations = map[string]string{}
 			}
 			secret.Annotations[launcherPodUIDAnnotation] = uid
-			updating, cancel := call(ctx)
-			_, err = secrets.Update(updating, secret, metav1.UpdateOptions{})
-			cancel()
+			_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
 			if err == nil {
 				break
 			}
@@ -355,13 +351,14 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 // is replaced rather than trusted. Any other failure to read a Secret, such as a timeout, a
 // throttled request or a server error, proves nothing about the pod: it is returned, so only the
 // launch that read it fails, and the caller stops that role's previous process (runtime.Runtime's
-// Spawn and Resume); the pod and every other role running in it are left as they are.
+// Spawn and Resume); the pod and every other role running in it are left as they are. Each Secret
+// it finds bound to pod, holding a launcher token, is held as its role's credential
+// (cacheLauncherCredential), so the launcher a kept pod's launch waits for is not refused for a
+// read of its own that failed earlier (credentialRetry).
 func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
 	for _, role := range roles {
 		name := roleSecretName(s.Name, role)
-		reading, cancel := call(ctx)
-		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(reading, name, metav1.GetOptions{})
-		cancel()
+		secret, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, name, metav1.GetOptions{})
 		switch {
 		case apierrors.IsNotFound(err):
 			return false, nil
@@ -369,6 +366,9 @@ func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod
 			return false, fmt.Errorf("read launcher secret %s: %w", name, err)
 		case !ownedBySandbox(secret.OwnerReferences, s.UID) || secret.Annotations[launcherPodUIDAnnotation] != string(pod.UID):
 			return false, nil
+		}
+		if len(secret.Data[LauncherTokenFile]) > 0 {
+			r.cacheLauncherCredential(s, secret)
 		}
 	}
 	return true, nil

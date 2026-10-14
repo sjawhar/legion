@@ -656,7 +656,7 @@ describe("DispatchClient", () => {
     }
   });
 
-  // Whatever answers at the Dispatch URL (a repository's own `.opencode/envoy.json` can name it)
+  // Whatever answers at the Dispatch URL (a repository's own `.envoy/envoy.json` can name it)
   // controls the body, and the excerpt is built synchronously on the host's event loop, before the
   // 120-character cut. Each pass over the body must stay linear and the scan bounded, or a page of
   // unclosed tags freezes the session: a quadratic pass takes seconds on tens of kilobytes. The

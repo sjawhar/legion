@@ -1,6 +1,9 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { hasErrnoCode } from "@legion/envoy-client/errors"
+import { z } from "zod"
+
+const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
 
 /**
  * The session id the channel server acts as, held once and passed by reference.
@@ -46,6 +49,25 @@ export function sessionHandoffFile(stateDirectory: string, claudePid: number): s
 /** Role state is keyed by session id so `claude --resume <id>` finds the role it held. */
 export function roleStateFile(stateDirectory: string, sessionId: string): string {
   return join(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`)
+}
+
+/** The role a session held, from its role file; undefined when it has none. */
+export async function readPersistedRole(
+  roleFile: string,
+): Promise<z.infer<typeof PersistedRole> | undefined> {
+  try {
+    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")))
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT")) return undefined
+    throw error
+  }
+}
+
+export async function writePersistedRole(
+  roleFile: string,
+  state: z.infer<typeof PersistedRole>,
+): Promise<void> {
+  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}\n`)
 }
 
 /**

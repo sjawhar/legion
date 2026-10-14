@@ -82,6 +82,7 @@ test("reasserts a restored role after a successful registration heartbeat loses 
     notifier,
     client,
     heartbeatMs: 25,
+    configFile: { path: join(stateDirectory, "envoy.json"), error: null },
     stateDirectory,
   })
 

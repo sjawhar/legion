@@ -87,6 +87,7 @@ test("reasserts a role claimed after channel startup on the next heartbeat", asy
       notifier,
       client,
       heartbeatMs: 25,
+      configFile: { path: join(stateDirectory, "envoy.json"), error: null },
       stateDirectory,
     })
 

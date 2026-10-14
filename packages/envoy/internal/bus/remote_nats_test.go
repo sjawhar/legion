@@ -34,10 +34,10 @@ func TestConnectOwningStreamStillReconcilesTheDeployedStream(t *testing.T) {
 }
 
 // Owning the stream is no exemption from saying which machine's NATS this is. Nothing separates
-// the deployed Dispatch from the same binary run out of a checkout - both read natsUrls from
-// ~/.config/opencode/envoy.json, which on an agent machine names production - so a bare
-// envoy-dispatch would otherwise reconcile production's stream before its own database check
-// failed. Each deployment sets the variable instead.
+// the deployed Dispatch from the same binary run out of a checkout - both read envoy.natsUrls from
+// the user envoy.json (${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json), which on an agent machine
+// names production - so a bare envoy-dispatch would otherwise reconcile production's stream
+// before its own database check failed. Each deployment sets the variable instead.
 func TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	uri := testnats.URL(t)
 	js := deployStream(t, uri)
@@ -98,7 +98,7 @@ func TestDialRefusesANATSServerThatIsNotThisMachines(t *testing.T) {
 	}
 }
 
-// An agent's ~/.config/opencode/envoy.json names production's bus, so a tool run from a checkout
+// An agent's user envoy.json names production's bus, so a tool run from a checkout
 // reaches production unless something stops it. The refusal names the server and the override,
 // and it is read off the URL: nothing dials while the run has not said it means another machine's
 // NATS.

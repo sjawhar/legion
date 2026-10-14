@@ -1,207 +1,185 @@
-import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import * as path from "node:path";
-import { z } from "zod";
+import { type BearerSource, bearerSource, type FileBearer, fileBearer } from "./bearer";
+import {
+  type CheckoutEnvoyConfig,
+  type EnvoyConfig,
+  type EnvoyConfigEnvironment,
+  httpUrl,
+  missingConfigNotice,
+  nonEmpty,
+  offWithError,
+  offWithNotice,
+  type ReadEnvoyConfig,
+  type SectionOff,
+} from "./envoy-config";
 import { messageFor } from "./errors";
-import { readSecretFile } from "./secret-file";
 
 /** Default dispatch server base URL, matching the Go server's listen address. */
 const DEFAULT_SERVER_URL = "http://localhost:8766";
 
-function normalizeDispatchUrl(url: string): string {
-  return url.replace(/\/+$/, "");
-}
-
-function parsedDispatchUrl(
-  value: string,
-  source: string
-): { url: string | null; error: string | null } {
-  const url = normalizeDispatchUrl(value);
-  try {
-    new URL(url);
-    return { url, error: null };
-  } catch {
-    return { url: null, error: `${source} must be a valid URL` };
-  }
-}
-
-// Mirrors the shared envoy.json contract (the Go loader in
-// packages/envoy/internal/dispatch/config, which the dispatch server reads):
-// strict dispatch keys, URL-shaped serverUrl, tolerant top level. A file the
-// Go loader rejects as invalid must not enable the dispatch tool either.
-const EnvoyFileSchema = z.looseObject({
-  $schema: z.string().optional(),
-  natsUrls: z.array(z.string()).optional(),
-  dispatch: z
-    .strictObject({
-      enabled: z.boolean().optional(),
-      serverUrl: z.url().optional(),
-      token: z.string().optional(),
-    })
-    .optional(),
-});
-
-type DispatchSettings = NonNullable<z.infer<typeof EnvoyFileSchema>["dispatch"]>;
-
-type EnvoyFileResult =
-  | { readonly kind: "absent" }
-  | { readonly kind: "invalid"; readonly reason: string }
-  | { readonly kind: "valid"; readonly settings: DispatchSettings | null };
-
-/** Describe the first schema-validation issue, naming the file and offending key. */
-function describeSchemaIssue(filePath: string, error: z.ZodError): string {
-  const issue = error.issues[0];
-  if (!issue) return `${filePath}: invalid dispatch config`;
-  if (issue.code === "unrecognized_keys") {
-    const keys = issue.keys.map((key) => `dispatch.${key}`).join(", ");
-    return `${filePath}: unrecognized dispatch key(s): ${keys}`;
-  }
-  return `${filePath}: ${issue.path.join(".")}: ${issue.message}`;
-}
-
-function readEnvoyFile(filePath: string): EnvoyFileResult {
-  let raw: string;
-  try {
-    raw = readFileSync(filePath, "utf-8");
-  } catch {
-    return { kind: "absent" };
-  }
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(raw);
-  } catch (err) {
-    return { kind: "invalid", reason: `${filePath}: invalid JSON (${messageFor(err)})` };
-  }
-  const parsed = EnvoyFileSchema.safeParse(parsedJson);
-  if (!parsed.success) {
-    return { kind: "invalid", reason: describeSchemaIssue(filePath, parsed.error) };
-  }
-  return { kind: "valid", settings: parsed.data.dispatch ?? null };
-}
-
-type DispatchEnvironment = {
-  readonly DISPATCH_URL?: string;
-  readonly DISPATCH_TOKEN?: string;
-  readonly DISPATCH_TOKEN_FILE?: string;
-  readonly HOME?: string;
-} & Record<string, string | undefined>;
-
-export interface DispatchConfigResolution {
-  readonly enabled: boolean;
-  readonly url: string | null;
-  readonly token: string | null;
-  /** Set when a file, URL, or token prevents Dispatch from being enabled. */
-  readonly error: string | null;
-}
-
-/**
- * Load Dispatch's URL and bearer token from the shared envoy.json contract.
- *
- * `DISPATCH_URL` overrides the file URL. The token resolves from `DISPATCH_TOKEN_FILE` (trimmed
- * file contents — how the Legion daemon delivers it to a pane), then `DISPATCH_TOKEN`, then
- * `dispatch.token`; a set `DISPATCH_TOKEN_FILE` that cannot be read or is blank disables Dispatch
- * with that failure as `error` and never falls back. A repository `dispatch.serverUrl` is trusted
- * only with the `dispatch.token` declared beside it, so it cannot redirect a user-level credential.
- * Dispatch tools are available only when both URL and bearer token resolve.
- */
-export function resolveDispatchConfig(
-  env: DispatchEnvironment,
-  options: { readonly cwd?: string; readonly home?: string } = {}
-): DispatchConfigResolution {
-  const explicitUrl = env.DISPATCH_URL;
-
-  // env is the call's one source of truth: a caller that hands us an
-  // environment with HOME set is read from there. os.homedir() alone is not a
-  // seam — Bun resolves it once at startup and ignores later HOME changes.
-  const home = options.home ?? env.HOME ?? homedir();
-  const cwd = options.cwd ?? process.cwd();
-  const userFile = readEnvoyFile(path.join(home, ".config", "opencode", "envoy.json"));
-  const repoFile = readEnvoyFile(path.join(cwd, ".opencode", "envoy.json"));
-
-  for (const file of [userFile, repoFile]) {
-    if (file.kind === "invalid") {
-      return { enabled: false, url: null, token: null, error: file.reason };
-    }
-  }
-
-  const userSettings = userFile.kind === "valid" ? userFile.settings : null;
-  const repoSettings = repoFile.kind === "valid" ? repoFile.settings : null;
-  const merged: DispatchSettings = { ...userSettings, ...repoSettings };
-  const repoURL = repoSettings?.serverUrl;
-
-  // Repository configuration is controlled by the repository author. It may
-  // provide its own endpoint and credential, but must never redirect a
-  // credential inherited from the user's config or process environment.
-  if (explicitUrl === undefined && merged.enabled === true && repoURL !== undefined) {
-    const token = repoSettings?.token ?? null;
-    if (!token) {
-      return {
-        enabled: false,
-        url: null,
-        token: null,
-        error:
-          "repository dispatch.serverUrl requires dispatch.token from the same .opencode/envoy.json or DISPATCH_URL with DISPATCH_TOKEN",
-      };
-    }
-    const url = parsedDispatchUrl(repoURL, "repository dispatch.serverUrl");
-    if (url.error !== null) return { enabled: false, url: null, token: null, error: url.error };
-    return { enabled: true, url: url.url, token, error: null };
-  }
-
-  const rawUrl =
-    explicitUrl !== undefined
-      ? { value: explicitUrl, source: "DISPATCH_URL" }
-      : merged.enabled === true
-        ? { value: merged.serverUrl ?? DEFAULT_SERVER_URL, source: "dispatch.serverUrl" }
-        : null;
-  const url = rawUrl ? parsedDispatchUrl(rawUrl.value, rawUrl.source) : { url: null, error: null };
-  let token: string | null;
-  let tokenSource: string;
-  if (env.DISPATCH_TOKEN_FILE !== undefined) {
-    tokenSource = "DISPATCH_TOKEN_FILE";
-    try {
-      token = readSecretFile(tokenSource, env.DISPATCH_TOKEN_FILE);
-    } catch (error) {
-      return { enabled: false, url: url.url, token: null, error: messageFor(error) };
-    }
-  } else if (env.DISPATCH_TOKEN !== undefined) {
-    tokenSource = "DISPATCH_TOKEN";
-    token = env.DISPATCH_TOKEN;
-  } else {
-    tokenSource = "dispatch.token";
-    token = merged.token ?? null;
-  }
-  if (url.error !== null) return { enabled: false, url: null, token, error: url.error };
-  if (url.url === null) return { enabled: false, url: null, token, error: null };
-  if (!token) {
-    return {
-      enabled: false,
-      url: url.url,
-      token,
-      error: `${tokenSource} must be a non-empty bearer token`,
-    };
-  }
-  return { enabled: true, url: url.url, token, error: null };
-}
-
-/** A resolution with Dispatch enabled: its URL and bearer token both resolved. */
-export type ActiveDispatchConfig = DispatchConfigResolution & {
-  readonly url: string;
-  readonly token: string;
+/** The variables `dispatchSettings` consults, by name, over whatever else the environment holds. */
+export type DispatchEnvironment = EnvoyConfigEnvironment & {
+  readonly DISPATCH_TOKEN?: string | undefined;
+  readonly DISPATCH_TOKEN_FILE?: string | undefined;
 };
 
+/** Dispatch on: its URL and bearer token, both resolved. */
+export interface ActiveDispatchConfig {
+  readonly enabled: true;
+  readonly url: string;
+  readonly token: string;
+}
+
+/** Dispatch on, or off with the one notice or error that says why (`SectionOff`). */
+export type DispatchConfigResolution = ActiveDispatchConfig | SectionOff;
+
+type ValidCheckout = Extract<CheckoutEnvoyConfig, { readonly kind: "valid" }>;
+
+/** A checkout's own server and the token written beside it, which only that server gets. Throws
+ * when the checkout names no token. */
+function checkoutPair(checkout: ValidCheckout, serverUrl: string): BearerSource {
+  const { token } = checkout.dispatch;
+  if (token === undefined) {
+    throw new Error(
+      `${checkout.path}: dispatch.serverUrl requires dispatch.token in the same file`
+    );
+  }
+  return {
+    kind: "file",
+    token,
+    field: "dispatch.token",
+    path: checkout.path,
+    server: serverUrl,
+    checkout: true,
+  };
+}
+
+/** The token a file gives when no variable does: the chosen file's `dispatch.token`. A checkout's
+ * `dispatch.token` here has no `dispatch.serverUrl` beside it (`checkoutPair` takes one that does),
+ * and is refused. */
+function writtenToken(
+  config: ReadEnvoyConfig,
+  checkout: ValidCheckout | null
+): FileBearer | undefined {
+  if (checkout?.dispatch.token !== undefined) {
+    throw new Error(
+      `${checkout.path}: dispatch.token requires dispatch.serverUrl in the same file`
+    );
+  }
+  const own = config.dispatch;
+  if (own.token === undefined) return undefined;
+  const server = own.serverUrl ?? DEFAULT_SERVER_URL;
+  return {
+    token: own.token,
+    field: "dispatch.token",
+    path: config.path,
+    server,
+    checkout: false,
+  };
+}
+
 /**
- * The active Dispatch configuration (`resolveDispatchConfig`), or null when none is configured. A
- * file, URL, or token that prevents Dispatch throws `dispatch config: <reason>` rather than reading
- * as unconfigured.
+ * Dispatch's URL and bearer token from `config` (`readEnvoyConfig`) and the environment. An empty
+ * variable counts as unset.
+ *
+ * The `enabled` rule is the Envoy section's (`envoySettings`): the chosen file's
+ * `dispatch.enabled: false` turns Dispatch off whatever the variables say; otherwise the section's
+ * fields apply, and Dispatch is on when its server resolves: `DISPATCH_URL`, a checkout's own
+ * server, the chosen file's `dispatch.serverUrl`, or the default that `dispatch.enabled: true`
+ * names. A checkout's file is read only while `DISPATCH_URL` is unset: `DISPATCH_URL` replaces its
+ * server, its token and its `enabled` together, so a repository can neither turn off the Dispatch
+ * the session's environment configured nor send its own token to the server the environment names.
+ * A checkout contributes only its `dispatch.enabled: false`, or its own server with its own token;
+ * its `dispatch.enabled: true` alone turns nothing on. A checkout's file that cannot be read or is
+ * not valid turns Dispatch off with its error, likewise only while `DISPATCH_URL` is unset.
+ *
+ * The token's source is chosen first: a checkout that names its own `dispatch.serverUrl` gives that
+ * server and the `dispatch.token` written beside it, and nothing else; otherwise the token resolves
+ * from `DISPATCH_TOKEN_FILE` (trimmed file contents, how the Legion daemon delivers it to a pane),
+ * then `DISPATCH_TOKEN`, then the chosen file's `dispatch.token` (a checkout's token without its own
+ * server is refused). A set `DISPATCH_TOKEN_FILE` that cannot be read or is blank disables Dispatch
+ * with that failure as `error` and never falls back. The URL follows: `DISPATCH_URL`, else the
+ * server written beside a file's token, else the chosen file's `dispatch.serverUrl`, else the
+ * default.
+ *
+ * Same server only: the chosen file's token goes with `DISPATCH_URL` only when it names the origin
+ * of the server written beside it (the default when it names none); any other server needs
+ * `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`. A checkout's server with its own token points the
+ * session at that server as that token's holder, whichever server it is, the user's own included;
+ * what a checkout cannot do is take the user's token, or a variable's, anywhere. A checkout's `!`
+ * token is refused; the chosen file's runs here, only once Dispatch is about to use it. Dispatch is
+ * on only when both URL and bearer token resolve; off, it says why: a `notice` when nothing names
+ * it or a file turns it off, an `error` otherwise.
  */
-export function activeDispatchConfig(
+export function dispatchSettings(
   env: DispatchEnvironment,
-  options: { readonly cwd?: string; readonly home?: string } = {}
+  config: EnvoyConfig
+): DispatchConfigResolution {
+  if (config.kind === "failed") return offWithError(config.error);
+  const explicitUrl = nonEmpty(env.DISPATCH_URL);
+  const checkoutFile = explicitUrl === undefined ? config.checkout : null;
+  if (checkoutFile?.kind === "invalid") return offWithError(checkoutFile.error);
+  const checkout = checkoutFile?.kind === "valid" ? checkoutFile : null;
+  const own = config.dispatch;
+  if (own.enabled === false) {
+    return offWithNotice(`${config.path} sets dispatch.enabled to false: Dispatch is off`);
+  }
+  if (checkout?.dispatch.enabled === false) {
+    return offWithNotice(`${checkout.path} sets dispatch.enabled to false: Dispatch is off`);
+  }
+  // On when its address resolves: DISPATCH_URL, a checkout's own server, the chosen file's server,
+  // or the default its enabled: true names. A checkout's enabled: true alone would name the default
+  // server and draw a variable's token to it, so it names nothing.
+  const checkoutServer = checkout?.dispatch.serverUrl;
+  const addressed =
+    explicitUrl !== undefined ||
+    checkoutServer !== undefined ||
+    own.serverUrl !== undefined ||
+    own.enabled === true;
+  if (!addressed) {
+    return offWithNotice(
+      config.missing === null
+        ? `${config.path} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`
+        : missingConfigNotice(config.path, config.missing, "Dispatch is off")
+    );
+  }
+  if (explicitUrl !== undefined && httpUrl(explicitUrl) === undefined) {
+    return offWithError("DISPATCH_URL must be an http or https URL");
+  }
+
+  try {
+    // A checkout's server goes only with the token written beside it.
+    const source =
+      checkout !== null && checkoutServer !== undefined
+        ? checkoutPair(checkout, checkoutServer)
+        : bearerSource(env, "DISPATCH", () => writtenToken(config, checkout));
+    if (source.kind === "none") {
+      return offWithError(
+        explicitUrl === undefined
+          ? `${config.path}: dispatch is enabled and no token is: set dispatch.token, or DISPATCH_TOKEN or DISPATCH_TOKEN_FILE`
+          : `DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${config.path}`
+      );
+    }
+    const url = (
+      explicitUrl ??
+      (source.kind === "file" ? source.server : (own.serverUrl ?? DEFAULT_SERVER_URL))
+    ).replace(/\/+$/, "");
+    const token =
+      source.kind === "variable" ? source.token : fileBearer(source, url, "DISPATCH", env);
+    return { enabled: true, url, token };
+  } catch (error) {
+    return offWithError(messageFor(error));
+  }
+}
+
+/**
+ * `resolution` when it has Dispatch enabled, or null when none is configured. A file, URL, or
+ * token that prevents Dispatch throws `dispatch config: <reason>` rather than reading as
+ * unconfigured.
+ */
+export function activeDispatchSettings(
+  resolution: DispatchConfigResolution
 ): ActiveDispatchConfig | null {
-  const config = resolveDispatchConfig(env, options);
-  if (config.error !== null) throw new Error(`dispatch config: ${config.error}`);
-  const { url, token } = config;
-  if (!config.enabled || url === null || token === null) return null;
-  return { ...config, url, token };
+  if (resolution.enabled) return resolution;
+  if (resolution.error !== null) throw new Error(`dispatch config: ${resolution.error}`);
+  return null;
 }

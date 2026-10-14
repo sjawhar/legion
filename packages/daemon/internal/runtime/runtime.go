@@ -244,6 +244,14 @@ type Observation struct {
 	// relaunches the claim as a fresh session rather than resume one that no longer exists. It is
 	// a field rather than a shape of Detail, which is prose for an operator and nothing else.
 	WorkspaceLost bool
+	// Displaced is a Gone or NotRecordedProcess of a process the daemon itself ended: it replaced
+	// the process's pod while the process ran, to launch another role there. Only the Sandbox
+	// runtime reports it, for a replacement of a live issue or controller pod — one on another
+	// image, one holding a worker stream, secrets broker enrollment or session database URL key a
+	// pod created now is not handed, or one whose role launcher Secret no longer binds it. The
+	// process did nothing wrong, so the supervisor resumes its session at once, charging nothing,
+	// rather than count a death. A field, as WorkspaceLost is, and never set beside it.
+	Displaced bool
 }
 
 // GitIdentity is the author a worker's commits carry.

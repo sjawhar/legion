@@ -230,7 +230,7 @@ export function AgentTokensSection(): ReactNode {
             </p>
           )}
           <p className={`mt-4 text-sm ${textSecondaryOnSurface}`}>
-            Put this in <code>~/.config/opencode/envoy.json</code>:
+            Put this in <code>~/.config/legion/envoy.json</code>:
           </p>
           <pre
             className={`mt-2 overflow-x-auto rounded-md p-3 text-sm ${surfaceMutedBg} ${textPrimaryOnSurface}`}
@@ -250,7 +250,11 @@ export function AgentTokensSection(): ReactNode {
             </code>
           </pre>
           <p className={`mt-2 text-sm ${textSecondaryOnSurface}`}>
-            This merges into your existing envoy.json file.
+            If the file exists, replace its <code>dispatch</code> section with this one and keep the
+            rest. A session under a named omp profile, or with <code>CLAUDE_CONFIG_DIR</code> or{" "}
+            <code>OPENCODE_CONFIG_DIR</code> set, reads the <code>envoy.json</code> in that
+            directory instead; any other session reads the file <code>ENVOY_CONFIG_FILE</code> names
+            when it is set.
           </p>
           <p className={`mt-4 text-sm ${textSecondaryOnSurface}`}>
             Or set these environment variables:

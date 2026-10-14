@@ -239,10 +239,12 @@ type SuperviseRequest struct {
 	// budgets: the failed claim stays failed for the boot report to name.
 	RuleResume bool `json:"ruleResume,omitempty"`
 	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
-	// red while it tested, or reviewed a round it had not completed (workflow's TriggerChecksRed). The
-	// start acts only once that role's claim is out of its turn (supervise.Machine.Quiesce), so the
-	// two never write the shared workspace together. It is empty for every other start, which a
-	// completion or a person's move hands the phase, and for every other operation.
+	// red while it tested, reviewed a round it had not completed, or worked toward its READY as the
+	// merger (workflow's TriggerChecksRed). The start acts only once that role's claim is out of its
+	// turn (supervise.Machine.Quiesce), so the two never write the shared workspace together. It is
+	// empty for every other start, which a completion or a person's move hands the phase, for a move
+	// between two phases of one role (retro back to implementing on a red, where the implementer
+	// keeps its turn and is handed the new task once it ends), and for every other operation.
 	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root

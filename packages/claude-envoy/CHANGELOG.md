@@ -1,5 +1,38 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
+  `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the session's file is missing, the channel server's notice, and the `open-asks` hook's summary
+  when that missing file is what turns Dispatch off, say so and name the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for
+  `$CLAUDE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
+  `XDG_CONFIG_HOME` they say only that the old file is not read there. A top-level `natsUrls` is
+  refused, naming `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
+- The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE` beside `DISPATCH_HOST`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the session's own file. A Bash that lacks what that hook writes, as a subagent's can, runs `dispatch` as host `claude` (`CLAUDE_CODE_CHILD_SESSION=1` with `DISPATCH_HOST` unset) on `CLAUDE_CONFIG_DIR`'s file, where it was refused for want of `DISPATCH_HOST`.
+- With Envoy off the channel server lists no tool, refuses each call with `Envoy is off for this session: <why>`, and exits 0 when stdin ends, instead of failing on `ENVOY_NATS_URL is required`.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone; its `.opencode/envoy.json` is not read, and while
+  `.envoy/envoy.json` is absent the `open-asks` hook's context, the channel server's notice and the
+  `dispatch` command name the rename. A checkout's file that is not valid refuses Dispatch only
+  while `DISPATCH_URL` is unset, and a checkout's `dispatch.token` needs its own
+  `dispatch.serverUrl` beside it.
+- `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server.
+- One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- With Envoy on and no NATS server, or with its NATS seed refused, the channel server serves the Envoy tools with inbound messages off, as pi-envoy does, and says so once on stderr (`Envoy's inbound messages are off: <why>; the Envoy tools still work`, where `<why>` is `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` or the seed's refusal); `envoy_subscribe` is refused naming why. It exited 1.
+- The channel server writes one notice to stderr when a section is off: the missing file, the section's error, or what a checkout's files hold that is not read.
+- `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
+- `envoy-send`, a command, counts `CLAUDE_CONFIG_DIR` only under Claude Code (`CLAUDE_CODE_CHILD_SESSION=1`): run from a plain terminal whose shell exports it, it does not read `$CLAUDE_CONFIG_DIR/envoy.json`. The hook and the channel server read `CLAUDE_CONFIG_DIR` whenever it is set.
+
+### Fixed
+
+- `claude plugin marketplace update legion-plugins`, then `claude plugin update claude-envoy@legion-plugins`, installs main's current tree: `.claude-plugin/plugin.json` declares no `version`, so Claude Code versions the plugin by its commit. Its fixed `1.0.0` held every install at the tree it was first installed from (`claude-envoy is already at the latest version (1.0.0)`).
+
 ## [1.0.0]
 
 ### Changed

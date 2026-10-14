@@ -285,6 +285,40 @@
 
 ### Changed
 
+- **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
+  `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
+  `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
+  that holds an `envoy` section refuses startup, naming `envoy` and the user file it belongs in
+  (`envoy: not read from a checkout's envoy.json; put it in <user file>`): a cloned repository
+  does not choose the NATS servers the process connects to. The session clients ignore such a
+  section and say so in their start notice instead. A `.envoy` that is a plain file, as some
+  repositories have, counts as no checkout file. A JSON `null`, at the top level, as a section or
+  as any key's value, is refused naming the key (`dispatch: Expected object`,
+  `envoy.natsUrls: Expected string array`), as the clients refuse it, and JSON that does not parse
+  is refused naming the file, the line and the column, never the text it stopped at, which can be
+  the start of a token or seed. A top-level `natsUrls` is refused: a user file's naming
+  `envoy.natsUrls`, a checkout's saying a checkout's envoy.json holds only a `dispatch` section.
+  `~/.config/opencode/envoy.json` is not read: while it is the only user file and the user file is
+  `~/.config/legion/envoy.json`, startup refuses, naming both paths and the move
+  (`<old file> is not read: mkdir -p <user file's directory> && mv <old file> <user file>`), whatever
+  `DISPATCH_SERVER_URL` and `NATS_URLS` say. A checkout's `.opencode/envoy.json` is not read: while
+  the checkout has no `.envoy/envoy.json`, `envoy-dispatch` logs one WARN at start
+  (`dispatch: a checkout's .opencode/envoy.json is not read`, with the rename as `fix`) and
+  `natstail` prints the rename. Neither gives a `mv` across a mount: where the old file's directory
+  and the nearest existing ancestor of the new file's directory are on different filesystems (as in
+  an agent box that bind-mounts `~/.config/opencode`), the text is `<old file> is not read, and is
+  on another filesystem than <new file> (a mount): create <new file>, and move <old file> on the
+  machine that owns it` (`config.LoadOptions.DeviceOf` answers a directory's device, `stat`'s by
+  default). The `envoy` section takes `enabled`, `url`, `natsUrls`, `token` and
+  `natsSeed` and refuses any other key; the server reads `envoy.natsUrls` whatever
+  `envoy.enabled` says, since `enabled` switches a session's Envoy. `XDG_CONFIG_HOME` is a row of
+  the settings table, and one set to a path that is not absolute refuses startup, naming it.
+  `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files, but not the old-file refusal.
+  No Go process runs `envoy.natsSeed`: `natstail` and `envoy-dispatch redeliver-webhooks` connect
+  as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names, so a run against a NATS that
+  requires a user needs `NATS_NKEY_SEED_FILE`, which the session launchers no longer export.
+  The compose deployment (`deploy/compose/dispatch.compose.yml`) mounts no `envoy.json` and needs
+  no change.
 - **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's
   `default` service account (`system:serviceaccount:<namespace>:default`), naming the entry: every
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's

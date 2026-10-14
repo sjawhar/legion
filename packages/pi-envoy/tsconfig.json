@@ -7,7 +7,7 @@
     "baseUrl": ".",
     "paths": {
       "@legion/contracts": ["../contracts/src/index.ts"],
-      "@legion/envoy-client/defaults": ["../envoy-client/src/defaults.ts"],
+      "@legion/envoy-client/envoy-settings": ["../envoy-client/src/envoy-settings.ts"],
       "@legion/envoy-client/delivery": ["../envoy-client/src/delivery.ts"],
       "@legion/envoy-client/errors": ["../envoy-client/src/errors.ts"],
       "@legion/envoy-client/machine": ["../envoy-client/src/machine.ts"],

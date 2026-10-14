@@ -8,7 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LegionRole } from "@legion/contracts";
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { DEFAULT_ENVOY_URL } from "@legion/envoy-client/envoy-settings";
+import { sessionConfigFile, sessionEnvoySettings } from "@legion/envoy-client/session-settings";
 
 /** This checkout's daemon module, the one the rig reads unless a run names another checkout's. */
 export const DAEMON_MODULE = path.resolve(import.meta.dir, "../../../daemon");
@@ -96,15 +97,20 @@ export interface PaneSource {
  * scratch state directory and the stand-in daemon, over the caller's own environment. Everything
  * the daemon tells the pane comes from the daemon's own functions in `source`'s module
  * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
- * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment,
- * `envoyDefaultsFromEnvironment`), `GH_CONFIG_DIR` naming the claim's gh files, which hold
- * `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty, `PI_SHELL_PREFIX`, the
- * four XDG base directories, the boot token pointer (`<state>/secrets/boot`, the file the stand-in
- * checks), and PATH with the launcher directory first; no grant file, since the `legion` tool mints
- * its grants in-process and no agent runs `legion` from bash; and, with `systemPrompt`, the system
- * prompt argument. An inherited `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and
- * the caller's own GitHub variables are dropped first. The profile's agent directory is under the
- * inherited `HOME`. */
+ * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment and
+ * the profile's envoy.json, `envoySettings`, which reads no Envoy from the workspace's
+ * `.envoy/envoy.json`; the default listener and no NATS when that Envoy is off), `GH_CONFIG_DIR`
+ * naming the claim's gh files, which hold `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and
+ * `GH_HOST` set empty,
+ * `PI_SHELL_PREFIX`, the four XDG base directories, the boot token pointer
+ * (`<state>/secrets/boot`, the file the stand-in checks), and PATH with the launcher directory
+ * first; no grant file, since the `legion` tool mints its grants in-process and no agent runs
+ * `legion` from bash; and, with `systemPrompt`, the system prompt argument. An inherited
+ * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the caller's own GitHub
+ * variables are dropped first. The profile's agent directory, and so its envoy.json, is under the
+ * inherited `HOME`. Throws `envoy: <why>` when that Envoy is off with an error, or on with inbound
+ * messages off (`inbound.off`: no NATS server, or its seed refused), since the pane's Legion claim
+ * refuses then. */
 export function workerPane(
   launch: WorkerLaunch,
   inherited: NodeJS.ProcessEnv,
@@ -122,14 +128,24 @@ export function workerPane(
   }
   const home = env.HOME ?? os.homedir();
   const stateDir = path.join(launch.rig, "state");
-  const envoy = envoyDefaultsFromEnvironment(env);
+  const workspace = path.join(launch.rig, "ws");
+  const profileEnv = {
+    ...env,
+    OMP_PROFILE: launch.profile,
+    PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
+  };
+  const envoy = sessionEnvoySettings(sessionConfigFile("omp", profileEnv), profileEnv, {
+    cwd: workspace,
+  });
+  if (!envoy.enabled && envoy.error !== null) throw new Error(`envoy: ${envoy.error}`);
+  if (envoy.enabled && "off" in envoy.inbound) throw new Error(`envoy: ${envoy.inbound.off}`);
   const request: PaneRequest = {
     ...claim,
     stateDir,
-    workspace: path.join(launch.rig, "ws"),
+    workspace,
     daemonUrl: `http://127.0.0.1:${launch.port}`,
-    envoyUrl: envoy.envoyUrl,
-    natsUrls: envoy.natsUrls,
+    envoyUrl: envoy.enabled ? envoy.url : DEFAULT_ENVOY_URL,
+    natsUrls: envoy.enabled && "natsUrls" in envoy.inbound ? envoy.inbound.natsUrls : [],
     bootTokenFile: path.join(stateDir, "secrets", "boot"),
     ghToken: RIG_GH_TOKEN,
     path: env.PATH ?? "",
@@ -142,9 +158,9 @@ export function workerPane(
     ...pane,
     env: {
       ...env,
-      OMP_PROFILE: launch.profile,
+      OMP_PROFILE: profileEnv.OMP_PROFILE,
       PI_PROFILE: launch.profile,
-      PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
+      PI_CODING_AGENT_DIR: profileEnv.PI_CODING_AGENT_DIR,
       PI_NOTIFICATIONS: "off",
       PI_NO_TITLE: "1",
       ...pane.env,

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -466,6 +467,196 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 		t.Fatalf("workspace-init called codegraph %q, want it to build no index on the pod's registration path", calls)
 	}
 	holdsNoToken(t, v.root, "after provisioning")
+}
+
+// staleLock leaves a git lock file at path, last written age ago, as a git or jj process killed or
+// interrupted mid-write leaves one beside the file it was writing.
+func staleLock(t *testing.T, path string, age time.Duration) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().Add(-age)
+	if err := os.Chtimes(path, when, when); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// removedLine matches provision's log line for the stale lock it removed at path, last written
+// about age ago (whole minutes; the seconds are the test's own run time).
+func removedLine(path string, age time.Duration) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^workspace-init: removed the stale git lock ` + regexp.QuoteMeta(path) +
+		`, last written ` + regexp.QuoteMeta(strings.TrimSuffix(age.String(), "0s")) + `\d+s ago`)
+}
+
+// provisioned runs provision for issue on the volume and fails the test unless it succeeds.
+func (v *issueVolume) provisioned(t *testing.T, issue string) string {
+	t.Helper()
+	code, stdout, stderr := runWorkspaceInitHere(v.args(issue))
+	if code != 0 {
+		t.Fatalf("provision %s: exit %d, stdout %q, stderr %q", issue, code, stdout, stderr)
+	}
+	return stdout
+}
+
+// A git or jj process interrupted mid-write leaves its lock beside the file it was writing, and
+// every later git or jj write to that file fails on it until someone deletes it (LEGION-731: a
+// worktree's index.lock failed every provisioning of an issue's pods with "Could not acquire lock
+// for index file"). provision runs before any role container of the issue's pod starts, on a
+// volume no other pod mounts, so nothing can hold a lock there: it removes the workspace's stale
+// index.lock, logging its path and age, and the update-stale that failed on it succeeds.
+func TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock(t *testing.T) {
+	v := newIssueVolume(t).withRemote(t)
+	v.fetch(t)
+	v.provisioned(t, "LEGION-42")
+	// The working copy is rebased from outside the workspace onto a commit carrying a file, so the
+	// next provisioning's update-stale checks out a new tree, which rewrites the worktree's index.
+	if err := os.WriteFile(filepath.Join(v.clone(), "added.txt"), []byte("added\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	v.jj(t, "describe", "-m", "adds a file", "-R", v.clone())
+	v.jj(t, "rebase", "-r", "legion-42@", "-d", "@", "--ignore-working-copy", "-R", v.clone())
+	lock := filepath.Join(v.clone(), ".git", "worktrees", "legion-42", "index.lock")
+	staleLock(t, lock, 31*time.Minute)
+
+	stdout := v.provisioned(t, "LEGION-42")
+	if _, err := os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%s after provisioning: %v, want it removed", lock, err)
+	}
+	if want := removedLine(lock, 31*time.Minute); !want.MatchString(stdout) {
+		t.Fatalf("stdout %q, want a line matching %q", stdout, want)
+	}
+	if _, err := os.Stat(filepath.Join(v.workspace("LEGION-42"), "added.txt")); err != nil {
+		t.Fatalf("the workspace after provisioning: %v, want the rebased tree update-stale checks out", err)
+	}
+}
+
+// provision removes the issue's own locks and no other: another workspace's git worktree entry in
+// the clone — an issue's that shared it, or a worktree an agent added — keeps its lock as it was,
+// however old.
+func TestWorkspaceInitLeavesAnotherWorkspacesLockAlone(t *testing.T) {
+	v := newIssueVolume(t).withRemote(t)
+	v.fetch(t)
+	v.provisioned(t, "LEGION-42")
+	v.provisioned(t, "LEGION-43")
+	other := filepath.Join(v.clone(), ".git", "worktrees", "legion-43", "index.lock")
+	staleLock(t, other, 31*time.Minute)
+	before, err := os.Lstat(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := v.provisioned(t, "LEGION-42")
+	after, err := os.Lstat(other)
+	if err != nil || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("LEGION-43's %s after LEGION-42's provisioning: %v (%v), want it left as it was", other, after, err)
+	}
+	if strings.Contains(stdout, other) {
+		t.Fatalf("stdout %q names LEGION-43's lock", stdout)
+	}
+}
+
+// The clone's own git directory holds locks beside what git and jj write there — its default
+// workspace's index, packed-refs, a ref — and the clone is as much the issue's alone as its
+// workspace: one per issue volume, which no other pod mounts. provision removes each stale one,
+// logging it, and provisions.
+func TestWorkspaceInitRemovesTheClonesStaleLocks(t *testing.T) {
+	v := newIssueVolume(t).withRemote(t)
+	v.fetch(t)
+	v.provisioned(t, "LEGION-42")
+	git := filepath.Join(v.clone(), ".git")
+	locks := []string{
+		filepath.Join(git, "index.lock"),
+		filepath.Join(git, "packed-refs.lock"),
+		filepath.Join(git, "refs", "heads", "legion", "LEGION-42.lock"),
+	}
+	for _, lock := range locks {
+		staleLock(t, lock, 2*time.Hour)
+	}
+
+	stdout := v.provisioned(t, "LEGION-42")
+	for _, lock := range locks {
+		if _, err := os.Lstat(lock); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s after provisioning: %v, want it removed", lock, err)
+		}
+		if want := removedLine(lock, 2*time.Hour); !want.MatchString(stdout) {
+			t.Errorf("stdout %q, want a line matching %q", stdout, want)
+		}
+	}
+}
+
+// A stale lock provision cannot remove fails it, naming the file, before any git or jj runs on
+// the clone: it would fail the provisioning anyway, on a message that names the lock alone.
+func TestWorkspaceInitFailsOnALockItCannotRemove(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root removes a file from a directory it cannot write")
+	}
+	v := newIssueVolume(t).withRemote(t)
+	v.fetch(t)
+	v.provisioned(t, "LEGION-42")
+	entry := filepath.Join(v.clone(), ".git", "worktrees", "legion-42")
+	lock := filepath.Join(entry, "index.lock")
+	staleLock(t, lock, 31*time.Minute)
+	if err := os.Chmod(entry, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(entry, 0o755) })
+	calls := len(v.jjCalls(t))
+
+	code, _, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
+	if code != 1 || !strings.Contains(stderr, "remove the stale git lock "+lock) {
+		t.Fatalf("exit %d, stderr %q, want exit 1 naming %s", code, stderr, lock)
+	}
+	if ran := v.jjCalls(t)[calls:]; len(ran) != 0 {
+		t.Fatalf("jj ran %q after the lock could not be removed, want nothing run", ran)
+	}
+}
+
+// The clone's .git and its worktrees directory are real directories, as git creates them, and both
+// are on the volume every agent of the issue writes. Either one replaced with a symlink would take
+// the sweep, and the worktree writes after it, to whatever directory it names: there an entry
+// whose gitdir names the issue's workspace counts as the workspace's own. provision refuses it,
+// naming the symlink, before it removes anything or runs jj.
+func TestWorkspaceInitRefusesASymlinkedGitDirectory(t *testing.T) {
+	for _, linked := range []string{".git", filepath.Join(".git", "worktrees")} {
+		t.Run(linked, func(t *testing.T) {
+			v := newIssueVolume(t).withRemote(t)
+			v.fetch(t)
+			v.provisioned(t, "LEGION-42")
+			path := filepath.Join(v.clone(), linked)
+			elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+			if err := os.Rename(path, elsewhere); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(elsewhere, path); err != nil {
+				t.Fatal(err)
+			}
+			evil := filepath.Join(v.clone(), ".git", "worktrees", "evil")
+			if err := os.MkdirAll(evil, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(evil, "gitdir"), []byte(filepath.Join(v.workspace("LEGION-42"), ".git")+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			victim := filepath.Join(evil, "victim.lock")
+			staleLock(t, victim, 31*time.Minute)
+			calls := len(v.jjCalls(t))
+
+			code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
+			if want := "refusing the git worktrees of " + v.clone() + ": " + path + " is a symlink"; code != 1 || !strings.Contains(stderr, want) {
+				t.Fatalf("exit %d, stdout %q, stderr %q, want exit 1 with %q", code, stdout, stderr, want)
+			}
+			if _, err := os.Lstat(victim); err != nil {
+				t.Fatalf("%s after the refusal: %v, want it left where the symlink points", victim, err)
+			}
+			if ran := v.jjCalls(t)[calls:]; len(ran) != 0 {
+				t.Fatalf("jj ran %q after the refusal, want nothing run", ran)
+			}
+		})
+	}
 }
 
 // Shared init distinguishes loss of the issue's storage from one role's missing transcript.

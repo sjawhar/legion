@@ -82,17 +82,22 @@ modify/delete case looked when reproduced. Temp file plus `mv` is the fix; the f
 it on `origin/main` after resolution, so a regression to `REBASE_HEAD:` (which would silently drop
 main's other edits) fails a check instead of passing because both sides started from one base.
 
-Three facts about driving the rebase from a script, each proved on git 2.43 with the merge
+Two facts about driving the rebase from a script, each proved on git 2.43 with the merge
 backend and each load-bearing:
 
 - `GIT_EDITOR=true git rebase --continue` — `--continue` opens an editor for the replayed commit's
   message; without a tty (Actions) it fails `There was a problem with the editor`. Not cargo cult.
-- A resolution that leaves the commit empty (main already carries the identical bump, reachable
-  because the workflow skips `npm publish` for an existing version) is dropped by `--continue`
-  itself. No `--skip` branch is needed; the loop's next `git push` says `Everything up-to-date`.
 - Best-effort cleanup is `git rebase --abort 2>/dev/null || true`. When the rebase failed before it
   started (a dirty tracked file), a bare `--abort` prints `fatal: No rebase in progress?` as the
   first thing an operator reads, ahead of the real `::error::` line.
+
+The resolver only ever raises main's version. After each fetch, `push-main` reads main's manifest:
+when it already holds the version being released or a later one, the script pushes nothing, says
+so in a `::notice::` and the job summary, and exits 0. That covers main already carrying the
+identical bump (a re-run whose first attempt landed it) and a re-run of an older run after a later
+release of the package landed, where taking main's copy and setting `.version` to the older
+version lowered main's manifest (test Cases 7 and 8). The "release in flight is the newest" rule
+holds for a first attempt, which derives its version from the newest tag, and not for a re-run.
 
 ## 3. "Every failure says the publish succeeded" means every exit path, and `set -e` hides exits
 
@@ -148,10 +153,12 @@ push, silently discarding nothing from the manifest but leaving the changelog to
 conflict handling (it would conflict as a second path and abort, which is the safe outcome). The
 mirror modify/delete shape — the *bump* commit deleting the manifest while main modified it — is
 unguarded for the same reason: `tag` stages a manifest the version step just wrote, so the bump
-commit is always a modification. Both live in the header comment as facts, not in code. When two
-stages of one script share a contract about the shape of what one produces and the other consumes
-destructively, write the contract down at the producing end; the consuming end's correctness is
-invisible to a reader who sees only it.
+commit is always a modification. `push-main`'s early exit when main already holds the version or a
+later one rests on the same contract more bluntly: it drops the whole bump commit, so a second file
+in that commit would be dropped without any conflict at all. All three are facts written in the
+header comment, not checked in code. When two stages of one script share a contract about the
+shape of what one produces and the other consumes destructively, write the contract down at the
+producing end; the consuming end's correctness is invisible to a reader who sees only it.
 
 Two more couplings a future editor of this script should know: `push-main`'s `rebase --continue`
 creates a commit and therefore needs `user.name`/`user.email`, which only the `tag` case sets —

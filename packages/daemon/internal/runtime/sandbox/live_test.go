@@ -100,6 +100,7 @@ var liveChecks = []liveCheck{
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
 	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
+	{"displaced", (*liveRig).checkDisplaced, nil},
 	{"postgres-resume", (*liveRig).checkPostgresResume, nil},
 }
 
@@ -693,7 +694,7 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	}
 	r.rc = rc
 	// The harness's own reads under the runtime identity ask the rules of every namespace, so
-	// they run faster than client-go's default rate; the runtime keeps the default.
+	// they run faster than client-go's default rate; the runtime paces its own (clientQPS).
 	own := rest.CopyConfig(rc)
 	own.QPS, own.Burst = 50, 100
 	if r.kube, err = kubernetes.NewForConfig(own); err != nil {
@@ -744,6 +745,10 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// (independent-provision).
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
 		{"child2", "S4A-2", "S4A-3", claim.RolePlanner},
+		// displaced and displacer are two roles of one more issue pod, which the displacer's launch
+		// replaces while the displaced role still runs in it (displaced).
+		{"displaced", "S4A-6", "S4A-6", claim.RoleArchitect},
+		{"displacer", "S4A-6", "S4A-6", claim.RoleImplementer},
 	} {
 		token, err := claim.NewToken(env.claimProject, c.issue, c.role)
 		if err != nil {

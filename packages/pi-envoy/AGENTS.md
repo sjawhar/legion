@@ -13,11 +13,12 @@ Legion pane loads beside this plugin and which reaches it through the interface 
 This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
 delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
 subject construction come from the Envoy core packages. Its NATS connection (the agent subjects in
-`extensions/envoy.ts`) connects as the nkey user
-`@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and without a
-credential when neither is set; an unusable seed fails the connect naming the variable, and a Legion
-daemon strips both from every pane it launches, handing it instead the `legion-pane` seed file it
-holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is the sole inbound
+`extensions/envoy.ts`) connects as the nkey user whose seed `envoySettings` resolves
+(`NATS_NKEY_SEED_FILE`, then `NATS_NKEY_SEED`, then `envoy.natsSeed` for the same file's own
+`envoy.natsUrls`; "Configuration" below), and without a credential when none is set; an unusable
+seed fails the connect naming its source, and a Legion daemon strips both variables from every pane
+it launches, handing it instead the `legion-pane` seed file it holds as `NATS_NKEY_SEED_FILE` when
+it has one. `@legion/envoy-client/delivery` is the sole inbound
 renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on) and
 posts its body or error to the correlated delivery attempt; **Aside** and **Steer** call
@@ -168,31 +169,84 @@ bridge the Legion entry claims through, the record of the user turns this plugin
 slot for the bootstrapped session's transcript; what the Legion entry does with it, and how it
 refuses to run without it, is "What this plugin needs from pi-envoy" there.
 
+## Configuration
+
+A session reads one envoy.json (`@legion/envoy-client/session-settings` over `envoy-config`),
+chosen at module load by Oh My Pi's rule: with `OMP_PROFILE` naming a profile other than
+`default`, `$PI_CODING_AGENT_DIR/envoy.json`; otherwise the file `ENVOY_CONFIG_FILE` names, else
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The module sets `ENVOY_CONFIG_FILE` to that
+path beside `PATH` and `DISPATCH_HOST` (below), so the `dispatch` command a shell command runs,
+which reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, reads the same file,
+and so does `@sjawhar/pi-legion` in the same process, by the same Oh My Pi rule. The `dispatch`
+section of a checkout's `<cwd>/.envoy/envoy.json` merges over it: its server is used only with the
+token written beside it, its token only beside its own server, and a `!` value in it is refused. An
+`envoy` section in the checkout's file is not read, which the start notice says, and a checkout's
+file that cannot be read or is not valid refuses Dispatch alone, only while `DISPATCH_URL` is unset.
+The file holds a `dispatch` section (`enabled`, `serverUrl`, `token`) and an `envoy` section
+(`enabled`, `url`, `natsUrls`, `token`, `natsSeed`), each strict and each resolved on its own: a
+chosen file that is not valid turns both sections off, `enabled: false` turns a section off
+whatever the variables say, and a missing file contributes nothing, so each section is then on
+only when its variables name it. A `token` or `natsSeed` starting with `!` is a command
+(`/bin/sh -c` in the envoy.json's directory and its own process group, 10 s, its exit status
+deciding, its trimmed stdout the value), run only when its section uses it; its value is kept for
+the process across every copy of the extension's modules (each `task` subagent loads a fresh one),
+and so is a command that ran out of time, which never runs again in that process (each run blocks
+it for the whole 10 s), while a failure that ended on its own is kept for 60 s, then it runs
+again. `DISPATCH_URL`,
+`DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`,
+`ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field, which is
+how a Legion pane gets the Dispatch and Envoy its daemon names. A file's token goes with
+`DISPATCH_URL` or `ENVOY_URL` only when the variable names the origin of the server written in that
+file, and a file's `natsSeed` with `ENVOY_NATS_URL` only when it names that file's `natsUrls`;
+otherwise the section is off with an error naming the variable to set.
+
+With Envoy off the extension builds no listener client, registers no Envoy tool and no `/whoami`,
+and opens no NATS connection; the Legion claim bridge and every other listener call go through one
+accessor (`requireEnvoy`) that throws `Envoy is off for this session: <why>`, the section's notice
+or error. With Envoy on and no NATS server, or with its NATS seed refused, inbound messages are off
+(`inbound.off` says why) and the tools and `/whoami` still work; `envoy_subscribe` and the Legion
+interface's `claim` and `subscribe` throw `inbound messages are off for this session: <why>` (the
+refusal, or that Envoy has no NATS server) through one accessor (`requireInbound`), before any
+listener call or NATS connection: nats.js handed no server dials `127.0.0.1:4222`, and a claimed
+role's every task and notice reaches its holder only over NATS, so a Legion process with inbound
+off fails its boot at the claim rather than hold a role that delivers nothing.
+Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the file stopped
+configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
+throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
+off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
+Envoy are off`), a section's error, what a checkout's files hold that the session does not read, or
+that inbound messages are off; a file that turns a section off says nothing. A file location that
+cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`)
+still loads the extension, with both sections off, nothing handed on, and that refusal as the
+notice.
+
+`~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
+user file is there and the session's file is missing, the missing file's notice ends with what to
+do: for `~/.config/legion/envoy.json`,
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`; for a profile's
+own file, copy or link the old file to it, or write it; under a relocated `XDG_CONFIG_HOME`, only
+that it is not read there. While a checkout has no `.envoy/envoy.json`, the notice names the rename
+of its `.opencode/envoy.json`. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
+
 ## The `dispatch` command
 
 The extension registers no Dispatch tool: agents run the `dispatch` command in their shell
 (`dispatch --help`, `dispatch <command> --help`), one command per spec of `@legion/contracts`'s
 `dispatchToolSpecs`. `bin/dispatch` is a shim that runs the bundled `dist/dispatch.js` with `bun`,
 and exits 2 naming the file when the plugin was not built. At module load `extensions/envoy.ts`
-puts the plugin's `bin/` (one directory above the module in both layouts) first on `PATH` and sets
-`DISPATCH_HOST=omp`; Oh My Pi snapshots `process.env` for its shell when it first runs one, after
-every extension has loaded, so both reach every shell command. `bindDispatchSession` sets
+puts the plugin's `bin/` (one directory above the module in both layouts) first on `PATH`, sets
+`DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`
+("Configuration"); Oh My Pi snapshots `process.env` for its shell when it first runs one, after
+every extension has loaded, so all three reach every shell command. `bindDispatchSession` sets
 `DISPATCH_SESSION_ID` to the session's id at `session_start`, `session_switch`, `session_branch`
 and the heartbeat's drift heal (and deletes it while the session has no id), and the command acts
 as that session; the session's title reaches it through the `title` file in the session's state
 directory (the `dispatch` CLI row under "Where to look"). The command resolves Dispatch's URL and
-bearer token on every call, so a Dispatch that moved (a new `dispatch.serverUrl` in `envoy.json`,
-or a changed `DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`, and a file
-that has since broken fails the call with its own error rather than using the stale endpoint. The
-extension resolves the same configuration once at load, for the `dispatch-first` context below and
-the warning `session_start` shows when it is invalid. Set
-`dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
-`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`. A repository
-`dispatch.serverUrl` can use only `dispatch.token` from that same repository
-file; override its endpoint only with `DISPATCH_URL` plus `DISPATCH_TOKEN` or
-`DISPATCH_TOKEN_FILE`. `DISPATCH_TOKEN_FILE` is a path whose trimmed contents
-are the token — how the Legion daemon delivers it to a pane — and never falls
-back when unreadable. A human mints a personal token in Dispatch Settings → Agent
+bearer token on every call, and so do the extension's own Dispatch calls (the open-asks read, a
+delivery's reply) over the same file, so a Dispatch that moved (a new `dispatch.serverUrl` in
+envoy.json, or a changed `DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`,
+and a file that has since broken fails the call with its own error rather than using the stale
+endpoint. A human mints a personal token in Dispatch Settings → Agent
 tokens, then supplies it through `dispatch.token` or `DISPATCH_TOKEN`; the server
 attributes that session's writes to the minting human. `DISPATCH_AGENT_TOKEN` is
 the shared devbox fallback, not a token to configure for an individual agent. No
@@ -353,8 +407,8 @@ state never nudges.
 | OMP extension entry | `extensions/envoy.ts` | The one entry; ships as `dist/envoy.js` in `@sjawhar/pi-envoy` and loads in every installed OMP session. The Legion entry is `../pi-legion/extensions/legion.ts` (`packages/pi-legion/AGENTS.md`) |
 | Legion lifecycle | `../pi-legion/` | The daemon client, the claim and controller sessions, the `legion` tool and the phase stall are `@sjawhar/pi-legion`'s: see `packages/pi-legion/AGENTS.md` |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
-| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH` and sets `DISPATCH_HOST=omp`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
-| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, and resets the process-wide interface so no Legion suite's record reaches it |
+| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
+| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no section with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The four skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |

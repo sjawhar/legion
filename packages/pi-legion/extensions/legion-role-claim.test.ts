@@ -1,5 +1,5 @@
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { agentSubject, roleToken } from "@legion/contracts";
@@ -41,10 +41,31 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   copyToClipboard: async () => undefined,
   ...hostAgentRegistryMock,
 }));
+// The Envoy entry picks its envoy.json when its module loads, and both entries read it on each use:
+// a file that holds no section, so the panes here take Dispatch and Envoy from the variables the
+// test sets, never from the caller's own envoy.json or Oh My Pi profile.
+const envoyConfigDirectory = mkdtempSync(join(tmpdir(), "legion-role-claim-envoy-config-"));
+const envoyConfigFile = join(envoyConfigDirectory, "envoy.json");
+writeFileSync(envoyConfigFile, "{}\n");
+const originalConfigEnvironment = {
+  ENVOY_CONFIG_FILE: process.env.ENVOY_CONFIG_FILE,
+  OMP_PROFILE: process.env.OMP_PROFILE,
+  PI_CODING_AGENT_DIR: process.env.PI_CODING_AGENT_DIR,
+} as const;
+process.env.ENVOY_CONFIG_FILE = envoyConfigFile;
+delete process.env.OMP_PROFILE;
+delete process.env.PI_CODING_AGENT_DIR;
 // Distinct mtime queries force distinct module instances, exercising the
 // cross-module role-claim bridge documented in envoy.ts. The Envoy entry is the sibling plugin's,
 // reached by path: this test is the one place the two entries meet in one process.
 const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
+afterAll(() => {
+  for (const [key, value] of Object.entries(originalConfigEnvironment)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  rmSync(envoyConfigDirectory, { recursive: true, force: true });
+});
 const { default: legionExtension, setLegionCapabilityHostForTests } = await import(
   "./legion.ts?legion-entry"
 );
@@ -95,10 +116,8 @@ const originalEnvironment = {
   DISPATCH_TOKEN: process.env.DISPATCH_TOKEN,
   DISPATCH_STATE_DIR: process.env.DISPATCH_STATE_DIR,
 } as const;
-// The envoy extension registers the dispatch tools whenever the developer's own
-// ~/.config/opencode/envoy.json enables dispatch; this file's zod stub is not a real schema
-// builder, so the resolution must see no user config and no DISPATCH_* override. The `dispatch`
-// command's state (the session title file legion.ts writes) goes to a scratch directory.
+// No DISPATCH_* override reaches the panes here, beside the file above. The `dispatch` command's
+// state (the session title file legion.ts writes) goes to a scratch directory.
 let dispatchState = "";
 beforeEach(() => {
   process.env.HOME = "/nonexistent-home-for-legion-tests";

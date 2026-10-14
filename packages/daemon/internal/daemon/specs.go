@@ -36,9 +36,6 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
-	// reviewWorkflows is the project's review_workflows, which a reviewer is told after its
-	// addressing (ReviewWorkflowsFragment).
-	reviewWorkflows []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
@@ -93,9 +90,6 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 	}
 	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
 		addressing += " " + DesignGateFragment(s.designGate)
-	}
-	if c.Role == claim.RoleReviewer {
-		addressing += " " + ReviewWorkflowsFragment(s.reviewWorkflows)
 	}
 	if c.Role == claim.RoleMerger {
 		addressing += " " + MergeRulesFragment(s.mergeRules)
@@ -202,17 +196,6 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 // the architect is in its Go role part (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
-}
-
-// ReviewWorkflowsFragment is the sentence a reviewer is told after its addressing: the required
-// workflows this project declares as review workflows (`projects.<KEY>.review_workflows`), the
-// "Review workflows" line its Go role part reads (prompts/go/reviewer.md). A red only they make is
-// the reviewer's round's to adjudicate; any other red required workflow is a failing check.
-func ReviewWorkflowsFragment(workflows []string) string {
-	if len(workflows) == 0 {
-		return "Review workflows: this project declares none (`review_workflows`)."
-	}
-	return "Review workflows: this project declares `" + strings.Join(workflows, "`, `") + "` (`review_workflows`)."
 }
 
 // MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.

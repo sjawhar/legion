@@ -21,9 +21,11 @@ type interrupt struct {
 }
 
 // Quiesce is asked by a start, outbox row row, that takes over this claim's issue's phase although
-// this claim never completed it: CI settled red while the tester tested, or while the reviewer
-// reviewed a round it had not completed, and the issue is back in implementing (workflow's
-// TriggerChecksRed, record.SuperviseRequest's Quiesce). A completion ends a worker's writes before
+// this claim never completed it: CI settled red while the tester tested, while the reviewer
+// reviewed a round it had not completed, or while the merger worked toward its READY, and the issue
+// is back in implementing (workflow's TriggerChecksRed, record.SuperviseRequest's Quiesce). A move
+// between two phases of one role - retro back to implementing - asks it of nobody: the implementer
+// keeps its turn and is handed the new task once it ends. A completion ends a worker's writes before
 // the next role starts; nothing does here, so the start acts only once this claim is out of its turn,
 // and its worker never writes the shared workspace beside the role the start hands it to. The claim
 // keeps its process and its session.

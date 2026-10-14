@@ -18,8 +18,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
@@ -164,20 +162,20 @@ func probeName(project, hex, run string) string {
 // so it may run while that project's daemon boots, or beside another probe-boot.
 type Prober struct{ r *Runtime }
 
-// NewProber builds a Prober over rc's clients (newProber).
+// NewProber builds a Prober over rc's clients (clients, newProber).
 func NewProber(ctx context.Context, rc *rest.Config, opts Options) (*Prober, error) {
-	dyn, kube, err := clients(rc)
+	c, err := clients(rc)
 	if err != nil {
 		return nil, err
 	}
-	return newProber(ctx, dyn, kube, opts)
+	return newProber(ctx, c, opts)
 }
 
 // newProber builds a Prober from opts, which need none of what only supervision reads
 // (configureProber), draws its probe run, and starts its Sandbox and pod informers for ctx's
 // lifetime as New does, and nothing else: no refresher of the roles' gh files, since it writes no
 // role's Secret.
-func newProber(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface, opts Options) (*Prober, error) {
+func newProber(ctx context.Context, c runtimeClients, opts Options) (*Prober, error) {
 	r, err := configureProber(opts)
 	if err != nil {
 		return nil, err
@@ -187,7 +185,7 @@ func newProber(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Inter
 		return nil, fmt.Errorf("sandbox runtime: draw the probe run: %w", err)
 	}
 	r.probeRun = fmt.Sprintf("%x", run)
-	if err := r.startInformers(ctx, dyn, kube); err != nil {
+	if err := r.startInformers(ctx, c); err != nil {
 		return nil, err
 	}
 	return &Prober{r: r}, nil
@@ -224,6 +222,10 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		return outcome, bootprobe.ImageReport{}
 	}
 	defer func() {
+		// Detached from ctx, which may be what ended the probe, so nothing but this bound ends the
+		// delete; it covers the wait on the client's limiter too. A delete it cuts short leaves a
+		// Sandbox the next probe replaces (createProbe), and the Sandbox's shutdown time ends it
+		// before then.
 		deleting, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiTimeout)
 		defer cancel()
 		background := metav1.DeletePropagationBackground
@@ -351,9 +353,7 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 		if err != nil {
 			return "", err
 		}
-		creating, cancel := call(ctx)
-		defer cancel()
-		created, err := r.sandboxClient().Create(creating, object, metav1.CreateOptions{})
+		created, err := r.sandboxClient().Create(ctx, object, metav1.CreateOptions{})
 		if err != nil {
 			return "", err
 		}
@@ -367,9 +367,7 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 	if !apierrors.IsAlreadyExists(err) {
 		return "", apiOutcome(digest, err, doing, true), false
 	}
-	getting, cancel := call(ctx)
-	existing, err := r.sandboxClient().Get(getting, name, metav1.GetOptions{})
-	cancel()
+	existing, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return "", apiOutcome(digest, err, "read the existing probe sandbox "+name, false), false
 	}
@@ -383,12 +381,10 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 	leftover := existing.GetUID()
 	r.log.Info("sandbox runtime: deleting a leftover probe sandbox from an earlier boot before probing the worker image",
 		"sandbox", name, "uid", leftover)
-	deleting, cancel := call(ctx)
 	background := metav1.DeletePropagationBackground
-	err = r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{
+	err = r.sandboxClient().Delete(ctx, name, metav1.DeleteOptions{
 		PropagationPolicy: &background, Preconditions: &metav1.Preconditions{UID: &leftover},
 	})
-	cancel()
 	if err != nil && !apierrors.IsNotFound(err) && !apierrors.IsConflict(err) {
 		return "", apiOutcome(digest, err, "delete the leftover probe sandbox "+name, false), false
 	}

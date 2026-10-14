@@ -76,9 +76,7 @@ func (r *Runtime) handOverSandbox(ctx context.Context, object *unstructured.Unst
 		return err
 	}
 	defer release()
-	reading, cancel := call(ctx)
-	current, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-	cancel()
+	current, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) || err == nil && (current.GetUID() != object.GetUID() || current.GetLabels()[labelTree] != labelValue(tree)) {
 		return nil
 	}
@@ -106,9 +104,7 @@ func (r *Runtime) handOverSandbox(ctx context.Context, object *unstructured.Unst
 
 // treeSandboxes lists tree's issue Sandboxes from the API, the image probe's left out.
 func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructured.Unstructured, error) {
-	reading, cancel := call(ctx)
-	defer cancel()
-	list, err := r.sandboxClient().List(reading, metav1.ListOptions{
+	list, err := r.sandboxClient().List(ctx, metav1.ListOptions{
 		LabelSelector: labelProject + "=" + r.project + "," + labelTree + "=" + labelValue(tree),
 	})
 	if err != nil {
@@ -124,11 +120,11 @@ func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructur
 }
 
 // deleteSandbox deletes object with foreground propagation, fenced to its UID and resourceVersion,
-// waits until the API no longer has it, and forgets its launchers' credentials. Every delete is
-// foreground: the Sandbox owns its PVC and its role Secrets by owner reference, and foreground
-// propagation has garbage collection remove them before the Sandbox is gone, so the Sandbox's
-// absence is the API's confirmation that its volume is gone — the restricted daemon identity has no
-// PVC verb to confirm it with. A conflict is returned as it is.
+// forgets its launchers' credentials once the API has accepted the delete, and waits until the API
+// no longer has it. Every delete is foreground: the Sandbox owns its PVC and its role Secrets by
+// owner reference, and foreground propagation has garbage collection remove them before the
+// Sandbox is gone, so the Sandbox's absence is the API's confirmation that its volume is gone — the
+// restricted daemon identity has no PVC verb to confirm it with. A conflict is returned as it is.
 func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstructured) error {
 	name, uid, version := object.GetName(), object.GetUID(), object.GetResourceVersion()
 	policy := metav1.DeletePropagationForeground
@@ -136,20 +132,15 @@ func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstru
 		PropagationPolicy: &policy,
 		Preconditions:     &metav1.Preconditions{UID: &uid, ResourceVersion: &version},
 	}
-	deleting, cancel := call(ctx)
-	err := r.sandboxClient().Delete(deleting, name, options)
-	cancel()
+	err := r.sandboxClient().Delete(ctx, name, options)
 	if err != nil && !apierrors.IsNotFound(err) {
 		if apierrors.IsConflict(err) {
 			return err
 		}
 		return fmt.Errorf("delete Sandbox %s: %w", name, err)
 	}
-	if err := r.awaitSandboxDeleted(ctx, name); err != nil {
-		return err
-	}
 	r.forgetLauncherCredentials(name)
-	return nil
+	return r.awaitSandboxDeleted(ctx, name)
 }
 
 // awaitSandboxDeleted waits, up to the boot timeout, until the API no longer has the Sandbox name.
@@ -157,9 +148,7 @@ func (r *Runtime) awaitSandboxDeleted(ctx context.Context, name string) error {
 	deadline := time.NewTimer(r.bootTimeout)
 	defer deadline.Stop()
 	for {
-		reading, cancel := call(ctx)
-		_, err := r.sandboxClient().Get(reading, name, metav1.GetOptions{})
-		cancel()
+		_, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return nil
 		}

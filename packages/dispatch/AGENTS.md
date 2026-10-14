@@ -827,7 +827,7 @@ changed, and a running server keeps the inode it started from. The script
 unsets inherited `DISPATCH_*`/`ENVOY_*`/`NATS_*` variables, supplies a fresh App
 key, passes no cookie signing key (the server generates one for its process, as
 `DISPATCH_DEV_SIGNIN` requires), and gives the server no caller Home or XDG
-directory. A caller's environment or `~/.config/opencode/envoy.json` /
+directory. A caller's environment or `~/.config/legion/envoy.json` /
 `~/.local/share/dispatch/{app.json,signing-key}` therefore cannot point the
 test server at a live Envoy, dashboard origin or GitHub App (every Legion pane
 exports `ENVOY_URL`). The harness ports stay inputs because the server script reads them too; on

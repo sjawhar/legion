@@ -1,7 +1,6 @@
 import { unwatchFile, watchFile } from "node:fs"
-import { readFile, rm } from "node:fs/promises"
+import { rm } from "node:fs/promises"
 import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
 import {
   type DispatchDelivery,
   expectsLaneReceipt,
@@ -9,11 +8,16 @@ import {
   postDeliveryReply,
   renderInbound,
 } from "@legion/envoy-client/delivery"
-import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
-import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
+import { messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
+import {
+  type SessionConfigFile,
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionSettings,
+} from "@legion/envoy-client/session-settings"
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -42,20 +46,21 @@ import {
   createChannelForwarder,
 } from "./channel-forwarder"
 import { claudeProjectDirectory, claudeSessionId, configuredValue } from "./claude-session"
+import { inboundOffChannelSession, serveEnvoyOff } from "./envoy-off"
 import {
   pruneStaleSessionHandoffs,
+  readPersistedRole,
   readSessionHandoff,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
-  writeAtomicStateFile,
+  writePersistedRole,
 } from "./session-identity"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
 const CHANNEL_INBOX_LIMIT = 50
 const EMPTY_RECEIPT = new Uint8Array()
 const ChannelMetaKey = /^[A-Za-z_][A-Za-z0-9_]*$/
-const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
 /** How often the handoff file is checked for a `/clear`. */
 const HANDOFF_POLL_MS = 250
 /** How long a handoff waits for NATS to confirm the new direct subject before retrying. */
@@ -140,6 +145,11 @@ export interface ChannelSessionOptions {
     "subscribe" | "unsubscribe" | "unregisterSession" | "setRole" | "getRole" | "getInterest"
   >
   readonly heartbeatMs: number
+  /**
+   * The session's envoy.json (`sessionConfigFile`): a rejected Dispatch frame is answered with the
+   * Dispatch URL and token read from it at that moment.
+   */
+  readonly configFile: SessionConfigFile
   /** How long a handoff waits for NATS to confirm the new direct subject before it retries. */
   readonly handoffFlushTimeoutMs?: number
   /** `${CLAUDE_PLUGIN_DATA}`: role state per session id and the per-process handoff files. */
@@ -185,10 +195,6 @@ function projectDirectory(): string {
   )
 }
 
-function currentDispatchConfig(directory = projectDirectory()) {
-  return resolveDispatchConfig(process.env, { cwd: directory })
-}
-
 export function channelToolDefinitions() {
   return envoyToolSpecs.map((spec) => ({
     name: spec.name,
@@ -222,15 +228,15 @@ export function sanitizeChannelMetadata(
  */
 async function postDispatchReply(
   identity: SessionIdentity,
+  configFile: SessionConfigFile,
   delivery: DispatchDelivery,
   result: { readonly error: string },
 ): Promise<void> {
-  const config = currentDispatchConfig(identity.directory)
-  // An enabled resolution always carries both; the token clause only tells the compiler so.
-  if (!config.enabled || config.url === null || config.token === null) {
-    throw new Error(config.error ?? "Dispatch is not configured")
-  }
-  await postDeliveryReply({ url: config.url, token: config.token }, identity.id, delivery, result)
+  const config = sessionDispatchSettings(configFile, process.env, {
+    cwd: identity.directory,
+  }).dispatch
+  if (!config.enabled) throw new Error(config.error ?? config.notice)
+  await postDeliveryReply(config, identity.id, delivery, result)
 }
 
 /**
@@ -240,6 +246,8 @@ async function postDispatchReply(
 export function createChannelDelivery(input: {
   readonly identity: SessionIdentity
   readonly notifier: ChannelNotifier
+  /** The session's envoy.json, which a rejected Dispatch frame's reply reads. */
+  readonly configFile: SessionConfigFile
 }): ChannelDelivery {
   const inbox: ChannelInboxEntry[] = []
   let tail = Promise.resolve()
@@ -264,7 +272,7 @@ export function createChannelDelivery(input: {
         process.stderr.write(
           `envoy-channel: rejecting malformed Dispatch targeted delivery ${rejected.id}\n`,
         )
-        return postDispatchReply(input.identity, rejected, {
+        return postDispatchReply(input.identity, input.configFile, rejected, {
           error: "Invalid Dispatch targeted delivery frame",
         }).then(
           () => false,
@@ -318,24 +326,6 @@ export function createChannelDelivery(input: {
   }
 }
 
-async function readPersistedRole(
-  roleFile: string,
-): Promise<z.infer<typeof PersistedRole> | undefined> {
-  try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")))
-  } catch (error) {
-    if (hasErrnoCode(error, "ENOENT")) return undefined
-    throw error
-  }
-}
-
-async function writePersistedRole(
-  roleFile: string,
-  state: z.infer<typeof PersistedRole>,
-): Promise<void> {
-  await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}\n`)
-}
-
 /**
  * Queues a channel event, then answers a forwarded lane's receipt, and resolves whether Claude
  * Code was handed the event. The receipt proves only this local queue accepted the request; Claude
@@ -368,7 +358,11 @@ export async function enqueueChannelMessage(
 export async function startChannelSession(options: ChannelSessionOptions): Promise<ChannelSession> {
   const { identity } = options
   let directSubject = agentSubject(identity.id)
-  const delivery = createChannelDelivery({ identity, notifier: options.notifier })
+  const delivery = createChannelDelivery({
+    identity,
+    notifier: options.notifier,
+    configFile: options.configFile,
+  })
   const userTopics = new Set<string>()
   let heldRole: string | undefined
   let shuttingDown = false
@@ -847,14 +841,26 @@ function pluginStateDirectory(): string {
   return pluginData
 }
 
-/** Start the stdio MCP server Claude Code invokes for this plugin. */
+/** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json. With
+ * Envoy off it serves no tool (`serveEnvoyOff`, `./envoy-off`). With Envoy on and inbound messages
+ * off (`inbound.off`: no NATS server, or its seed refused), it serves the tools, which call the
+ * listener, on an inbound-off session (`inboundOffChannelSession`, `./envoy-off`); the start notice
+ * has said why on stderr. */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
-  const dispatchConfig = currentDispatchConfig(directory)
-  if (!dispatchConfig.enabled) {
-    process.stderr.write(
-      `envoy-channel: Dispatch disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}\n`,
+  // The session's envoy.json, by Claude Code's rule (`$CLAUDE_CONFIG_DIR/envoy.json` when that is
+  // set), worked out once as the server starts; Dispatch's URL and token are re-read from it on each
+  // use, so a file that moved its server takes effect without a restart.
+  const configFile = sessionConfigFile("claude", process.env)
+  const { envoy, notice } = sessionSettings(configFile, process.env, { cwd: directory })
+  // Claude Code logs the server's stderr: why a section is off, once.
+  if (notice !== null) process.stderr.write(`envoy-channel: ${notice}\n`)
+  if (!envoy.enabled) {
+    await serveEnvoyOff(
+      MCP_SERVER_INFO,
+      `Envoy is off for this session: ${envoy.error ?? envoy.notice}`,
     )
+    return
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
   const identity = new SessionIdentity(
@@ -864,10 +870,6 @@ export async function runEnvoyChannelServer(): Promise<void> {
     }),
     directory,
   )
-  const defaults = envoyDefaultsFromEnvironment(process.env)
-  if (defaults.natsUrls.length === 0) {
-    throw new Error("ENVOY_NATS_URL is required for the Envoy Claude channel server")
-  }
   const stateDirectory = pluginStateDirectory()
 
   const server = new Server(MCP_SERVER_INFO, {
@@ -875,7 +877,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
     instructions:
       "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
   })
-  const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch })
+  const client = createEnvoyClient({
+    baseUrl: envoy.url,
+    fetch: globalThis.fetch,
+    token: envoy.token,
+  })
   let runtime: ChannelToolRuntime | undefined
   const toolDefinitions = channelToolDefinitions()
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
@@ -906,24 +912,30 @@ export async function runEnvoyChannelServer(): Promise<void> {
 
   let connection: ChannelForwarderConnection | undefined
   try {
-    connection = await connect({
-      servers: [...defaults.natsUrls],
-      name: `claude-envoy-channel-${identity.id}`,
-      ...natsAuthOptions(process.env),
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait: 2_000,
-    })
-    session = await startChannelSession({
-      identity,
-      connection,
-      notifier: server,
-      client,
-      heartbeatMs: defaults.heartbeatMs,
-      stateDirectory,
-      // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
-      ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
-    })
+    const { inbound } = envoy
+    if ("off" in inbound) {
+      session = inboundOffChannelSession({ identity, stateDirectory, why: inbound.off })
+    } else {
+      connection = await connect({
+        servers: [...inbound.natsUrls],
+        name: `claude-envoy-channel-${identity.id}`,
+        ...natsAuthOptions(inbound.natsSeed),
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        reconnectTimeWait: 2_000,
+      })
+      session = await startChannelSession({
+        identity,
+        connection,
+        notifier: server,
+        client,
+        heartbeatMs: envoy.heartbeatMs,
+        configFile,
+        stateDirectory,
+        // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
+        ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
+      })
+    }
     runtime = { identity, client, session }
     if (stopping) await session.shutdown()
     await stopped.promise

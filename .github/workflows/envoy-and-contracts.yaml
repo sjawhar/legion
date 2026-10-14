@@ -12,6 +12,8 @@ on:
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
+      # claude-envoy's tests hold the marketplace entry to no version (Claude Code tracks commits).
+      - ".claude-plugin/marketplace.json"
       - "packages/pi-envoy/**"
       - "packages/pi-legion/**"
       - "packages/pi-shared/**"
@@ -64,6 +66,7 @@ on:
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
+      - ".claude-plugin/marketplace.json"
       - "packages/pi-envoy/**"
       - "packages/pi-legion/**"
       - "packages/pi-shared/**"
@@ -260,6 +263,9 @@ jobs:
               # tests/dispatch-first-hook.test.ts reads the skill through the plugin's skills/ link
               # and holds the hook's context to Claude Code's 10,000-character cap.
               - 'skills/dispatch-first/**'
+              # tests/envoy-channel-server.test.ts holds claude-envoy's marketplace entry to no
+              # version, so Claude Code tracks its commits.
+              - '.claude-plugin/marketplace.json'
             # The private workspace package both Oh My Pi plugins import. Its tests stage each
             # plugin's skills through the prepack script and hold the two lists to a partition of
             # skills/ (test/skills-partition.test.ts).

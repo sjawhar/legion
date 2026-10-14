@@ -63,6 +63,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   23 plugin's strict reader refuses a state whose views carry `pluginContract`, so the boot gate
   and `legion probe-image` refuse the mixed pair.
 
+- `register_gate`'s document lookup (LEGION-707) resolves Dispatch as the session's Envoy plugin
+  does, from the pane's own envoy.json: a named Oh My Pi profile's
+  `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, with the `dispatch` section of the workspace's
+  `.envoy/envoy.json` over it. `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which the daemon sets on
+  every pane when Dispatch is configured (`dispatch_url`), still override both.
+  `~/.config/opencode/envoy.json` and a workspace's `.opencode/envoy.json` are not read. A tmux
+  pane's `XDG_CONFIG_HOME` is relocated under the daemon's state directory, so while the old user
+  file is there a default-profile pane's Envoy plugin says it is not read under that
+  `XDG_CONFIG_HOME`, and a named-profile pane's names the profile's file to copy or link it to; a
+  pod carries no old file.
 - `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an
@@ -259,3 +270,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
   `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now
   degrades to no trailer, as it does for any other failure to resolve jj.
+- A `handoff_complete` whose jj fails on a git lock file still on disk — the `index.lock` a git or
+  jj interrupted mid-write leaves, which fails every later jj that snapshots a change into the
+  working copy (LEGION-731) — names each such lock in its error, with how long ago it was last
+  written. It says not to remove the lock while the issue's pod runs, since another role's git,
+  which the role's container cannot see, may hold it, and that replacing the issue's pod removes
+  it; and that under the tmux runtime nothing removes it, so it is removed by hand once no git or
+  jj on the host is using the repository (`src/git-lock.ts`). The lock is left as it is.

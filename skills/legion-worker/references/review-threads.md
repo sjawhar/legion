@@ -67,11 +67,8 @@ opened that is none of Legion's role Apps, with one reply in your own words. A b
 cannot accept becomes your own: say what stands and request changes. Approve once each of those
 threads carries your answer and no finding stands, read in `gh api graphql` — quote those answers
 in the approval. Your approval never waits on a resolution: resolution is the pull request author's
-App's, except when a review workflow the project declares (`projects.<KEY>.review_workflows`) is
-red on its findings. Such a workflow starts again only on a push, so neither a reply nor a
-resolution re-runs it, and it passes on a re-run only once its threads are resolved: answer its
-threads, name the ones you accepted to the implementer with `envoy_publish` to its role topic, and
-read the listing above until each shows `isResolved` true before you push your handoff, so the run
-that push starts reads the threads as the implementer left them; then re-run the failed run once,
-as your role prompt says, before you approve. The merger resolves nothing: READY requires no thread
-state beyond what your approval already judged.
+App's. A review bot that is red while a thread it opened still stands is CI like any other, and
+you re-run nothing: when the base branch requires its check, that red sends the work back to the
+implementer, who answers or fixes each of the bot's threads, resolves them with its own `gh` (the
+ones you named to it, above, and its own), and pushes, and the bot runs again on that push. The
+merger resolves nothing: READY requires no thread state beyond what your approval already judged.

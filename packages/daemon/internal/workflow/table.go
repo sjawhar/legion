@@ -65,6 +65,8 @@ var Table = append([]Row{
 	{From: phase.Reviewing, Trigger: TriggerReviewRejected, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Testing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Reviewing, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Retro, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
+	{From: phase.Merging, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},
 	{From: phase.Retro, Trigger: TriggerRetroCompleted, Guard: allow, To: phase.Merging, Effects: []EffectKind{EffectStart, EffectNotice}},
 	{From: phase.Merging, Trigger: TriggerReady, Guard: allow, To: phase.AwaitingMerge, Effects: []EffectKind{EffectNotice}},
 	{From: phase.AwaitingMerge, Trigger: TriggerChecksRed, Guard: allow, To: phase.Implementing, Status: "in_progress", Effects: []EffectKind{EffectStatus, EffectStart, EffectNotice}},

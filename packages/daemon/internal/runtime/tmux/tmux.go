@@ -67,7 +67,11 @@ type Options struct {
 	NatsURLs  []string
 	// DispatchURL and DispatchTokenFile are the configured Dispatch service and the daemon-held
 	// 0600 bearer file every pane is told as DISPATCH_URL and DISPATCH_TOKEN_FILE. Both or neither:
-	// without them, OMP's Dispatch client falls back to the operator's user-level configuration.
+	// without them, a pane's Dispatch is the one in the envoy.json of the omp profile it runs under
+	// (OMP_PROFILE, set in omp_launch_prefix). A pane in the default profile reads
+	// <state_dir>/home/.config/legion/envoy.json, since its XDG_CONFIG_HOME is under the daemon's
+	// home (xdgDirectories), never the operator's own file, so it has Dispatch only when
+	// dispatch_url is set.
 	DispatchURL       string
 	DispatchTokenFile string
 	// GitHubCredential is the daemon's function for a role's gh files (runtime.GitHubCredential):

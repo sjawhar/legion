@@ -42,10 +42,18 @@ func webhookSweeper(natsClient *bus.Client, app *auth.AppConfig, apiBase string)
 
 // redeliverWebhooks is the operator command over the same sweep: it lists the App webhook's
 // failed deliveries since --since and, unless --dry-run, redelivers them under the running
-// sweep's rules and records. It leaves the running sweep's cursor alone.
+// sweep's rules and records. It leaves the running sweep's cursor alone. It connects to
+// envoy.natsUrls as the nkey user NATS_NKEY_SEED_FILE (or NATS_NKEY_SEED) names and never runs
+// envoy.natsSeed, so a run against a NATS that requires a user needs NATS_NKEY_SEED_FILE.
 func redeliverWebhooks(ctx context.Context, args []string, env settingValues, out io.Writer) int {
 	flags := flag.NewFlagSet("redeliver-webhooks", flag.ContinueOnError)
 	flags.SetOutput(out)
+	flags.Usage = func() {
+		fmt.Fprintln(out, "usage: envoy-dispatch redeliver-webhooks --since <duration> [--dry-run]")
+		fmt.Fprintln(out, "Connects to envoy.natsUrls as the nkey user NATS_NKEY_SEED_FILE (or NATS_NKEY_SEED) names;")
+		fmt.Fprintln(out, "it never runs envoy.natsSeed, so a run against a NATS that requires a user needs NATS_NKEY_SEED_FILE.")
+		flags.PrintDefaults()
+	}
 	since := flags.Duration("since", 0, "list failed deliveries this far back (GitHub keeps 72h)")
 	dryRun := flags.Bool("dry-run", false, "decide every delivery without requesting a redelivery or writing state")
 	if err := flags.Parse(args); err != nil {
@@ -60,7 +68,7 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintf(out, "redeliver-webhooks: load envoy config: %v\n", err)
 		return 1
 	}
-	natsClient, err := bus.Connect(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
+	natsClient, err := bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: connect NATS: %v\n", err)
 		return 1

@@ -276,12 +276,12 @@ func writeFile(t *testing.T, name, contents string) string {
 	return path
 }
 
-// envoyJSONHome is a home directory whose envoy.json names a dashboard origin and NATS servers,
-// for the settings that override it.
+// envoyJSONHome is a home directory whose user envoy.json names a dashboard origin and NATS
+// servers, for the settings that override it.
 func envoyJSONHome(t *testing.T) string {
 	t.Helper()
-	path := writeFile(t, filepath.Join(".config", "opencode", "envoy.json"),
-		`{"natsUrls": ["nats://from-envoy-json:4222"], "dispatch": {"serverUrl": "https://from-envoy-json.example"}}`)
+	path := writeFile(t, filepath.Join(".config", "legion", "envoy.json"),
+		`{"envoy": {"natsUrls": ["nats://from-envoy-json:4222"]}, "dispatch": {"serverUrl": "https://from-envoy-json.example"}}`)
 	return filepath.Dir(filepath.Dir(filepath.Dir(path)))
 }
 
@@ -683,14 +683,29 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"NATS_URLS": func(t *testing.T) {
-			if cfg, err := envoyJSON(t, map[string]string{"NATS_URLS": "nats://one:4222, nats://two:4222"}); err != nil || !slices.Equal(cfg.NatsURLs, []string{"nats://one:4222", "nats://two:4222"}) {
+			if cfg, err := envoyJSON(t, map[string]string{"NATS_URLS": "nats://one:4222, nats://two:4222"}); err != nil || !slices.Equal(cfg.Envoy.NatsURLs, []string{"nats://one:4222", "nats://two:4222"}) {
 				t.Errorf("set: %+v, %v; want the variable over envoy.json", cfg, err)
 			}
-			if cfg, err := envoyJSON(t, nil); err != nil || !slices.Equal(cfg.NatsURLs, []string{"nats://from-envoy-json:4222"}) {
-				t.Errorf("unset: %+v, %v; want envoy.json's", cfg, err)
+			if cfg, err := envoyJSON(t, nil); err != nil || !slices.Equal(cfg.Envoy.NatsURLs, []string{"nats://from-envoy-json:4222"}) {
+				t.Errorf("unset: %+v, %v; want envoy.json's envoy.natsUrls", cfg, err)
 			}
 			if _, err := envoyJSON(t, map[string]string{"NATS_URLS": ""}); err == nil || !strings.Contains(err.Error(), "NATS_URLS") {
 				t.Errorf("set but empty: err = %v, want a refusal naming NATS_URLS", err)
+			}
+		},
+		"XDG_CONFIG_HOME": func(t *testing.T) {
+			configHome := filepath.Dir(filepath.Dir(writeFile(t, filepath.Join("legion", "envoy.json"),
+				`{"envoy": {"natsUrls": ["nats://from-config-home:4222"]}, "dispatch": {"serverUrl": "https://from-config-home.example"}}`)))
+			if cfg, err := envoyJSON(t, map[string]string{"XDG_CONFIG_HOME": configHome}); err != nil || cfg.Dispatch.ServerURL != "https://from-config-home.example" || !slices.Equal(cfg.Envoy.NatsURLs, []string{"nats://from-config-home:4222"}) {
+				t.Errorf("set: %+v, %v; want %s/legion/envoy.json's", cfg, err, configHome)
+			}
+			for name, values := range map[string]map[string]string{"unset": nil, "set but empty": {"XDG_CONFIG_HOME": ""}} {
+				if cfg, err := envoyJSON(t, values); err != nil || cfg.Dispatch.ServerURL != "https://from-envoy-json.example" {
+					t.Errorf("%s: %+v, %v; want ~/.config/legion/envoy.json's", name, cfg, err)
+				}
+			}
+			if _, err := envoyJSON(t, map[string]string{"XDG_CONFIG_HOME": "relative"}); err == nil || err.Error() != `XDG_CONFIG_HOME is "relative", which is not an absolute path` {
+				t.Errorf("relative: err = %v, want a refusal naming XDG_CONFIG_HOME and its value", err)
 			}
 		},
 		"ENVOY_ALLOW_REMOTE_NATS": func(t *testing.T) {

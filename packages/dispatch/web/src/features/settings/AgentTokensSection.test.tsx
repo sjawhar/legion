@@ -55,7 +55,11 @@ test("Settings exposes a new personal token once, copies it, and revokes an exis
     const snippets = Array.from(document.querySelectorAll("pre code"));
     const configSnippet = snippets.find((snippet) => snippet.textContent?.includes('"dispatch"'));
     expect(configSnippet?.textContent).toBe(config);
-    expect(screen.getByText("This merges into your existing envoy.json file.")).toBeDefined();
+    const paragraphs = Array.from(document.querySelectorAll("p"), (p) => p.textContent);
+    expect(paragraphs).toContain("Put this in ~/.config/legion/envoy.json:");
+    expect(paragraphs).toContain(
+      "If the file exists, replace its dispatch section with this one and keep the rest. A session under a named omp profile, or with CLAUDE_CONFIG_DIR or OPENCODE_CONFIG_DIR set, reads the envoy.json in that directory instead; any other session reads the file ENVOY_CONFIG_FILE names when it is set."
+    );
     const envSnippet = snippets.find((snippet) => snippet.textContent?.includes("DISPATCH_URL="));
     expect(envSnippet?.textContent).toBe(`DISPATCH_URL=${origin}\nDISPATCH_TOKEN=${plaintext}`);
 

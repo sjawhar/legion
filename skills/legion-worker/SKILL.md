@@ -118,9 +118,12 @@ turn, including one an Envoy question starts: you are kept alive to answer quest
 editing. Do not create new commits, run `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files
 once your own handoff is committed and pushed — a code change belongs to
 whichever phase is active now. The same holds once the Go daemon has taken your phase back without
-your completion: CI settling red while you tested, or reviewed a round you had not completed,
-moves the issue to `implementing` and interrupts your turn, and the implementer starts only once
-that turn has ended. Do not resume the interrupted work afterward.
+your completion: CI settling red while you tested, reviewed a round you had not completed, or
+built READY, moves the issue to `implementing` and interrupts your turn, and the implementer starts
+only once that turn has ended. Do not resume the interrupted work afterward. From retro the
+issue moves the same way with nothing interrupted: you are the implementer, handed the implementing
+task once your turn ends; a retro completion started after the move is refused, and one in flight
+when the red lands can be taken as your implementing completion, caught by the tester's CI read.
 
 On every start, and especially after revival or re-creation, read the issue and then the
 committed predecessor handoffs in lifecycle order, with the `read` tool from
@@ -437,8 +440,8 @@ record of this issue's active phase. Do not add pipeline labels, run a controlle
 invent a different completion protocol — this is the whole contract.
 
 A reviewer's phase ends with its completion, not with its review; the order of a review round
-(the handoff push; for an approval, CI settled green at that head; the review of that head; then
-the completion) is in `skill://legion-worker/references/merge-gate.md`.
+(the read of the code commit's checks on GitHub; the handoff push; the review of the head that
+push made; then the completion) is in `skill://legion-worker/references/merge-gate.md`.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to
 the run whose task you took, and answers with what it found. What each answer carries, and what to

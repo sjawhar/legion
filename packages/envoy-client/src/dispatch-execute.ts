@@ -59,7 +59,7 @@ import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine, commandName } from "./dispatch-command";
-import type { DispatchConfigResolution } from "./dispatch-config";
+import type { ActiveDispatchConfig } from "./dispatch-config";
 import {
   type DispatchHost,
   type DispatchOrigin,
@@ -147,7 +147,8 @@ export interface ExecuteDispatchToolInput {
   readonly host: DispatchHost;
   readonly sessionId?: string;
   readonly sessionTitle?: string;
-  readonly config: DispatchConfigResolution;
+  /** The resolved Dispatch (`activeDispatchSettings`): the server and the bearer it takes. */
+  readonly config: Pick<ActiveDispatchConfig, "url" | "token">;
   /** Host cancellation for the currently executing tool call. */
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
@@ -2106,11 +2107,7 @@ function withAccount(error: unknown, account: string): Error {
 export async function executeDispatchTool(
   input: ExecuteDispatchToolInput
 ): Promise<DispatchToolResult> {
-  const configUrl = input.config.url;
-  const configToken = input.config.token;
-  if (!input.config.enabled || !configUrl || !configToken) {
-    throw new Error("Dispatch is disabled; resolve both DISPATCH_URL and DISPATCH_TOKEN");
-  }
+  const { url: configUrl, token: configToken } = input.config;
   const baseFetch = input.fetchImpl ?? fetch;
   const fetchImpl = Object.assign(
     async (...args: Parameters<typeof fetch>): Promise<Response> => {

@@ -9,6 +9,7 @@
 import { mkdtemp } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { sessionConfigFile } from "@legion/envoy-client/session-settings"
 import type { EnvoyClient, Interest } from "@legion/envoy-client/transport"
 import type {
   ChannelBrokerMessage,
@@ -195,6 +196,8 @@ export function recordingClient(calls: string[], overrides: Partial<FakeClient> 
   }
 }
 
+/** Options binding the fakes, with the envoy.json the test's environment picks as they are built:
+ * `isolatePaneEnvironment`'s scratch file in a file that calls it. */
 export function sessionOptions(
   identity: SessionIdentity,
   stateDirectory: string,
@@ -206,6 +209,7 @@ export function sessionOptions(
     notifier: new FakeNotifier(),
     client: recordingClient([]),
     heartbeatMs: 60_000,
+    configFile: sessionConfigFile("claude", process.env),
     stateDirectory,
     ...extra,
   }
