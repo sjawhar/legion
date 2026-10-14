@@ -235,7 +235,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	ctx := context.Background()
 	rig := &documentSocketRig{pool: oidctest.New(t), email: "alice@d.example"}
 	rig.pool.EnableCodeFlow(rig.pool.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(ctx, rig.pool.URL(), "dispatch-client", "dispatch-secret")
+	flow, err := oidc.NewCodeFlow(ctx, rig.pool.URL(), "dispatch-client", "dispatch-secret", "")
 	if err != nil {
 		t.Fatalf("discover the sign-in pool: %v", err)
 	}

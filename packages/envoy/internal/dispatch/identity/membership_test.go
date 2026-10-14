@@ -41,7 +41,7 @@ func newMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret", "")
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}

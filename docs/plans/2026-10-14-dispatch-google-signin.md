@@ -163,15 +163,15 @@ directory.
 **Files:** `internal/oidc/codeflow.go`, `internal/dispatch/identity/person.go`, their tests, and the
 D3 and D5 callers.
 
-- [ ] Test first: in domain mode the session decodes `email`, `hd`, `sub` and `email_verified` as
+- [x] Test first: in domain mode the session decodes `email`, `hd`, `sub` and `email_verified` as
   `true`, `"true"`, `"false"`, a number, null and an object (the last four false, none an error);
   the domain rule admits a verified email with the right `hd` and refuses a wrong `hd`, a missing
   `hd`, an unverified email and a missing email, each with its reason; a Cognito-shaped token still
   verifies through `Verify` with its fields unchanged; in domain mode AuthURL carries
   `access_type=offline`, `prompt=consent` and `hd=<domain>`, and in group mode none of them (read
   the redirect's `Location`, as `router_test.go:961-975` does).
-- [ ] Implement.
-- [ ] Run `go test ./internal/oidc/ ./internal/dispatch/identity/`; pass.
+- [x] Implement.
+- [x] Run `go test ./internal/oidc/ ./internal/dispatch/identity/`; pass.
 
 ### Task 3: sign-in, `sub`, refusal page and hourly confirmation end to end
 

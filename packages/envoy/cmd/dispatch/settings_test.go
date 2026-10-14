@@ -663,6 +663,17 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			refusedWith(t, domain("Example.com"), "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got Example.com")
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set")
+			// The domain the code flow main discovers names to Google, against a fake issuer in
+			// Google's place so no test calls Google: the domain resolved under Google's issuer.
+			pool := signInPool(t, "dispatch-client", "client-secret")
+			boot.SignInIssuer = pool.URL()
+			t.Run("router", func(t *testing.T) {
+				handler := signInRouter(t, boot, peopleStore(t))
+				location, err := url.Parse(startSignIn(t, handler).Header().Get("Location"))
+				if err != nil || location.Query().Get("hd") != "example.com" || location.Query().Get("access_type") != "offline" {
+					t.Errorf("DISPATCH_SIGNIN_DOMAIN=example.com: GET /auth/start redirected to %v (%v), want hd example.com with offline access", location, err)
+				}
+			})
 		},
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": func(t *testing.T) {
 			for _, value := range []string{"", "true"} {

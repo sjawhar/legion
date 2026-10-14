@@ -130,14 +130,14 @@ func signInRule(boot bootConfig) identity.SignInRule {
 	return identity.SignInRule{Group: boot.SignInGroup, Domain: boot.SignInDomain}
 }
 
-// discoverSignIn is the sign-in pool's code flow for boot's DISPATCH_SIGNIN_* settings, its
-// endpoints read from the issuer's discovery document; nil when boot configures no sign-in
-// (header identity, or dev sign-in).
+// discoverSignIn is the sign-in issuer's code flow for boot's DISPATCH_SIGNIN_* settings, its
+// endpoints read from the issuer's discovery document, asking Google for boot's Workspace domain
+// in domain mode; nil when boot configures no sign-in (header identity, or dev sign-in).
 func discoverSignIn(ctx context.Context, boot bootConfig) (*oidc.CodeFlow, error) {
 	if boot.SignInIssuer == "" {
 		return nil, nil
 	}
-	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, oidc.DiscoveryTimeout)
+	return oidc.DiscoverCodeFlow(ctx, boot.SignInIssuer, boot.SignInClientID, boot.SignInClientSecret, boot.SignInDomain, oidc.DiscoveryTimeout)
 }
 
 // openPeople is the people store main serves boot with over pool, and the key session cookies are

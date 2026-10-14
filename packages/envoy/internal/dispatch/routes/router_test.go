@@ -119,9 +119,10 @@ const (
 	rigClientID = "dispatch-client"
 	rigGroup    = "dispatch-members"
 	rigEmail    = "a.b+c@d.example"
+	rigDomain   = "example.com"
 )
 
-// signInRig is a Dispatch router signing people in through a fake sign-in pool, with the
+// signInRig is a Dispatch router signing people in through a fake sign-in issuer, with the
 // cookie identity production runs and a clock the membership refresh reads.
 type signInRig struct {
 	handler  http.Handler
@@ -133,23 +134,36 @@ type signInRig struct {
 	now      time.Time
 }
 
+// newSignInRig is a router signing the members of rigGroup in through a fake Cognito sign-in pool.
 func newSignInRig(t *testing.T, serverURL string) *signInRig {
+	t.Helper()
+	return newSignInRigFor(t, serverURL, identity.SignInRule{Group: rigGroup})
+}
+
+// newDomainSignInRig is a router signing the people of the Workspace domain rigDomain in through a
+// fake issuer that mints Google's claims.
+func newDomainSignInRig(t *testing.T) *signInRig {
+	t.Helper()
+	return newSignInRigFor(t, "", identity.SignInRule{Domain: rigDomain})
+}
+
+func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule) *signInRig {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), rigClientID, "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret", rule.Domain)
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}
 	rig := &signInRig{issuer: issuer, people: newMemoryPeople(), sessions: &memorySessionStore{generations: map[string]int64{}}, now: time.Now()}
-	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: identity.SignInRule{Group: rigGroup}, Now: rig.clock}
+	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: rule, Now: rig.clock}
 	rig.ctx, err = BuildAppContext(AppContextOptions{
 		SigningKey: "signing-key",
 		People:     rig.people,
 		Sessions:   rig.sessions,
 		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
 		SignIn:     flow,
-		SignInRule: identity.SignInRule{Group: rigGroup},
+		SignInRule: rule,
 		ServerURL:  serverURL,
 	})
 	if err != nil {
@@ -972,6 +986,30 @@ func TestAuthStartUsesConfiguredCanonicalOriginForCallback(t *testing.T) {
 	}
 	if client := location.Query().Get("client_id"); client != rigClientID {
 		t.Fatalf("sign-in client = %q, want %q", client, rigClientID)
+	}
+}
+
+// A domain-mode server sends the browser to Google asking for offline access with consent, so the
+// exchange carries a refresh token every time, and with the domain as a hint; a group-mode server's
+// redirect carries none of the three.
+func TestAuthStartAsksGoogleForOfflineAccessInTheDomain(t *testing.T) {
+	// rig.start reads the redirect's Location.
+	query := func(rig *signInRig) url.Values {
+		t.Helper()
+		location, _ := rig.start(t, "http://dispatch.test/auth/start")
+		return location.Query()
+	}
+	domain := query(newDomainSignInRig(t))
+	for name, want := range map[string]string{"access_type": "offline", "prompt": "consent", "hd": rigDomain, "client_id": rigClientID} {
+		if got := domain.Get(name); got != want {
+			t.Errorf("domain mode: GET /auth/start redirected with %s=%q, want %q", name, got, want)
+		}
+	}
+	group := query(newSignInRig(t, ""))
+	for _, name := range []string{"access_type", "prompt", "hd"} {
+		if group.Has(name) {
+			t.Errorf("group mode: GET /auth/start redirected with %s=%q, want none", name, group.Get(name))
+		}
 	}
 }
 

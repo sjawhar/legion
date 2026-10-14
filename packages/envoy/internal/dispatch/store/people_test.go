@@ -101,7 +101,7 @@ func revokingPool(t *testing.T) (*oidctest.Issuer, *oidc.CodeFlow) {
 	t.Helper()
 	pool := oidctest.New(t)
 	pool.EnableCodeFlow(pool.PublishKey(t, "pool-key"), "dispatch-client", "client-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), pool.URL(), "dispatch-client", "client-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), pool.URL(), "dispatch-client", "client-secret", "")
 	if err != nil {
 		t.Fatalf("discover the sign-in pool: %v", err)
 	}
