@@ -442,9 +442,11 @@ Resources, all with `pulumi.Parent(comp)`, registered only after `providers.Requ
 | `<name>-watchdog` (only with `watchdog`) | `remote.Command` | `Connection: {Host: watchdog.host}`; `Create` and `Delete`: the Docker-host program's texts (`watchdog.ts:121-162`), byte for byte, with the env file built from the container's envs, the image reference, the port in `healthcheck_cmd` (`watchdog.ts:40`) and the component's name in the closing `echo` (`:155`) | `DependsOn(container)`, alias from `adopt.watchdog` |
 
 Refusals, each an error naming the input: `watchdog` with a `containerName` other than
-`envoy-listener` (R5); `watchdog` with `seed` (R10); a `watchdog.host` containing `@` or `://`; these
-before any registration. A `natsUrls` element `core.ListenerEnv` refuses fails the update, from the
-`ApplyT` that computes the envs.
+`envoy-listener` (R5); `watchdog` with `seed` (R10); a `watchdog.host` containing `@` or `://`; and
+what `core.ListenerConfig.CheckPlain` refuses of the fields known at construct (a blank
+`machineId`, a port outside 1-65535, a `hostBridge` with surrounding whitespace); all before any
+registration. A `natsUrls` element `core.ListenerEnv` refuses fails the update, from the `ApplyT`
+that computes the envs. `aws:WebhookListener` calls the same `CheckPlain` before it registers.
 
 - [ ] **Step 1: failing unit tests** (`listener_test.go`) with `pulumi.WithMocks`, run through
 `NewListener` directly:
@@ -1117,7 +1119,7 @@ are gone, they read them from this command.
 ## Slice 4: `gcp:NatsHub`
 
 Branch `envoy-infra-gcp` in its own clone (`~/.worktrees/legion/envoy-infra-gcp`), a plain PR based
-on `envoy-infra-core` outside the gh-stack, rebased onto `main` by hand once slice 2 merges. Task
+on `envoy-infra-core` outside the gh-stack, which merges `main` once slice 2 merges. Task
 4.1 starts once Task 2.1 is on `envoy-infra-core`; 4.2 needs Task 2.2; 4.3 needs 4.1; 4.4 needs 4.2
 and 4.3.
 
@@ -1297,7 +1299,7 @@ and `nats`
 `ExecStop=/usr/bin/docker stop -t 30 nats`), each with `RequiresMountsFor=/mnt/disks/data`;
 `tailscaled` also has `After=` and `Wants=fetch-tailnet-key.service` (not `Requires=`: a node
 whose tailnet state is on the disk never reads the key, so a failed fetch on a later boot must not
-keep it down); `fetch-tailnet-key` retries up to five times, ten seconds apart, and has
+keep it down); `fetch-tailnet-key` makes up to six attempts, ten seconds apart, and has
 `RemainAfterExit=yes`. COS's host firewall accepts incoming connections only for SSH, so a oneshot
 `nats-firewall` (`RemainAfterExit=yes`) adds, idempotently (`iptables -w -C … || iptables -w -A …`),
 `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` for Google's health checks;
@@ -1349,6 +1351,11 @@ Items to verify, each with the row that settles it and where its result goes:
   `nats-firewall` unit also accepts tcp/4222 on `tailscale0`, or the tailscale container runs with
   `TS_DEBUG_FIREWALL_MODE=nftables` (E9; same).
 - A v4 docker provider diffing unset v5-only inputs (E3 in CI, E4 on the existing deployment).
+- The GCP seed store against the real Secret Manager: `versions/latest` names a DISABLED or
+  DESTROYED newest version, `GetSecretVersion` on `latest` answers NOT_FOUND with no versions, and
+  an unfiltered `ListSecretVersions` includes DESTROYED versions (E8; the first GCP deployment).
+- Two statements the README makes from Google's documentation: raising `diskSizeGb` later does not
+  grow the kept data disk, and deleting the hub leaves that disk behind, detached (E9; same).
 
 ## End-to-end verification plan
 
