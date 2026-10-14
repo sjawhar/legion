@@ -18,9 +18,10 @@ const (
 	ListenerContainerName = "envoy-listener"
 )
 
-// supportedWebhooks is the one webhooks list this version takes: the list whose container
-// definitions the reference renders, byte for byte, and the only one a consumer passes.
-var supportedWebhooks = []string{"github", "slack"}
+// supportedWebhooks are the webhooks lists this version takes, the lists whose container
+// definitions the reference renders byte for byte: none, which leaves ENVOY_WEBHOOKS unset so the
+// listener mounts no webhook route, and github then slack.
+var supportedWebhooks = [][]string{{}, {"github", "slack"}}
 
 // WebhookInput is one input of a WebhookListener that belongs to a webhook.
 type WebhookInput struct {
@@ -73,8 +74,12 @@ func (e ListenerEnv) Check() error {
 	}); err != nil {
 		return err
 	}
-	if !slices.Equal(e.Webhooks, supportedWebhooks) {
-		return core.InputErrorf("webhooks", "webhooks %q is not supported: this version takes exactly %q", e.Webhooks, supportedWebhooks)
+	if !slices.ContainsFunc(supportedWebhooks, func(w []string) bool { return slices.Equal(e.Webhooks, w) }) {
+		supported := make([]string, len(supportedWebhooks))
+		for i, w := range supportedWebhooks {
+			supported[i] = fmt.Sprintf("%q", w)
+		}
+		return core.InputErrorf("webhooks", "webhooks %q is not supported: this version takes %s", e.Webhooks, strings.Join(supported, " or "))
 	}
 	if err := e.config().CheckPlain(); err != nil {
 		return err

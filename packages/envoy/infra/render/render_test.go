@@ -328,13 +328,15 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 		natsUrls               []string
 		listenHost, hostBridge string
 		replicas               int
-		trigger, appID         string
+		webhooks               []string
+		trigger, appID         string // given with github
 		want                   string // derived by hand from the listener's environment rules
 	}{
 		{
 			name:       "a remote NATS server and a host bridge",
 			natsUrls:   []string{"nats://example-bus.example-namespace.internal.example:4222"},
-			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1, trigger: "@legion", appID: "1234567",
+			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1,
+			webhooks: []string{"github", "slack"}, trigger: "@legion", appID: "1234567",
 			want: "PORT=9020\n" +
 				"ENVOY_LISTEN_HOST=0.0.0.0\n" +
 				"ENVOY_MACHINE_ID=example-machine\n" +
@@ -349,7 +351,8 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 		{
 			name:       "two loopback NATS servers and no host bridge",
 			natsUrls:   []string{"nats://127.0.0.1:4222", "nats://localhost:4223"},
-			listenHost: "::", hostBridge: "", replicas: 3, trigger: "@example-bot", appID: "7654321",
+			listenHost: "::", hostBridge: "", replicas: 3,
+			webhooks: []string{"github", "slack"}, trigger: "@example-bot", appID: "7654321",
 			want: "PORT=9020\n" +
 				"ENVOY_LISTEN_HOST=::\n" +
 				"ENVOY_MACHINE_ID=example-machine\n" +
@@ -359,11 +362,28 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 				"ENVOY_GITHUB_MENTION_TRIGGER=@example-bot\n" +
 				"ENVOY_REVIEWER_APP_ID=7654321\n",
 		},
+		{
+			name:       "no webhook",
+			natsUrls:   []string{"nats://example-bus.example-namespace.internal.example:4222"},
+			listenHost: "0.0.0.0", hostBridge: "127.0.0.1", replicas: 1,
+			webhooks: []string{},
+			want: "PORT=9020\n" +
+				"ENVOY_LISTEN_HOST=0.0.0.0\n" +
+				"ENVOY_MACHINE_ID=example-machine\n" +
+				"NATS_URLS=nats://example-bus.example-namespace.internal.example:4222\n" +
+				"ENVOY_ALLOW_REMOTE_NATS=1\n" +
+				"ENVOY_HOST_BRIDGE=127.0.0.1\n" +
+				"ENVOY_NATS_REPLICAS=1\n",
+		},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			github := slices.Contains(c.webhooks, "github")
 			args := append([]string{"webhook-listener-env", "--machine-id", "example-machine"}, flags("nats-url", c.natsUrls...)...)
-			args = append(args, "--webhook", "github", "--webhook", "slack", "--reviewer-app-id", c.appID,
-				"--mention-trigger", c.trigger, "--listen-host", c.listenHost, "--host-bridge", c.hostBridge,
+			args = append(args, flags("webhook", c.webhooks...)...)
+			if github {
+				args = append(args, "--reviewer-app-id", c.appID, "--mention-trigger", c.trigger)
+			}
+			args = append(args, "--listen-host", c.listenHost, "--host-bridge", c.hostBridge,
 				"--nats-replicas", strconv.Itoa(c.replicas))
 			stdout, stderr, code := run(args...)
 			require.Equal(t, 0, code, stderr)
@@ -373,7 +393,14 @@ func TestWebhookListenerEnvIsTheEnvironmentWebhookListenerRegisters(t *testing.T
 			in := listenerArgs()
 			in.NatsUrls = pulumi.ToStringArray(c.natsUrls)
 			in.ListenHost, in.HostBridge, in.NatsReplicas = c.listenHost, c.hostBridge, c.replicas
+			in.Webhooks = c.webhooks
 			in.MentionTrigger, in.ReviewerAppId = pulumi.StringRef(c.trigger), pulumi.StringRef(c.appID)
+			if !github {
+				in.GitHubWebhookSecretArn, in.MentionTrigger, in.ReviewerAppId = nil, nil, nil
+			}
+			if !slices.Contains(c.webhooks, "slack") {
+				in.SlackSigningSecretArn = nil
+			}
 			m := registered(t, func(ctx *pulumi.Context, opts pulumi.ResourceOption) error {
 				_, err := envoyaws.NewWebhookListener(ctx, "example-listener", in, opts)
 				return err
@@ -592,24 +619,30 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			want: `refused: --mention-trigger: mentionTrigger is given for webhook "github", which webhooks does not list`,
 		},
 		{
+			name: "--reviewer-app-id with no --webhook",
+			args: listenerFlags([]string{"webhook", "mention-trigger"}),
+			want: `refused: --reviewer-app-id: reviewerAppId is given for webhook "github", which webhooks does not list`,
+		},
+		{
+			name: "--mention-trigger with no --webhook",
+			args: listenerFlags([]string{"webhook", "reviewer-app-id"}),
+			want: `refused: --mention-trigger: mentionTrigger is given for webhook "github", which webhooks does not list`,
+		},
+		// The webhooks lists this version takes: none, or github then slack.
+		{
 			name: "--webhook github alone",
 			args: listenerFlags([]string{"webhook"}, "--webhook", "github"),
-			want: `refused: --webhook: webhooks ["github"] is not supported: this version takes exactly ["github" "slack"]`,
+			want: `refused: --webhook: webhooks ["github"] is not supported: this version takes [] or ["github" "slack"]`,
 		},
 		{
 			name: "--webhook slack alone",
 			args: listenerFlags(append([]string{"webhook"}, githubFlags...), "--webhook", "slack"),
-			want: `refused: --webhook: webhooks ["slack"] is not supported`,
-		},
-		{
-			name: "no --webhook",
-			args: listenerFlags(append([]string{"webhook"}, githubFlags...)),
-			want: `refused: --webhook: webhooks [] is not supported`,
+			want: `refused: --webhook: webhooks ["slack"] is not supported: this version takes [] or ["github" "slack"]`,
 		},
 		{
 			name: "slack before github",
 			args: listenerFlags([]string{"webhook"}, "--webhook", "slack", "--webhook", "github"),
-			want: `refused: --webhook: webhooks ["slack" "github"] is not supported`,
+			want: `refused: --webhook: webhooks ["slack" "github"] is not supported: this version takes [] or ["github" "slack"]`,
 		},
 		{
 			name: "a webhook the component does not know",

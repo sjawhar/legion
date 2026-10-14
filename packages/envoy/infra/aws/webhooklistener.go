@@ -32,7 +32,7 @@ type WebhookListenerArgs struct {
 	ApiTokenSecretArn       pulumi.StringInput    `pulumi:"apiTokenSecretArn"`
 	ApiTokenSecretVersionId pulumi.StringInput    `pulumi:"apiTokenSecretVersionId"` // orders the task definition after the token's version
 	SeedSecretArn           pulumi.StringPtrInput `pulumi:"seedSecretArn,optional"`  // the NATS user's seed; unset injects none
-	// The ENVOY_WEBHOOKS list; this version takes exactly ["github", "slack"]. Each webhook's
+	// The ENVOY_WEBHOOKS list; this version takes [] or exactly ["github", "slack"]. Each webhook's
 	// inputs are required while it is listed and refused while it is not.
 	Webhooks               []string              `pulumi:"webhooks"`
 	GitHubWebhookSecretArn pulumi.StringPtrInput `pulumi:"githubWebhookSecretArn,optional"`

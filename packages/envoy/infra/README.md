@@ -456,11 +456,12 @@ environment, in this order:
 | `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
 | `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
 | `ENVOY_NATS_REPLICAS` | `natsReplicas` |
-| `ENVOY_WEBHOOKS` | `webhooks`, joined with commas |
-| `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId` |
+| `ENVOY_WEBHOOKS` | `webhooks`, joined with commas, when it lists one |
+| `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId`, with `github` |
 
-ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET`, `ENVOY_SLACK_SIGNING_SECRET`,
-`ENVOY_API_TOKEN` and, with `seedSecretArn`, `NATS_NKEY_SEED`.
+ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET` with `github`,
+`ENVOY_SLACK_SIGNING_SECRET` with `slack`, `ENVOY_API_TOKEN`, and `NATS_NKEY_SEED` with
+`seedSecretArn`.
 
 Each alarm pages `alarmTopicArn` on one matching line in five minutes (`Sum` over 300 s at least 1,
 missing data not breaching) and sends the OK transition there too, so the channel sees the signal
@@ -487,7 +488,7 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 | `apiTokenSecretArn` | required | The secret holding the listener's API token. |
 | `apiTokenSecretVersionId` | required | The token's secret version. The component only orders the task definition after it, so pass your `SecretVersion`'s `versionId` output: a literal orders nothing. |
 | `seedSecretArn` | unset | The secret holding the seed of the NATS user the listener connects as. Unset, it connects with none. |
-| `webhooks` | required | The webhooks the listener serves. This version takes exactly `["github", "slack"]`. |
+| `webhooks` | required | The webhooks the listener serves: `["github", "slack"]`, or `[]` for none. With `[]` the container carries no webhook's setting or secret, and the listener mounts no webhook route. This version takes no other list. |
 | `githubWebhookSecretArn`, `reviewerAppId`, `mentionTrigger` | with `github` | Required while `webhooks` lists `github`, refused while it does not. |
 | `slackSigningSecretArn` | with `slack` | Required while `webhooks` lists `slack`, refused while it does not. |
 | `clusterArn`, `executionRoleArn`, `taskRoleArn` | required | The ECS cluster and the task's two roles. |
@@ -516,8 +517,8 @@ the input:
   `authorization`; an empty `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
 - `aws:WebhookListener`: a webhook's input missing while `webhooks` lists it (a blank
   `reviewerAppId` or `mentionTrigger` counts as missing) or given while it does not, each input
-  checked before the list; then a `webhooks` other than exactly `["github", "slack"]`; a blank
-  `machineId`; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
+  checked before the list; then a `webhooks` other than `[]` or exactly `["github", "slack"]`; a
+  blank `machineId`; a `hostBridge` with leading or trailing whitespace; a blank `listenHost`; a
   `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
@@ -817,6 +818,9 @@ ENVOY_WEBHOOKS=github,slack
 ENVOY_GITHUB_MENTION_TRIGGER=@legion
 ENVOY_REVIEWER_APP_ID=1234567
 ```
+
+With no `--webhook`, it prints no `ENVOY_WEBHOOKS` line and no GitHub lines, as the component writes
+none for `webhooks: []`, and refuses `--reviewer-app-id` and `--mention-trigger`.
 
 Without `--reviewer-app-id`, it prints
 `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.

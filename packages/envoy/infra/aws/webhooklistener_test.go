@@ -1,6 +1,7 @@
 package aws_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"maps"
 	"slices"
@@ -78,6 +79,14 @@ func exampleListenerArgs() *envoyaws.WebhookListenerArgs {
 		MetricNamespace: "example/EnvoyListener",
 		NatsServiceArn:  pulumi.String("example-nats-service-arn"),
 	}
+}
+
+// noWebhooks makes args a listener that serves no webhook: webhooks an empty list and none of a
+// webhook's inputs given. With the seed kept, its container definitions are
+// listener-no-webhooks-seed.golden, the reference's own render of the empty list.
+func noWebhooks(a *envoyaws.WebhookListenerArgs) {
+	a.Webhooks = []string{}
+	a.GitHubWebhookSecretArn, a.SlackSigningSecretArn, a.ReviewerAppId, a.MentionTrigger = nil, nil, nil, nil
 }
 
 // listenerOutputs are the listener's outputs as a test reads them.
@@ -177,10 +186,15 @@ func readPolicy(arn string) string {
 // set: the reference's resources with their inputs, each named from the component's name as the
 // reference names it from envoy-listener.
 func exampleListenerChildren(t *testing.T, seed bool) map[string]child {
-	golden := "listener-github-slack-no-seed.golden"
 	if seed {
-		golden = "listener-github-slack-seed.golden"
+		return listenerChildren(t, "listener-github-slack-seed.golden", true)
 	}
+	return listenerChildren(t, "listener-github-slack-no-seed.golden", false)
+}
+
+// listenerChildren are exampleListenerChildren with the task definition's container definitions
+// the golden named golden: the webhooks list changes nothing else a listener registers.
+func listenerChildren(t *testing.T, golden string, seed bool) map[string]child {
 	children := map[string]child{
 		"example-listener-log-group": {logGroupType, map[string]any{
 			"name": "/ecs/envoy-listener", "retentionInDays": float64(7), "tags": tags("example-listener"),
@@ -267,18 +281,24 @@ func exampleListenerChildren(t *testing.T, seed bool) map[string]child {
 }
 
 func TestWebhookListenerRegistersTheReferenceChildren(t *testing.T) {
-	for _, seed := range []bool{true, false} {
-		t.Run(fmt.Sprintf("seed %v", seed), func(t *testing.T) {
+	for _, row := range []struct {
+		name, golden string
+		seed         bool
+		mutate       func(*envoyaws.WebhookListenerArgs)
+	}{
+		{"seed true", "listener-github-slack-seed.golden", true, func(*envoyaws.WebhookListenerArgs) {}},
+		{"seed false", "listener-github-slack-no-seed.golden", false, func(a *envoyaws.WebhookListenerArgs) { a.SeedSecretArn = nil }},
+		{"no webhooks", "listener-no-webhooks-seed.golden", true, noWebhooks},
+	} {
+		t.Run(row.name, func(t *testing.T) {
 			args := exampleListenerArgs()
-			if !seed {
-				args.SeedSecretArn = nil
-			}
+			row.mutate(args)
 			m, out, err := runListener(t, args, true)
 			require.NoError(t, err)
 
 			require.Equal(t, "example-listener", m.one(t, webhookListenerType).name)
 			children := m.children(t)
-			requireChildren(t, exampleListenerChildren(t, seed), children)
+			requireChildren(t, listenerChildren(t, row.golden, row.seed), children)
 			for name, c := range children {
 				require.Equal(t, listenerURN, c.rpc.GetParent(), "%s's parent is the component", name)
 				require.Contains(t, c.rpc.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
@@ -369,23 +389,59 @@ func TestWebhookListenerAdoptAliasesEachChildToItsRootLevelName(t *testing.T) {
 	}
 }
 
+// listenerGoldens are the reference's renders of the container definitions, each with the change
+// to exampleListenerArgs that gives the inputs it was rendered from.
+var listenerGoldens = []struct {
+	golden string
+	mutate func(*envoyaws.WebhookListenerArgs)
+}{
+	{"listener-github-slack-seed.golden", func(*envoyaws.WebhookListenerArgs) {}},
+	{"listener-github-slack-no-seed.golden", func(a *envoyaws.WebhookListenerArgs) { a.SeedSecretArn = nil }},
+	{"listener-no-webhooks-seed.golden", noWebhooks},
+}
+
 func TestWebhookListenerContainerDefinitionsMatchTheReferenceGoldens(t *testing.T) {
-	for _, c := range []struct {
-		golden string
-		seed   pulumi.StringPtrInput
-	}{
-		{"listener-github-slack-seed.golden", pulumi.String(listenerSecretArn + "nats-seed")},
-		{"listener-github-slack-no-seed.golden", nil},
-	} {
+	for _, c := range listenerGoldens {
 		t.Run(c.golden, func(t *testing.T) {
 			args := exampleListenerArgs()
-			args.SeedSecretArn = c.seed
+			c.mutate(args)
 			m, _, err := runListener(t, args, true)
 			require.NoError(t, err)
 			require.Equal(t, resource.NewProperty(readGolden(t, c.golden)),
 				m.one(t, taskDefinitionType).inputs["containerDefinitions"])
 		})
 	}
+}
+
+// A listener that serves no webhook carries none of a webhook's settings or secrets: no
+// ENVOY_WEBHOOKS, which the listener reads as no route to mount, no ENVOY_GITHUB_MENTION_TRIGGER
+// or ENVOY_REVIEWER_APP_ID, and neither signing secret. Its API token and seed stay.
+func TestWebhookListenerWithNoWebhooksWritesNoWebhookSetting(t *testing.T) {
+	args := exampleListenerArgs()
+	noWebhooks(args)
+	m, _, err := runListener(t, args, true)
+	require.NoError(t, err)
+
+	type entry struct {
+		Name string `json:"name"`
+	}
+	var containers []struct {
+		Environment []entry `json:"environment"`
+		Secrets     []entry `json:"secrets"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(m.one(t, taskDefinitionType).inputs["containerDefinitions"].StringValue()), &containers))
+	require.Len(t, containers, 1)
+	names := func(entries []entry) []string {
+		var out []string
+		for _, e := range entries {
+			out = append(out, e.Name)
+		}
+		return out
+	}
+	require.Equal(t, []string{
+		"PORT", "ENVOY_LISTEN_HOST", "ENVOY_MACHINE_ID", "NATS_URLS", "ENVOY_ALLOW_REMOTE_NATS", "ENVOY_HOST_BRIDGE", "ENVOY_NATS_REPLICAS",
+	}, names(containers[0].Environment))
+	require.Equal(t, []string{"ENVOY_API_TOKEN", "NATS_NKEY_SEED"}, names(containers[0].Secrets))
 }
 
 // The alarms' descriptions send the reader to the log group the filters read, whatever its name.
@@ -454,26 +510,26 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 		mutate func(*envoyaws.WebhookListenerArgs)
 		err    string
 	}{
-		// The webhooks this version takes.
+		// The webhooks lists this version takes: none, or github then slack.
 		{
 			name: "github alone",
 			mutate: func(a *envoyaws.WebhookListenerArgs) {
 				a.Webhooks, a.SlackSigningSecretArn = []string{"github"}, nil
 			},
-			err: `webhooks ["github"] is not supported: this version takes exactly ["github" "slack"]`,
+			err: `webhooks ["github"] is not supported: this version takes [] or ["github" "slack"]`,
 		},
 		{
-			name: "no webhook",
+			name: "slack alone",
 			mutate: func(a *envoyaws.WebhookListenerArgs) {
 				withoutGitHub(a)
-				a.Webhooks, a.SlackSigningSecretArn = []string{}, nil
+				a.Webhooks = []string{"slack"}
 			},
-			err: `webhooks [] is not supported`,
+			err: `webhooks ["slack"] is not supported: this version takes [] or ["github" "slack"]`,
 		},
 		{
 			name:   "both in the other order",
 			mutate: func(a *envoyaws.WebhookListenerArgs) { a.Webhooks = []string{"slack", "github"} },
-			err:    `webhooks ["slack" "github"] is not supported`,
+			err:    `webhooks ["slack" "github"] is not supported: this version takes [] or ["github" "slack"]`,
 		},
 		{
 			name:   "a webhook the component does not know",
@@ -532,6 +588,39 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			name:   "a slack secret with slack unlisted",
 			mutate: func(a *envoyaws.WebhookListenerArgs) { a.Webhooks = []string{"github"} },
 			err:    `slackSigningSecretArn is given for webhook "slack", which webhooks does not list`,
+		},
+		// A webhook's input with no webhook listed, refused as for any unlisted webhook.
+		{
+			name: "a github secret with no webhook",
+			mutate: func(a *envoyaws.WebhookListenerArgs) {
+				noWebhooks(a)
+				a.GitHubWebhookSecretArn = pulumi.String(listenerSecretArn + "github-webhook")
+			},
+			err: `githubWebhookSecretArn is given for webhook "github", which webhooks does not list`,
+		},
+		{
+			name: "a slack secret with no webhook",
+			mutate: func(a *envoyaws.WebhookListenerArgs) {
+				noWebhooks(a)
+				a.SlackSigningSecretArn = pulumi.String(listenerSecretArn + "slack-signing")
+			},
+			err: `slackSigningSecretArn is given for webhook "slack", which webhooks does not list`,
+		},
+		{
+			name: "a reviewerAppId with no webhook",
+			mutate: func(a *envoyaws.WebhookListenerArgs) {
+				noWebhooks(a)
+				a.ReviewerAppId = pulumi.StringRef("1234567")
+			},
+			err: `reviewerAppId is given for webhook "github", which webhooks does not list`,
+		},
+		{
+			name: "a mentionTrigger with no webhook",
+			mutate: func(a *envoyaws.WebhookListenerArgs) {
+				noWebhooks(a)
+				a.MentionTrigger = pulumi.StringRef("@legion")
+			},
+			err: `mentionTrigger is given for webhook "github", which webhooks does not list`,
 		},
 		// The rest of the environment and the service.
 		{
@@ -595,8 +684,8 @@ func listenerContainer(t *testing.T, args *envoyaws.WebhookListenerArgs) renderi
 			ReviewerAppId:  args.ReviewerAppId,
 			MentionTrigger: args.MentionTrigger,
 		},
-		GitHubWebhookSecretArn: literal(t, args.GitHubWebhookSecretArn.(pulumi.StringInput)),
-		SlackSigningSecretArn:  literal(t, args.SlackSigningSecretArn.(pulumi.StringInput)),
+		GitHubWebhookSecretArn: optionalLiteral(t, args.GitHubWebhookSecretArn),
+		SlackSigningSecretArn:  optionalLiteral(t, args.SlackSigningSecretArn),
 		ApiTokenSecretArn:      literal(t, args.ApiTokenSecretArn),
 		LogGroup:               args.LogGroupName,
 		Region:                 args.Region,
@@ -608,17 +697,21 @@ func listenerContainer(t *testing.T, args *envoyaws.WebhookListenerArgs) renderi
 	return c
 }
 
+// optionalLiteral returns the string an optional Input field of an example holds, and "" for one
+// left unset, as NewWebhookListener passes an absent webhook ARN.
+func optionalLiteral(t *testing.T, in pulumi.StringPtrInput) string {
+	t.Helper()
+	if in == nil {
+		return ""
+	}
+	return literal(t, in.(pulumi.StringInput))
+}
+
 func TestListenerContainerDefinitionsMatchTheReferenceGoldens(t *testing.T) {
-	for _, c := range []struct {
-		golden string
-		seed   pulumi.StringPtrInput
-	}{
-		{"listener-github-slack-seed.golden", pulumi.String(listenerSecretArn + "nats-seed")},
-		{"listener-github-slack-no-seed.golden", nil},
-	} {
+	for _, c := range listenerGoldens {
 		t.Run(c.golden, func(t *testing.T) {
 			args := exampleListenerArgs()
-			args.SeedSecretArn = c.seed
+			c.mutate(args)
 			definitions, err := rendering.ListenerContainerDefinitions(listenerContainer(t, args))
 			require.NoError(t, err)
 			require.Equal(t, readGolden(t, c.golden), definitions)
@@ -637,8 +730,8 @@ func without(t *testing.T, text string, parts ...string) string {
 }
 
 // ENVOY_WEBHOOKS is written only when a webhook is listed, the GitHub variables only with github,
-// and each webhook's secret only with its webhook. The component takes exactly github and slack,
-// so these lists reach only the container definitions, which the goldens pin for both.
+// and each webhook's secret only with its webhook. The component takes no webhook or github and
+// slack, which the goldens pin; github or slack alone reaches only the container definitions.
 func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T) {
 	golden := readGolden(t, "listener-github-slack-no-seed.golden")
 	const (
@@ -774,6 +867,21 @@ func TestWebhookListenerConstructTakesSecretArnsWithNoDependency(t *testing.T) {
 	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
 	require.NoError(t, err)
 	requireChildren(t, exampleListenerChildren(t, true), m.children(t))
+}
+
+// A consumer's `webhooks: []` reaches the component through Construct as an empty list, not as a
+// missing input, and with none of a webhook's inputs the listener registers the empty list's
+// container, every other child as with both webhooks.
+func TestWebhookListenerConstructTakesAnEmptyWebhooksList(t *testing.T) {
+	in := listenerInputs(t, fromUpstream)
+	for _, name := range []string{"githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger"} {
+		delete(in, name)
+	}
+	in["webhooks"] = property.New(property.NewArray(nil))
+	require.True(t, in["webhooks"].IsArray())
+	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
+	require.NoError(t, err)
+	requireChildren(t, listenerChildren(t, "listener-no-webhooks-seed.golden", true), m.children(t))
 }
 
 // A stack output a consumer builds from a component output would preview as changed if the output

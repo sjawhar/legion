@@ -198,7 +198,7 @@ func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 	var natsReplicas int
 	s.fs.StringVar(&machineID, "machine-id", "", "machineId: the listener's name, ENVOY_MACHINE_ID")
 	s.fs.Var(&natsURLs, "nats-url", "natsUrls: one NATS server's URL; give it once per URL, in order")
-	s.fs.Var(&webhooks, "webhook", "webhooks: one webhook the listener serves; this version takes exactly github, then slack")
+	s.fs.Var(&webhooks, "webhook", "webhooks: one webhook the listener serves; this version takes none, or exactly github, then slack")
 	s.fs.StringVar(&reviewerAppID, "reviewer-app-id", "", "reviewerAppId: ENVOY_REVIEWER_APP_ID, required with --webhook github and refused without it")
 	s.fs.StringVar(&mentionTrigger, "mention-trigger", "", "mentionTrigger: ENVOY_GITHUB_MENTION_TRIGGER, required with --webhook github and refused without it")
 	s.fs.StringVar(&listenHost, "listen-host", "", "listenHost: ENVOY_LISTEN_HOST")
