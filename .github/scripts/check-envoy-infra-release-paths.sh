@@ -19,7 +19,8 @@
 # a `!` negation or a `:(...)` pathspec is refused rather than guessed at.
 #
 # Run from anywhere: .github/scripts/check-envoy-infra-release-paths.sh
-# CI runs it in the envoy-infra-go job of envoy-and-contracts.yaml.
+# CI runs it in the envoy-infra-go job of envoy-and-contracts.yaml, and its tests in the test job of
+# pr-and-main.yaml.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."

@@ -259,6 +259,11 @@ jobs:
           go-version-file: packages/daemon/go.mod
           cache-dependency-path: packages/daemon/go.sum
 
+      # After the Go install: the check under test runs `go list` over each case's miniature
+      # workspace, which imports only the standard library, so nothing is downloaded.
+      - name: Test the envoy-infra release path check
+        run: .github/scripts/check-envoy-infra-release-paths.test.sh
+
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.
       - name: Install tmux
