@@ -54,6 +54,7 @@ type measuresFixture struct {
 		HeadSHA      string                          `json:"head_sha"`
 		HeadCommitAt time.Time                       `json:"head_commit_at"`
 		StartedAt    time.Time                       `json:"started_at"`
+		CreatedAt    time.Time                       `json:"created_at"`
 		CompletedAt  *time.Time                      `json:"completed_at"`
 		Conclusion   *delivery.DeliveryRunConclusion `json:"conclusion"`
 		HeadBranch   *string                         `json:"head_branch"`
@@ -127,9 +128,10 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 	}
 
 	for _, run := range fixture.Runs {
+		createdAt := run.CreatedAt
 		if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
 			Repo: fixture.Settings.DeployRepo, RunID: run.RunID, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: run.HeadSHA,
-			HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
+			HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CreatedAt: &createdAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
 			HeadBranch: run.HeadBranch, Event: run.Event,
 			URL: "https://github.com/" + fixture.Settings.DeployRepo + "/actions/runs/" + strconv.FormatInt(run.RunID, 10),
 		}); err != nil {
