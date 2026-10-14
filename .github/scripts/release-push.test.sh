@@ -332,16 +332,18 @@ check "forged refs with a space and a newline: git ignores both" "$(is "$(printf
 
 echo
 echo "Case 11: release creates a missing release, publishes a draft, and reuses a published one"
-# The stub gh, first on PATH. It logs each call's arguments to $GH_TEST_DIR/calls.
-# `gh release view <tag> ... --json isDraft -q .isDraft` answers for
-# $GH_TEST_RELEASE: none (exit 1, as gh does for a missing release), draft or
-# published (true or false), or odd (a value gh never prints). An upload, edit
-# or create fails when $GH_TEST_FAIL names it. Any other call fails as
-# unexpected, so a call the command should not make shows up as an error.
+# The stub gh, first on PATH. It logs each call to $GH_TEST_DIR/calls as one
+# line, each argument in brackets, so an argument the script splits or joins
+# shows up as a different log line. `gh release view <tag> ... --json isDraft
+# -q .isDraft` answers for $GH_TEST_RELEASE: none (exit 1, as gh does for a
+# missing release), draft or published (true or false), or odd (a value gh
+# never prints). An upload, edit or create fails when $GH_TEST_FAIL names it.
+# Any other call fails as unexpected, so a call the command should not make
+# shows up as an error.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >> "$GH_TEST_DIR/calls"
+{ printf '[%s]' "$@"; printf '\n'; } >> "$GH_TEST_DIR/calls"
 case "$1 $2" in
   "release view")
     [[ " $* " == *" --json isDraft -q .isDraft "* ]] || { echo "view without --json isDraft: $*" >&2; exit 3; }
@@ -375,14 +377,18 @@ release_run() {
   set -e
   calls=$(<"$work/calls")
 }
-view='release view pkg-v1.0.1 --repo example/repo --json isDraft -q .isDraft'
-upload='release upload pkg-v1.0.1 a.tgz b.tgz --repo example/repo --clobber'
-publish='release edit pkg-v1.0.1 --repo example/repo --draft=false'
+# argv <arg>...: one call as the stub logs it.
+argv() { printf '[%s]' "$@"; }
+view=$(argv release view pkg-v1.0.1 --repo example/repo --json isDraft -q .isDraft)
+upload=$(argv release upload pkg-v1.0.1 a.tgz b.tgz --repo example/repo --clobber)
+publish=$(argv release edit pkg-v1.0.1 --repo example/repo --draft=false)
 release_run none "" pkg-v1.0.1 "Pkg v1.0.1" a.tgz b.tgz
 check "none: exits 0" "$(is "$rc" 0)"
-check "none: creates it from the pushed tag, with generated notes" "$(is "$calls" "$view"$'\n''release create pkg-v1.0.1 a.tgz b.tgz --repo example/repo --title Pkg v1.0.1 --generate-notes --verify-tag')"
-release_run none "" --notes "Fixed notes." pkg-v1.0.1 "Pkg v1.0.1" a.tgz b.tgz
-check "none, --notes: creates it with those notes" "$(is "$calls" "$view"$'\n''release create pkg-v1.0.1 a.tgz b.tgz --repo example/repo --title Pkg v1.0.1 --notes Fixed notes. --verify-tag')"
+check "none: creates it from the pushed tag, with generated notes" "$(is "$calls" "$view"$'\n'"$(argv release create pkg-v1.0.1 a.tgz b.tgz --repo example/repo --title "Pkg v1.0.1" --generate-notes --verify-tag)")"
+check "none: the title reaches gh as one argument" "$(contains "$calls" '\[--title\]\[Pkg v1\.0\.1\]\[')"
+release_run none "" --notes "Fixed notes, in a few words." pkg-v1.0.1 "Pkg v1.0.1" a.tgz b.tgz
+check "none, --notes: creates it with those notes" "$(is "$calls" "$view"$'\n'"$(argv release create pkg-v1.0.1 a.tgz b.tgz --repo example/repo --title "Pkg v1.0.1" --notes "Fixed notes, in a few words." --verify-tag)")"
+check "none, --notes: the notes reach gh as one argument" "$(contains "$calls" '\[--notes\]\[Fixed notes, in a few words\.\]\[')"
 release_run draft "" pkg-v1.0.1 "Pkg v1.0.1" a.tgz b.tgz
 check "draft: exits 0" "$(is "$rc" 0)"
 check "draft: uploads this run's assets over its own, then publishes it" "$(is "$calls" "$view"$'\n'"$upload"$'\n'"$publish")"
