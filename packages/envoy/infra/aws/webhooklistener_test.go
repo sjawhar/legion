@@ -409,7 +409,8 @@ func TestWebhookListenerAlarmsNameItsLogGroup(t *testing.T) {
 	require.Equal(t, 5, alarms)
 }
 
-// core.ListenerEnv's refusals reach the consumer as the run's error.
+// natsUrls may be known only in the apply, so core.ListenerEnv refuses a bad one there and the
+// refusal reaches the consumer as the run's error.
 func TestWebhookListenerRefusesWhatTheListenerEnvironmentRefuses(t *testing.T) {
 	args := exampleListenerArgs()
 	args.NatsUrls = pulumi.StringArray{pulumi.String("nats://a.internal.example:4222,nats://b.internal.example:4222")}
@@ -532,6 +533,16 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			err:    `slackSigningSecretArn is given for webhook "slack", which webhooks does not list`,
 		},
 		// The rest of the environment and the service.
+		{
+			name:   "a blank machineId",
+			mutate: func(a *envoyaws.WebhookListenerArgs) { a.MachineId = " " },
+			err:    "machineId is required",
+		},
+		{
+			name:   "a padded hostBridge",
+			mutate: func(a *envoyaws.WebhookListenerArgs) { a.HostBridge = " 127.0.0.1" },
+			err:    `hostBridge has leading or trailing whitespace: " 127.0.0.1"`,
+		},
 		{
 			name:   "a blank listen host",
 			mutate: func(a *envoyaws.WebhookListenerArgs) { a.ListenHost = " " },

@@ -358,6 +358,11 @@ func (args *WebhookListenerArgs) validate() error {
 	if !slices.Equal(args.Webhooks, supportedWebhooks) {
 		return fmt.Errorf("webhooks %q is not supported: this version takes exactly %q", args.Webhooks, supportedWebhooks)
 	}
+	// The environment's fields known at construct; natsUrls may be known only later, and the
+	// container definitions' apply refuses a bad one.
+	if err := (core.ListenerConfig{MachineID: args.MachineId, Port: listenerPort, HostBridge: args.HostBridge}).CheckPlain(); err != nil {
+		return err
+	}
 	// The listener binds 127.0.0.1 when ENVOY_LISTEN_HOST is blank, where the target group cannot
 	// reach it.
 	if strings.TrimSpace(args.ListenHost) == "" {
