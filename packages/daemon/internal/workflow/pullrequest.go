@@ -149,14 +149,19 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	}
 	// A push classified after its head arrived can complete the carry of a code head's red to the
 	// handoff head that replaced it (classify.SettlementFor), which sends the work back as the
-	// settlement would have (standingRed); otherwise it can be what lets an approval of an earlier
-	// head stand, or what shows the current head carries code the approved one does not, so the
-	// round is settled again.
+	// settlement would have (standingRed), in whatever phase the issue is: GitHub delivers a push
+	// webhook and its synchronize in either order, and the implementer's completion waits on no
+	// webhook, so the head can move and the issue enter testing, retro or merging before the push is
+	// classified. A phase with no checks_red row - implementing, planning - moves nothing (sendBack),
+	// and in awaiting_merge the rule does not act (standingRed). In reviewing the push can otherwise
+	// be what lets an approval of an earlier head stand, or what shows the current head carries code
+	// the approved one does not, so the round is settled again; the round's re-ask is reviewing's
+	// alone.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
+	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved || issue.Phase != phase.Reviewing {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.reaskRound(ctx, tx, *issue, pr, prior)

@@ -472,15 +472,18 @@ func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record
 // stands for the head (classify.RedSendsBack) sends the work back to implementing, whatever the
 // tester has found, the round holds or the merger is doing, unless the fix-attempt cap holds the
 // red (classify.FixAttemptCapHolds): then nothing moves on it, and the architect decides what
-// follows (decideChecks's count report), a review round's own decision governing meanwhile.
-// decideChecks applies the rule on a settlement or a read of the required set, the facts that
-// change the verdict; two facts that are no CI result can find a red standing and apply it too: a
-// push classified late, which can complete the carry of a code head's settlement to the handoff
-// head above it (classify.SettlementFor), and a hold's retry, which restores reviewing after a
-// settlement reached the issue while it was held, where nothing moves. A review or a completion
-// changes nothing about the verdict, and reads none.
+// follows (decideChecks's count report), a review round's own decision governing meanwhile. The
+// rule runs before awaiting_merge: there only the head's own red withdraws the READY
+// (classify.RedWithdrawsReady, decideChecks's AwaitingMerge case), never one carried to the READY
+// head from the code head a .legion/-only push replaced, since READY found the head's own CI green
+// on GitHub, which is what GitHub merges by. decideChecks applies the rule on a settlement or a
+// read of the required set, the facts that change the verdict; two facts that are no CI result can
+// find a red standing and apply it too: a push classified late, which can complete the carry of a
+// code head's settlement to the handoff head above it (classify.SettlementFor), and a hold's retry,
+// which restores reviewing after a settlement reached the issue while it was held, where nothing
+// moves. A review or a completion changes nothing about the verdict, and reads none.
 func (e *Engine) standingRed(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) (bool, error) {
-	if pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
+	if issue.Phase == phase.AwaitingMerge || pr == nil || !classify.RedSendsBack(*pr) || classify.FixAttemptCapHolds(*pr, e.cfg.MaxFixAttempts) {
 		return false, nil
 	}
 	return e.sendBack(ctx, tx, issue, pr)

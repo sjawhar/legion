@@ -324,6 +324,43 @@ func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 	}
 }
 
+// A push classified late that completes the carry of the code head's red to the READY head sends
+// nothing back from awaiting_merge, as the settlement it carries would not either
+// (TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing): READY found the head's own CI
+// green on GitHub, which is what GitHub merges by, and only the head's own red withdraws the READY
+// (classify.RedWithdrawsReady). The CI rule the push applies in every phase before awaiting_merge
+// (standingRed) does not act there, so the READY stands, nobody is told, and nothing is started.
+func TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	// The head has moved to the READY head, the red settlement stands recorded at the code head it
+	// replaced, and the push between the two is not yet known: no verdict stands.
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "code", Required: []string{requiredGate},
+		CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Failing: []string{requiredGate}})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+	applyRefusingNothing(t, pool, readyEngine("merge-queue"), pushedFromTo("code", "head", ".legion/LEGION-208/implement.json", "legion-implementer[bot]"))
+	if got := pullRequestAt(t, pool); got.verdict != "red" {
+		t.Fatalf("after the push the head's verdict is %q, want the code head's red carried to it", got.verdict)
+	}
+	if got := issuePhase(t, pool); got != phase.AwaitingMerge {
+		t.Fatalf("after the late push completed the carry the issue is in %s, want awaiting_merge: a carried red withdraws no READY", got)
+	}
+	if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+		t.Fatalf("notices %v, want none", got)
+	}
+	assertOutboxCount(t, pool, "supervise", 0)
+	assertOutboxCount(t, pool, "dispatch_status", 0)
+	if published := mergeQueuePublishes(t, pool); len(published) != 0 {
+		t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
+	}
+	if rounds := implementerRounds(t, pool); rounds != 0 {
+		t.Fatalf("rounds = %d, want none counted: nothing went back", rounds)
+	}
+}
+
 // startTask is the task role was last started with, "" when it was not started.
 func startTask(t *testing.T, pool *pgxpool.Pool, role claim.Role) string {
 	t.Helper()
