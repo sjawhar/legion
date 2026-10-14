@@ -135,6 +135,14 @@
       "outcome": {
         "kind": "unchanged"
       }
+    },
+    {
+      "spec": "The carry reads who answered a decision block from the version it compares: the block's state, answered_by and answered_at, which the server writes from the ask rows; the three fields a re-approval request carries were written as three flat optionals (plan 2.5).",
+      "plan": "The version being written is judged by the document's asks rows alone (the ask whose block_id names the block: its state, answer.user, answer.at), and a version holding any ask node that no row of this document backs (a forged block, a copy of another document's block, one the room has not credited yet) or that settlement could not read (invalid) carries nothing; a document holding a copy therefore never carries. ask.approval.approved is one optional object {version, at, by}. Decided by the architect on the first review round (Envoy 08e77b35d54fb519ea65148bf20bb33e, 5f0fd680f8d51a5c5129a41afcf18f4c); plan.md version 3 records it as departure 4.",
+      "evidence": "The reviewer's Critical on PR #1944 (thread PRRT_kwDORFy7ds6sJXuP): the server-owned attributes are stripped only on markdown writes; a peer on /ws/doc/{room} writes an ask element with state=answered and answered_by=<the approver> that parseAskBlock rejects (an empty question), settlement keeps those attributes, and the carry recorded the approver's approval of a version holding a block he never answered - TestAForgedAnsweredBlockOnTheSocketCarriesNoApproval was red on the previous rule.",
+      "outcome": {
+        "kind": "unchanged"
+      }
     }
   ]
 }
