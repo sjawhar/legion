@@ -2,65 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-698",
-  "completed": "2026-10-14T07:17:00Z",
-  "round": 2,
+  "completed": "2026-10-14T08:21:00Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/1950",
-  "head": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
-  "ciHead": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
-  "ci": "Tests run 38526020000 (lint, typecheck, test success) and PR Title run 38526019967 (pr-title success) at fbd6393d itself: the round-2 push carried code and the handoff together (compare 6355564e...fbd6393d: pullrequest.go, review.go, required_checks_test.go, implement.json), so it carries no trailer and CI ran at the tip. One earlier pr-title attempt at fbd6393d (run 38526165532) was cancelled by a later body-edit run; the latest succeeded, and the record reads checksVerdict green. Read, not re-run.",
+  "head": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
+  "ciHead": "f0b5430b5e7b56a96bfb37049e9ce689adc1b693",
+  "ci": "At f0b5430b: Tests run 38533000317 (lint, typecheck, test success), PR Title run 38533000360 (pr-title success), Docs 38533000336 and Worker Image 38533000433 success, and Legion Envoy and Contracts run 38533000318 FAILURE in job pi-legion (src/skills-guard.test.ts, 'every skill body stays under 500 lines, its detail in references': legion-worker/SKILL.md 502). The two handoff commits above it (72d1d28c, 490441e9) are .legion/-only with the trailer and have 0 check runs; compare f0b5430b...490441e9 is implement.json alone. The PR body's CI line names the required runs and omits the failed workflow. Read, not re-run.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2's proof entry (the tester's red test and TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing): re-ran its go test selection at fbd6393d on the embedded Postgres at 127.0.0.1:54332 (the implementer used 54331): --- PASS for every row of TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging), for the new awaiting_merge test, and for TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing, TestARedVerdictSendsTheTreeBackToImplementing and TestAnApprovalEndsTheRoundWhateverCISays; ok. jj diff --from 881481d11a0e --to @- -- checks_red_test.go: 0 files changed, so the red test is mine as written. The round-1 entries stand: GitHub's compare 9fb30a6c...fbd6393d touches only the three workflow files and the two handoffs, so the config loader, prompts, skills and docs those entries prove are byte-identical to the head they were verified at."
+    "how": "Round 3's proof entry: re-ran its go test selection at 490441e9 on the embedded Postgres at 127.0.0.1:54332: --- PASS for every row of TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging to implementing with the start quiesced on tester / reviewer / nobody / merger and a checks-red naming the phase; awaiting_merge stays with nothing told or started), TestARetryOfAHoldFromAnyPhaseWithARedHeadSendsTheWorkBack (testing, retro, merging), TestARetryOfARoundWithARedCodeHeadSendsTheWorkBack, TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound, my TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase and TestAnApprovalEndsTheRoundWhateverCISays; ok. The census's invoked entry re-driven: the legion CLI rebuilt at 490441e9 refuses review_workflows as a list, [], a bare key and reviewWorkflows (exit 1, Unknown key) and accepts the control file (Config OK, exit 0). The proof's claims hold; what it does not cover is the pi-legion suite the same head turned red (failures)."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "The repository's own test suite is green on the head's code (every CI lane the pull request runs; the PR body's CI line cites the lanes read on GitHub). Round 3's edit to skills/legion-worker/SKILL.md breaks packages/pi-legion/src/skills-guard.test.ts.",
+      "evidence": "Legion Envoy and Contracts run 38533000318 at f0b5430b5e7b56a96bfb37049e9ce689adc1b693, job pi-legion: (fail) every skill body stays under 500 lines, its detail in references — expected [] received [{file: legion-worker/SKILL.md, lines: 502}] (packages/pi-shared/test/skills-guard.ts longSkillBodies: split('\\n').length >= 500). The file is 501 lines by wc -l at this head (496 by the guard's count on main e4ec5a20, 498 at the round-2 head fbd6393d, whose run 38526019936 has pi-legion success); round 3's +4/-1 edit at SKILL.md:123-129 (the retro-completion sentence) crossed the guard. Not a required check (the ruleset names lint, typecheck, test, pr-title), so checksVerdict reads green and READY would not refuse it, but the suite is red because of this change. Remedy: bring skills/legion-worker/SKILL.md to at most 498 lines by wc -l (the guard needs split count < 500) — fold the new sentence into the existing one or move the detail to a reference — then the pi-legion job is green again; the existing test is the pin, no new red test written."
+    }
+  ],
   "proof": [
     {
-      "criterion": "Acceptance 2 (round 2): a red a push classified late carries to the handoff head sends the work back from testing, reviewing, retro and merging alike, never from awaiting_merge, and moves nothing in a phase with no checks_red row.",
-      "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54332, driven through intake.ApplyFact with a late handoff-only push code->head over a red settlement recorded at code.",
-      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable go -C packages/daemon test -count=1 ./internal/workflow -run 'TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase|TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing|TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing|TestARedVerdictSendsTheTreeBackToImplementing|TestAnApprovalEndsTheRoundWhateverCISays' -v; then a throwaway probe (not committed) applying the same late push with the issue seeded in implementing and in production_check.",
-      "observed": "Every row --- PASS, ok github.com/sjawhar/legion/daemon/internal/workflow 6.088s: after the late push the issue is in implementing from testing (start waits on the tester), reviewing (reviewer), retro (nobody) and merging (merger), each with a checks-red naming the from-phase; in awaiting_merge the verdict reads red by the carry and the issue stays with no notice, no supervise row and no merge-queue publish. The probe: in implementing and production_check the issue stays, no notice, no supervise row, no counted round, and the push fact is not refused (transition finds no row and returns nil).",
-      "headSha": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
-      "negativeControl": "At 9fb30a6c the same red test fails its testing, retro and merging rows ('after the late push completed the carry the issue is in testing, want implementing') and passes reviewing (round 1's failures entry)."
+      "criterion": "Acceptance 2 (round 3): the CI rule is applied by whichever fact makes a red stand — a head arriving over a known handoff push, and a hold's retry from testing, retro or merging — in every phase before awaiting_merge.",
+      "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54332, driven through intake.ApplyFact.",
+      "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable go -C packages/daemon test -count=1 ./internal/workflow -run 'TestAHeadArrivingOverAKnownPush|TestARetryOfAHoldFromAnyPhase|TestAPushClassifiedLate|TestARetryOfARound|TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound|TestAnApprovalEndsTheRoundWhateverCISays' -v",
+      "observed": "Every row --- PASS, ok github.com/sjawhar/legion/daemon/internal/workflow 4.855s: the synchronize over a known handoff push sends back from testing, reviewing, retro and merging with the start quiesced on tester / reviewer / nobody / merger and a checks-red naming the phase, and leaves awaiting_merge with nothing told or started; the hold retry from testing, retro and merging sends back with one implementer start and zero starts of the restored role; the round-1 late-push test and the approval table still pass.",
+      "headSha": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
+      "negativeControl": "At the reviewed head c8c33210 the reviewer's two findings stand (its review.json: the synchronize ordering leaves testing, retro and merging in place with HeadVerdict red; a hold retried from testing restarts the tester), and at 9fb30a6c my late-push test failed three of four rows."
     },
     {
-      "criterion": "Acceptance 4 (round 2 head): the reviewer's four-step read lands on the checks that stand for the code at a head that has its own CI.",
-      "surface": "GitHub, on #1950 at fbd6393d with the exact commands reviewer.md and merge-gate.md carry.",
-      "command": "gh api 'repos/sjawhar/legion/actions/runs?branch=legion/LEGION-698&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'; gh api repos/sjawhar/legion/commits/fbd6393d.../check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'; gh api repos/sjawhar/legion/compare/fbd6393d...fbd6393d --jq '[.files[].filename] | all(startswith(\".legion/\"))'",
-      "observed": "The CI head is fbd6393d itself (the push carried code and handoff together); lint, typecheck, test and pr-title are completed/success there (plus one superseded pr-title attempt completed/cancelled); the compare prints true.",
-      "headSha": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
-      "negativeControl": "At 70450b2b, the code commit below it, GitHub has 0 check runs: CI ran at the push's tip, not at the code commit, which is the case the LEGION-631 learning now describes."
-    },
-    {
-      "criterion": "Acceptance 6: legion start --check-config refuses a file that still sets projects.<KEY>.review_workflows, and the daemon's boot refuses it too.",
-      "surface": "The legion CLI built from the branch at 9fb30a6c (go build -o /tmp/legion-bin ./cmd/legion) on four minimal legion.yaml files under /tmp/cfg (project LEGION, repo sjawhar/legion, state_dir, postgres_dsn, 0600 dispatch_token_file and operator_token_file, gates.design, both github_apps, nats_urls).",
-      "command": "/tmp/legion-bin start --check-config --config /tmp/cfg/rw.yaml (review_workflows: [.github/workflows/review.yml]); rw-empty.yaml (review_workflows: []); rw-null.yaml (review_workflows: with no value); rw-camel.yaml (reviewWorkflows: [...]); then timeout 20 /tmp/legion-bin start --config /tmp/cfg/rw.yaml",
-      "observed": "legion start: Unknown key \"projects.LEGION.review_workflows\" and exit 1 for rw, rw-empty and rw-null; legion start: Unknown key \"projects.LEGION.reviewWorkflows\" and exit 1 for rw-camel; the boot (legion start without --check-config) prints the same Unknown key line and exits 1 before any boot stage runs.",
-      "headSha": "9fb30a6cc3a7064d669f1afb92b2b2da14c15a1e",
-      "negativeControl": "/tmp/cfg/ok.yaml, the same file without the key: Config OK: project=LEGION, the two open-capability lines, exit 0; and the boot on ok.yaml gets past the config load to the prompts stage, where this pod's missing pi-legion profile install stops it (an unrelated refusal, which shows the config loaded)."
-    },
-    {
-      "criterion": "Acceptance 4: the reviewer reads the code commit's checks on GitHub before approving, as reviewer.md, architect-common.md and merge-gate.md say, and the read works at a skip-checks handoff head.",
-      "surface": "GitHub, on this pull request (#1950, head 9fb30a6c, a handoff-only commit over code head 8593a1a1) and on #1944 (the plan's measured example), with the exact commands the three texts carry.",
-      "command": "gh pr view 1950 --json baseRefName,headRefOid,headRefName; gh api repos/sjawhar/legion/rules/branches/main --jq '.[] | select(.type==\"required_status_checks\") | .parameters.required_status_checks[].context'; gh api repos/sjawhar/legion/branches/main --jq '.protection.required_status_checks.checks[].context'; gh api 'repos/sjawhar/legion/actions/runs?branch=legion/LEGION-698&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'; gh api repos/sjawhar/legion/commits/8593a1a1.../check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'; gh api repos/sjawhar/legion/compare/8593a1a1...9fb30a6c --jq '[.files[].filename] | all(startswith(\".legion/\"))'; gh pr checks 1950; gh api 'repos/sjawhar/legion/actions/runs?branch=legion/LEGION-573&per_page=40' --jq '.workflow_runs[]|[.id,.name,.event,.head_sha[0:10]]|@tsv'",
-      "observed": "Required set lint, typecheck, test, pr-title from the ruleset, none from branch protection; the newest pull_request run's head is 8593a1a1; its check-runs list lint, typecheck, test, pr-title (twice) and build all completed/success, the rest skipped; the compare prints true; gh pr checks 1950 says no checks reported on the branch (the handoff head has 0 check runs). On #1944 the runs at 0220b94fc2 are PR Title runs of event pull_request_review and pull_request_review_comment only, which the event=pull_request filter excludes, so the read lands on the code head 3b5c8f78's runs.",
-      "headSha": "9fb30a6cc3a7064d669f1afb92b2b2da14c15a1e",
-      "negativeControl": "The same grep the implementer ran (checksVerdict|review[_ ]?workflows|Review workflows|starts (no|none)|stuck) over the three texts hits only architect-common.md:12, the review-stuck paragraph naming its two surviving causes; over main's copies it hits reviewer.md, architect-common.md and merge-gate.md on the deleted clauses."
-    },
-    {
-      "criterion": "Acceptance 1: a reviewer's APPROVE of the head ends the round whatever CI says at that commit, in the sequence this issue was filed for.",
-      "surface": "The daemon's workflow engine on the embedded Postgres, driven through intake.ApplyFact with the facts in production order (a throwaway probe test, not committed).",
-      "command": "Seed reviewing with code head green on lint, typecheck, test, pr-title; apply pushedFromTo(code, review1, .legion/LEGION-208/review.json, legion-reviewer[bot]), syncedTo(review1), the approval of review1, a PullRequestChecks at review1 with CheckRuns [pr-title] and Failing [] (the review event's run, replacing the carried green with no verdict), in both orders, then the reviewer's HandoffComplete.",
-      "observed": "The issue is in retro after the completion in both orders; notices carry no checks-red and no review-stuck. A second probe: the approval, then a red settlement at the head before the completion, moves the issue to implementing with the implementer's start waiting on the reviewer and the late completion refused HANDOFF_NOT_CURRENT_PHASE; a third: a hold retry (completion, ClaimFailed, approval, red, RetryOrEscalate retry) ends in implementing with a checks-red, as the implementer's deviation says.",
-      "headSha": "9fb30a6cc3a7064d669f1afb92b2b2da14c15a1e",
-      "negativeControl": "The same TestAnApprovalEndsTheRoundWhateverCISays red and undecided rows fail on main e4ec5a20 with HANDOFF_NOT_CURRENT_PHASE on the half after the red sent the work back, and TestARoundNoReviewDecidesTellsTheArchitect (a COMMENT-only round) still passes on the branch, so the surviving stuck cause is intact."
+      "criterion": "Contract change census, the invoked entry: legion.yaml projects.<KEY>.review_workflows is refused at load.",
+      "surface": "The legion CLI rebuilt from 490441e9 (go build -o /tmp/legion-bin3 ./cmd/legion) on the /tmp/cfg files.",
+      "command": "/tmp/legion-bin3 start --check-config --config /tmp/cfg/rw.yaml; rw-empty.yaml; rw-null.yaml; rw-camel.yaml",
+      "observed": "legion start: Unknown key \"projects.LEGION.review_workflows\", exit 1 for rw, rw-empty and rw-null; Unknown key \"projects.LEGION.reviewWorkflows\", exit 1 for rw-camel.",
+      "headSha": "490441e9dfe0bd6cf67001188c84bbe6c5fb0f82",
+      "negativeControl": "/tmp/cfg/ok.yaml without the key: Config OK: project=LEGION, exit 0."
     }
   ],
   "risks": [
-    "D2's daemon side (probe, not pinned): after a red moves retro to implementing, an implementer completion reporting any commit but its last handoff is accepted as the implementation's and moves the issue to testing; HANDOFF_NOT_NEW catches only the last handoff commit. The refusal of a retro completion rests on pi-legion's lookup of implement.json at the state's phase, read before the commit is found and the completion posted, so a red landing inside that window lets a retro completion through. Narrow; recorded for the architect, no change asked.",
-    "A red standing when a phase is entered is not re-read (plan D4): an implementer that completes on a code head already red, its handoff push and synchronize known, hands the tester a head whose verdict is red with nothing to act on it until the next CI fact or READY. Accepted by the plan; noted because the failure above is the neighbouring case where the daemon learns of the red after entry.",
-    "Local lanes: the NATS-backed tests were skipped by name per the LEGION-668 recipe; CI's Tests run 38521728279 ran them at 8593a1a1. go.work.sum was rewritten by the CLI build and restored before committing.",
-    "Round 2: standingRed now returns false in awaiting_merge, so the push handler's phase-wide application cannot withdraw a READY on a carried red; the head's own red still withdraws it through decideChecks' AwaitingMerge case (TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing, green at this head)."
+    "D2's daemon side is now stated precisely in worker-common.md and SKILL.md (a retro completion already in flight when the red lands can be taken as the implementing completion); the race itself is unchanged and bounded by the tester's CI read.",
+    "The PR body's CI line for round 3 names the required runs at f0b5430b and omits the failed Legion Envoy and Contracts run; the implementer should cite it once green.",
+    "Local lanes: the NATS-backed tests skipped by name per the LEGION-668 recipe; CI's Tests run 38533000317 ran them at f0b5430b."
   ],
   "previousRounds": [
     {
@@ -112,6 +92,68 @@
         "Local lanes: the NATS-backed tests were skipped by name per the LEGION-668 recipe; CI's Tests run 38521728279 ran them at 8593a1a1. go.work.sum was rewritten by the CLI build and restored before committing."
       ],
       "completed": "2026-10-14T06:51:00Z"
+    },
+    {
+      "round": 2,
+      "head": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
+      "ciHead": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
+      "ci": "Tests run 38526020000 (lint, typecheck, test success) and PR Title run 38526019967 (pr-title success) at fbd6393d itself: the round-2 push carried code and the handoff together (compare 6355564e...fbd6393d: pullrequest.go, review.go, required_checks_test.go, implement.json), so it carries no trailer and CI ran at the tip. One earlier pr-title attempt at fbd6393d (run 38526165532) was cancelled by a later body-edit run; the latest succeeded, and the record reads checksVerdict green. Read, not re-run.",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Round 2's proof entry (the tester's red test and TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing): re-ran its go test selection at fbd6393d on the embedded Postgres at 127.0.0.1:54332 (the implementer used 54331): --- PASS for every row of TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging), for the new awaiting_merge test, and for TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing, TestARedVerdictSendsTheTreeBackToImplementing and TestAnApprovalEndsTheRoundWhateverCISays; ok. jj diff --from 881481d11a0e --to @- -- checks_red_test.go: 0 files changed, so the red test is mine as written. The round-1 entries stand: GitHub's compare 9fb30a6c...fbd6393d touches only the three workflow files and the two handoffs, so the config loader, prompts, skills and docs those entries prove are byte-identical to the head they were verified at."
+      },
+      "failed": 0,
+      "failures": [],
+      "proof": [
+        {
+          "criterion": "Acceptance 2 (round 2): a red a push classified late carries to the handoff head sends the work back from testing, reviewing, retro and merging alike, never from awaiting_merge, and moves nothing in a phase with no checks_red row.",
+          "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54332, driven through intake.ApplyFact with a late handoff-only push code->head over a red settlement recorded at code.",
+          "command": "LEGION_TEST_PG_DSN=postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable go -C packages/daemon test -count=1 ./internal/workflow -run 'TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase|TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing|TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing|TestARedVerdictSendsTheTreeBackToImplementing|TestAnApprovalEndsTheRoundWhateverCISays' -v; then a throwaway probe (not committed) applying the same late push with the issue seeded in implementing and in production_check.",
+          "observed": "Every row --- PASS, ok github.com/sjawhar/legion/daemon/internal/workflow 6.088s: after the late push the issue is in implementing from testing (start waits on the tester), reviewing (reviewer), retro (nobody) and merging (merger), each with a checks-red naming the from-phase; in awaiting_merge the verdict reads red by the carry and the issue stays with no notice, no supervise row and no merge-queue publish. The probe: in implementing and production_check the issue stays, no notice, no supervise row, no counted round, and the push fact is not refused (transition finds no row and returns nil).",
+          "headSha": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
+          "negativeControl": "At 9fb30a6c the same red test fails its testing, retro and merging rows ('after the late push completed the carry the issue is in testing, want implementing') and passes reviewing (round 1's failures entry)."
+        },
+        {
+          "criterion": "Acceptance 4 (round 2 head): the reviewer's four-step read lands on the checks that stand for the code at a head that has its own CI.",
+          "surface": "GitHub, on #1950 at fbd6393d with the exact commands reviewer.md and merge-gate.md carry.",
+          "command": "gh api 'repos/sjawhar/legion/actions/runs?branch=legion/LEGION-698&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'; gh api repos/sjawhar/legion/commits/fbd6393d.../check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'; gh api repos/sjawhar/legion/compare/fbd6393d...fbd6393d --jq '[.files[].filename] | all(startswith(\".legion/\"))'",
+          "observed": "The CI head is fbd6393d itself (the push carried code and handoff together); lint, typecheck, test and pr-title are completed/success there (plus one superseded pr-title attempt completed/cancelled); the compare prints true.",
+          "headSha": "fbd6393d7d9e79b514b3932b4f99cacb30ae1a70",
+          "negativeControl": "At 70450b2b, the code commit below it, GitHub has 0 check runs: CI ran at the push's tip, not at the code commit, which is the case the LEGION-631 learning now describes."
+        },
+        {
+          "criterion": "Acceptance 6: legion start --check-config refuses a file that still sets projects.<KEY>.review_workflows, and the daemon's boot refuses it too.",
+          "surface": "The legion CLI built from the branch at 9fb30a6c (go build -o /tmp/legion-bin ./cmd/legion) on four minimal legion.yaml files under /tmp/cfg (project LEGION, repo sjawhar/legion, state_dir, postgres_dsn, 0600 dispatch_token_file and operator_token_file, gates.design, both github_apps, nats_urls).",
+          "command": "/tmp/legion-bin start --check-config --config /tmp/cfg/rw.yaml (review_workflows: [.github/workflows/review.yml]); rw-empty.yaml (review_workflows: []); rw-null.yaml (review_workflows: with no value); rw-camel.yaml (reviewWorkflows: [...]); then timeout 20 /tmp/legion-bin start --config /tmp/cfg/rw.yaml",
+          "observed": "legion start: Unknown key \"projects.LEGION.review_workflows\" and exit 1 for rw, rw-empty and rw-null; legion start: Unknown key \"projects.LEGION.reviewWorkflows\" and exit 1 for rw-camel; the boot (legion start without --check-config) prints the same Unknown key line and exits 1 before any boot stage runs.",
+          "headSha": "9fb30a6cc3a7064d669f1afb92b2b2da14c15a1e",
+          "negativeControl": "/tmp/cfg/ok.yaml, the same file without the key: Config OK: project=LEGION, the two open-capability lines, exit 0; and the boot on ok.yaml gets past the config load to the prompts stage, where this pod's missing pi-legion profile install stops it (an unrelated refusal, which shows the config loaded)."
+        },
+        {
+          "criterion": "Acceptance 4: the reviewer reads the code commit's checks on GitHub before approving, as reviewer.md, architect-common.md and merge-gate.md say, and the read works at a skip-checks handoff head.",
+          "surface": "GitHub, on this pull request (#1950, head 9fb30a6c, a handoff-only commit over code head 8593a1a1) and on #1944 (the plan's measured example), with the exact commands the three texts carry.",
+          "command": "gh pr view 1950 --json baseRefName,headRefOid,headRefName; gh api repos/sjawhar/legion/rules/branches/main --jq '.[] | select(.type==\"required_status_checks\") | .parameters.required_status_checks[].context'; gh api repos/sjawhar/legion/branches/main --jq '.protection.required_status_checks.checks[].context'; gh api 'repos/sjawhar/legion/actions/runs?branch=legion/LEGION-698&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'; gh api repos/sjawhar/legion/commits/8593a1a1.../check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'; gh api repos/sjawhar/legion/compare/8593a1a1...9fb30a6c --jq '[.files[].filename] | all(startswith(\".legion/\"))'; gh pr checks 1950; gh api 'repos/sjawhar/legion/actions/runs?branch=legion/LEGION-573&per_page=40' --jq '.workflow_runs[]|[.id,.name,.event,.head_sha[0:10]]|@tsv'",
+          "observed": "Required set lint, typecheck, test, pr-title from the ruleset, none from branch protection; the newest pull_request run's head is 8593a1a1; its check-runs list lint, typecheck, test, pr-title (twice) and build all completed/success, the rest skipped; the compare prints true; gh pr checks 1950 says no checks reported on the branch (the handoff head has 0 check runs). On #1944 the runs at 0220b94fc2 are PR Title runs of event pull_request_review and pull_request_review_comment only, which the event=pull_request filter excludes, so the read lands on the code head 3b5c8f78's runs.",
+          "headSha": "9fb30a6cc3a7064d669f1afb92b2b2da14c15a1e",
+          "negativeControl": "The same grep the implementer ran (checksVerdict|review[_ ]?workflows|Review workflows|starts (no|none)|stuck) over the three texts hits only architect-common.md:12, the review-stuck paragraph naming its two surviving causes; over main's copies it hits reviewer.md, architect-common.md and merge-gate.md on the deleted clauses."
+        },
+        {
+          "criterion": "Acceptance 1: a reviewer's APPROVE of the head ends the round whatever CI says at that commit, in the sequence this issue was filed for.",
+          "surface": "The daemon's workflow engine on the embedded Postgres, driven through intake.ApplyFact with the facts in production order (a throwaway probe test, not committed).",
+          "command": "Seed reviewing with code head green on lint, typecheck, test, pr-title; apply pushedFromTo(code, review1, .legion/LEGION-208/review.json, legion-reviewer[bot]), syncedTo(review1), the approval of review1, a PullRequestChecks at review1 with CheckRuns [pr-title] and Failing [] (the review event's run, replacing the carried green with no verdict), in both orders, then the reviewer's HandoffComplete.",
+          "observed": "The issue is in retro after the completion in both orders; notices carry no checks-red and no review-stuck. A second probe: the approval, then a red settlement at the head before the completion, moves the issue to implementing with the implementer's start waiting on the reviewer and the late completion refused HANDOFF_NOT_CURRENT_PHASE; a third: a hold retry (completion, ClaimFailed, approval, red, RetryOrEscalate retry) ends in implementing with a checks-red, as the implementer's deviation says.",
+          "headSha": "9fb30a6cc3a7064d669f1afb92b2b2da14c15a1e",
+          "negativeControl": "The same TestAnApprovalEndsTheRoundWhateverCISays red and undecided rows fail on main e4ec5a20 with HANDOFF_NOT_CURRENT_PHASE on the half after the red sent the work back, and TestARoundNoReviewDecidesTellsTheArchitect (a COMMENT-only round) still passes on the branch, so the surviving stuck cause is intact."
+        }
+      ],
+      "risks": [
+        "D2's daemon side (probe, not pinned): after a red moves retro to implementing, an implementer completion reporting any commit but its last handoff is accepted as the implementation's and moves the issue to testing; HANDOFF_NOT_NEW catches only the last handoff commit. The refusal of a retro completion rests on pi-legion's lookup of implement.json at the state's phase, read before the commit is found and the completion posted, so a red landing inside that window lets a retro completion through. Narrow; recorded for the architect, no change asked.",
+        "A red standing when a phase is entered is not re-read (plan D4): an implementer that completes on a code head already red, its handoff push and synchronize known, hands the tester a head whose verdict is red with nothing to act on it until the next CI fact or READY. Accepted by the plan; noted because the failure above is the neighbouring case where the daemon learns of the red after entry.",
+        "Local lanes: the NATS-backed tests were skipped by name per the LEGION-668 recipe; CI's Tests run 38521728279 ran them at 8593a1a1. go.work.sum was rewritten by the CLI build and restored before committing.",
+        "Round 2: standingRed now returns false in awaiting_merge, so the push handler's phase-wide application cannot withdraw a READY on a carried red; the head's own red still withdraws it through decideChecks' AwaitingMerge case (TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing, green at this head)."
+      ],
+      "completed": "2026-10-14T07:17:00Z",
+      "verdict": "pass"
     }
   ]
 }
