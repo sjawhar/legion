@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-698",
-  "completed": "2026-10-14T06:30:51Z",
+  "completed": "2026-10-14T07:04:11Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1950",
-  "head": "8593a1a151a11ebc7a52ed0fa15da87bb40e9982",
+  "head": "70450b2b452f0c398993f8e614991f29e8372988",
   "proof": [
     {
       "criterion": "Acceptance 1: a reviewer's APPROVE of the head ends the round whatever CI says at that commit, a REQUEST_CHANGES sends the work back; a test in packages/daemon/internal/workflow/review_test.go is red on main before the fix.",
@@ -53,6 +53,14 @@
       "observed": "legion start: Unknown key \"projects.LEGION.review_workflows\" / exit status 1 / exit=1. The grep's only hits are the refusal's own text: packages/daemon/internal/config/config_test.go lines 419-426 (the two rows 'review_workflows is no longer a key' and '..., even empty', each wanting Unknown key \"projects.DEMO.review_workflows\") and docs/site/src/content/docs/legion/running-legion.md lines 357-359 (the Upgrade note quoting the refusal). Any other hit fails this acceptance; there is none (the architect agreed this reading on 2026-10-14).",
       "headSha": "8593a1a151a11ebc7a52ed0fa15da87bb40e9982",
       "negativeControl": "The same file without the review_workflows key (/tmp/rw-ok.yaml): Config OK: project=LEGION, then the two open-capability lines, exit=0."
+    },
+    {
+      "criterion": "Acceptance 2 (round 2, the tester's red test): a red that a push classified late carries to the handoff head sends the work back from testing, reviewing, retro and merging alike, and never from awaiting_merge, where only the head's own red withdraws the READY.",
+      "surface": "The daemon's workflow engine on the embedded Postgres 16.4 at 127.0.0.1:54331 (LEGION_TEST_PG_DSN set), driven through intake.ApplyFact with a late handoff-only push code->head over a red settlement recorded at code; the tester's test file checks_red_test.go unchanged from its commit 881481d11a0e (jj diff --from 881481d11a0e --to @ -- packages/daemon/internal/workflow/checks_red_test.go: 0 files changed).",
+      "command": "go -C packages/daemon test -count=1 ./internal/workflow -run 'TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase|TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing' -v ; go -C packages/daemon test -count=1 ./internal/workflow ./internal/classify -skip 'Consume|Captured|RateLimited|BackwardMoveNoRow|LateEventOfAnEarlier|ScratchDispatch'",
+      "observed": "--- PASS: TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase (testing, reviewing, retro, merging: each in implementing after the late push, the implementer's start waiting on tester / reviewer / nobody / merger, a checks-red notice naming the from-phase); --- PASS: TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing (awaiting_merge: the verdict reads red by the carry, the issue stays, no notice, no supervise row, no merge-queue publish); ok ./internal/workflow 135.597s, ok ./internal/classify.",
+      "headSha": "70450b2b452f0c398993f8e614991f29e8372988",
+      "negativeControl": "At the previous head 9fb30a6c the tester's test fails for testing, retro and merging ('after the late push completed the carry the issue is in testing, want implementing') and passes for reviewing, as .legion/LEGION-698/test.json records; and TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing's 'on the code head, carried to the READY head' row still moves nothing."
     }
   ],
   "filesChanged": [
@@ -71,13 +79,15 @@
     "packages/daemon/internal/prompts/go/reviewer.md, architect-common.md, worker-common.md, roles/reviewer.md, roles/implementer.md: the reviewer's four-step read of the code commit's checks; checks-red from testing/reviewing/retro/merging; review-stuck's two causes; no review workflows, no checksVerdict",
     "skills/legion-worker/references/merge-gate.md, review-threads.md, skills/legion-worker/SKILL.md, skills/legion-architect/SKILL.md: the round's order (read CI, push the handoff, review the head that push made, complete), the takeover phases, no review workflows",
     "docs/site/src/content/docs/legion/concepts.md, running-legion.md (Upgrade note), troubleshooting.md; deploy/kubernetes/daemon/legion.yaml.example; AGENTS.md; docs/solutions/legion/…LEGION-631.md",
-    ".legion/LEGION-698/plan.json: one word redacted at line 38 (the other deployment's project name), which .github/scripts/check-private-names.sh, run by the required lint job, refused"
+    ".legion/LEGION-698/plan.json: one word redacted at line 38 (the other deployment's project name), which .github/scripts/check-private-names.sh, run by the required lint job, refused",
+    "round 2: packages/daemon/internal/workflow/pullrequest.go (push applies standingRed in every phase, re-asks the round only in reviewing), review.go (standingRed does not act in awaiting_merge), required_checks_test.go (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing)"
   ],
   "trickyParts": [
     "The plan's own TestAnApprovalEndsTheRoundWhateverCISays rows are unreachable under the plan's reviewRound ordering (roundApproved then roundSentBack): with a red standing, whichever half arrives first finds the round incomplete, falls through to RedSendsBack and sends the work back, and the second half is refused HANDOFF_NOT_CURRENT_PHASE (that is exactly the row's failure on main). So the round reads no CI at all; standingRed holds the CI rule and the push handler and the hold retry apply it before asking the round.",
     "Deleting decideChecks' reviewing branch removed the only path that re-evaluated a round left open by CodeOnItsWay once the push's new head arrived (the new head's settlement used to). pullRequestSynchronized now re-asks the round in reviewing, guarded on HeadPushKnown: GitHub delivers push and synchronize in either order, and asking before the push is classified would re-tell a stuck round at the new head for a handoff push that then ends it approved (TestAHeadArrivingBeforeItsPushTellsNothingOfAStuckRound).",
     "retro → implementing is a same-role move: record.SuperviseRequest validation refuses a start whose Quiesce is its own role, so takenOver returns no quiesce when the leaving role is the starting one; the implementer keeps its turn and is handed the implementing task once it ends.",
-    "The daemon's tests need Postgres: an embedded Postgres 16.4 from the zonky jar (docs/solutions/testing/…LEGION-668.md) at 127.0.0.1:54331; the NATS-backed tests are skipped by name (-skip 'Consume|Captured|RateLimited|BackwardMoveNoRow|LateEventOfAnEarlier|ScratchDispatch'), and ./internal/daemon runs by -run selection. CI's Tests run 38521728279 ran them all green."
+    "The daemon's tests need Postgres: an embedded Postgres 16.4 from the zonky jar (docs/solutions/testing/…LEGION-668.md) at 127.0.0.1:54331; the NATS-backed tests are skipped by name (-skip 'Consume|Captured|RateLimited|BackwardMoveNoRow|LateEventOfAnEarlier|ScratchDispatch'), and ./internal/daemon runs by -run selection. CI's Tests run 38521728279 ran them all green.",
+    "Round 2: the push handler's one guard served two rules - the CI rule and the round's re-ask - so a late push that completed a red's carry acted only in reviewing. standingRed now excludes awaiting_merge itself (a carried red must not withdraw a READY GitHub judged on the head's own CI; sendBack would otherwise find the awaiting_merge checks_red row), so every caller gets the one rule, and the re-ask alone stays reviewing's."
   ],
   "deviations": [
     "Plan §1/D1 kept a roundSentBack case inside reviewRound after roundApproved. The implementation takes the CI read out of reviewRound entirely (standingRed, applied by decideChecks, the push classification handler and the hold retry before the round is asked). On the review and completion facts D1 holds literally: a red already standing when the approval lands is unsent and the issue goes to retro (R1's window). The asymmetry, chosen with the architect (2026-10-14): a hold retry or a push classification that finds BOTH an approval and a standing red sends the work to implementing, where plan D1 said retro — Sami's two rules are independent and name no order, a red head would reach READY only to be refused, so implementing is the cheaper outcome. An oracle pass found no fact outside those four that can newly make a red sendable, so nothing the plan's roundSentBack caught is lost.",
@@ -92,5 +102,6 @@
   "discoveredComplexity": [
     "byPush is now the only fact other than the reviewer's own completion and review that writes a review-stuck notice (byChecks and byRequired are gone); the architect prompt lists the four survivors.",
     "The deploy ordering (plan §6): the other deployment's legion.yaml sets review_workflows and the new daemon refuses to boot on it; the architect settled on the plan thread that the legion-deploy holder drops the key in the same pull request as the pin after the release. The production check's deploy request names it."
-  ]
+  ],
+  "round": 2
 }
