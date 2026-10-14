@@ -397,9 +397,11 @@ written to, or read from, a secret of the same name in another account.
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
    secret that is absent, is scheduled for deletion or holds any version, deprecated ones
-   included, so it never replaces a seed a client may already read. After the write it lists the
-   versions again and reads back the version Secrets Manager serves by default (`AWSCURRENT`),
-   which must be the one it wrote and derive the public key it prints.
+   included, so it never replaces a seed a client may already read. It prints the public key just
+   before the write, so the key is on your terminal whatever happens next, and the version id once
+   the write answers. After the write it lists the versions again and reads back the version
+   Secrets Manager serves by default (`AWSCURRENT`), which must be the one it wrote and derive the
+   public key it printed.
 4. Put the public key into the NATS server's authorization as that user's `NKey`, with `HasSeed`
    set: see [NATS authorization](#nats-authorization). It is public, so it may sit in the stack's
    configuration in plain text.
@@ -443,7 +445,7 @@ pasted there must not reach the terminal.
 | Code | Meaning |
 | --- | --- |
 | 0 | Done: `check` printed its line, `generate` wrote the seed and read it back, or `verify` found the stored seed derives the key. |
-| 1 | `verify` found another key or no seed; or `generate` failed after its write. A version may then exist: `generate` prints the public key and version id when it has them, then `error after writing: <what failed>`. Run `check`, and `verify` with that key, before anything else. |
+| 1 | `verify` found another key or no seed; or `generate` failed after it began its write. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
 | 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the AWS error code, as `refused: describe-secret <name> failed: AccessDeniedException`. |
 
 ### The AWS calls each mode makes

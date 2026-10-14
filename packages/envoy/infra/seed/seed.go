@@ -113,9 +113,15 @@ func existing(d Description, name string) error {
 // secret that is absent, scheduled for deletion or holds any version, so it never replaces a seed a
 // client may already read. It then lists the versions again, to check the secret holds that version
 // alone, and reads back the version served by default, which must be that version and derive the
-// public key it returns. Once Put has written a version, every error comes with the public key and
-// the version id.
+// public key it returns. Once Put has been called, every return carries the public key, and the
+// version id when Put answered one: a version may exist, and verify needs the key to check it.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
+	return generate(ctx, s, name, func(string) {})
+}
+
+// generate is Generate, calling announce with the public key just before Put is called, so the
+// command can print the key before anything is written.
+func generate(ctx context.Context, s Store, name string, announce func(publicKey string)) (publicKey, version string, err error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", "", refuse("%v", err)
@@ -145,10 +151,11 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 		return "", "", refuse("read the public key of the nkey user made for %s: %v", name, err)
 	}
 
+	announce(publicKey)
 	version, err = s.Put(ctx, name, value)
 	if err != nil {
 		if version == "" {
-			return "", "", afterWritef("%v; whether a version was written is unknown, run check", err)
+			return publicKey, "", afterWritef("%v; whether a version was written is unknown, run check", err)
 		}
 		return publicKey, version, afterWritef("%v", err)
 	}
@@ -216,24 +223,37 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 // that account's, with no call before that check but the one reading them.
 type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
 
-// mode is one of the command's modes: it returns the line the command prints on stdout, "" for
-// none, and its error.
-type mode func(ctx context.Context, s Store, name, publicKey string) (string, error)
+// mode is one of the command's modes: it returns the line the command prints on stdout last, "" for
+// none, and its error. Only generate writes to stdout itself, to print the public key before its
+// write.
+type mode func(ctx context.Context, s Store, name, publicKey string, stdout io.Writer) (string, error)
 
 var modes = map[string]mode{
-	"check":    func(ctx context.Context, s Store, name, _ string) (string, error) { return Check(ctx, s, name) },
+	"check": func(ctx context.Context, s Store, name, _ string, _ io.Writer) (string, error) {
+		return Check(ctx, s, name)
+	},
 	"generate": generateMode,
-	"verify":   Verify,
+	"verify": func(ctx context.Context, s Store, name, publicKey string, _ io.Writer) (string, error) {
+		return Verify(ctx, s, name, publicKey)
+	},
 }
 
-// generateMode is Generate as the command reports it: the public key and the version id, once a
-// version was written, before any error that followed.
-func generateMode(ctx context.Context, s Store, name, _ string) (string, error) {
-	public, version, err := Generate(ctx, s, name)
-	if version == "" {
+// generateMode prints the public key on stdout before the write, so it is on the terminal whatever
+// the write and the checks after it do, the process ending among them, and returns the version id
+// line once the write was tried: "unknown" when Put answered no version.
+func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer) (string, error) {
+	announced := false
+	_, version, err := generate(ctx, s, name, func(publicKey string) {
+		fmt.Fprintf(stdout, "public key: %s\n", publicKey)
+		announced = true
+	})
+	if !announced {
 		return "", err
 	}
-	return fmt.Sprintf("public key: %s\nversion id: %s", public, version), err
+	if version == "" {
+		version = "unknown"
+	}
+	return "version id: " + version, err
 }
 
 const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
@@ -311,7 +331,7 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	if err != nil {
 		return exitCode(stderr, refuse("%s: %v", name, err))
 	}
-	line, err := run(ctx, s, name, publicKey)
+	line, err := run(ctx, s, name, publicKey, stdout)
 	if line != "" {
 		fmt.Fprintln(stdout, line)
 	}

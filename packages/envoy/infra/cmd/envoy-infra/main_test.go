@@ -4,11 +4,17 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/seed"
 )
 
@@ -83,5 +89,74 @@ func TestHelpNamesVersion(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "the command is seed") {
 		t.Errorf("--help reports a usage error: %q", stderr.String())
+	}
+}
+
+// TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting: an interrupt while PutSecretValue is in
+// flight cancels the call rather than killing the process, so generate ends as any write whose
+// answer never came does: exit 1, the public key it printed before the write, `version id:
+// unknown`, and the error telling the operator to check the secret.
+func TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting(t *testing.T) {
+	const name = "example/envoy/nats-nkey-seed-example-host-a"
+	binary := filepath.Join(t.TempDir(), "envoy-infra")
+	if b, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		t.Fatalf("go build: %v\n%s", err, b)
+	}
+	putArrived, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		switch r.Header.Get("X-Amz-Target") {
+		case "secretsmanager.DescribeSecret":
+			_, _ = w.Write([]byte(`{"ARN": "arn:aws:secretsmanager:us-east-1:000000000000:secret:` + name + `", "Name": "` + name + `"}`))
+		case "secretsmanager.ListSecretVersionIds":
+			_, _ = w.Write([]byte(`{"Versions": []}`))
+		case "secretsmanager.PutSecretValue":
+			close(putArrived)
+			select { // the write hangs until the client gives up on it, or the test ends
+			case <-r.Context().Done():
+			case <-release:
+			}
+		default:
+			t.Errorf("unexpected request %q", r.Header.Get("X-Amz-Target"))
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+
+	home := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(binary, "seed", "generate", "--store", "aws-secrets-manager", "--name", name, "--region", "us-east-1")
+	cmd.Env = []string{
+		"PATH=/usr/bin:/bin", "HOME=" + home,
+		"AWS_ENDPOINT_URL=" + server.URL, "AWS_ACCESS_KEY_ID=AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY=example-signing-key",
+		"AWS_CONFIG_FILE=" + filepath.Join(home, "config"), "AWS_SHARED_CREDENTIALS_FILE=" + filepath.Join(home, "credentials"),
+		"AWS_EC2_METADATA_DISABLED=true",
+	}
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-putArrived:
+	case <-time.After(30 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatalf("PutSecretValue never arrived; stderr %q", stderr.String())
+	}
+	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	err := cmd.Wait()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+		t.Fatalf("generate ended with %v, want exit 1; stdout %q, stderr %q", err, stdout.String(), stderr.String())
+	}
+	key, rest, _ := strings.Cut(strings.TrimPrefix(stdout.String(), "public key: "), "\n")
+	if !core.IsUserPublicKey(key) || rest != "version id: unknown\n" {
+		t.Errorf("stdout %q, want the public key and `version id: unknown`", stdout.String())
+	}
+	if want := "error after writing: put-secret-value " + name + " failed: canceled; whether a version was written is unknown, run check\n"; stderr.String() != want {
+		t.Errorf("stderr %q, want %q", stderr.String(), want)
 	}
 }

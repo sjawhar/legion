@@ -559,6 +559,8 @@ func TestAWSGenerateRetriesALostAnswerWithItsToken(t *testing.T) {
 	require.Contains(t, out, "version id: "+f.tokens[0]+"\n")
 }
 
+// A write whose answer never came may have landed, as here, so the operator gets the public key
+// generate printed before it, and verify can check the secret against it.
 func TestAWSGenerateCallsAnUnansweredWriteUnknownNotRefused(t *testing.T) {
 	f := newFakeAWS(t)
 	f.loseAnswers = 1
@@ -566,10 +568,10 @@ func TestAWSGenerateCallsAnUnansweredWriteUnknownNotRefused(t *testing.T) {
 	t.Setenv("AWS_MAX_ATTEMPTS", "1")
 	code, out, errs := runAWS(t, f, "generate")
 	require.Equal(t, 1, code, errs)
-	require.Empty(t, out)
 	require.Equal(t, "error after writing: put-secret-value "+awsSecret+" failed: RequestSendError; "+
 		"whether a version was written is unknown, run check\n", errs)
 	require.Len(t, f.versions, 1, "the write landed")
+	require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: unknown\n", out)
 }
 
 // A service message can quote the request, and a write's request carries the seed: an AWS error is

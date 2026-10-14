@@ -8,15 +8,23 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/sjawhar/envoy/infra/seed"
 )
 
 var version = "0.0.0-dev" // -ldflags "-X main.version=<X.Y.Z>" in the release job
 
+// main cancels the command's context on an interrupt or SIGTERM rather than dying at once, so a
+// write in flight ends as the command reports any write whose answer never came: with the public
+// key it printed before the write and an error telling the operator to check the secret.
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	stores := seed.Stores{seed.AWSSecretsManager: seed.OpenAWS}
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr, stores))
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, stores)
+	stop()
+	os.Exit(code)
 }
 
 // run runs the command line args, the words after the program's name, and returns its exit code.

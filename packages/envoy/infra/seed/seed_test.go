@@ -51,6 +51,7 @@ type fakeStore struct {
 	readBack            []byte   // what Current answers instead of the stored value
 	racing              *version // another writer's version, which lands with Put's
 	lateWriter          *version // another writer's version, which lands just before Current reads and is served
+	beforePut           func()   // runs as Put is called, before it writes
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
@@ -101,6 +102,9 @@ func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
 func (f *fakeStore) Put(_ context.Context, name string, value []byte) (string, error) {
 	f.calls = append(f.calls, "put")
 	f.named(name)
+	if f.beforePut != nil {
+		f.beforePut()
+	}
 	f.puts = append(f.puts, bytes.Clone(value))
 	if f.putErr != nil {
 		return "", f.putErr
@@ -393,46 +397,47 @@ func TestVerifyReportsAStoredValueThatIsNoUserSeed(t *testing.T) {
 	}
 }
 
-// After the write, generate exits 1, never 2, and its stdout already holds the public key and the
-// version id when Put answered one.
+// After the write, generate exits 1, never 2. Its stdout already holds the public key, which it
+// printed before the write, and the version id Put answered, or "unknown" when Put answered none:
+// a version may exist either way, and verify needs the key.
 func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 	otherSeed, _ := testnats.User(t)
 	rows := []struct {
-		name        string
-		store       func(*fakeStore) *fakeStore
-		want        string
-		printsTheV1 bool
+		name    string
+		store   func(*fakeStore) *fakeStore
+		want    string
+		version string
 	}{
 		{"put fails", func(f *fakeStore) *fakeStore {
 			f.putErr = errors.New("put-secret-value " + secretName + " failed: RequestSendError")
 			return f
-		}, "whether a version was written is unknown, run check", false},
+		}, "whether a version was written is unknown, run check", "unknown"},
 		{"put writes a version that is not served", func(f *fakeStore) *fakeStore {
 			f.putErrAfterWrite = errors.New("version v1 was written but is not AWSCURRENT; run check")
 			return f
-		}, "version v1 was written but is not AWSCURRENT; run check", true},
+		}, "version v1 was written but is not AWSCURRENT; run check", "v1"},
 		{"listing afterwards fails", func(f *fakeStore) *fakeStore {
 			f.versionsErrAfterPut = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
 			return f
 		}, "version v1 was written, but listing versions afterwards failed: list-secret-version-ids " + secretName +
-			" failed: ThrottlingException", true},
+			" failed: ThrottlingException", "v1"},
 		{"another writer raced it", func(f *fakeStore) *fakeStore {
 			f.racing = &version{id: "their-version", value: []byte(otherSeed)}
 			return f
 		}, secretName + " now holds 2 version(s), not only version v1: another writer raced this one. " +
-			"Run verify with the public key above before committing it", true},
+			"Run verify with the public key above before committing it", "v1"},
 		{"another writer's version is served by the read-back", func(f *fakeStore) *fakeStore {
 			f.lateWriter = &version{id: "their-version", value: []byte(otherSeed)}
 			return f
-		}, "version v1 was written, but " + secretName + " serves version their-version by default: another writer raced this one", true},
+		}, "version v1 was written, but " + secretName + " serves version their-version by default: another writer raced this one", "v1"},
 		{"reading back fails", func(f *fakeStore) *fakeStore {
 			f.currentErr = errors.New("get-secret-value " + secretName + " failed: DecryptionFailure")
 			return f
-		}, "version v1 was written, but reading it back failed: get-secret-value " + secretName + " failed: DecryptionFailure", true},
+		}, "version v1 was written, but reading it back failed: get-secret-value " + secretName + " failed: DecryptionFailure", "v1"},
 		{"it reads back as another seed", func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed); return f },
-			"version v1 was written, but it does not derive the public key above", true},
+			"version v1 was written, but it does not derive the public key above", "v1"},
 		{"it reads back as no seed", func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed[:5] + "A" + readmeSeed[6:]); return f },
-			"version v1 was written, but it reads back as no user seed: the value's checksum does not match", true},
+			"version v1 was written, but it reads back as no user seed: the value's checksum does not match", "v1"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -442,19 +447,42 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 			require.True(t, strings.HasPrefix(errs, "error after writing: "), errs)
 			require.Contains(t, errs, row.want)
 			require.NotContains(t, errs, "refused")
-			lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-			if row.printsTheV1 {
-				kp, err := nkeys.FromSeed(store.puts[0])
-				require.NoError(t, err)
-				public, err := kp.PublicKey()
-				require.NoError(t, err)
-				require.Equal(t, []string{"public key: " + public, "version id: v1"}, lines)
-			} else {
-				require.Empty(t, out)
-			}
+			public := publicKeyOfSeed(t, store.puts[0])
+			require.Equal(t, "public key: "+public+"\nversion id: "+row.version+"\n", out)
 			requireNoValue(t, store, out, errs)
+
+			direct := row.store(newStore(t))
+			got, version, err := seed.Generate(context.Background(), direct, secretName)
+			require.Error(t, err)
+			require.Equal(t, publicKeyOfSeed(t, direct.puts[0]), got, "Generate returns the key on every path after Put")
+			require.Equal(t, strings.TrimSuffix(row.version, "unknown"), version)
 		})
 	}
+}
+
+// publicKeyOfSeed is the public key of a user seed, by nkeys.
+func publicKeyOfSeed(t *testing.T, seed []byte) string {
+	t.Helper()
+	kp, err := nkeys.FromSeed(seed)
+	require.NoError(t, err)
+	public, err := kp.PublicKey()
+	require.NoError(t, err)
+	return public
+}
+
+// generate prints the public key before it writes the seed, so the key is on the terminal whatever
+// the write and the checks after it do, the process ending among them.
+func TestGeneratePrintsThePublicKeyBeforeItsWrite(t *testing.T) {
+	store := newStore(t)
+	var out, errs bytes.Buffer
+	printed := "(Put was not called)"
+	store.beforePut = func() { printed = out.String() }
+	code := seed.Command(context.Background(), mode("generate"), &out, &errs,
+		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
+	require.Equal(t, 0, code, errs.String())
+	public := publicKeyOfSeed(t, store.puts[0])
+	require.Equal(t, "public key: "+public+"\n", printed)
+	require.Equal(t, "public key: "+public+"\nversion id: v1\n", out.String())
 }
 
 // The canary seed, and every value a store holds or is handed, appears in no byte the command
