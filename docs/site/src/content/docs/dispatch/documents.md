@@ -118,7 +118,8 @@ that answer is the whole change since the version you approved: Dispatch records
 your name at the version your answer writes, the chip reads `Approved` at that version, and the
 review history shows it, so nobody asks you to approve again what you just decided. A change
 outside the decision blocks, a block added or answered since your approval without your own answer
-(someone else's answer, or a block waived), a removed block, or a request for changes newer than your approval leaves the document
+(someone else's answer, or a block waived), a decided block whose question or options were
+changed, a removed block, or a request for changes newer than your approval leaves the document
 `changed since`, and the next request shows you the diff.
 
 When Legion's design gate is on, Legion waits for this approval before it builds what a root

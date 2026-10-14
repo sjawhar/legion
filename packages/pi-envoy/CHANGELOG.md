@@ -104,7 +104,7 @@
   approval, which the request names in `ask.approval.approved` (`{version, at, by}`) and the card
   shows with its `Show diff` control. The reference lists what still
   leaves an approval stale: a change outside the blocks, a block added or answered since the approval
-  without the human's own answer, a removed block, a newer request for changes, or a document they never approved.
+  without the human's own answer, a decided block whose wording was changed, a removed block, a newer request for changes, or a document they never approved.
 
 - The `dispatch` skill's example of a to-do handed to a human is a certificate only its owner can
   renew, no longer an ask for approval to deploy (LEGION-447): a deploy goes to the agent the

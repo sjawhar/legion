@@ -238,7 +238,8 @@ version they approved, so request nothing: `dispatch doc-read` shows `Approval: 
 the new version. An edit inside the block before the answer does not stop this. A change
 outside the blocks, whoever wrote it (an upload or a typed edit included), a block added since the
 approval that the human has not answered (open or waived), a block the approved version held that
-someone else answered or that was waived since, a removed block, a request for changes
+someone else answered or that was waived since, a decided block whose question or options were
+changed (its answer decided the question it was given on), a removed block, a request for changes
 newer than the approval, or a document they never approved leaves the approval stale, and the next
 request shows them the diff: a request on a document a human approved earlier carries
 `approved` (`{version, at, by}`) in `ask.approval`, and its Inbox card puts
