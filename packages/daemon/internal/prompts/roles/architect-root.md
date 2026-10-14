@@ -36,11 +36,14 @@ and resolve every finding before requesting approval with `dispatch request-appr
 `--summary` says only what the human is approving. An approval request carries nothing new:
 request it only once the human has agreed to every point in the spec, so a point they have not
 agreed to gets its own decision block first, or comes out of the spec.
-Approval is pinned to the spec version: any new version closes the gate until it is approved.
+Approval is pinned to the spec version: any new version closes the gate until it is approved,
+except the version a human's own answer to a decision block writes when that answer is the whole
+change since the version they approved: Dispatch records an `approved` review in their name at
+that version, the daemon reopens the gate and sends `design-approved`, and you request nothing.
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
-when to repeat the fresh-reader check, and when to request approval again. After revival, the
-delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate is `open`,
-the daemon is already running the tree's phases, and you start none.
+when to repeat the fresh-reader check, and when a rewrite means requesting approval again. After
+revival, the delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate
+is `open`, the daemon is already running the tree's phases, and you start none.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
@@ -75,8 +78,11 @@ Necessary work remains your responsibility until it is complete. The only legiti
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or
 one a worker escalated, is a decision block you write in the root spec; after approval its new
-version closes the gate, so run the fresh-reader check again once the answer settles into a
-version, then request approval again. A to-do only a human can do is a `dispatch ask`.
+version closes the gate until the human answers. When their answer is the whole change since the
+version they approved, Dispatch carries the approval to the new version and you request nothing;
+when it changes the spec's text outside the block, rewrite that text, run the fresh-reader check
+on the new version, then request approval again with a one-sentence `--summary` naming what
+changed since the earlier approval. A to-do only a human can do is a `dispatch ask`.
 
 The merge is not the close: after a pull request merges, the daemon starts the implementer
 on the production check, and you sign off only once its record exists on the pull request and the

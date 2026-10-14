@@ -52,7 +52,7 @@ func (s *server) inboxAssigneeFilter(ctx context.Context, raw string, caller mod
 	case "unassigned":
 		return "unassigned", "", nil
 	case "me":
-		return "login", canonicalLogin(caller.ID), nil
+		return "login", model.CanonicalLogin(caller.ID), nil
 	default:
 		login, err := s.allowedLogin(ctx, value)
 		if err != nil {
@@ -92,7 +92,7 @@ func (s *server) listInbox(w http.ResponseWriter, r *http.Request) {
 		       or ($2 = 'login' and i.assignee = $3))
 		order by i.priority asc nulls last, waiting_on desc,
 		         coalesce(lr.created_at, a.created_at) desc, a.id desc
-	`, project, assigneeMode, assigneeLogin, canonicalLogin(caller.ID))
+	`, project, assigneeMode, assigneeLogin, model.CanonicalLogin(caller.ID))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

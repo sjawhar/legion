@@ -345,7 +345,7 @@ func TestAgentRepliesToADirectMessageAreUnreadForItsSenderUntilRead(t *testing.T
 	}
 }
 
-// Three things turn this red and nothing else does: the read-mark write's canonicalLogin
+// Three things turn this red and nothing else does: the read-mark write's model.CanonicalLogin
 // (state.go:307), direct_marks' deliberate canonical/raw split, and the arguments the shared read
 // path builds (unreadDirectRepliesArgs). It never calls the conversation window, so it is not
 // window coverage; deleting it as redundant would take all three guards away with every other
@@ -658,7 +658,7 @@ func TestTheWindowReturnsEveryUnreadConversationBesideTheFiftyMostActive(t *test
 // passing the raw one would pass this test while the window read zero roots.
 func TestTheUnreadCountEqualsWhatTheWindowShowsForEverySession(t *testing.T) {
 	const login = "Alice"
-	if login == canonicalLogin(login) {
+	if login == model.CanonicalLogin(login) {
 		t.Fatalf("the fixture login %q is already canonical, or this test stops testing the canonicalization it is named for", login)
 	}
 	handler, database, root, reply, _ := directConversationFrom(t, login)

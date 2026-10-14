@@ -1,13 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
+import { isText } from "../../api/artifact-version";
 import { api } from "../../api/client";
-import type {
-  Artifact,
-  ArtifactVersionContent,
-  ArtifactVersionText,
-  Version,
-} from "../../api/types";
+import type { Artifact, Version } from "../../api/types";
 import {
   borderDefault,
   dangerText,
@@ -28,10 +24,6 @@ import {
   versionLabel,
   versionsNewestFirst,
 } from "./ArtifactHeader";
-
-function isText(content: ArtifactVersionContent | undefined): content is ArtifactVersionText {
-  return content !== undefined && "markdown" in content;
-}
 
 // A blob (image/file) has no markdown to diff, so its "compare" is size and checksum, not a
 // text diff — this is what a document's From/To compare falls back to when either side lacks

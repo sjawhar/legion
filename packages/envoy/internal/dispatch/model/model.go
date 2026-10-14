@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -26,6 +27,12 @@ type Actor struct {
 // names.
 func (a Actor) SameAs(other Actor) bool {
 	return a.Kind == other.Kind && a.ID == other.ID
+}
+
+// CanonicalLogin is the stored form of a person's email: trimmed and lowercased, the form the
+// identity implementations name a person by and the people table holds.
+func CanonicalLogin(login string) string {
+	return strings.ToLower(strings.TrimSpace(login))
 }
 
 // ActorOrigin describes the client environment of a session actor.
@@ -692,11 +699,23 @@ type AskBlockArtifact struct {
 // AskApproval is the document an approval ask names. Version follows the document's latest
 // settled version while the ask remains open. RequestedVersion is the version the agent most
 // recently handed to a human, so a lower value means the agent is revising the moved request.
+// Approved names the document's newest approval as the request was opened, so a request to
+// approve again says which approval it follows; a request on a document nobody has approved
+// carries none. A version move re-encodes the whole approval, so it survives it unchanged.
 type AskApproval struct {
-	ArtifactID       string `json:"artifact_id"`
-	Name             string `json:"name"`
-	Version          int    `json:"version"`
-	RequestedVersion int    `json:"requested_version"`
+	ArtifactID       string               `json:"artifact_id"`
+	Name             string               `json:"name"`
+	Version          int                  `json:"version"`
+	RequestedVersion int                  `json:"requested_version"`
+	Approved         *AskApprovalApproved `json:"approved,omitempty"`
+}
+
+// AskApprovalApproved is the approval a request follows: the version a human approved, when
+// (RFC 3339 UTC, the review's created_at) and who.
+type AskApprovalApproved struct {
+	Version int    `json:"version"`
+	At      string `json:"at"`
+	By      Actor  `json:"by"`
 }
 
 // AskEditPrevious is the mutable content of an ask before an edit.

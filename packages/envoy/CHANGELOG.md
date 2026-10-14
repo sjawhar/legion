@@ -4,6 +4,40 @@
 
 ### Added
 
+- A human's answer to a decision block carries his approval forward (LEGION-573). When the
+  version his answer writes differs from the version he approved only in its ask blocks, every
+  block it holds that is not as the approved version held it is one he answered, and at least one
+  is, Dispatch records an `approved` review in his name pinned to that version and appends
+  `artifact.approved`, in the transaction that writes the version (`docs.carryApproval`, from
+  `writeVersionTx` after the open request's move), rather than leaving his approval stale and
+  asking him to approve again what he just decided. The carried review's `reason` is `Carried
+  forward from the approval of version <N>: the answer to a decision block was the whole change
+  since it.`; an approval request open at the carry is answered `Approve` in his name
+  (`ask.answered`) and the review's `ask_id` names it, null otherwise. The new version is compared
+  with the one he approved alone: a block of it not as that version held it must be his answer,
+  given after that approval, one must differ, and no version between them is read. Who answered
+  what is the document's asks rows, never the blocks' own attributes, which a peer on the document
+  socket writes as it likes: an ask block no row of the document backs (forged, or not yet
+  indexed), a block id the version repeats, a block whose server attributes are not what
+  settlement's own writer leaves from its row (`state`, `answered_by`, `answered_at`, `selected`,
+  `answer`, a copy's `copied_from`, an unreadable block's `invalid`; an answer settlement withheld
+  for room is as the row has it), and the block of an answered or resolved row that asks other
+  wording than the row was decided on (the wording settlement writes back) or that settlement
+  cannot parse refuses the carry; an open row's body is free. The comparison is
+  `docs.CutDecisionBlocks`, the markdown rendered again with every ask block left out wherever it
+  stands, on both sides. An edit outside the blocks, a block he did not answer (open, resolved, or
+  answered by someone else, whether added since his approval or held open by the approved version
+  and answered or resolved since; a block answered before his approval and untouched since is
+  content he approved), a block of the approved version the agent removed, an agent's reword of an
+  answered block or a selection forged on one landing in the version his answer writes, an
+  answered block the agent deleted and inserted again (its row stays answered; nothing of his
+  changed, whether the approved version held the block or not), two people's answers in one
+  version, an approval by someone else only, his own later request for changes or anyone's newer
+  one, a copy's document when its source is answered, and a copy planted in the document since his
+  approval carry nothing, as before; should two people's approvals both pass, nothing is carried.
+  An approval request on a document a human approved earlier names that approval in
+  `ask.approval.approved` (`{version, at, by}`), so the human reads what he is approving since the
+  version he approved; a first request carries no `approved` key.
 - A finished Actions job on the default branch, of a run with no pull request, is published on
   `notifications.github.<owner>.<repo>.job.<run_id>.completed` (LEGION-690): a completed
   `check_run` that lists no pull request, from the GitHub Actions App, whose
@@ -703,6 +737,21 @@
   workspace build, through `packages/daemon`'s client-go) could close it with 1008, the code for a
   caller that no longer resolves, depending on a race. The published image, built in module mode
   with gorilla v1.5.3, never did. The page reconnects with backoff after either close.
+
+- The approval carry holds the version a human approved to the document's asks rows as it holds
+  the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
+  his approval only while the approved version holds a block under the same id whose stored
+  attributes and, for a decided row, wording are what settlement's own writer leaves from that
+  block's row - the whole server-owned set, not `state`, `answered_by` and `answered_at` alone -
+  so an approved version stored inside the settle window, showing a selection, an answer, a copy's
+  provenance or a question other than its row's on a decided block, no longer compares as
+  unchanged against the row-true version his later answer writes: that block is a change, which
+  must be his own answer since his approval, and his answer to another block carries nothing
+  (`stale`, as before the carry existed). The same sequence over an approved version whose block
+  is as its row has it carries, as before. The approved version's blocks are read as the new
+  version's are (`askNodes`); a stored version's read-back repairs a repeated block id before the
+  carry reads it, so a stored version that held an id twice shows a block the new version never
+  had and carried nothing before this change either.
 
 - A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
   line a pasted picture is written as, now shows in the document editor and in a past version,

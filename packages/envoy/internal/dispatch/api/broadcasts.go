@@ -274,7 +274,7 @@ func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []
 		panic(err)
 	}
 	sum := sha256.Sum256(encoded)
-	return broadcastKey{login: canonicalLogin(actor.ID), key: key, digest: hex.EncodeToString(sum[:])}
+	return broadcastKey{login: model.CanonicalLogin(actor.ID), key: key, digest: hex.EncodeToString(sum[:])}
 }
 
 // answerHeldBroadcastKey answers a send whose key this human has already used, and reports

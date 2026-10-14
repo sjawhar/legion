@@ -331,7 +331,16 @@ that round's own implementer handoff (the daemon's phase record must hold the im
 handoff for that round when the issue reaches testing, and the pushed commit carrying the handoff
 that every planner, implementer, tester, and reviewer completion reported is authored and
 committed by that role's own App, read from the issue's workspace). It also proves `pr-blocked`,
-READY refusing after a later spec version until a human approves it, a held
+READY refusing after a later spec version until a human approves it
+(`ready-gated-on-new-spec-version`, which ends on Dispatch carrying the human's approval forward:
+after the gate-state negative control below, the proof inserts a decision block at the end of the
+spec through the edits route in a stand-in architect session's name (`dispatch_agent` in
+`lib/workflow.sh`), the merger's READY is refused at that version, and the proof human answers
+the block, which is the whole change since the version he approved; the issue reaches
+`awaiting_merge` on the carried `artifact.approved` at the version after the refused one, the
+spec's newest review is pinned to that version in his name with the carry's reason and no ask, no
+approval request is opened, and the proof writes no review through the reviews route between the
+refusal and the release), a held
 worker after its launch budget and the architect's retry relaunching it, a root whose human
 decides at the design gate that no change is needed (`architect-closes-a-no-change-root`: the
 architect ends its admitted tree with `close_root`, the daemon posts its reason on the issue before
@@ -390,7 +399,11 @@ Each check is named in the transcript;
 negative controls demonstrate that the status-actor, held-worker, re-closed-gate
 and worker-notice assertions reject deliberately corrupted observations before the captured
 observations pass again (the worker notice's: a copy
-of one phase-worker session with a `pr-blocked` delivery appended).
+of one phase-worker session with a `pr-blocked` delivery appended). `ready-gated-on-new-spec-version`
+opens with a live gate-state negative control for the carry: the human's whole-document upload
+closes the gate, no `artifact.approved` names its version and no review is pinned to it (a
+version that is nobody's answer to a decision block carries no approval), and only his own review
+reopens it, which releases nothing since no READY is held yet.
 Once every agent is gone, `model-turns-through-the-gateway` runs
 [`lib/check-model-route.sh`](#libcheck-model-routesh) over every agent session in the isolated
 profile, each subagent's included: it fails on any assistant turn or model selection that is not
@@ -1871,7 +1884,13 @@ under its root's tree.
 proper. `ensure_project` creates `project` as a proof-human write, naming `dispatch_actor`: 201 and
 409 `PROJECT_EXISTS` both leave it ready, any other status fails the check naming the status and
 the body, and a failed connection fails it in one line naming curl's error.
-`lib/ensure-project.test.ts` drives both against a fake `curl`.
+`dispatch_human METHOD PATH [BODY]` is every proof-human write, over `dispatch-human-header`;
+`dispatch_agent METHOD PATH BODY` is a write in an agent's name over `dispatch-auth-header`, the
+agents' bearer, whose body gains the stand-in session `stage3-architect-stand-in` as its `actor`
+(a bearer caller must name one; the stand-in holds no claim), for a proof step whose author must be
+a session, such as the decision block Stage 3 inserts into the spec as its architect would.
+`lib/ensure-project.test.ts` drives `write_dispatch_header`, `ensure_project` and `dispatch_agent`
+against a fake `curl`.
 
 `require_proof_human` is the proof human's precondition, which every stage proof that writes to
 GitHub as the proof human runs in `prerequisites` before its first `gh` call. It asks the devbox

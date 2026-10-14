@@ -72,7 +72,7 @@ func answerTransition(actor model.Actor, selected []string, text *string, option
 					return model.Ask{}, errorf(http.StatusConflict, "ASK_APPROVAL_REVIEW", "an approval is a review of a document version; record a new review on the document instead")
 				case !ask.Answer.At.Equal(*options.ReplacesAnswer):
 					return model.Ask{}, errorf(http.StatusConflict, "ASK_ANSWER_CHANGED", "the answer changed after you reviewed it; review the current answer and confirm your change")
-				case canonicalLogin(ask.Answer.User) != canonicalLogin(actor.ID):
+				case model.CanonicalLogin(ask.Answer.User) != model.CanonicalLogin(actor.ID):
 					return model.Ask{}, errorf(http.StatusForbidden, "NOT_ANSWERER", "only the person who gave the current answer may change it")
 				}
 				previousAnswer = ask.Answer
@@ -230,7 +230,7 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return nil, err
 		}
-		_, event, err := s.writeReview(ctx, tx, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID))
+		_, event, err := docs.WriteReview(ctx, tx, s.deps.Events, artifact, ask.Approval.Version, state, actor, reason, new(ask.ID))
 		if err != nil {
 			return nil, err
 		}
