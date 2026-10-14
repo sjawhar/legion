@@ -369,11 +369,15 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
 	if natsClient != nil {
 		go delivery.NewIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
+		// LEGION-690: a deploy run's jobs as each finishes, from Envoy's job events, on a durable
+		// of its own so a run's burst of jobs never queues behind the intake's merges.
+		go delivery.NewJobIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
 
-	handler := dispatchHandler(routes.New(appCtx), database, natsClient, fileStore, buildCommit)
+	routesHandler, waitDelivery := routes.New(appCtx)
+	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -387,7 +391,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}

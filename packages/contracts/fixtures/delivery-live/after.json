@@ -1,0 +1,361 @@
+{
+  "type": "snapshot",
+  "sub": "timeline-1",
+  "seq": "42",
+  "changed_at": "2026-10-02T23:00:00Z",
+  "body": {
+    "window": {
+      "from": "2026-10-01T01:30:00Z",
+      "to": "2026-10-03T01:30:00Z"
+    },
+    "prs": [
+      {
+        "id": "acme/widgets#3",
+        "repo": "acme/widgets",
+        "number": 3,
+        "title": "feat: change 3",
+        "url": "https://github.com/acme/widgets/pull/3",
+        "author": "octocat",
+        "created_at": "2026-10-01T03:00:00Z",
+        "merged_at": "2026-10-01T03:00:00Z",
+        "first_commit_at": null,
+        "additions": null,
+        "deletions": null,
+        "partial": false,
+        "rework": false,
+        "issue": "ACME-1",
+        "issue_title": "First issue",
+        "priority": "P1",
+        "components": [
+          "ACME/api"
+        ],
+        "sessions": [
+          "s-1"
+        ],
+        "parent_agent": "s-1",
+        "deploy_run": 42,
+        "deployed_at": "2026-10-02T23:00:00Z",
+        "deployed_status": "deployed",
+        "unfetchable_reason": null
+      },
+      {
+        "id": "acme/widgets#4",
+        "repo": "acme/widgets",
+        "number": 4,
+        "title": "feat: change 4",
+        "url": "https://github.com/acme/widgets/pull/4",
+        "author": "octocat",
+        "created_at": "2026-10-01T04:00:00Z",
+        "merged_at": "2026-10-01T04:00:00Z",
+        "first_commit_at": null,
+        "additions": null,
+        "deletions": null,
+        "partial": false,
+        "rework": false,
+        "issue": "ACME-1",
+        "issue_title": "First issue",
+        "priority": "P1",
+        "components": [
+          "ACME/api"
+        ],
+        "sessions": [
+          "s-1"
+        ],
+        "parent_agent": "s-1",
+        "deploy_run": null,
+        "deployed_at": null,
+        "deployed_status": "waiting",
+        "unfetchable_reason": null
+      }
+    ],
+    "waiting": [
+      {
+        "merged_at": "2026-09-30T21:00:00Z",
+        "deployed_at": "2026-10-02T23:00:00Z"
+      }
+    ],
+    "runs": [
+      {
+        "id": 41,
+        "url": "https://github.com/acme/widgets/actions/runs/41",
+        "head_sha": "0000000000000000000000000000000000000041",
+        "head_at": "2026-09-30T23:50:00Z",
+        "started_at": "2026-10-01T00:00:00Z",
+        "completed_at": "2026-10-01T01:00:00Z",
+        "conclusion": "success",
+        "production": {
+          "conclusion": "success",
+          "completed_at": "2026-10-01T01:00:00Z"
+        },
+        "failed_jobs": [],
+        "root_failing_job": null,
+        "prs": []
+      },
+      {
+        "id": 42,
+        "url": "https://github.com/acme/widgets/actions/runs/42",
+        "head_sha": "0000000000000000000000000000000000000042",
+        "head_at": "2026-10-02T21:50:00Z",
+        "started_at": "2026-10-02T22:00:00Z",
+        "completed_at": "2026-10-02T23:00:00Z",
+        "conclusion": "success",
+        "production": {
+          "conclusion": "success",
+          "completed_at": "2026-10-02T23:00:00Z"
+        },
+        "failed_jobs": [],
+        "root_failing_job": null,
+        "prs": [
+          {
+            "id": "acme/widgets#3",
+            "title": "feat: change 3"
+          }
+        ]
+      }
+    ],
+    "facet_counts": {
+      "author": {
+        "octocat": 2
+      },
+      "component": {
+        "ACME/api": 2
+      },
+      "deployed": {
+        "deployed": 1,
+        "waiting": 1
+      },
+      "issue": {
+        "ACME-1": 2
+      },
+      "parent_agent": {
+        "s-1": 2
+      },
+      "priority": {
+        "P1": 2
+      },
+      "repo": {
+        "acme/widgets": 2
+      },
+      "rework": {
+        "value": 2
+      },
+      "session": {
+        "s-1": 2
+      }
+    },
+    "color_counts": {
+      "author": {
+        "octocat": 2
+      },
+      "component": {
+        "ACME/api": 2
+      },
+      "parent_agent": {
+        "s-1": 2
+      },
+      "priority": {
+        "P1": 2
+      },
+      "repo": {
+        "acme/widgets": 2
+      }
+    },
+    "components": {
+      "ACME/api": {
+        "title": "api",
+        "parent": null
+      }
+    },
+    "issue_titles": {
+      "ACME-1": "First issue"
+    },
+    "freshness": {
+      "last_event_at": "2026-10-03T01:30:00Z",
+      "last_reconcile_at": "2026-10-03T01:30:00Z",
+      "last_error": null,
+      "unfetchable_count": 0
+    },
+    "session_groups": [],
+    "session_titles": {
+      "s-1": "Session s-1"
+    },
+    "session_pr_counts": {
+      "s-1": 2
+    },
+    "measures": {
+      "window": {
+        "from": "2026-10-01T01:30:00Z",
+        "to": "2026-10-03T01:30:00Z"
+      },
+      "computed_at": "2026-10-03T01:30:00Z",
+      "measures": {
+        "deploy_frequency": {
+          "successful_deploys": 2,
+          "deploys_with_prs": 0,
+          "per_day": 0,
+          "with_prs_per_day": 0
+        },
+        "lead_time": {
+          "merge_to_production": {
+            "median_minutes": null,
+            "p90_minutes": null,
+            "max_minutes": null
+          },
+          "first_commit_to_production": {
+            "median_minutes": null,
+            "p90_minutes": null,
+            "max_minutes": null
+          },
+          "opened_to_production": {
+            "median_minutes": null,
+            "p90_minutes": null,
+            "max_minutes": null
+          },
+          "opened_to_merge": {
+            "median_minutes": null,
+            "p90_minutes": null,
+            "max_minutes": null
+          }
+        },
+        "change_failure_rate": {
+          "per_pr": {
+            "confirmed": 0,
+            "pending": 0,
+            "rejected": 0,
+            "reverts": 0,
+            "total": 0,
+            "rate": 0
+          },
+          "per_deploy": {
+            "confirmed": 0,
+            "pending": 0,
+            "rejected": 0,
+            "reverts": 0,
+            "total": 0,
+            "rate": 0,
+            "confirmed_or_pending": 0,
+            "upper_bound_rate": 0
+          }
+        },
+        "time_to_restore": {
+          "median_minutes": null
+        },
+        "rework_share": 0,
+        "deploy_run_success": {
+          "concluded": 0,
+          "reached_production": 0,
+          "cancelled": 0,
+          "rate": null
+        },
+        "daily": []
+      },
+      "flags_source": "none",
+      "unowned_p0": [],
+      "targets": {
+        "deploys_per_day": 20,
+        "change_failure_rate": 0.05,
+        "merge_to_production_minutes": 45,
+        "opened_to_merge_median_minutes": 60,
+        "deploy_run_success_rate": 0.9,
+        "unowned_p0": 0
+      },
+      "status": {
+        "deploys_per_day": false,
+        "change_failure_rate": null,
+        "change_failure_rate_upper_bound": null,
+        "merge_to_production_median": null,
+        "merge_to_production": null,
+        "opened_to_merge": null,
+        "deploy_run_success": null,
+        "unowned_p0": true
+      },
+      "freshness": {
+        "last_event_at": "2026-10-03T01:30:00Z",
+        "last_reconcile_at": null,
+        "last_error": null,
+        "unfetchable_count": 0
+      }
+    }
+  },
+  "revs": {
+    "items": {
+      "prs": {
+        "acme/widgets#3": "c85f28be7fff3df0",
+        "acme/widgets#4": "269739e4cabde7df"
+      },
+      "runs": {
+        "41": "37091c3d62324786",
+        "42": "0ebe403c80373eaf"
+      },
+      "session_groups": {}
+    },
+    "maps": {
+      "components": {
+        "ACME/api": "d554f578ad564c18"
+      },
+      "issue_titles": {
+        "ACME-1": "b9b1caff941f5d38"
+      },
+      "session_pr_counts": {
+        "s-1": "af63af4c8601a015"
+      },
+      "session_titles": {
+        "s-1": "1e3cdfd92c3a4522"
+      }
+    },
+    "counts": {
+      "color_counts": {
+        "author": {
+          "octocat": "af63af4c8601a015"
+        },
+        "component": {
+          "ACME/api": "af63af4c8601a015"
+        },
+        "parent_agent": {
+          "s-1": "af63af4c8601a015"
+        },
+        "priority": {
+          "P1": "af63af4c8601a015"
+        },
+        "repo": {
+          "acme/widgets": "af63af4c8601a015"
+        }
+      },
+      "facet_counts": {
+        "author": {
+          "octocat": "af63af4c8601a015"
+        },
+        "component": {
+          "ACME/api": "af63af4c8601a015"
+        },
+        "deployed": {
+          "deployed": "af63ac4c86019afc",
+          "waiting": "af63ac4c86019afc"
+        },
+        "issue": {
+          "ACME-1": "af63af4c8601a015"
+        },
+        "parent_agent": {
+          "s-1": "af63af4c8601a015"
+        },
+        "priority": {
+          "P1": "af63af4c8601a015"
+        },
+        "repo": {
+          "acme/widgets": "af63af4c8601a015"
+        },
+        "rework": {
+          "value": "af63af4c8601a015"
+        },
+        "session": {
+          "s-1": "af63af4c8601a015"
+        }
+      }
+    },
+    "fields": {
+      "measures": "8891b375e4cb2e4b",
+      "waiting": "eb3703b276c3c52c",
+      "window": "922afccc8929b320"
+    }
+  }
+}

@@ -110,9 +110,11 @@ func (s *server) deliverySettings(w http.ResponseWriter, r *http.Request) (deliv
 // and waiting-to-deploy PRs within [from, to) and the given facets and search, computed from
 // stored facts at request time (deployed_status, root_failing_job, the Parent agent and session
 // labels, the issue facts and every count are never stored -- "the server computes every
-// measure from stored facts on request"), and the measures of that same window and selection
-// (deliveryMeasuresFor over the population this read already holds), so a page showing both reads
-// the population once. GET /api/v1/delivery/measures is the measures alone, for another window.
+// measure from stored facts on request"), and the measures of that same window and selection, so a
+// page showing both reads the population once. GET /api/v1/delivery/measures is the measures
+// alone, for another window. The answer is readDeliveryPopulation's read and
+// deliveryTimelineCompute's compute, the two halves the live hub calls too, so a live page's
+// snapshot is this body.
 func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -127,39 +129,45 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	ctx := r.Context()
-	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, true)
+	population, err := s.readDeliveryPopulation(r.Context(), settings, from, to, query, true)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
+	WriteJSON(w, http.StatusOK, deliveryTimelineCompute(settings, population, from, to, time.Now().UTC()))
+}
+
+// deliveryTimelineCompute is GET /api/v1/delivery/timeline's body (deliveryTimelineWithMeasures)
+// for [from, to) from a population read for that window or narrowed to it. It reads nothing; now
+// is only the measures' computed_at.
+func deliveryTimelineCompute(settings delivery.DeliverySettings, pop deliveryPopulation, from, to, now time.Time) deliveryTimelineWithMeasures {
+	derived := pop.derive(settings)
 
 	// A run's prs[] is every window pull request it shipped first, whatever the facets: the page
 	// sizes a deploy and lists its drill-down by everything it shipped.
-	prViews := make([]delivery.DeliveryPRView, 0, len(population.rows))
-	for _, row := range population.rows {
-		if row.matches(population.selection, "") {
+	prViews := make([]delivery.DeliveryPRView, 0, len(derived.rows))
+	for _, row := range derived.rows {
+		if row.matches(derived.selection, "") {
 			prViews = append(prViews, row.view)
 		}
 	}
 
 	// The pull requests still waiting at `from`, under the same facets and search, so the
 	// waiting line starts the window at their count rather than at zero.
-	waitingViews := make([]delivery.DeliveryWaitingPRView, 0, len(population.waiting))
-	for _, waiting := range population.waiting {
-		if waiting.row.matches(population.selection, "") {
+	waitingViews := make([]delivery.DeliveryWaitingPRView, 0, len(derived.waiting))
+	for _, waiting := range derived.waiting {
+		if waiting.row.matches(derived.selection, "") {
 			waitingViews = append(waitingViews, waiting.view)
 		}
 	}
 
-	runViews := make([]delivery.DeliveryRunView, 0, len(population.applyRuns))
-	for _, run := range population.applyRuns {
+	runViews := make([]delivery.DeliveryRunView, 0, len(pop.applyRuns))
+	for _, run := range pop.applyRuns {
 		if run.StartedAt.Before(from) || !run.StartedAt.Before(to) {
 			continue
 		}
-		jobs := population.jobsByRun[run.RunID]
-		shipped := population.shipped[run.RunID]
+		jobs := pop.jobsByRun[run.RunID]
+		shipped := derived.shipped[run.RunID]
 		if shipped == nil {
 			// Always a slice, never nil, so it always serializes as `[]`, not `null` -- the
 			// common case for any successful deploy that shipped no in-window population PR.
@@ -175,29 +183,23 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	measured, err := s.deliveryMeasuresFor(ctx, settings, from, to, population)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-
-	WriteJSON(w, http.StatusOK, deliveryTimelineWithMeasures{
+	return deliveryTimelineWithMeasures{
 		DeliveryTimelineResponse: delivery.DeliveryTimelineResponse{
 			Window:          delivery.DeliveryWindowView{From: from, To: to},
 			PRs:             prViews,
 			Waiting:         waitingViews,
 			Runs:            runViews,
-			FacetCounts:     deliveryFacetCounts(population.rows, population.selection),
-			ColorCounts:     deliveryColorCounts(population.rows),
-			Components:      population.components,
-			IssueTitles:     population.issueTitles,
-			Freshness:       population.freshness,
-			SessionGroups:   population.sessionGroups,
-			SessionTitles:   population.sessionTitles,
-			SessionPRCounts: population.sessionPRCounts,
+			FacetCounts:     deliveryFacetCounts(derived.rows, derived.selection),
+			ColorCounts:     deliveryColorCounts(derived.rows),
+			Components:      derived.components,
+			IssueTitles:     derived.issueTitles,
+			Freshness:       derived.freshness,
+			SessionGroups:   pop.groups,
+			SessionTitles:   derived.sessionTitles,
+			SessionPRCounts: derived.sessionPRCounts,
 		},
-		Measures: measured,
-	})
+		Measures: deliveryMeasuresOver(settings, pop, derived, from, to, now),
+	}
 }
 
 // deliveryTimelineWithMeasures is the timeline's wire shape: delivery.DeliveryTimelineResponse
@@ -209,13 +211,46 @@ type deliveryTimelineWithMeasures struct {
 	Measures deliveryMeasuresResponse `json:"measures"`
 }
 
-// deliveryPopulation is one window's population pull requests, each with its view and its facet
-// values, and what the timeline reads beside them: the request's search and facet selection, the
-// pull requests still waiting at the window's start, the deploy runs whose applies decided each
-// pull request's deploy, those runs' jobs, the labels of every component and issue the window's
-// pull requests name, and the data's freshness.
+// deliveryPopulation is every read the timeline's and the measures' answers for one window and
+// query make, as stored, before anything is computed from them: the population pull requests
+// merged in the window, the deploy repository's pull requests still waiting at its start, the
+// deploy runs on main by head commit from its start (containment's input) and by start inside it
+// (the measures'), each with its jobs, the open unowned P0 issues, the session groups, the titles
+// of the sessions and the facts of the issues those pull requests name, and the components of
+// those issues' projects. Nothing that computes from it reads again (derive), so the live hub
+// keeps it and computes a later window from it narrowed (narrowedTo) without a read.
 type deliveryPopulation struct {
-	// rows is every population pull request merged in [from, to), before the facets, in merge
+	query url.Values
+	// prs is every population pull request merged in the window, oldest merge first.
+	prs []delivery.DeliveryPullRequest
+	// withWaiting is whether waiting was read: the deploy repository's pull requests merged before
+	// the window that had not shipped by its start, oldest merge first, which only the timeline
+	// reads.
+	withWaiting bool
+	waiting     []delivery.WaitingPullRequest
+	// applyRuns is every deploy run on main with a head commit at or after the window's start,
+	// oldest head commit first, and jobsByRun their jobs.
+	applyRuns []delivery.DeliveryRun
+	jobsByRun map[int64][]delivery.DeliveryRunJob
+	// windowRuns is every deploy run on main started in the window, oldest start first, and
+	// windowJobs their jobs: the measures' deploys.
+	windowRuns []delivery.DeliveryRun
+	windowJobs map[int64][]delivery.DeliveryRunJob
+	unownedP0  []delivery.UnownedIssue
+	groups     []delivery.SessionGroup
+	titles     map[string]string
+	issues     map[string]deliveryIssue
+	components map[string]delivery.DeliveryComponentView
+	// unfetchable is how many population pull requests can no longer be fetched from GitHub.
+	unfetchable int
+}
+
+// deliveryDerived is what the timeline and the measures compute from a deliveryPopulation: each
+// pull request with its view and its facet values, the request's search and facet selection, the
+// waiting rows, which window pull requests each deploy run shipped first, the labels of every
+// component and issue the pull requests name, and the freshness.
+type deliveryDerived struct {
+	// rows is every population pull request merged in the window, before the facets, in merge
 	// order: the timeline counts facets and colours over it. A row passing
 	// row.matches(selection, "") is one the timeline's prs[] shows and the measures' pull-request
 	// figures count.
@@ -226,15 +261,11 @@ type deliveryPopulation struct {
 	shipped     map[int64][]delivery.DeliveryShippedPRView
 	selection   deliverySelection
 	waiting     []deliveryWaitingRow
-	applyRuns   []delivery.DeliveryRun
-	jobsByRun   map[int64][]delivery.DeliveryRunJob
 	components  map[string]delivery.DeliveryComponentView
 	issueTitles map[string]string
-	// sessionGroups is every session group; sessionTitles and sessionPRCounts are, for each session
-	// that is the first session of a window pull request (the sessions a Parent agent can be),
-	// its title (or its id when it has none) and how many window pull requests it is first on,
-	// before the facets.
-	sessionGroups   []delivery.SessionGroup
+	// sessionTitles and sessionPRCounts are, for each session that is the first session of a
+	// window pull request (the sessions a Parent agent can be), its title (or its id when it has
+	// none) and how many window pull requests it is first on, before the facets.
 	sessionTitles   map[string]string
 	sessionPRCounts map[string]int
 	// freshness is the timeline's and the measures' freshness object: the settings row's intake
@@ -250,15 +281,22 @@ type deliveryWaitingRow struct {
 	view delivery.DeliveryWaitingPRView
 }
 
-// filteredDeliveryPullRequests reads the population pull requests merged in [from, to), derives
-// each one's deploy from the deploy runs on main listed from `from` by head commit, joins its
-// issue's facts and its sessions' titles, and parses the request's search and facets. With
-// withWaiting it also reads the deploy repository's pull requests still waiting at `from`
-// (ListPullRequestsWaitingAt), resolved through the same issue and session lookups so the
-// timeline's waiting line filters them alike; the measures read none. The timeline and the
-// measures both call it, so a pull request the timeline shows is exactly one the measures count.
-func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting bool) (deliveryPopulation, error) {
+// readDeliveryPopulation is every read the timeline's and the measures' answers for one window and
+// query make (the population pull requests, the deploy runs on main listed from `from` by head
+// commit with their jobs, the measures' runs started in the window with their jobs, and the
+// unowned P0 list); nothing that computes from it reads again. With withWaiting it also reads the
+// deploy repository's pull requests still waiting at `from` (ListPullRequestsWaitingAt), resolved
+// through the same issue and session lookups so the timeline's waiting line filters them alike;
+// the measures read none.
+func (s *server) readDeliveryPopulation(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting bool) (deliveryPopulation, error) {
+	return s.readDeliveryRows(ctx, settings, from, to, query, withWaiting, true)
+}
+
+// readDeliveryRows is readDeliveryPopulation, and with withMeasures false leaves out the measures'
+// runs and unowned P0 list, which the Pipeline page's lead times do not read.
+func (s *server) readDeliveryRows(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, query url.Values, withWaiting, withMeasures bool) (deliveryPopulation, error) {
 	pool := s.deps.Store.Pool
+	pop := deliveryPopulation{query: query, withWaiting: withWaiting, jobsByRun: map[int64][]delivery.DeliveryRunJob{}, windowJobs: map[int64][]delivery.DeliveryRunJob{}}
 
 	// Independent reads, side by side. They never shared a transaction (each is its own
 	// statement on the pool, so each already read its own snapshot), so running them at once
@@ -266,25 +304,33 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
 	//
-	// A timeline request therefore holds up to five of the pool's 16 connections
+	// A timeline request therefore holds up to seven of the pool's 16 connections
 	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
-	// is fine because none of the five holds a lock or opens a transaction, so none waits on
+	// is fine because none of them holds a lock or opens a transaction, so none waits on
 	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to
 	// prevent needs a caller already holding a connection, which ForConcurrentRead refuses. A read
-	// past the pool's free connections waits for one, as any request does. The page reads the
-	// timeline on load, a filter change and the event stream's refresh, so concurrent timeline
-	// requests are a handful of open tabs, not a load the pool must be sized against.
-	var (
-		prs              []delivery.DeliveryPullRequest
-		waiting          []delivery.WaitingPullRequest
-		applyRuns        []delivery.DeliveryRun
-		jobsByRun        map[int64][]delivery.DeliveryRunJob
-		unfetchableCount int
-		groups           []delivery.SessionGroup
-	)
+	// past the pool's free connections waits for one, as any request does.
+	runsWithJobs := func(list func(ctx context.Context) ([]delivery.DeliveryRun, error), runs *[]delivery.DeliveryRun, jobs *map[int64][]delivery.DeliveryRunJob) func(ctx context.Context) error {
+		return func(ctx context.Context) error {
+			listed, err := list(ctx)
+			if err != nil {
+				return err
+			}
+			runIDs := make([]int64, len(listed))
+			for i, run := range listed {
+				runIDs[i] = run.RunID
+			}
+			byRun, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
+			if err != nil {
+				return err
+			}
+			*runs, *jobs = listed, byRun
+			return nil
+		}
+	}
 	independent := []func(ctx context.Context) error{
 		func(ctx context.Context) (err error) {
-			prs, err = delivery.ListPullRequestsInWindow(ctx, pool, from, to)
+			pop.prs, err = delivery.ListPullRequestsInWindow(ctx, pool, from, to)
 			return err
 		},
 		// Every deploy run on main with a head commit at or after `from`: the containment
@@ -292,36 +338,36 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		// just before `to` may first ship after it -- bounding this query to [from, to) would
 		// wrongly read such a PR as "waiting". A production job on another branch ships no PR
 		// (decision 7). The timeline's runs[] list is filtered to [from, to) separately.
-		func(ctx context.Context) error {
-			runs, err := delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", from)
-			if err != nil {
-				return err
-			}
-			runIDs := make([]int64, len(runs))
-			for i, run := range runs {
-				runIDs[i] = run.RunID
-			}
-			jobs, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
-			if err != nil {
-				return err
-			}
-			applyRuns, jobsByRun = runs, jobs
-			return nil
-		},
+		runsWithJobs(func(ctx context.Context) ([]delivery.DeliveryRun, error) {
+			return delivery.ListRuns(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", from)
+		}, &pop.applyRuns, &pop.jobsByRun),
 		func(ctx context.Context) (err error) {
-			unfetchableCount, err = delivery.CountUnfetchablePullRequests(ctx, pool)
+			pop.unfetchable, err = delivery.CountUnfetchablePullRequests(ctx, pool)
 			return err
 		},
 		func(ctx context.Context) (err error) {
-			groups, err = delivery.ListSessionGroups(ctx, pool)
+			pop.groups, err = delivery.ListSessionGroups(ctx, pool)
 			return err
 		},
+	}
+	if withMeasures {
+		// Whether a run reached production is decided on the window's own runs and their jobs,
+		// never on the head-commit list containment reads, so every run the window counts is
+		// judged.
+		independent = append(independent,
+			runsWithJobs(func(ctx context.Context) ([]delivery.DeliveryRun, error) {
+				return delivery.ListRunsStartedIn(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", "", from, to)
+			}, &pop.windowRuns, &pop.windowJobs),
+			func(ctx context.Context) (err error) {
+				pop.unownedP0, err = delivery.ListUnownedP0(ctx, pool)
+				return err
+			})
 	}
 	if withWaiting {
 		// The deploy repository's pull requests still waiting at `from`, so the waiting line
 		// starts the window at their count rather than at zero.
 		independent = append(independent, func(ctx context.Context) (err error) {
-			waiting, err = delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.ProductionJobName, from)
+			pop.waiting, err = delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.ProductionJobName, from)
 			return err
 		})
 	}
@@ -343,52 +389,86 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	if err := reads.Wait(); err != nil {
 		return deliveryPopulation{}, err
 	}
-	applies := s.productionApplies(applyRuns, jobsByRun, settings.ProductionJobName)
+	// Warned here, once per run, rather than in the compute, which runs again on every expiry.
+	s.productionApplies(pop.applyRuns, pop.jobsByRun, settings.ProductionJobName)
+	s.productionApplies(pop.windowRuns, pop.windowJobs, settings.ProductionJobName)
 
 	sessionIDs := []string{}
 	issueKeys := []string{}
-	collect := func(pr delivery.DeliveryPullRequest) {
+	for _, pr := range pop.prs {
 		sessionIDs = append(sessionIDs, pr.Sessions...)
 		if pr.IssueKey != nil {
 			issueKeys = append(issueKeys, *pr.IssueKey)
 		}
 	}
-	for _, pr := range prs {
-		collect(pr)
+	for _, pr := range pop.waiting {
+		sessionIDs = append(sessionIDs, pr.Sessions...)
+		if pr.IssueKey != nil {
+			issueKeys = append(issueKeys, *pr.IssueKey)
+		}
 	}
-	for _, pr := range waiting {
-		collect(pr.DeliveryPullRequest)
-	}
-	titles, err := delivery.ResolveSessionTitles(ctx, pool, sessionIDs)
-	if err != nil {
+	var err error
+	if pop.titles, err = delivery.ResolveSessionTitles(ctx, pool, sessionIDs); err != nil {
 		return deliveryPopulation{}, err
 	}
-	parentAgents := delivery.NewParentAgents(groups, titles)
+	if pop.issues, err = s.deliveryIssueFacts(ctx, issueKeys); err != nil {
+		return deliveryPopulation{}, err
+	}
+	if pop.components, err = s.deliveryComponents(ctx, deliveryIssueProjects(pop.issues)); err != nil {
+		return deliveryPopulation{}, err
+	}
+	return pop, nil
+}
+
+// deliveryIssueProjects is the projects issues belong to, once each.
+func deliveryIssueProjects(issues map[string]deliveryIssue) []string {
+	projects := []string{}
+	for _, issue := range issues {
+		if !slices.Contains(projects, issue.project) {
+			projects = append(projects, issue.project)
+		}
+	}
+	return projects
+}
+
+// derive computes, from the population alone, each pull request's deploy from the deploy runs'
+// applies, its issue's facts, its Parent agent and its facet values, the waiting rows, and the
+// labels and selection the timeline reads beside them. The issue titles and components are those
+// of the issues the population's pull requests name, so a narrowed population derives what a fresh
+// read of its window would.
+func (p deliveryPopulation) derive(settings delivery.DeliverySettings) deliveryDerived {
+	applies, _ := delivery.ProductionApplies(p.applyRuns, p.jobsByRun, settings.ProductionJobName)
+	parentAgents := delivery.NewParentAgents(p.groups, p.titles)
 	sessionTitles := map[string]string{}
 	sessionPRCounts := map[string]int{}
-	for _, pr := range prs {
+	issueTitles := map[string]string{}
+	projects := map[string]bool{}
+	nameIssue := func(pr delivery.DeliveryPullRequest) {
+		if pr.IssueKey == nil {
+			return
+		}
+		if issue, found := p.issues[*pr.IssueKey]; found {
+			issueTitles[*pr.IssueKey] = issue.title
+			projects[issue.project] = true
+		}
+	}
+	for _, pr := range p.prs {
+		nameIssue(pr)
 		if len(pr.Sessions) == 0 {
 			continue
 		}
 		first := pr.Sessions[0]
 		sessionPRCounts[first]++
-		sessionTitles[first] = delivery.SessionTitle(titles, first)
+		sessionTitles[first] = delivery.SessionTitle(p.titles, first)
 	}
-	issues, err := s.deliveryIssueFacts(ctx, issueKeys)
-	if err != nil {
-		return deliveryPopulation{}, err
+	for _, pr := range p.waiting {
+		nameIssue(pr.DeliveryPullRequest)
 	}
-	projects := []string{}
-	issueTitles := make(map[string]string, len(issues))
-	for key, issue := range issues {
-		issueTitles[key] = issue.title
-		if !slices.Contains(projects, issue.project) {
-			projects = append(projects, issue.project)
+	components := map[string]delivery.DeliveryComponentView{}
+	for key, component := range p.components {
+		if project, _, _ := strings.Cut(key, "/"); projects[project] {
+			components[key] = component
 		}
-	}
-	components, err := s.deliveryComponents(ctx, projects)
-	if err != nil {
-		return deliveryPopulation{}, err
 	}
 
 	// viewOf is a pull request as the timeline shows it, shipped by deployRun at deployedAt.
@@ -402,7 +482,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 			UnfetchableReason: pr.UnfetchableReason,
 		}
 		if pr.IssueKey != nil {
-			if issue, found := issues[*pr.IssueKey]; found {
+			if issue, found := p.issues[*pr.IssueKey]; found {
 				view.IssueTitle = &issue.title
 				view.Components = issue.components
 				if issue.priority != nil {
@@ -418,9 +498,9 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		return view
 	}
 
-	rows := make([]deliveryRow, 0, len(prs))
+	rows := make([]deliveryRow, 0, len(p.prs))
 	shipped := map[int64][]delivery.DeliveryShippedPRView{}
-	for _, pr := range prs {
+	for _, pr := range p.prs {
 		apply := delivery.ContainingRun(pr, settings.DeployRepo, applies)
 		var deployRun *int64
 		var deployedAt *time.Time
@@ -435,8 +515,8 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		rows = append(rows, newDeliveryRow(view))
 	}
 
-	waitingRows := make([]deliveryWaitingRow, 0, len(waiting))
-	for _, pr := range waiting {
+	waitingRows := make([]deliveryWaitingRow, 0, len(p.waiting))
+	for _, pr := range p.waiting {
 		status := delivery.DeployedStatusWaiting
 		if pr.DeployRun != nil {
 			status = delivery.DeployedStatusDeployed
@@ -447,23 +527,128 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		})
 	}
 
-	return deliveryPopulation{
+	return deliveryDerived{
 		rows:            rows,
 		shipped:         shipped,
-		selection:       parseDeliverySelection(query, components),
+		selection:       parseDeliverySelection(p.query, components),
 		waiting:         waitingRows,
-		applyRuns:       applyRuns,
-		jobsByRun:       jobsByRun,
 		components:      components,
 		issueTitles:     issueTitles,
-		sessionGroups:   groups,
 		sessionTitles:   sessionTitles,
 		sessionPRCounts: sessionPRCounts,
 		freshness: delivery.DeliveryFreshnessView{
 			LastEventAt: settings.LastEventAt, LastReconcileAt: settings.LastReconcileAt, LastError: settings.LastError,
-			UnfetchableCount: unfetchableCount,
+			UnfetchableCount: p.unfetchable,
 		},
-	}, nil
+	}
+}
+
+// narrowedTo is the population for [from', to') with from' at or after the start it was read for.
+// A row merged before from' leaves the window, and joins the waiting entries when its repo is the
+// deploy repository and it had not shipped by from' (ListPullRequestsWaitingAt reads only
+// pr.repo = deployRepo; the window's rows hold every population repo). A waiting entry that shipped
+// before from' leaves them. A run started before from', or one whose head commit is before from',
+// leaves the lists that filter on that time. The maps keep only the keys the remaining rows and runs
+// name (derive reads them by those keys). This is ListPullRequestsWaitingAt's rule (store.go:384-437):
+// a pull request shipped by from' exactly when its ship time (the earliest successful production job
+// of a run whose head is at or after its merge) is before from'. A leaving row's ship is read from
+// the runs read here, which hold every run whose head is at or after its merge, since it merged at
+// or after the start they were read from. The window's end moves with from', past the read's end:
+// a preset's read ends at the present, so nothing stored lies past it.
+func (p deliveryPopulation) narrowedTo(settings delivery.DeliverySettings, from time.Time) deliveryPopulation {
+	narrowed := p
+	narrowed.prs = make([]delivery.DeliveryPullRequest, 0, len(p.prs))
+	var left []delivery.DeliveryPullRequest
+	for _, pr := range p.prs {
+		if pr.MergedAt.Before(from) {
+			left = append(left, pr)
+			continue
+		}
+		narrowed.prs = append(narrowed.prs, pr)
+	}
+	narrowed.applyRuns, narrowed.jobsByRun = runsWhere(p.applyRuns, p.jobsByRun, func(run delivery.DeliveryRun) bool { return !run.HeadCommitAt.Before(from) })
+	narrowed.windowRuns, narrowed.windowJobs = runsWhere(p.windowRuns, p.windowJobs, func(run delivery.DeliveryRun) bool { return !run.StartedAt.Before(from) })
+	if !p.withWaiting {
+		return narrowed
+	}
+	narrowed.waiting = make([]delivery.WaitingPullRequest, 0, len(p.waiting)+len(left))
+	for _, waiting := range p.waiting {
+		if waiting.DeployedAt == nil || !waiting.DeployedAt.Before(from) {
+			narrowed.waiting = append(narrowed.waiting, waiting)
+		}
+	}
+	applies, _ := delivery.ProductionApplies(p.applyRuns, p.jobsByRun, settings.ProductionJobName)
+	for _, pr := range left {
+		if pr.Repo != settings.DeployRepo {
+			continue
+		}
+		waiting := delivery.WaitingPullRequest{DeliveryPullRequest: pr}
+		if apply := delivery.ContainingRun(pr, settings.DeployRepo, applies); apply != nil {
+			if apply.CompletedAt.Before(from) {
+				continue
+			}
+			runID, completedAt := apply.RunID, apply.CompletedAt
+			waiting.DeployRun, waiting.DeployedAt = &runID, &completedAt
+		}
+		narrowed.waiting = append(narrowed.waiting, waiting)
+	}
+	return narrowed
+}
+
+// runsWhere is the runs keep holds, in their order, with only their jobs.
+func runsWhere(runs []delivery.DeliveryRun, jobs map[int64][]delivery.DeliveryRunJob, keep func(delivery.DeliveryRun) bool) ([]delivery.DeliveryRun, map[int64][]delivery.DeliveryRunJob) {
+	kept := make([]delivery.DeliveryRun, 0, len(runs))
+	keptJobs := make(map[int64][]delivery.DeliveryRunJob, len(runs))
+	for _, run := range runs {
+		if !keep(run) {
+			continue
+		}
+		kept = append(kept, run)
+		if runJobs, ok := jobs[run.RunID]; ok {
+			keptJobs[run.RunID] = runJobs
+		}
+	}
+	return kept, keptJobs
+}
+
+// nextExpiry is the first moment after now at which a preset window of length n, ending at the
+// present, loses something the population holds or its daily series moves: just past the oldest
+// row's merge + n, the oldest run start (each list that filters on starts) + n, the oldest head
+// commit among the runs ListRuns read + n, and each waiting entry's ship time + n; and the next UTC
+// midnight (measures.DailySeries, measures.go:240), where a whole-day window's first and last days
+// move together. Nothing else in the timeline or the measures reads the present (the LEGION-690 PR's
+// Task 0 checks, Step 17).
+func nextExpiry(pop deliveryPopulation, n time.Duration, now time.Time) time.Time {
+	next := nextUTCMidnight(now)
+	consider := func(leaves time.Time) {
+		// A row is in the window while its time is at or after the start, so it leaves just past
+		// its time + n.
+		if at := leaves.Add(n).Add(time.Nanosecond); at.After(now) && at.Before(next) {
+			next = at
+		}
+	}
+	for _, pr := range pop.prs {
+		consider(*pr.MergedAt)
+	}
+	for _, run := range pop.applyRuns {
+		consider(run.HeadCommitAt)
+		consider(run.StartedAt)
+	}
+	for _, run := range pop.windowRuns {
+		consider(run.StartedAt)
+	}
+	for _, waiting := range pop.waiting {
+		if waiting.DeployedAt != nil {
+			consider(*waiting.DeployedAt)
+		}
+	}
+	return next
+}
+
+// nextUTCMidnight is the first UTC midnight after t.
+func nextUTCMidnight(t time.Time) time.Time {
+	t = t.UTC()
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, 1)
 }
 
 // getDeliveryRun answers GET /api/v1/delivery/runs/{id}: one run of the deploy repository with

@@ -282,25 +282,32 @@ func deliveryConsumerConfig() natsgo.ConsumerConfig {
 	}
 }
 
-// bind creates (on first run) or resumes (on a restart) the durable and subscribes to it.
-// Checks ConsumerInfo before AddConsumer, like cmd/listener/durable.go's
-// startListenerSubscription: a durable's DeliverSubject is a random inbox chosen once at
-// creation, and calling AddConsumer again with a freshly generated one on every restart would
-// try to change a durable's config out from under itself rather than resuming its cursor.
-// Unlike the listener's own consumer, this package skips the rolling-deploy bind-retry/backoff
-// machinery (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet.
+// bind creates (on first run) or resumes (on a restart) the delivery durable and subscribes to it.
 func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*natsgo.Subscription, bool) {
-	js := in.nats.JS()
-	info, err := js.ConsumerInfo(bus.Stream, deliveryConsumerName)
-	wanted := deliveryConsumerConfig()
+	return bindDurableConsumer(in.nats, deliveryConsumerConfig(), func(msg *natsgo.Msg) {
+		in.deliver(msg, handle)
+	})
+}
+
+// bindDurableConsumer creates (on first run) or resumes (on a restart) a durable and subscribes to
+// it. It checks ConsumerInfo before AddConsumer, like cmd/listener/durable.go's
+// startListenerSubscription: a durable's DeliverSubject is a random inbox chosen once at creation,
+// and calling AddConsumer again with a freshly generated one on every restart would try to change a
+// durable's config out from under itself rather than resuming its cursor. Unlike the listener's own
+// consumer, this package skips the rolling-deploy bind-retry/backoff machinery
+// (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet.
+func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bool) {
+	js := client.JS()
+	name, subject := wanted.Durable, wanted.FilterSubject
+	info, err := js.ConsumerInfo(bus.Stream, name)
 	switch {
 	case errors.Is(err, natsgo.ErrConsumerNotFound):
 		if _, err := js.AddConsumer(bus.Stream, &wanted); err != nil {
-			slog.Error("dispatch delivery: create NATS consumer", "name", deliveryConsumerName, "subject", githubIntakeSubject, "error", err)
+			slog.Error("dispatch delivery: create NATS consumer", "name", name, "subject", subject, "error", err)
 			return nil, false
 		}
 	case err != nil:
-		slog.Error("dispatch delivery: look up NATS consumer", "name", deliveryConsumerName, "error", err)
+		slog.Error("dispatch delivery: look up NATS consumer", "name", name, "error", err)
 		return nil, false
 	case len(info.Config.FilterSubjects) > 0:
 		// A durable an earlier release left carrying a filter-subject set, which withholds the
@@ -311,15 +318,15 @@ func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*nat
 		recreate := wanted
 		recreate.DeliverPolicy = natsgo.DeliverByStartSequencePolicy
 		recreate.OptStartSeq = info.AckFloor.Stream + 1
-		if err := js.DeleteConsumer(bus.Stream, deliveryConsumerName); err != nil {
-			slog.Error("dispatch delivery: replace multi-subject NATS consumer", "name", deliveryConsumerName, "error", err)
+		if err := js.DeleteConsumer(bus.Stream, name); err != nil {
+			slog.Error("dispatch delivery: replace multi-subject NATS consumer", "name", name, "error", err)
 			return nil, false
 		}
 		if _, err := js.AddConsumer(bus.Stream, &recreate); err != nil {
-			slog.Error("dispatch delivery: create replacement NATS consumer", "name", deliveryConsumerName, "start_seq", recreate.OptStartSeq, "error", err)
+			slog.Error("dispatch delivery: create replacement NATS consumer", "name", name, "start_seq", recreate.OptStartSeq, "error", err)
 			return nil, false
 		}
-		slog.Info("dispatch delivery: multi-subject NATS consumer replaced", "name", deliveryConsumerName, "subject", githubIntakeSubject, "start_seq", recreate.OptStartSeq)
+		slog.Info("dispatch delivery: multi-subject NATS consumer replaced", "name", name, "subject", subject, "start_seq", recreate.OptStartSeq)
 	case info.Config.FilterSubject != wanted.FilterSubject ||
 		info.Config.AckWait != wanted.AckWait ||
 		info.Config.MaxAckPending != wanted.MaxAckPending:
@@ -332,19 +339,17 @@ func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*nat
 		config.AckWait = wanted.AckWait
 		config.MaxAckPending = wanted.MaxAckPending
 		if _, err := js.UpdateConsumer(bus.Stream, &config); err != nil {
-			slog.Error("dispatch delivery: update NATS consumer policy", "name", deliveryConsumerName, "configured_subject", info.Config.FilterSubject, "wanted_subject", wanted.FilterSubject, "error", err)
+			slog.Error("dispatch delivery: update NATS consumer policy", "name", name, "configured_subject", info.Config.FilterSubject, "wanted_subject", wanted.FilterSubject, "error", err)
 			return nil, false
 		}
-		slog.Info("dispatch delivery: NATS consumer policy updated", "name", deliveryConsumerName, "subject", wanted.FilterSubject, "ack_wait", wanted.AckWait, "max_ack_pending", wanted.MaxAckPending)
+		slog.Info("dispatch delivery: NATS consumer policy updated", "name", name, "subject", wanted.FilterSubject, "ack_wait", wanted.AckWait, "max_ack_pending", wanted.MaxAckPending)
 	}
 	// The subject must be the consumer's own filter subject: nats.go checks a bound
 	// subscription's subject against it, and refuses an empty one ("subject does not match
 	// consumer").
-	sub, err := in.nats.Subscribe(githubIntakeSubject, func(msg *natsgo.Msg) {
-		in.deliver(msg, handle)
-	}, natsgo.Bind(bus.Stream, deliveryConsumerName), natsgo.ManualAck())
+	sub, err := client.Subscribe(subject, deliver, natsgo.Bind(bus.Stream, name), natsgo.ManualAck())
 	if err != nil {
-		slog.Error("dispatch delivery: bind NATS consumer", "name", deliveryConsumerName, "subject", githubIntakeSubject, "error", err)
+		slog.Error("dispatch delivery: bind NATS consumer", "name", name, "subject", subject, "error", err)
 		return nil, false
 	}
 	return sub, true
@@ -541,7 +546,8 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliveryS
 		// jobs too and will complete them.
 		return fmt.Errorf("fetch jobs of run %d: %w", runID, err)
 	}
-	return UpsertRunJobs(ctx, in.pool, repoFull, runID, RunJobs(repoFull, runID, fetchedJobs))
+	jobs := RunJobs(repoFull, runID, fetchedJobs)
+	return UpsertRunJobs(ctx, in.pool, repoFull, runID, jobs, JobsComplete(jobs))
 }
 
 // commitMessagePayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits,

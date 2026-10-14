@@ -463,11 +463,12 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 }
 
 // fetchRequest is a pod's first init container's request: the feed and the credential directory are
-// the container's own.
+// the container's own, and its retries run on the wall clock.
 func fetchRequest(t *testing.T) FetchRequest {
 	t.Helper()
 	return FetchRequest{
 		Repo: ghrepo.MustParse("acme/widgets"), Token: "test-installation-token", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Log: func(line string) { t.Logf("fetch logged: %s", line) }, Clock: WallClock{},
 	}
 }
 

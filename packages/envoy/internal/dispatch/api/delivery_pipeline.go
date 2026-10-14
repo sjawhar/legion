@@ -62,37 +62,46 @@ func (s *server) getDeliveryPipeline(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	response, err := s.deliveryPipelineAt(r.Context(), settings, at)
+	population, err := s.readPipelinePopulation(r.Context(), settings, at)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, response)
+	WriteJSON(w, http.StatusOK, deliveryPipelineCompute(settings, population, at, time.Now().UTC()))
 }
 
-// deliveryPipelineAt computes the Pipeline page as of at.
-func (s *server) deliveryPipelineAt(ctx context.Context, settings delivery.DeliverySettings, at time.Time) (deliveryPipelineResponse, error) {
+// pipelinePopulation is every read the Pipeline page's answer for one `at` makes: the PR-checks
+// pull_request runs and the deploy push runs on main started in the shown days, each with its
+// jobs, and the population pull requests merged in them (their lead times).
+type pipelinePopulation struct {
+	checks, deploys delivery.RunsWithJobs
+	leadTimes       deliveryPopulation
+}
+
+// readPipelinePopulation reads the Pipeline page's runs and pull requests for the shown days
+// ending on at's UTC day. Runs are read by start over the whole of the shown days, today included
+// past at.
+func (s *server) readPipelinePopulation(ctx context.Context, settings delivery.DeliverySettings, at time.Time) (pipelinePopulation, error) {
 	pool := s.deps.Store.Pool
-	days := measures.ShownDays(at)
 	from := measures.WindowStart(at)
 	to := from.AddDate(0, 0, measures.ShownDayCount)
 
 	// The two run reads are independent, so they run side by side, each on a hold mark of its own
-	// (store.ForConcurrentRead), as filteredDeliveryPullRequests runs its reads.
-	var checks, deploys delivery.RunsWithJobs
+	// (store.ForConcurrentRead), as readDeliveryPopulation runs its reads.
+	var pop pipelinePopulation
 	reads, readsCtx := errgroup.WithContext(ctx)
 	for _, read := range []struct {
 		into                *delivery.RunsWithJobs
 		kind                delivery.DeliveryRunKind
 		branch, githubEvent string
 	}{
-		{&checks, delivery.DeliveryRunKindPRChecks, "", "pull_request"},
-		{&deploys, delivery.DeliveryRunKindDeploy, "main", "push"},
+		{&pop.checks, delivery.DeliveryRunKindPRChecks, "", "pull_request"},
+		{&pop.deploys, delivery.DeliveryRunKindDeploy, "main", "push"},
 	} {
 		readCtx, err := store.ForConcurrentRead(readsCtx)
 		if err != nil {
 			_ = reads.Wait()
-			return deliveryPipelineResponse{}, err
+			return pipelinePopulation{}, err
 		}
 		reads.Go(func() (err error) {
 			*read.into, err = delivery.ListRunsWithJobsStartedIn(readCtx, pool, settings.DeployRepo, read.kind, read.branch, read.githubEvent, from, to)
@@ -100,35 +109,42 @@ func (s *server) deliveryPipelineAt(ctx context.Context, settings delivery.Deliv
 		})
 	}
 	if err := reads.Wait(); err != nil {
-		return deliveryPipelineResponse{}, err
+		return pipelinePopulation{}, err
 	}
-	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, url.Values{}, false)
-	if err != nil {
-		return deliveryPipelineResponse{}, err
+	var err error
+	if pop.leadTimes, err = s.readDeliveryRows(ctx, settings, from, to, url.Values{}, false, false); err != nil {
+		return pipelinePopulation{}, err
 	}
+	return pop, nil
+}
 
+// deliveryPipelineCompute is GET /api/v1/delivery/pipeline's body as of at, from a population read
+// for at or narrowed to it. It reads nothing; now is only computed_at.
+func deliveryPipelineCompute(settings delivery.DeliverySettings, pop pipelinePopulation, at, now time.Time) deliveryPipelineResponse {
+	days := measures.ShownDays(at)
 	rollup := ""
 	if settings.PRChecksRollupJobName != nil {
 		rollup = *settings.PRChecksRollupJobName
 	}
-	run, slowest, failing := measures.PRChecks(checks.Runs, checks.Jobs, days, at, rollup)
+	run, slowest, failing := measures.PRChecks(pop.checks.Runs, pop.checks.Jobs, days, at, rollup)
 	names := []string{settings.ProductionJobName}
 	for _, name := range []*string{settings.StagingE2EJobName, settings.StagingApplyJobName} {
 		if name != nil {
 			names = append(names, *name)
 		}
 	}
-	deployJobs := measures.DeployJobs(deploys.Runs, deploys.Jobs, names, days)
+	deployJobs := measures.DeployJobs(pop.deploys.Runs, pop.deploys.Jobs, names, days)
 	optional := func(name *string) *measures.DeployJobTiming {
 		if name == nil {
 			return nil
 		}
 		return new(deployJobs[*name])
 	}
-	mergeToProduction, openedToMerge := measures.LeadTimes(population.measuresPRs(), days)
+	derived := pop.leadTimes.derive(settings)
+	mergeToProduction, openedToMerge := measures.LeadTimes(derived.measuresPRs(), days)
 	return deliveryPipelineResponse{
 		Days:              days,
-		ComputedAt:        time.Now().UTC(),
+		ComputedAt:        now,
 		PRChecks:          deliveryPipelinePRChecks{Run: run, SlowestJobs: slowest, FailingJobs: failing},
 		StagingE2E:        optional(settings.StagingE2EJobName),
 		StagingApply:      optional(settings.StagingApplyJobName),
@@ -136,6 +152,40 @@ func (s *server) deliveryPipelineAt(ctx context.Context, settings delivery.Deliv
 		MergeToProduction: mergeToProduction,
 		OpenedToMerge:     openedToMerge,
 		Targets:           measures.DefaultTargets,
-		Freshness:         population.freshness,
-	}, nil
+		Freshness:         derived.freshness,
+	}
+}
+
+// narrowedTo is the population for a later `at`: when at's UTC day moved, the runs started before
+// the new first shown day leave and the lead times' pull requests narrow to it; the failing-jobs
+// table needs nothing taken out, since deliveryPipelineCompute reads its 24 hours from at.
+func (p pipelinePopulation) narrowedTo(settings delivery.DeliverySettings, at time.Time) pipelinePopulation {
+	start := measures.WindowStart(at)
+	startedInShownDays := func(run delivery.DeliveryRun) bool { return !run.StartedAt.Before(start) }
+	narrowed := pipelinePopulation{leadTimes: p.leadTimes.narrowedTo(settings, start)}
+	narrowed.checks.Runs, narrowed.checks.Jobs = runsWhere(p.checks.Runs, p.checks.Jobs, startedInShownDays)
+	narrowed.deploys.Runs, narrowed.deploys.Jobs = runsWhere(p.deploys.Runs, p.deploys.Jobs, startedInShownDays)
+	return narrowed
+}
+
+// pipelineNextExpiry is the next UTC midnight (measures.ShownDays, pipeline.go:142) or the earliest
+// failing-jobs edge, whichever comes first: just past a timed PR-checks run's completion +
+// measures.FailingWindow (pipeline.go:33), when it leaves the 24 hours the table counts, or a timed
+// run's completion itself when that is after now (a clock ahead of Dispatch's), when it enters them.
+func pipelineNextExpiry(pop pipelinePopulation, now time.Time) time.Time {
+	next := nextUTCMidnight(now)
+	consider := func(at time.Time) {
+		if at.After(now) && at.Before(next) {
+			next = at
+		}
+	}
+	for _, run := range pop.checks.Runs {
+		outcome, ok := measures.OutcomeOf(run.Conclusion)
+		if !ok || (outcome != measures.OutcomeSuccess && outcome != measures.OutcomeFailure) || run.CompletedAt == nil {
+			continue
+		}
+		consider(*run.CompletedAt)
+		consider(run.CompletedAt.Add(measures.FailingWindow).Add(time.Nanosecond))
+	}
+	return next
 }

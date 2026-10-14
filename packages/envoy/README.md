@@ -69,7 +69,7 @@ submits signed public GitHub fixtures plus a three-paragraph direct agent
 message. The driver asserts the one-warning response for a never-seen GitHub
 repository, rejects an unheld role publish before proving the fake session can
 claim and receive that role, validates settled pull-request checks, lifecycle
-and comment topics, PR-less workflow behavior, obsolete-topic absence, and
+and comment topics, PR-less workflow and Actions-job behavior, obsolete-topic absence, and
 both renderers' direct-message summary/body contract.
 
 Docker downloads it from `mirror.gcr.io/library/nats:2.10-alpine`, Google's

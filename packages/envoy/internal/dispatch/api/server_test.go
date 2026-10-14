@@ -83,6 +83,12 @@ type testServerOptions struct {
 	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
 	// deployment with no bucket does.
 	files files.Store
+	// lifetime is the server's Deps.Lifetime, on which Register builds the delivery hub GET
+	// /ws/delivery serves; nil, every test but the socket's, mounts no such route. It must end
+	// by the test's end (derive it from t.Context()): the test waits out the hub's goroutines.
+	lifetime context.Context
+	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
+	streamHeartbeat time.Duration
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -130,6 +136,14 @@ func newTestHandlerWithTestHooks(t *testing.T) (http.Handler, *store.Store) {
 // second pair.
 func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store, Deps) {
 	t.Helper()
+	handler, database, deps, _ := newRegisteredTestServer(t, options)
+	return handler, database, deps
+}
+
+// newRegisteredTestServer is newTestServer, answering also the server Register mounted, whose
+// delivery hub and open sockets a socket test reads.
+func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Handler, *store.Store, Deps, *server) {
+	t.Helper()
 	settle := options.settle
 	if settle == 0 {
 		settle = 20 * time.Millisecond
@@ -158,6 +172,8 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		App:              options.app,
 		GitHubAPIBase:    options.githubAPIBase,
 		TestHooksEnabled: options.testHooks,
+		Lifetime:         options.lifetime,
+		StreamHeartbeat:  options.streamHeartbeat,
 		EnvoyURL:         options.envoyURL,
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
@@ -169,8 +185,12 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	mux := http.NewServeMux()
-	Register(mux, deps)
-	return mux, database, deps
+	served := register(mux, deps)
+	if served.deliveryHub != nil {
+		t.Cleanup(served.deliveryHub.wait)
+		t.Cleanup(served.deliverySockets.wait)
+	}
+	return mux, database, deps, served
 }
 
 // directServer is a server a test calls a handler or a delivery step on directly, without the

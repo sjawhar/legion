@@ -1,4 +1,9 @@
-import type { QueryClient } from "@tanstack/react-query";
+import type { Query, QueryClient } from "@tanstack/react-query";
+
+/** Whether a query is owned by Dispatch's live delivery socket rather than refreshed by events. */
+export function isLiveQuery(query: Pick<Query, "meta">): boolean {
+  return query.meta?.live === true;
+}
 
 /**
  * How a stream event refreshes the query cache: which of a batch's keys are worth invalidating,
@@ -82,7 +87,10 @@ function stateFor(queryClient: QueryClient): FirstLoadState {
  * than the gap between events, so a query is cancelled at most once until it holds data; a
  * later flush lets the running request land and refreshes the query when it settles instead.
  * Progress is guaranteed and the post-event body still wins. Only active, non-static queries
- * are cancelled, which is a subset of the set `invalidateQueries` refetches.
+ * are cancelled, which is a subset of the set `invalidateQueries` refetches. A live-owned query
+ * (`meta.live`, the delivery reads `api/delivery-live.ts` keeps current) is never cancelled: its
+ * first load is a subscription whose snapshot the live client writes itself, and no event of
+ * this stream names it.
  *
  * The cancelled request is not aborted on the wire: TanStack aborts through the signal on the
  * query function's context, and no query function in this app reads it. So the window costs two
@@ -107,7 +115,8 @@ function cancelFirstLoads(
   for (const queryKey of queryKeys ?? [undefined]) {
     const loads = cache.findAll({
       fetchStatus: "fetching",
-      predicate: (query) => query.state.data === undefined && !query.isStatic(),
+      predicate: (query) =>
+        query.state.data === undefined && !query.isStatic() && !isLiveQuery(query),
       queryKey,
       type: "active",
     });
@@ -125,7 +134,10 @@ function cancelFirstLoads(
   }
 }
 
-/** Refreshes `queryKeys`, or every query the app holds when they are omitted. */
+/** Refreshes `queryKeys`, or every query the app holds but the live-owned ones when they are
+ *  omitted: a live query is kept current by its own socket, so a whole-cache refresh (the stream's
+ *  reconnect, an unknown event) would only re-subscribe it and have Dispatch send its snapshot
+ *  again. */
 export function refreshQueries(
   queryClient: QueryClient,
   queryKeys?: readonly (readonly unknown[])[]
@@ -134,8 +146,11 @@ export function refreshQueries(
   // one batch can match the same query, and interleaving would have the second key cancel the
   // request the first one just started.
   cancelFirstLoads(queryClient, queryKeys);
-  // An explicitly `undefined` key matches every query, exactly as omitting the filter does.
-  for (const queryKey of queryKeys ?? [undefined]) {
+  if (queryKeys === undefined) {
+    queryClient.invalidateQueries({ predicate: (query) => !isLiveQuery(query) });
+    return;
+  }
+  for (const queryKey of queryKeys) {
     queryClient.invalidateQueries({ queryKey });
   }
 }

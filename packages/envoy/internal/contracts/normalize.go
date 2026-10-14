@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -41,9 +42,13 @@ func GithubEnvelopes(input GithubEnvelopeInput, trigger string) []Envelope {
 	if input.Event == "workflow_run" && len(sliceValue(nested(input.Body, "workflow_run", "pull_requests"))) > 0 {
 		return nil
 	}
+	if _, _, ok := githubActionsJob(input.Event, input.Body); ok {
+		return []Envelope{GithubEnvelope(input)}
+	}
 	if githubCIEvent(input.Event) {
-		// CI events fold into envoy_ci_state through the webhook handler's
-		// CIRecorder. The listener emits one settled pr.<n>.checks envelope.
+		// A pull request's CI events fold into envoy_ci_state through the webhook handler's
+		// CIRecorder, and the listener emits one settled pr.<n>.checks envelope. Any other CI
+		// event but a finished Actions job is published nowhere.
 		return nil
 	}
 	item := GithubEnvelope(input)
@@ -280,8 +285,12 @@ func SlackEnvelopes(input SlackEnvelopeInput) []Envelope {
 // Push to branch main:    push.branch.main
 // Push to tag v1.0.0:     push.tag.v1_0_0 (dots sanitized to underscores)
 // workflow_run:            workflow.<filename>.<action>
+// Actions job finished:   job.<run_id>.completed (a check_run on the default branch, of a run with no pull request)
 // Returns empty string for events that should not be routed (e.g. push to refs that aren't heads or tags).
 func githubTopic(owner string, repo string, event string, body map[string]any) string {
+	if runID, _, ok := githubActionsJob(event, body); ok {
+		return GithubJobSubject(owner, repo, runID, "completed")
+	}
 	if event == "push" {
 		refType, refName, ok := githubPushRefSegments(body)
 		if !ok {
@@ -396,18 +405,22 @@ var githubEventKinds = map[string]string{
 
 const githubDefaultKind = "comment"
 
+// githubJobKind is the kind a finished Actions job on the default branch, of a run with no pull
+// request, is published under (githubActionsJob), and its payload's kind.
+const githubJobKind = "job"
+
 // githubMentionKind is the kind a mention copy is published under, after the repository or after
 // the mentioning resource.
 const githubMentionKind = "mention"
 
 // GithubTopicKinds are the tokens that follow a GitHub topic's owner and name, sorted: every kind
-// and parent kind the two tables name, githubDefaultKind, and githubMentionKind (the push, workflow
-// and checks topics begin `push`, `workflow` and `pr`). A token there that is none of these is not
-// a GitHub topic kind.
+// and parent kind the two tables name, githubDefaultKind, githubMentionKind and githubJobKind (the
+// push, workflow and checks topics begin `push`, `workflow` and `pr`). A token there that is none of
+// these is not a GitHub topic kind.
 var GithubTopicKinds = githubTopicKinds()
 
 func githubTopicKinds() []string {
-	kinds := []string{githubDefaultKind, githubMentionKind}
+	kinds := []string{githubDefaultKind, githubMentionKind, githubJobKind}
 	for _, kind := range githubEventKinds {
 		kinds = append(kinds, kind)
 	}
@@ -497,6 +510,35 @@ func githubCIEvent(event string) bool {
 		return true
 	}
 	return false
+}
+
+// githubActionsJobURL is the details_url GitHub Actions gives the check run of each job it runs:
+// the run's id, then the job's.
+var githubActionsJobURL = regexp.MustCompile(`^https://github\.com/[^/]+/[^/]+/actions/runs/(\d+)/job/(\d+)$`)
+
+// githubActionsJob reports whether a webhook is a finished GitHub Actions job on the repository's
+// default branch, of a run with no pull request, and its run and job ids: a completed check_run
+// that lists no pull request, from the GitHub Actions App, whose check suite's head_branch is the
+// repository's default_branch and whose details_url names the run and the job. A merge queue's
+// commit and a branch push run with no pull request too, and are most of a busy repository's jobs,
+// so they are left out. The check run of a job of a pull request's run lists it and goes to the CI
+// store instead (GithubCIObservations).
+func githubActionsJob(event string, body map[string]any) (runID, jobID string, ok bool) {
+	if event != "check_run" || stringValue(body["action"]) != "completed" {
+		return "", "", false
+	}
+	if len(sliceValue(nested(body, "check_run", "pull_requests"))) > 0 || nestedString(body, "check_run", "app", "slug") != "github-actions" {
+		return "", "", false
+	}
+	defaultBranch := nestedString(body, "repository", "default_branch")
+	if defaultBranch == "" || nestedString(body, "check_run", "check_suite", "head_branch") != defaultBranch {
+		return "", "", false
+	}
+	match := githubActionsJobURL.FindStringSubmatch(nestedString(body, "check_run", "details_url"))
+	if match == nil {
+		return "", "", false
+	}
+	return match[1], match[2], true
 }
 
 func githubCIPullRequests(event string, body map[string]any) []string {
@@ -644,6 +686,17 @@ func githubSummary(event string, body map[string]any) string {
 			nestedNumberString(body, "workflow_run", "id"),
 			status,
 		)
+	case "check_run":
+		runID, _, ok := githubActionsJob(event, body)
+		if !ok {
+			summary = fmt.Sprintf("%s %s", event, action)
+			break
+		}
+		status := nestedString(body, "check_run", "status")
+		if conclusion := nestedString(body, "check_run", "conclusion"); conclusion != "" {
+			status += "/" + conclusion
+		}
+		summary = fmt.Sprintf("job %s run %s %s", first(nestedString(body, "check_run", "name"), 90), runID, status)
 	default:
 		summary = fmt.Sprintf("%s %s", event, action)
 	}
@@ -796,6 +849,24 @@ func githubPayload(event string, body map[string]any) string {
 			"run_started_at": nestedString(body, "workflow_run", "run_started_at"),
 			"updated_at":     nestedString(body, "workflow_run", "updated_at"),
 			"url":            nestedString(body, "workflow_run", "html_url"),
+		}
+	case "check_run":
+		runID, jobID, ok := githubActionsJob(event, body)
+		if !ok {
+			return ""
+		}
+		data = map[string]string{
+			"kind":         githubJobKind,
+			"repo":         repo,
+			"run_id":       runID,
+			"job_id":       jobID,
+			"name":         nestedString(body, "check_run", "name"),
+			"status":       nestedString(body, "check_run", "status"),
+			"conclusion":   nestedString(body, "check_run", "conclusion"),
+			"started_at":   nestedString(body, "check_run", "started_at"),
+			"completed_at": nestedString(body, "check_run", "completed_at"),
+			"head_sha":     nestedString(body, "check_run", "head_sha"),
+			"url":          nestedString(body, "check_run", "html_url"),
 		}
 	default:
 		return ""

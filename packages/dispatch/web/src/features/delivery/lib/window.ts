@@ -1,7 +1,10 @@
 // The Delivery page's window: a rolling preset (the URL keeps `window=7d`, so a shared link always
-// shows the latest days) or a custom range of whole UTC days (the URL keeps `from` and `to`). The
-// server refuses a window over 84 days (`maxDeliveryWindow`, api/delivery.go); a custom range
-// longer than that is refused here first, with the limit stated. Pure: no React.
+// shows the latest days) or a custom range of whole UTC days (the URL keeps `from` and `to`). A
+// preset is subscribed by its days, so Dispatch keeps its end at the present; the page reads the
+// range it resolved from the answer's `window`. The server refuses a window over 84 days
+// (`maxDeliveryWindow`, api/delivery.go); a custom range longer than that is refused here first,
+// with the limit stated. Pure: no React.
+import type { DeliveryLiveWindow } from "../../../api/types";
 
 export const WINDOW_PRESETS = ["7d", "14d", "28d", "84d"] as const;
 export type WindowPreset = (typeof WINDOW_PRESETS)[number];
@@ -18,7 +21,10 @@ export type WindowChoice =
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-const PRESET_DAYS: Record<WindowPreset, number> = { "7d": 7, "14d": 14, "28d": 28, "84d": 84 };
+const PRESET_DAYS = { "7d": 7, "14d": 14, "28d": 28, "84d": 84 } as const satisfies Record<
+  WindowPreset,
+  number
+>;
 
 export const PRESET_LABELS: Record<WindowPreset, string> = {
   "7d": "Last 7 days",
@@ -67,12 +73,12 @@ export function readWindow(params: URLSearchParams): WindowChoice {
   return { kind: "preset", preset: isPreset(preset) ? preset : DEFAULT_WINDOW_PRESET };
 }
 
-/** A preset's range: its days, ending at `nowMs`. */
-export function presetRange(preset: WindowPreset, nowMs: number): { from: string; to: string } {
-  return {
-    from: new Date(nowMs - PRESET_DAYS[preset] * DAY_MS).toISOString(),
-    to: new Date(nowMs).toISOString(),
-  };
+/** The live socket's window for a choice: a preset by its days, whose end Dispatch keeps at the
+ *  present, or a custom range by its exact ends. */
+export function liveWindow(choice: WindowChoice): DeliveryLiveWindow {
+  return choice.kind === "custom"
+    ? { from: choice.from, to: choice.to }
+    : { preset: PRESET_DAYS[choice.preset] };
 }
 
 /** A custom range from two `YYYY-MM-DD` dates read as whole UTC days: it starts at the first

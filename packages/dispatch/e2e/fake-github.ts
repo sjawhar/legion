@@ -1,16 +1,20 @@
 import { harnessPorts } from "./harness-ports";
 
-// Minimal GitHub App API for the architecture-source access check and the
-// architecture importer: the installation lookup, the installation-token mint,
-// the repository read that proves the minted token works, and the
-// commit/tree/blob reads a sync walks. Tests seed per-repository state through
-// /__fixture/repos; the server reaches this via DISPATCH_GITHUB_API_BASE.
+// Minimal GitHub App API for the architecture-source access check, the
+// architecture importer and the delivery reconcile: the installation lookup, the
+// installation-token mint, the repository read that proves the minted token works,
+// the commit/tree/blob reads a sync walks, and empty delivery listings. Tests seed
+// per-repository state through /__fixture/repos; the server reaches this via
+// DISPATCH_GITHUB_API_BASE.
 
 const ARCHITECTURE_DIR = ".dispatch/architecture";
 
 interface FakeRepo {
   /** Contents permission the installation reports: "read", "write", "none". */
   readonly contents: string;
+  /** Actions and Pull-requests permissions a delivery reconcile needs. */
+  readonly actions?: string;
+  readonly pull_requests?: string;
   readonly installation_id: number;
   /** Markdown files inside .dispatch/architecture/, keyed by file name. The
    *  branch commit is derived from their content, so a re-seed with different
@@ -23,6 +27,11 @@ function commitFor(repo: FakeRepo): string {
   const hasher = new Bun.CryptoHasher("sha1");
   hasher.update(JSON.stringify(repo.files ?? {}));
   return hasher.digest("hex");
+}
+
+/** The permissions an installation reports for a repository, in both installation answers. */
+function permissionsOf(repo: FakeRepo): Record<string, string | undefined> {
+  return { actions: repo.actions, contents: repo.contents, pull_requests: repo.pull_requests };
 }
 
 // "owner/repo" → its installation; a missing repository answers 404 (App not
@@ -49,7 +58,7 @@ Bun.serve({
       return Response.json({
         app_slug: "dispatch-e2e",
         id: repo.installation_id,
-        permissions: { contents: repo.contents },
+        permissions: permissionsOf(repo),
       });
     }
 
@@ -64,6 +73,55 @@ Bun.serve({
         },
         { status: 201 }
       );
+    }
+
+    if (request.method === "GET" && url.pathname === "/app/installations") {
+      const installations = new Map<number, FakeRepo>();
+      for (const repo of repos.values()) installations.set(repo.installation_id, repo);
+      return Response.json(
+        [...installations.values()].map((repo) => ({
+          account: { login: "acme" },
+          app_slug: "dispatch-e2e",
+          id: repo.installation_id,
+          permissions: permissionsOf(repo),
+        }))
+      );
+    }
+
+    if (request.method === "GET" && url.pathname === "/installation/repositories") {
+      const installationId = Number(
+        request.headers.get("Authorization")?.replace("Bearer ghs_fake_", "")
+      );
+      return Response.json({
+        repositories: [...repos]
+          .filter(([, repo]) => repo.installation_id === installationId)
+          .map(([fullName]) => ({ full_name: fullName })),
+      });
+    }
+
+    if (request.method === "POST" && url.pathname === "/graphql") {
+      return Response.json({
+        data: {
+          search: { issueCount: 0, nodes: [], pageInfo: { endCursor: "", hasNextPage: false } },
+        },
+      });
+    }
+
+    const workflowRuns = url.pathname.match(
+      /^\/repos\/([^/]+)\/([^/]+)\/actions\/workflows\/[^/]+\/runs$/
+    );
+    if (request.method === "GET" && workflowRuns !== null) {
+      if (!repos.has(`${workflowRuns[1]}/${workflowRuns[2]}`)) {
+        return Response.json({ message: "Not Found" }, { status: 404 });
+      }
+      return Response.json({ total_count: 0, workflow_runs: [] });
+    }
+
+    // A stored pull request's attribution read is skipped on a server error, leaving the row as
+    // seeded. A 404 would mark it unfetchable and change the delivery data under the test.
+    const pull = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls\/\d+$/);
+    if (request.method === "GET" && pull !== null) {
+      return Response.json({ message: "fixture has no pull request" }, { status: 500 });
     }
 
     const commit = url.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/commits\/([^/]+)$/);

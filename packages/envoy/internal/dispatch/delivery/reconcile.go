@@ -147,6 +147,11 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 	if err := RecordReconcileSuccess(ctx, r.pool, now); err != nil {
 		slog.Error("dispatch delivery: record reconcile success", "error", err)
 	}
+	// The change log keeps a day (ChangeRetention): a page away longer reads its window once. A
+	// failed prune leaves the rows for the next pass and fails nothing else.
+	if _, err := PruneChanges(ctx, r.pool, time.Now()); err != nil {
+		slog.Error("dispatch: delivery prune changes failed", "error", err)
+	}
 }
 
 // maxLastErrorLength bounds what fail() writes to delivery_settings.last_error: a reconcile pass
@@ -716,7 +721,8 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 		}
 		return fmt.Errorf("list jobs: %w", err)
 	}
-	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, RunJobs(repoFull, run.RunID, fetchedJobs))
+	jobs := RunJobs(repoFull, run.RunID, fetchedJobs)
+	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, jobs, JobsComplete(jobs))
 }
 
 // mapRunConclusionPtr adapts mapRunConclusion (which intake.go calls with the envelope's raw

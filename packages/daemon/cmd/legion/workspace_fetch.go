@@ -15,11 +15,15 @@ import (
 
 const workspaceFetchUsage = "legion workspace-init fetch --repo <owner>/<repo> --feed <dir>"
 
+// fetchClock is the time the fetch's clone retries read and wait on; a test replaces it.
+var fetchClock workspace.Clock = workspace.WallClock{}
+
 // workspaceFetch reads the provisioning token and clones the repository from GitHub into the
 // feed, the container's own volume, with no git configuration but its own. It reads --repo
 // before anything else, resolves git alone, and refuses before it ever touches the feed or its
 // own TMPDIR, where the one-shot credential goes — every check (--repo, --feed, the token, git on
-// PATH) runs first, so a refusal here leaves neither behind.
+// PATH) runs first, so a refusal here leaves neither behind. A clone that fails transiently is
+// cloned again (workspace.Fetch), each retried failure one line on stdout.
 func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
@@ -45,6 +49,7 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 	}
 	fed, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
 		Repo: repository, Token: token, CredentialDir: os.TempDir(), Feed: feed,
+		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init fetch: "+line) }, Clock: fetchClock,
 	})
 	if err != nil {
 		return err

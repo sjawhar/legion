@@ -3,8 +3,15 @@ import { keepPreviousData, type QueryFunctionContext, queryOptions } from "@tans
 import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
 
-import { api, type DeliveryTimelineOptions } from "./client";
-import type { InboxRow } from "./types";
+import { api } from "./client";
+import { deliveryLiveFor } from "./delivery-live";
+import type {
+  DeliveryLiveView,
+  DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
+  DeliveryTimelineResponse,
+  InboxRow,
+} from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it. */
 export const whoAmIQuery = () =>
@@ -140,40 +147,61 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
   return settled.promise;
 }
 
-/** The delivery timeline's one read, keyed by every facet so a filter change refetches its own
- *  cache entry: `GET /api/v1/delivery/timeline` applies the window, the search and every facet
- *  server-side (LEGION-567's plan, "API"). The page keeps showing the previous answer while a new
- *  selection's read is in flight, as a filter change in the prototype it ports never blanks it. */
-export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
+/** What every live-owned delivery query shares (LEGION-690): its first load subscribes its view
+ *  over the page's one delivery socket (`api/delivery-live.ts`), which writes the snapshot and every
+ *  later change into the cache, so nothing here reads again. `meta.live` keeps the event stream's
+ *  refresh paths away from it (`api/query-refresh.ts`); `gcTime` 0 drops the subscription with the
+ *  last observer; the page keeps the previous answer on screen while a new view's snapshot is out,
+ *  as a filter change in the prototype it ports never blanks it. */
+const LIVE = {
+  gcTime: 0,
+  meta: { live: true },
+  refetchOnReconnect: false,
+  refetchOnWindowFocus: false,
+  staleTime: Number.POSITIVE_INFINITY,
+} as const;
+
+/** The live view's answer, which is the body of the GET route its kind mirrors. */
+function subscribeLive<B>(context: QueryFunctionContext, view: DeliveryLiveView): Promise<B> {
+  // The socket answers each view with its own route's body (packages/contracts DeliveryLiveView),
+  // which the kind the caller passes names; the frame carries the union.
+  return deliveryLiveFor(context.client).subscribe(context.queryKey, view) as Promise<B>;
+}
+
+/** The delivery timeline, live: the window, the search and every facet, applied by Dispatch
+ *  (LEGION-567's plan, "API"), keyed by the view so a filter change subscribes its own entry. */
+export const deliveryTimelineQuery = (view: DeliveryLiveView & { kind: "timeline" }) =>
   queryOptions({
+    ...LIVE,
     placeholderData: keepPreviousData,
-    queryKey: ["delivery", "timeline", filters],
-    queryFn: () => api.getDeliveryTimeline(filters),
+    queryKey: ["delivery", "timeline", view],
+    queryFn: (context) => subscribeLive<DeliveryTimelineResponse>(context, view),
   });
 
-/** The measures panel's read, keyed under `["delivery"]` beside the timeline so a settings save's
- *  `invalidateQueries({ queryKey: ["delivery"] })` refreshes both, and by the same filters so the
- *  window, the search and every facet drive the measures as they drive the timeline. */
-export const deliveryMeasuresQuery = (filters: DeliveryTimelineOptions) =>
+/** The measures panel's own read for a brushed window, live, under `["delivery"]` beside the
+ *  timeline and by the same search and facets. */
+export const deliveryMeasuresQuery = (view: DeliveryLiveView & { kind: "measures" }) =>
   queryOptions({
-    queryKey: ["delivery", "measures", filters],
-    queryFn: () => api.getDeliveryMeasures(filters),
+    ...LIVE,
+    placeholderData: keepPreviousData,
+    queryKey: ["delivery", "measures", view],
+    queryFn: (context) => subscribeLive<DeliveryMeasuresResponse>(context, view),
   });
 
-/** One deploy-repository run with every job it ran: a finished run's jobs no longer change, so
- *  the drill-down reads it once per run. */
+/** One deploy-repository run with every job it ran, read by GET. A live delta that changes the
+ *  run invalidates this key, so an open drill-down reads it again. */
 export const deliveryRunQuery = (id: number) =>
   queryOptions({
     queryKey: ["delivery", "run", id],
     queryFn: () => api.getDeliveryRun(id),
   });
 
-/** The Pipeline page's read, keyed under `["delivery"]` so a settings save refreshes it with the
- *  timeline, and by `at` so a pinned day is its own cache entry. */
-export const deliveryPipelineQuery = (options: { at?: string }) =>
+/** The Pipeline page, live, by `at` so a pinned day is its own subscription. */
+export const deliveryPipelineQuery = (view: DeliveryLiveView & { kind: "pipeline" }) =>
   queryOptions({
-    queryKey: ["delivery", "pipeline", options],
-    queryFn: () => api.getDeliveryPipeline(options),
+    ...LIVE,
+    queryKey: ["delivery", "pipeline", view],
+    queryFn: (context) => subscribeLive<DeliveryPipelineResponse>(context, view),
   });
 
 /** The delivery timeline's configuration record, or `null` until someone sets it: the Settings

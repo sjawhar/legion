@@ -48,7 +48,7 @@ func TestTheWaitingSQLAgreesWithTheShippingRule(t *testing.T) {
 		}
 		if err := UpsertRunJobs(ctx, pool, repo, run.id, []DeliveryRunJob{
 			{Repo: repo, RunID: run.id, Name: job, StartedAt: &started, CompletedAt: &done, Conclusion: new(run.result)},
-		}); err != nil {
+		}, true); err != nil {
 			t.Fatalf("seed run %d's job: %v", run.id, err)
 		}
 	}

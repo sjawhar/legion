@@ -151,8 +151,12 @@ review posted without a completion leaves the issue in reviewing until you finis
   carrying the Legion footer, and a `dispatch message` on the issue — the reviewer and merger
   read GitHub, the architect reads the issue. When the deploy that carries the merge has not
   happened (a shared profile still holding the previous plugin release, a daemon still running
-  the previous commit, a slot nobody has run), open a `dispatch ask` that starts with the
-  production gap and why it matters, then names the required install or restart step, its risk,
-  and outcome-named options. Keep the `Production:` line at `pending <what is missing>`, and
-  complete the check once the human answers. Never record a staging pass as the production check,
-  and never let the architect sign off on a `pending` line.
+  the previous commit, a slot nobody has run) and you cannot perform it yourself, ask the agent or
+  role the deployment instructions name for that deploy: `envoy_publish` to its role topic with the
+  merge commit and `expects_reply: required`, then wait on the production signal the instructions
+  name. Open a `dispatch ask` to a person only when the instructions name nobody for that deploy;
+  it starts with the production gap and why it matters, then names the required install or restart
+  step, its risk, and outcome-named options. Never ask anyone for approval to deploy. Keep the
+  `Production:` line at `pending <what is missing>`, and complete the check once that signal shows
+  the deploy carries the merge (or the person answers, when an ask was the route). Never record a
+  staging pass as the production check, and never let the architect sign off on a `pending` line.

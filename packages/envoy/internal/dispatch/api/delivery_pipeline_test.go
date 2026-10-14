@@ -53,7 +53,7 @@ func seedPipelineRun(t *testing.T, pool *store.Pool, run delivery.DeliveryRun, j
 			rows[i].Conclusion = new(delivery.DeliveryJobConclusion(job.conclusion))
 		}
 	}
-	if err := delivery.UpsertRunJobs(t.Context(), pool, "acme/widgets", run.RunID, rows); err != nil {
+	if err := delivery.UpsertRunJobs(t.Context(), pool, "acme/widgets", run.RunID, rows, true); err != nil {
 		t.Fatalf("seed jobs of run %d: %v", run.RunID, err)
 	}
 }

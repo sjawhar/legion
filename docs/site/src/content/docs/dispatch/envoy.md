@@ -39,6 +39,7 @@ notifications.github.<owner>.<repo>.pr.<n>.mention    comments that mention the 
 notifications.github.<owner>.<repo>.pr.<n>.checks     a commit's checks have all finished
 notifications.github.<owner>.<repo>.push.branch.<ref> a branch push
 notifications.github.<owner>.<repo>.workflow.<file>.<action>  a workflow run with no pull request
+notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions job on the default branch, of a run with no pull request
 ```
 
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is

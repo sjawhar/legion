@@ -20,7 +20,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
@@ -722,11 +721,13 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
-// which is how much longer a launch may run before its agent starts while its pod's init containers
-// run. Provisioning from the feed onto the issue's own volume is local work and waits on no other
-// pod, so it shares the registration deadline's base bound as the agent's own boot does.
+// which is how much longer than the boot timeout a launch may wait for its pod's launcher, counted
+// from when it first sees one of the pod's init containers running (awaitRoleLauncher). The fetch
+// started no later than that, so it ends inside the bound; workspace-init's provisioning from the
+// feed onto the issue's own volume, local work that waits on no other pod, then has at least the
+// boot timeout. A test shortens it (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
-	return workspace.FetchTimeout
+	return r.provisionBound
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells

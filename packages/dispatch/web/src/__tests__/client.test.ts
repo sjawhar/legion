@@ -369,9 +369,8 @@ test(
       featureOff.getCredentialRecord("record-1").catch((error: unknown) => error),
       documentSchema.getArtifactText("artifact-1").catch((error: unknown) => error),
       serverError.whoAmI().catch((error: unknown) => error),
-      deliveryUnset
-        .getDeliveryTimeline({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
-        .catch((error: unknown) => error),
+      // The run route answers 404 DELIVERY_NOT_CONFIGURED while no settings row exists.
+      deliveryUnset.getDeliveryRun(7).catch((error: unknown) => error),
     ]);
 
     expect(isRetryableQueryError(unauthorizedError)).toBe(false);

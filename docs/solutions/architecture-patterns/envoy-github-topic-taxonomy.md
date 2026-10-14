@@ -11,20 +11,24 @@ repository traffic.
 | Push to a branch | `notifications.github.<owner>.<repo>.push.branch.<branch_sanitized>` |
 | Push to a tag | `notifications.github.<owner>.<repo>.push.tag.<tag_sanitized>` |
 | `workflow_run` | `notifications.github.<owner>.<repo>.workflow.<filename_sanitized>.<action>` |
+| A finished Actions job on the default branch, of a run with no PR | `notifications.github.<owner>.<repo>.job.<run_id>.completed` |
 | Settled PR CI | `notifications.github.<owner>.<repo>.pr.<number>.checks` |
 | PR opened/closed/merged/ready | `notifications.github.<owner>.<repo>.pr.<number>` |
 | PR comment | `notifications.github.<owner>.<repo>.pr.<number>.comment` |
 | Issue comment | `notifications.github.<owner>.<repo>.issue.<number>.comment` |
 | Push to another ref | Dropped — no envelope |
 | `workflow_run` missing `path` | Dropped — no envelope |
-| CI event without an associated PR | Dropped — no state or envelope |
+| Any other CI event without an associated PR | Dropped — no state or envelope |
 
 `<owner>` and `<repo>` are each one segment, a dot written `_` (`sjawhar/.github`
 is `notifications.github.sjawhar._github`); the payload's `repo` is the exact name.
 
-`check_run` and `check_suite` webhook events do not publish raw envelopes.
-They update durable CI state; one `checks` envelope publishes after the PR
-head's CI is complete.
+A `check_run` or `check_suite` of a pull request does not publish a raw envelope.
+It updates durable CI state; one `checks` envelope publishes after the PR head's
+CI is complete. A completed `check_run` from the GitHub Actions App that lists no
+pull request, whose check suite's `head_branch` is the repository's
+`default_branch` and whose `details_url` names `/actions/runs/<run_id>/job/<job_id>`,
+publishes on its run's `job` topic as it finishes.
 
 ## Subscription examples
 

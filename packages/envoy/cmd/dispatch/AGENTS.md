@@ -94,6 +94,8 @@ without seeding thousands of events to trip the SSE replay cap. `POST
 /api/v1/artifacts/_test/quiesce` closes every live document, flushing each through the store, and
 waits for the settlements in flight, leaving the service able to load documents again; `e2e/seed.ts`
 calls it before truncating so no document the previous scenario had open writes after the truncate. `POST
+/api/v1/delivery/_test/disconnect` closes every open `/ws/delivery` socket, so the Delivery page's
+resume path can be exercised. `POST
 /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed tree the document-repair
 browser test uses.
 
@@ -430,7 +432,9 @@ the table says human only.
 | `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
 | `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
+| `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
 | `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in pool no longer confirms), so their editor stops receiving and sending the document's edits. |
+| `/ws/delivery` | GET | user or bearer | The Delivery and Pipeline pages' live updates: a subscribe frame names a view; Dispatch answers a snapshot, then only what changed, and a resume with the page's revisions answers what changed since (packages/contracts DeliveryLive*). A `heartbeat` frame goes out every `StreamHeartbeat` (15 s), so a client tells a quiet socket from a dead one. |
 
 ## Dispatch topics
 

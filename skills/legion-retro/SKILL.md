@@ -180,7 +180,7 @@ dispatch message --issue <KEY> --body-file - <<'EOF'
 
 **Proofs read:** implementer <surface/command>, tester <surface/command>.
 
-**Production check:** <what the implementer will drive after the merge, or the deploy/restart step a human will have to perform first>
+**Production check:** <what the implementer will drive after the merge, and any deploy or restart it waits on first, with the agent or role the deployment instructions name to perform it, or the person it asks when they name none>
 
 <!-- legion: {"session":"<session-id>","phase":"retro"} -->
 EOF

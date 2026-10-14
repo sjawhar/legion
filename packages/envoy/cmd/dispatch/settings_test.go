@@ -294,7 +294,8 @@ func routerFor(t *testing.T, boot bootConfig, built routes.AppContextOptions) ht
 	if err != nil {
 		t.Fatalf("build the router: %v", err)
 	}
-	return routes.New(appCtx)
+	handler, _ := routes.New(appCtx)
+	return handler
 }
 
 // appContextFor is routes.BuildAppContext as main calls it, with the signing key, the session store

@@ -14,6 +14,19 @@
   outside the decision blocks stales the approval and the request after it carries a one-sentence
   summary of what changed, and the human's own answer carries it when it is the whole change
   (LEGION-573).
+- The Delivery and Pipeline pages' live frames on `GET /ws/delivery` (LEGION-690):
+  `DeliveryLiveView` and `DeliveryLiveWindow` (a preset, whose end stays at the present, or a
+  custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and
+  Dispatch's `DeliveryLiveSnapshot` (the matching GET route's body and a revision per key),
+  `DeliveryLiveDelta` (list items by id, map entries by key, counts by facet and value, null for a
+  key that left, and the other fields whole), `DeliveryLiveFreshness`, `DeliveryLiveError` and
+  `DeliveryLiveHeartbeat` (sent every heartbeat interval beside the socket's ping, which a browser
+  never shows the page). `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it,
+  an error and a heartbeat frame as the server writes them.
+- `githubJobSubject(owner, repo, runId, "completed")` and its type `GithubJobSubject`,
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
+  default branch, of a run with no pull request, and the generated Go `GithubJobSubject`
+  (LEGION-690).
 - `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
   returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
   (LEGION-687).

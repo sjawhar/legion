@@ -79,7 +79,9 @@
   `approved_by`) and the card shows with its `Show diff` control. The reference lists what still
   leaves an approval stale: a change outside the blocks, a block added since the approval the human
   has not answered, a removed block, a newer request for changes, or a document they never approved.
-
+- The `dispatch` skill's example of a to-do handed to a human is a certificate only its owner can
+  renew, no longer an ask for approval to deploy (LEGION-447): a deploy goes to the agent the
+  deployment names, never to a person for approval.
 - `@legion/pi-shared`'s plugin interface is at version 2 (LEGION-394): a turn sent as typed input
   is found by its tag alone, a `/skill:`'s tagged `skill-prompt` message counts as the person's
   turn in a Legion phase worker, and such a turn is still found after the run's `agent_end` (the

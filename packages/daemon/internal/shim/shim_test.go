@@ -1133,10 +1133,12 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				jjAs("implementer", "describe", "-m", "feat: the pushed change")
 			}
 			before := jjAs("implementer", "log", "-r", "@", "--no-graph", "-T", "commit_id")
-			// The shim's jj, recording each command it runs: first on PATH, where the shim looks.
+			// The shim's jj, recording each command it runs: first on PATH, where the shim looks. It
+			// hands the real jj the PATH past its own directory, so a jj on PATH that is itself a
+			// wrapper looking jj up on PATH never finds this one again.
 			record := filepath.Join(t.TempDir(), "jj-commands")
 			bin := t.TempDir()
-			if err := os.WriteFile(filepath.Join(bin, "jj"), []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+record+"\nexec "+jj+" \"$@\"\n"), 0o700); err != nil {
+			if err := os.WriteFile(filepath.Join(bin, "jj"), []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+record+"\nPATH=\"${PATH#*:}\" exec "+jj+" \"$@\"\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
 			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1168,6 +1170,89 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 			parent := jjAs("implementer", "log", "-r", "@-", "--no-graph", "-T", `commit_id ++ " " ++ author.name() ++ " " ++ description.first_line()`)
 			if parent != before+" implementer feat: the pushed change" {
 				t.Fatalf("the adopted working copy's parent is %q, want the described commit %s kept, authored by implementer", parent, before)
+			}
+		})
+	}
+}
+
+// A git lock an interrupted git or jj left in a running pod's workspace fails the adoption on
+// every write of what it locks, and nothing under a running pod removes it: another role's live git
+// may hold it. The failure names the lock and how long ago it was last written, says not to remove
+// it while the pod runs and that replacing the pod removes it, and says what holds under tmux,
+// whether jj's own git backend reported it (the index jj rewrites as it snapshots the working copy,
+// as in LEGION-731) or a git command jj ran; and the lock stays.
+func TestAdoptWorkingCopyNamesTheStaleGitLockItFailedOn(t *testing.T) {
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		t.Fatalf("jj is required: %v", err)
+	}
+	jjConfig := filepath.Join(t.TempDir(), "jj.toml")
+	if err := os.WriteFile(jjConfig, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("JJ_CONFIG", jjConfig)
+	for _, tc := range []struct {
+		name string
+		// script is the PATH's jj, given the real jj and the lock.
+		script func(jj, lock string) string
+	}{
+		{"jj's own index write", func(jj, _ string) string { return "#!/bin/sh\nPATH=\"${PATH#*:}\" exec " + jj + " \"$@\"\n" }},
+		{"a git jj ran", func(_, lock string) string {
+			return "#!/bin/sh\necho \"fatal: Unable to create '" + lock + "': File exists.\" >&2\nexit 1\n"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			initialize := exec.Command(jj, "git", "init", "--colocate", workspace)
+			initialize.Env = append(os.Environ(), "JJ_USER=implementer", "JJ_EMAIL=implementer@example.test")
+			if output, err := initialize.CombinedOutput(); err != nil {
+				t.Fatalf("jj git init: %v\n%s", err, output)
+			}
+			// A file the adoption's first jj snapshots, so jj rewrites the git index.
+			if err := os.WriteFile(filepath.Join(workspace, "README.md"), []byte("smoke\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			lock := filepath.Join(workspace, ".git", "index.lock")
+			if err := os.WriteFile(lock, nil, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			written := time.Now().Add(-31 * time.Minute)
+			if err := os.Chtimes(lock, written, written); err != nil {
+				t.Fatal(err)
+			}
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(tc.script(jj, lock)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+			path := socketPath(t)
+			daemon := listen(t, path)
+			child := newOMP(t)
+			cfg := config(t, path, child)
+			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace)
+			run(t, cfg, newClock())
+			p := daemon.accept(t)
+			p.open(t)
+			p.send(t, shimwire.AdoptWorkingCopy{ID: "adopt", JJUser: "tester", JJEmail: "tester@example.test", TimeoutMs: 10000})
+			got, ok := p.next(t).(shimwire.AdoptWorkingCopyResult)
+			if !ok || got.OK {
+				t.Fatalf("the shim answered %#v, want a failed adoption", got)
+			}
+			for _, want := range []string{
+				"Command failed (exit 1)",
+				"git lock " + lock + " was last written 31m",
+				"Do not remove it while the issue's pod runs: another role's git, which this container cannot see, may hold it.",
+				"Replacing the issue's pod removes it.",
+				"Under the tmux runtime nothing removes it",
+			} {
+				if !strings.Contains(got.Error, want) {
+					t.Errorf("the result's error %q does not mention %q", got.Error, want)
+				}
+			}
+			if _, err := os.Lstat(lock); err != nil {
+				t.Fatalf("the lock after the failed adoption: %v, want it left in place", err)
 			}
 		})
 	}

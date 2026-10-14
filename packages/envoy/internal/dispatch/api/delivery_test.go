@@ -98,7 +98,7 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 	}
 	if err := delivery.UpsertRunJobs(ctx, pool, "acme/widgets", 100, []delivery.DeliveryRunJob{
 		{Repo: "acme/widgets", RunID: 100, Name: "widgets-release / widgets-release", StartedAt: &deployedAt, CompletedAt: &deployedAt, Conclusion: &jobSuccess},
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatalf("seed run job: %v", err)
 	}
 
@@ -236,7 +236,7 @@ func TestGetDeliveryTimelineAnswersThePullRequestsStillWaitingAtFrom(t *testing.
 		}
 		if err := delivery.UpsertRunJobs(ctx, pool, "acme/widgets", run.id, []delivery.DeliveryRunJob{
 			{Repo: "acme/widgets", RunID: run.id, Name: "release / release", StartedAt: run.head, CompletedAt: run.done, Conclusion: &jobSuccess},
-		}); err != nil {
+		}, true); err != nil {
 			t.Fatalf("seed run %d's job: %v", run.id, err)
 		}
 	}
@@ -472,7 +472,7 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 	for i := range jobs {
 		jobs[i].Repo, jobs[i].RunID = "acme/widgets", 7
 	}
-	if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", 7, jobs); err != nil {
+	if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", 7, jobs, true); err != nil {
 		t.Fatalf("seed jobs: %v", err)
 	}
 
@@ -554,7 +554,7 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, delivery.RunJobs("acme/widgets", run.id, run.jobs)); err != nil {
+		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, delivery.RunJobs("acme/widgets", run.id, run.jobs), true); err != nil {
 			t.Fatalf("seed run %d's jobs: %v", run.id, err)
 		}
 	}

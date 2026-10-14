@@ -22,6 +22,29 @@
   names that approval in `ask.approval` (`approved_version`, `approved_at`, `approved_by`), so the
   human reads what he is approving since the version he approved; a first request carries none of
   the three.
+- A finished Actions job on the default branch, of a run with no pull request, is published on
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed` (LEGION-690): a completed
+  `check_run` that lists no pull request, from the GitHub Actions App, whose
+  `check_suite.head_branch` is the repository's `default_branch` and whose `details_url` names
+  `/actions/runs/<run_id>/job/<job_id>`. The payload is `kind: "job"`, `repo`, `run_id`, `job_id`,
+  `name`, `status`, `conclusion`, `started_at`, `completed_at`, `head_sha` and `url`, each text
+  capped like every envelope's. A check run that lists a pull request still goes only to the CI
+  store, a merge queue's or another branch's job is published nowhere, and `job` joins
+  `contracts.GithubTopicKinds`, so the listener's subscribe warnings take it as a kind.
+
+- The Delivery and Pipeline pages update themselves live (LEGION-690). `GET /ws/delivery` (any
+  signed-in person or agent token) takes a `subscribe` frame naming a view, the GET route's query
+  string and a preset or custom window, and answers a `snapshot`, the matching GET route's body
+  with a revision per key; after that it sends only `delta` frames carrying what changed (pull
+  requests, runs and session groups by id, map entries by key, counts by facet and value, the
+  other fields whole), a `freshness` frame when the freshness verdict changes, and a `heartbeat`
+  every 15 s, the only frame on a quiet window. Nothing re-reads on a timer, a preset's end stays
+  at the present, and a reconnecting page resumes with its last change and revisions and is sent
+  what changed since. A jobs read marks a run complete only when that same GitHub listing has every
+  job finished, and Dispatch shutdown waits for delivery sockets and the live hub before it closes
+  its database pool. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
+  closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
+  a bearer, one JSON line per frame, and compares what it applied with the GET routes.
 - Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
   comment thread, an issue message thread - where someone else has written since they last read
   it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact

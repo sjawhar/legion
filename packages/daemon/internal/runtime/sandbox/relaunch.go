@@ -148,12 +148,12 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		}
 	}
 	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
-	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
-	defer cancel()
-	ended, err := r.awaitRoleLauncher(starting, loc)
+	ended, deadline, err := r.awaitRoleLauncher(ctx, loc)
 	if err != nil {
 		return fail("wait for its role launcher", err)
 	}
+	starting, cancel := context.WithDeadline(ctx, deadline.Add(r.terminationGrace))
+	defer cancel()
 	if ended {
 		// A real failed init proves no role could start. Return its recorded pod so supervision
 		// observes Gone (and WorkspaceLost), rather than charging an unrelated launcher timeout.
@@ -198,9 +198,27 @@ func (r *Runtime) stopIssuedChild(ctx context.Context, token claim.Token, podUID
 	return nil
 }
 
-func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, error) {
+// awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
+// has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
+// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
+// clone and its retries may take up to ProvisionBound from the fetch's own start. So until the
+// wait first sees the pod provisioning (an init container running, provisioning) it gives the pod
+// the boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw
+// the pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
+func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
+	what := "role launcher " + string(loc.Claim)
+	start := time.Now()
+	deadline := start.Add(r.bootTimeout)
+	var first time.Time
 	ended := false
-	err := r.await(ctx, r.bootTimeout, "role launcher "+string(loc.Claim), func() (bool, error) {
+	// await's own budget is only a backstop. The check below runs at every informer event and at
+	// least every recheckInterval, and it ends the wait before it extends the deadline, so the pod
+	// is first seen provisioning within the boot timeout of the start or never, and no deadline lies
+	// past twice the boot timeout plus ProvisionBound from the start. Two recheck intervals more let
+	// that check end the wait first.
+	backstop := 2*r.bootTimeout + r.ProvisionBound() + 2*recheckInterval
+	err := r.await(ctx, backstop, what, func() (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
 		if err != nil {
 			return false, err
@@ -210,10 +228,44 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 			ended = true
 			return true, nil
 		}
-		_, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
-		return ready, nil
+		if _, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID); ready {
+			return true, nil
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+		}
+		if provisioning(view.pod) {
+			if first.IsZero() {
+				first = now
+			}
+			deadline = launcherDeadline(first, now, r.bootTimeout, r.ProvisionBound())
+		}
+		return false, nil
 	})
-	return ended, err
+	return ended, deadline, err
+}
+
+// launcherDeadline is when a wait for a role launcher gives up, having first seen its pod
+// provisioning at first and last at last: the boot timeout after last, but no later than the boot
+// timeout plus bound after first.
+func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Time {
+	deadline := last.Add(boot)
+	if limit := first.Add(boot + bound); deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
+
+// provisioning is whether pod is running one of its init containers, workspace-fetch or
+// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
+func provisioning(pod *corev1.Pod) bool {
+	if phaseOf(pod) != corev1.PodPending {
+		return false
+	}
+	return slices.ContainsFunc(pod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
+		return status.State.Running != nil
+	})
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
@@ -249,17 +301,13 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
 	for {
-		getting, cancel := call(ctx)
-		u, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
-		cancel()
+		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			manifest, err := encodeSandbox(r.sandboxManifest(l))
 			if err != nil {
 				return nil, err
 			}
-			creating, cancel := call(ctx)
-			createdObject, err := r.sandboxClient().Create(creating, manifest, metav1.CreateOptions{})
-			cancel()
+			createdObject, err := r.sandboxClient().Create(ctx, manifest, metav1.CreateOptions{})
 			if apierrors.IsAlreadyExists(err) && time.Now().Before(deadline) {
 				continue
 			}
@@ -309,9 +357,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {
-			getting, cancel := call(ctx)
-			defer cancel()
-			current, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
+			current, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return true, nil
 			}
@@ -334,9 +380,7 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 			old[pod.UID] = true
 			return false, nil
 		}
-		getting, cancel := call(ctx)
-		defer cancel()
-		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(getting, s.Name, metav1.GetOptions{})
+		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(ctx, s.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -452,8 +496,6 @@ func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMet
 }
 
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
-	ctx, cancel := call(ctx)
-	defer cancel()
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
 	switch {
@@ -551,9 +593,7 @@ func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) (*s
 	if err != nil {
 		return nil, err
 	}
-	patching, cancel := call(ctx)
-	defer cancel()
-	u, err := r.sandboxClient().Patch(patching, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
+	u, err := r.sandboxClient().Patch(ctx, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
 	}

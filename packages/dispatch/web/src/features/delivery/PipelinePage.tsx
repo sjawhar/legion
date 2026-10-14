@@ -61,7 +61,9 @@ export function PipelinePage(): ReactNode {
   useDocumentTitle("Pipeline · Dispatch");
   const [params] = useSearchParams();
   const at = params.get("at");
-  const query = useQuery(deliveryPipelineQuery(at === null ? {} : { at }));
+  const query = useQuery(
+    deliveryPipelineQuery(at === null ? { kind: "pipeline" } : { kind: "pipeline", at })
+  );
   // The page's "now": a pinned at, else the clock, so a failure's age is from the moment the
   // failing-jobs table looked back from.
   const nowMs = at === null ? Date.now() : Date.parse(at);

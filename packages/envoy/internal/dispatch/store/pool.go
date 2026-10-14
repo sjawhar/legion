@@ -134,6 +134,7 @@ type Pool struct {
 	mu     sync.Mutex
 	rooms  *pgxpool.Pool
 	health *pgxpool.Pool
+	listen *pgxpool.Pool
 	closed bool
 }
 
@@ -222,6 +223,27 @@ func (p *Pool) Healthy(ctx context.Context) (int, error) {
 	return version, nil
 }
 
+// listenerPoolSize bounds the pool Listener takes its connections from: each is hijacked as soon
+// as it is opened, so the pool never holds one, and one is all it ever opens at a time.
+const listenerPoolSize = 1
+
+// Listener returns one connection of its own for LISTEN, from a one-connection pool opened from the
+// shared pool's configuration and hijacked, so it holds no shared connection. The caller closes it.
+// The delivery hub (api/delivery_live_hub.go) holds one for as long as it waits for notifications,
+// which is the life of the process: a connection of the shared pool held that long would be one
+// fewer for every request, and a LISTEN on a pooled connection would end when the pool recycled it.
+func (p *Pool) Listener(ctx context.Context) (*pgx.Conn, error) {
+	listen, err := p.separate(&p.listen, listenerPoolSize, "listener")
+	if err != nil {
+		return nil, err
+	}
+	conn, err := listen.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return conn.Hijack(), nil
+}
+
 // separate opens the pool held at field on demand, sized at size and copied from the shared
 // pool's configuration, and closes it with the shared pool. Each caller holds mu for the whole
 // check-and-open so two of them cannot open two pools, and one opened after Close would be a
@@ -259,14 +281,13 @@ func (p *Pool) Close() {
 		return
 	}
 	p.closed = true
-	rooms, health := p.rooms, p.health
-	p.rooms, p.health = nil, nil
+	rooms, health, listen := p.rooms, p.health, p.listen
+	p.rooms, p.health, p.listen = nil, nil, nil
 	p.mu.Unlock()
-	if rooms != nil {
-		rooms.Close()
-	}
-	if health != nil {
-		health.Close()
+	for _, separate := range []*pgxpool.Pool{rooms, health, listen} {
+		if separate != nil {
+			separate.Close()
+		}
 	}
 	p.pool.Close()
 }

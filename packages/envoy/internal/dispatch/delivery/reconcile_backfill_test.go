@@ -476,7 +476,7 @@ func TestBackfillRunsListsJobsOnlyForRunsWithoutStoredJobs(t *testing.T) {
 		}
 		if err := UpsertRunJobs(ctx, pool, "acme/widgets", id, []DeliveryRunJob{{
 			Repo: "acme/widgets", RunID: id, Name: "build", CompletedAt: &completed, Conclusion: new(DeliveryJobConclusionSuccess),
-		}}); err != nil {
+		}}, true); err != nil {
 			t.Fatalf("seed run %d's jobs: %v", id, err)
 		}
 	}
@@ -519,7 +519,7 @@ func TestBackfillRunsLeavesTheRegularStepAlone(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", id, err)
 		}
-		if err := UpsertRunJobs(ctx, pool, "acme/widgets", id, []DeliveryRunJob{{Repo: "acme/widgets", RunID: id, Name: "build"}}); err != nil {
+		if err := UpsertRunJobs(ctx, pool, "acme/widgets", id, []DeliveryRunJob{{Repo: "acme/widgets", RunID: id, Name: "build", CompletedAt: &completed}}, true); err != nil {
 			t.Fatalf("seed run %d's jobs: %v", id, err)
 		}
 	}

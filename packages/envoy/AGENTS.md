@@ -2056,6 +2056,15 @@ the synchronous listener call records the sent or failed attempt instead of blin
   listed from the merge base, so its `changed_paths` do not describe what it did to the head it
   replaced. Envoy forwards what GitHub sent; what counts as a handoff-only push is the Legion
   daemon's rule, not the listener's.
+- A workflow run with no pull request publishes `workflow.<file>.<action>`. A finished Actions job on
+  the default branch, of a run with no pull request, publishes `job.<run_id>.completed`: a completed
+  `check_run` that lists no pull request, from the GitHub Actions App, whose
+  `check_suite.head_branch` is the repository's `default_branch` and whose `details_url` names
+  `/actions/runs/<run_id>/job/<job_id>`. Its payload fields are `kind: "job"`, `repo`, `run_id`,
+  `job_id`, `name`, `status`, `conclusion`, `started_at`, `completed_at`, `head_sha` and `url` (the
+  job's page). A check run that lists a pull request goes to the CI store instead, and any other
+  check run or suite with no pull request (a merge queue's commit, a branch push) is published
+  nowhere.
 - Every other text a webhook payload copies from its body (a title, a ref, a path, a workflow name,
   a URL) is capped at 2,048 runes with a trailing `…` too (`maxEnvelopeTextRunes`; a comment's or
   review's body is cut there without one and says so in `body_truncated`), and so is every text a

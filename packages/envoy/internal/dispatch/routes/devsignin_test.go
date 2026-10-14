@@ -40,7 +40,8 @@ func newDevSignInRouterWithPeople(t *testing.T, serverURL string, sessions *memo
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	return New(ctx), people
+	handler, _ := New(ctx)
+	return handler, people
 }
 
 // devSignInRequest is a request as a browser on this machine sends it to the dashboard origin.
@@ -311,7 +312,7 @@ func TestDevSignInIsNotMountedByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
-	handler := New(ctx)
+	handler, _ := New(ctx)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, devSignInRequest(t, devSignInOrigin+"/auth/_dev/signin?login=alice"))
 	if response.Code != http.StatusNotFound || errorCodeOf(t, response) != "NOT_FOUND" {
