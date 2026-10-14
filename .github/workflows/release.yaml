@@ -932,7 +932,7 @@ jobs:
       (needs.changes.outputs.envoy_infra == 'true' || github.event_name == 'workflow_dispatch') &&
       (needs.pi_legion.result == 'success' || needs.pi_legion.result == 'skipped')
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`gh release create`, below); id-token and
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
     # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
@@ -947,27 +947,20 @@ jobs:
       - name: Determine next version
         id: version
         run: |
-          # Anyone who can push a tag names one (no ruleset guards envoy-infra-v*), and git accepts
-          # shell syntax in a tag name, so a version taken from one is used only when it is a plain
-          # X.Y.Z. Every later step reads the version and the tag through env:, never pasted into
-          # its script.
-          plain_version() { [[ $1 =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; }
-
-          # A tag already at this commit is a re-run of a run that pushed it, perhaps without its
-          # release: rebuild and release that version, as release-envoy-listener.yaml does, so the
-          # tag and release steps below take their reuse branches rather than the run skipping.
-          EXISTING_TAG=$(git tag --list 'envoy-infra-v*' --points-at HEAD --sort=-v:refname | head -1)
-          if [ -n "$EXISTING_TAG" ]; then
-            if ! plain_version "${EXISTING_TAG#envoy-infra-v}"; then
-              echo "::error::The tag $EXISTING_TAG at this commit is not envoy-infra-v<X.Y.Z>; refusing to release it"
-              exit 1
-            fi
+          # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
+          # HEAD, where the range below would be empty and skip the release it never finished.
+          # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
+          # not envoy-infra-vX.Y.Z): "Tag release" accepts its own tag at this commit and "Create
+          # GitHub release" reuses a published release and publishes a draft one. The job tags the
+          # commit it checked out and commits no bump, so `tagged` takes no package directory.
+          TAGGED=$(.github/scripts/release-push.sh tagged envoy-infra-v)
+          if [ -n "$TAGGED" ]; then
             {
-              echo "version=${EXISTING_TAG#envoy-infra-v}"
-              echo "release_tag=$EXISTING_TAG"
+              echo "version=${TAGGED#envoy-infra-v}"
+              echo "release_tag=$TAGGED"
               echo "skip=false"
             } >> "$GITHUB_OUTPUT"
-            echo "Ensuring release for existing tag $EXISTING_TAG"
+            echo "Releasing $TAGGED, already at HEAD"
             exit 0
           fi
 
@@ -984,11 +977,9 @@ jobs:
             echo "First release: envoy-infra-v${VERSION}"
             exit 0
           fi
+          # release-bump.sh refuses a previous version that is not X.Y.Z, since the newest tag's name
+          # is whatever its pusher chose.
           PREV_VERSION="${PREV_TAG#envoy-infra-v}"
-          if ! plain_version "$PREV_VERSION"; then
-            echo "::error::The newest envoy-infra-v* tag, $PREV_TAG, is not envoy-infra-v<X.Y.Z>; refusing to version from it"
-            exit 1
-          fi
           # The plugin renders grants from the Envoy packages it compiles in, so a commit to one of
           # them releases it; .github/scripts/check-envoy-infra-release-paths.sh holds these paths
           # to `go list -deps`. The notices script and the target list are runtime inputs of the
@@ -1105,30 +1096,12 @@ jobs:
           fi
           git tag "$TAG"
           git push origin "refs/tags/$TAG"
-      # A re-run can find this release already there. gh release create makes a draft, uploads every
-      # asset and only then publishes it, so a published release holds them all and is reused as
-      # is. A draft is what a job that died mid-upload leaves (gh release view finds drafts too), so
-      # this run uploads its own attested assets over it and publishes it.
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.version.outputs.release_tag }}
           VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
-            if [ "$is_draft" = true ]; then
-              echo "Release $TAG is an unpublished draft; uploading this run's assets and publishing it"
-              gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
-              gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
-            else
-              echo "Release $TAG already exists; reusing it"
-            fi
-          else
-            gh release create "$TAG" \
-              assets/* \
-              --repo "$GITHUB_REPOSITORY" \
-              --title "envoy-infra v$VERSION" \
-              --generate-notes \
-              --verify-tag
-          fi
+        # release-push.sh `release`: creates the release, reuses a published one, or publishes a
+        # draft an earlier attempt left, with this run's assets.
+        run: .github/scripts/release-push.sh release "$TAG" "envoy-infra v$VERSION" assets/*
