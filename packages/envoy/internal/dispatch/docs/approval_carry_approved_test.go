@@ -8,10 +8,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
-	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // The version the human approved holds one block id twice: the agent named it while the live tree
@@ -28,38 +26,10 @@ import (
 // enough that settlement does not run between the steps and repair or version the repeat on its
 // own.
 func TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
-	const spec = "Context\n\n:::ask{#region urgency=\"low\" multiple=\"false\"}\nWhich region goes first?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"
-	database := storetest.Open(t)
-	artifactID := createDocument(t, database, spec)
-	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Second})
-	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
-	seedServiceText(t, service, artifactID, spec)
-	// Settlement indexes the block as an ask of this document, the row the carry reads.
-	service.ScheduleSettlement(artifactID)
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		var rows int
-		if err := database.Pool.QueryRow(context.Background(), `select count(*) from asks where block_artifact_id = $1 and block_id = 'region'`, artifactID).Scan(&rows); err != nil {
-			t.Fatal(err)
-		}
-		if rows == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("settlement did not index the block")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	database, service, artifactID := seededRegionDocument(t, time.Second)
 	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 
-	editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-		second, err := pmdoc.Parse(":::ask{#region urgency=\"low\" multiple=\"false\"}\nWhich region goes last?\n\n- North: The cold one.\n:::\n")
-		if err != nil {
-			t.Fatal(err)
-		}
-		tree.Children = append(tree.Children, second.Children...)
-		return tree
-	})
+	editLiveTree(t, service, artifactID, appendSecondRegionAsk(t))
 	joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
 		_, err := service.NamedVersion(ctx, artifactID, "Named by the agent with the repeat", agent)
 		return err

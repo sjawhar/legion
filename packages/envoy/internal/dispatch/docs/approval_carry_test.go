@@ -588,46 +588,59 @@ func answerBlockAs(t *testing.T, service *Service, artifactID, blockID, login st
 	})
 }
 
+// regionSpec is the one-block document the repeated-block-id carry tests decide and then repeat:
+// a single ask under the block id region.
+const regionSpec = "Context\n\n:::ask{#region urgency=\"low\" multiple=\"false\"}\nWhich region goes first?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"
+
+// seededRegionDocument creates regionSpec as a document, starts a service that settles a live
+// write after settle, seeds the document's live text with the same markdown, and returns the
+// store, the service and the document's id once settlement has indexed the block as an ask of the
+// document - the row the carry reads.
+func seededRegionDocument(t *testing.T, settle time.Duration) (*store.Store, *Service, string) {
+	t.Helper()
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, regionSpec)
+	service := New(Deps{Store: database, Events: events.NewBroker(), Settle: settle})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	seedServiceText(t, service, artifactID, regionSpec)
+	// Settlement indexes the block as an ask of this document, the row the carry reads.
+	service.ScheduleSettlement(artifactID)
+	waitFor(t, 3*time.Second, "settlement to index the block", func() bool {
+		var rows int
+		if err := database.Pool.QueryRow(context.Background(), `select count(*) from asks where block_artifact_id = $1 and block_id = 'region'`, artifactID).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows == 1
+	})
+	return database, service, artifactID
+}
+
+// appendSecondRegionAsk is the live-tree edit of a document-socket peer that writes a second ask
+// node under the block id region, leaving the tree holding that id twice.
+func appendSecondRegionAsk(t *testing.T) func(*pmdoc.Node) *pmdoc.Node {
+	t.Helper()
+	return func(tree *pmdoc.Node) *pmdoc.Node {
+		second, err := pmdoc.Parse(":::ask{#region urgency=\"low\" multiple=\"false\"}\nWhich region goes last?\n\n- North: The cold one.\n:::\n")
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree.Children = append(tree.Children, second.Children...)
+		return tree
+	}
+}
+
 // A version named from the live tree while it holds two ask nodes under one decided block id - a
 // second node a document-socket peer wrote with the id of the block the human answered - carries
 // nothing: one node per id is the first thing the carry holds a version to, before any node is
 // read. The same version without the repeat carries, so the repeat alone is what refuses.
 func TestAVersionHoldingARepeatedBlockIDCarriesNothing(t *testing.T) {
-	const spec = "Context\n\n:::ask{#region urgency=\"low\" multiple=\"false\"}\nWhich region goes first?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"
 	run := func(t *testing.T, repeat bool) (reviews, approvals int) {
-		database := storetest.Open(t)
-		artifactID := createDocument(t, database, spec)
-		service := New(Deps{Store: database, Events: events.NewBroker(), Settle: 20 * time.Millisecond})
-		t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
-		seedServiceText(t, service, artifactID, spec)
-		// Settlement indexes the block as an ask of this document, the row the carry reads.
-		service.ScheduleSettlement(artifactID)
-		deadline := time.Now().Add(3 * time.Second)
-		for {
-			var rows int
-			if err := database.Pool.QueryRow(context.Background(), `select count(*) from asks where block_artifact_id = $1 and block_id = 'region'`, artifactID).Scan(&rows); err != nil {
-				t.Fatal(err)
-			}
-			if rows == 1 {
-				break
-			}
-			if time.Now().After(deadline) {
-				t.Fatal("settlement did not index the block")
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+		database, service, artifactID := seededRegionDocument(t, 20*time.Millisecond)
 		approveStoredVersion(t, database, artifactID, 1, "alice")
 
 		answerBlockAs(t, service, artifactID, "region", "alice", []string{"East"})
 		if repeat {
-			editLiveTree(t, service, artifactID, func(tree *pmdoc.Node) *pmdoc.Node {
-				second, err := pmdoc.Parse(":::ask{#region urgency=\"low\" multiple=\"false\"}\nWhich region goes last?\n\n- North: The cold one.\n:::\n")
-				if err != nil {
-					t.Fatal(err)
-				}
-				tree.Children = append(tree.Children, second.Children...)
-				return tree
-			})
+			editLiveTree(t, service, artifactID, appendSecondRegionAsk(t))
 		}
 		joined(t, service, func(ctx context.Context, tx pgx.Tx) error {
 			_, err := service.NamedVersion(ctx, artifactID, "Named by the agent", model.Actor{Kind: "session", ID: "session-0123456789abcdef"})
