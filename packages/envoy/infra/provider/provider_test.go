@@ -2,6 +2,8 @@ package provider_test
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -107,11 +109,9 @@ func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
 
 	// Generated SDKs append Args to an object type's name for its input type.
 	require.Equal(t, "#/types/envoy-infra:aws:Authorization", nats.InputProperties["authorization"].Ref)
-	var awsTypes []string
-	for token := range schema.Types {
-		if strings.HasPrefix(token, "envoy-infra:aws:") {
-			awsTypes = append(awsTypes, token)
-		}
-	}
-	require.ElementsMatch(t, []string{"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:aws:Rules"}, awsTypes)
+	// The schema's types are exactly the two components' own.
+	require.ElementsMatch(t, []string{
+		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
+		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:aws:Rules",
+	}, slices.Collect(maps.Keys(schema.Types)))
 }
