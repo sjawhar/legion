@@ -1,15 +1,12 @@
 package core
 
 import (
-	"encoding/base32"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/nats-io/nkeys"
 )
 
 // User is one nkey user of a NATS server's authorization block.
@@ -35,12 +32,6 @@ type Authorization struct {
 }
 
 var userName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$`)
-
-// userKeyText is a user public key's text: the U of its prefix byte and 55 more base32 characters,
-// 35 bytes in all.
-var userKeyText = regexp.MustCompile(`^U[A-Z2-7]{55}$`)
-
-var userKeyEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // Validate refuses an authorization nats-server would read otherwise than its fields say. Every
 // refusal names the user, by index and name, and the field.
@@ -118,18 +109,6 @@ func (a Authorization) Validate() error {
 		return nil
 	}
 	return fmt.Errorf("noAuthUser %q names no user", a.NoAuthUser)
-}
-
-// IsUserPublicKey reports whether key is a user public key: U and 55 base32 characters, whose 35
-// bytes are the user prefix byte, the key and a valid CRC-16/XMODEM checksum. nkeys alone
-// (IsValidPublicUserKey) reads more than that: its base32 decoder skips line breaks, it takes a key
-// of any length, and it masks the prefix byte's low three bits.
-func IsUserPublicKey(key string) bool {
-	if !userKeyText.MatchString(key) || !nkeys.IsValidPublicUserKey(key) {
-		return false
-	}
-	raw, err := userKeyEncoding.DecodeString(key)
-	return err == nil && raw[0] == byte(nkeys.PrefixByteUser)
 }
 
 // validate refuses rules nats-server would read otherwise than they say: an empty allow list,

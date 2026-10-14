@@ -32,7 +32,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
+| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); and `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`). |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `internal/providers/` | `Require`, the providers check. |

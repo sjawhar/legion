@@ -97,7 +97,9 @@ func lenientKeys(t *testing.T) map[string]string {
 }
 
 // crc16XMODEM is the nkeys checksum, written out here so a test can build a key nkeys would make
-// no other way.
+// no other way. It stays independent of core's own, which is unexported: lenientKeys checks every
+// key it builds against nkeys itself, so this copy is held to nkeys rather than to the code under
+// test.
 func crc16XMODEM(data []byte) uint16 {
 	var crc uint16
 	for _, b := range data {
