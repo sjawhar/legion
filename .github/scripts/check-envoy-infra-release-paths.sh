@@ -69,12 +69,12 @@ def relative(path: str) -> str:
 # The repository's own modules: those the module's go.work binds, as `go list -m` names them. Their
 # go.mod and go.sum, and the go.work and go.work.sum binding them, set the versions the build uses.
 modules = {}
-for line in go("list", "-m", "-f", "{{.Path}}\t{{.Dir}}\t{{.GoMod}}"):
-    path, directory, gomod = line.split("\t")
-    modules[path] = (relative(directory), relative(gomod))
+for line in go("list", "-m", "-f", "{{.Path}}\t{{.GoMod}}"):
+    path, gomod = line.split("\t")
+    modules[path] = relative(gomod)
 
 required: dict[str, str] = {}
-for module_path, (_, gomod) in modules.items():
+for module_path, gomod in modules.items():
     required[gomod] = f"{module_path}'s go.mod"
     gosum = Path(gomod).with_name("go.sum")
     if gosum.is_file():

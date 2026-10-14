@@ -3,6 +3,8 @@ package api
 import (
 	"net/http"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // Snoozing an Inbox row is a human's own view state, like the Agents page's Clear: the ask
@@ -16,8 +18,8 @@ import (
 //
 // The row is keyed on the canonical login, not on the actor id: rows written before every
 // identity lowercased the person it names can carry another casing of the same email, so keying
-// on the actor id raw could give one person two snooze sets. canonicalLogin is the form issues
-// store assignees in and the form inboxAssigneeFilter compares against.
+// on the actor id raw could give one person two snooze sets. model.CanonicalLogin is the form
+// issues store assignees in and the form inboxAssigneeFilter compares against.
 
 // userAskSnooze is one row's snooze for the calling human: when the Inbox stops folding it
 // away. The Inbox's "Until I clear it" is this timestamp set far enough out that only the
@@ -68,7 +70,7 @@ func (s *server) putAskSnooze(w http.ResponseWriter, r *http.Request) {
 		select $1, id, $3 from asks where id = $2
 		on conflict (login, ask_id) do update set snoozed_until = excluded.snoozed_until
 		returning snoozed_until
-	`, canonicalLogin(actor.ID), askID, snoozedUntil).Scan(&stored); err != nil {
+	`, model.CanonicalLogin(actor.ID), askID, snoozedUntil).Scan(&stored); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -90,7 +92,7 @@ func (s *server) deleteAskSnooze(w http.ResponseWriter, r *http.Request) {
 	// the same 204 rather than a 404 the reader could do nothing with.
 	if _, err := s.deps.Store.Pool.Exec(r.Context(), `
 		delete from user_ask_snooze where login = $1 and ask_id = $2
-	`, canonicalLogin(actor.ID), askID); err != nil {
+	`, model.CanonicalLogin(actor.ID), askID); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}

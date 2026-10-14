@@ -61,6 +61,7 @@ import { AskThread } from "./AskThread";
 import { AskThreadDisclosure } from "./AskThreadDisclosure";
 import { askTurnLabel } from "./ask-turn";
 import { URGENCY_LABELS } from "./ask-urgency";
+import { EarlierApproval } from "./EarlierApproval";
 import { clearReplyDraft } from "./reply-drafts";
 import { useAskAnswerForm } from "./useAskAnswerForm";
 
@@ -515,6 +516,12 @@ export function AskCard({
           <div className={`text-[15px] leading-relaxed font-medium ${textPrimaryOnSurface}`}>
             <MarkdownBody markdown={displayedAsk.question} />
           </div>
+        )}
+        {/* A request to approve again names the approval it follows, under the question (the
+            spec's own placement), with the diff from that version behind Show diff; a first
+            request carries no earlier approval, and EarlierApproval renders nothing for it. */}
+        {displayedAsk.approval === undefined ? null : (
+          <EarlierApproval approval={displayedAsk.approval} />
         )}
         {/* One provenance line under the question, in the spec's decided conversation grammar:
             whose turn it is (the only part a reader acts on), who asked, when, and the ask's

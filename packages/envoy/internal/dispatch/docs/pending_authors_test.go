@@ -80,7 +80,7 @@ func editAsConnectedPeer(t *testing.T, service *Service, artifactID string, conn
 // waitForLandedAppends waits until every update the room has recorded is durable.
 func waitForLandedAppends(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), untilTestDeadline(t))
+	ctx, cancel := context.WithTimeout(context.Background(), roomWait(t))
 	defer cancel()
 	if err := service.waitForPendingUpdates(ctx, artifactID); err != nil {
 		t.Fatalf("wait for the room's updates to reach persistence: %v", err)
@@ -96,7 +96,7 @@ func waitForLandedAppends(t *testing.T, service *Service, artifactID string) {
 func awaitAppendLandedOrQueued(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
 	ctx := context.Background()
-	deadline := time.Now().Add(untilTestDeadline(t))
+	deadline := time.Now().Add(roomWait(t))
 	for time.Now().Before(deadline) {
 		if !service.hasPendingUpdates(artifactID) &&
 			(!service.hasDurableAppend(artifactID) || lockWaits(t, ctx, service.store, "%pg_advisory_lock(hashtext%") > 0) {
@@ -689,6 +689,7 @@ func TestAFailedUploadLeavesItsRoomsHeldUpdatesAsTheyWere(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin the failing upload: %v", err)
 	}
+	defer tx.Rollback(ctx)
 	joined, ledger := taskA.Join(ctx, refusedCommitTx{Tx: tx})
 	const uploaded = "First.\n\nSecond, uploaded on task A.\n"
 	uploader := model.Actor{Kind: "session", ID: "uploader-on-task-a"}
@@ -892,6 +893,7 @@ func TestADiscardedNamedVersionMarksNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin the discarded version: %v", err)
 	}
+	defer tx.Rollback(ctx)
 	joined, ledger := service.Join(ctx, tx)
 	discarded, err := service.NamedVersion(joined, artifactID, "discarded", model.Actor{Kind: "session", ID: "discarded-session"})
 	service.afterReadWarm = nil
@@ -966,7 +968,7 @@ func TestAnEvictionDuringAVersionsCommitListsItsAuthorOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("evict the room: %v", err)
 		}
-	case <-time.After(untilTestDeadline(t)):
+	case <-time.After(roomWait(t)):
 		t.Fatal("the eviction did not finish")
 	}
 	waitFor(t, 30*time.Second, "alice's append to land", func() bool {
@@ -1016,7 +1018,7 @@ func TestTwoVersionsBeforeAnAppendAsksForTheLockListItsAuthorOnce(t *testing.T) 
 	editAsConnectedPeer(t, service, artifactID, 1, bob, appendBlocks(t, "Bob's paragraph.\n"))
 	select {
 	case <-entered:
-	case <-time.After(untilTestDeadline(t)):
+	case <-time.After(roomWait(t)):
 		t.Fatal("bob's append never reached the store")
 	}
 	v1 := commitNamedVersion(t, service, artifactID, first)

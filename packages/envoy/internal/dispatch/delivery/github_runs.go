@@ -33,7 +33,8 @@ type FetchedRun struct {
 	RunID        int64
 	HeadSHA      string
 	HeadCommitAt time.Time
-	StartedAt    time.Time
+	StartedAt    time.Time // GitHub's run_started_at (created_at when it sends none): a re-run's start
+	CreatedAt    time.Time // GitHub's created_at, which a re-run keeps
 	CompletedAt  *time.Time
 	Conclusion   *string
 	PRNumber     *int // non-nil only when GitHub associates the run with exactly one pull request
@@ -97,6 +98,7 @@ func fetchedRunFromItem(item workflowRunItem) FetchedRun {
 		RunID:      item.ID,
 		HeadSHA:    item.HeadSHA,
 		StartedAt:  item.CreatedAt,
+		CreatedAt:  item.CreatedAt,
 		Conclusion: item.Conclusion,
 		URL:        item.HTMLURL,
 		HeadBranch: nonEmpty(item.HeadBranch),
@@ -273,6 +275,18 @@ func DecodeJobsPage(body []byte) ([]FetchedJob, int, error) {
 		jobs[i] = FetchedJob{Name: j.Name, StartedAt: j.StartedAt, CompletedAt: j.CompletedAt, Conclusion: j.Conclusion}
 	}
 	return jobs, payload.TotalCount, nil
+}
+
+// StoredRun is a fetched run as intake, the reconcile and its backfills store it (UpsertRun), its
+// GitHub conclusion mapped to the schema's (mapRunConclusionPtr).
+func StoredRun(repo string, kind DeliveryRunKind, run FetchedRun) DeliveryRun {
+	createdAt := run.CreatedAt
+	return DeliveryRun{
+		Repo: repo, RunID: run.RunID, Kind: kind, PRNumber: run.PRNumber, HeadSHA: run.HeadSHA,
+		HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CreatedAt: &createdAt, CompletedAt: run.CompletedAt,
+		Conclusion: mapRunConclusionPtr(run.Conclusion), URL: run.URL,
+		HeadBranch: run.HeadBranch, Event: run.Event,
+	}
 }
 
 // RunJobs is one run's fetched jobs as intake and the reconcile store them (UpsertRunJobs), each

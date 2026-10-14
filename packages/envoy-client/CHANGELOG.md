@@ -4,6 +4,14 @@
 
 ### Changed
 
+- Every text that says when to request approval again states the carried approval (LEGION-573):
+  a human's own answer to a decision block carries their approval to the version it writes when
+  that answer is the whole change since the version they approved, so nothing is requested for
+  it; a change outside the decision blocks makes the approval stale, and the request that follows
+  carries a `--summary` naming what changed since the earlier approval. A stale approval's line
+  in a document read, `dispatch request-approval`'s refusal while a decision block is open (its
+  answered-block line says to wait for the version, no longer to request again) and its two
+  result texts say so.
 - **Breaking:** Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
   `resolveDispatchConfig`, `activeDispatchConfig` and `DispatchConfigOptions` are gone. A caller
   reads Dispatch with `sessionDispatchSettings(file, env, { cwd })` over the file

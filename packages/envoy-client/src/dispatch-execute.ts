@@ -1216,7 +1216,7 @@ function approvalLine(artifact: Pick<Artifact, "approval">): string | undefined 
     case "approved":
       return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
     case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again once the human has agreed to every point in this version`;
+      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, changed since (now v${approval.latest_version}) - the human's own answer to a decision block carries the approval when that answer is the whole change since v${approval.version}; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v${approval.version}`;
     case "changes_requested":
       return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
   }
@@ -1912,7 +1912,7 @@ async function refuseOpenDecisionBlocks(
   // waived one (resolved) gets the decision written in.
   const stillOpen = (named: string, state: string): string =>
     state === "answered"
-      ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait, then request again`
+      ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait for that version`
       : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
@@ -1963,7 +1963,7 @@ async function refuseOpenDecisionBlocks(
     [
       `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, it settles into a version on its own in about two seconds; wait, then request again. Edit the document only where the answer changes design text outside the block, never to restate it. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, it settles into a version on its own in about two seconds. When the human approved an earlier version and their answer is the whole change since it, Dispatch carries the approval to the new version in their name: request nothing. When the answer changes design text outside the block, rewrite that text (never to restate the answer), then request approval again once the human has agreed to every point in the new version, with a one-sentence --summary naming what changed since the earlier approval. On a document nobody has approved, wait for that version, then request. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason), write their decision into the text with dispatch doc-edit, then request approval again once the human has agreed to every point in the new version. The call opens the request, or hands an open one back to the human.",
     ].join("\n")
   );
 }
@@ -3144,7 +3144,7 @@ export async function executeDispatchTool(
       });
       if (result.ask === null) {
         return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version, once the human has agreed to every point in it.`,
+          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. A change outside the decision blocks after approval makes it stale, so request again only for such a version, once the human has agreed to every point in it, with a --summary naming what changed since version ${result.version}; the human's own answer to a decision block carries the approval when that answer is the whole change.`,
           details: {
             ...(resolved.owner.kind === "project"
               ? documentResultDetails(resolved.artifact)
@@ -3161,7 +3161,7 @@ export async function executeDispatchTool(
         ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
         : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and a change outside the decision blocks after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one, with a --summary naming what changed since the earlier approval. The human's own answer to a decision block carries the approval when that answer is the whole change since the approved version, and answers an open request Approve in their name: request nothing then.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }

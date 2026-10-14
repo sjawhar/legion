@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,20 +51,27 @@ func SmokeImage(t testing.TB) string {
 const DockerPluginEnv = "ENVOY_INFRA_DOCKER_PLUGIN"
 
 var (
-	mainRuns bool
-	homeOnce sync.Once
-	home     string
-	homeErr  error
+	mainRuns   bool
+	homeOnce   sync.Once
+	home       string
+	homeErr    error
+	pluginOnce sync.Once
+	pluginDir  string
+	pluginErr  error
 )
 
-// Main runs the package's tests, then removes the PULUMI_HOME they shared, and returns the exit
-// code. A package whose tests use NewCLI calls it from TestMain: os.Exit(pulumitest.Main(m)).
+// Main runs the package's tests, then removes the PULUMI_HOME and the plugin build they shared,
+// and returns the exit code. A package whose tests use NewCLI or Plugin calls it from TestMain:
+// os.Exit(pulumitest.Main(m)).
 func Main(m *testing.M) int {
 	mainRuns = true
 	code := m.Run()
-	if home != "" {
-		if err := os.RemoveAll(home); err != nil {
-			fmt.Fprintf(os.Stderr, "remove the tests' PULUMI_HOME %s: %v\n", home, err)
+	for _, shared := range []struct{ what, dir string }{{"PULUMI_HOME", home}, {"plugin build", pluginDir}} {
+		if shared.dir == "" {
+			continue
+		}
+		if err := os.RemoveAll(shared.dir); err != nil {
+			fmt.Fprintf(os.Stderr, "remove the tests' %s %s: %v\n", shared.what, shared.dir, err)
 			if code == 0 {
 				code = 1
 			}
@@ -72,15 +80,21 @@ func Main(m *testing.M) int {
 	return code
 }
 
+// requireMain fails the test when no TestMain calls Main, which removes what the tests share.
+func requireMain(t testing.TB) {
+	t.Helper()
+	if !mainRuns {
+		t.Fatal("pulumitest: call os.Exit(pulumitest.Main(m)) from the package's TestMain, " +
+			"which removes the PULUMI_HOME and the plugin build the tests share")
+	}
+}
+
 // pulumiHome returns the test binary's PULUMI_HOME, made on first use with the docker plugin
 // DockerPluginEnv names installed. It fails the test when that input is unset or the install
 // fails, and when no TestMain calls Main, which removes the home.
 func pulumiHome(t testing.TB) string {
 	t.Helper()
-	if !mainRuns {
-		t.Fatal("pulumitest: call os.Exit(pulumitest.Main(m)) from the package's TestMain, " +
-			"which removes the PULUMI_HOME the tests share")
-	}
+	requireMain(t)
 	homeOnce.Do(func() { home, homeErr = newHome() })
 	if homeErr != nil {
 		t.Fatal(homeErr)
@@ -111,17 +125,32 @@ func newHome() (string, error) {
 // PluginName is the plugin binary's file name, which Pulumi looks for in a plugin directory.
 const PluginName = "pulumi-resource-envoy-infra"
 
-// Plugin builds the plugin from this module into a directory of its own and returns the binary's
-// path.
+// Plugin returns the path of the plugin binary, built from this module on the test binary's first
+// call into a directory of its own, which Main removes. Every test gets that one build: a program
+// only reads the binary through its plugin path, and nothing writes beside it.
 func Plugin(t testing.TB) string {
 	t.Helper()
-	bin := filepath.Join(t.TempDir(), PluginName)
-	build := exec.Command("go", "build", "-ldflags", "-X main.version=0.0.1", "-o", bin,
+	requireMain(t)
+	pluginOnce.Do(func() { pluginDir, pluginErr = buildPlugin() })
+	if pluginErr != nil {
+		t.Fatal(pluginErr)
+	}
+	return filepath.Join(pluginDir, PluginName)
+}
+
+// buildPlugin builds the plugin into a temporary directory. It returns the directory even when
+// the build fails, so Main removes it.
+func buildPlugin() (string, error) {
+	dir, err := os.MkdirTemp("", "envoy-infra-plugin-")
+	if err != nil {
+		return "", fmt.Errorf("make the plugin's directory: %w", err)
+	}
+	build := exec.Command("go", "build", "-ldflags", "-X main.version=0.0.1", "-o", filepath.Join(dir, PluginName),
 		"github.com/sjawhar/envoy/infra/cmd/pulumi-resource-envoy-infra")
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build the plugin: %v\n%s", err, out)
+		return dir, fmt.Errorf("build the plugin: %v\n%s", err, out)
 	}
-	return bin
+	return dir, nil
 }
 
 // CLI runs pulumi in one directory, on a file backend of its own.
@@ -203,9 +232,7 @@ func (s *Stack) SetProgram(program map[string]any) {
 			map[string]any{"name": "envoy-infra", "path": filepath.Dir(s.plugin)},
 		}},
 	}
-	for k, v := range program {
-		project[k] = v
-	}
+	maps.Copy(project, program)
 	b, err := json.MarshalIndent(project, "", "  ")
 	if err != nil {
 		s.t.Fatalf("render Pulumi.yaml: %v", err)
@@ -215,7 +242,8 @@ func (s *Stack) SetProgram(program map[string]any) {
 	}
 }
 
-// URN returns the URN of the root-level resource name of type typ in this stack.
+// URN returns the URN of the resource name of type typ in this stack: a root-level resource's
+// type, or a child's written <parent type>$<type>.
 func (s *Stack) URN(typ, name string) string {
 	return "urn:pulumi:" + stackName + "::" + s.project + "::" + typ + "::" + name
 }
@@ -259,7 +287,6 @@ func (s *Stack) Preview() []Step {
 type Resource struct {
 	URN      string `json:"urn"`
 	Type     string `json:"type"`
-	Parent   string `json:"parent"`
 	Provider string `json:"provider"` // <provider URN>::<provider ID>
 }
 

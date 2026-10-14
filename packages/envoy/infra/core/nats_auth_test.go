@@ -379,12 +379,11 @@ func requireViolation(t *testing.T, conn *natsgo.Conn, errs <-chan error, want s
 
 // The rendered block, as a server's whole configuration, on both the 2.10 image and the hub's.
 func TestRenderedAuthorizationOnRealServers(t *testing.T) {
-	images := []struct{ name, ref string }{{"2.10", testnats.Image}, {"hub", testnats.HubImage}}
-	for _, image := range images {
-		t.Run(image.name, func(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
 			t.Run("without a fallback", func(t *testing.T) {
 				users := newLiveUsers(t, false)
-				_, uri := testnats.StartImageConfig(t, image.ref, users.render(t), []string{"-js"}, false)
+				_, uri := testnats.StartImageConfig(t, image.Ref, users.render(t), []string{"-js"}, false)
 
 				t.Run("a client with its user's seed connects", func(t *testing.T) {
 					conn, _ := connect(t, uri, users.listenerSeed)
@@ -421,7 +420,7 @@ func TestRenderedAuthorizationOnRealServers(t *testing.T) {
 			})
 			t.Run("with a fallback, a client with no credential has the fallback's grant", func(t *testing.T) {
 				users := newLiveUsers(t, true)
-				_, uri := testnats.StartImageConfig(t, image.ref, users.render(t), []string{"-js"}, true)
+				_, uri := testnats.StartImageConfig(t, image.Ref, users.render(t), []string{"-js"}, true)
 				conn, errs := connect(t, uri, "")
 				require.NoError(t, conn.Publish("fallback.allowed", nil))
 				require.NoError(t, conn.Publish("envoy.example.listener-only", nil))

@@ -138,8 +138,12 @@ The block becomes an ask in the person's Inbox, and their answer lands next to i
 
 When every decision block is settled and the spec proposes something the person has not already
 agreed to, run `dispatch request-approval` with a short `--summary` of what is new. The person
-approves that version, or requests changes with a reason. Any later version makes the approval
-stale.
+approves that version, or requests changes with a reason. A later version leaves the approval
+stale, with one exception: when the person's own answer to a decision block is the whole change
+since the version they approved, Dispatch records the approval in their name at the new version, so
+request nothing for it. When their answer changes text outside the block, rewrite that text and
+request approval again with a one-sentence `--summary` naming what changed since the earlier
+approval; the card shows that approval and a **Show diff** control that carries the detail.
 
 ## Whose turn it is
 

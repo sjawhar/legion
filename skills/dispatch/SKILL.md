@@ -213,11 +213,11 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 ## Asking
 
 Two kinds of question reach a human. A decision about the design a document records is a decision
-block in that document ([Decision blocks](#decision-blocks)), whatever phase the work is in and
-whether or not the document was approved: a block in an approved document makes the approval
-stale, which is right. A Legion phase worker sends such a decision to its architect, which writes
-the block (`skill://legion-worker`). A to-do or permission only a human can give, or a decision
-with no document to live in, is a `dispatch ask`. The gates below apply to both.
+block in that document ([Decision blocks](#decision-blocks)), at every phase, approved or not: a
+block in an approved document leaves the approval stale until the answer, which carries it
+forward when it is the whole change (below). A Legion phase worker sends it to its architect,
+which writes the block (`skill://legion-worker`). A to-do or permission only a human can give, or
+a decision with no document to live in, is a `dispatch ask`. The gates below apply to both.
 
 ### Before you ask
 
@@ -368,33 +368,33 @@ See [Following](#following) for why you receive what happens to asks you open an
 ## Approval of a spec
 
 Approval is a property of a document, not a question you phrase: a human approves a specific
-version, the way a pull-request review approves a commit, and any later version makes that
-approval stale. A later version also moves an open request to that version and leaves it waiting
-on you until you request again, which hands the same request back to the human. Answering a
-decision block writes a new version, so request approval only when all three hold: every decision
-block is settled, which means answered or waived as the next paragraph
-says; the human has agreed to every point in the spec; and the current version has not been
-approved. A Legion root spec under an armed design gate always goes to approval once all three
-hold (`skill://legion-architect`).
+version, the way a pull-request review approves a commit, and a later version leaves that approval
+stale, unless the human's own answer to a decision block is the whole change since the version
+they approved; then Dispatch records an `approved` review in their name at that version and emits
+`artifact.approved`, so request nothing. When the answer changes text outside its block, rewrite
+that text, run the fresh reader below on it and request again. A later version also moves an open
+request with it, waiting on you until you request again. Request only when all three hold: every
+decision block is settled (answered or waived, below); the human has agreed to every point in the
+spec; and the current version has not been approved. A Legion root spec under an armed design gate
+always goes to approval once all three hold (`skill://legion-architect`).
 
 Before calling `dispatch request-approval`, have a fresh read-only reader check the current spec
-against the code and the human's words, then resolve every finding. A Legion architect uses its
-`plan-gap-analyst`; another session uses the read-only reader its host supplies.
-
-When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
-the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
-request it and do not hold it silently: name each open block and ask them to answer it or waive
-it. For a waiver, close the block with `dispatch resolve-ask --kind resolved` (their words as
-`--reason`), then write their decision into the text in their words and request.
-`dispatch request-approval` refuses while any block is open.
+against the code and the human's words, then resolve every finding. A Legion architect uses
+`plan-gap-analyst`, another session the read-only reader its host supplies. When all three hold,
+request in the pass that finishes the spec: a design waiting with nothing in the human's Inbox
+waits on nobody. When a human asks for approval while a block is open, neither request it nor hold
+it silently: name each open block and ask them to answer or waive it. For a waiver, close it with
+`dispatch resolve-ask --kind resolved` (their words as `--reason`), write their decision into the
+text in their words and request. `dispatch request-approval` refuses while any block is open.
 
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
 block first, with your recommendation, or, when it is a choice you can make yourself
 ([Before you ask](#before-you-ask), gate 1) and the human will not want a say in it, comes out of
 the spec and is made where the work happens; an inference you cannot defend in a decision block
 comes out of the spec. `--summary` says in one to three sentences what the human is approving and
-nothing else: no commentary on itself or on the conversation, and no open question. The Inbox
-shows it after "Approve spec.md (version N)?". Never write "Approve" options into an ordinary
+nothing else: no commentary on itself or on the conversation, and no open question; after an
+earlier approval, one sentence naming what changed since it, since the card shows that approval
+and its `Show diff` control carries the detail. Never write "Approve" options into an ordinary
 `dispatch ask`; only humans approve. The call, its result and its answer:
 [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 

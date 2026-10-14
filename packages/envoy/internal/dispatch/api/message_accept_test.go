@@ -330,7 +330,7 @@ func TestAcceptRefusesEveryAttemptThatIsNotAPersonsFreshLatestDeliveryToThisSess
 
 // A person's own retry of their direct message is still their turn when their name reaches
 // Dispatch cased differently from the first send: an email names one person however it is cased,
-// as canonicalLogin compares it, so the accept's check that the requester is the message's author
+// as model.CanonicalLogin compares it, so the accept's check that the requester is the message's author
 // compares people the same way.
 func TestAcceptTakesTheAuthorsOwnRetryHoweverTheirLoginIsCased(t *testing.T) {
 	handler, database, root, _, _ := directConversationFrom(t, "Alice")

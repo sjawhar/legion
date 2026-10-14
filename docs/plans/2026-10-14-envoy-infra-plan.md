@@ -160,7 +160,6 @@ Rejected, with the reason:
 | 2 | a new PR stacked on #1946 (gh-stack), branch `envoy-infra-core` | `envoy-infra seed check` and `verify --store aws-secrets-manager` read an existing deployment's live seed and print the reference script's lines | Task 1.1 on `envoy-infra` |
 | 3 | a new PR stacked on slice 2's (gh-stack, linear: `envoy-infra` ← `envoy-infra-core` ← `envoy-infra-aws`) | the existing AWS deployment's staging, production and dispatch previews show no diff with its NATS service and webhook listener built by `envoy-infra:aws:NatsService` and `aws:WebhookListener` | Tasks 2.1 and 2.2 |
 | 4 | a plain PR based on `envoy-infra-core`, outside the gh-stack (gh-stack is strictly linear), which merges `main` once slice 2 merges and is then retargeted; branch `envoy-infra-gcp` | `envoy-infra seed generate --store gcp-secret-manager` writes a seed; `envoy-infra:gcp:NatsHub` serves NATS on GCE over a tailnet | Tasks 2.1 and 2.2 |
-| 1.7 (only under the dotfiles plan's seed option A) | a plain PR on `main` after #1946 merges, released as the next minor version (a new input) | `host:Listener` runs a healthy listener whose seed it reads from a host file through a read-only bind mount | slice 1 merged and released |
 
 A stacked branch takes its lower layer's later commits by merging it (`git merge origin/<lower>`,
 then a fast-forward push), never by a rebase and a force push: each PR squash-merges, so the merge
@@ -442,9 +441,11 @@ Resources, all with `pulumi.Parent(comp)`, registered only after `providers.Requ
 | `<name>-watchdog` (only with `watchdog`) | `remote.Command` | `Connection: {Host: watchdog.host}`; `Create` and `Delete`: the Docker-host program's texts (`watchdog.ts:121-162`), byte for byte, with the env file built from the container's envs, the image reference, the port in `healthcheck_cmd` (`watchdog.ts:40`) and the component's name in the closing `echo` (`:155`) | `DependsOn(container)`, alias from `adopt.watchdog` |
 
 Refusals, each an error naming the input: `watchdog` with a `containerName` other than
-`envoy-listener` (R5); `watchdog` with `seed` (R10); a `watchdog.host` containing `@` or `://`; these
-before any registration. A `natsUrls` element `core.ListenerEnv` refuses fails the update, from the
-`ApplyT` that computes the envs.
+`envoy-listener` (R5); `watchdog` with `seed` (R10); a `watchdog.host` containing `@` or `://`; and
+what `core.ListenerConfig.CheckPlain` refuses of the fields known at construct (a blank
+`machineId`, a port outside 1-65535, a `hostBridge` with surrounding whitespace); all before any
+registration. A `natsUrls` element `core.ListenerEnv` refuses fails the update, from the `ApplyT`
+that computes the envs. `aws:WebhookListener` calls the same `CheckPlain` before it registers.
 
 - [ ] **Step 1: failing unit tests** (`listener_test.go`) with `pulumi.WithMocks`, run through
 `NewListener` directly:
@@ -599,17 +600,6 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
   its `docker:index/remoteImage:RemoteImage` and its `docker:index/container:Container`. Record the
   commands and output on #1946.
 
-### Task 1.7: `host:Listener`'s `seedFile` input (only if Sami chooses option A of the dotfiles plan's seed decision)
-
-A follow-on minor release (a new input), in its own PR after #1946 merges. `seedFile` (plain, optional) names an
-absolute host path; the component bind-mounts it read-only (a `bind` mount, so a missing source
-fails the container's create rather than creating a directory) at a fixed path in the container
-and sets `NATS_NKEY_SEED_FILE` to it. It is refused together with `seed`, and together with
-`watchdog` (whose recreate would come back without the mount, as R10 refuses `seed`). Unit tests
-pin the mount and the environment; a live test proves a listener reaches "healthy" with a seed read
-through the mount (a 0444 file inside a 0700 directory) and, as its negative control, refuses the
-create with the file missing. The README documents the input.
-
 ---
 
 ## Slice 2: NATS authorization and the seed command, from the existing AWS deployment
@@ -628,7 +618,7 @@ written here.
 - Create: `packages/envoy/infra/core/nats_auth.go`, `nats_auth_test.go`, `pyfmt.go`,
   `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
 - Modify: `packages/envoy/internal/testnats/nats.go`:
-  - export `startNkeyConfig` as `StartNkeyConfig` (its callers are `:220` and `:238`);
+  - (`startNkeyConfig` stays unexported: Task 2.2's live test uses `StartImageConfig`);
   - add `const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"`
     on one line beside `Image`;
   - add `StartImageConfig(t, image, config string, serverArgs []string, anonymous bool)`. It runs
@@ -821,8 +811,8 @@ starts, and record the version.
   SDK reaches it through `BaseEndpoint`.
 - [ ] **Step 3: the seed reaches NATS** (`seed_live_test.go`). `Generate` against the fake store;
   render a `core` authorization with the returned key; start the server with
-  `testnats.StartNkeyConfig`. A client using the stored seed connects, and one without it is
-  refused.
+  `testnats.StartImageConfig` on both images. A client using the stored seed connects, and one
+  without it is refused.
 - [ ] **Step 4: commit** `feat(envoy-infra): seed command with the AWS Secrets Manager store`.
 
 ### Task 2.3: release the CLI, and the slice's proof
@@ -854,7 +844,7 @@ starts, and record the version.
 
 Branch `envoy-infra-aws` in its own clone (`~/.worktrees/legion/envoy-infra-aws`), stacked on
 `envoy-infra-core`. Task 3.1 owns the pulumi-aws dependency (`go.mod`, `go.sum`); 3.2 needs 3.1,
-and its empty-list golden needs the deployment plan's PR 0 commit under that plan's decision (a);
+and its empty-list golden needs the deployment plan's PR 0 commit (Task 3.4);
 3.3 needs 3.2.
 
 Every task in this slice takes the reference inventory, supplied with its brief: each resource's
@@ -1061,11 +1051,9 @@ type WebhookListener struct {
   listed, and each webhook's secret entry only when its webhook is listed. That is the reference's
   rule once the deployment makes its listener slot-capable; for a deployment that lists both, the
   container is today's. The goldens show the result is byte for byte: one for both webhooks,
-  rendered by the reference implementation, and one for the empty list, rendered by the deployment
-  plan's PR 0 branch (its Task 0, under its decision (a)) at a commit the coordinator supplies in
-  the brief, from placeholder inputs. This step waits for that commit. Under that plan's decision
-  (b), no consumer lists fewer than both webhooks, so the component refuses any other list, naming
-  it, until a consumer needs one, and there is only the first golden.
+  rendered by the reference implementation. The first version accepts only the full list, refusing
+  any other naming it; Task 3.4 adds the empty list once the deployment plan's PR 0 (its Task 0)
+  renders it.
 - [ ] **Tests,** as in Task 3.1, including its construct test.
 - [ ] **Commit** `feat(envoy-infra): aws:WebhookListener`.
 
@@ -1086,8 +1074,8 @@ are gone, they read them from this command.
   - `render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>`
     prints the container's non-secret `KEY=value` lines in order. It applies the refusals that its
     own flags can meet, each with its own test row: `--webhook github` without `--reviewer-app-id`
-    or `--mention-trigger`; either of those flags without `--webhook github`; and, under the
-    deployment plan's decision (b), any list other than `github` and `slack`.
+    or `--mention-trigger`; either of those flags without `--webhook github`; and, until Task 3.4,
+    any list other than `github` and `slack`.
   - `render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --logical-name-prefix <p> --json`
     prints each filter's logical name, pattern, metric name and namespace; `<p>` is the component's
     `metricFilterLogicalNamePrefix` (Task 3.1 added the input: the reference names its filters with a
@@ -1112,12 +1100,26 @@ are gone, they read them from this command.
   - The record goes on that repository's draft PR, opened early for it. This PR gets operation
     counts by resource type only.
 
+### Task 3.4: the empty webhooks list
+
+Sami left the deployment's proof surface to the coordinator on 2026-10-14, which chose a
+slot-capable Envoy (the deployment plan's PR 0): a standalone slot runs a listener with no webhooks.
+Once that PR has a commit, the coordinator supplies it in the brief:
+
+- [ ] Render the empty-list container definition with that commit's reference code from placeholder
+  inputs (header lines substituted as in Task 2.1), and commit it as the second golden.
+- [ ] `aws:WebhookListener` and `render webhook-listener-env` accept `webhooks: []` as well as the
+  full list, and still refuse any other list, naming it. The component's output for `[]` matches the
+  golden byte for byte; a refusal row per partial list stays.
+- [ ] The README's webhooks row says so.
+- [ ] Commit `feat(envoy-infra): a webhook listener with no webhooks`.
+
 ---
 
 ## Slice 4: `gcp:NatsHub`
 
 Branch `envoy-infra-gcp` in its own clone (`~/.worktrees/legion/envoy-infra-gcp`), a plain PR based
-on `envoy-infra-core` outside the gh-stack, rebased onto `main` by hand once slice 2 merges. Task
+on `envoy-infra-core` outside the gh-stack, which merges `main` once slice 2 merges. Task
 4.1 starts once Task 2.1 is on `envoy-infra-core`; 4.2 needs Task 2.2; 4.3 needs 4.1; 4.4 needs 4.2
 and 4.3.
 
@@ -1297,7 +1299,7 @@ and `nats`
 `ExecStop=/usr/bin/docker stop -t 30 nats`), each with `RequiresMountsFor=/mnt/disks/data`;
 `tailscaled` also has `After=` and `Wants=fetch-tailnet-key.service` (not `Requires=`: a node
 whose tailnet state is on the disk never reads the key, so a failed fetch on a later boot must not
-keep it down); `fetch-tailnet-key` retries up to five times, ten seconds apart, and has
+keep it down); `fetch-tailnet-key` makes up to six attempts, ten seconds apart, and has
 `RemainAfterExit=yes`. COS's host firewall accepts incoming connections only for SSH, so a oneshot
 `nats-firewall` (`RemainAfterExit=yes`) adds, idempotently (`iptables -w -C … || iptables -w -A …`),
 `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` for Google's health checks;
@@ -1349,6 +1351,11 @@ Items to verify, each with the row that settles it and where its result goes:
   `nats-firewall` unit also accepts tcp/4222 on `tailscale0`, or the tailscale container runs with
   `TS_DEBUG_FIREWALL_MODE=nftables` (E9; same).
 - A v4 docker provider diffing unset v5-only inputs (E3 in CI, E4 on the existing deployment).
+- The GCP seed store against the real Secret Manager: `versions/latest` names a DISABLED or
+  DESTROYED newest version, `GetSecretVersion` on `latest` answers NOT_FOUND with no versions, and
+  an unfiltered `ListSecretVersions` includes DESTROYED versions (E8; the first GCP deployment).
+- Two statements the README makes from Google's documentation: raising `diskSizeGb` later does not
+  grow the kept data disk, and deleting the hub leaves that disk behind, detached (E9; same).
 
 ## End-to-end verification plan
 
@@ -1365,11 +1372,10 @@ Items to verify, each with the row that settles it and where its result goes:
 | E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by Jason or Rajashree, and Sami's tailnet, policy and OAuth-client steps | Task 4.4 |
 | E10. The CLI checks and verifies the existing AWS deployment's live seed read-only, printing the reference script's lines | 2 | infrastructure | that deployment's staging Secrets Manager, from the devbox, with the branch-built CLI | the devbox's `staging` profile (`--expect-account` refuses any other) | Task 2.3 |
 | E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, from the devbox, with this branch's plugin by path | the devbox's `staging` profile for staging, its instance identity for production and dispatch | Task 3.3; the deployment's own plan |
-| E12. (Task 1.7, only under option A) `host:Listener` with `seedFile` reaches "healthy" reading its seed through the mount; a missing file refuses the create | 1.7 | infrastructure | `pulumi up` of a YAML program against the runner's Docker, as E2 | CI runner | Task 1.7 live test |
 
 Legion's own end-to-end stages (`scripts/e2e/stage*.sh`) exercise none of the changed paths. The
 Envoy changes (`bus.LocalNATSURL`, `bus.ListenerDurable`/`ListenerQueue`,
-`testnats.StartNkeyConfig`) are covered by `envoy-go` and `envoy-smoke`, which run on these PRs.
+`testnats.HubImage`/`StartImageConfig`) are covered by `envoy-go` and `envoy-smoke`, which run on these PRs.
 
 ## Skill catalog
 
@@ -1381,7 +1387,7 @@ dotfiles skills (`opening-a-pr`, `landing-a-pr`, `using-docker`, `updating-docs`
 
 | Step | Worker | Required skills |
 | --- | --- | --- |
-| Tasks 1.1-1.4, 1.7, 2.1-2.2, 3.1-3.2, 4.1-4.3 | `deep` (implementer) | `test-driven-development`, `using-docker`, `verification-before-completion`, `systematic-debugging` when a test fails unexpectedly |
+| Tasks 1.1-1.4, 2.1-2.2, 3.1-3.2, 4.1-4.3 | `deep` (implementer) | `test-driven-development`, `using-docker`, `verification-before-completion`, `systematic-debugging` when a test fails unexpectedly |
 | Tasks 1.5, 2.3, 3.3, 4.4 (docs) | `deep` | `updating-docs` |
 | Opening and landing each PR; Task 1.6 | `deep` (implementer) | `opening-a-pr`, `landing-a-pr`, `gh-stack` (slices 2-3) |
 | Slice acceptance | `deep` (tester) | `verification-before-completion`, `using-docker` |
@@ -1399,7 +1405,6 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   (now call the functions) and the tests `main_test.go:2260,2277`, `reconnect_shutdown_test.go:158`,
   `shutdown_test.go:113`, `startup_test.go:51` (keep their literals as independent checks). The
   names produced are unchanged (Task 4.1 Step 1).
-- `testnats.startNkeyConfig` → `StartNkeyConfig`: `nats.go:220,238,315`.
 - `release-envoy-listener.yaml` no longer runs for `packages/envoy/infra/**`, and its bump ignores
   it: `git grep -n 'packages/envoy' -- .github/` shows no `workflow_run` or other dependent of that
   workflow. Rollout: immediate.

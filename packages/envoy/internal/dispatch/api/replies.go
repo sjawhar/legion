@@ -130,7 +130,7 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	login := canonicalLogin(caller.ID)
+	login := model.CanonicalLogin(caller.ID)
 	response := model.MyRepliesResponse{Rows: []model.MyReplyRow{}, Limit: limit, Offset: offset}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), myRepliesCountQuery, login, issue, artifact).Scan(&response.Total); err != nil {
 		s.writeHandlerError(w, fmt.Errorf("count my replies: %w", err))
@@ -219,7 +219,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	login := canonicalLogin(actor.ID)
+	login := model.CanonicalLogin(actor.ID)
 	threadID := r.PathValue("id")
 	tx, err := s.begin(r.Context())
 	if err != nil {

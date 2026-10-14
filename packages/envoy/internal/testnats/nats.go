@@ -44,6 +44,10 @@ const Image = "mirror.gcr.io/library/nats:2.10"
 // a single-line string constant.
 const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
 
+// Images are the two NATS server images the real-server tests run on, Image and HubImage, each
+// with the short name its subtest takes.
+var Images = []struct{ Name, Ref string }{{"2.10", Image}, {"hub", HubImage}}
+
 var (
 	mainRuns   bool
 	sharedOnce sync.Once
@@ -222,7 +226,7 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 // and returns its client URL once the server answers there (answering).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	_, uri := StartNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
 	return uri
 }
 
@@ -240,7 +244,7 @@ type NkeyGrant struct {
 // change the grant.
 func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
 	t.Helper()
-	ctr, uri := StartNkeyConfig(t, publishGrantConfig(user, allow))
+	ctr, uri := startNkeyConfig(t, publishGrantConfig(user, allow))
 	return &NkeyGrant{URL: uri, user: user, ctr: ctr}
 }
 
@@ -317,10 +321,10 @@ func nkeyConfig(entry string) string {
 	return fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
 }
 
-// StartNkeyConfig runs a NATS test container on Image, with JetStream, whose configuration is
+// startNkeyConfig runs a NATS test container on Image, with JetStream, whose configuration is
 // config, removed when the test ends (even when its start fails), and returns it with its client
 // URL once the server answers there (answering): config must declare the users it enforces.
-func StartNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
+func startNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
 	t.Helper()
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))

@@ -10,10 +10,10 @@ import (
 )
 
 // The two variables a process names its NATS user's nkey seed with: a file holding the seed, or
-// the seed itself.
+// the seed itself. NkeySeedEnvVar is exported for what writes a process's environment.
 const (
 	nkeySeedFileVariable = "NATS_NKEY_SEED_FILE"
-	nkeySeedVariable     = "NATS_NKEY_SEED"
+	NkeySeedEnvVar       = "NATS_NKEY_SEED"
 )
 
 // nkeyCredential is the NATS user this process connects as, from its environment: the trimmed
@@ -42,12 +42,12 @@ func nkeyCredential(lookup func(string) (string, bool)) (nats.Option, error) {
 			return nil, fmt.Errorf("%s names %s, which is empty", nkeySeedFileVariable, file)
 		}
 		source = fmt.Sprintf("%s (%s)", nkeySeedFileVariable, file)
-	} else if value, set := lookup(nkeySeedVariable); set {
+	} else if value, set := lookup(NkeySeedEnvVar); set {
 		seed = strings.TrimSpace(value)
 		if seed == "" {
-			return nil, fmt.Errorf("%s is set but empty", nkeySeedVariable)
+			return nil, fmt.Errorf("%s is set but empty", NkeySeedEnvVar)
 		}
-		source = nkeySeedVariable
+		source = NkeySeedEnvVar
 	} else {
 		return nil, nil
 	}

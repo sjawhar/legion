@@ -73,7 +73,9 @@ Two decisions stay with people:
 
 - **The design gate.** Before implementation starts, a person approves the root issue's spec at a
   specific version in Dispatch. A later version of the spec closes the gate again until someone
-  approves it. The gate is on by default; a deployment can turn it off.
+  approves it, unless that version is the person's own answer to a decision block and the answer is
+  the whole change since the version they approved: then Dispatch records their approval at the new
+  version and the gate reopens. The gate is on by default; a deployment can turn it off.
 - **The merge.** The merger checks that every check and workflow the base branch requires has
   passed, posts `READY` on the Dispatch issue, and submits the pull request for merge. The
   repository's own rules decide when it lands.

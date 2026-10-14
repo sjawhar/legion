@@ -105,7 +105,9 @@ const (
 // deploy repository, identified by (Repo, RunID). CompletedAt and Conclusion are nil while the
 // run is still in progress. HeadBranch and Event are GitHub's head_branch and event; both are nil
 // on a row stored before they were (the reconcile's backfill step fills them), and a nil counts in
-// no measure that filters on it.
+// no measure that filters on it. StartedAt is GitHub's run_started_at, which moves to a re-run's
+// start; CreatedAt is GitHub's created_at, which a re-run keeps, nil on a row stored before it was
+// (Created says what stands in for it).
 type DeliveryRun struct {
 	Repo         string                 `json:"repo"`
 	RunID        int64                  `json:"run_id"`
@@ -114,11 +116,24 @@ type DeliveryRun struct {
 	HeadSHA      string                 `json:"head_sha"`
 	HeadCommitAt time.Time              `json:"head_commit_at"`
 	StartedAt    time.Time              `json:"started_at"`
+	CreatedAt    *time.Time             `json:"created_at"`
 	CompletedAt  *time.Time             `json:"completed_at"`
 	Conclusion   *DeliveryRunConclusion `json:"conclusion"`
 	URL          string                 `json:"url"`
 	HeadBranch   *string                `json:"head_branch"`
 	Event        *string                `json:"event"`
+}
+
+// Created is when GitHub created the run, which decides the pull requests it can ship
+// (FirstShippingApply). A row the reconcile's created_at backfill has not reached (CreatedAt nil:
+// stored before the column, and older than the backfill's 28 days or not filled yet) reads
+// StartedAt instead, which equals the creation time except on a re-run, whose start is the
+// re-run's. runCreatedAt (store.go) is the same rule in SQL.
+func (run DeliveryRun) Created() time.Time {
+	if run.CreatedAt != nil {
+		return *run.CreatedAt
+	}
+	return run.StartedAt
 }
 
 // DeliveryRunJob is one job of a DeliveryRun, identified within it by Name (GitHub does not

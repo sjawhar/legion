@@ -45,6 +45,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
+  human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
+  whole change since the version they approved, Dispatch carries their approval to the new version,
+  the daemon reopens the gate and sends `design-approved`, and that notice opens nothing new — the
+  architect requests nothing and releases no wave because of it; when the answer changes the
+  Summary, the Acceptance or the tree's scope, the architect rewrites that text, repeats the
+  fresh-reader check, the approval request and `register_gate` on the new version with a
+  one-sentence `--summary` naming what changed since the earlier approval, and releases no wave on
+  the `design-approved` the answer brought. An approved spec gets nothing but the decision block
+  and its evidence; an in-block edit before the answer closes the gate like any version without
+  stopping the answer carrying the approval.
 - A production check whose deploy the implementer cannot perform goes to the agent or role the
   deployment instructions name for that deploy, with the merge commit, and waits on the production
   signal they name (LEGION-447). It opens a `dispatch ask` to a person only when the instructions

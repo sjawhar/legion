@@ -17,7 +17,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
-	"github.com/google/uuid"
 )
 
 // AWSSecretsManager is the --store value of AWS Secrets Manager.
@@ -130,14 +129,13 @@ func (s *awsStore) Versions(ctx context.Context, name string) (int, error) {
 	}
 }
 
-// Put writes value as a SecretString with a fresh ClientRequestToken, which the SDK's retries
-// resend, so a lost answer retried writes no second version. The written version must be
-// AWSCURRENT.
+// Put writes value as a SecretString. The SDK fills in a fresh ClientRequestToken for each call and
+// its retries resend that token, so a lost answer retried writes no second version. The written
+// version must be AWSCURRENT.
 func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	out, err := s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
-		SecretId:           aws.String(name),
-		SecretString:       aws.String(string(value)),
-		ClientRequestToken: aws.String(uuid.NewString()),
+		SecretId:     aws.String(name),
+		SecretString: aws.String(string(value)),
 	})
 	if err != nil {
 		return "", awsFailed("put-secret-value", name, err)
@@ -169,7 +167,7 @@ func awsFailed(call, name string, err error) error {
 // sdkWrappers are the error types the SDK and fmt wrap a failure in, which name nothing of it: a
 // lost answer is an OperationError around a MaxAttemptsError around a ResponseError (both the AWS
 // and the smithy one are http.ResponseError) around the RequestSendError that says what happened.
-var sdkWrappers = []string{"*smithy.OperationError", "*retry.MaxAttemptsError", "*http.ResponseError", "*fmt.wrapError", "*fmt.wrapErrors"}
+var sdkWrappers = []string{"*smithy.OperationError", "*retry.MaxAttemptsError", "*http.ResponseError", "*fmt.wrapError"}
 
 // errorClass names err without its text: an AWS error's code; for a context's end, that; otherwise
 // the type of the first error in its chain that is not one of the SDK's wrappers, such as
@@ -184,11 +182,13 @@ func errorClass(err error) string {
 	case errors.Is(err, context.DeadlineExceeded):
 		return "deadline exceeded"
 	}
-	for e := err; ; e = errors.Unwrap(e) {
+	for e := err; ; {
 		name := reflect.TypeOf(e).String()
-		if next := errors.Unwrap(e); next == nil || !slices.Contains(sdkWrappers, name) {
+		next := errors.Unwrap(e)
+		if next == nil || !slices.Contains(sdkWrappers, name) {
 			return name[strings.LastIndex(name, ".")+1:]
 		}
+		e = next
 	}
 }
 

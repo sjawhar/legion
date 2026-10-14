@@ -129,30 +129,30 @@ func TestFirstShippingApply(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mergedAt := base
 
-	t.Run("exact boundary counts (>=)", func(t *testing.T) {
+	t.Run("created one second after the merge counts", func(t *testing.T) {
 		applies := []Apply{
-			{RunID: 1, CompletedAt: base.Add(time.Hour), HeadCommitAt: mergedAt},
+			{RunID: 1, CompletedAt: base.Add(time.Hour), CreatedAt: mergedAt.Add(time.Second)},
 		}
 		got := FirstShippingApply(mergedAt, applies)
 		if got == nil || got.RunID != 1 {
-			t.Fatalf("expected apply at exact boundary to qualify, got %+v", got)
+			t.Fatalf("expected the apply created after the merge to qualify, got %+v", got)
 		}
 	})
 
-	t.Run("one microsecond before does not count", func(t *testing.T) {
+	t.Run("created in the merge's own instant does not count (>)", func(t *testing.T) {
 		applies := []Apply{
-			{RunID: 1, CompletedAt: base.Add(time.Hour), HeadCommitAt: mergedAt.Add(-time.Microsecond)},
+			{RunID: 1, CompletedAt: base.Add(time.Hour), CreatedAt: mergedAt},
 		}
 		got := FirstShippingApply(mergedAt, applies)
 		if got != nil {
-			t.Fatalf("expected no qualifying apply, got %+v", got)
+			t.Fatalf("expected no qualifying apply at the exclusive boundary, got %+v", got)
 		}
 	})
 
-	t.Run("earliest completing wins, not earliest head commit", func(t *testing.T) {
+	t.Run("earliest completing wins, not earliest creation", func(t *testing.T) {
 		applies := []Apply{
-			{RunID: 1, CompletedAt: base.Add(3 * time.Hour), HeadCommitAt: mergedAt},
-			{RunID: 2, CompletedAt: base.Add(1 * time.Hour), HeadCommitAt: mergedAt.Add(2 * time.Hour)},
+			{RunID: 1, CompletedAt: base.Add(3 * time.Hour), CreatedAt: mergedAt.Add(time.Second)},
+			{RunID: 2, CompletedAt: base.Add(1 * time.Hour), CreatedAt: mergedAt.Add(2 * time.Hour)},
 		}
 		got := FirstShippingApply(mergedAt, applies)
 		if got == nil || got.RunID != 2 {
@@ -162,7 +162,7 @@ func TestFirstShippingApply(t *testing.T) {
 
 	t.Run("no qualifying apply returns nil", func(t *testing.T) {
 		applies := []Apply{
-			{RunID: 1, CompletedAt: base, HeadCommitAt: mergedAt.Add(-time.Hour)},
+			{RunID: 1, CompletedAt: base, CreatedAt: mergedAt.Add(-time.Hour)},
 		}
 		got := FirstShippingApply(mergedAt, applies)
 		if got != nil {
@@ -171,11 +171,43 @@ func TestFirstShippingApply(t *testing.T) {
 	})
 }
 
+// TestProductionAppliesReadsTheRunsCreation: an apply carries the run's creation (Created), never
+// its head commit's time, which a merge queue writes before the merge it carries is recorded, and
+// a row stored before created_at reads its start in its place. Run 1 is the merge queue's: its
+// head commit is timed ten minutes before the merge, and GitHub created it two minutes after, so
+// it ships the pull request the old head-commit rule handed to run 2. Run 3 is a re-run whose
+// start moved past the merge while its creation, and its head, came before it.
+func TestProductionAppliesReadsTheRunsCreation(t *testing.T) {
+	const jobName = "widgets-release / widgets-release"
+	merged := time.Date(2026, 10, 7, 12, 0, 0, 0, time.UTC)
+	success := DeliveryRunConclusionSuccess
+	runs := []DeliveryRun{
+		{RunID: 1, HeadCommitAt: merged.Add(-10 * time.Minute), CreatedAt: new(merged.Add(2 * time.Minute)), StartedAt: merged.Add(2 * time.Minute), Conclusion: &success},
+		{RunID: 2, HeadCommitAt: merged.Add(20 * time.Minute), StartedAt: merged.Add(25 * time.Minute), Conclusion: &success},
+		{RunID: 3, HeadCommitAt: merged.Add(-40 * time.Minute), CreatedAt: new(merged.Add(-30 * time.Minute)), StartedAt: merged.Add(15 * time.Minute), Conclusion: &success},
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{}
+	for i, run := range runs {
+		jobsByRun[run.RunID] = []DeliveryRunJob{{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(merged.Add(time.Duration(30+10*i) * time.Minute))}}
+	}
+	applies, _ := ProductionApplies(runs, jobsByRun, jobName)
+	created := map[int64]time.Time{}
+	for _, apply := range applies {
+		created[apply.RunID] = apply.CreatedAt
+	}
+	if !created[1].Equal(merged.Add(2*time.Minute)) || !created[2].Equal(merged.Add(25*time.Minute)) || !created[3].Equal(merged.Add(-30*time.Minute)) {
+		t.Fatalf("applies' creation = %v, want run 1's created_at, run 2's start (no created_at), run 3's created_at", created)
+	}
+	if got := FirstShippingApply(merged, applies); got == nil || got.RunID != 1 {
+		t.Fatalf("FirstShippingApply = %+v, want the merge queue's run 1", got)
+	}
+}
+
 func TestContainingRun(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	mergedAt := base
 	applies := []Apply{
-		{RunID: 1, CompletedAt: base.Add(time.Hour), HeadCommitAt: mergedAt},
+		{RunID: 1, CompletedAt: base.Add(time.Hour), CreatedAt: mergedAt.Add(time.Second)},
 	}
 
 	t.Run("outside deploy repo is always nil", func(t *testing.T) {
@@ -197,7 +229,7 @@ func TestContainingRun(t *testing.T) {
 
 func TestComputeDeployedStatus(t *testing.T) {
 	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	apply := &Apply{RunID: 1, CompletedAt: base, HeadCommitAt: base}
+	apply := &Apply{RunID: 1, CompletedAt: base, CreatedAt: base}
 
 	t.Run("deployed in deploy repo", func(t *testing.T) {
 		pr := DeliveryPullRequest{Repo: "acme/widgets"}
