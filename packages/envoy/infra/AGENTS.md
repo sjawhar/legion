@@ -63,22 +63,24 @@ versions. Never add the module to the root `go.work`.
   backtick, `\` or line break.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
-  output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go:395`, `:764-766`). A
-  field a consumer takes from another resource or stack is a `pulumi.*Input`, as `natsUrls` and
-  `seed` are, and gets a Construct test that sends it as another resource's output and as unknown
-  under preview (`host/construct_test.go`), a path `pulumi.WithMocks` never takes.
+  output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
+  `constructInputsCopyTo` and `copyInputTo`). A field a consumer takes from another resource or
+  stack is a `pulumi.*Input`, as `natsUrls` and `seed` are, and gets a Construct test that sends it
+  as another resource's output and as unknown under preview (`host/construct_test.go`), a path
+  `pulumi.WithMocks` never takes.
 - **Secrets.** Every input holding a secret carries `provider:"secret"`.
 - **Object types.** An object input type has an `Annotate` that sets its token
   (`a.SetToken("host", "Watchdog")`): generated SDKs append `Args` to an input type's name, so the
   Go name would reach consumers as `WatchdogArgsArgs`.
 - **Outputs.** Set a component's output fields after `RegisterComponentResource`, which replaces
   them.
-- **Release contract.** `provider.go`'s `downloadURL` names the release the release job publishes:
-  tag `envoy-infra-v<version>`, asset `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz`
-  with the binary at the archive root. Changing one side breaks every consumer's install. A commit
-  releases the plugin only when it touches a path `release.yaml` names for it, in its push paths,
-  its `changes` job's `envoy_infra` filter and the bump paths after `--`, so a `packages/envoy`
-  package the plugin starts compiling in, directly or through another import, goes into all three.
+- **Release contract.** `provider.go`'s `downloadURL` names the release
+  `.github/workflows/release-envoy-infra.yaml` publishes: tag `envoy-infra-v<version>`, asset
+  `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` with the binary at the archive root.
+  Changing one side breaks every consumer's install. A commit releases the plugin only when it
+  touches a path that workflow's push paths name and a path `.github/envoy-infra-release-paths`
+  lists (the pathspecs its version step cuts a version from), so a `packages/envoy` package the
+  plugin starts compiling in, directly or through another import, goes into both.
   `.github/scripts/check-envoy-infra-release-paths.sh` derives that set from `go list -deps` for
   every target and fails naming each path and list that misses it.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
@@ -88,21 +90,14 @@ versions. Never add the module to the root `go.work`.
 ## Tests
 
 The unit tests need neither the Pulumi CLI nor Docker. They run components under
-`pulumi.WithMocks` (`host/listener_test.go`, `internal/providers/`) and the plugin in process
-through pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`,
-`host/construct_test.go`). The `envoy-infra-go` job in `.github/workflows/envoy-and-contracts.yaml`
-runs, from `packages/envoy/infra`:
-
-```sh
-test -z "$(gofmt -l .)"
-../../../.github/scripts/check-envoy-infra-release-paths.sh
-go vet -tags pulumilive,natslive ./...
-go test ./...
-```
-
-The release path check runs from any directory. Its own tests,
-`.github/scripts/check-envoy-infra-release-paths.test.sh`, run in the `test` job of
-`.github/workflows/pr-and-main.yaml`; run them after changing the check.
+`pulumi.WithMocks` (`host/listener_test.go`, `internal/providers/`), the refusals against
+`host.resolveListener` directly, and the plugin in process through pulumi-go-provider's
+`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`). CI runs them in
+the `envoy-infra-go` job of `.github/workflows/envoy-and-contracts.yaml`, with gofmt and vet under
+the live tests' build tag. The required `lint` job of `.github/workflows/pr-and-main.yaml` runs the
+release path check and compiles the module's commands for every release target; its `test` job
+runs the check's own tests, `.github/scripts/check-envoy-infra-release-paths.test.sh`. Run those
+steps from those jobs after changing what they cover.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit
@@ -111,14 +106,14 @@ previews with both `same`; a listener with a seed connects to an nkey-authorized
 without never does; and a Go program builds against the SDK `pulumi package add` generates. They
 take:
 
-- the `pulumi` CLI on `PATH`. CI pins v3.268.0 in `.github/actions/install-pulumi`, which the
-  `envoy-smoke` job and release.yaml's `envoy_infra` job both install it through;
+- the `pulumi` CLI on `PATH`, the version `.github/actions/install-pulumi` installs;
 - `ENVOY_SMOKE_IMAGE`, a listener image built beforehand. A live test without it fails at once
   and never builds one itself;
-- `ENVOY_INFRA_DOCKER_PLUGIN`, the path of the docker provider plugin v4.11.0 tarball for this
-  machine's platform, whose SHA-256 the caller has checked. The test binary installs it into a
-  `PULUMI_HOME` it makes for itself in a temporary directory and removes when its tests end, so the
-  CLI downloads no plugin and the caller's own Pulumi home is untouched.
+- `ENVOY_INFRA_DOCKER_PLUGIN`, the path of the docker provider plugin tarball of
+  `pulumitest.DockerPluginVersion` for this machine's platform, whose SHA-256 the caller has
+  checked. The test binary refuses a tarball of another version, installs it into a `PULUMI_HOME`
+  it makes for itself in a temporary directory and removes when its tests end, so the CLI
+  downloads no plugin and the caller's own Pulumi home is untouched.
 
 Each stack runs on a `file://` backend of its own in a temporary directory. Each listener gets a
 container name of its own (`envoy-listener-live-<random>`) and a free port, and reaches only a
@@ -127,22 +122,17 @@ first test that asks for it, and every test runs that build. A package whose tes
 calls `os.Exit(pulumitest.Main(m))` from its `TestMain`, which removes that `PULUMI_HOME` and that
 build.
 
-To run them, from the repository root:
+To run them, install the CLI as `.github/actions/install-pulumi` does and download the docker
+provider plugin as the `envoy-smoke` job's "Download the docker provider plugin the live tests pin"
+step does, each checked against the SHA-256 pinned there; then, from the repository root:
 
 ```sh
-curl -fsSL -o /tmp/pulumi-v3.268.0-linux-x64.tar.gz https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
-echo '903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  /tmp/pulumi-v3.268.0-linux-x64.tar.gz' | sha256sum -c -
-tar -xzf /tmp/pulumi-v3.268.0-linux-x64.tar.gz -C /tmp
 docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .
-curl -fsSL -o /tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
-echo '4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  /tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz' | sha256sum -c -
-cd packages/envoy/infra && PATH=/tmp/pulumi:$PATH \
-  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local \
-  ENVOY_INFRA_DOCKER_PLUGIN=/tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz \
+cd packages/envoy/infra && ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local \
+  ENVOY_INFRA_DOCKER_PLUGIN=<the tarball> \
   go test -count=1 -tags pulumilive -v -timeout 15m ./host/
 ```
 
 `-count=1` because go's test cache cannot see the image behind a fixed tag, and would replay a
-cached pass against an image that has since changed. In CI the `envoy-smoke` job runs them, each
-input a step of its own (the CLI through `.github/actions/install-pulumi`), and then checks that
-`pulumi package get-schema` reports the version the plugin was built with.
+cached pass against an image that has since changed. In CI the `envoy-smoke` job runs them, and
+then checks that `pulumi package get-schema` reports the version the plugin was built with.

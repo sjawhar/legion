@@ -9,6 +9,27 @@ key-value buckets itself when it starts, so it needs only a NATS server with Jet
 
 ## Install
 
+The plugin runs on the machine that runs `pulumi`, and logs in to the Docker hosts it deploys to, so
+verify an archive before installing it. Each release's archives carry build provenance from
+`.github/workflows/release-envoy-infra.yaml` on `main`; `--repo` alone would accept an attestation
+from any workflow of this repository, so the command pins the signer:
+
+```sh
+version=<version>
+archive=pulumi-resource-envoy-infra-v$version-<os>-<arch>.tar.gz
+gh release download "envoy-infra-v$version" --repo sjawhar/legion --pattern "$archive"
+gh attestation verify "$archive" --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+pulumi plugin install resource envoy-infra "$version" \
+  --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}' \
+  --checksum "$(sha256sum "$archive" | cut -d' ' -f1)"
+```
+
+`--source-digest <the envoy-infra-v<version> tag's commit>` added to the `verify` pins the commit as
+well. `--checksum` makes `pulumi` refuse a download whose SHA-256 is not the archive's you
+verified. Then add the package to the project:
+
 ```sh
 pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'
 ```
