@@ -16,7 +16,8 @@ Instead:
 - `packages/envoy/infra/go.work` (`use (. ..)`) binds this module and `packages/envoy`. A go
   command run inside `packages/envoy/infra` finds it first: `go env GOWORK` there names it.
 - `go.mod` replaces `github.com/sjawhar/envoy` with `../`, so the plugin compiles the Envoy
-  packages it uses (`internal/bus`'s remote-NATS rule) from this checkout.
+  packages it uses (`internal/bus`'s remote-NATS rule, and the `internal/bus` and
+  `internal/contracts` names the permission sets are built from) from this checkout.
 - Both being workspace modules keeps `scripts/go-third-party-notices.sh`, which ignores every
   module `go list -m` names, from listing Envoy's own packages as third-party code.
 
@@ -32,9 +33,10 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
+| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`), the AWS Secrets Manager store (`awsstore.go`) and the GCP Secret Manager store (`gcpstore.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the key fetcher's script (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
 
@@ -59,13 +61,19 @@ versions. Never add the module to the root `go.work`.
   later: `core.ListenerEnv` runs `CheckPlain` again and then checks each URL, inside the `ApplyT`
   over `natsUrls` that computes the container's environment (`:147-151`). A bad URL therefore fails
   the preview or update when the container's `envs` resolve, after the component and its image have
-  registered, not the constructor.
+  registered, not the constructor. `NewNatsHub` checks every plain input, and that
+  `tailnetAuthKey` is set and `subnetwork` comes with `network`, in `newSettings`, which also
+  renders the authorization; it then renders the cloud-config and calls `providers.Require`
+  (`gcp/natshub.go:122-235`). It reads none of its Inputs by value.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go:395`, `:764-766`). A
   field a consumer takes from another resource or stack is a `pulumi.*Input`, as `natsUrls` and
-  `seed` are, and gets a Construct test that sends it as another resource's output and as unknown
-  under preview (`host/construct_test.go`), a path `pulumi.WithMocks` never takes.
+  `seed` are, and `gcp:NatsHub`'s `tailnetAuthKey`, `network` and `subnetwork`, and gets a Construct
+  test that sends it as another resource's output and as unknown under preview
+  (`host/construct_test.go`, `gcp/construct_test.go`), a path `pulumi.WithMocks` never takes. The
+  hub's cloud-config is built from plain inputs alone and holds no secret (`gcp/cloudconfig.go`,
+  `vm`), so it is known at preview and never carries the auth key, which the VM fetches at boot.
 - **Secrets.** Every input holding a secret carries `provider:"secret"`.
 - **Object types.** An object input type has an `Annotate` that sets its token
   (`a.SetToken("host", "Watchdog")`): generated SDKs append `Args` to an input type's name, so the
@@ -85,7 +93,17 @@ versions. Never add the module to the root `go.work`.
   every command under `cmd/` for every target and fails naming each path and list that misses it.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
-  every host. Change them only with the goldens.
+  every host. The hub's cloud-config is its instance template's `user-data`, and a template cannot
+  change, so any change to the cloud-config's text replaces every hub's VM on its next update.
+  Change them only with the goldens. `gcp/fetch_key_test.go` runs the key fetcher's script as the
+  golden holds it, so a change to the script is tested there.
+- **Permission sets.** `core/permissions.go` builds each set from names that
+  `packages/envoy/internal/bus` and `internal/contracts` export, and the plugin and the command
+  compile no other Envoy package (`go list -deps ./cmd/...`), so a change to Envoy's stores cuts no
+  plugin release. A subject Envoy's code sends that has no exported name gets one in `bus`, and
+  the code that sends it moves onto that name, so the client and its grant share one spelling.
+  `core/permissions_test.go` writes each set out by hand, as a check independent of those names. A
+  change to a set changes every hub's rendered authorization, and so replaces every hub's VM.
 
 ## The seed command
 
@@ -111,19 +129,28 @@ endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`, and
 ## Tests
 
 The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
-(`host/listener_test.go`, `internal/providers/`), the plugin in process through pulumi-go-provider's
-`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`), the seed command
-against a fake `Store` (`seed/seed_test.go`), the AWS SDK against an `httptest` endpoint speaking
-Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test on any request it does not
-expect (`seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over
-TLS, which fails a test on any call outside the mode's or any request it does not expect
+(`host/listener_test.go`, `gcp/natshub_test.go`, `internal/providers/`), the plugin in process
+through pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`,
+`host/construct_test.go`, `gcp/construct_test.go`), the hub's cloud-config against its golden
+(`gcp/cloudconfig_test.go`), the key fetcher's script under `/bin/sh` against `httptest` fakes of
+the metadata server and Secret Manager, with a `sleep` stub first on its `PATH` that records each
+wait (`gcp/fetch_key_test.go`, which needs `curl`, `jq`, `base64` and `mktemp` on this machine
+and fails, never skips, without one), the seed command against a fake `Store`
+(`seed/seed_test.go`), the AWS SDK against an `httptest` endpoint speaking Secrets Manager's JSON
+1.1 and STS's query protocol, which fails a test on any request it does not expect
+(`seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over TLS,
+which fails a test on any call outside the mode's or any request it does not expect
 (`seed/gcpstore_test.go`; the package's `TestMain` makes the fake's certificate a root the whole
 test process trusts, through `SSL_CERT_FILE`), and the command built as the release job stamps it,
 for its `--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests start nats-server
-containers on this machine's Docker through `testnats`, as do the `natslive` tests
-(`seed/seed_live_test.go`: a generated seed connects, and a client without it is refused, on
-`testnats.Image` and `testnats.HubImage`). The `envoy-infra-go` job in
-`.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
+containers on this machine's Docker through `testnats`, as do the `natslive` tests, each on
+`testnats.Image` and `testnats.HubImage`: `seed/seed_live_test.go` (a generated seed connects, and
+a client without it is refused) and `core/permissions_live_test.go` (the listener, built from
+`packages/envoy/cmd/listener` under the root `go.work`, reaches `"status":"healthy"` as one user
+holding `HostPermissions`, a session as the same user receives, and the server refuses nothing the
+set allows; without the durable's consumer create, the listener never reaches `"status":"healthy"`).
+The `envoy-infra-go` job in `.github/workflows/envoy-and-contracts.yaml` runs, from
+`packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -176,3 +203,7 @@ cd packages/envoy/infra && PATH=/tmp/pulumi:$PATH \
 cached pass against an image that has since changed. In CI the `envoy-smoke` job runs them, each
 input a step of its own, and then checks that `pulumi package get-schema` reports the version the
 plugin was built with.
+
+`gcp:NatsHub` has no live test here, since it needs Google Cloud and a tailnet: what only a real
+deployment proves is listed under "What a first Google Cloud deployment proves" in
+`packages/envoy/infra/README.md`.
