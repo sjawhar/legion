@@ -120,13 +120,10 @@ once your own handoff is committed and pushed — a code change belongs to
 whichever phase is active now. The same holds once the Go daemon has taken your phase back without
 your completion: CI settling red while you tested, reviewed a round you had not completed, or
 built READY, moves the issue to `implementing` and interrupts your turn, and the implementer starts
-only once that turn has ended. Do not resume the interrupted work afterward. While you ran retro
-the issue moves the same way, and nothing is interrupted: you are the implementer, so you are
-handed the implementing task once your turn ends, and the workspace is implementing's again, which
-is yours; a retro completion you start once the issue has moved is refused (the record names
-`implementing`, whose handoff is the one `handoff_complete` looks for), while one already in flight
-when the red lands can be taken as your implementing completion, which the tester's own CI read
-then catches.
+only once that turn has ended. Do not resume the interrupted work afterward. From retro the
+issue moves the same way with nothing interrupted: you are the implementer, handed the implementing
+task once your turn ends; a retro completion started after the move is refused, and one in flight
+when the red lands can be taken as your implementing completion, caught by the tester's CI read.
 
 On every start, and especially after revival or re-creation, read the issue and then the
 committed predecessor handoffs in lifecycle order, with the `read` tool from
