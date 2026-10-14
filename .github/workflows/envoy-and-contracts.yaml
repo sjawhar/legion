@@ -843,6 +843,52 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
+  # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
+  # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
+  # the Envoy binaries and the daemon build with, and every go command below runs in that
+  # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too; tests
+  # that start NATS take testnats.Image, pulled first for the reason envoy-go's own pull step
+  # gives.
+  envoy-infra-go:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/infra/go.mod
+          cache-dependency-path: packages/envoy/infra/go.sum
+      - name: Pull the NATS test container image
+        run: |
+          nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
+          [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
+          for attempt in 1 2 3; do
+            docker pull "$nats_image" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 10
+          done
+        working-directory: packages/envoy
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
+            echo "$unformatted"
+            exit 1
+          fi
+        working-directory: packages/envoy/infra
+      - name: Vet envoy-infra, its live-test tags included
+        run: go vet -tags pulumilive,natslive ./...
+        working-directory: packages/envoy/infra
+      - name: Unit test envoy-infra
+        run: go test ./...
+        working-directory: packages/envoy/infra
+
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
   # this package under -race before a PR claimed it), delivery (its intake handler reads the

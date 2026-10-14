@@ -19,8 +19,9 @@ Sami, 2026-10-13 and 2026-10-14:
 
 - The components are written in Go and ship as an executable Pulumi plugin, so a consumer in any
   Pulumi language needs only the Pulumi CLI.
-- They live in their own Go module, `packages/envoy/infra`, nested under `packages/envoy` and added
-  to `go.work`, so Pulumi and its provider SDKs stay out of the module the Envoy binaries build from.
+- They live in their own Go module, `packages/envoy/infra`, nested under `packages/envoy` with a
+  `go.work` of its own, not the repository's, so Pulumi and its provider SDKs stay out of the Envoy
+  binaries' module and their dependency versions.
 - An existing deployment moves onto the components only when its `pulumi preview` creates, updates,
   replaces or deletes no cloud resource. The only creates allowed are the component resources
   themselves, which exist only in Pulumi state. Stack outputs stay unchanged.
@@ -37,8 +38,8 @@ Sami, 2026-10-13 and 2026-10-14:
   configuration holds public keys only, never a seed.
 - Permission sets for a listener and for an agent session, derived from the subjects Envoy itself
   uses, so a deployment does not hand-write subject lists.
-- The listener's environment for a host: machine ID, NATS URLs, the remote-NATS opt-in, port, listen
-  host, seed and webhooks.
+- The listener's environment for a host: machine ID, NATS URLs, the remote-NATS opt-in, port, host
+  bridge and seed.
 
 **`envoy-infra seed`**, a command built from the same module:
 
@@ -73,7 +74,8 @@ Every component creates its resources with the providers the consumer passes in 
 resource option), never with default providers of the plugin's own versions.
 
 **Release**: `release.yaml` builds the plugin per OS and architecture from
-`.github/go-release-targets.json` and attaches it to a GitHub release tagged
+`.github/envoy-infra-targets.json` (a file of its own, since the shared targets file is a release
+input of the other Go binaries) and attaches it to a GitHub release tagged
 `envoy-infra-v<version>`, with assets named `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz`.
 The schema's `pluginDownloadURL` is
 `https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}`: Pulumi fills in
