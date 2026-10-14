@@ -31,7 +31,7 @@
 
 ### Fixed
 
-- `claude plugin update claude-envoy@legion-plugins` installs main's current tree: `.claude-plugin/plugin.json` declares no `version`, so Claude Code versions the plugin by its commit. Its fixed `1.0.0` held every install at the tree it was first installed from (`claude-envoy is already at the latest version (1.0.0)`).
+- `claude plugin marketplace update legion-plugins`, then `claude plugin update claude-envoy@legion-plugins`, installs main's current tree: `.claude-plugin/plugin.json` declares no `version`, so Claude Code versions the plugin by its commit. Its fixed `1.0.0` held every install at the tree it was first installed from (`claude-envoy is already at the latest version (1.0.0)`).
 
 ## [1.0.0]
 
