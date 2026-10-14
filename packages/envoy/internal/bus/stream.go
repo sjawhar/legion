@@ -12,6 +12,27 @@ import (
 
 const Stream = "ENVOY_NOTIFICATIONS"
 
+// NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
+// role lanes and the exception lanes.
+const NotificationTopicPrefix = "notifications."
+
+// ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
+// on ExceptionTopicPrefix followed by its original topic.
+const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// ListenerDurable is the durable consumer of the stream that the listener of machine machineID
+// binds. A space in the machine id is a hyphen in the name.
+func ListenerDurable(machineID string) string {
+	return "listener-" + strings.ReplaceAll(machineID, " ", "-")
+}
+
+// ListenerQueue is the queue group the listener of machine machineID subscribes the role lanes in,
+// so NATS hands each role message to one of the machine's listeners while a rolling deploy runs two.
+// A space in the machine id is a hyphen in the name.
+func ListenerQueue(machineID string) string {
+	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
+}
+
 // streamDuplicateWindow covers the entire retained notification lifetime, so
 // an outbox retry after a crash before published_at is recorded cannot create a
 // second retained Dispatch event while the original remains observable, and a
