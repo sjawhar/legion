@@ -42,21 +42,25 @@ versions. Never add the module to the root `go.work`.
   also runs outside the plugin, as the unit tests run it under `pulumi.WithMocks`, where no call
   carries one (`host/listener.go`, `listenerType`). `provider.New` serves it through
   `infer.ComponentF`.
-- **Providers.** Before it registers anything, a component calls
-  `providers.Require(ctx.Context(), <token>, <package>, opts...)` for each package it creates
-  resources with, so a missing provider fails naming the component and the package, and no
-  resource falls back to a default provider of the plugin's own SDK version. Its unit test runs it
-  without each provider and asserts nothing registered.
-- **Refusals.** Every refusal names the input. A component refuses every input it holds as a plain
-  value before it registers anything, and its unit test asserts nothing but the test's providers
-  registered. `NewListener` refuses an explicit `port` 0, then calls
-  `core.ListenerConfig.CheckPlain` (a blank `machineId`, a `port` outside 1-65535, a `hostBridge`
-  with surrounding whitespace), then the watchdog's three refusals and a missing provider
-  (`host/listener.go:90-124`). Only `natsUrls`, which may be another resource's output, is checked
-  later: `core.ListenerEnv` runs `CheckPlain` again and then checks each URL, inside the `ApplyT`
-  over `natsUrls` that computes the container's environment (`:147-151`). A bad URL therefore fails
-  the preview or update when the container's `envs` resolve, after the component and its image have
-  registered, not the constructor.
+- **Resolve, then require, then register.** A component's constructor first resolves its inputs in a
+  pure function that needs no engine (`host.resolveListener`): it gives each optional input its
+  default, refuses every input it holds as a plain value, and lists the provider packages the
+  component creates resources with. The constructor then calls
+  `providers.Require(ctx.Context(), <token>, <package>, opts...)` for each of those packages, so a
+  missing provider fails naming the component and the package and no resource falls back to a
+  default provider of the plugin's own SDK version, and only then registers anything. The refusal
+  table runs against the resolver directly; one test drives the constructor with a refused input
+  and one per missing provider, each asserting nothing registered beyond the test's providers.
+- **Refusals.** Every refusal names the input. `core.ListenerConfig.CheckPlain` holds the checks of
+  the listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`);
+  `core.ListenerEnv` runs it again and then checks each of `natsUrls`, the one field that may be
+  another resource's output, inside the `ApplyT` that computes the container's environment. A bad
+  URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
+  container's `envs` resolve, after the component and its image have registered, not the
+  constructor. The watchdog's create script runs as root on the host (`host.watchdogCreate`), so
+  no value of the environment, which it writes into a heredoc, may hold a control character, and
+  with a watchdog the listener's name, which it echoes in double quotes, may hold no `"`, `$`,
+  backtick, `\` or line break.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go:395`, `:764-766`). A

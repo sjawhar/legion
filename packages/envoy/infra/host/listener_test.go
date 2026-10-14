@@ -88,12 +88,6 @@ func (m *mocks) types() []string {
 // constructed listener inside the program.
 func run(t *testing.T, args *host.ListenerArgs, check func(*host.Listener), pkgs ...string) (*mocks, error) {
 	t.Helper()
-	return runNamed(t, "example-host-a", args, check, pkgs...)
-}
-
-// runNamed is run with the listener named name.
-func runNamed(t *testing.T, name string, args *host.ListenerArgs, check func(*host.Listener), pkgs ...string) (*mocks, error) {
-	t.Helper()
 	m := &mocks{}
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		var provs []pulumi.ProviderResource
@@ -115,7 +109,7 @@ func runNamed(t *testing.T, name string, args *host.ListenerArgs, check func(*ho
 			}
 			provs = append(provs, prov)
 		}
-		l, err := host.NewListener(ctx, name, args, pulumi.Providers(provs...))
+		l, err := host.NewListener(ctx, "example-host-a", args, pulumi.Providers(provs...))
 		if err != nil {
 			return err
 		}
@@ -315,7 +309,8 @@ func TestListenerRefusesMissingProvidersBeforeRegistering(t *testing.T) {
 	})
 }
 
-func TestListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
+// resolveListener refuses every input it can check from the inputs alone, with no engine.
+func TestListenerRefusesInvalidInputs(t *testing.T) {
 	cases := []struct {
 		name     string
 		listener string // the listener's name; example-host-a when empty
@@ -403,16 +398,26 @@ func TestListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			if listener == "" {
 				listener = "example-host-a"
 			}
-			m, err := runNamed(t, listener, args, nil, "docker", "command")
+			err := host.ResolveListener(listener, args)
 			require.Error(t, err)
 			for _, want := range c.err {
 				require.ErrorContains(t, err, want)
 			}
-			// The two provider registrations race each other, so only their set is fixed.
-			require.ElementsMatch(t, []string{"pulumi:providers:docker", "pulumi:providers:command"}, m.types(),
-				"nothing registered beyond the test's providers")
 		})
 	}
+}
+
+// NewListener resolves its inputs before it requires a provider or registers anything, so a
+// refused input leaves only the program's own providers behind.
+func TestListenerRefusesBeforeRegistering(t *testing.T) {
+	args := exampleArgs()
+	args.MachineID = "a\nENVEOF\nid"
+	args.Watchdog = &host.WatchdogArgs{Host: "example-host-a"}
+	m, err := run(t, args, nil, "docker", "command")
+	require.ErrorContains(t, err, "machineId contains a control character")
+	// The two provider registrations race each other, so only their set is fixed.
+	require.ElementsMatch(t, []string{"pulumi:providers:docker", "pulumi:providers:command"}, m.types(),
+		"nothing registered beyond the test's providers")
 }
 
 func TestListenerNatsUrlRefusedByListenerEnvFailsTheRun(t *testing.T) {
@@ -441,8 +446,7 @@ func TestListenerNatsUrlThatWouldEscapeTheWatchdogHeredocFailsTheRun(t *testing.
 
 // A listener's name is refused only with a watchdog, whose script echoes it.
 func TestListenerNameIsFreeWithoutAWatchdog(t *testing.T) {
-	_, err := runNamed(t, "example-host-$a", exampleArgs(), nil, "docker")
-	require.NoError(t, err)
+	require.NoError(t, host.ResolveListener("example-host-$a", exampleArgs()))
 }
 
 // A blank seed would start a listener that refuses its NATS_NKEY_SEED and restarts until the
