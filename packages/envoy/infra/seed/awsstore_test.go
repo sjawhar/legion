@@ -576,9 +576,7 @@ func TestAWSGenerateAfterItsWrite(t *testing.T) {
 // new version out and GetSecretValue can find no AWSCURRENT version. generate looks again rather
 // than calling either a race or a failed read-back.
 func TestAWSGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
-	saved := readBackWaits
-	readBackWaits = []time.Duration{0, 0, 0}
-	t.Cleanup(func() { readBackWaits = saved })
+	SetReadBackWaits(t, 0, 0, 0)
 	rows := []struct {
 		name                  string
 		staleLists, staleGets int

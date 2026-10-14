@@ -18,6 +18,15 @@ import (
 	"github.com/sjawhar/envoy/infra/seed"
 )
 
+// buildCLI builds this package's binary at out with the extra go build arguments args.
+func buildCLI(t *testing.T, out string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("go", append(append([]string{"build"}, args...), "-o", out, ".")...)
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build %v: %v\n%s", args, err, b)
+	}
+}
+
 // TestVersionPrintsTheStampedRelease: the release job stamps the CLI with
 // `-ldflags "-X main.version=<X.Y.Z>"`, so a build stamped that way prints exactly that version
 // and nothing else, without any AWS configuration. Any other build prints 0.0.0-dev, as the plugin
@@ -25,15 +34,8 @@ import (
 func TestVersionPrintsTheStampedRelease(t *testing.T) {
 	dir := t.TempDir()
 	stamped, local := filepath.Join(dir, "stamped"), filepath.Join(dir, "local")
-	build := func(out string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("go", append(append([]string{"build"}, args...), "-o", out, ".")...)
-		if b, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("go build %v: %v\n%s", args, err, b)
-		}
-	}
-	build(stamped, "-ldflags", "-X main.version=9.9.9")
-	build(local)
+	buildCLI(t, stamped, "-ldflags", "-X main.version=9.9.9")
+	buildCLI(t, local)
 
 	for _, c := range []struct{ binary, want string }{{stamped, "9.9.9\n"}, {local, "0.0.0-dev\n"}} {
 		var stdout, stderr bytes.Buffer
@@ -99,9 +101,7 @@ func TestHelpNamesVersion(t *testing.T) {
 func TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting(t *testing.T) {
 	const name = "example/envoy/nats-nkey-seed-example-host-a"
 	binary := filepath.Join(t.TempDir(), "envoy-infra")
-	if b, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("go build: %v\n%s", err, b)
-	}
+	buildCLI(t, binary)
 	putArrived, release := make(chan struct{}), make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
