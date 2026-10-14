@@ -56,9 +56,9 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 	if state == "changes_requested" {
 		eventType = "artifact.changes_requested"
 	}
-	event := model.Event{
-		Type: eventType, Actor: actor,
-		Payload: model.ArtifactReviewEventPayload{
+	event, err := broker.Append(ctx, tx, documentAskEvent(
+		artifactOwner{IssueKey: artifact.IssueKey}, artifact.ID, eventType, actor,
+		model.ArtifactReviewEventPayload{
 			ArtifactID: artifact.ID,
 			Name:       artifact.Name,
 			Version:    version,
@@ -66,13 +66,7 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 			Reason:     reason,
 			AskID:      askID,
 		},
-	}
-	if artifact.IssueKey != nil {
-		event.IssueKey = new(*artifact.IssueKey)
-	} else {
-		event.ArtifactID = new(artifact.ID)
-	}
-	event, err = broker.Append(ctx, tx, event)
+	))
 	if err != nil {
 		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("append %s: %w", eventType, err)
 	}
@@ -82,18 +76,24 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 // LatestApprovedReview is the newest approval of artifactID, whoever gave it, or nil when nobody
 // has approved the document at any version.
 func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*model.ArtifactReview, error) {
-	review, err := ScanReview(q.QueryRow(ctx, `
+	return newestReview(ctx, q, "latest approved review", `
 		select `+ReviewColumns+`
 		from artifact_reviews
 		where artifact_id = $1 and state = 'approved'
 		order by created_at desc, id desc
 		limit 1
-	`, artifactID))
+	`, artifactID)
+}
+
+// newestReview runs a query selecting ReviewColumns of at most one row and returns that review,
+// nil when the query selects none; what names the read in the error any other failure wraps.
+func newestReview(ctx context.Context, q Queryer, what, query string, args ...any) (*model.ArtifactReview, error) {
+	review, err := ScanReview(q.QueryRow(ctx, query, args...))
 	if err == nil {
 		return &review, nil
 	}
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
-	return nil, fmt.Errorf("read latest approved review: %w", err)
+	return nil, fmt.Errorf("read %s: %w", what, err)
 }

@@ -44,11 +44,18 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if !holdsAnsweredBlock(blocks) {
 		return nil, nil
 	}
+	// Every version write runs this, and a document keeps its answered blocks for the rest of its
+	// life: the version before this one is read and parsed only once a carry is possible at all,
+	// which needs an approval of the document by someone.
+	if approvedByAnyone, err := LatestApprovedReview(ctx, tx, artifactID); err != nil || approvedByAnyone == nil {
+		return nil, err
+	}
 	previous, readable, err := s.storedVersionTree(ctx, tx, artifactID, version.Number-1)
 	if err != nil || !readable {
 		return nil, err
 	}
-	login, newly := newlyAnsweredBlocks(blocks, askBlockStates(previous))
+	previousBlocks := askBlockStates(previous)
+	login, newly := newlyAnsweredBlocks(blocks, previousBlocks)
 	if !newly {
 		return nil, nil
 	}
@@ -85,7 +92,10 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if approvedCut != cut {
 		return nil, nil
 	}
-	approvedBlocks := askBlockStates(approved)
+	approvedBlocks := previousBlocks
+	if approved != previous {
+		approvedBlocks = askBlockStates(approved)
+	}
 	for id, block := range blocks {
 		if _, held := approvedBlocks[id]; held {
 			continue
@@ -219,21 +229,14 @@ func (s *Service) storedVersionTree(ctx context.Context, tx pgx.Tx, artifactID s
 
 // latestReviewBy is the newest review of artifactID a person gave, in any state, by his canonical
 // login (model.CanonicalLogin), or nil when he has reviewed the document at no version.
-func latestReviewBy(ctx context.Context, tx pgx.Tx, artifactID, login string) (*model.ArtifactReview, error) {
-	review, err := ScanReview(tx.QueryRow(ctx, `
+func latestReviewBy(ctx context.Context, q Queryer, artifactID, login string) (*model.ArtifactReview, error) {
+	return newestReview(ctx, q, fmt.Sprintf("latest review by %q", login), `
 		select `+ReviewColumns+`
 		from artifact_reviews
 		where artifact_id = $1 and actor->>'kind' = 'user' and lower(trim(actor->>'id')) = $2
 		order by created_at desc, id desc
 		limit 1
-	`, artifactID, login))
-	if err == nil {
-		return &review, nil
-	}
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("read latest review by %q: %w", login, err)
+	`, artifactID, login)
 }
 
 // answerApprovalAsk answers the open approval request ask with Approve in actor's name, giving

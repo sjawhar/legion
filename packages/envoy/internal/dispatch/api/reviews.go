@@ -448,7 +448,7 @@ func (s *server) openApprovalAsk(
 	}
 	if approved != nil {
 		approval.ApprovedVersion = new(approved.Version)
-		approval.ApprovedAt = new(approved.CreatedAt.UTC().Format(time.RFC3339Nano))
+		approval.ApprovedAt = new(timestampValue(approved.CreatedAt))
 		approval.ApprovedBy = new(approved.Actor)
 	}
 	ask := model.Ask{

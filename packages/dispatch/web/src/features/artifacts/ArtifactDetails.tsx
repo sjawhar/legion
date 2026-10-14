@@ -29,7 +29,10 @@ import {
   versionsNewestFirst,
 } from "./ArtifactHeader";
 
-function isText(content: ArtifactVersionContent | undefined): content is ArtifactVersionText {
+/** Whether a fetched version is a document's text (one with `markdown`) rather than a blob. */
+export function isText(
+  content: ArtifactVersionContent | undefined
+): content is ArtifactVersionText {
   return content !== undefined && "markdown" in content;
 }
 

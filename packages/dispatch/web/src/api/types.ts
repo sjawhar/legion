@@ -29,6 +29,7 @@ export type {
   Ask,
   AskAnchorArtifact,
   AskAnswer,
+  AskApproval,
   AskBlockArtifact,
   AskEdit,
   AskEditPrevious,

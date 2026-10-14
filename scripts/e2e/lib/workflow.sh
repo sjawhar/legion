@@ -76,12 +76,15 @@ dispatch_status_is() { dispatch_get "issues/$1" | jq -e --arg status "$2" '.stat
 review_cap_posted() {
   dispatch_events "$1" | jq -e 'any(.[]; .type == "message.created" and (.payload.body | contains("review_round_cap=3")))'
 }
+# session_actor_body SESSION BODY prints the JSON object BODY with SESSION as its actor: the shape a
+# bearer caller must name, or Dispatch refuses the write (ACTOR_KIND).
+session_actor_body() { jq -c --arg id "$1" '. + {actor: {kind: "session", id: $id}}' <<<"$2"; }
 # proof_human_body BODY prints the JSON object BODY as a proof-human write sends it: with the proof
-# human's session as its actor when dispatch_actor names one (a bearer caller must name one, or
-# Dispatch refuses the write, ACTOR_KIND), and unchanged when dispatch_actor is empty.
+# human's session as its actor when dispatch_actor names one, and unchanged when dispatch_actor is
+# empty.
 proof_human_body() {
   if [ -n "$dispatch_actor" ]; then
-    jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$1"
+    session_actor_body "$dispatch_actor" "$1"
   else
     printf '%s' "$1"
   fi
@@ -105,7 +108,7 @@ dispatch_human() {
 dispatch_agent_session=stage3-architect-stand-in
 dispatch_agent() {
   local method=$1 path=$2 body
-  body=$(jq -c --arg id "$dispatch_agent_session" '. + {actor: {kind: "session", id: $id}}' <<<"$3")
+  body=$(session_actor_body "$dispatch_agent_session" "$3")
   curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-auth-header" -H 'content-type: application/json' \
     --data "$body" "$(dispatch_url)/api/v1/$path"
 }

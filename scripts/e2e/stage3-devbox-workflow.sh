@@ -500,13 +500,15 @@ assert_ready_gate_closed() {
   ' "$file" >/dev/null
 }
 # The design gate in the daemon's state: closed while the spec's current version is past the one a
-# human approved, open while the approved version is the current one.
+# human approved, open while the approved version is the current one; design_gate_version ISSUE
+# prints the spec version the gate currently names.
 design_gate_closed() {
   daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion' >/dev/null
 }
 design_gate_open() {
   daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.approvedVersion == .issues[$issue].designGate.currentVersion' >/dev/null
 }
+design_gate_version() { daemon_state | jq -er --arg issue "$1" '.issues[$issue].designGate.currentVersion'; }
 # spec_event ISSUE TYPE VERSION: the issue's Dispatch event log carries the TYPE event
 # (artifact.version or artifact.approved) naming the spec ($artifact_id) at VERSION; spec_event_in
 # TYPE VERSION reads a saved log on stdin. The spec is not the issue's only document (the planner's
@@ -845,7 +847,7 @@ primary_issue() {
   dispatch_human POST "issues/$root_issue/artifacts" \
     "$(jq -cn --arg name spec.md --arg content "# Stage 3 smoke\n\nThe human revised this proof specification before READY.\n" '{name:$name,content:$content,summary:"Stage 3 gate re-close"}')" >/dev/null
   until_true 120 "the human's new primary spec version to close the gate" design_gate_closed "$root_issue"
-  uploaded_version=$(daemon_state | jq -er --arg issue "$root_issue" '.issues[$issue].designGate.currentVersion')
+  uploaded_version=$(design_gate_version "$root_issue")
   until_true 60 "the artifact.version event naming spec version $uploaded_version on $root_issue" spec_event "$root_issue" artifact.version "$uploaded_version"
   dispatch_events "$root_issue" >"$evidence/ready-gate-upload-events.json"
   if spec_event_in artifact.approved "$uploaded_version" <"$evidence/ready-gate-upload-events.json"; then
@@ -872,7 +874,7 @@ primary_issue() {
     "$evidence/ready-refused.json" >"$evidence/ready-open-negative.json"
   expect_failure ready-gate-not-reclosed assert_ready_gate_closed "$evidence/ready-open-negative.json"
   assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the READY gate did not restore after its negative control"
-  new_version=$(daemon_state | jq -er --arg issue "$root_issue" '.issues[$issue].designGate.currentVersion')
+  new_version=$(design_gate_version "$root_issue")
   # The carry: the proof human answers the block, and nothing else changed since the version he
   # approved, so Dispatch records his approval of the version the answer settles into itself. No
   # review goes through the reviews route from here to awaiting_merge; the daemon's gate reopens on

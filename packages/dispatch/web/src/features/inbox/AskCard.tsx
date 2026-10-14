@@ -519,10 +519,10 @@ export function AskCard({
         )}
         {/* A request to approve again names the approval it follows, under the question (the
             spec's own placement), with the diff from that version behind Show diff; a first
-            request carries no earlier approval and renders neither. */}
-        {isApproval && displayedAsk.approval?.approved_version !== undefined ? (
+            request carries no earlier approval, and EarlierApproval renders nothing for it. */}
+        {displayedAsk.approval === undefined ? null : (
           <EarlierApproval approval={displayedAsk.approval} />
-        ) : null}
+        )}
         {/* One provenance line under the question, in the spec's decided conversation grammar:
             whose turn it is (the only part a reader acts on), who asked, when, and the ask's
             own reference. The session's own handles - its ID, its title, its tmux target - are
