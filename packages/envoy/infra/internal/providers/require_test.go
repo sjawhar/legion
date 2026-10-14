@@ -66,9 +66,10 @@ func TestRequireRefusesAMissingProviderNamingComponentAndPackage(t *testing.T) {
 	require.ErrorContains(t, err, `envoy-infra:host:Listener needs a "docker" provider in its providers option`)
 }
 
+// The command provider is named "docker", so only its type, pulumi:providers:command, refuses it.
 func TestRequireRefusesAProviderOfAnotherPackage(t *testing.T) {
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
-		cmd, err := command.NewProvider(ctx, "command-host", &command.ProviderArgs{})
+		cmd, err := command.NewProvider(ctx, "docker", &command.ProviderArgs{})
 		if err != nil {
 			return err
 		}
