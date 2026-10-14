@@ -68,6 +68,61 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 	// WatchdogArgs would reach consumers as WatchdogArgsArgs.
 	require.Equal(t, "#/types/envoy-infra:host:Watchdog", listener.InputProperties["watchdog"].Ref)
 	require.Equal(t, "#/types/envoy-infra:host:Adopt", listener.InputProperties["adopt"].Ref)
-	require.ElementsMatch(t, []string{"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt"},
-		slices.Collect(maps.Keys(schema.Types)))
+	require.ElementsMatch(t, []string{
+		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
+		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:Rules",
+	}, slices.Collect(maps.Keys(schema.Types)))
+}
+
+func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
+	prov, err := provider.New()
+	require.NoError(t, err)
+	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
+		integration.WithProvider(prov))
+	require.NoError(t, err)
+
+	resp, err := server.GetSchema(p.GetSchemaRequest{})
+	require.NoError(t, err)
+
+	type property struct {
+		Type   string `json:"type"`
+		Secret bool   `json:"secret"`
+		Ref    string `json:"$ref"`
+		Items  struct {
+			Ref string `json:"$ref"`
+		} `json:"items"`
+	}
+	var schema struct {
+		Resources map[string]struct {
+			IsComponent     bool                `json:"isComponent"`
+			InputProperties map[string]property `json:"inputProperties"`
+			RequiredInputs  []string            `json:"requiredInputs"`
+			Properties      map[string]property `json:"properties"`
+		} `json:"resources"`
+		Types map[string]struct {
+			Properties map[string]property `json:"properties"`
+		} `json:"types"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(resp.Schema), &schema))
+	hub, ok := schema.Resources["envoy-infra:gcp:NatsHub"]
+	require.True(t, ok, "the schema lists envoy-infra:gcp:NatsHub")
+	require.True(t, hub.IsComponent)
+	require.ElementsMatch(t, []string{
+		"users", "tailnetAuthKey", "hostname", "tags", "zone", "machineType", "diskSizeGb", "natsImage",
+		"tailscaleImage", "network", "subnetwork",
+	}, slices.Collect(maps.Keys(hub.InputProperties)))
+	require.ElementsMatch(t, []string{"users", "tailnetAuthKey", "hostname", "tags", "zone", "natsImage", "tailscaleImage"},
+		hub.RequiredInputs)
+	for name, in := range hub.InputProperties {
+		require.Equal(t, name == "tailnetAuthKey", in.Secret, "only tailnetAuthKey is a secret input, not %s", name)
+	}
+	require.Equal(t, "#/types/envoy-infra:gcp:NatsUser", hub.InputProperties["users"].Items.Ref)
+	require.ElementsMatch(t, []string{"natsUrl", "instanceGroup"}, slices.Collect(maps.Keys(hub.Properties)))
+
+	// Generated SDKs append Args to an object type's name for its input type, so the Go names
+	// NATSUserArgs, PermissionsArgs and RulesArgs would reach consumers doubled.
+	user := schema.Types["envoy-infra:gcp:NatsUser"]
+	require.Equal(t, "#/types/envoy-infra:gcp:Permissions", user.Properties["permissions"].Ref)
+	require.Equal(t, "#/types/envoy-infra:gcp:Rules",
+		schema.Types["envoy-infra:gcp:Permissions"].Properties["publish"].Ref)
 }

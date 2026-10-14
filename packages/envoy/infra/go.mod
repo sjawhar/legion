@@ -8,10 +8,12 @@ require (
 	github.com/nats-io/nkeys v0.4.15
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-docker/sdk/v5 v5.2.0
+	github.com/pulumi/pulumi-gcp/sdk/v10 v10.1.0
 	github.com/pulumi/pulumi-go-provider v1.7.0
 	github.com/pulumi/pulumi/sdk/v3 v3.265.0
 	github.com/sjawhar/envoy v0.0.0
 	github.com/stretchr/testify v1.12.1
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -168,7 +170,6 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260921155816-b14227669459 // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/frand v1.5.1 // indirect
 )
 
