@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-573",
+  "completed": "2026-10-14T00:34:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1944",
+  "headSha": "51836f1022d287cc25672fd444d81c1e893f5841",
+  "proof": [
+    {
+      "criterion": "When a human answers a decision block in a document he approved, and nothing outside the decision blocks changed since the version he approved, the version his answer writes carries his approval: a review pinned to the new version by the same actor, artifact.approved emitted, in the same transaction as the version.",
+      "surface": "Dispatch built from this branch (cd packages/envoy && go build -o /tmp/pg573/dispatch-e2e ./cmd/dispatch; DISPATCH_DEV_SIGNIN=1 DISPATCH_IDENTITY=cookie DISPATCH_AGENT_TOKEN=proof-token against an embedded Postgres 16 with pgvector at 127.0.0.1:55573), driven over HTTP as the human 'proof' (dev sign-in cookie) and the agent bearer (actor {kind: session, id: smoke-architect}).",
+      "command": "POST /api/v1/issues {project: PROOF, spec: two paragraphs}; human POST /api/v1/artifacts/{id}/reviews {state: approved} (v1); agent POST /api/v1/artifacts/{id}/edits {ops: [{op: insert, after: end, markdown: ':::ask{urgency=\"high\" multiple=\"false\"}…:::'}]} (v2); human POST /api/v1/asks/{block ask}/answer {selected: [Keep], expected_edited_at: null}; then GET /api/v1/artifacts/{id}, GET /api/v1/artifacts/{id}/reviews, GET /api/v1/issues/PROOF-1/events?limit=200",
+      "observed": "Before the answer approval.state was stale at latest_version 2. After it: approval {state: approved, version: 3, latest_version: 3, by: {user proof}, reason: 'Carried forward from the approval of version 1: the answer to a decision block was the whole change since it.'}; reviews newest first: (3, approved, actor {user proof}, ask_id null, the carry reason), (1, approved); events: (2 artifact.approved v1), (3 artifact.version v2), (4 ask.opened), (5 ask.answered), (6 artifact.approved v3), (7 artifact.version v3), with zero approval-kind ask.opened. The daemon's consume path, cd packages/daemon && go test ./internal/workflow/... -run 'Approval|Gate', passes unchanged.",
+      "headSha": "51836f1022d287cc25672fd444d81c1e893f5841",
+      "negativeControl": "On a second document approved at v1, the agent inserted a block and then changed one paragraph outside it (op: replace) before the human answered → approval.state stale at latest_version 4, GET …/reviews still only the v1 row, no artifact.approved after v1."
+    },
+    {
+      "criterion": "A re-approval request on a spec with an earlier approval carries that approval's version, date and approver, and the card says 'Approved at version N on <date> by <who>.' with a Show diff control that renders the two versions' diff with decision blocks cut out only when pressed, in the Inbox and on the document page; a first request renders as today.",
+      "surface": "The same branch-built Dispatch serving the web bundle built from this head (cd packages/dispatch && bun run build:web), in a real Chromium tab signed in as 'proof' (browser.open on http://127.0.0.1:38573/auth/_dev/signin?login=proof&next=/), plus the agent bearer for the request.",
+      "command": "agent POST /api/v1/artifacts/{control doc}/approval-requests {summary: 'The flag paragraph gained a canary since your approval.'}; agent POST /api/v1/artifacts/{fresh doc}/approval-requests {summary: 'A first request.'}; then the Inbox at /, the document page /issues/PROOF-2 → margin 'Review (1)' tab, and /issues/PROOF-1 for the carried document's chip",
+      "observed": "The request answered ask.approval {version: 4, requested_version: 4, approved_version: 1, approved_at: <the v1 review's created_at>, approved_by: {user proof}}; the fresh document's request answered approval with keys [artifact_id, name, requested_version, version] only. Inbox card for 'Approve spec.md (version 4)?' rendered the line 'Approved at version 1 on 2026-10-14 by proof.' and Show diff; no [data-testid=version-diff] and no version fetch until pressed; pressed, exactly GET …/versions/1 and GET …/versions/4 were fetched and the diff held one del ('The service ships behind a flag.') and one ins ('The service ships behind a flag and a canary.') with no 'ask{' text; Hide diff toggled back. The document page's margin card rendered the same line, control and diff. PROOF-1's chip read 'Approved v3' and its Reviews dialog 'proof approved v3' with the carry reason above 'proof approved v1'. Screenshots were taken of the Inbox card closed and open, the margin card open, and the Reviews dialog.",
+      "headSha": "51836f1022d287cc25672fd444d81c1e893f5841",
+      "negativeControl": "The first request's card (PROOF-3, never approved) rendered 'Approval requested' and the question with no 'Approved at version' line and no Show diff control; AskCard.test.tsx pins the same."
+    },
+    {
+      "criterion": "Every skill, prompt, CLI result text and tool description that said the old rule says the new one: request nothing when the answer carried the approval; rewrite, fresh-reader check and request with a one-sentence summary when the answer changes the Summary, Acceptance or scope.",
+      "surface": "The files and their pinned tests in this workspace at the head.",
+      "command": "grep -rn -e 'request approval again' -e 'makes the approval stale' -e 'makes that approval stale' -e 'an edit after approval' skills packages/daemon/internal/prompts packages/envoy-client/src packages/contracts/src docs/site/src/content/docs AGENTS.md; cd packages/envoy-client && env -u ENVOY_TOKEN_FILE -u ENVOY_TOKEN bun test; cd packages/pi-envoy && bun test src/skills-guard.test.ts; cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/daemon && go test ./internal/prompts/... ./internal/daemon/ -run 'Spec|Prompt|Role'; cd packages/claude-envoy && bun scripts/build.ts --check",
+      "observed": "The grep lists only skills/legion-architect/SKILL.md lines 164, 200, 398 and 399, each the rewrite branch or the design-changes-requested row the plan keeps; envoy-client 560 pass 0 fail (the dispatch_doc_read stale line test pins the new text); skills-guard 8 pass (pi-envoy) and 9 pass (pi-legion); daemon prompts and specs tests ok; claude-envoy dist matches a fresh build.",
+      "headSha": "51836f1022d287cc25672fd444d81c1e893f5841",
+      "negativeControl": "Before the text commit the same grep listed the old sentences in skills/dispatch/SKILL.md ('a block in an approved document makes the approval stale, which is right'; 'any later version makes that approval stale'), both architect prompts and packages/envoy-client/src/dispatch-execute.ts, and the envoy-client test pinned the old stale line."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/docs/approval_carry.go (new: carryApproval, CutDecisionBlocks)",
+    "packages/envoy/internal/dispatch/docs/approval_review.go (new: WriteReview, ScanReview, ReviewColumns, LatestApprovedReview, newestReview, the option constants)",
+    "packages/envoy/internal/dispatch/docs/mutation.go (writeVersionTx calls carryApproval after MoveApprovalAsk)",
+    "packages/envoy/internal/dispatch/api/reviews.go, ask_transitions.go, issue_assignee.go and the other api files that called canonicalLogin (docs.WriteReview; model.CanonicalLogin; openApprovalAsk fills approved_version/approved_at/approved_by)",
+    "packages/envoy/internal/dispatch/model/model.go (CanonicalLogin; AskApproval's three fields)",
+    "packages/envoy/internal/dispatch/api/approval_carry_test.go, docs/approval_carry_test.go (new); packages/contracts/fixtures/decision-blocks/{approved,answered,paragraph-changed}.md (new, shared with the web test)",
+    "packages/contracts/src/dispatch-api.ts, dispatch-tools.ts",
+    "packages/dispatch/web/src/features/inbox/EarlierApproval.tsx (new), AskCard.tsx, AskCard.test.tsx; features/doc/decision-blocks.ts (new) and its test; features/artifacts/ArtifactDetails.tsx (isText exported); api/types.ts (AskApproval re-exported)",
+    "packages/envoy-client/src/dispatch-execute.ts and its test; packages/claude-envoy/dist (rebuilt)",
+    "skills/dispatch/SKILL.md, skills/dispatch/references/documents.md, skills/legion-architect/SKILL.md; packages/daemon/internal/prompts/roles/architect-root.md, architect.md",
+    "AGENTS.md; docs/site/src/content/docs/{dispatch/documents,dispatch/for-agents,dispatch/inbox-and-asks,legion/concepts,how-it-fits}.md; packages/envoy/AGENTS.md, cmd/dispatch/AGENTS.md, cmd/dispatch/README.md; packages/dispatch/AGENTS.md",
+    "scripts/e2e/stage3-devbox-workflow.sh, scripts/e2e/lib/workflow.sh (dispatch_agent, session_actor_body), scripts/e2e/lib/ensure-project.test.ts, scripts/e2e/README.md",
+    "CHANGELOGs: packages/envoy, contracts, envoy-client, pi-envoy, pi-legion, claude-envoy"
+  ],
+  "trickyParts": [
+    "The carry runs on every version write, so it reads the previous version only once the document has any approval at all (LatestApprovedReview), then parses the previous version and, when the approved version is not the previous one, that version too; both parse with pmdoc.ParseRendering (the renderer's own output), and a stored version outside today's schema is logged at WARN and carries nothing rather than failing the human's write.",
+    "The trigger reads the trees' server-owned ask attributes (state, answered_by, answered_at, copied_from), never the version's actor: the version an answer settles into may be credited to SettlementActor or share its window with an agent's edit; blocks carrying copied_from are ignored so a copy's document never carries on its source's answer.",
+    "CutDecisionBlocks keeps one empty paragraph in a container the cut empties (a blockquote or callout holding only ask blocks), since both parsers read an empty container as that and Render refuses an empty one; the browser's line-based cut need not be byte-identical to the server's, only agree on the fixtures' equalities.",
+    "An embedded Postgres 16 (zonky jar) with pgvector from the PGDG .deb ran the Postgres-backed Go suites in the pod, initdb'd with --locale-provider=icu --icu-locale=en-US so the rank collation test can tell migration 0049 apart; both dispatch packages' full suites take about 13 minutes sequentially and need -p 1 -timeout 40m."
+  ],
+  "deviations": [
+    "The card's earlier-approval line and Show diff control sit under the question (the spec's placement), not between the document link and the question as the plan's section 2.5 implied; packages/dispatch/AGENTS.md records the one exception to 'nothing else separates the question from its options'.",
+    "Stage 3 is written, shellchecked and library-tested but not run: it is devbox-only and dispatch://LEGION-718 reports it failing before this checkpoint; the architect directed not to wait for LEGION-718 (Envoy message e9ec66d7825a3f06ec60d9d9bdcace5b).",
+    "The simplify pass applied twelve findings (hot-path short-circuit on no approval, block-state reuse, documentAskEvent for the review event, one one-row review reader, useMemo on the cut, the two version numbers as props, the shared isText guard and AskApproval type, EarlierApproval owning its render condition, timestampValue, session_actor_body and design_gate_version); the checks and the full proof were re-run at the applied head."
+  ],
+  "openQuestions": [
+    "The production check (plan section 7) needs two human clicks on a LEGSMOKE scratch document after the dispatch-deploy holder deploys the merge; the architect approved one dispatch ask for them, opened at production-check time only."
+  ],
+  "discoveredComplexity": [
+    "The lib tests under scripts/e2e/lib need a jq binary on PATH; the pod's shell has jq only as a builtin, so they were run with a static jq 1.7.1 bind-mounted into a private mount namespace (298 pass; the one failure is install-model-gateway's chmod-0 case, which cannot fail as the namespace's root uid and passes as the ordinary user)."
+  ]
+}
