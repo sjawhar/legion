@@ -141,12 +141,7 @@ What each part is for:
   changed path, so anchor one (`^migrations/versions/`) to mean a directory. A pull request whose
   change touches one is `READY` with a `MANUAL_MERGE_REQUIRED:` note: the merger does not auto-arm
   it, the packet the daemon tells starts with the note, and a person merges it under the
-  repository's rules. It may also list
-  `review_workflows`, the paths (`.github/workflows/<name>.yml`, each once) of the workflows its
-  base branch requires that review the code and fail on their own findings, such as a review bot's.
-  A red only they make, in testing or review, goes to the reviewer, who adjudicates their findings
-  and re-runs them, rather than back to the implementer; any other red required workflow sends the
-  work back, as a red required check does. None is declared unless you list it.
+  repository's rules.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
@@ -358,6 +353,17 @@ Closing the terminal leaves the project without one, and the daemon logs
    `legion` binary and both plugins from it.
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
+
+   **After the first upgrade to a release without `review_workflows`,** a `legion.yaml` that still
+   sets `projects.<KEY>.review_workflows` is refused at load with
+   `Unknown key "projects.<KEY>.review_workflows"`, by `legion start --check-config` and by the
+   daemon's boot alike, so the daemon does not come up on it: delete the key before or with the
+   image pin (an empty list is refused too). A review bot's red is now CI like any other: it sends
+   the work back to the implementer, which answers and resolves the bot's threads and pushes, and
+   the bot runs again; the reviewer adjudicates nothing of it and re-runs nothing. Where the bot's
+   threads must be closed before a merge, make that the repository's own rule (a ruleset's
+   "Require conversation resolution before merging").
+
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
    `legion stop --config legion.yaml`) and start it again. `legion restart <PROJECT>` does both in
    the shell it runs in, from the configuration the stopped daemon recorded. The new daemon probes
