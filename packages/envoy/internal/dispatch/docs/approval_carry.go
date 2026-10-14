@@ -43,19 +43,20 @@ import (
 // nobody made, or one under words nobody decided.
 //
 // The version he approved, A, is held to the same row as N. A block of N is as A held it only
-// while A holds a block under its id, read as N's blocks are (askNodes: a block id A repeats,
-// which settlement reads no block under, makes A no measure of what he agreed to, and nothing is
-// carried), and that stored block is as settlement's own writer leaves it from the row of N's
-// block (blockAsSettlementLeavesIt: the whole server-owned set, and a decided row's wording, as
-// for N). A stored block that is not - one showing a selection, an answer, a copy's provenance or
-// a question other than its row's, approved before settlement wrote the row back over it - is a
-// change of N's, which must then be his own answer since his approval, or nothing is carried. The
-// row is the row at N's write, the only row there is, and holding A's block to it is exact: a
-// decided row's wording is frozen (the edit route's ASK_NOT_OPEN), its selection and text move
-// only with a new answer, which moves answered_at, and its state moves only with a resolution, so
-// a stored block that is as the current row has it over the whole set was as the row stood when A
-// was written, and one the row has moved away from since fails on answered_at or state
-// (LEGION-752).
+// while A holds a block under its id, read as N's blocks are (askNodes), and that stored block is
+// as settlement's own writer leaves it from the row of N's block (blockAsSettlementLeavesIt: the
+// whole server-owned set, and a decided row's wording, as for N). A stored block that is not -
+// one showing a selection, an answer, a copy's provenance or a question other than its row's,
+// approved before settlement wrote the row back over it - is a change of N's, which must then be
+// his own answer since his approval, or nothing is carried. The row is the row at N's write, the
+// only row there is, and holding A's block to it is exact: a decided row's wording is frozen (the
+// edit route's ASK_NOT_OPEN), its selection and text move only with a new answer, which moves
+// answered_at, and its state moves only with a resolution, so a stored block that is as the
+// current row has it over the whole set was as the row stood when A was written, and one the row
+// has moved away from since fails on answered_at or state (LEGION-752). A stored A that held one
+// block id twice carries nothing either: its read-back (storedVersionTree) repairs the repeat,
+// keeping the id on the first block and minting one for the next, so A shows a block N never had,
+// and a block of A that no longer stands in N refuses the carry.
 
 // carryReason is the reason a carried review records, naming the approval it follows.
 const carryReason = "Carried forward from the approval of version %d: the answer to a decision block was the whole change since it."
@@ -193,9 +194,12 @@ func (s *Service) candidateApproval(ctx context.Context, tx pgx.Tx, artifactID, 
 
 // readApprovedVersion reads the stored version number of artifactID as the rule compares N with
 // it (storedVersionTree), and whether it could be read. Its ask nodes are read as N's are
-// (askNodes): a version that holds one block id twice is one settlement reads no block under, so
-// it is no measure of what he agreed to, and is not readable - the candidate's approval does not
-// stand, and nothing is carried, as nothing is carried from an N that repeats an id.
+// (askNodes), which refuses a tree holding one block id twice - no measure of what he agreed to,
+// as nothing is carried from an N that repeats an id. A stored version's read-back
+// (pmdoc.ParseRendering) has already repaired such a repeat before this reads it, keeping the id
+// on the first block and minting one for the next, so from a stored version the refusal is never
+// reached: A then shows a block under the minted id that N never had, and carryVerdict refuses
+// the carry for a block of A that no longer stands. Either way nothing is carried.
 func (s *Service) readApprovedVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int) (approvedVersion, bool, error) {
 	tree, readable, err := s.storedVersionTree(ctx, tx, artifactID, number)
 	if err != nil || !readable {
