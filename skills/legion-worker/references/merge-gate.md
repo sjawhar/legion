@@ -20,7 +20,33 @@ the head voids it.
 - The reviewer verifies the `CI`, `Threads`, and `E2E` facts against GitHub directly —
   never from a handoff — then runs `task(agent="thermonuclear-deep-review")` and
   `task(agent="thermonuclear-code-quality")` once at that head — the head the round reviews —
-  and records the verdict.
+  and records the verdict. The `CI` fact is the checks that stand for the code under review:
+  those GitHub ran for the newest push of the branch that started `pull_request` workflows, when
+  every commit above that push's head changes only `.legion/` (a push that changes only
+  `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
+  `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
+  `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set, from
+  the base branch's rulesets
+  (`gh api repos/<o>/<r>/rules/branches/<base> --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'`)
+  and its branch protection, when it has any
+  (`gh api repos/<o>/<r>/branches/<base> --jq '.protection.required_status_checks.checks[].context'`);
+  a read GitHub refuses is reported to the architect, never guessed. The CI head, the head of the
+  branch's newest `pull_request` run
+  (`gh api 'repos/<o>/<r>/actions/runs?branch=<headRefName>&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'`,
+  newest first); the PR body's `CI:` line names runs at that same commit
+  (`gh run view <run-id> --json headSha,status,conclusion`), or the line is stale and the review
+  says so. That commit's check-runs
+  (`gh api repos/<o>/<r>/commits/<ci head>/check-runs --paginate --jq '.check_runs[] | [.name, .status, .conclusion] | @tsv'`):
+  every required name present, `completed` and `success` (GitHub counts `neutral` and `skipped`
+  as passing for a required check). And the compare proving only `.legion/` changed since
+  (`gh api repos/<o>/<r>/compare/<ci head>...<headRefOid> --jq '[.files[].filename] | all(startswith(".legion/"))'`
+  prints `true`; `false` means code was pushed since CI ran, so wait for the new push's runs and
+  read the CI head again). A required check `queued` or `in_progress`: wait. One `completed` as
+  `cancelled`, or absent: `gh run rerun <run-id>` once, then wait; when nothing will run it (a
+  check only a commit status reports, a workflow another repository defines), tell the architect
+  and do not approve. `gh pr checks <n>` is not the read: it reads only the current head, which
+  at a handoff head shows only the `pr-title` runs the review events start (measured on
+  sjawhar/legion#1944 at 0220b94fc2 on 2026-10-14).
   Approval is refused while either `E2E (implementer)` or `E2E (tester)` is missing: `REQUEST_CHANGES` naming the missing line.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
@@ -42,25 +68,17 @@ the head voids it.
   when every thread is settled enough to approve, and resolving one never gates your approval.
 
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
-and takes this order: write, commit and push the handoff; submit the review of the head that push
-made, by its SHA; then complete. An approval waits for the CI verdict to settle green at that head
-before you submit it, since an approval stands only on green checks and GitHub can dismiss one
-once the head moves, and a verdict that settles red there makes the round's decision a request for
-changes naming the failing checks, unless only review workflows the project declares
-(`projects.<KEY>.review_workflows`) are red on their own findings: then you answer their threads,
-name the ones you accepted to the implementer, who resolves them with its own `gh` as the pull
-request's author, and re-run the failed run once they are resolved, as your role prompt says, and
-approve once it passes. Any other red required workflow is a failing check like any other. A
-request for changes does not wait, since it stands whatever CI says and the issue leaves
-reviewing with it. The verdict is of the checks and workflows the base branch requires, the set
-READY checks: red when one of them failed, and never red for a check the base branch does not
-require. A required check that was cancelled, or that the head's checks
-settled without, leaves no verdict until a later settlement decides it, since a run can be
-cancelled or not yet queued when the head settles; a required workflow's run on the head that is
-still going or has not happened leaves none either. A review of a head the handoff push
-then replaces names a head the pull request no longer has. The daemon moves the issue
-once both are in — the decision GitHub reports and your completion, in either order — so a
-review posted without a completion leaves the issue in reviewing until you finish.
+and takes this order: read CI as above; write, commit and push the handoff; submit the review of
+the head that push made, by its SHA; then complete. A red at the code is a `REQUEST_CHANGES`
+naming the check, never an approval. A request for changes does not wait, since it stands
+whatever CI says and the issue leaves reviewing with it. The approval waits on nothing at the
+handoff commit either: it ends the round whatever CI says there, since the round reads no CI
+verdict, and a red the daemon reads later — at that commit or any above it — is the code's red
+and resumes the implementer from wherever the issue is (reviewing, retro or merging) without the
+reviewer. A review of a head the handoff push then replaces names a head the pull request no
+longer has. The daemon moves the issue once both are in — the decision GitHub reports and your
+completion, in either order — so a review posted without a completion leaves the issue in
+reviewing until you finish.
 
 ## Retro
 
