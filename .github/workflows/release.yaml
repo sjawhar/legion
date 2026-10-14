@@ -148,15 +148,7 @@ jobs:
             envoy_infra:
               - 'packages/envoy/infra/**'
               - 'packages/envoy/internal/bus/**'
-              - 'packages/envoy/internal/cistore/**'
               - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/internal/id/**'
-              - 'packages/envoy/internal/kvwatch/**'
-              - 'packages/envoy/internal/logging/**'
-              - 'packages/envoy/internal/metrics/**'
-              - 'packages/envoy/internal/routing/**'
-              - 'packages/envoy/internal/session/**'
-              - 'packages/envoy/internal/store/**'
               - 'packages/envoy/go.mod'
               - 'packages/envoy/go.sum'
               - 'scripts/go-third-party-notices.sh'
@@ -957,11 +949,7 @@ jobs:
           # release-bump.sh reads a --patch-path only when it is also one of the paths after --.
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
             --patch-path scripts/go-third-party-notices.sh --patch-path .github/envoy-infra-targets.json \
-            -- packages/envoy/infra/ packages/envoy/internal/bus/ packages/envoy/internal/cistore/ \
-            packages/envoy/internal/contracts/ packages/envoy/internal/id/ \
-            packages/envoy/internal/kvwatch/ packages/envoy/internal/logging/ \
-            packages/envoy/internal/metrics/ packages/envoy/internal/routing/ \
-            packages/envoy/internal/session/ packages/envoy/internal/store/ \
+            -- packages/envoy/infra/ packages/envoy/internal/bus/ packages/envoy/internal/contracts/ \
             packages/envoy/go.mod packages/envoy/go.sum scripts/go-third-party-notices.sh \
             .github/envoy-infra-targets.json)
 
