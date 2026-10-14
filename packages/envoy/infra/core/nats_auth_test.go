@@ -344,19 +344,8 @@ func (u liveUsers) render(t *testing.T) string {
 func connect(t *testing.T, uri, seed string) (*natsgo.Conn, <-chan error) {
 	t.Helper()
 	errs := make(chan error, 16)
-	opts := []natsgo.Option{
-		natsgo.Timeout(time.Second),
-		natsgo.NoReconnect(),
-		natsgo.ErrorHandler(func(_ *natsgo.Conn, _ *natsgo.Subscription, err error) { errs <- err }),
-	}
-	if seed != "" {
-		user, err := nkeys.FromSeed([]byte(seed))
-		require.NoError(t, err)
-		public, err := user.PublicKey()
-		require.NoError(t, err)
-		opts = append(opts, natsgo.Nkey(public, user.Sign))
-	}
-	conn, err := natsgo.Connect(uri, opts...)
+	conn, err := testnats.ConnectSeed(t, uri, seed,
+		natsgo.ErrorHandler(func(_ *natsgo.Conn, _ *natsgo.Subscription, err error) { errs <- err }))
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 	return conn, errs
@@ -392,7 +381,7 @@ func TestRenderedAuthorizationOnRealServers(t *testing.T) {
 					require.NoError(t, conn.Flush())
 				})
 				t.Run("a client with no credential is refused", func(t *testing.T) {
-					_, err := natsgo.Connect(uri, natsgo.Timeout(time.Second), natsgo.NoReconnect())
+					_, err := testnats.ConnectSeed(t, uri, "")
 					require.ErrorIs(t, err, natsgo.ErrAuthorization)
 				})
 				t.Run("a publish outside the user's grant is a permissions violation", func(t *testing.T) {

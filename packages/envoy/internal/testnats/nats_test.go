@@ -13,7 +13,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 	"github.com/testcontainers/testcontainers-go"
 )
 
@@ -270,7 +269,7 @@ func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		answering(wait, uri)
+		awaitAuth(wait, uri, false)
 	}()
 	select {
 	case <-done:
@@ -330,7 +329,10 @@ func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
 			seed, public := User(t)
 			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
 			_, uri := StartImageConfig(t, image.Ref, config, []string{"-js"}, false)
-			conn := connectWithSeed(t, uri, seed)
+			conn, err := ConnectSeed(t, uri, seed)
+			if err != nil {
+				t.Fatalf("connect with the seed: %v", err)
+			}
 			defer conn.Close()
 			js, err := conn.JetStream()
 			if err != nil {
@@ -353,7 +355,10 @@ func TestStartImageConfigRunsNoArgumentItWasNotGiven(t *testing.T) {
 			seed, public := User(t)
 			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
 			_, uri := StartImageConfig(t, image.Ref, config, nil, false)
-			conn := connectWithSeed(t, uri, seed)
+			conn, err := ConnectSeed(t, uri, seed)
+			if err != nil {
+				t.Fatalf("connect with the seed: %v", err)
+			}
 			defer conn.Close()
 			js, err := conn.JetStream()
 			if err != nil {
@@ -374,7 +379,7 @@ func TestStartImageConfigWaitsForAnAnonymousServerToAdmitAClient(t *testing.T) {
 			_, public := User(t)
 			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\nno_auth_user: %q\n", public, public)
 			_, uri := StartImageConfig(t, image.Ref, config, nil, true)
-			conn, err := natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
+			conn, err := ConnectSeed(t, uri, "")
 			if err != nil {
 				t.Fatalf("a client with no credential was refused after the wait: %v", err)
 			}
@@ -393,7 +398,7 @@ func TestTheAnonymousWaitRefusesAServerThatRefusesAnyone(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		admitting(wait, uri)
+		awaitAuth(wait, uri, true)
 	}()
 	select {
 	case <-done:
@@ -403,22 +408,4 @@ func TestTheAnonymousWaitRefusesAServerThatRefusesAnyone(t *testing.T) {
 	if want := "refused a client with no credential"; !strings.Contains(wait.message, want) {
 		t.Errorf("the anonymous wait ended with %q, want it to say %q", wait.message, want)
 	}
-}
-
-// connectWithSeed connects to uri as the nkey user whose seed is seed.
-func connectWithSeed(t *testing.T, uri, seed string) *natsgo.Conn {
-	t.Helper()
-	user, err := nkeys.FromSeed([]byte(seed))
-	if err != nil {
-		t.Fatalf("read the seed: %v", err)
-	}
-	public, err := user.PublicKey()
-	if err != nil {
-		t.Fatalf("public key: %v", err)
-	}
-	conn, err := natsgo.Connect(uri, natsgo.Nkey(public, user.Sign), natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
-	if err != nil {
-		t.Fatalf("connect as %s: %v", public, err)
-	}
-	return conn
 }
