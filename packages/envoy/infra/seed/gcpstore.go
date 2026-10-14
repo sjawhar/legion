@@ -158,7 +158,9 @@ func (s *gcpStore) Versions(ctx context.Context, name string) (int, error) {
 
 // Put adds value as a version with AddSecretVersion, which takes no request id and which the library
 // does not retry, so a lost answer leaves the write unknown rather than doubled. The added version
-// must be ENABLED.
+// must be version 1, since Secret Manager numbers a secret's versions from 1, one more for each
+// (resources.proto, SecretVersion.name): any other number is a version the eventually consistent
+// listing before the write missed. It must also be ENABLED.
 func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	if err := gcpName(name); err != nil {
 		return "", err
@@ -173,6 +175,10 @@ func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, 
 	number, err := gcpVersionNumber("add-secret-version", name, added.GetName())
 	if err != nil {
 		return "", err
+	}
+	if number != "1" {
+		return number, fmt.Errorf("version %s was written, not version 1: %s held a version the listing before "+
+			"the write did not show; run check", number, name)
 	}
 	if added.GetState() != secretmanagerpb.SecretVersion_ENABLED {
 		return number, fmt.Errorf("version %s was written but is %s; run check", number, added.GetState())

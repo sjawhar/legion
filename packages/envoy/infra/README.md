@@ -824,9 +824,12 @@ projects/example-project/secrets/envoy-nats-seed-example-host-a latest (version 
 ```
 
 `generate` refuses a secret that holds any version, whatever its state, destroyed ones included.
-It reads back `versions/latest`, the version Secret Manager serves by default, which must be the
-one it added. Secret Manager's listings and `latest` are eventually consistent with a new version
-(only an access by version number is not:
+Secret Manager numbers a secret's versions from 1, so the version it adds must be version 1: any
+other number shows the secret held a version the listing before the write missed, and `generate`
+stops with an error after writing, naming that version. It reads back `versions/latest`, the
+version Secret Manager serves by default, which must be the one it added. Secret Manager's
+listings and `latest` are eventually consistent with a new version (only an access by version
+number is not:
 [resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)), so
 while the listing shows no version yet, or `latest` names none, it waits as it does on Secrets
 Manager. A `latest` that names a version it will not serve, such as a disabled one, is no wait but
