@@ -326,8 +326,7 @@ var testImages = []struct{ name, ref string }{{"2.10", Image}, {"hub", HubImage}
 
 // StartImageConfig gives the server config as its whole configuration and serverArgs after it, on
 // either image: the server refuses a client with no credential, as config's one nkey user makes it,
-// admits that user by its seed, and answers JetStream, which only the -js among serverArgs turns
-// on.
+// admits that user by its seed, and answers JetStream, which the -js among serverArgs turns on.
 func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
 	for _, image := range testImages {
 		t.Run(image.name, func(t *testing.T) {
@@ -344,6 +343,28 @@ func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
 				_, err := js.AccountInfo()
 				return err
 			})
+		})
+	}
+}
+
+// With no serverArgs the server runs without JetStream: StartImageConfig replaces the NATS
+// module's own default arguments (-DV -js) rather than adding to them. nats-server enables
+// JetStream before it accepts a client (server/server.go Start), so the first answer is final.
+func TestStartImageConfigRunsNoArgumentItWasNotGiven(t *testing.T) {
+	for _, image := range testImages {
+		t.Run(image.name, func(t *testing.T) {
+			seed, public := User(t)
+			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
+			_, uri := StartImageConfig(t, image.ref, config, nil, false)
+			conn := connectWithSeed(t, uri, seed)
+			defer conn.Close()
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("JetStream context: %v", err)
+			}
+			if _, err := js.AccountInfo(); !errors.Is(err, natsgo.ErrJetStreamNotEnabled) {
+				t.Fatalf("JetStream account info on a server given no -js: %v, want %v", err, natsgo.ErrJetStreamNotEnabled)
+			}
 		})
 	}
 }

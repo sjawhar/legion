@@ -360,16 +360,18 @@ func connect(t *testing.T, uri, seed string) (*natsgo.Conn, <-chan error) {
 	return conn, errs
 }
 
-// requireViolation requires the next error the server sent to be its permissions violation, and
-// its text to hold want. Every allowed operation a test makes comes before the refused one, so a
-// violation for it would arrive first and fail here.
+// requireViolation requires the next error the server sent to be exactly its permissions violation
+// for want ("Publish to …", "Subscription to …"), as nats.go reports it. The whole text is
+// compared because the server's violations nest: a refused queue subscription is "Subscription to
+// "s" using queue "q"", which holds the plain subscription's text. Every allowed operation a test
+// makes comes before the refused one, so a violation for it would arrive first and fail here.
 func requireViolation(t *testing.T, conn *natsgo.Conn, errs <-chan error, want string) {
 	t.Helper()
 	require.NoError(t, conn.Flush())
 	select {
 	case err := <-errs:
 		require.ErrorIs(t, err, natsgo.ErrPermissionViolation)
-		require.Contains(t, err.Error(), want)
+		require.EqualError(t, err, "nats: permissions violation: Permissions Violation for "+want)
 	case <-time.After(5 * time.Second):
 		t.Fatalf("the server reported no permissions violation within 5s, want one for %s", want)
 	}
