@@ -54,7 +54,8 @@ type fakeStore struct {
 	puts     [][]byte
 
 	describeErr         error    // every Describe fails
-	describeErrAfterPut error    // a Describe once Put has written fails
+	versionsErr         error    // every Versions fails
+	versionsErrAfterPut error    // a Versions once Put has written fails
 	putErr              error    // Put fails and writes nothing
 	putErrAfterWrite    error    // Put writes, then answers its version with this error
 	currentErr          error    // Current fails
@@ -87,16 +88,25 @@ func (f *fakeStore) Describe(_ context.Context, name string) (seed.Description, 
 	if f.describeErr != nil {
 		return seed.Description{}, f.describeErr
 	}
-	if len(f.puts) > 0 && f.describeErrAfterPut != nil {
-		return seed.Description{}, f.describeErrAfterPut
-	}
 	switch {
 	case !f.exists:
 		return seed.Description{}, nil
 	case f.deleted:
 		return seed.Description{Exists: true, ScheduledForDeletion: true, DeletionDate: "2026-09-30 00:00:00+00:00"}, nil
 	}
-	return seed.Description{Exists: true, Versions: len(f.versions), CurrentVersion: f.current}, nil
+	return seed.Description{Exists: true, CurrentVersion: f.current}, nil
+}
+
+func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
+	f.calls = append(f.calls, "versions")
+	f.named(name)
+	if f.versionsErr != nil {
+		return 0, f.versionsErr
+	}
+	if len(f.puts) > 0 && f.versionsErrAfterPut != nil {
+		return 0, f.versionsErrAfterPut
+	}
+	return len(f.versions), nil
 }
 
 func (f *fakeStore) Put(_ context.Context, name string, value []byte) (string, error) {
@@ -209,6 +219,7 @@ func TestCheckPrintsOneOfTheReferenceLines(t *testing.T) {
 			require.Equal(t, row.want+"\n", out)
 			require.Empty(t, errs)
 			require.Empty(t, store.puts)
+			require.Equal(t, []string{"describe"}, store.calls, "check describes the secret and lists no versions")
 			requireNoValue(t, store, out, errs)
 
 			line, err := seed.Check(context.Background(), row.store(newStore(t)), secretName)
@@ -223,7 +234,7 @@ func TestGenerateWritesOneSeedAndReadsBackTheVersionItWrote(t *testing.T) {
 	code, out, errs, _ := run(t, store, mode("generate")...)
 	require.Equal(t, 0, code, errs)
 	require.Empty(t, errs)
-	require.Equal(t, []string{"describe", "put", "describe", "current"}, store.calls)
+	require.Equal(t, []string{"describe", "versions", "put", "versions", "current"}, store.calls)
 	require.Len(t, store.puts, 1)
 	written := store.puts[0]
 	require.True(t, bytes.HasPrefix(written, []byte("SU")), "the stored value is a bare user seed")
@@ -258,6 +269,10 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 		// A version without the default label is still a seed someone may have read.
 		{"generate: two versions", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed, readmeSeed) }, "already holds 2 version(s)"},
 		{"generate: describe fails", mode("generate"), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f }, "AccessDeniedException"},
+		{"generate: listing versions fails", mode("generate"), func(f *fakeStore) *fakeStore {
+			f.versionsErr = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
+			return f
+		}, "ThrottlingException"},
 		{"check: describe fails", mode("check"), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f }, "AccessDeniedException"},
 		{"verify: absent", mode("verify", "--public-key", readmePublicKey), func(f *fakeStore) *fakeStore { f.exists = false; return f }, "does not exist"},
 		{"verify: scheduled for deletion", mode("verify", "--public-key", readmePublicKey),
@@ -323,7 +338,7 @@ func TestVerify(t *testing.T) {
 		require.Equal(t, 0, code, errs)
 		require.Equal(t, secretName+" AWSCURRENT (version v1) derives "+readmePublicKey+": yes\n", out)
 		require.Empty(t, errs)
-		require.NotContains(t, store.calls, "put")
+		require.Equal(t, []string{"describe", "current"}, store.calls, "verify describes and reads, and lists no versions")
 		requireNoValue(t, store, out, errs)
 	})
 	t.Run("the stored seed derives another key", func(t *testing.T) {
@@ -332,7 +347,7 @@ func TestVerify(t *testing.T) {
 		require.Equal(t, 1, code)
 		require.Equal(t, secretName+" AWSCURRENT (version v1) derives "+otherPublic+": no\n", out)
 		require.Empty(t, errs)
-		require.NotContains(t, store.calls, "put")
+		require.Equal(t, []string{"describe", "current"}, store.calls, "verify describes and reads, and lists no versions")
 		requireNoValue(t, store, out, errs)
 
 		line, err := seed.Verify(context.Background(), newStore(t).holding(readmeSeed), secretName, otherPublic)
@@ -395,15 +410,16 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 			f.putErrAfterWrite = errors.New("version v1 was written but is not AWSCURRENT; run check")
 			return f
 		}, "version v1 was written but is not AWSCURRENT; run check", true},
-		{"describing afterwards fails", func(f *fakeStore) *fakeStore {
-			f.describeErrAfterPut = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
+		{"listing afterwards fails", func(f *fakeStore) *fakeStore {
+			f.versionsErrAfterPut = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
 			return f
-		}, "version v1 was written, but describing " + secretName + " afterwards failed: list-secret-version-ids", true},
+		}, "version v1 was written, but listing versions afterwards failed: list-secret-version-ids " + secretName +
+			" failed: ThrottlingException", true},
 		{"another writer raced it", func(f *fakeStore) *fakeStore {
 			f.racing = &version{id: "their-version", value: []byte(otherSeed)}
 			return f
-		}, secretName + " now holds 2 version(s), serving version v1 by default; generate wrote only version v1: " +
-			"another writer raced this one. Run verify with the public key above before committing it", true},
+		}, secretName + " now holds 2 version(s), not only version v1: another writer raced this one. " +
+			"Run verify with the public key above before committing it", true},
 		{"another writer's version is served by the read-back", func(f *fakeStore) *fakeStore {
 			f.lateWriter = &version{id: "their-version", value: []byte(otherSeed)}
 			return f

@@ -33,7 +33,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
 | `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`). |
-| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store`, and the AWS Secrets Manager store (`awsstore.go`). |
+| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
@@ -79,6 +79,13 @@ the error's text, which can quote the request; the AWS SDK runs with its logger 
 (`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
 and every error and line it returns, for a canary seed. A new store implements `seed.Store` and
 joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+
+`check` and `verify` read a secret's metadata and value and nothing else: `check` calls `Describe`
+(Secrets Manager's `DescribeSecret`), `verify` calls `Describe` and `Current` (`GetSecretValue`),
+so a read-only check of a deployment's seed needs no grant beyond those. Only `generate` calls
+`Versions` (`ListSecretVersionIds`), for its refusal of a secret that holds any version and for
+its re-list after the write. `seed/awsstore_test.go`'s fake endpoint fails a `check` or `verify`
+that sends `ListSecretVersionIds`.
 
 ## Tests
 

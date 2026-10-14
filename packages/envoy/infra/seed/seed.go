@@ -22,10 +22,15 @@ import (
 
 // Store is a secret store holding the seed. None of its errors carries a value: each names the call
 // and the secret.
+//
+// check makes one call, Describe, and verify two, Describe and Current, so reading a secret needs
+// no grant beyond its metadata and its value. Only generate counts versions.
 type Store interface {
-	// Describe reports whether the secret exists, whether it is scheduled for deletion, and how
-	// many versions it holds, deprecated ones included.
+	// Describe reports, from the secret's metadata alone, whether it exists, whether it is
+	// scheduled for deletion and when, and which version the store serves by default.
 	Describe(ctx context.Context, name string) (Description, error)
+	// Versions counts every version the secret holds, deprecated ones included.
+	Versions(ctx context.Context, name string) (int, error)
 	// Put writes value as the secret's first version and returns its version id. An error with a
 	// version id means that version was written; one without may follow a write that landed.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
@@ -34,12 +39,11 @@ type Store interface {
 	Current(ctx context.Context, name string) (version string, value []byte, err error)
 }
 
-// Description is what a store reports of a secret without reading its value. Versions and
-// CurrentVersion are read only for a secret that exists and is not scheduled for deletion.
+// Description is what a store's metadata says of a secret. CurrentVersion is read only for a
+// secret that exists and is not scheduled for deletion.
 type Description struct {
 	Exists, ScheduledForDeletion bool
 	DeletionDate                 string
-	Versions                     int
 	CurrentVersion               string // "" when the store serves none
 	// The newest version's id and state, for a store whose default names the newest version
 	// whatever its state (GCP's versions/latest); "" for a store without such a default.
@@ -57,8 +61,8 @@ var ErrRefused = errors.New("seed: refused")
 // another public key. The command exits 1.
 var ErrMismatch = errors.New("seed: the stored value does not derive the public key")
 
-// defaultLabel names the version a store serves by default in Check's and Verify's lines: the
-// reference's, Secrets Manager's staging label.
+// defaultLabel names the version a store serves by default in Check's and Verify's lines: Secrets
+// Manager's staging label.
 const defaultLabel = awsCurrent
 
 type refusal struct{ msg string }
@@ -80,8 +84,8 @@ func afterWritef(format string, args ...any) error {
 	return &afterWrite{msg: fmt.Sprintf(format, args...)}
 }
 
-// Check returns the reference's report line for the secret: absent, scheduled for deletion, or
-// present with or without a version the store serves by default. It reads no value.
+// Check returns the report line for the secret: absent, scheduled for deletion, or present with or
+// without a version the store serves by default. It reads no value.
 func Check(ctx context.Context, s Store, name string) (string, error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
@@ -111,9 +115,10 @@ func existing(d Description, name string) error {
 
 // Generate makes an nkey user and writes its seed as the secret's first version: it refuses a
 // secret that is absent, scheduled for deletion or holds any version, so it never replaces a seed a
-// client may already read. It then checks that the secret holds that version alone, serves it by
-// default, and reads back a seed deriving the public key it returns. Once Put has written a
-// version, every error comes with the public key and the version id.
+// client may already read. It then lists the versions again, to check the secret holds that version
+// alone, and reads back the version served by default, which must be that version and derive the
+// public key it returns. Once Put has written a version, every error comes with the public key and
+// the version id.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
@@ -122,9 +127,13 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 	if err := existing(d, name); err != nil {
 		return "", "", err
 	}
-	if d.Versions > 0 {
+	held, err := s.Versions(ctx, name)
+	if err != nil {
+		return "", "", refuse("%v", err)
+	}
+	if held > 0 {
 		return "", "", refuse("%s already holds %d version(s). generate writes only a secret's first version, so it "+
-			"never replaces a seed a client may already read; use check or verify", name, d.Versions)
+			"never replaces a seed a client may already read; use check or verify", name, held)
 	}
 	user, err := nkeys.CreateUser()
 	if err != nil {
@@ -147,18 +156,13 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 		}
 		return publicKey, version, afterWritef("%v", err)
 	}
-	d, err = s.Describe(ctx, name)
+	held, err = s.Versions(ctx, name)
 	if err != nil {
-		return publicKey, version, afterWritef("version %s was written, but describing %s afterwards failed: %v", version, name, err)
+		return publicKey, version, afterWritef("version %s was written, but listing versions afterwards failed: %v", version, err)
 	}
-	if d.Versions != 1 || d.CurrentVersion != version {
-		served := "no version"
-		if d.CurrentVersion != "" {
-			served = "version " + d.CurrentVersion
-		}
-		return publicKey, version, afterWritef("%s now holds %d version(s), serving %s by default; generate wrote only "+
-			"version %s: another writer raced this one. Run verify with the public key above before committing it",
-			name, d.Versions, served, version)
+	if held != 1 {
+		return publicKey, version, afterWritef("%s now holds %d version(s), not only version %s: another writer raced "+
+			"this one. Run verify with the public key above before committing it", name, held, version)
 	}
 	read, stored, err := s.Current(ctx, name)
 	if err != nil {
@@ -179,7 +183,7 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 	return publicKey, version, nil
 }
 
-// Verify returns the reference's line for whether the seed the store serves by default derives
+// Verify returns the line saying whether the seed the store serves by default derives
 // publicKey, with ErrMismatch when it does not or is no user seed. publicKey is never echoed unless
 // it is a user public key: a seed pasted there by mistake must not reach the terminal twice.
 func Verify(ctx context.Context, s Store, name, publicKey string) (string, error) {

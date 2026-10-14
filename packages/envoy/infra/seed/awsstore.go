@@ -73,9 +73,7 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 // code (or the SDK error's class), never the error's own message, which can quote the request.
 type awsStore struct{ client *secretsmanager.Client }
 
-// Describe reads DescribeSecret, then counts every version ListSecretVersionIds lists with
-// IncludeDeprecated, across every page: an unlabelled version is still a seed a client may have
-// read. It lists nothing for a secret scheduled for deletion.
+// Describe reads DescribeSecret alone.
 func (s *awsStore) Describe(ctx context.Context, name string) (Description, error) {
 	out, err := s.client.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(name)})
 	var notFound *types.ResourceNotFoundException
@@ -96,26 +94,33 @@ func (s *awsStore) Describe(ctx context.Context, name string) (Description, erro
 			d.CurrentVersion = version
 		}
 	}
+	return d, nil
+}
+
+// Versions counts every version ListSecretVersionIds lists with IncludeDeprecated, across every
+// page: an unlabelled version is still a seed a client may have read.
+func (s *awsStore) Versions(ctx context.Context, name string) (int, error) {
 	in := &secretsmanager.ListSecretVersionIdsInput{SecretId: aws.String(name), IncludeDeprecated: aws.Bool(true)}
 	handedOut := map[string]bool{}
+	count := 0
 	for {
 		page, err := s.client.ListSecretVersionIds(ctx, in)
 		if err != nil {
-			return Description{}, awsFailed("list-secret-version-ids", name, err)
+			return 0, awsFailed("list-secret-version-ids", name, err)
 		}
 		for _, v := range page.Versions {
 			if v.VersionId != nil {
-				d.Versions++
+				count++
 			}
 		}
 		token := aws.ToString(page.NextToken)
 		if token == "" {
-			return d, nil
+			return count, nil
 		}
 		// The SDK's paginator stops quietly on a repeated token, which would undercount versions;
 		// following it would never end.
 		if handedOut[token] {
-			return Description{}, fmt.Errorf("list-secret-version-ids %s failed: the listing handed out page token %s twice", name, token)
+			return 0, fmt.Errorf("list-secret-version-ids %s failed: the listing handed out page token %s twice", name, token)
 		}
 		handedOut[token] = true
 		in.NextToken = aws.String(token)
@@ -184,8 +189,8 @@ func errorClass(err error) string {
 	}
 }
 
-// pythonDate is t as the reference prints a timestamp boto3 parsed: Python's str of a datetime in
-// the machine's zone, with microseconds only when there are some.
+// pythonDate is t in loc as Python's str prints a datetime: microseconds only when there are some,
+// then the offset as ±hh:mm. check prints a deletion date in this form.
 func pythonDate(t time.Time, loc *time.Location) string {
 	t = t.In(loc)
 	text := t.Format("2006-01-02 15:04:05")

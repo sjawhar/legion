@@ -62,6 +62,10 @@ type fakeAWS struct {
 	loseAnswers  int                   // how many PutSecretValue answers are lost after the write
 	racing       *awsVersion           // another writer's version, landing with the put
 	echoRequests bool                  // every error message quotes the request body
+	// generating is set for a generate run, the one mode that lists versions: check and verify make
+	// only DescribeSecret and GetSecretValue, and a listing from either is a request the fake does
+	// not expect.
+	generating bool
 }
 
 func newFakeAWS(t *testing.T) *fakeAWS {
@@ -181,6 +185,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 		}
 		f.answer(w, out)
 	case "ListSecretVersionIds":
+		if !f.generating {
+			f.reject(w, "ListSecretVersionIds from check or verify, which make only DescribeSecret and GetSecretValue")
+			return
+		}
 		var in struct {
 			SecretId          string
 			IncludeDeprecated *bool
@@ -364,6 +372,9 @@ func serve(t *testing.T, f *fakeAWS) *httptest.Server {
 func runAWS(t *testing.T, f *fakeAWS, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errs bytes.Buffer
+	f.mu.Lock()
+	f.generating = len(args) > 0 && args[0] == "generate"
+	f.mu.Unlock()
 	code = Command(context.Background(), append(args, "--store", AWSSecretsManager, "--name", awsSecret, "--region", awsRegion),
 		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
 	stdout, stderr = out.String(), errs.String()
@@ -410,10 +421,9 @@ func TestAWSCheck(t *testing.T) {
 			awsSecret + ": present, scheduled for deletion (2025-09-29 17:00:00.500000-07:00)", []string{"DescribeSecret"}},
 		{"scheduled for deletion on the second", func(f *fakeAWS) *fakeAWS { f.deletedAt = 1759190400; return f },
 			awsSecret + ": present, scheduled for deletion (2025-09-29 17:00:00-07:00)", []string{"DescribeSecret"}},
-		{"empty", func(f *fakeAWS) *fakeAWS { return f }, awsSecret + ": present; AWSCURRENT: no",
-			[]string{"DescribeSecret", "ListSecretVersionIds"}},
+		{"empty", func(f *fakeAWS) *fakeAWS { return f }, awsSecret + ": present; AWSCURRENT: no", []string{"DescribeSecret"}},
 		{"seeded", func(f *fakeAWS) *fakeAWS { return f.holding(seedValue, seedValue) }, awsSecret + ": present; AWSCURRENT: yes (version v2)",
-			[]string{"DescribeSecret", "ListSecretVersionIds"}},
+			[]string{"DescribeSecret"}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -445,7 +455,7 @@ func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T)
 	code, out, errs := runAWS(t, f, "generate")
 	require.Equal(t, 0, code, errs)
 	require.Empty(t, errs)
-	require.Equal(t, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue", "DescribeSecret", "ListSecretVersionIds", "GetSecretValue"},
+	require.Equal(t, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue", "ListSecretVersionIds", "GetSecretValue"},
 		f.recorded())
 	require.Len(t, f.versions, 1)
 	written := f.versions[0]
@@ -523,7 +533,7 @@ func TestAWSGenerateAfterItsWrite(t *testing.T) {
 		{"listing afterwards fails", func(f *fakeAWS) *fakeAWS {
 			f.failAfterPut = map[string]awsFailure{"ListSecretVersionIds": {"AccessDeniedException", "not allowed"}}
 			return f
-		}, "but describing " + awsSecret + " afterwards failed: list-secret-version-ids " + awsSecret + " failed: AccessDeniedException"},
+		}, "but listing versions afterwards failed: list-secret-version-ids " + awsSecret + " failed: AccessDeniedException"},
 		{"reading back fails", func(f *fakeAWS) *fakeAWS {
 			f.failAfterPut = map[string]awsFailure{"GetSecretValue": {"DecryptionFailure", "cannot decrypt"}}
 			return f
@@ -593,7 +603,7 @@ func TestAWSVerify(t *testing.T) {
 		code, out, errs := runAWS(t, f, "verify", "--public-key", public)
 		require.Equal(t, 0, code, errs)
 		require.Equal(t, awsSecret+" AWSCURRENT (version v1) derives "+public+": yes\n", out)
-		require.Equal(t, []string{"DescribeSecret", "ListSecretVersionIds", "GetSecretValue"}, f.recorded())
+		require.Equal(t, []string{"DescribeSecret", "GetSecretValue"}, f.recorded())
 	})
 	t.Run("no", func(t *testing.T) {
 		f := newFakeAWS(t).holding(seedValue)
@@ -620,7 +630,7 @@ func TestAWSExpectAccountRunsFirstAndAlone(t *testing.T) {
 		serve(t, f)
 		code, _, errs := runAWS(t, f, "check", "--expect-account", awsAccount)
 		require.Equal(t, 0, code, errs)
-		require.Equal(t, []string{"GetCallerIdentity", "DescribeSecret", "ListSecretVersionIds"}, f.recorded())
+		require.Equal(t, []string{"GetCallerIdentity", "DescribeSecret"}, f.recorded())
 	})
 	t.Run("another account", func(t *testing.T) {
 		_, public := otherAWSUser(t)
@@ -674,8 +684,12 @@ func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 }
 
 // The fake fails a test on any request the store does not make: an operation it does not answer, a
-// field it does not expect, or an unsigned request.
+// field it does not expect, an unsigned request, or a version listing outside generate.
 func TestTheFakeRecordsEveryRequestItDoesNotExpect(t *testing.T) {
+	listing := func() *http.Request {
+		return signed(httptest.NewRequest(http.MethodPost, "/",
+			strings.NewReader(`{"SecretId":"`+awsSecret+`","IncludeDeprecated":true}`)), "secretsmanager.ListSecretVersionIds")
+	}
 	f := &fakeAWS{t: t, account: awsAccount, exists: true}
 	for _, request := range []*http.Request{
 		signed(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"SecretId":"`+awsSecret+`"}`)), "secretsmanager.DeleteSecret"),
@@ -683,12 +697,21 @@ func TestTheFakeRecordsEveryRequestItDoesNotExpect(t *testing.T) {
 			"secretsmanager.GetSecretValue"),
 		signed(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"SecretId":"`+awsSecret+`"}`)), "secretsmanager.ListSecretVersionIds"),
 		httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"SecretId":"`+awsSecret+`"}`)),
+		listing(), // well formed, but no generate is running
 	} {
 		recorder := httptest.NewRecorder()
 		f.ServeHTTP(recorder, request)
 		require.Equal(t, http.StatusBadRequest, recorder.Code)
 	}
-	require.Len(t, f.unexpected, 4)
+	require.Len(t, f.unexpected, 5)
+	require.Contains(t, f.unexpected[4], "ListSecretVersionIds from check or verify")
+
+	// The same listing during a generate is answered.
+	f.unexpected, f.generating = nil, true
+	recorder := httptest.NewRecorder()
+	f.ServeHTTP(recorder, listing())
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.Empty(t, f.unexpected)
 }
 
 func signed(r *http.Request, target string) *http.Request {
