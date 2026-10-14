@@ -52,14 +52,16 @@ func (s *testSessionStore) generation(login string) int64 {
 	return s.generations[login]
 }
 
-// testPeopleStore is auth.PeopleStore in memory.
+// testPeopleStore is auth.PeopleStore in memory. A sign-in under another subject than the one it
+// holds for the address ends the address's sessions in sessions, as store.PgPeopleStore does.
 type testPeopleStore struct {
-	mu     sync.Mutex
-	people map[string]auth.PersonMembership
+	mu       sync.Mutex
+	people   map[string]auth.PersonMembership
+	sessions *testSessionStore
 }
 
-func newTestPeopleStore() *testPeopleStore {
-	return &testPeopleStore{people: map[string]auth.PersonMembership{}}
+func newTestPeopleStore(sessions *testSessionStore) *testPeopleStore {
+	return &testPeopleStore{people: map[string]auth.PersonMembership{}, sessions: sessions}
 }
 
 func (s *testPeopleStore) Record(_ context.Context, email string) error {
@@ -71,10 +73,20 @@ func (s *testPeopleStore) Record(_ context.Context, email string) error {
 	return nil
 }
 
-func (s *testPeopleStore) SignIn(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
+func (s *testPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.people[email] = auth.PersonMembership{RefreshToken: refreshToken, ConfirmedAt: confirmedAt}
+	membership := s.people[email]
+	if subject != "" {
+		if membership.Subject != "" && membership.Subject != subject {
+			if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+				return err
+			}
+		}
+		membership.Subject = subject
+	}
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
 	return nil
 }
 
@@ -88,15 +100,17 @@ func (s *testPeopleStore) Membership(_ context.Context, email string) (auth.Pers
 func (s *testPeopleStore) Confirm(_ context.Context, email, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.people[email] = auth.PersonMembership{RefreshToken: refreshToken, ConfirmedAt: confirmedAt}
+	membership := s.people[email]
+	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
+	s.people[email] = membership
 	return nil
 }
 
 func (s *testPeopleStore) End(_ context.Context, email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, found := s.people[email]; found {
-		s.people[email] = auth.PersonMembership{}
+	if membership, found := s.people[email]; found {
+		s.people[email] = auth.PersonMembership{Subject: membership.Subject}
 	}
 	return nil
 }
@@ -123,7 +137,7 @@ func cookieRequest(t *testing.T, email string, generation int64) *http.Request {
 // A test or local harness header names a person by email; Dispatch's form of it is lowercased,
 // and the person is recorded as having signed in, which is what makes them assignable.
 func TestHeaderIdentityNamesThePersonLowercasedAndRecordsThem(t *testing.T) {
-	people := newTestPeopleStore()
+	people := newTestPeopleStore(nil)
 	identity := HeaderIdentity{Header: "X-Dispatch-User", People: people}
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -141,7 +155,7 @@ func TestHeaderIdentityNamesThePersonLowercasedAndRecordsThem(t *testing.T) {
 }
 
 func TestHeaderIdentityRejectsAMissingHeader(t *testing.T) {
-	people := newTestPeopleStore()
+	people := newTestPeopleStore(nil)
 	identity := HeaderIdentity{Header: "X-Dispatch-User", People: people}
 	for _, value := range []string{"", "   "} {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)

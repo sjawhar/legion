@@ -179,15 +179,15 @@ D3 and D5 callers.
 `internal/dispatch/store/people.go` and a new migration with its census file
 (`cmd/dispatch/README.md:600-608`), their tests, `api/events_identity_test.go`.
 
-- [ ] Test first, against `oidctest.Issuer` with Google-shaped claims: a domain member signs in and
+- [x] Test first, against `oidctest.Issuer` with Google-shaped claims: a domain member signs in and
   gets a session; a non-member and an unverified email reach the refusal page with their reason, no
   session and the D6 log line; the hourly confirmation keeps a member's sessions and ends them when
   the refreshed token's `hd`, email or `sub` changes, or the refresh fails; two Google subjects share
   one address, and after the second signs in the first one's cookie answers 401 while the second's
   works; the same subject signing in again keeps its other sessions; group mode writes no `sub`;
   the Cognito tests' assertions are unchanged and pass. Run, see them fail.
-- [ ] Implement.
-- [ ] Run `go test -v ./internal/dispatch/...` and the migration census check with
+- [x] Implement.
+- [x] Run `go test -v ./internal/dispatch/...` and the migration census check with
   `DISPATCH_TEST_DATABASE_URL` set, and confirm the new store and router cases ran; pass.
 
 ### Task 4: docs and deployment files

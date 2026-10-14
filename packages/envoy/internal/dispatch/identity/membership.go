@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -29,7 +30,9 @@ type Refresher interface {
 // a confirmation younger than MembershipMaxAge stands, and an older one is renewed by refreshing
 // the person's sign-in. A refresh the issuer refuses, or one whose ID token no longer names this
 // person under Rule, ends every session the person holds: it advances their session generation
-// and forgets their refresh token, so they sign in again or not at all.
+// and forgets their refresh token, so they sign in again or not at all. Under a domain the
+// refreshed token must also name the Google account the address's row records (Subject): an
+// address Google gave to another account, or a row no domain sign-in recorded, ends the same way.
 type Membership struct {
 	People   auth.PeopleStore
 	Sessions auth.SessionStore
@@ -87,6 +90,9 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	}
 	if person != email {
 		return m.end(ctx, email, "the refreshed sign-in names "+person)
+	}
+	if m.Rule.Domain != "" && session.Claims.Subject != membership.Subject {
+		return m.end(ctx, email, fmt.Sprintf("the refreshed sign-in is Google account %q, and the address's sign-in recorded %q", session.Claims.Subject, membership.Subject))
 	}
 	return m.People.Confirm(ctx, email, session.RefreshToken, m.now())
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -39,35 +40,132 @@ type membershipRig struct {
 // does, and returns the membership that renews it.
 func newMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
+	return newMembershipRigFor(t, SignInRule{Group: memberGroup}, memberClaims(memberGroup), "")
+}
+
+// memberDomain is the Workspace domain of memberEmail, the domain rule's.
+const memberDomain = "d.example"
+
+// googleMemberClaims is a Google ID token's claims for memberEmail, a verified account of
+// memberDomain.
+func googleMemberClaims() map[string]any {
+	return map[string]any{
+		"sub":            "google-subject",
+		"email":          "A.B+C@d.example",
+		"email_verified": true,
+		"hd":             memberDomain,
+	}
+}
+
+// newDomainMembershipRig signs memberEmail in with Google for memberDomain at rig.now, as the
+// sign-in callback does, recording the account's subject, and returns the membership that renews
+// it.
+func newDomainMembershipRig(t *testing.T) *membershipRig {
+	t.Helper()
+	return newMembershipRigFor(t, SignInRule{Domain: memberDomain}, googleMemberClaims(), "google-subject")
+}
+
+func newMembershipRigFor(t *testing.T, rule SignInRule, claims map[string]any, subject string) *membershipRig {
+	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret", "")
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret", rule.Domain)
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}
-	issuer.SignInAs(memberClaims(memberGroup))
+	issuer.SignInAs(claims)
 	code, _ := issuer.Authorize(t, flow.AuthURL(memberRedirect, "state", "nonce"))
 	session, err := flow.Exchange(context.Background(), memberRedirect, code, "nonce")
 	if err != nil {
 		t.Fatalf("Exchange: %v", err)
 	}
+	sessions := &testSessionStore{generations: map[string]int64{memberEmail: 0}}
 	rig := &membershipRig{
 		issuer:   issuer,
-		people:   newTestPeopleStore(),
-		sessions: &testSessionStore{generations: map[string]int64{memberEmail: 0}},
+		people:   newTestPeopleStore(sessions),
+		sessions: sessions,
 		now:      time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
 	}
-	if err := rig.people.SignIn(context.Background(), memberEmail, session.RefreshToken, rig.now); err != nil {
+	if err := rig.people.SignIn(context.Background(), memberEmail, subject, session.RefreshToken, rig.now); err != nil {
 		t.Fatalf("record sign-in: %v", err)
 	}
 	rig.membership = &Membership{
 		People:   rig.people,
 		Sessions: rig.sessions,
 		SignIn:   flow,
-		Rule:     SignInRule{Group: memberGroup},
+		Rule:     rule,
 		Now:      func() time.Time { return rig.now },
 	}
 	return rig
+}
+
+// Under the domain rule the hourly confirmation refreshes with Google and keeps the sessions of a
+// verified account of the domain under the subject that signed in.
+func TestDomainMembershipKeepsAMemberOfTheDomain(t *testing.T) {
+	rig := newDomainMembershipRig(t)
+	rig.now = rig.now.Add(time.Hour)
+	if err := rig.membership.Confirm(context.Background(), memberEmail); err != nil {
+		t.Fatalf("Confirm after an hour: %v", err)
+	}
+	if refreshes := rig.issuer.Refreshes(); refreshes != 1 {
+		t.Fatalf("refreshes after an hour = %d, want 1", refreshes)
+	}
+	if membership, _ := rig.people.get(memberEmail); !membership.ConfirmedAt.Equal(rig.now) || membership.Subject != "google-subject" {
+		t.Fatalf("membership after the refresh = %#v, want confirmed at %s under google-subject", membership, rig.now)
+	}
+	if generation := rig.sessions.generation(memberEmail); generation != 0 {
+		t.Fatalf("a successful refresh moved the session generation to %d", generation)
+	}
+}
+
+// The domain rule runs again on the refreshed token, and the refreshed account must be the one
+// that signed in: an account that left the domain, lost its verified email, changed its email or
+// is another account (another subject), or a refresh Google refuses, ends every session.
+func TestDomainMembershipEndsTheSessionWhenTheRefreshedAccountNoLongerQualifies(t *testing.T) {
+	for name, change := range map[string]func(claims map[string]any){
+		"another domain":         func(claims map[string]any) { claims["hd"] = "other.example" },
+		"no domain":              func(claims map[string]any) { delete(claims, "hd") },
+		"an unverified email":    func(claims map[string]any) { claims["email_verified"] = "false" },
+		"another email":          func(claims map[string]any) { claims["email"] = "someone-else@d.example" },
+		"another Google account": func(claims map[string]any) { claims["sub"] = "another-google-subject" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			rig := newDomainMembershipRig(t)
+			rig.issuer.UpdateGrants(change)
+			rig.now = rig.now.Add(2 * time.Hour)
+			if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
+				t.Fatalf("Confirm: err = %v, want ErrNoIdentity", err)
+			}
+			assertSessionEnded(t, rig)
+		})
+	}
+	t.Run("a refresh Google refuses", func(t *testing.T) {
+		rig := newDomainMembershipRig(t)
+		rig.issuer.RevokeGrants()
+		rig.now = rig.now.Add(2 * time.Hour)
+		if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
+			t.Fatalf("Confirm: err = %v, want ErrNoIdentity", err)
+		}
+		assertSessionEnded(t, rig)
+	})
+}
+
+// A row whose refresh token no domain sign-in recorded holds no subject to compare: the domain rule
+// ends its sessions at the confirmation rather than admitting whichever account the token names.
+func TestDomainMembershipEndsTheSessionOfARowWithNoSubject(t *testing.T) {
+	rig := newDomainMembershipRig(t)
+	membership, _ := rig.people.get(memberEmail)
+	if err := rig.people.End(context.Background(), memberEmail); err != nil {
+		t.Fatal(err)
+	}
+	rig.people.mu.Lock()
+	rig.people.people[memberEmail] = auth.PersonMembership{RefreshToken: membership.RefreshToken, ConfirmedAt: membership.ConfirmedAt}
+	rig.people.mu.Unlock()
+	rig.now = rig.now.Add(2 * time.Hour)
+	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
+		t.Fatalf("Confirm of a row with no subject: err = %v, want ErrNoIdentity", err)
+	}
+	assertSessionEnded(t, rig)
 }
 
 func TestMembershipConfirmedWithinTheHourAsksTheIssuerNothing(t *testing.T) {

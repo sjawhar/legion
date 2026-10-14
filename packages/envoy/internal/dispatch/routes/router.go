@@ -267,10 +267,12 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 	http.Redirect(w, req, r.ctx.SignIn.AuthURL(callbackURL(r.ctx.ServerURL, req), state, nonce), http.StatusFound)
 }
 
-// authCallback completes a sign-in the sign-in pool redirected back: it exchanges the code for
-// the person's ID token, names them by the email their Google Workspace username carries, and
-// signs in only a member of SignInRule's group, keeping the pool's refresh token to confirm that
-// membership hourly.
+// authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
+// person's ID token and signs in only a person SignInRule admits (identity.Person), keeping the
+// issuer's refresh token to confirm that hourly. Under a group the person is named by the email
+// their Google Workspace username at the Cognito pool carries; under a domain, by the email of a
+// Google account of the domain, and the account's subject is recorded with the sign-in, which
+// ends the address's sessions when another account held it (auth.PeopleStore.SignIn).
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)
@@ -298,13 +300,22 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
+	domain := r.ctx.SignInRule.Domain != ""
 	email, err := identity.Person(session.Claims, r.ctx.SignInRule)
 	if err != nil {
-		slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
+		if domain {
+			slog.Warn("dispatch: sign-in refused", "email", session.Claims.Email, "hd", session.Claims.HostedDomain, "reason", err)
+		} else {
+			slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
+		}
 		writeSignInRefusedPage(w, email, err)
 		return
 	}
-	if err := r.ctx.People.SignIn(req.Context(), email, session.RefreshToken, time.Now()); err != nil {
+	var subject string
+	if domain {
+		subject = session.Claims.Subject
+	}
+	if err := r.ctx.People.SignIn(req.Context(), email, subject, session.RefreshToken, time.Now()); err != nil {
 		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
@@ -722,12 +733,21 @@ func writeCodeError(w http.ResponseWriter, status int, message, code string) {
 }
 
 // writeSignInRefusedPage answers the sign-in callback, a top-level browser navigation back from
-// the sign-in pool where JSON would be unreadable, for a person the pool vouched for but Dispatch
-// does not admit: one outside the group, named by email, or a sign-in that names nobody by email.
+// the issuer where JSON would be unreadable, for a person the issuer vouched for but Dispatch does
+// not admit, with the reason: one outside the group or the domain, or whose email Google has not
+// verified, each named by email; a Google sign-in that carries no email; or a sign-in that names
+// nobody by email.
 func writeSignInRefusedPage(w http.ResponseWriter, email string, reason error) {
 	message := "This sign-in does not name a person by a Google Workspace email. Sign in with your Google Workspace account."
-	if errors.Is(reason, identity.ErrNotMember) {
+	switch {
+	case errors.Is(reason, identity.ErrNotMember):
 		message = html.EscapeString(email) + " is not in the group that may use Dispatch. Ask an administrator to add you, then sign in again."
+	case errors.Is(reason, identity.ErrNotInDomain):
+		message = html.EscapeString(email) + " is not in the domain that may use Dispatch. Sign in with your Google Workspace account."
+	case errors.Is(reason, identity.ErrEmailNotVerified):
+		message = html.EscapeString(email) + ": email not verified. Google has not verified this account's email address, so Dispatch cannot name you by it."
+	case errors.Is(reason, identity.ErrNoEmail):
+		message = "No email: this sign-in carries no email address Dispatch can name you by. Sign in with your Google Workspace account."
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

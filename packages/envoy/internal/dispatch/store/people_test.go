@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -27,7 +28,7 @@ func TestPgPeopleStoreKeepsEachPersonsMembership(t *testing.T) {
 		t.Fatalf("membership before any sign-in: found=%t err=%v, want not found", found, err)
 	}
 	signedIn := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
-	if err := people.SignIn(ctx, email, "refresh-1", signedIn); err != nil {
+	if err := people.SignIn(ctx, email, "", "refresh-1", signedIn); err != nil {
 		t.Fatalf("sign in: %v", err)
 	}
 	// Recording a person who already signed in through the pool keeps their membership.
@@ -153,7 +154,7 @@ func TestPgPeopleStoreSealsTheRefreshTokenAtRest(t *testing.T) {
 		name  string
 		write func(token string) error
 	}{
-		{"sign-in", func(token string) error { return people.SignIn(ctx, email, token, confirmed) }},
+		{"sign-in", func(token string) error { return people.SignIn(ctx, email, "", token, confirmed) }},
 		{"confirmation", func(token string) error { return people.Confirm(ctx, email, token, confirmed) }},
 	} {
 		token := "refresh-" + write.name + "-" + randomDatabaseSuffix(t)
@@ -191,13 +192,13 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 		revoked bool
 	}{
 		"sealed under another signing key": {store: func(t *testing.T, _ *PgPeopleStore, email, token string) {
-			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key", nil).SignIn(ctx, email, token, confirmed); err != nil {
+			if err := NewPgPeopleStore(database.Pool, "rotated-signing-key", nil).SignIn(ctx, email, "", token, confirmed); err != nil {
 				t.Fatal(err)
 			}
 		}},
 		"sealed for another person": {store: func(t *testing.T, people *PgPeopleStore, email, token string) {
 			other := "other-" + email
-			if err := people.SignIn(ctx, other, token, confirmed); err != nil {
+			if err := people.SignIn(ctx, other, "", token, confirmed); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := database.Pool.Exec(ctx, `insert into people (email, refresh_token, confirmed_at) select $1, refresh_token, confirmed_at from people where email = $2`, email, other); err != nil {
@@ -238,7 +239,7 @@ func TestPgPeopleStoreReadsARefreshTokenThatDoesNotOpenAsNone(t *testing.T) {
 			if strings.Contains(out, token) || strings.Contains(out, *stored) {
 				t.Errorf("the log carries the stored value:\n%s", out)
 			}
-			if err := people.SignIn(ctx, email, "refresh-again", confirmed); err != nil {
+			if err := people.SignIn(ctx, email, "", "refresh-again", confirmed); err != nil {
 				t.Fatal(err)
 			}
 			if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-again" {
@@ -265,7 +266,7 @@ func TestRetirePlainRefreshTokensRevokesEachThenForgetsIt(t *testing.T) {
 	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
 	storePlainRefreshToken(t, database, "plain-1@d.example", "plain-token-1")
 	storePlainRefreshToken(t, database, "plain-2@d.example", "plain-token-2")
-	if err := people.SignIn(ctx, "sealed@d.example", "sealed-token", time.Now()); err != nil {
+	if err := people.SignIn(ctx, "sealed@d.example", "", "sealed-token", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	sealed := storedRefreshToken(t, database, "sealed@d.example")
@@ -395,7 +396,7 @@ func TestPgPeopleStoreSignInRetiresThePlainTokenItReplaces(t *testing.T) {
 		storePlainRefreshToken(t, database, email, plain)
 		pool.FailRevocation(status, "invalid_request")
 		logs := captureLogs(t)
-		if err := people.SignIn(ctx, email, "refresh-fresh", time.Now()); err != nil {
+		if err := people.SignIn(ctx, email, "", "refresh-fresh", time.Now()); err != nil {
 			t.Fatalf("pool answering %d: sign in: %v", status, err)
 		}
 		if got := pool.RevocationRequests(); !reflect.DeepEqual(got, []string{plain}) {
@@ -426,7 +427,7 @@ func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
 	_, flow := revokingPool(t)
 	people := NewPgPeopleStore(database.Pool, "signing-key", flow)
 	email := "raced@d.example"
-	if err := people.SignIn(ctx, email, "refresh-new", time.Now()); err != nil {
+	if err := people.SignIn(ctx, email, "", "refresh-new", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	if err := people.retire(ctx, email, "plain-the-sweep-read"); err != nil {
@@ -434,5 +435,141 @@ func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
 	}
 	if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-new" {
 		t.Errorf("membership = %#v err=%v, want the later sign-in's refresh-new", membership, err)
+	}
+}
+
+// sessionGeneration is the session generation of login, and whether user_sessions holds a row for
+// it.
+func sessionGeneration(t *testing.T, sessions *PgSessionStore, login string) (int64, bool) {
+	t.Helper()
+	generation, found, err := sessions.CurrentSessionGeneration(context.Background(), login)
+	if err != nil {
+		t.Fatalf("read the session generation of %s: %v", login, err)
+	}
+	return generation, found
+}
+
+// In domain mode the row holds the Google account's subject. A sign-in under the subject the row
+// holds keeps the address's sessions; one under another subject (a deleted account's address
+// given to a new account) ends every session of the address and records the new subject, logging
+// the address. A sign-in under a group neither reads nor writes the subject, and ending a sign-in
+// keeps it, so the next account's sign-in is still compared with it.
+func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	membership := func() auth.PersonMembership {
+		t.Helper()
+		membership, found, err := people.Membership(ctx, email)
+		if err != nil || !found {
+			t.Fatalf("membership of %s: found=%t err=%v", email, found, err)
+		}
+		return membership
+	}
+	logs := captureLogs(t)
+
+	if err := people.SignIn(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
+		t.Fatalf("first sign-in: %v", err)
+	}
+	if got := membership(); got.Subject != "subject-1" || got.RefreshToken != "refresh-1" {
+		t.Fatalf("membership after the first sign-in = %#v, want subject-1 with refresh-1", got)
+	}
+	if _, found := sessionGeneration(t, sessions, email); found {
+		t.Fatal("a first sign-in under a subject touched user_sessions")
+	}
+	generation, err := sessions.EnsureSession(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := people.SignIn(ctx, email, "subject-1", "refresh-2", time.Now()); err != nil {
+		t.Fatalf("sign-in under the same subject: %v", err)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation {
+		t.Fatalf("a sign-in under the subject the row holds moved the generation from %d to %d", generation, got)
+	}
+	if strings.Contains(logs.String(), "another Google account") {
+		t.Fatalf("a sign-in under the same subject logged a revoke:\n%s", logs.String())
+	}
+
+	if err := people.SignIn(ctx, email, "subject-2", "refresh-3", time.Now()); err != nil {
+		t.Fatalf("sign-in under another subject: %v", err)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("a sign-in under another subject left the generation at %d, want %d: every earlier cookie ended", got, generation+1)
+	}
+	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "refresh-3" {
+		t.Fatalf("membership after another subject's sign-in = %#v, want subject-2 with refresh-3", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "another Google account") || !strings.Contains(out, "email="+email) {
+		t.Errorf("the revoke was not logged at WARN with the address:\n%s", out)
+	}
+
+	if err := people.SignIn(ctx, email, "", "refresh-4", time.Now()); err != nil {
+		t.Fatalf("sign-in under a group: %v", err)
+	}
+	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "refresh-4" {
+		t.Fatalf("membership after a group sign-in = %#v, want subject-2 kept with refresh-4", got)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("a group sign-in moved the generation to %d", got)
+	}
+	if err := people.End(ctx, email); err != nil {
+		t.Fatal(err)
+	}
+	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "" {
+		t.Fatalf("membership after End = %#v, want subject-2 kept with no refresh token", got)
+	}
+
+	// A person recorded with no subject (header identity, a group sign-in, before the column)
+	// has nothing to compare: their first domain sign-in records its subject and ends nothing.
+	if err := people.Record(ctx, "recorded@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignIn(ctx, "recorded@example.com", "subject-3", "refresh-5", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := sessionGeneration(t, sessions, "recorded@example.com"); found {
+		t.Error("a first domain sign-in of a recorded person touched user_sessions")
+	}
+}
+
+// The revoke and the new subject commit together: a revoke that fails leaves the row's subject and
+// refresh token as they were, so the next sign-in under the new subject revokes again.
+func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	if err := people.SignIn(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := sessions.EnsureSession(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		create function refuse_session_revoke() returns trigger language plpgsql as $$ begin raise exception 'the test refuses every revoke'; end $$;
+		create trigger refuse_session_revoke before insert or update on user_sessions for each row execute function refuse_session_revoke();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()); err == nil || !strings.Contains(err.Error(), "the test refuses every revoke") {
+		t.Fatalf("a sign-in whose revoke fails: err = %v, want the revoke's error", err)
+	}
+	if membership, _, err := people.Membership(ctx, email); err != nil || membership.Subject != "subject-1" || membership.RefreshToken != "refresh-1" {
+		t.Fatalf("membership after the failed revoke = %#v err=%v, want subject-1 and refresh-1 as they were", membership, err)
+	}
+	if _, err := database.Pool.Exec(ctx, `drop trigger refuse_session_revoke on user_sessions`); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
+		t.Fatalf("the retry: %v", err)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("the retry left the generation at %d, want %d", got, generation+1)
 	}
 }
