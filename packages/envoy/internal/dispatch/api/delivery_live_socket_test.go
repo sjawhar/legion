@@ -493,9 +493,16 @@ func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 
 	// A resume's revisions may run to megabytes: a frame under 8 MiB is read, and this one is answered
 	// for its view, which names no kind. The answer comes only once all 7 MiB have arrived and been
-	// parsed, so its wait is throughputWait.
+	// parsed, so its wait is throughputWait, and so is the write's: it is one frame, which only the
+	// server's pong deadline, twice the heartbeat, would otherwise end if the transfer stalled.
 	revisions := strings.Repeat("0", 7<<20)
-	client.sendText(t, []byte(`{"type":"subscribe","sub":"r","view":{"kind":"bogus"},"resume":{"seq":"0","revs":{"items":{},"maps":{},"counts":{},"fields":{"f":"`+revisions+`"}}}}`))
+	subscribe := []byte(`{"type":"subscribe","sub":"r","view":{"kind":"bogus"},"resume":{"seq":"0","revs":{"items":{},"maps":{},"counts":{},"fields":{"f":"` + revisions + `"}}}}`)
+	written := throughputWait(t)
+	_ = client.conn.SetWriteDeadline(time.Now().Add(written))
+	if err := client.conn.WriteMessage(gws.TextMessage, subscribe); err != nil {
+		t.Fatalf("write the 7 MiB subscribe frame within throughputWait (%s): %v", written, err)
+	}
+	_ = client.conn.SetWriteDeadline(time.Time{})
 	client.refusal(t, throughputWait(t), "r", "INVALID_FRAME")
 
 	// One over it closes the socket with 1009. gorilla compares a frame's declared length with the
