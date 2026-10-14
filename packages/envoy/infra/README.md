@@ -17,6 +17,27 @@ a build provenance attestation for every archive.
 
 ### The plugin
 
+The plugin runs on the machine that runs `pulumi`, and logs in to the Docker hosts it deploys to, so
+verify an archive before installing it. Each release's archives carry build provenance from
+`.github/workflows/release-envoy-infra.yaml` on `main`; `--repo` alone would accept an attestation
+from any workflow of this repository, so the command pins the signer:
+
+```sh
+version=<version>
+archive=pulumi-resource-envoy-infra-v$version-<os>-<arch>.tar.gz
+gh release download "envoy-infra-v$version" --repo sjawhar/legion --pattern "$archive"
+gh attestation verify "$archive" --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+pulumi plugin install resource envoy-infra "$version" \
+  --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}' \
+  --checksum "$(sha256sum "$archive" | cut -d' ' -f1)"
+```
+
+`--source-digest <the envoy-infra-v<version> tag's commit>` added to the `verify` pins the commit as
+well. `--checksum` makes `pulumi` refuse a download whose SHA-256 is not the archive's you
+verified. Then add the package to the project:
+
 ```sh
 pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'
 ```
@@ -130,17 +151,25 @@ listener's NATS client then refuses to connect rather than connect without the s
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
 - a blank `machineId`;
+- a `machineId` or `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
 - a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
+- `watchdog` on a listener whose name contains `"`, `$`, a backtick, `\` or a line break, since the
+  watchdog's script echoes the name in double quotes;
 - a missing provider (see [Providers](#providers)).
 
-`natsUrls` may come from another resource or stack, so the listener checks it only when it
-computes the container's environment. That happens at preview, unless `natsUrls` is not known until
-the update. It refuses an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas
-separate the URLs in `NATS_URLS`).
+`natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
+it computes the container's environment. That happens at preview, unless they are not known until
+the update. It refuses an empty `natsUrls`, a URL in it that is blank, contains a comma (commas
+separate the URLs in `NATS_URLS`) or holds a control character, and a blank `seed`.
+
+The watchdog writes the environment, one variable per line, into a heredoc of a script it runs as
+root on the host, so a line break in a value could end the heredoc and run what follows as a
+command. That is why no value may hold a control character, even one the program reads from
+another stack.
 
 ## Providers
 

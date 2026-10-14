@@ -825,7 +825,7 @@ starts, and record the version.
 - [ ] **README.** Document the seed workflow: the consumer declares an empty secret,
   `envoy-infra seed generate` writes it, and the public key goes into the authorization. Also
   document `check` and `verify`, the exit codes, and `core.Authorization`'s rules, and tell an
-  operator to run `gh attestation verify <archive> --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main --source-ref refs/heads/main --deny-self-hosted-runners`
+  operator to run `gh attestation verify <archive> --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main --source-ref refs/heads/main --deny-self-hosted-runners`
   before installing the CLI (`--repo` alone accepts an attestation from any workflow run in the
   repository; docs/kubernetes.md pins the same three flags).
   Commit `docs(envoy-infra): NATS authorization and seeds`.

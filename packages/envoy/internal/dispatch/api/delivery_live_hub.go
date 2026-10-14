@@ -103,7 +103,7 @@ func (h *deliveryHub) Unsubscribe(conn deliveryLiveConn, sub string) {
 }
 
 // Close drops every sub conn holds. The socket calls it however it ends: shutdown (1012), its
-// request ending (1008), a full queue (1013), a read error.
+// caller no longer resolving (1008), a full queue (1013), a read error.
 func (h *deliveryHub) Close(conn deliveryLiveConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

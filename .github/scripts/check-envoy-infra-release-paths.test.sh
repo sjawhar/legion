@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Tests for `check-envoy-infra-release-paths.sh`: release.yaml's envoy_infra push paths, filter and
-# bump paths must cover every package of the repository's own Go modules a command under the
-# module's cmd/ compiles in, for each target the target list names, and the module and workspace
-# files that set their versions.
+# Tests for `check-envoy-infra-release-paths.sh`: release-envoy-infra.yaml's push paths and
+# .github/envoy-infra-release-paths, the paths its version step cuts a version from, must cover
+# every package of the repository's own Go modules a command under the module's cmd/ compiles in,
+# for each target the target list names, the module and workspace files that set their versions,
+# and the paths file itself.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real
-# script into it, so the script under test is the file CI runs. The miniature holds a Go workspace
-# shaped like the real one (packages/envoy and its nested packages/envoy/infra module, bound by
-# infra's go.work) whose packages import only the standard library, so `go list` reads it with no
-# download.
+# script and the path model it imports (workflow_paths.py) into it, so the code under test is the
+# file CI runs. The miniature holds a Go workspace shaped like the real one (packages/envoy and its
+# nested packages/envoy/infra module, bound by infra's go.work) whose packages import only the
+# standard library, so `go list` reads it with no download.
 #
 # Run from anywhere: .github/scripts/check-envoy-infra-release-paths.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test), after its Go install.
@@ -22,6 +23,9 @@ trap 'rm -rf "$work"' EXIT
 
 # shellcheck source=.github/scripts/test-lib.sh
 source "$script_dir/test-lib.sh"
+
+workflow=.github/workflows/release-envoy-infra.yaml
+release_paths=.github/envoy-infra-release-paths
 
 # fixture <name>: a tree that passes. The plugin's command imports core, which imports two
 # packages of packages/envoy (bus and contracts); a third (other) is imported by nothing. The
@@ -37,6 +41,7 @@ fixture() {
     "$envoy/internal/contracts" "$envoy/internal/other" "$infra/cmd/pulumi-resource-envoy-infra" \
     "$infra/core"
   ln -s "$check_script" "$root/.github/scripts/check-envoy-infra-release-paths.sh"
+  ln -s "$script_dir/workflow_paths.py" "$root/.github/scripts/workflow_paths.py"
   printf '{\n  "envoy-infra": ["linux/amd64", "darwin/arm64"]\n}\n' > "$root/.github/envoy-infra-targets.json"
   printf 'module example.com/envoy\n\ngo 1.22\n' > "$envoy/go.mod"
   : > "$envoy/go.sum"
@@ -64,40 +69,41 @@ import "example.com/envoy/infra/core"
 
 func main() { println(core.Describe()) }
 GO
-  cat > "$root/.github/workflows/release.yaml" <<'YAML'
-name: Release Packages
+  cat > "$root/$release_paths" <<'PATHS'
+packages/envoy/infra/
+packages/envoy/internal/bus/
+packages/envoy/internal/contracts/
+packages/envoy/go.mod
+packages/envoy/go.sum
+.github/envoy-infra-targets.json
+.github/envoy-infra-release-paths
+PATHS
+  cat > "$root/$workflow" <<'YAML'
+name: Release envoy-infra
 on:
   push:
     branches: [main]
     paths:
-      - "packages/envoy/**"
+      - "packages/envoy/infra/**"
+      - "packages/envoy/internal/bus/**"
+      - "packages/envoy/internal/contracts/**"
+      - "packages/envoy/go.mod"
+      - "packages/envoy/go.sum"
       - ".github/envoy-infra-targets.json"
+      - ".github/envoy-infra-release-paths"
+  workflow_dispatch:
 jobs:
-  changes:
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: dorny/paths-filter@v4
-        id: filter
-        with:
-          filters: |
-            envoy_infra:
-              - 'packages/envoy/infra/**'
-              - 'packages/envoy/internal/bus/**'
-              - 'packages/envoy/internal/contracts/**'
-              - 'packages/envoy/go.mod'
-              - 'packages/envoy/go.sum'
-              - '.github/envoy-infra-targets.json'
-  envoy_infra:
+  release:
     runs-on: ubuntu-24.04
     steps:
       - name: Determine next version
         id: version
         run: |
           # A comment that names release-bump.sh (as this one does) is no call.
+          mapfile -t paths < .github/envoy-infra-release-paths
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "${PREV_TAG}..HEAD" \
             --patch-path .github/envoy-infra-targets.json \
-            -- packages/envoy/infra/ packages/envoy/internal/bus/ packages/envoy/internal/contracts/ \
-            packages/envoy/go.mod packages/envoy/go.sum .github/envoy-infra-targets.json)
+            -- "${paths[@]}")
 YAML
   echo "$root"
 }
@@ -110,10 +116,10 @@ run_check() {
   set -e
 }
 
-# edit <root> <old> <new>: replaces the one occurrence of <old> in the fixture's release.yaml, and
-# fails the harness when it is not there exactly once, so a case never runs on an unchanged tree.
+# edit <file> <old> <new>: replaces the one occurrence of <old> in a fixture's file, and fails the
+# harness when it is not there exactly once, so a case never runs on an unchanged tree.
 edit() {
-  python3 - "$1/.github/workflows/release.yaml" "$2" "$3" <<'PY'
+  python3 - "$1" "$2" "$3" <<'PY'
 import sys
 from pathlib import Path
 
@@ -125,57 +131,83 @@ path.write_text(text.replace(old, new))
 PY
 }
 
-filter_miss="is missing from the changes job's envoy_infra filter"
-bump_miss="is missing from the paths after -- of envoy_infra's release-bump.sh call"
-push_miss="is missing from the workflow's push paths"
+push_miss="is missing from $workflow's push paths"
+bump_miss="is missing from $release_paths$"
 
-echo "case: every list covers what the plugin builds from"
+echo "case: both lists cover what the plugin builds from"
 root=$(fixture green)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "says what it covered" \
-  "$(contains "$out" 'cover the 10 packages and module files above, which the plugin and command build from across 2 targets')"
+  "$(contains "$out" 'cover the 11 packages and files above, which the plugin and command build from across 2 targets')"
 check "lists a package of packages/envoy the plugin compiles in" \
   "$(contains "$out" '  packages/envoy/internal/bus/ (example.com/envoy/internal/bus)')"
 check "lists the workspace file" "$(contains "$out" '  packages/envoy/infra/go.work (the workspace file)')"
 check "lists a module's checksums" "$(contains "$out" "  packages/envoy/go.sum (example.com/envoy's go.sum)")"
+check "lists the paths file itself" \
+  "$(contains "$out" "  $release_paths (the paths a version is cut from)")"
 check "leaves out a package nothing imports" "$(is "$(contains "$out" 'internal/other')" false)"
 
-echo "case: a package the plugin compiles in, missing from the filter"
-root=$(fixture filter-missing)
-edit "$root" "              - 'packages/envoy/internal/bus/**'"$'\n' ""
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the package and the filter" \
-  "$(contains "$out" "packages/envoy/internal/bus/ (example.com/envoy/internal/bus) $filter_miss")"
-check "blames no other list" "$(is "$(contains "$out" "$bump_miss\|$push_miss")" false)"
-
-echo "case: a package the plugin compiles in, missing from the bump paths"
-root=$(fixture bump-missing)
-edit "$root" " packages/envoy/internal/contracts/ \\" " \\"
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the package and the bump paths" \
-  "$(contains "$out" "packages/envoy/internal/contracts/ (example.com/envoy/internal/contracts) $bump_miss")"
-check "blames no other list" "$(is "$(contains "$out" "$filter_miss\|$push_miss")" false)"
-
-echo "case: the push paths miss the module"
+echo "case: a package the plugin compiles in, missing from the push paths"
 root=$(fixture push-missing)
-edit "$root" '      - "packages/envoy/**"' '      - "packages/envoy/cmd/**"'
+edit "$root/$workflow" '      - "packages/envoy/internal/bus/**"'$'\n' ""
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
-check "names a package" \
-  "$(contains "$out" "packages/envoy/infra/core/ (example.com/envoy/infra/core) $push_miss")"
-check "names a module file" "$(contains "$out" "packages/envoy/infra/go.mod (example.com/envoy/infra's go.mod) $push_miss")"
-check "names every one of the 10" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 10)"
+check "names the package, the push paths and a file they miss" \
+  "$(contains "$out" "packages/envoy/internal/bus/ (example.com/envoy/internal/bus) $push_miss: packages/envoy/internal/bus/bus.go is not covered")"
+check "blames not the paths file" "$(is "$(contains "$out" "$bump_miss")" false)"
 
-echo "case: a module file, missing from the filter"
-root=$(fixture gomod-missing)
-edit "$root" "              - 'packages/envoy/go.mod'"$'\n' ""
+echo "case: a package the plugin compiles in, missing from the paths file"
+root=$(fixture bump-missing)
+edit "$root/$release_paths" "packages/envoy/internal/contracts/"$'\n' ""
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
-check "names the module's go.mod" \
-  "$(contains "$out" "packages/envoy/go.mod (example.com/envoy's go.mod) $filter_miss")"
+check "names the package and the paths file" \
+  "$(contains "$out" "packages/envoy/internal/contracts/ (example.com/envoy/internal/contracts) $bump_miss")"
+check "blames not the push paths" "$(is "$(contains "$out" "$push_miss")" false)"
+
+echo "case: the push paths narrowed to the plugin's command"
+root=$(fixture push-narrowed)
+edit "$root/$workflow" '      - "packages/envoy/infra/**"' '      - "packages/envoy/infra/cmd/**"'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names a package" "$(contains "$out" "packages/envoy/infra/core/ (example.com/envoy/infra/core) $push_miss")"
+check "names a module file" "$(contains "$out" "packages/envoy/infra/go.mod (example.com/envoy/infra's go.mod) $push_miss")"
+check "names each of the 5 the command's glob leaves out" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 5)"
+
+echo "case: a negation in the push paths, read as GitHub reads it"
+root=$(fixture push-negated)
+edit "$root/$workflow" '      - "packages/envoy/infra/**"' \
+  '      - "packages/envoy/infra/**"'$'\n''      - "!packages/envoy/infra/core/**"'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the package the negation drops" \
+  "$(contains "$out" "packages/envoy/infra/core/ (example.com/envoy/infra/core) $push_miss: packages/envoy/infra/core/core.go is not covered")"
+check "names it alone" "$(is "$(grep -c -- "$push_miss" <<<"$out" || true)" 1)"
+
+echo "case: a file in a package's directory the push paths' glob leaves out"
+root=$(fixture push-glob)
+edit "$root/$workflow" '      - "packages/envoy/internal/bus/**"' '      - "packages/envoy/internal/bus/*.go"'
+printf 'The bus.\n' > "$root/packages/envoy/internal/bus/README.md"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the package and the file" \
+  "$(contains "$out" "packages/envoy/internal/bus/ (example.com/envoy/internal/bus) $push_miss: packages/envoy/internal/bus/README.md is not covered")"
+
+echo "case: a module file, missing from the push paths"
+root=$(fixture gomod-missing)
+edit "$root/$workflow" '      - "packages/envoy/go.mod"'$'\n' ""
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the module's go.mod" "$(contains "$out" "packages/envoy/go.mod (example.com/envoy's go.mod) $push_miss")"
+
+echo "case: the paths file does not list itself"
+root=$(fixture paths-file-unlisted)
+edit "$root/$release_paths" ".github/envoy-infra-release-paths"$'\n' ""
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the paths file" \
+  "$(contains "$out" "$release_paths (the paths a version is cut from) $bump_miss")"
 
 echo "case: a new import on one target's platform only"
 root=$(fixture darwin-import)
@@ -183,11 +215,10 @@ printf '//go:build darwin\n\npackage core\n\nimport _ "example.com/envoy/interna
   > "$root/packages/envoy/infra/core/other_darwin.go"
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
-check "names the package missing from the filter" \
-  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $filter_miss")"
-check "names it missing from the bump paths" \
+check "names the package missing from the push paths" \
+  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $push_miss")"
+check "names it missing from the paths file" \
   "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $bump_miss")"
-check "the push paths' packages/envoy/** already covers it" "$(is "$(contains "$out" "$push_miss")" false)"
 
 echo "case: a new import on a platform no target names"
 root=$(fixture windows-import)
@@ -205,7 +236,7 @@ run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "lists the second command's package" \
   "$(contains "$out" '  packages/envoy/infra/cmd/envoy-infra/ (example.com/envoy/infra/cmd/envoy-infra)')"
-check "counts it" "$(contains "$out" 'cover the 11 packages and module files above')"
+check "counts it" "$(contains "$out" 'cover the 12 packages and files above')"
 
 echo "case: a package only the second command compiles in"
 root=$(fixture second-command-import)
@@ -214,11 +245,10 @@ printf 'package main\n\nimport _ "example.com/envoy/internal/other"\n\nfunc main
   > "$root/packages/envoy/infra/cmd/envoy-infra/main.go"
 run_check "$root"
 check "exits 1: every command under cmd/ is read, not the plugin's alone" "$(is "$status" 1)"
-check "names the package missing from the filter" \
-  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $filter_miss")"
-check "names it missing from the bump paths" \
+check "names the package missing from the push paths" \
+  "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $push_miss")"
+check "names it missing from the paths file" \
   "$(contains "$out" "packages/envoy/internal/other/ (example.com/envoy/internal/other) $bump_miss")"
-check "the push paths' packages/envoy/** covers it" "$(is "$(contains "$out" "$push_miss")" false)"
 
 echo "case: a package whose path extends a listed one"
 root=$(fixture extended-path)
@@ -228,51 +258,69 @@ printf 'package core\n\nimport _ "example.com/envoy/internal/busx"\n' \
   > "$root/packages/envoy/infra/core/busx.go"
 run_check "$root"
 check "exits 1: internal/bus/** and internal/bus/ cover only that directory" "$(is "$status" 1)"
-check "names it missing from the filter" \
-  "$(contains "$out" "packages/envoy/internal/busx/ (example.com/envoy/internal/busx) $filter_miss")"
-check "names it missing from the bump paths" \
+check "names it missing from the push paths" \
+  "$(contains "$out" "packages/envoy/internal/busx/ (example.com/envoy/internal/busx) $push_miss")"
+check "names it missing from the paths file" \
   "$(contains "$out" "packages/envoy/internal/busx/ (example.com/envoy/internal/busx) $bump_miss")"
-check "the push paths' packages/envoy/** covers it" "$(is "$(contains "$out" "$push_miss")" false)"
 
 echo "case: an entry the check cannot read"
-root=$(fixture negated-filter)
-edit "$root" "              - 'packages/envoy/go.mod'" \
-  "              - 'packages/envoy/go.mod'"$'\n'"              - '!packages/envoy/infra/testdata/**'"
+root=$(fixture push-plus)
+edit "$root/$workflow" '      - "packages/envoy/go.mod"' '      - "packages/envoy+/go.mod"'
 run_check "$root"
-check "a negation in the filter fails" "$(is "$status" 1)"
-check "names the entry" \
-  "$(contains "$out" "the changes job's envoy_infra filter holds '!packages/envoy/infra/testdata/\*\*', which this check cannot read")"
+check "a push path with + fails" "$(is "$status" 1)"
+check "names the entry" "$(contains "$out" "the push paths hold \['packages/envoy+/go.mod'\]")"
 
-root=$(fixture pathspec-bump)
-edit "$root" "-- packages/envoy/infra/ " "-- ':(exclude)packages/envoy/infra/testdata' packages/envoy/infra/ "
+root=$(fixture paths-pathspec)
+edit "$root/$release_paths" "packages/envoy/infra/" ":(exclude)packages/envoy/infra/testdata"$'\n'"packages/envoy/infra/"
 run_check "$root"
-check "a pathspec magic in the bump paths fails" "$(is "$status" 1)"
-check "names the entry" "$(contains "$out" "holds ':(exclude)packages/envoy/infra/testdata', which this check cannot read")"
+check "a pathspec magic in the paths file fails" "$(is "$status" 1)"
+check "names the line" "$(contains "$out" "cannot read the line ':(exclude)packages/envoy/infra/testdata'")"
 
-root=$(fixture glob-push)
-edit "$root" '      - "packages/envoy/**"' '      - "packages/envoy/*/go.mod"'
+root=$(fixture paths-glob)
+edit "$root/$release_paths" "packages/envoy/go.mod" "packages/envoy/*/go.mod"
 run_check "$root"
-check "a glob inside a push path fails" "$(is "$status" 1)"
-check "names the entry" "$(contains "$out" "the workflow's push paths holds 'packages/envoy/\*/go.mod'")"
+check "a glob in the paths file fails" "$(is "$status" 1)"
+check "names the line" "$(contains "$out" "cannot read the line 'packages/envoy/\*/go.mod'")"
+
+root=$(fixture paths-blank)
+edit "$root/$release_paths" "packages/envoy/go.mod"$'\n' "packages/envoy/go.mod"$'\n\n'
+run_check "$root"
+check "a blank line in the paths file fails" "$(is "$status" 1)"
+check "names the line" "$(contains "$out" "cannot read the line ''")"
 
 echo "case: a workflow the check cannot find its lists in"
-root=$(fixture no-filter)
-edit "$root" "            envoy_infra:" "            envoy_infra_renamed:"
+root=$(fixture no-push-paths)
+edit "$root/$workflow" "    paths:" "    paths-ignore:"
 run_check "$root"
-check "a missing filter fails" "$(is "$status" 1)"
-check "says so" "$(contains "$out" 'has no envoy_infra filter')"
+check "push paths missing fails" "$(is "$status" 1)"
+check "says so" "$(contains "$out" 'on.push names no paths')"
+
+root=$(fixture inline-paths)
+edit "$root/$workflow" "          mapfile -t paths < .github/envoy-infra-release-paths" \
+  "          paths=(packages/envoy/infra/)"
+run_check "$root"
+check "a version step that does not read the paths file fails" "$(is "$status" 1)"
+check "says so" "$(contains "$out" "the version step does not read $release_paths")"
+
+root=$(fixture extra-path)
+# shellcheck disable=SC2016 # literal workflow text, no expansion wanted
+edit "$root/$workflow" '-- "${paths[@]}")' '-- "${paths[@]}" packages/envoy/cmd/)'
+run_check "$root"
+check "a version step passing a path of its own fails" "$(is "$status" 1)"
+check "says what it must pass" "$(contains "$out" 'the lines of .github/envoy-infra-release-paths, and no other path')"
 
 root=$(fixture two-calls)
-edit "$root" "packages/envoy/go.mod packages/envoy/go.sum .github/envoy-infra-targets.json)" \
-  "packages/envoy/go.mod packages/envoy/go.sum .github/envoy-infra-targets.json)"$'\n'"          OTHER=\$(.github/scripts/release-bump.sh 0.0.0 HEAD -- packages/envoy/)"
+# shellcheck disable=SC2016 # literal workflow text, no expansion wanted
+edit "$root/$workflow" '-- "${paths[@]}")' \
+  '-- "${paths[@]}")'$'\n'"          OTHER=\$(.github/scripts/release-bump.sh 0.0.0 HEAD -- packages/envoy/)"
 run_check "$root"
 check "a second release-bump.sh call fails" "$(is "$status" 1)"
-check "counts them" "$(contains "$out" 'expected one release-bump.sh call in envoy_infra')"
+check "counts them" "$(contains "$out" 'expected one release-bump.sh call in the version step, found 2')"
 
 root=$(fixture no-version-step)
-edit "$root" "        id: version" "        id: versions"
+edit "$root/$workflow" "        id: version" "        id: versions"
 run_check "$root"
 check "a version step under another id fails" "$(is "$status" 1)"
-check "names the step it wants" "$(contains "$out" 'expected one step with id version in job envoy_infra, found 0')"
+check "names the step it wants" "$(contains "$out" 'expected one step with id version, found 0')"
 
 summary "check-envoy-infra-release-paths.sh"
