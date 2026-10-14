@@ -23,7 +23,6 @@ const listenerType = "envoy-infra:host:Listener"
 
 const (
 	defaultContainerName = "envoy-listener"
-	defaultPort          = 9020
 	// waitTimeout is how long, in seconds, the docker provider waits for a new container's
 	// health check to pass.
 	waitTimeout = 90
@@ -35,7 +34,7 @@ type ListenerArgs struct {
 	NatsUrls      pulumi.StringArrayInput `pulumi:"natsUrls"`               // may come from another stack's output
 	Image         string                  `pulumi:"image"`                  // e.g. ghcr.io/sjawhar/legion/envoy:<tag>
 	ContainerName *string                 `pulumi:"containerName,optional"` // default "envoy-listener"
-	Port          *int                    `pulumi:"port,optional"`          // default 9020
+	Port          *int                    `pulumi:"port,optional"`          // default core.DefaultListenerPort, 9020
 	HostBridge    *string                 `pulumi:"hostBridge,optional"`
 	Seed          pulumi.StringInput      `pulumi:"seed,optional" provider:"secret"`
 	Watchdog      *WatchdogArgs           `pulumi:"watchdog,optional"`
@@ -80,17 +79,13 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 	if args.ContainerName != nil {
 		containerName = *args.ContainerName
 	}
-	port := defaultPort
+	port := core.DefaultListenerPort
 	if args.Port != nil {
 		port = *args.Port
 	}
 	hostBridge := ""
 	if args.HostBridge != nil {
 		hostBridge = *args.HostBridge
-	}
-	// core reads a Port of 0 as its default, which would leave the health check on port 0.
-	if port == 0 {
-		return nil, fmt.Errorf("%s %s: port 0 is outside 1-65535", listenerType, name)
 	}
 	// Every field of the listener's environment but natsUrls is known here; natsUrls may be
 	// another resource's output, so ListenerEnv checks it when the container's envs resolve.

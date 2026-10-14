@@ -11,9 +11,9 @@ import (
 	"github.com/sjawhar/envoy/internal/bus"
 )
 
-// defaultListenerPort is the port the listener serves on when PORT is unset
-// (cmd/listener/main.go: config.Load(9020)).
-const defaultListenerPort = 9020
+// DefaultListenerPort is the port the listener serves on when PORT is unset (cmd/listener/main.go,
+// `config.Load(9020)`), and so a component's default for its port.
+const DefaultListenerPort = 9020
 
 // EnvNATSSeed names the variable holding the nkey seed of the NATS user the listener connects as,
 // the one its bus client reads the seed from. Its value is a secret, so ListenerEnv never renders
@@ -24,7 +24,7 @@ const EnvNATSSeed = bus.NkeySeedEnvVar
 type ListenerConfig struct {
 	MachineID  string   // ENVOY_MACHINE_ID
 	NATSURLs   []string // NATS_URLS, joined with commas
-	Port       int      // 0 means 9020
+	Port       int      // PORT, 1-65535: a component resolves its default, DefaultListenerPort
 	HostBridge string   // "" leaves ENVOY_HOST_BRIDGE unset
 }
 
@@ -34,10 +34,10 @@ type ListenerConfig struct {
 //
 // The listener requires ENVOY_MACHINE_ID and refuses it blank (internal/config/config.go), and
 // reads ENVOY_HOST_BRIDGE untrimmed into every local delivery's URL (internal/session/session.go),
-// so a host bridge with surrounding whitespace is refused. A Port of 0 means 9020. No value may
-// hold a control character: a watchdog writes the environment, one variable per line, into a
-// heredoc of a script that runs as root on the host, where a line break would end the heredoc and
-// run what follows it.
+// so a host bridge with surrounding whitespace is refused. Port is always given, since a health
+// check calls it. No value may hold a control character: a watchdog writes the environment, one
+// variable per line, into a heredoc of a script that runs as root on the host, where a line break
+// would end the heredoc and run what follows it.
 func (c ListenerConfig) CheckPlain() error {
 	if strings.TrimSpace(c.MachineID) == "" {
 		return errors.New("machineId is required")
@@ -45,7 +45,7 @@ func (c ListenerConfig) CheckPlain() error {
 	if strings.ContainsFunc(c.MachineID, unicode.IsControl) {
 		return fmt.Errorf("machineId contains a control character: %q", c.MachineID)
 	}
-	if port := c.port(); port < 1 || port > 65535 {
+	if c.Port < 1 || c.Port > 65535 {
 		return fmt.Errorf("port %d is outside 1-65535", c.Port)
 	}
 	if strings.TrimSpace(c.HostBridge) != c.HostBridge {
@@ -55,14 +55,6 @@ func (c ListenerConfig) CheckPlain() error {
 		return fmt.Errorf("hostBridge contains a control character: %q", c.HostBridge)
 	}
 	return nil
-}
-
-// port is the port the listener serves on.
-func (c ListenerConfig) port() int {
-	if c.Port == 0 {
-		return defaultListenerPort
-	}
-	return c.Port
 }
 
 // ListenerEnv returns the listener's non-secret environment, KEY=value, in a fixed order.
@@ -95,7 +87,7 @@ func ListenerEnv(c ListenerConfig) ([]string, error) {
 		}
 	}
 	env := []string{
-		"PORT=" + strconv.Itoa(c.port()),
+		"PORT=" + strconv.Itoa(c.Port),
 		"ENVOY_MACHINE_ID=" + c.MachineID,
 		"NATS_URLS=" + strings.Join(c.NATSURLs, ","),
 	}
