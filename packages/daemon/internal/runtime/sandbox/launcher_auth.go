@@ -24,21 +24,20 @@ type launcherCredential struct {
 	hash          [sha256.Size]byte
 }
 
-// launcherSecret is what the runtime holds of one role's launcher Secret, for the Sandbox with
-// sandboxUID: the credential a read or a binding write of the Secret gave it (held), or else when
-// its latest read failed.
+// launcherSecret is what the runtime holds of one role's launcher Secret for one Sandbox: the
+// credential a read or a binding of the Secret gave it (held), or else when its latest read failed.
 type launcherSecret struct {
-	sandboxUID types.UID
 	credential launcherCredential
 	held       bool
 	failedAt   time.Time
 }
 
-// launcherCredentials are the launcher Secrets the runtime holds, by name, and the reads of them in
-// flight, one per Secret of a Sandbox (launcherCredential).
+// launcherCredentials are the launcher Secrets the runtime holds, by name and then by the UID of
+// the Sandbox each was read or bound for, so a Sandbox's entry is never another's of the same
+// name; and the reads of them in flight, one per Secret of a Sandbox (launcherCredential).
 type launcherCredentials struct {
 	mu      sync.Mutex
-	secrets map[string]launcherSecret
+	secrets map[string]map[types.UID]launcherSecret
 	reads   singleflight.Group
 }
 
@@ -154,67 +153,70 @@ func credentialFromSecret(secret *corev1.Secret) launcherCredential {
 func (c *launcherCredentials) lookup(name string, uid types.UID) (credential launcherCredential, held bool, readFrom time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	secret, found := c.secrets[name]
+	secret := c.secrets[name][uid]
 	switch {
-	case !found || secret.sandboxUID != uid:
-		return launcherCredential{}, false, time.Time{}
 	case secret.held:
 		return secret.credential, true, time.Time{}
+	case secret.failedAt.IsZero():
+		return launcherCredential{}, false, time.Time{}
 	}
 	return launcherCredential{}, false, secret.failedAt.Add(credentialRetry)
 }
 
-// bind holds credential, a binding write's or a binding check's, as name's for the Sandbox with uid,
-// in place of whatever was held. A credential once held is replaced only here, by the launch of a
-// pod of the Sandbox that holds the name now, or dropped with its Sandbox (forget): never by a read,
-// which may be of a Sandbox since deleted (store, fail).
+// bind holds credential, a binding write's or a binding check's, as name's for the Sandbox with
+// uid, in place of whatever was held. A binding is made under a launch of that Sandbox's pod, which
+// proves it holds the name now, so every other Sandbox's entry of the name, a deleted one's, goes.
 func (c *launcherCredentials) bind(name string, uid types.UID, credential launcherCredential) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.put(name, launcherSecret{sandboxUID: uid, credential: credential, held: true})
+	if c.secrets == nil {
+		c.secrets = make(map[string]map[types.UID]launcherSecret)
+	}
+	c.secrets[name] = map[types.UID]launcherSecret{uid: {credential: credential, held: true}}
 }
 
-// store holds credential, a read's, as name's for the Sandbox with uid, unless a credential is held
-// already (bind): one of that Sandbox is a binding write that completed during the read, newer than
-// it, and one of another Sandbox is not the read's to replace. It is the credential the Sandbox with
-// uid holds, or the read's when another Sandbox holds the name.
+// store holds credential, a read's, as name's for the Sandbox with uid, unless that Sandbox holds
+// one already: a binding that completed during the read is newer than it. It is the credential the
+// Sandbox holds.
 func (c *launcherCredentials) store(name string, uid types.UID, credential launcherCredential) launcherCredential {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if held := c.secrets[name]; held.held {
-		if held.sandboxUID == uid {
-			return held.credential
-		}
-		return credential
+	if held := c.secrets[name][uid]; held.held {
+		return held.credential
 	}
-	c.put(name, launcherSecret{sandboxUID: uid, credential: credential, held: true})
+	c.put(name, uid, launcherSecret{credential: credential, held: true})
 	return credential
 }
 
-// fail records that a read of name for the Sandbox with uid failed at at, unless a credential is
-// held (bind), whichever Sandbox's it is.
+// fail records that a read of name for the Sandbox with uid failed at at, unless that Sandbox
+// holds a credential.
 func (c *launcherCredentials) fail(name string, uid types.UID, at time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.secrets[name].held {
+	if c.secrets[name][uid].held {
 		return
 	}
-	c.put(name, launcherSecret{sandboxUID: uid, failedAt: at})
+	c.put(name, uid, launcherSecret{failedAt: at})
 }
 
-// forget drops whatever is held of name.
+// forget drops whatever is held of name, for every Sandbox. A read that lands afterwards for a
+// Sandbox since deleted writes only that Sandbox's entry, which nothing looks up again, until the
+// name's next bind or forget drops it.
 func (c *launcherCredentials) forget(name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	delete(c.secrets, name)
 }
 
-// put holds secret as name's; its caller holds c.mu.
-func (c *launcherCredentials) put(name string, secret launcherSecret) {
+// put holds secret as name's for the Sandbox with uid; its caller holds c.mu.
+func (c *launcherCredentials) put(name string, uid types.UID, secret launcherSecret) {
 	if c.secrets == nil {
-		c.secrets = make(map[string]launcherSecret)
+		c.secrets = make(map[string]map[types.UID]launcherSecret)
 	}
-	c.secrets[name] = secret
+	if c.secrets[name] == nil {
+		c.secrets[name] = make(map[types.UID]launcherSecret)
+	}
+	c.secrets[name][uid] = secret
 }
 
 // cacheLauncherCredential holds secret's credential, read or written as bound to its pod, for the

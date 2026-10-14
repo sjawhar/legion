@@ -483,6 +483,26 @@ func TestAReadOfADeletedSandboxNeverEvictsItsSuccessorsBinding(t *testing.T) {
 	}
 }
 
+// A read for a deleted Sandbox that lands after the runtime forgot it leaves nothing its same-name
+// successor reads: the successor's failed read still holds off the next, and its read is still
+// held, before any launch of it binds.
+func TestASuccessorHoldsOffAndHoldsItsOwnReadsWhateverALateReadOfItsPredecessorLeft(t *testing.T) {
+	const name = "legion-legion-legion-208-tester-boot"
+	var c launcherCredentials
+	c.bind(name, "uid-old", launcherCredential{podUID: "uid-pod-old"})
+	c.forget(name)
+	c.store(name, "uid-old", launcherCredential{podUID: "uid-pod-old"})
+	c.fail(name, "uid-old", rigNow)
+	c.fail(name, "uid-new", rigNow)
+	if _, held, readFrom := c.lookup(name, "uid-new"); held || !readFrom.Equal(rigNow.Add(credentialRetry)) {
+		t.Fatalf("the successor's lookup after its failed read: held %t, read from %s, want a hold-off to %s", held, readFrom, rigNow.Add(credentialRetry))
+	}
+	c.store(name, "uid-new", launcherCredential{podUID: "uid-pod-new"})
+	if got, held, _ := c.lookup(name, "uid-new"); !held || got.podUID != "uid-pod-new" {
+		t.Fatalf("the successor's lookup after its read: held %t, pod %q, want its read held", held, got.podUID)
+	}
+}
+
 // The runtime's two client sets share one limiter at 50 requests a second with a burst of 100,
 // whatever rate the caller's configuration names; the requests' clients bound each request by
 // apiTimeout, and the informers' have no timeout, which would end a watch.

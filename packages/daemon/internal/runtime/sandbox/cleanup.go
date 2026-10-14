@@ -120,11 +120,11 @@ func (r *Runtime) treeSandboxes(ctx context.Context, tree string) ([]*unstructur
 }
 
 // deleteSandbox deletes object with foreground propagation, fenced to its UID and resourceVersion,
-// waits until the API no longer has it, and forgets its launchers' credentials. Every delete is
-// foreground: the Sandbox owns its PVC and its role Secrets by owner reference, and foreground
-// propagation has garbage collection remove them before the Sandbox is gone, so the Sandbox's
-// absence is the API's confirmation that its volume is gone — the restricted daemon identity has no
-// PVC verb to confirm it with. A conflict is returned as it is.
+// forgets its launchers' credentials once the API has accepted the delete, and waits until the API
+// no longer has it. Every delete is foreground: the Sandbox owns its PVC and its role Secrets by
+// owner reference, and foreground propagation has garbage collection remove them before the
+// Sandbox is gone, so the Sandbox's absence is the API's confirmation that its volume is gone — the
+// restricted daemon identity has no PVC verb to confirm it with. A conflict is returned as it is.
 func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstructured) error {
 	name, uid, version := object.GetName(), object.GetUID(), object.GetResourceVersion()
 	policy := metav1.DeletePropagationForeground
@@ -139,11 +139,8 @@ func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstru
 		}
 		return fmt.Errorf("delete Sandbox %s: %w", name, err)
 	}
-	if err := r.awaitSandboxDeleted(ctx, name); err != nil {
-		return err
-	}
 	r.forgetLauncherCredentials(name)
-	return nil
+	return r.awaitSandboxDeleted(ctx, name)
 }
 
 // awaitSandboxDeleted waits, up to the boot timeout, until the API no longer has the Sandbox name.
