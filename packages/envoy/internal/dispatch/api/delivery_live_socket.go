@@ -46,12 +46,10 @@ const (
 	// deliverySocketCloseWait is how long a socket that sent its close frame waits for the page's.
 	deliverySocketCloseWait = time.Second
 	// deliverySocketReadBuffer is the socket's own read buffer, gorilla's default size. Setting one
-	// at all is what matters: with a zero ReadBufferSize, gorilla reuses the bufio reader net/http
-	// hands over at the hijack. The gorilla a workspace build links (v1.5.4-0.20250319132907-
-	// e064f32e3674, which packages/daemon's client-go requires) leaves that reader on net/http's
-	// connection reader, whose read error cancels the request's context, so the writer would close a
-	// page whose pong deadline passed with 1008, as if its caller no longer resolved. The v1.5.3
-	// packages/envoy/go.mod names, which the image builds, resets the reader onto the raw connection.
+	// at all is what matters: gorilla must read the raw connection through a reader of its own, which
+	// a nonzero ReadBufferSize guarantees (with zero, "buffers allocated by the HTTP server are used").
+	// A read through net/http's reader cancels the request's context on a read error, and the writer
+	// reads that context's end as the caller no longer resolving (1008).
 	deliverySocketReadBuffer = 4096
 )
 

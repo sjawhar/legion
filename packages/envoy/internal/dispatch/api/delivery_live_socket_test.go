@@ -74,12 +74,13 @@ func (rig *deliverySocketRig) sockets(t *testing.T, n int) []*deliverySocket {
 }
 
 // socketClient is one page's GET /ws/delivery connection. Once it reads, every message it is sent
-// lands in frames, and ended closes when the connection ends, with err saying how.
+// lands in frames, and ended closes when the connection ends, with err saying how and endedAt when.
 type socketClient struct {
-	conn   *gws.Conn
-	frames chan []byte
-	ended  chan struct{}
-	err    error
+	conn    *gws.Conn
+	frames  chan []byte
+	ended   chan struct{}
+	err     error
+	endedAt time.Time
 }
 
 // open dials the socket, failing the test unless the upgrade succeeds; it reads nothing until read.
@@ -125,10 +126,12 @@ func (c *socketClient) read() *socketClient {
 			kind, data, err := c.conn.ReadMessage()
 			if err != nil {
 				c.err = err
+				c.endedAt = time.Now()
 				return
 			}
 			if kind != gws.TextMessage {
 				c.err = fmt.Errorf("a message of kind %d", kind)
+				c.endedAt = time.Now()
 				return
 			}
 			c.frames <- data
@@ -238,7 +241,7 @@ func (c *socketClient) closeCode(t *testing.T, within time.Duration) (code, mess
 			if errors.As(c.err, &closed) {
 				return closed.Code, messages
 			}
-			t.Logf("the socket ended with no close frame: %v", c.err)
+			t.Logf("the socket ended with an error that carries no close code: %v", c.err)
 			return 0, messages
 		case <-deadline:
 			t.Fatalf("the socket was still open after %s", within)
@@ -659,31 +662,41 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 		return answering.conn.WriteControl(gws.PongMessage, []byte(data), time.Now().Add(time.Second))
 	})
 	answering.read()
-	silent := rig.open(t, gws.DefaultDialer, asUser("bob"))
-	silent.conn.SetPingHandler(func(string) error { return nil })
-	opened := time.Now()
-	silent.read()
+	// Where a page that answers no ping ends with the wrong close, it does so through a race in the
+	// writer, so one silent page would show a regression only in some runs. Eight pages, each racing
+	// on its own, make it fail nearly every run: at an even race a run misses with odds of 1 in 256.
+	const silentPages = 8
+	silent := make([]*socketClient, silentPages)
+	opened := make([]time.Time, silentPages)
+	for i := range silent {
+		silent[i] = rig.open(t, gws.DefaultDialer, asUser("bob"))
+		silent[i].conn.SetPingHandler(func(string) error { return nil })
+		opened[i] = time.Now()
+		silent[i].read()
+	}
 
 	// A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
 	// stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
 	// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
 	// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
 	// resolves.
-	select {
-	case <-silent.ended:
-		if waited := time.Since(opened); waited < heartbeat || waited > 2*heartbeat+time.Second {
-			t.Fatalf("the silent page's socket ended %s after it opened, want about two heartbeats (%s)", waited, 2*heartbeat)
+	for i, page := range silent {
+		select {
+		case <-page.ended:
+			if waited := page.endedAt.Sub(opened[i]); waited < heartbeat || waited > 2*heartbeat+time.Second {
+				t.Errorf("silent page %d's socket ended %s after it opened, want about two heartbeats (%s)", i, waited, 2*heartbeat)
+			}
+			var closed *gws.CloseError
+			if !errors.As(page.err, &closed) || closed.Code != gws.CloseAbnormalClosure {
+				t.Errorf("silent page %d's socket ended with %v, want an end with no close frame (1006)", i, page.err)
+			}
+		case <-time.After(2*heartbeat + 3*time.Second):
+			t.Errorf("silent page %d, which answers no ping, kept its socket", i)
 		}
-		var closed *gws.CloseError
-		if !errors.As(silent.err, &closed) || closed.Code != gws.CloseAbnormalClosure {
-			t.Fatalf("the silent page's socket ended with %v, want an end with no close frame (1006)", silent.err)
-		}
-	case <-time.After(2*heartbeat + 3*time.Second):
-		t.Fatal("a page that answers no ping kept its socket")
 	}
 
 	// A page that answers each ping keeps its socket, idle, across many heartbeats.
-	time.Sleep(time.Until(opened.Add(6 * heartbeat)))
+	time.Sleep(time.Until(opened[0].Add(6 * heartbeat)))
 	if !answering.open() {
 		t.Fatalf("an idle page that answers every ping lost its socket: %v", answering.err)
 	}
