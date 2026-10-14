@@ -1075,20 +1075,24 @@ jobs:
       # installed.
       - name: Install the Pulumi CLI
         uses: ./.github/actions/install-pulumi
-      # The release's own checksums file lists SHA-1 digests (this asset's is
+      # The version is the one the live programs pin, read from pulumitest.DockerPluginVersion, and
+      # the step hands the tarball's path to the live tests through ENVOY_INFRA_DOCKER_PLUGIN. The
+      # release's own checksums file lists SHA-1 digests (this asset's is
       # 9a7f6014d3ebc330030ec033ddc7222ec13ad116); the SHA-256 is the digest GitHub records for the
       # release asset, which hashes to that same SHA-1. The live tests install the verified tarball
-      # into a PULUMI_HOME of their own (ENVOY_INFRA_DOCKER_PLUGIN), so the CLI downloads none.
+      # into a PULUMI_HOME of their own, so the CLI downloads none.
       - name: Download the docker provider plugin the live tests pin
         run: |
-          tarball="$RUNNER_TEMP/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz"
-          curl -fsSL -o "$tarball" https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
+          version=$(sed -n 's/^const DockerPluginVersion = "\(.*\)"$/\1/p' internal/pulumitest/pulumitest.go)
+          [ -n "$version" ] || { echo "::error::no const DockerPluginVersion in internal/pulumitest/pulumitest.go"; exit 1; }
+          tarball="$RUNNER_TEMP/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/pulumi/pulumi-docker/releases/download/v$version/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
+          echo "ENVOY_INFRA_DOCKER_PLUGIN=$tarball" >> "$GITHUB_ENV"
+        working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra's host:Listener
         run: go test -tags pulumilive -v -timeout 15m ./host/
         working-directory: packages/envoy/infra
-        env:
-          ENVOY_INFRA_DOCKER_PLUGIN: ${{ runner.temp }}/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
       - name: The envoy-infra plugin's schema carries the version it was built with
         run: >-
           go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra &&
