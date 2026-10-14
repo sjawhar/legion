@@ -10,7 +10,7 @@ on:
     # otherwise publish no image, so no pin could name it. .github/scripts/check-image-trigger-paths.sh
     # fails the build when this list misses a file the image build reads. The envoy-infra plugin's
     # module (packages/envoy/infra) is no input of the image or of this release's binaries, and
-    # release.yaml's envoy_infra job releases it.
+    # release-envoy-infra.yaml releases it.
     paths:
       - "packages/envoy/**"
       - "!packages/envoy/infra/**"
@@ -376,8 +376,8 @@ jobs:
           # Every notices script changes an artifact this release publishes: the web app in the
           # image, the Go archives, or the image assembly; and the target list decides the
           # archives. They therefore take a patch release. The envoy-infra plugin's module is
-          # excluded: release.yaml's envoy_infra job releases it, and nothing published here
-          # compiles it in.
+          # excluded: release-envoy-infra.yaml releases it, and nothing published here compiles
+          # it in.
           VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
             --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \

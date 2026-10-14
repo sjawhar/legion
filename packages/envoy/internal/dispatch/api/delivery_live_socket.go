@@ -29,6 +29,9 @@ import (
 //   - 1009 (message too big) for a frame over deliverySocketReadLimit, which gorilla writes;
 //   - 1011 (internal error) for a frame Dispatch cannot encode.
 //
+// A page that answers no ping for two heartbeats, or whose connection fails, has gone or stopped
+// reading: its socket ends with no close frame, which the page reads as 1006.
+//
 // The page reconnects after each and resumes every subscription with its revisions, so what a close
 // cut off reaches it as part of what changed since.
 
@@ -42,6 +45,12 @@ const (
 	deliverySocketWriteWait = 10 * time.Second
 	// deliverySocketCloseWait is how long a socket that sent its close frame waits for the page's.
 	deliverySocketCloseWait = time.Second
+	// deliverySocketReadBuffer is the socket's own read buffer, gorilla's default size. Setting one
+	// at all is what matters: gorilla must read the raw connection through a reader of its own, which
+	// a nonzero ReadBufferSize guarantees (with zero, "buffers allocated by the HTTP server are used").
+	// A read through net/http's reader cancels the request's context on a read error, and the writer
+	// reads that context's end as the caller no longer resolving (1008).
+	deliverySocketReadBuffer = 4096
 )
 
 // deliverySocket is one open GET /ws/delivery socket, the deliveryLiveConn the hub sends to.
@@ -172,7 +181,7 @@ func (s *server) serveDeliverySocket(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	upgrader := gws.Upgrader{EnableCompression: true}
+	upgrader := gws.Upgrader{EnableCompression: true, ReadBufferSize: deliverySocketReadBuffer}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // the upgrader has answered the request

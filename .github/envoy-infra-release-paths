@@ -1,0 +1,8 @@
+packages/envoy/infra/
+packages/envoy/internal/bus/
+packages/envoy/internal/contracts/
+packages/envoy/go.mod
+packages/envoy/go.sum
+scripts/go-third-party-notices.sh
+.github/envoy-infra-targets.json
+.github/envoy-infra-release-paths

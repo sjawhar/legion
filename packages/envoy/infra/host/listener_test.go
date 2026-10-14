@@ -1,6 +1,7 @@
 package host_test
 
 import (
+	"fmt"
 	"os"
 	"slices"
 	"strings"
@@ -308,11 +309,13 @@ func TestListenerRefusesMissingProvidersBeforeRegistering(t *testing.T) {
 	})
 }
 
-func TestListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
+// resolveListener refuses every input it can check from the inputs alone, with no engine.
+func TestListenerRefusesInvalidInputs(t *testing.T) {
 	cases := []struct {
-		name string
-		edit func(*host.ListenerArgs)
-		err  []string
+		name     string
+		listener string // the listener's name; example-host-a when empty
+		edit     func(*host.ListenerArgs)
+		err      []string
 	}{
 		{
 			name: "a watchdog for a container not named envoy-listener",
@@ -360,21 +363,61 @@ func TestListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			edit: func(a *host.ListenerArgs) { a.HostBridge = pulumi.StringRef(" 127.0.0.1") },
 			err:  []string{"hostBridge has leading or trailing whitespace", `" 127.0.0.1"`},
 		},
+		{
+			name: "a machineId with a control character",
+			edit: func(a *host.ListenerArgs) { a.MachineID = "a\nENVEOF\nid" },
+			err:  []string{`machineId contains a control character: "a\nENVEOF\nid"`},
+		},
+		{
+			name: "a host bridge with a control character inside",
+			edit: func(a *host.ListenerArgs) { a.HostBridge = pulumi.StringRef("127.0.0.1\nENVEOF") },
+			err:  []string{`hostBridge contains a control character: "127.0.0.1\nENVEOF"`},
+		},
+	}
+	// The watchdog's create script echoes the listener's name inside double quotes, so a name
+	// holding what the shell expands there, or a line break, is refused with a watchdog.
+	for _, unsafe := range []string{`"`, "$", "`", `\`, "\n"} {
+		listener := "example-host-a" + unsafe + "id"
+		cases = append(cases, struct {
+			name     string
+			listener string
+			edit     func(*host.ListenerArgs)
+			err      []string
+		}{
+			name:     fmt.Sprintf("a watchdog on a listener named %q", listener),
+			listener: listener,
+			edit:     func(a *host.ListenerArgs) { a.Watchdog = &host.WatchdogArgs{Host: "example-host-a"} },
+			err:      []string{fmt.Sprintf("%q", listener), "watchdog", `", $, a backtick, \ or a newline`},
+		})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			args := exampleArgs()
 			c.edit(args)
-			m, err := run(t, args, nil, "docker", "command")
+			listener := c.listener
+			if listener == "" {
+				listener = "example-host-a"
+			}
+			err := host.ResolveListener(listener, args)
 			require.Error(t, err)
 			for _, want := range c.err {
 				require.ErrorContains(t, err, want)
 			}
-			// The two provider registrations race each other, so only their set is fixed.
-			require.ElementsMatch(t, []string{"pulumi:providers:docker", "pulumi:providers:command"}, m.types(),
-				"nothing registered beyond the test's providers")
 		})
 	}
+}
+
+// NewListener resolves its inputs before it requires a provider or registers anything, so a
+// refused input leaves only the program's own providers behind.
+func TestListenerRefusesBeforeRegistering(t *testing.T) {
+	args := exampleArgs()
+	args.MachineID = "a\nENVEOF\nid"
+	args.Watchdog = &host.WatchdogArgs{Host: "example-host-a"}
+	m, err := run(t, args, nil, "docker", "command")
+	require.ErrorContains(t, err, "machineId contains a control character")
+	// The two provider registrations race each other, so only their set is fixed.
+	require.ElementsMatch(t, []string{"pulumi:providers:docker", "pulumi:providers:command"}, m.types(),
+		"nothing registered beyond the test's providers")
 }
 
 func TestListenerNatsUrlRefusedByListenerEnvFailsTheRun(t *testing.T) {
@@ -382,6 +425,37 @@ func TestListenerNatsUrlRefusedByListenerEnvFailsTheRun(t *testing.T) {
 	args.NatsUrls = pulumi.StringArray{pulumi.String("nats://a:1,nats://b:2")}
 	_, err := run(t, args, nil, "docker")
 	require.ErrorContains(t, err, "natsUrls[0] contains a comma")
+}
+
+// natsUrls may come from another stack, so a URL that would end the watchdog's env-file heredoc
+// fails the run when the envs resolve, and no create script is rendered from it.
+func TestListenerNatsUrlThatWouldEscapeTheWatchdogHeredocFailsTheRun(t *testing.T) {
+	args := exampleArgs()
+	args.NatsUrls = pulumi.StringArray{pulumi.String(
+		"nats://hub.internal.example:4222\nENVEOF\ntouch /root/injected\ncat > /dev/null << 'ENVEOF'")}
+	args.WaitForHealthy = pulumi.BoolRef(false)
+	args.Watchdog = &host.WatchdogArgs{Host: "example-host-a"}
+	m, err := run(t, args, nil, "docker", "command")
+	require.ErrorContains(t, err, "natsUrls[0] contains a control character")
+	for _, r := range m.registered {
+		create, _ := plain(r.inputs["create"])
+		require.False(t, create.IsString() && strings.Contains(create.StringValue(), "touch /root/injected"),
+			"%s %s carries the URL's command", r.typ, r.name)
+	}
+}
+
+// A listener's name is refused only with a watchdog, whose script echoes it.
+func TestListenerNameIsFreeWithoutAWatchdog(t *testing.T) {
+	require.NoError(t, host.ResolveListener("example-host-$a", exampleArgs()))
+}
+
+// A blank seed would start a listener that refuses its NATS_NKEY_SEED and restarts until the
+// health wait gives up, naming no input, so it fails the run naming seed.
+func TestListenerBlankSeedFailsTheRun(t *testing.T) {
+	args := exampleArgs()
+	args.Seed = pulumi.String(" ")
+	_, err := run(t, args, nil, "docker")
+	require.ErrorContains(t, err, "seed is blank")
 }
 
 // watchdogOf constructs a listener with a watchdog on example-host-a and returns its command's

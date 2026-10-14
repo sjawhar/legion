@@ -28,9 +28,9 @@ const awsCurrent = "AWSCURRENT"
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
 // OpenAWS opens Secrets Manager under the caller's own AWS configuration (the environment, then the
-// shared files), in region when it is not "". With account, it first refuses unless
-// sts:GetCallerIdentity answers that account, so a seed never lands in, or is read from, another
-// account's secret of the same name.
+// shared files), in region when it is not "". It refuses credentials it cannot retrieve before any
+// call, naming the fix. With account, it then refuses unless sts:GetCallerIdentity answers that
+// account, so a seed never lands in, or is read from, another account's secret of the same name.
 func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	if account != "" && !awsAccountID.MatchString(account) {
 		return nil, refuse("--expect-account is a 12-digit AWS account id")
@@ -41,6 +41,15 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	}
 	if cfg.Region == "" {
 		return nil, refuse("no AWS region: pass --region, or name one in AWS_REGION or the profile")
+	}
+	// The credentials cache keeps what this retrieves, so the calls below sign with it. A chain that
+	// finds no credentials fails with a plain error whose type names nothing, so only a named
+	// failure, such as an AWS error's code, is given.
+	if _, err := cfg.Credentials.Retrieve(ctx); err != nil {
+		if name, ok := errorName(err); ok {
+			return nil, refuse("no usable AWS credentials (%s); log in or set AWS_PROFILE", name)
+		}
+		return nil, refuse("no usable AWS credentials; log in or set AWS_PROFILE")
 	}
 	if account != "" {
 		identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
@@ -150,14 +159,24 @@ func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, 
 	return version, nil
 }
 
-// Current reads the AWSCURRENT version's SecretString.
+// Current reads the AWSCURRENT version's SecretString. Secrets Manager answers
+// ResourceNotFoundException when no version is AWSCURRENT, as just after a first write it may.
 func (s *awsStore) Current(ctx context.Context, name string) (string, []byte, error) {
 	out, err := s.client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(name)})
+	var notFound *types.ResourceNotFoundException
+	if errors.As(err, &notFound) {
+		return "", nil, notServed{awsFailed("get-secret-value", name, err)}
+	}
 	if err != nil {
 		return "", nil, awsFailed("get-secret-value", name, err)
 	}
 	return aws.ToString(out.VersionId), []byte(aws.ToString(out.SecretString)), nil
 }
+
+// notServed is an error that reads as the store's own and matches ErrNotServed.
+type notServed struct{ error }
+
+func (notServed) Is(target error) bool { return target == ErrNotServed }
 
 // awsFailed is "<call> <secret> failed: <code>": an AWS error's code, or the SDK error's class.
 func awsFailed(call, name string, err error) error {
@@ -169,18 +188,11 @@ func awsFailed(call, name string, err error) error {
 // and the smithy one are http.ResponseError) around the RequestSendError that says what happened.
 var sdkWrappers = []string{"*smithy.OperationError", "*retry.MaxAttemptsError", "*http.ResponseError", "*fmt.wrapError"}
 
-// errorClass names err without its text: an AWS error's code; for a context's end, that; otherwise
-// the type of the first error in its chain that is not one of the SDK's wrappers, such as
-// RequestSendError.
+// errorClass names err without its text: its name when it has one (errorName), otherwise the type
+// of the first error in its chain that is not one of the SDK's wrappers, such as RequestSendError.
 func errorClass(err error) string {
-	var api smithy.APIError
-	switch {
-	case errors.As(err, &api) && api.ErrorCode() != "":
-		return api.ErrorCode()
-	case errors.Is(err, context.Canceled):
-		return "canceled"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline exceeded"
+	if name, ok := errorName(err); ok {
+		return name
 	}
 	for e := err; ; {
 		name := reflect.TypeOf(e).String()
@@ -190,6 +202,21 @@ func errorClass(err error) string {
 		}
 		e = next
 	}
+}
+
+// errorName names err when it says what happened without its text: an AWS error's code, or a
+// context's end.
+func errorName(err error) (string, bool) {
+	var api smithy.APIError
+	switch {
+	case errors.As(err, &api) && api.ErrorCode() != "":
+		return api.ErrorCode(), true
+	case errors.Is(err, context.Canceled):
+		return "canceled", true
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline exceeded", true
+	}
+	return "", false
 }
 
 // pythonDate is t in loc as Python's str prints a datetime: microseconds only when there are some,

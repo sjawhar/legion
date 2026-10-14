@@ -2,6 +2,7 @@
 package host
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -22,7 +23,6 @@ const listenerType = "envoy-infra:host:Listener"
 
 const (
 	defaultContainerName = "envoy-listener"
-	defaultPort          = 9020
 	// waitTimeout is how long, in seconds, the docker provider waits for a new container's
 	// health check to pass.
 	waitTimeout = 90
@@ -34,7 +34,7 @@ type ListenerArgs struct {
 	NatsUrls      pulumi.StringArrayInput `pulumi:"natsUrls"`               // may come from another stack's output
 	Image         string                  `pulumi:"image"`                  // e.g. ghcr.io/sjawhar/legion/envoy:<tag>
 	ContainerName *string                 `pulumi:"containerName,optional"` // default "envoy-listener"
-	Port          *int                    `pulumi:"port,optional"`          // default 9020
+	Port          *int                    `pulumi:"port,optional"`          // default core.DefaultListenerPort, 9020
 	HostBridge    *string                 `pulumi:"hostBridge,optional"`
 	Seed          pulumi.StringInput      `pulumi:"seed,optional" provider:"secret"`
 	Watchdog      *WatchdogArgs           `pulumi:"watchdog,optional"`
@@ -71,57 +71,83 @@ type Listener struct {
 	Port          pulumi.IntOutput    `pulumi:"port"`
 }
 
-// NewListener registers a listener: the image, the container, and, with watchdog, the systemd
-// watchdog that supervises it. It refuses invalid inputs and a missing provider before it
-// registers anything.
-func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...pulumi.ResourceOption) (*Listener, error) {
-	containerName := defaultContainerName
+// listenerPlan is what a listener's inputs resolve to before anything registers.
+type listenerPlan struct {
+	containerName string
+	// plain is every field of the listener's environment but NATSURLs, which may be another
+	// resource's output and is known only when the container's envs resolve.
+	plain    core.ListenerConfig
+	adopt    AdoptArgs
+	packages []string // the provider packages the listener creates resources with
+}
+
+// resolveListener gives each optional input its default and refuses every input it can check from
+// the inputs alone: all of them but natsUrls and seed, which may be another resource's output. It
+// registers nothing and needs no engine, so NewListener calls it first, and a refusal leaves
+// nothing behind.
+func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
+	plan := listenerPlan{
+		containerName: defaultContainerName,
+		plain:         core.ListenerConfig{MachineID: args.MachineID, Port: core.DefaultListenerPort},
+		packages:      []string{"docker"},
+	}
 	if args.ContainerName != nil {
-		containerName = *args.ContainerName
+		plan.containerName = *args.ContainerName
 	}
-	port := defaultPort
 	if args.Port != nil {
-		port = *args.Port
+		plan.plain.Port = *args.Port
 	}
-	hostBridge := ""
 	if args.HostBridge != nil {
-		hostBridge = *args.HostBridge
+		plan.plain.HostBridge = *args.HostBridge
 	}
-	// core reads a Port of 0 as its default, which would leave the health check on port 0.
-	if port == 0 {
-		return nil, fmt.Errorf("%s %s: port 0 is outside 1-65535", listenerType, name)
+	if args.Adopt != nil {
+		plan.adopt = *args.Adopt
 	}
-	// Every field of the listener's environment but natsUrls is known here; natsUrls may be
-	// another resource's output, so ListenerEnv checks it when the container's envs resolve.
-	plain := core.ListenerConfig{MachineID: args.MachineID, Port: port, HostBridge: hostBridge}
-	if err := plain.CheckPlain(); err != nil {
-		return nil, fmt.Errorf("%s %s: %w", listenerType, name, err)
+	if err := plan.plain.CheckPlain(); err != nil {
+		return listenerPlan{}, fmt.Errorf("%s %s: %w", listenerType, name, err)
 	}
-	if args.Watchdog != nil {
-		// The watchdog's files and units are fixed per host and name the container envoy-listener.
-		if containerName != defaultContainerName {
-			return nil, fmt.Errorf("%s %s: watchdog supervises only a container named %q, not containerName %q",
-				listenerType, name, defaultContainerName, containerName)
-		}
-		// It recreates a removed container from an env file that holds no secret, so the
-		// recreated listener would come back without its seed.
-		if args.Seed != nil {
-			return nil, fmt.Errorf("%s %s: watchdog and seed cannot both be set: the watchdog recreates "+
-				"a removed container from an env file that holds no secret", listenerType, name)
-		}
-		if strings.Contains(args.Watchdog.Host, "@") || strings.Contains(args.Watchdog.Host, "://") {
-			return nil, fmt.Errorf("%s %s: watchdog.host must be the bare SSH address, with no user or "+
-				"scheme (pulumi-command logs in as root): %q", listenerType, name, args.Watchdog.Host)
-		}
+	if args.Watchdog == nil {
+		return plan, nil
 	}
-	if err := providers.Require(ctx.Context(), listenerType, "docker", opts...); err != nil {
+	// The watchdog's files and units are fixed per host and name the container envoy-listener.
+	if plan.containerName != defaultContainerName {
+		return listenerPlan{}, fmt.Errorf("%s %s: watchdog supervises only a container named %q, not containerName %q",
+			listenerType, name, defaultContainerName, plan.containerName)
+	}
+	// It recreates a removed container from an env file that holds no secret, so the recreated
+	// listener would come back without its seed.
+	if args.Seed != nil {
+		return listenerPlan{}, fmt.Errorf("%s %s: watchdog and seed cannot both be set: the watchdog recreates "+
+			"a removed container from an env file that holds no secret", listenerType, name)
+	}
+	if strings.Contains(args.Watchdog.Host, "@") || strings.Contains(args.Watchdog.Host, "://") {
+		return listenerPlan{}, fmt.Errorf("%s %s: watchdog.host must be the bare SSH address, with no user or "+
+			"scheme (pulumi-command logs in as root): %q", listenerType, name, args.Watchdog.Host)
+	}
+	// The create script echoes the name inside double quotes, where the shell expands $, a
+	// backtick and \, and where a line break would end the command.
+	if strings.ContainsAny(name, "\"$`\\\n") {
+		return listenerPlan{}, fmt.Errorf("%s %q: with a watchdog the name may not contain \", $, a backtick, \\ "+
+			"or a newline, since the watchdog's script echoes it in double quotes", listenerType, name)
+	}
+	plan.packages = append(plan.packages, "command")
+	return plan, nil
+}
+
+// NewListener registers a listener: the image, the container, and, with watchdog, the systemd
+// watchdog that supervises it. It resolves its inputs, then requires a provider of each package it
+// creates resources with, and only then registers anything.
+func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...pulumi.ResourceOption) (*Listener, error) {
+	plan, err := resolveListener(name, args)
+	if err != nil {
 		return nil, err
 	}
-	if args.Watchdog != nil {
-		if err := providers.Require(ctx.Context(), listenerType, "command", opts...); err != nil {
+	for _, pkg := range plan.packages {
+		if err := providers.Require(ctx.Context(), listenerType, pkg, opts...); err != nil {
 			return nil, err
 		}
 	}
+	port := plan.plain.Port
 
 	comp := &Listener{}
 	if err := ctx.RegisterComponentResource(listenerType, name, comp, opts...); err != nil {
@@ -129,35 +155,35 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 	}
 	// Registering replaces every output field with one the engine's answer resolves, so the
 	// outputs are set after it.
-	comp.ContainerName = pulumi.String(containerName).ToStringOutput()
+	comp.ContainerName = pulumi.String(plan.containerName).ToStringOutput()
 	comp.Port = pulumi.Int(port).ToIntOutput()
-	var adopt AdoptArgs
-	if args.Adopt != nil {
-		adopt = *args.Adopt
-	}
 
 	image, err := docker.NewRemoteImage(ctx, name+"-image", &docker.RemoteImageArgs{
 		Name:        pulumi.String(args.Image),
 		KeepLocally: pulumi.Bool(true),
-	}, childOptions(comp, adopt.Image)...)
+	}, childOptions(comp, plan.adopt.Image)...)
 	if err != nil {
 		return nil, err
 	}
 
 	listenerEnv := args.NatsUrls.ToStringArrayOutput().ApplyT(func(urls []string) ([]string, error) {
-		config := plain
+		config := plan.plain
 		config.NATSURLs = urls
 		return core.ListenerEnv(config)
 	}).(pulumi.StringArrayOutput)
 	envs := listenerEnv
 	if args.Seed != nil {
-		envs = pulumi.ToSecret(pulumi.All(listenerEnv, args.Seed).ApplyT(func(v []any) []string {
-			return append(slices.Clone(v[0].([]string)), core.EnvNATSSeed+"="+v[1].(string))
+		envs = pulumi.ToSecret(pulumi.All(listenerEnv, args.Seed).ApplyT(func(v []any) ([]string, error) {
+			seed := v[1].(string)
+			if strings.TrimSpace(seed) == "" {
+				return nil, errors.New("seed is blank")
+			}
+			return append(slices.Clone(v[0].([]string)), core.EnvNATSSeed+"="+seed), nil
 		})).(pulumi.StringArrayOutput)
 	}
 
 	containerArgs := &docker.ContainerArgs{
-		Name:                pulumi.String(containerName),
+		Name:                pulumi.String(plan.containerName),
 		Image:               image.ImageId,
 		Command:             pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-listener")},
 		Restart:             pulumi.String("unless-stopped"),
@@ -184,7 +210,7 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 		containerArgs.Wait = pulumi.Bool(false)
 	}
 	container, err := docker.NewContainer(ctx, name+"-container", containerArgs,
-		append(childOptions(comp, adopt.Container), pulumi.DeleteBeforeReplace(true))...)
+		append(childOptions(comp, plan.adopt.Container), pulumi.DeleteBeforeReplace(true))...)
 	if err != nil {
 		return nil, err
 	}
@@ -197,7 +223,7 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 			Connection: remote.ConnectionArgs{Host: pulumi.String(args.Watchdog.Host)},
 			Create:     create,
 			Delete:     pulumi.String(watchdogDelete),
-		}, append(childOptions(comp, adopt.Watchdog), pulumi.DependsOn([]pulumi.Resource{container}))...); err != nil {
+		}, append(childOptions(comp, plan.adopt.Watchdog), pulumi.DependsOn([]pulumi.Resource{container}))...); err != nil {
 			return nil, err
 		}
 	}

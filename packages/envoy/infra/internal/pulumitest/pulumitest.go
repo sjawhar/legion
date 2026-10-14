@@ -19,19 +19,27 @@ import (
 
 // localRun is how to run the live tests by hand, from the repository root.
 const localRun = "From the repository root, build the listener image and fetch the docker provider " +
-	"plugin, checking its digest:\n" +
+	"plugin v" + DockerPluginVersion + ", checking it against the SHA-256 the envoy-smoke job of " +
+	".github/workflows/envoy-and-contracts.yaml pins:\n" +
 	"  docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .\n" +
-	"  curl -fsSL -o /tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz " +
-	"https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz\n" +
-	"  echo '4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  " +
-	"/tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz' | sha256sum -c -\n" +
+	"  curl -fsSL -o /tmp/" + dockerPluginTarball + " " +
+	"https://github.com/pulumi/pulumi-docker/releases/download/v" + DockerPluginVersion + "/" +
+	dockerPluginTarball + "\n" +
 	"then, in packages/envoy/infra, with the pulumi CLI on PATH:\n" +
 	"  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local " +
-	"ENVOY_INFRA_DOCKER_PLUGIN=/tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz " +
+	"ENVOY_INFRA_DOCKER_PLUGIN=/tmp/" + dockerPluginTarball + " " +
 	"go test -count=1 -tags pulumilive -v -timeout 15m ./host/\n" +
 	"-count=1 because go's test cache cannot see the image behind a fixed tag, and would " +
 	"replay a cached PASS against an image that had since changed. In CI each is a step of its " +
 	"own; see .github/workflows/envoy-and-contracts.yaml."
+
+// DockerPluginVersion is the docker provider plugin the live programs pin, and so the version of
+// the tarball DockerPluginEnv names. CI reads it from here when it downloads that tarball.
+const DockerPluginVersion = "4.11.0"
+
+// dockerPluginTarball is the linux/amd64 tarball of DockerPluginVersion, as the docker provider's
+// release names it.
+const dockerPluginTarball = "pulumi-resource-docker-v" + DockerPluginVersion + "-linux-amd64.tar.gz"
 
 // SmokeImage returns ENVOY_SMOKE_IMAGE, the already-built listener image a live test runs. Unset,
 // it fails the test at once and prints the build command: a build inside go test spends the test's
@@ -45,9 +53,9 @@ func SmokeImage(t testing.TB) string {
 	return image
 }
 
-// DockerPluginEnv names the docker provider plugin tarball, v4.11.0 for this machine's platform,
-// that the test binary installs into its own PULUMI_HOME. The live programs pin that version, so
-// the CLI loads it from there and never downloads a plugin itself.
+// DockerPluginEnv names the docker provider plugin tarball, DockerPluginVersion for this machine's
+// platform, that the test binary installs into its own PULUMI_HOME. The live programs pin that
+// version, so the CLI loads it from there and never downloads a plugin itself.
 const DockerPluginEnv = "ENVOY_INFRA_DOCKER_PLUGIN"
 
 var (
@@ -102,7 +110,8 @@ func pulumiHome(t testing.TB) string {
 	return home
 }
 
-// newHome makes a temporary PULUMI_HOME and installs the docker plugin into it. It returns the
+// newHome makes a temporary PULUMI_HOME and installs the docker plugin into it. It refuses a
+// tarball whose name is not of DockerPluginVersion before it makes anything, and returns the
 // directory even when the install fails, so Main removes it.
 func newHome() (string, error) {
 	tarball := os.Getenv(DockerPluginEnv)
@@ -110,11 +119,15 @@ func newHome() (string, error) {
 		return "", errors.New(DockerPluginEnv + " is unset: it names the docker provider plugin " +
 			"tarball the tests install, so the pulumi CLI never downloads one unchecked.\n" + localRun)
 	}
+	if !strings.Contains(filepath.Base(tarball), "-v"+DockerPluginVersion+"-") {
+		return "", fmt.Errorf("%s=%s is not the docker provider plugin v%s the live programs pin, so the "+
+			"pulumi CLI would download that one unchecked.\n%s", DockerPluginEnv, tarball, DockerPluginVersion, localRun)
+	}
 	dir, err := os.MkdirTemp("", "envoy-infra-pulumi-home-")
 	if err != nil {
 		return "", fmt.Errorf("make the tests' PULUMI_HOME: %w", err)
 	}
-	install := exec.Command("pulumi", "plugin", "install", "resource", "docker", "v4.11.0", "--file", tarball)
+	install := exec.Command("pulumi", "plugin", "install", "resource", "docker", "v"+DockerPluginVersion, "--file", tarball)
 	install.Env = append(os.Environ(), "PULUMI_HOME="+dir, "PULUMI_SKIP_UPDATE_CHECK=true")
 	if out, err := install.CombinedOutput(); err != nil {
 		return dir, fmt.Errorf("install the docker plugin from %s=%s: %v\n%s", DockerPluginEnv, tarball, err, out)

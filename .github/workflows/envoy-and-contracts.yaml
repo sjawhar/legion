@@ -58,11 +58,6 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
-      # The envoy-infra-go job's release path check reads release.yaml's envoy_infra job and the
-      # plugin's target list.
-      - ".github/workflows/release.yaml"
-      - ".github/envoy-infra-targets.json"
-      - ".github/scripts/check-envoy-infra-release-paths.sh"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -106,9 +101,6 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
-      - ".github/workflows/release.yaml"
-      - ".github/envoy-infra-targets.json"
-      - ".github/scripts/check-envoy-infra-release-paths.sh"
   merge_group:
     types: [checks_requested]
 
@@ -135,7 +127,6 @@ jobs:
       envoy: ${{ steps.filter.outputs.envoy }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       envoy_image: ${{ steps.filter.outputs.envoy_image }}
-      envoy_infra_release: ${{ steps.filter.outputs.envoy_infra_release }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_shared: ${{ steps.filter.outputs.pi_shared }}
@@ -200,13 +191,6 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
-            # What envoy-infra-go's release path check reads beyond the Go modules `envoy` holds:
-            # release.yaml's envoy_infra job, the plugin's target list and the check itself. Its
-            # own filter, so a release.yaml change runs that job alone and not the whole Go suite.
-            envoy_infra_release:
-              - '.github/workflows/release.yaml'
-              - '.github/envoy-infra-targets.json'
-              - '.github/scripts/check-envoy-infra-release-paths.sh'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
             # this: that would run the whole Go suite on every Dispatch pull request.
@@ -877,11 +861,11 @@ jobs:
   # the Envoy binaries and the daemon build with, and every go command below runs in that
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too, and the
   # natslive files run here against real nats-server; tests that start NATS take testnats.Image and
-  # testnats.HubImage, pulled first for the reason envoy-go's own pull step gives. It also runs on
-  # a change to what its release path check reads (envoy_infra_release).
+  # testnats.HubImage, pulled first for the reason envoy-go's own pull step gives. The release path
+  # check and the per-target compile run in pr-and-main.yaml's required lint job.
   envoy-infra-go:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true' || needs.changes.outputs.envoy_infra_release == 'true'
+    if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -916,25 +900,8 @@ jobs:
             exit 1
           fi
         working-directory: packages/envoy/infra
-      # release.yaml's envoy_infra job releases the plugin and the envoy-infra command only for a
-      # commit to a path it names, so its push paths, filter and bump paths must cover every
-      # package either compiles in.
-      - name: Check release.yaml's envoy_infra paths cover every package the plugin and command compile in
-        run: .github/scripts/check-envoy-infra-release-paths.sh
       - name: Vet envoy-infra, its live-test tags included
         run: go vet -tags pulumilive,natslive ./...
-        working-directory: packages/envoy/infra
-      # Vet and the tests compile for this runner's linux/amd64 only, and the notices step in
-      # pr-and-main.yaml loads packages without type-checking them, so this compiles every command
-      # of the module for each target release.yaml's envoy_infra job builds, with the release
-      # build's CGO_ENABLED and -buildvcs: a compile error on one platform only fails here rather
-      # than in the release after the merge.
-      - name: Compile envoy-infra's commands for every release target
-        run: |
-          for target in $(jq -r '.["envoy-infra"][]' ../../../.github/envoy-infra-targets.json); do
-            echo "$target"
-            CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go build -buildvcs=false -o /dev/null ./cmd/...
-          done
         working-directory: packages/envoy/infra
       - name: Unit test envoy-infra
         run: go test ./...
@@ -1131,20 +1098,24 @@ jobs:
       # installed.
       - name: Install the Pulumi CLI
         uses: ./.github/actions/install-pulumi
-      # The release's own checksums file lists SHA-1 digests (this asset's is
+      # The version is the one the live programs pin, read from pulumitest.DockerPluginVersion, and
+      # the step hands the tarball's path to the live tests through ENVOY_INFRA_DOCKER_PLUGIN. The
+      # release's own checksums file lists SHA-1 digests (this asset's is
       # 9a7f6014d3ebc330030ec033ddc7222ec13ad116); the SHA-256 is the digest GitHub records for the
       # release asset, which hashes to that same SHA-1. The live tests install the verified tarball
-      # into a PULUMI_HOME of their own (ENVOY_INFRA_DOCKER_PLUGIN), so the CLI downloads none.
+      # into a PULUMI_HOME of their own, so the CLI downloads none.
       - name: Download the docker provider plugin the live tests pin
         run: |
-          tarball="$RUNNER_TEMP/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz"
-          curl -fsSL -o "$tarball" https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
+          version=$(sed -n 's/^const DockerPluginVersion = "\(.*\)"$/\1/p' internal/pulumitest/pulumitest.go)
+          [ -n "$version" ] || { echo "::error::no const DockerPluginVersion in internal/pulumitest/pulumitest.go"; exit 1; }
+          tarball="$RUNNER_TEMP/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/pulumi/pulumi-docker/releases/download/v$version/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
           echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
+          echo "ENVOY_INFRA_DOCKER_PLUGIN=$tarball" >> "$GITHUB_ENV"
+        working-directory: packages/envoy/infra
       - name: Live tests of envoy-infra's host:Listener
         run: go test -tags pulumilive -v -timeout 15m ./host/
         working-directory: packages/envoy/infra
-        env:
-          ENVOY_INFRA_DOCKER_PLUGIN: ${{ runner.temp }}/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
       - name: The envoy-infra plugin's schema carries the version it was built with
         run: >-
           go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra &&

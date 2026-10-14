@@ -11,7 +11,7 @@ new deployment needs configuration rather than infrastructure code of its own.
 with `pulumi-go-provider`'s `infer` package, and in slice 2 an `envoy-infra` CLI. A `core` package
 holds cloud-free logic (listener environment, NATS authorization, permission sets). Component
 packages (`host`, `aws`, `gcp`) hold Pulumi components whose tokens are `envoy-infra:<package>:<Type>`.
-The plugin is released from `release.yaml` as tarballs under the tag `envoy-infra-v<version>`, and
+The plugin is released from its own workflow, `release-envoy-infra.yaml`, as tarballs under the tag `envoy-infra-v<version>`, and
 the schema names an `https` download URL with `${VERSION}`.
 
 **Tech stack:** Go 1.26.8, pulumi-go-provider v1.7.0 (requires Pulumi `sdk/v3` and `pkg/v3`
@@ -526,7 +526,7 @@ Run `.github/scripts/check-image-trigger-paths.sh` and `.github/scripts/check-ac
 - Create: `.github/envoy-infra-targets.json` (multi-line, like `.github/go-release-targets.json`):
   `{"envoy-infra": ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]}`
 - Create: `.github/scripts/check-envoy-infra-release-paths.sh` (R8)
-- Modify: `.github/workflows/release.yaml` (a `changes` filter `envoy_infra`, a job `envoy_infra`)
+- Create: `.github/workflows/release-envoy-infra.yaml` (the plugin's own release, on the model of `release-envoy-listener.yaml`) and `.github/envoy-infra-release-paths` (its bump paths, one pathspec per line)
 - Modify: `.github/workflows/release-envoy-listener.yaml` (R3)
 - Modify: `.github/workflows/pr-and-main.yaml` (notices for the new binary, cache key)
 
@@ -535,12 +535,15 @@ Run `.github/scripts/check-image-trigger-paths.sh` and `.github/scripts/check-ac
 `packages/envoy/go.sum`, `scripts/go-third-party-notices.sh`, `.github/envoy-infra-targets.json`.
 `check-envoy-infra-release-paths.sh` runs `go list -deps -f '{{.ImportPath}}' ./cmd/...` in
 `packages/envoy/infra`, keeps `github.com/sjawhar/envoy/internal/*`, and fails naming any directory
-missing from the `envoy_infra` filter or the bump paths; `envoy-infra-go` runs it.
+missing from `release-envoy-infra.yaml`'s push paths or the paths file; the required `lint` job runs
+it, with the per-target compile, so auto-merge waits on both.
 
-- [ ] **Step 2: the job**, shaped like `legion` (`release.yaml:206-386`): runs on `main` when the
-`envoy_infra` filter matched or on `workflow_dispatch`; ordered after the jobs that push a bump
-commit (as `pi_legion` after `pi_envoy`, `:696-707`); permissions `contents: write`,
-`id-token: write`, `attestations: write`; checkout with the deploy key and full history; version:
+- [ ] **Step 2: the workflow.** `release-envoy-infra.yaml`, on the model of
+`release-envoy-listener.yaml`: `on.push` to `main` on the paths of Step 1, plus `workflow_dispatch`;
+`permissions: {}` at the top; one job with `if: github.ref == 'refs/heads/main'` and
+`concurrency: {group: release-envoy-infra, cancel-in-progress: false}`, waiting on no other
+release; permissions `contents: write`, `id-token: write`, `attestations: write`; checkout with full
+history and `persist-credentials: false`, the deploy key given to the tag step only; version:
 
 ```bash
 PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
@@ -562,7 +565,8 @@ root. Smoke the linux/amd64 binary with the pinned Pulumi CLI:
 `pulumi package get-schema <binary> | jq -e --arg v "$VERSION" '.version == $v and .pluginDownloadURL == "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"'`.
 Attest provenance with `actions/attest-build-provenance`, `subject-path: assets/pulumi-resource-envoy-infra-v*.tar.gz`
 (consumers run `gh attestation verify` on exactly these tarballs), push the tag, `gh release create "envoy-infra-v$VERSION" assets/* --verify-tag --generate-notes --title "envoy-infra v$VERSION"`.
-Add the filter and the workflow's `on.push.paths`.
+The version, tag and release steps are `release-push.sh tagged` and `release-push.sh release`, as
+the other release workflows use them.
 
 - [ ] **Step 3: R3.** In `release-envoy-listener.yaml` add `- "!packages/envoy/infra/**"` after
 `- "packages/envoy/**"` and `':(exclude)packages/envoy/infra'` after `--` in the bump. Run
@@ -593,7 +597,7 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
 
 ### Task 1.6: production check, after merge
 
-- [ ] Once #1946 is merged and `release.yaml` has run: record the run id and the
+- [ ] Once #1946 is merged and `release-envoy-infra.yaml` has run: record the run id and the
   `envoy-infra-v<v>` tag; from an empty directory, `pulumi package add envoy-infra@<v> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'`
   succeeds, and `pulumi preview` of a YAML program with one explicit `pulumi:providers:docker` and
   one `envoy-infra:host:Listener` plans creates of exactly the stack, that provider, the component,
@@ -764,9 +768,8 @@ type Description struct {
 	Exists, ScheduledForDeletion bool
 	DeletionDate                 string
 	CurrentVersion               string // "" when the store serves none
-	// The newest version's id and state, for a store whose default names the newest version
-	// whatever its state (GCP's versions/latest); "" for a store without such a default.
-	NewestVersion, NewestState string
+	// Task 4.2 adds NewestVersion and NewestState, for a store whose default names the newest
+	// version whatever its state (GCP's versions/latest).
 }
 
 func Check(ctx context.Context, s Store, name string) (string, error) // the report line
@@ -817,7 +820,7 @@ starts, and record the version.
 
 ### Task 2.3: release the CLI, and the slice's proof
 
-- [ ] **Extend the `envoy_infra` release job.** Also build `./cmd/envoy-infra` per target into
+- [ ] **Extend `release-envoy-infra.yaml`.** Also build `./cmd/envoy-infra` per target into
   `envoy-infra-$os-$arch.tar.gz`. Each archive holds one directory, `envoy-infra-$os-$arch/`, with
   `envoy-infra` and `THIRD_PARTY_NOTICES`: the `legion` layout, so a mise `github:` pin works. Add
   the notices loop for it in `pr-and-main.yaml`. Widen the attestation's `subject-path` to cover
@@ -825,7 +828,7 @@ starts, and record the version.
 - [ ] **README.** Document the seed workflow: the consumer declares an empty secret,
   `envoy-infra seed generate` writes it, and the public key goes into the authorization. Also
   document `check` and `verify`, the exit codes, and `core.Authorization`'s rules, and tell an
-  operator to run `gh attestation verify <archive> --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main --source-ref refs/heads/main --deny-self-hosted-runners`
+  operator to run `gh attestation verify <archive> --repo sjawhar/legion --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main --source-ref refs/heads/main --deny-self-hosted-runners`
   before installing the CLI (`--repo` alone accepts an attestation from any workflow run in the
   repository; docs/kubernetes.md pins the same three flags).
   Commit `docs(envoy-infra): NATS authorization and seeds`.
@@ -1074,8 +1077,8 @@ are gone, they read them from this command.
   - `render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>`
     prints the container's non-secret `KEY=value` lines in order. It applies the refusals that its
     own flags can meet, each with its own test row: `--webhook github` without `--reviewer-app-id`
-    or `--mention-trigger`; either of those flags without `--webhook github`; and, until Task 3.4,
-    any list other than `github` and `slack`.
+    or `--mention-trigger`; either of those flags without `--webhook github`; and any list other
+    than the full one (`github`, `slack`) or the empty one.
   - `render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --logical-name-prefix <p> --json`
     prints each filter's logical name, pattern, metric name and namespace; `<p>` is the component's
     `metricFilterLogicalNamePrefix` (Task 3.1 added the input: the reference names its filters with a
@@ -1106,13 +1109,14 @@ Sami left the deployment's proof surface to the coordinator on 2026-10-14, which
 slot-capable Envoy (the deployment plan's PR 0): a standalone slot runs a listener with no webhooks.
 Once that PR has a commit, the coordinator supplies it in the brief:
 
-- [ ] Render the empty-list container definition with that commit's reference code from placeholder
+- [x] Render the empty-list container definition with that commit's reference code from placeholder
   inputs (header lines substituted as in Task 2.1), and commit it as the second golden.
-- [ ] `aws:WebhookListener` and `render webhook-listener-env` accept `webhooks: []` as well as the
+- [x] `aws:WebhookListener` and `render webhook-listener-env` accept `webhooks: []` as well as the
   full list, and still refuse any other list, naming it. The component's output for `[]` matches the
   golden byte for byte; a refusal row per partial list stays.
-- [ ] The README's webhooks row says so.
-- [ ] Commit `feat(envoy-infra): a webhook listener with no webhooks`.
+- [x] The README's webhooks row says so.
+- [x] Commit `feat(envoy-infra): a webhook listener with no webhooks` (`86373960`, from the reference
+  at the deployment's PR 0 commit `0b6a25ed`).
 
 ---
 
@@ -1418,7 +1422,7 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
 | `secretsmanager:GetSecretValue` on the API token and the seed | the listener's execution role | `aws:WebhookListener`'s role-policy children | AWS IAM | E11 (policies unchanged) |
 | `roles/secretmanager.secretAccessor` on the hub's tailnet auth key | the hub VM's service account | `gcp:NatsHub`'s `SecretIamMember` | Secret Manager IAM | E9 (the VM joins only if it reads the key) |
 | Writing a host's seed secret | the operator running `envoy-infra seed generate` | the operator's role in the consumer's account or project (the consumer's plan names it) | Secrets Manager or Secret Manager IAM | E8 |
-| `contents: write`, `id-token: write`, `attestations: write`, deploy-key tag push | the `envoy_infra` release job | the job's `permissions` block and `secrets.DEPLOY_KEY` | GitHub | E5 (the first release run) |
+| `contents: write`, `id-token: write`, `attestations: write`, deploy-key tag push | `release-envoy-infra.yaml`'s job (the deploy key on its tag step only) | the job's `permissions` block and `secrets.DEPLOY_KEY` | GitHub | E5 (the first release run) |
 | Root on a watchdog host (writes `/etc/envoy`, `/usr/local/bin`, systemd units) | `root` at the consumer's `watchdog.host`, pulumi-command's default user | that host's SSH configuration | the host | E4 when the existing deployment has a watchdog; otherwise not exercised |
 
 ## Evidence

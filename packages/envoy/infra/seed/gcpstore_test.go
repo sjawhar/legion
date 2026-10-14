@@ -44,6 +44,7 @@ import (
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -548,14 +549,17 @@ func TestGCPGenerateAfterItsWrite(t *testing.T) {
 }
 
 // AddSecretVersion carries no request id and the library does not retry it, so a write whose answer
-// is lost is reported as unknown, not refused.
+// is lost is reported as unknown, not refused, after the public key generate printed before it.
 func TestGCPGenerateCallsAFailedWriteUnknownNotRefused(t *testing.T) {
 	f := newFakeGCP(t)
 	f.failures = map[string]codes.Code{"AddSecretVersion": codes.Unavailable}
 	serveGCP(t, f)
 	code, out, errs := runGCP(t, f, "generate")
 	require.Equal(t, 1, code, errs)
-	require.Empty(t, out)
+	key, rest, _ := strings.Cut(out, "\n")
+	require.True(t, strings.HasPrefix(key, "public key: ") && core.IsUserPublicKey(strings.TrimPrefix(key, "public key: ")),
+		"stdout %q does not start with the public key", out)
+	require.Equal(t, "version id: unknown\n", rest)
 	require.Equal(t, "error after writing: add-secret-version "+gcpSecret+" failed: Unavailable; "+
 		"whether a version was written is unknown, run check\n", errs)
 	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}, f.recorded(),

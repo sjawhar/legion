@@ -97,7 +97,9 @@ func lenientKeys(t *testing.T) map[string]string {
 }
 
 // crc16XMODEM is the nkeys checksum, written out here so a test can build a key nkeys would make
-// no other way.
+// no other way. It stays independent of core's own, which is unexported: lenientKeys checks every
+// key it builds against nkeys itself, so this copy is held to nkeys rather than to the code under
+// test.
 func crc16XMODEM(data []byte) uint16 {
 	var crc uint16
 	for _, b := range data {
@@ -342,19 +344,8 @@ func (u liveUsers) render(t *testing.T) string {
 func connect(t *testing.T, uri, seed string) (*natsgo.Conn, <-chan error) {
 	t.Helper()
 	errs := make(chan error, 16)
-	opts := []natsgo.Option{
-		natsgo.Timeout(time.Second),
-		natsgo.NoReconnect(),
-		natsgo.ErrorHandler(func(_ *natsgo.Conn, _ *natsgo.Subscription, err error) { errs <- err }),
-	}
-	if seed != "" {
-		user, err := nkeys.FromSeed([]byte(seed))
-		require.NoError(t, err)
-		public, err := user.PublicKey()
-		require.NoError(t, err)
-		opts = append(opts, natsgo.Nkey(public, user.Sign))
-	}
-	conn, err := natsgo.Connect(uri, opts...)
+	conn, err := testnats.ConnectSeed(t, uri, seed,
+		natsgo.ErrorHandler(func(_ *natsgo.Conn, _ *natsgo.Subscription, err error) { errs <- err }))
 	require.NoError(t, err)
 	t.Cleanup(conn.Close)
 	return conn, errs
@@ -390,7 +381,7 @@ func TestRenderedAuthorizationOnRealServers(t *testing.T) {
 					require.NoError(t, conn.Flush())
 				})
 				t.Run("a client with no credential is refused", func(t *testing.T) {
-					_, err := natsgo.Connect(uri, natsgo.Timeout(time.Second), natsgo.NoReconnect())
+					_, err := testnats.ConnectSeed(t, uri, "")
 					require.ErrorIs(t, err, natsgo.ErrAuthorization)
 				})
 				t.Run("a publish outside the user's grant is a permissions violation", func(t *testing.T) {
