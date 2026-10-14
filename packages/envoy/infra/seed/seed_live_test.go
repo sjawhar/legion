@@ -39,8 +39,8 @@ func connectWith(uri, seed string) (*natsgo.Conn, error) {
 // returned, and a client takes the seed the store holds. That client connects; one with no
 // credential, or with another user's well-formed seed, is refused. On the 2.10 image and the hub's.
 func TestAGeneratedSeedReachesNATS(t *testing.T) {
-	for _, image := range []struct{ name, ref string }{{"2.10", testnats.Image}, {"hub", testnats.HubImage}} {
-		t.Run(image.name, func(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
 			store := newStore(t)
 			public, version, err := seed.Generate(context.Background(), store, secretName)
 			require.NoError(t, err)
@@ -57,7 +57,7 @@ func TestAGeneratedSeedReachesNATS(t *testing.T) {
 			}}}.Render([]string{"Rendered by envoy-infra from placeholder inputs.", "Public keys only."})
 			require.NoError(t, err)
 			require.NotContains(t, config, stored, "the server's configuration holds the public key only")
-			_, uri := testnats.StartImageConfig(t, image.ref, config, []string{"-js"}, false)
+			_, uri := testnats.StartImageConfig(t, image.Ref, config, []string{"-js"}, false)
 
 			t.Run("a client with the stored seed connects", func(t *testing.T) {
 				conn, err := connectWith(uri, stored)
@@ -71,7 +71,7 @@ func TestAGeneratedSeedReachesNATS(t *testing.T) {
 				require.ErrorIs(t, err, natsgo.ErrAuthorization)
 			})
 			t.Run("a client with another user's seed is refused", func(t *testing.T) {
-				other, _ := otherUser(t)
+				other, _ := testnats.User(t)
 				_, err := connectWith(uri, other)
 				require.ErrorIs(t, err, natsgo.ErrAuthorization)
 			})

@@ -23,6 +23,8 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
+
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const (
@@ -409,7 +411,7 @@ func TestAWSCheck(t *testing.T) {
 	zone := time.Local
 	time.Local = time.FixedZone("PDT", -7*60*60)
 	t.Cleanup(func() { time.Local = zone })
-	seedValue, _ := otherAWSUser(t)
+	seedValue, _ := testnats.User(t)
 	rows := []struct {
 		name  string
 		fake  func(*fakeAWS) *fakeAWS
@@ -438,17 +440,6 @@ func TestAWSCheck(t *testing.T) {
 	}
 }
 
-func otherAWSUser(t *testing.T) (seed, public string) {
-	t.Helper()
-	kp, err := nkeys.CreateUser()
-	require.NoError(t, err)
-	raw, err := kp.Seed()
-	require.NoError(t, err)
-	public, err = kp.PublicKey()
-	require.NoError(t, err)
-	return string(raw), public
-}
-
 func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T) {
 	f := newFakeAWS(t)
 	serve(t, f)
@@ -472,7 +463,7 @@ func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T)
 }
 
 func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
-	seedValue, _ := otherAWSUser(t)
+	seedValue, _ := testnats.User(t)
 	rows := []struct {
 		name  string
 		fake  func(*fakeAWS) *fakeAWS
@@ -520,7 +511,7 @@ func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
 }
 
 func TestAWSGenerateAfterItsWrite(t *testing.T) {
-	theirs, _ := otherAWSUser(t)
+	theirs, _ := testnats.User(t)
 	rows := []struct {
 		name string
 		fake func(*fakeAWS) *fakeAWS
@@ -595,8 +586,8 @@ func TestAWSAnErrorQuotingTheRequestNeverPrintsIt(t *testing.T) {
 }
 
 func TestAWSVerify(t *testing.T) {
-	seedValue, public := otherAWSUser(t)
-	_, another := otherAWSUser(t)
+	seedValue, public := testnats.User(t)
+	_, another := testnats.User(t)
 	t.Run("yes", func(t *testing.T) {
 		f := newFakeAWS(t).holding(seedValue)
 		serve(t, f)
@@ -633,7 +624,7 @@ func TestAWSExpectAccountRunsFirstAndAlone(t *testing.T) {
 		require.Equal(t, []string{"GetCallerIdentity", "DescribeSecret"}, f.recorded())
 	})
 	t.Run("another account", func(t *testing.T) {
-		_, public := otherAWSUser(t)
+		_, public := testnats.User(t)
 		for _, mode := range [][]string{{"check"}, {"generate"}, {"verify", "--public-key", public}} {
 			f := newFakeAWS(t)
 			f.account = "111111111111"

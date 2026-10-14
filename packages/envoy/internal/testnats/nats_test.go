@@ -321,18 +321,15 @@ func TestASecondGrantWaitsForItsOwnReload(t *testing.T) {
 	}
 }
 
-// testImages are the two images StartImageConfig's tests run on, by a short name.
-var testImages = []struct{ name, ref string }{{"2.10", Image}, {"hub", HubImage}}
-
 // StartImageConfig gives the server config as its whole configuration and serverArgs after it, on
 // either image: the server refuses a client with no credential, as config's one nkey user makes it,
 // admits that user by its seed, and answers JetStream, which the -js among serverArgs turns on.
 func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
-	for _, image := range testImages {
-		t.Run(image.name, func(t *testing.T) {
+	for _, image := range Images {
+		t.Run(image.Name, func(t *testing.T) {
 			seed, public := User(t)
 			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
-			_, uri := StartImageConfig(t, image.ref, config, []string{"-js"}, false)
+			_, uri := StartImageConfig(t, image.Ref, config, []string{"-js"}, false)
 			conn := connectWithSeed(t, uri, seed)
 			defer conn.Close()
 			js, err := conn.JetStream()
@@ -351,11 +348,11 @@ func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
 // module's own default arguments (-DV -js) rather than adding to them. nats-server enables
 // JetStream before it accepts a client (server/server.go Start), so the first answer is final.
 func TestStartImageConfigRunsNoArgumentItWasNotGiven(t *testing.T) {
-	for _, image := range testImages {
-		t.Run(image.name, func(t *testing.T) {
+	for _, image := range Images {
+		t.Run(image.Name, func(t *testing.T) {
 			seed, public := User(t)
 			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
-			_, uri := StartImageConfig(t, image.ref, config, nil, false)
+			_, uri := StartImageConfig(t, image.Ref, config, nil, false)
 			conn := connectWithSeed(t, uri, seed)
 			defer conn.Close()
 			js, err := conn.JetStream()
@@ -372,11 +369,11 @@ func TestStartImageConfigRunsNoArgumentItWasNotGiven(t *testing.T) {
 // With anonymous set, StartImageConfig returns once the server admits a client with no
 // credential, as a configuration naming a no_auth_user makes it, and that client stays admitted.
 func TestStartImageConfigWaitsForAnAnonymousServerToAdmitAClient(t *testing.T) {
-	for _, image := range testImages {
-		t.Run(image.name, func(t *testing.T) {
+	for _, image := range Images {
+		t.Run(image.Name, func(t *testing.T) {
 			_, public := User(t)
 			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\nno_auth_user: %q\n", public, public)
-			_, uri := StartImageConfig(t, image.ref, config, nil, true)
+			_, uri := StartImageConfig(t, image.Ref, config, nil, true)
 			conn, err := natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
 			if err != nil {
 				t.Fatalf("a client with no credential was refused after the wait: %v", err)

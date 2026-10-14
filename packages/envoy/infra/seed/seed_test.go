@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/seed"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const secretName = "example/envoy/nats-nkey-seed-example-host-a"
@@ -24,18 +25,6 @@ const (
 	readmeSeed      = "SUAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY"
 	readmePublicKey = "UD466L6EBCM3YY5HEGHJANNTN4LSKTSUXTH7RILHCKEQMQHTBNLHJJXT"
 )
-
-// otherUser is a user other than the README's, made fresh for the run.
-func otherUser(t *testing.T) (seed, public string) {
-	t.Helper()
-	kp, err := nkeys.CreateUser()
-	require.NoError(t, err)
-	raw, err := kp.Seed()
-	require.NoError(t, err)
-	public, err = kp.PublicKey()
-	require.NoError(t, err)
-	return string(raw), public
-}
 
 type version struct {
 	id    string
@@ -254,7 +243,7 @@ func TestGenerateWritesOneSeedAndReadsBackTheVersionItWrote(t *testing.T) {
 
 // Every refusal exits 2, names the secret, writes nothing and prints nothing on stdout.
 func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
-	_, otherPublic := otherUser(t)
+	_, otherPublic := testnats.User(t)
 	denied := errors.New("describe-secret " + secretName + " failed: AccessDeniedException")
 	rows := []struct {
 		name  string
@@ -331,7 +320,7 @@ func TestTheOpenerGetsTheRegionAndTheExpectedAccount(t *testing.T) {
 }
 
 func TestVerify(t *testing.T) {
-	_, otherPublic := otherUser(t)
+	_, otherPublic := testnats.User(t)
 	t.Run("the stored seed derives the key", func(t *testing.T) {
 		store := newStore(t).holding(readmeSeed)
 		code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
@@ -407,7 +396,7 @@ func TestVerifyReportsAStoredValueThatIsNoUserSeed(t *testing.T) {
 // After the write, generate exits 1, never 2, and its stdout already holds the public key and the
 // version id when Put answered one.
 func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
-	otherSeed, _ := otherUser(t)
+	otherSeed, _ := testnats.User(t)
 	rows := []struct {
 		name        string
 		store       func(*fakeStore) *fakeStore
@@ -471,7 +460,7 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 // The canary seed, and every value a store holds or is handed, appears in no byte the command
 // writes and in no error or line the functions return, whatever the store's state.
 func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
-	_, otherPublic := otherUser(t)
+	_, otherPublic := testnats.User(t)
 	states := map[string]func(*fakeStore) *fakeStore{
 		"seeded":             func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) },
 		"two versions":       func(f *fakeStore) *fakeStore { return f.holding(readmeSeed, readmeSeed) },
