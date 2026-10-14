@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -182,6 +183,11 @@ func deliveryTimelineCompute(settings delivery.DeliverySettings, pop deliveryPop
 			PRs:            shipped,
 		})
 	}
+	// Listed by head commit time, then id, which the page's live merge mirrors
+	// (applyDelta.ts's ORDERS); applyRuns itself is in ListRuns' creation order.
+	slices.SortFunc(runViews, func(a, b delivery.DeliveryRunView) int {
+		return cmp.Or(a.HeadAt.Compare(b.HeadAt), cmp.Compare(a.ID, b.ID))
+	})
 
 	return deliveryTimelineWithMeasures{
 		DeliveryTimelineResponse: delivery.DeliveryTimelineResponse{
@@ -214,8 +220,8 @@ type deliveryTimelineWithMeasures struct {
 // deliveryPopulation is every read the timeline's and the measures' answers for one window and
 // query make, as stored, before anything is computed from them: the population pull requests
 // merged in the window, the deploy repository's pull requests still waiting at its start, the
-// deploy runs on main by head commit from its start (containment's input) and by start inside it
-// (the measures'), each with its jobs, the open unowned P0 issues, the session groups, the titles
+// deploy runs on main GitHub created from its start (containment's input) and those started inside
+// it (the measures'), each with its jobs, the open unowned P0 issues, the session groups, the titles
 // of the sessions and the facts of the issues those pull requests name, and the components of
 // those issues' projects. Nothing that computes from it reads again (derive), so the live hub
 // keeps it and computes a later window from it narrowed (narrowedTo) without a read.
@@ -228,8 +234,8 @@ type deliveryPopulation struct {
 	// reads.
 	withWaiting bool
 	waiting     []delivery.WaitingPullRequest
-	// applyRuns is every deploy run on main with a head commit at or after the window's start,
-	// oldest head commit first, and jobsByRun their jobs.
+	// applyRuns is every deploy run on main GitHub created at or after the window's start
+	// (delivery.ListRuns), oldest creation first, and jobsByRun their jobs.
 	applyRuns []delivery.DeliveryRun
 	jobsByRun map[int64][]delivery.DeliveryRunJob
 	// windowRuns is every deploy run on main started in the window, oldest start first, and
@@ -282,8 +288,8 @@ type deliveryWaitingRow struct {
 }
 
 // readDeliveryPopulation is every read the timeline's and the measures' answers for one window and
-// query make (the population pull requests, the deploy runs on main listed from `from` by head
-// commit with their jobs, the measures' runs started in the window with their jobs, and the
+// query make (the population pull requests, the deploy runs on main GitHub created at or after
+// `from` with their jobs, the measures' runs started in the window with their jobs, and the
 // unowned P0 list); nothing that computes from it reads again. With withWaiting it also reads the
 // deploy repository's pull requests still waiting at `from` (ListPullRequestsWaitingAt), resolved
 // through the same issue and session lookups so the timeline's waiting line filters them alike;
@@ -333,7 +339,7 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 			pop.prs, err = delivery.ListPullRequestsInWindow(ctx, pool, from, to)
 			return err
 		},
-		// Every deploy run on main with a head commit at or after `from`: the containment
+		// Every deploy run on main GitHub created at or after `from`: the containment
 		// algorithm needs every apply from there forward, unbounded past `to`, since a PR merged
 		// just before `to` may first ship after it -- bounding this query to [from, to) would
 		// wrongly read such a PR as "waiting". A production job on another branch ships no PR
@@ -352,7 +358,7 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 	}
 	if withMeasures {
 		// Whether a run reached production is decided on the window's own runs and their jobs,
-		// never on the head-commit list containment reads, so every run the window counts is
+		// never on the creation-time list containment reads, so every run the window counts is
 		// judged.
 		independent = append(independent,
 			runsWithJobs(func(ctx context.Context) ([]delivery.DeliveryRun, error) {
@@ -547,14 +553,14 @@ func (p deliveryPopulation) derive(settings delivery.DeliverySettings) deliveryD
 // A row merged before from' leaves the window, and joins the waiting entries when its repo is the
 // deploy repository and it had not shipped by from' (ListPullRequestsWaitingAt reads only
 // pr.repo = deployRepo; the window's rows hold every population repo). A waiting entry that shipped
-// before from' leaves them. A run started before from', or one whose head commit is before from',
-// leaves the lists that filter on that time. The maps keep only the keys the remaining rows and runs
-// name (derive reads them by those keys). This is ListPullRequestsWaitingAt's rule (store.go:384-437):
-// a pull request shipped by from' exactly when its ship time (the earliest successful production job
-// of a run whose head is at or after its merge) is before from'. A leaving row's ship is read from
-// the runs read here, which hold every run whose head is at or after its merge, since it merged at
-// or after the start they were read from. The window's end moves with from', past the read's end:
-// a preset's read ends at the present, so nothing stored lies past it.
+// before from' leaves them. A run started before from', or one GitHub created before from', leaves
+// the lists that filter on that time. The maps keep only the keys the remaining rows and runs name
+// (derive reads them by those keys). This is ListPullRequestsWaitingAt's rule: a pull request
+// shipped by from' exactly when its ship time (the earliest successful production job of a run
+// created after its merge) is before from'. A leaving row's ship is read from the runs read here,
+// which hold every run created after its merge, since it merged at or after the start they were
+// read from. The window's end moves with from', past the read's end: a preset's read ends at the
+// present, so nothing stored lies past it.
 func (p deliveryPopulation) narrowedTo(settings delivery.DeliverySettings, from time.Time) deliveryPopulation {
 	narrowed := p
 	narrowed.prs = make([]delivery.DeliveryPullRequest, 0, len(p.prs))
@@ -566,7 +572,7 @@ func (p deliveryPopulation) narrowedTo(settings delivery.DeliverySettings, from 
 		}
 		narrowed.prs = append(narrowed.prs, pr)
 	}
-	narrowed.applyRuns, narrowed.jobsByRun = runsWhere(p.applyRuns, p.jobsByRun, func(run delivery.DeliveryRun) bool { return !run.HeadCommitAt.Before(from) })
+	narrowed.applyRuns, narrowed.jobsByRun = runsWhere(p.applyRuns, p.jobsByRun, func(run delivery.DeliveryRun) bool { return !run.Created().Before(from) })
 	narrowed.windowRuns, narrowed.windowJobs = runsWhere(p.windowRuns, p.windowJobs, func(run delivery.DeliveryRun) bool { return !run.StartedAt.Before(from) })
 	if !p.withWaiting {
 		return narrowed
@@ -613,8 +619,8 @@ func runsWhere(runs []delivery.DeliveryRun, jobs map[int64][]delivery.DeliveryRu
 
 // nextExpiry is the first moment after now at which a preset window of length n, ending at the
 // present, loses something the population holds or its daily series moves: just past the oldest
-// row's merge + n, the oldest run start (each list that filters on starts) + n, the oldest head
-// commit among the runs ListRuns read + n, and each waiting entry's ship time + n; and the next UTC
+// row's merge + n, the oldest run start (each list that filters on starts) + n, the oldest creation
+// among the runs ListRuns read + n, and each waiting entry's ship time + n; and the next UTC
 // midnight (measures.DailySeries, measures.go:240), where a whole-day window's first and last days
 // move together. Nothing else in the timeline or the measures reads the present (the LEGION-690 PR's
 // Task 0 checks, Step 17).
@@ -631,7 +637,7 @@ func nextExpiry(pop deliveryPopulation, n time.Duration, now time.Time) time.Tim
 		consider(*pr.MergedAt)
 	}
 	for _, run := range pop.applyRuns {
-		consider(run.HeadCommitAt)
+		consider(run.Created())
 		consider(run.StartedAt)
 	}
 	for _, run := range pop.windowRuns {

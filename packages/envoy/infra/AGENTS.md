@@ -134,7 +134,8 @@ previews with both `same`; a listener with a seed connects to an nkey-authorized
 without never does; and a Go program builds against the SDK `pulumi package add` generates. They
 take:
 
-- the `pulumi` CLI on `PATH`. CI pins v3.268.0;
+- the `pulumi` CLI on `PATH`. CI pins v3.268.0 in `.github/actions/install-pulumi`, which the
+  `envoy-smoke` job and release.yaml's `envoy_infra` job both install it through;
 - `ENVOY_SMOKE_IMAGE`, a listener image built beforehand. A live test without it fails at once
   and never builds one itself;
 - `ENVOY_INFRA_DOCKER_PLUGIN`, the path of the docker provider plugin v4.11.0 tarball for this
@@ -144,8 +145,10 @@ take:
 
 Each stack runs on a `file://` backend of its own in a temporary directory. Each listener gets a
 container name of its own (`envoy-listener-live-<random>`) and a free port, and reaches only a
-loopback NATS from `testnats`, never a tailnet name. A package whose tests use the harness calls
-`os.Exit(pulumitest.Main(m))` from its `TestMain`, which removes that `PULUMI_HOME`.
+loopback NATS from `testnats`, never a tailnet name. The test binary builds the plugin once, on the
+first test that asks for it, and every test runs that build. A package whose tests use the harness
+calls `os.Exit(pulumitest.Main(m))` from its `TestMain`, which removes that `PULUMI_HOME` and that
+build.
 
 To run them, from the repository root:
 
@@ -164,5 +167,5 @@ cd packages/envoy/infra && PATH=/tmp/pulumi:$PATH \
 
 `-count=1` because go's test cache cannot see the image behind a fixed tag, and would replay a
 cached pass against an image that has since changed. In CI the `envoy-smoke` job runs them, each
-input a step of its own, and then checks that `pulumi package get-schema` reports the version the
-plugin was built with.
+input a step of its own (the CLI through `.github/actions/install-pulumi`), and then checks that
+`pulumi package get-schema` reports the version the plugin was built with.

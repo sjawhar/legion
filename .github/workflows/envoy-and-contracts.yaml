@@ -44,6 +44,8 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
+      # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
+      - ".github/actions/install-pulumi/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the six below before the target list are the ones the entries
       # above do not already cover. .github/scripts/check-image-trigger-paths.sh fails the build
@@ -95,6 +97,7 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
+      - ".github/actions/install-pulumi/**"
       # Same entries the push list owes, for the same jobs.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
@@ -226,6 +229,8 @@ jobs:
               - 'docs/site/package.json'
               - '.dockerignore'
               - '.github/workflows/envoy-and-contracts.yaml'
+              # The Pulumi CLI the job's envoy-infra live tests run.
+              - '.github/actions/install-pulumi/**'
               # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
               # every module in it belong here too — `envoy` carried go.work and go.work.sum and
               # this filter must not be narrower. packages/daemon requires testcontainers-go,
@@ -1120,16 +1125,12 @@ jobs:
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
       # The envoy-infra plugin's live tests (packages/envoy/infra/host/live_test.go) apply Pulumi
-      # YAML programs with the pinned Pulumi CLI against this runner's Docker, on the listener image
-      # built above and on the docker provider the plugin's first consumer pins. Each download is
-      # checked against its SHA-256 before it is unpacked or installed.
+      # YAML programs with the pinned Pulumi CLI (.github/actions/install-pulumi) against this
+      # runner's Docker, on the listener image built above and on the docker provider the plugin's
+      # first consumer pins. Each download is checked against its SHA-256 before it is unpacked or
+      # installed.
       - name: Install the Pulumi CLI
-        run: |
-          tarball="$RUNNER_TEMP/pulumi-v3.268.0-linux-x64.tar.gz"
-          curl -fsSL -o "$tarball" https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
-          echo "903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  $tarball" | sha256sum -c -
-          tar -xzf "$tarball" -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/pulumi" >> "$GITHUB_PATH"
+        uses: ./.github/actions/install-pulumi
       # The release's own checksums file lists SHA-1 digests (this asset's is
       # 9a7f6014d3ebc330030ec033ddc7222ec13ad116); the SHA-256 is the digest GitHub records for the
       # release asset, which hashes to that same SHA-1. The live tests install the verified tarball

@@ -108,8 +108,9 @@ Sign in, then open **Settings**:
   [Delivery](/legion/dispatch/delivery/) page shows the same form. Every save, of any field,
   starts the delivery import over: what is already stored stays on both pages, the freshness line
   reads "never checked" until the next five-minute pass, that pass lists the last 28 days from
-  GitHub again, and the re-listing of each run's branch and event walks those 28 days a day per
-  pass, about 28 passes in all.
+  GitHub again, and two re-listings walk those 28 days a day per pass, about 28 passes in all:
+  one of each run's branch and event, and one of each deploy run's creation time, which decides
+  the deploy a pull request is credited to.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 

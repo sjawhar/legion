@@ -69,7 +69,7 @@ func (s *server) listMyAnswers(w http.ResponseWriter, r *http.Request) {
 		left join artifacts ar on ar.id = a.artifact_id
 		order by m.at desc, m.event_id desc nulls last, m.reply_id desc nulls last
 		limit $2 offset $3
-	`, canonicalLogin(caller.ID), limit, offset)
+	`, model.CanonicalLogin(caller.ID), limit, offset)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

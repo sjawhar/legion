@@ -980,11 +980,15 @@ export const dispatchToolSpecs = [
       "nothing, and a different one is refused, since it would rewrite the card the human is " +
       "reading. Approve and Request changes each close the request, so the next call opens a new " +
       "one. Call it once per revision, when the revision is complete, never after each edit. An " +
-      "approval goes stale when the document changes after it: request approval again once that " +
-      "revision is complete and " +
+      "approval goes stale when the document changes outside its decision blocks after it: " +
+      "request approval again once that revision is complete and " +
       HUMAN_AGREED_TO_DOCUMENT +
-      ". A new version of a Legion root spec closes its armed design gate until a human approves " +
-      "it. " +
+      ", with a one-sentence summary naming what changed since the earlier approval: the card " +
+      "names that approval (version, date, reviewer) and its Show diff control carries the detail. " +
+      "A human's own answer to a decision block carries the approval to the version it writes when " +
+      "that answer is the whole change since the approved version, so nothing is requested for " +
+      "it. A new version of a Legion root spec closes its armed design gate until a human " +
+      "approves it; the carried approval reopens it too. " +
       "Refused, with nothing sent, while the document holds an open decision block, even when a " +
       "human asked for approval: the refusal names each block; ask the human to answer or waive " +
       "it first. " +
@@ -1001,7 +1005,7 @@ export const dispatchToolSpecs = [
       summary: z
         .string({ min: 1 })
         .describe(
-          `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
+          `What the human is approving, in one to three sentences, and nothing else: no commentary on itself or the conversation, and no question; after an earlier approval, one sentence naming what changed since it, since the card shows that approval and a diff. Request approval only once ${HUMAN_AGREED_TO_DOCUMENT}.`
         ),
     }),
     validation: documentOwnerValidation(true),

@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
@@ -382,5 +384,152 @@ test("an answer given after every reply is what the mark watches and reads throu
     expect(card.mark.mock.calls).toEqual([["ask-1", answer.at]]);
   } finally {
     card.cleanup();
+  }
+});
+
+/** One of the decision-block fixtures `cutDecisionBlocks` and the Go server's cut share. */
+function decisionBlockFixture(name: string): string {
+  return readFileSync(
+    join(import.meta.dir, "../../../../../contracts/fixtures/decision-blocks", name),
+    "utf8"
+  );
+}
+
+const earlierApproval = {
+  approved: { at: "2026-10-05T14:30:00Z", by: { id: "alice", kind: "user" }, version: 11 },
+} satisfies Partial<NonNullable<Ask["approval"]>>;
+
+/** An open approval request for version 12 of `spec.md`, carrying `approval` as given. */
+function approvalAsk(approval: Partial<NonNullable<Ask["approval"]>> = {}): Ask {
+  return answeredAsk({
+    answer: null,
+    approval: {
+      artifact_id: "artifact-1",
+      name: "spec.md",
+      requested_version: 12,
+      version: 12,
+      ...approval,
+    },
+    approval_artifact: { name: "spec.md", primary: true, project: "CORE", slug: "spec-md" },
+    kind: "approval",
+    options: [{ label: "Approve" }, { label: "Request changes" }],
+    question: "Approve spec.md (version 12)?",
+    state: "open",
+  });
+}
+
+/** `getArtifactVersion` answering `versions[n]` as version n's markdown. */
+function mockVersions(versions: Record<number, string>) {
+  return spyOn(api, "getArtifactVersion").mockImplementation(async (_id, version) => ({
+    authors: [],
+    created_at: "2026-10-05T00:00:00Z",
+    markdown: versions[version] ?? "",
+    named: false,
+    number: version,
+    summary: null,
+  }));
+}
+
+// The suite's preload registers no testing-library cleanup, so a render another file never
+// unmounts stays in the shared document; these tests read their own card alone (`within`).
+for (const variant of ["full", "compact"] as const) {
+  test(`a ${variant} approval card names the earlier approval and diffs the two versions only when asked`, async () => {
+    const ask = approvalAsk(earlierApproval);
+    const getArtifactVersion = mockVersions({ 11: "Before\n", 12: "After\n" });
+    const { view } = renderCard(
+      variant === "full" ? (
+        <AskCard ask={ask} initialThread={thread(ask)} />
+      ) : (
+        <AskCard ask={ask} documentLink={false} initialThread={thread(ask)} variant="compact" />
+      )
+    );
+    const card = within(view.container);
+    try {
+      const line = card.getByText(/^Approved at version 11 on/);
+      expect(line.textContent).toBe("Approved at version 11 on 2026-10-05 by alice.");
+      const time = line.querySelector("time");
+      expect(time?.getAttribute("datetime")).toBe("2026-10-05T14:30:00Z");
+      expect(time?.getAttribute("title")).toBe("2026-10-05T14:30:00Z");
+      expect(card.getByText("Approve spec.md (version 12)?")).toBeTruthy();
+      expect(card.queryByTestId("version-diff")).toBeNull();
+      expect(getArtifactVersion).not.toHaveBeenCalled();
+
+      const show = card.getByRole("button", { name: "Show diff" });
+      expect(show.getAttribute("aria-expanded")).toBe("false");
+      fireEvent.click(show);
+      const diff = await card.findByTestId("version-diff");
+      expect(getArtifactVersion.mock.calls).toEqual([
+        ["artifact-1", 11],
+        ["artifact-1", 12],
+      ]);
+      expect(diff.querySelector("del")?.textContent).toBe("Before\n");
+      expect(diff.querySelector("ins")?.textContent).toBe("After\n");
+      expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
+
+      const hide = card.getByRole("button", { name: "Hide diff" });
+      expect(hide.getAttribute("aria-expanded")).toBe("true");
+      fireEvent.click(hide);
+      expect(card.queryByTestId("version-diff")).toBeNull();
+      expect(card.getByRole("button", { name: "Show diff" })).toBeTruthy();
+    } finally {
+      view.unmount();
+      getArtifactVersion.mockRestore();
+    }
+  });
+}
+
+test("a first approval request shows no earlier approval and no diff control", async () => {
+  const ask = approvalAsk();
+  const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
+  const card = within(view.container);
+  try {
+    await card.findByRole("radio", { name: "Approve" });
+    expect(card.getByText("Approval requested")).toBeTruthy();
+    expect(card.queryByText(/Approved at version/)).toBeNull();
+    expect(card.queryByRole("button", { name: "Show diff" })).toBeNull();
+  } finally {
+    view.unmount();
+  }
+});
+
+test("the diff cuts every decision block, so answers alone leave nothing changed", async () => {
+  const ask = approvalAsk(earlierApproval);
+  const getArtifactVersion = mockVersions({
+    11: decisionBlockFixture("approved.md"),
+    12: decisionBlockFixture("answered.md"),
+  });
+  const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
+  const card = within(view.container);
+  try {
+    fireEvent.click(card.getByRole("button", { name: "Show diff" }));
+    const diff = await card.findByTestId("version-diff");
+    expect(diff.querySelector("ins, del")).toBeNull();
+    expect(diff.textContent).toContain("The platform team asked for a rollback path.");
+    expect(diff.textContent).not.toContain("ask{");
+  } finally {
+    view.unmount();
+    getArtifactVersion.mockRestore();
+  }
+});
+
+test("the diff keeps a paragraph changed beside the decision blocks", async () => {
+  const ask = approvalAsk(earlierApproval);
+  const getArtifactVersion = mockVersions({
+    11: decisionBlockFixture("approved.md"),
+    12: decisionBlockFixture("paragraph-changed.md"),
+  });
+  const { view } = renderCard(<AskCard ask={ask} initialThread={thread(ask)} />);
+  const card = within(view.container);
+  try {
+    fireEvent.click(card.getByRole("button", { name: "Show diff" }));
+    const diff = await card.findByTestId("version-diff");
+    expect(diff.querySelector("del")?.textContent).toBe("The service ships behind a flag.\n");
+    expect(diff.querySelector("ins")?.textContent).toBe(
+      "The service ships behind a flag and a canary.\n"
+    );
+    expect(diff.textContent).not.toContain("ask{");
+  } finally {
+    view.unmount();
+    getArtifactVersion.mockRestore();
   }
 });

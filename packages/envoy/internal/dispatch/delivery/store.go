@@ -384,14 +384,14 @@ type WaitingPullRequest struct {
 // ListPullRequestsWaitingAt lists the deploy repository's pull requests merged before at that had
 // not shipped by then, oldest merge first, up to maxPullRequestsPerWindow, each with the run that
 // shipped it afterwards: what the timeline's waiting line starts its window from. A pull request
-// ships with the earliest-finishing successful production job of a run on main whose head commit
-// is at or after its merge (containment.go, with ListRuns' "main"), so one merged at or before the
-// newest such head among the jobs that finished before at had shipped by then, and every later one
-// had not: that head, read through delivery_runs_kind_started newest first, is the one bound this
-// needs. A run on another branch, or one stored before head_branch was (null until the reconcile's
-// backfill fills it), ships nothing here either. The shipping run is read here rather than from
-// the window's own runs, which start at the window and so can miss a run whose head commit came
-// before it.
+// ships with the earliest-finishing successful production job of a run on main that GitHub created
+// after its merge (containment.go, with ListRuns' "main"), so one merged before the latest creation
+// among the runs whose job finished before at had shipped by then, and every one merged at or
+// after it had not: that creation, read through delivery_runs_kind_created newest first, is the one
+// bound this needs. A run on another branch, or one stored before head_branch was (null until the
+// reconcile's backfill fills it), ships nothing here either. The shipping run is read here rather
+// than from the window's own runs, which start at the window and so can miss a run created before
+// it.
 func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo, productionJobName string, at time.Time) ([]WaitingPullRequest, error) {
 	rows, err := pool.Query(ctx, `
 		select `+PullRequestColumns+`, ship.run_id, ship.completed_at
@@ -401,16 +401,16 @@ func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo
 			from delivery_runs r
 			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = $2
 			where r.repo = $1 and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success'
-				and j.completed_at is not null and r.head_commit_at >= pr.merged_at
+				and j.completed_at is not null and `+runCreatedAt+` > pr.merged_at
 			order by j.completed_at
 			limit 1
 		) ship on true
-		where pr.repo = $1 and pr.merged_at < $3 and pr.merged_at > coalesce((
-			select r.head_commit_at
+		where pr.repo = $1 and pr.merged_at < $3 and pr.merged_at >= coalesce((
+			select `+runCreatedAt+`
 			from delivery_runs r
 			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = $2
 			where r.repo = $1 and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success' and j.completed_at < $3
-			order by r.head_commit_at desc
+			order by `+runCreatedAt+` desc
 			limit 1
 		), '-infinity')
 		order by pr.merged_at
@@ -517,7 +517,13 @@ func listPullRequests(ctx context.Context, pool *store.Pool, query string, args 
 }
 
 // RunColumns is the delivery_runs select list ScanRun reads, in scan order.
-const RunColumns = `repo, run_id, kind, pr_number, head_sha, head_commit_at, started_at, completed_at, conclusion, url, head_branch, event`
+const RunColumns = `repo, run_id, kind, pr_number, head_sha, head_commit_at, started_at, created_at, completed_at, conclusion, url, head_branch, event`
+
+// runCreatedAt is when GitHub created the delivery_runs row r: DeliveryRun.Created in SQL, whose
+// comment says why a row without created_at reads started_at. delivery_runs_kind_created
+// (migration 0108) indexes (repo, kind, this expression), so every query that filters or orders
+// on it writes it exactly so, over the alias r.
+const runCreatedAt = `coalesce(r.created_at, r.started_at)`
 
 // ScanRun decodes one RunColumns row into a DeliveryRun.
 func ScanRun(row pgx.Row) (DeliveryRun, error) {
@@ -526,7 +532,7 @@ func ScanRun(row pgx.Row) (DeliveryRun, error) {
 	var conclusion *string
 	if err := row.Scan(
 		&run.Repo, &run.RunID, &kind, &run.PRNumber, &run.HeadSHA, &run.HeadCommitAt,
-		&run.StartedAt, &run.CompletedAt, &conclusion, &run.URL, &run.HeadBranch, &run.Event,
+		&run.StartedAt, &run.CreatedAt, &run.CompletedAt, &conclusion, &run.URL, &run.HeadBranch, &run.Event,
 	); err != nil {
 		return DeliveryRun{}, err
 	}
@@ -550,20 +556,21 @@ func UpsertRun(ctx context.Context, pool *store.Pool, run DeliveryRun) error {
 		conclusion = &c
 	}
 	_, err := pool.Exec(ctx, `
-		insert into delivery_runs (repo, run_id, kind, pr_number, head_sha, head_commit_at, started_at, completed_at, conclusion, url, head_branch, event)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		insert into delivery_runs (repo, run_id, kind, pr_number, head_sha, head_commit_at, started_at, created_at, completed_at, conclusion, url, head_branch, event)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		on conflict (repo, run_id) do update set
 			kind = excluded.kind,
 			pr_number = excluded.pr_number,
 			head_sha = excluded.head_sha,
 			head_commit_at = excluded.head_commit_at,
 			started_at = excluded.started_at,
+			created_at = excluded.created_at,
 			completed_at = excluded.completed_at,
 			conclusion = excluded.conclusion,
 			url = excluded.url,
 			head_branch = excluded.head_branch,
 			event = excluded.event
-	`, run.Repo, run.RunID, string(run.Kind), run.PRNumber, run.HeadSHA, run.HeadCommitAt, run.StartedAt, run.CompletedAt, conclusion, run.URL, run.HeadBranch, run.Event)
+	`, run.Repo, run.RunID, string(run.Kind), run.PRNumber, run.HeadSHA, run.HeadCommitAt, run.StartedAt, run.CreatedAt, run.CompletedAt, conclusion, run.URL, run.HeadBranch, run.Event)
 	return err
 }
 
@@ -844,21 +851,24 @@ func ListRunJobsForRuns(ctx context.Context, pool *store.Pool, repo string, runI
 	return byRun, rows.Err()
 }
 
-// ListRuns lists every run of kind on repo with head_commit_at or later, oldest first, narrowed to
-// one head branch when branch is non-empty (a null head_branch never matches it): the containment
-// algorithm's input (population.go/containment.go), which the timeline and the measures read with
-// "main", since a production job on another branch ships no pull request.
-// delivery_runs_kind_started's index covers (repo, kind, head_commit_at) to match this exact
-// filter/order. Bounded by maxRunsPerWindow for the same reason ListPullRequestsInWindow is: an
-// unbounded caller should fail loudly rather than exhaust memory.
+// ListRuns lists every run of kind on repo that GitHub created at since or later (runCreatedAt),
+// oldest creation first, narrowed to one head branch when branch is non-empty (a null head_branch
+// never matches it): the containment algorithm's input (population.go/containment.go), which the
+// timeline and the measures read with "main", since a production job on another branch ships no
+// pull request. It reads by creation rather than by head commit time because creation decides what
+// a run ships, and a run that ships a pull request merged in the window was created after that
+// merge, while its head commit, which a merge queue writes before the merge is recorded, can be
+// timed before the window's start. delivery_runs_kind_created indexes (repo, kind, runCreatedAt)
+// to match this exact filter/order. Bounded by maxRunsPerWindow for the same reason
+// ListPullRequestsInWindow is: an unbounded caller should fail loudly rather than exhaust memory.
 const maxRunsPerWindow = 50_000
 
 func ListRuns(ctx context.Context, pool *store.Pool, repo string, kind DeliveryRunKind, branch string, since time.Time) ([]DeliveryRun, error) {
 	rows, err := pool.Query(ctx, `
 		select `+RunColumns+`
-		from delivery_runs
-		where repo = $1 and kind = $2 and head_commit_at >= $3 and ($4 = '' or head_branch = $4)
-		order by head_commit_at
+		from delivery_runs r
+		where r.repo = $1 and r.kind = $2 and `+runCreatedAt+` >= $3 and ($4 = '' or r.head_branch = $4)
+		order by `+runCreatedAt+`, r.run_id
 		limit $5
 	`, repo, string(kind), since, branch, maxRunsPerWindow)
 	if err != nil {

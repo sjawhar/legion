@@ -65,6 +65,9 @@ port_listener=
 port_dispatch=
 dispatch_base=
 dispatch_actor=
+# The person every proof-human Dispatch write is: the X-Dispatch-User the scratch Dispatch trusts
+# (dispatch-human-header), and so the actor of each review it records in his name.
+proof_human_user=smoke
 port_worker_stream=
 port_pg=
 port_nats=
@@ -482,6 +485,42 @@ assert_ready_gate_closed() {
     .issues[$issue].phase == "merging" and .issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion
   ' "$file" >/dev/null
 }
+# The design gate in the daemon's state: closed while the spec's current version is past the one a
+# human approved, open while the approved version is the current one; design_gate_version ISSUE
+# prints the spec version the gate currently names.
+design_gate_closed() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.currentVersion > .issues[$issue].designGate.approvedVersion' >/dev/null
+}
+design_gate_open() {
+  daemon_state | jq -e --arg issue "$1" '.issues[$issue].designGate.approvedVersion == .issues[$issue].designGate.currentVersion' >/dev/null
+}
+design_gate_version() { daemon_state | jq -er --arg issue "$1" '.issues[$issue].designGate.currentVersion'; }
+# spec_event ISSUE TYPE VERSION: the issue's Dispatch event log carries the TYPE event
+# (artifact.version or artifact.approved) naming the spec ($artifact_id) at VERSION; spec_event_in
+# TYPE VERSION reads a saved log on stdin. The spec is not the issue's only document (the planner's
+# plan is another), so the event is matched by artifact as well as by version: the number an
+# artifact.approved payload carries bare and an artifact.version payload as its version record's.
+spec_event() { dispatch_events "$1" | spec_event_in "$2" "$3"; }
+spec_event_in() {
+  jq -e --arg type "$1" --argjson version "$2" --arg artifact "$artifact_id" '
+    any(.[]; .type == $type and .payload.artifact_id == $artifact
+      and (.payload.version | if type == "object" then .number else . end) == $version)
+  ' >/dev/null
+}
+# The decision block the proof inserts into the spec as an architect would (skills/dispatch/
+# references/documents.md, "Typed blocks"), and its question, by which the ask settlement indexes
+# from it is found.
+carry_question='Stage 3 proof question: keep or drop the smoke paragraph?'
+carry_block=$(printf ':::ask{urgency="high" multiple="false"}\n%s\n\n- Keep: the paragraph stays.\n- Drop: the paragraph goes.\n:::\n' "$carry_question")
+# spec_block_ask ISSUE prints the id of the open ask Dispatch's settlement indexed from the proof's
+# decision block (the ask with that block's question and a block_id), and fails while there is none.
+spec_block_ask() {
+  dispatch_get "issues/$1/asks?state=open" |
+    jq -er --arg question "$carry_question" 'first(.[] | select(.block_id != null and .question == $question)) | .id'
+}
+# approval_requests_in counts the approval requests ever opened on an issue in the event log it
+# reads on stdin: the ask.opened events whose ask is an approval, not a question.
+approval_requests_in() { jq '[.[] | select(.type == "ask.opened" and .payload.kind == "approval")] | length'; }
 
 begin prerequisites
 refuse_leftovers legion-e2e3
@@ -551,7 +590,7 @@ begin rig
   printf 'Authorization: Bearer %s\n' "$(cat "$work/envoy-token")" >"$work/envoy-auth-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/dispatch-token" &&
   printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
-  printf 'X-Dispatch-User: smoke\n' >"$work/dispatch-human-header" &&
+  printf 'X-Dispatch-User: %s\n' "$proof_human_user" >"$work/dispatch-human-header" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/operator-token" &&
   head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' >"$work/postgres-password")
 chmod 0600 "$work"/*token "$work"/*-header "$work/postgres-password"
@@ -785,11 +824,34 @@ primary_issue() {
 
   begin ready-gated-on-new-spec-version
   # A named primary-artifact upload creates version two and emits artifact.version. The gate must
-  # close before the merger sends READY; no second READY is allowed after the human approves it.
+  # close on it, and this first closing is the gate-state negative control for the approval carry
+  # below: a human's whole-document upload is nobody's answer to a decision block, so Dispatch
+  # carries no approval to it (no artifact.approved names its version, no review is pinned to it)
+  # and only the human's own review reopens the gate. No READY is held yet, so that reopening
+  # releases nothing: a merging stint has one refusal-and-release cycle (a held READY is accepted at
+  # the first reopening, the daemon's advancePendingReady), and this proof spends it on the carry.
   dispatch_human POST "issues/$root_issue/artifacts" \
     "$(jq -cn --arg name spec.md --arg content "# Stage 3 smoke\n\nThe human revised this proof specification before READY.\n" '{name:$name,content:$content,summary:"Stage 3 gate re-close"}')" >/dev/null
-  until_true 120 "the new primary spec version to close the gate" sh -c \
-    "'$work/legion' state --json --port '$port_daemon' | jq -e --arg issue '$root_issue' '.issues[\$issue].designGate.currentVersion > .issues[\$issue].designGate.approvedVersion'"
+  until_true 120 "the human's new primary spec version to close the gate" design_gate_closed "$root_issue"
+  uploaded_version=$(design_gate_version "$root_issue")
+  until_true 60 "the artifact.version event naming spec version $uploaded_version on $root_issue" spec_event "$root_issue" artifact.version "$uploaded_version"
+  dispatch_events "$root_issue" >"$evidence/ready-gate-upload-events.json"
+  if spec_event_in artifact.approved "$uploaded_version" <"$evidence/ready-gate-upload-events.json"; then
+    fail "an artifact.approved event names spec version $uploaded_version, the human's whole-document upload, which answers no decision block"
+  fi
+  dispatch_get "artifacts/$artifact_id/reviews" >"$evidence/ready-gate-upload-reviews.json"
+  if jq -e --argjson version "$uploaded_version" 'any(.[]; .version == $version)' "$evidence/ready-gate-upload-reviews.json" >/dev/null; then
+    fail "a review is pinned to spec version $uploaded_version before anyone reviewed it"
+  fi
+  dispatch_human POST "artifacts/$artifact_id/reviews" '{"state":"approved"}' >/dev/null
+  until_true 120 "the human's review of spec version $uploaded_version to reopen the gate" design_gate_open "$root_issue"
+  note "the gate closed on spec version $uploaded_version, a whole-document upload, with no approval carried to it, and the human's own review reopened it"
+  # The decision block an architect would write, inserted at the end of the spec in a stand-in
+  # session's name through the edits route (dispatch_agent): its version closes the gate again, and
+  # that version is the one the merger's READY meets.
+  dispatch_agent POST "artifacts/$artifact_id/edits" \
+    "$(jq -cn --arg markdown "$carry_block" '{ops: [{op: "insert", after: "end", markdown: $markdown}]}')" >/dev/null
+  until_true 120 "the decision block's spec version to close the gate" design_gate_closed "$root_issue"
   state_file ready-refused
   send_agent "$root_issue" merger "Stage 3 proof READY operation: call the legion tool's handoff_complete with summary 'stage 3 ready gate proof' and ready true now. Record its exact refusal and then wait; do not retry it."
   until_true 180 "merger to observe the READY 409 refusal naming the new version" session_contains "$root_issue" merger "READY refused: approve design version"
@@ -798,10 +860,35 @@ primary_issue() {
     "$evidence/ready-refused.json" >"$evidence/ready-open-negative.json"
   expect_failure ready-gate-not-reclosed assert_ready_gate_closed "$evidence/ready-open-negative.json"
   assert_ready_gate_closed "$evidence/ready-refused.json" || fail "the READY gate did not restore after its negative control"
-  new_version=$(daemon_state | jq -er --arg issue "$root_issue" '.issues[$issue].designGate.currentVersion')
-  dispatch_human POST "artifacts/$artifact_id/reviews" '{"state":"approved"}' >/dev/null
+  new_version=$(design_gate_version "$root_issue")
+  # The carry: the proof human answers the block, and nothing else changed since the version he
+  # approved, so Dispatch records his approval of the version the answer settles into itself. No
+  # review goes through the reviews route from here to awaiting_merge; the daemon's gate reopens on
+  # the carried artifact.approved, which releases the held READY.
+  until_true 60 "settlement to index the decision block as an open ask on $root_issue" spec_block_ask "$root_issue"
+  block_ask=$(spec_block_ask "$root_issue")
+  approval_requests_before=$(dispatch_events "$root_issue" | approval_requests_in)
+  dispatch_human POST "asks/$block_ask/answer" '{"selected":["Keep"],"expected_edited_at":null}' >/dev/null
   wait_for_phase "$root_issue" awaiting_merge
-  note "READY refused at unapproved spec version $new_version; approval advanced awaiting_merge without another READY"
+  carried_version=$((new_version + 1))
+  daemon_state | jq -e --arg issue "$root_issue" --argjson version "$carried_version" \
+    '.issues[$issue].designGate.approvedVersion == $version and .issues[$issue].designGate.currentVersion == $version' >/dev/null ||
+    fail "the daemon's gate is $(daemon_state | jq -c --arg issue "$root_issue" '.issues[$issue].designGate'), want spec version $carried_version, the answer's, approved and current"
+  # The newest review is the carry: pinned to the answer's version, in the proof human's own name,
+  # answering no approval request, with the carry's reason.
+  dispatch_get "artifacts/$artifact_id/reviews" >"$evidence/ready-gate-carry-reviews.json"
+  carried_review=$(jq -c '.[0]' "$evidence/ready-gate-carry-reviews.json")
+  jq -e --argjson version "$carried_version" --arg user "$proof_human_user" \
+    '.version == $version and .state == "approved" and .actor.kind == "user" and .actor.id == $user and .ask_id == null and ((.reason // "") | length > 0)' \
+    <<<"$carried_review" >/dev/null ||
+    fail "the newest review of $artifact_id is $carried_review, want the proof human's (user $proof_human_user) carried approval of version $carried_version with a reason and no ask"
+  dispatch_events "$root_issue" >"$evidence/ready-gate-carry-events.json"
+  approval_requests_after=$(approval_requests_in <"$evidence/ready-gate-carry-events.json")
+  [ "$approval_requests_after" = "$approval_requests_before" ] ||
+    fail "the carry opened an approval request on $root_issue: $approval_requests_before opened before the answer, $approval_requests_after after"
+  spec_event_in artifact.approved "$carried_version" <"$evidence/ready-gate-carry-events.json" ||
+    fail "no artifact.approved event names spec version $carried_version, the carried approval"
+  note "READY refused at unapproved spec version $new_version, the stand-in architect's decision block; the human's answer carried his approval of version $uploaded_version forward to version $carried_version (review by user $proof_human_user, reason $(jq -r .reason <<<"$carried_review")), no approval request was opened, and the carried approval advanced awaiting_merge without another READY"
   pass
 
   begin ordinary-human-squash-merge

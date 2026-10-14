@@ -3,11 +3,12 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// ensure_project and write_dispatch_header (lib/workflow.sh) against a fake curl on PATH: it logs
-// every invocation, writes FAKE_CURL_BODY to whatever file follows -o, prints FAKE_CURL_STATUS to
-// stdout (curl's own -w '%{http_code}' convention, since -o diverts the body), and on a nonzero
-// FAKE_CURL_EXIT prints FAKE_CURL_ERROR to stderr and 000 to stdout and writes nothing, as real curl
-// does when the connection fails (no response, so -w writes the status as 000).
+// ensure_project, write_dispatch_header and dispatch_agent (lib/workflow.sh) against a fake curl on
+// PATH: it logs every invocation, writes FAKE_CURL_BODY to whatever file follows -o, prints
+// FAKE_CURL_STATUS to stdout (curl's own -w '%{http_code}' convention, since -o diverts the body),
+// and on a nonzero FAKE_CURL_EXIT prints FAKE_CURL_ERROR to stderr and 000 to stdout and writes
+// nothing, as real curl does when the connection fails (no response, so -w writes the status as
+// 000).
 const lib = join(import.meta.dir, "workflow.sh");
 const dir = mkdtempSync(join(tmpdir(), "ensure-project-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -189,5 +190,30 @@ describe("ensure_project", () => {
     expect(r.stderr.trimEnd().split("\n")).toEqual([
       "CHECK prerequisites: FAIL: Dispatch could not be reached to create LPROOF2: curl: (7) Failed to connect to dispatch.example port 443",
     ]);
+  });
+});
+
+describe("dispatch_agent", () => {
+  // A bearer caller must name its session in the body (400 ACTOR_KIND otherwise), and the session
+  // dispatch_agent names is the stand-in architect's, never the proof human's dispatch_actor: the
+  // write is an agent's, over the agents' bearer rather than the human header.
+  test("sends the bearer header file, JSON, the method, the path and the body plus the stand-in session's actor", () => {
+    const r = run(
+      `write_dispatch_header\ndispatch_agent POST "artifacts/doc-1/edits" '{"ops":[{"op":"insert","after":"end","markdown":"Hello."}]}'`
+    );
+    expect(r.status).toBe(0);
+    expect(r.calls).toHaveLength(1);
+    expect(r.calls[0]).toContain("-X POST");
+    expect(r.calls[0]).toContain(`-H @${r.work}/dispatch-auth-header `);
+    expect(r.calls[0]).not.toContain("dispatch-human-header");
+    expect(readFileSync(join(r.work, "dispatch-auth-header"), "utf8")).toBe(
+      "Authorization: Bearer stage4b-fake-bearer\n"
+    );
+    expect(r.calls[0]).toContain("-H content-type: application/json");
+    expect(r.calls[0]).toContain(" https://dispatch.example/api/v1/artifacts/doc-1/edits");
+    expect(r.calls[0]).toContain(
+      '--data {"ops":[{"op":"insert","after":"end","markdown":"Hello."}],"actor":{"kind":"session","id":"stage3-architect-stand-in"}}'
+    );
+    expect(r.calls[0]).not.toContain(proofActor);
   });
 });
