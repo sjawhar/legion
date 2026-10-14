@@ -34,7 +34,8 @@ one conflict shape. The script sees only exit codes from `git push`, `git fetch`
 `git show`, so a test that runs those same binaries against a `file://` origin exercises the same
 code path as the Actions step; only the transport differs. It needs git ≥ 2.32 and `jq`, runs in
 about one second on the runner, and is a step of the `Tests` workflow right after checkout (before
-Bun setup, since it needs neither). Seven cases, thirty-three checks. The patterns:
+Bun setup, since it needs neither). Ten cases, fifty-three checks, the last case covering
+`release-push.sh tagged`. The patterns:
 
 ## 1. Bare origin plus two clones at different starting points
 
@@ -60,9 +61,11 @@ after two runs proves nothing is left behind.
 
 Each case is a different shape of what `a` did before `b` arrived: the same manifest line (Case
 1); a different file (Case 2); the manifest and a different file (Case 2b); a different package's
-manifest (Case 4); deleting the package (Case 6, modify/delete). The assertions read state from
-the bare origin, never from a clone: `git -C origin.git show main:<path> | jq -r .version`,
-`git -C origin.git log --format=%s main | grep -c '^chore: release'`.
+manifest (Case 4); deleting the package (Case 6, modify/delete); the same bump `b` makes, as a
+re-run finds its own first attempt's (Case 7, `b`'s commit dated apart so it is a commit of its
+own); a later release of the package (Case 8, `b` an older run's re-run). The assertions read
+state from the bare origin, never from a clone: `git -C origin.git show main:<path> | jq -r
+.version`, `git -C origin.git log --format=%s main | grep -c '^chore: release'`.
 
 ## 2. A pre-receive hook that always rejects forces exhaustion
 
@@ -132,6 +135,11 @@ that each case defends its contract rather than passing for an unrelated reason
 ([bash-harness-cases-that-pass-for-the-wrong-reason](bash-harness-cases-that-pass-for-the-wrong-reason.md));
 they belong in the PR body's `E2E` line next to the green ones and the CI run that produced the
 same green line on the runner.
+
+The re-run cases (7 to 9) were run against the script before them the same way: `Results: 40
+passed, 13 failed`. Case 8's failures include `origin/main keeps the later version`: that script
+rewrote main's manifest from 1.0.2 down to 1.0.1. Case 7 failed only on its notice, since that
+script's rebase already dropped the duplicate bump. Then `53 passed, 0 failed`.
 
 ## Related
 
