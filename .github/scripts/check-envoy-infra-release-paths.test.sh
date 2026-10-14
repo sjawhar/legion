@@ -195,6 +195,20 @@ printf '//go:build windows\n\npackage core\n\nimport _ "example.com/envoy/intern
 run_check "$root"
 check "exits 0: the targets decide which files are compiled in" "$(is "$status" 0)"
 
+echo "case: a package whose path extends a listed one"
+root=$(fixture extended-path)
+mkdir -p "$root/packages/envoy/internal/busx"
+printf 'package busx\n\nconst Subject = "busx"\n' > "$root/packages/envoy/internal/busx/busx.go"
+printf 'package core\n\nimport _ "example.com/envoy/internal/busx"\n' \
+  > "$root/packages/envoy/infra/core/busx.go"
+run_check "$root"
+check "exits 1: internal/bus/** and internal/bus/ cover only that directory" "$(is "$status" 1)"
+check "names it missing from the filter" \
+  "$(contains "$out" "packages/envoy/internal/busx/ (example.com/envoy/internal/busx) $filter_miss")"
+check "names it missing from the bump paths" \
+  "$(contains "$out" "packages/envoy/internal/busx/ (example.com/envoy/internal/busx) $bump_miss")"
+check "the push paths' packages/envoy/** covers it" "$(is "$(contains "$out" "$push_miss")" false)"
+
 echo "case: an entry the check cannot read"
 root=$(fixture negated-filter)
 edit "$root" "              - 'packages/envoy/go.mod'" \
