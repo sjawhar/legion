@@ -47,6 +47,8 @@ network, with:
 - log options `max-file=5` and `max-size=20m`;
 - a Docker health check, `curl -f http://127.0.0.1:<port>/healthz` every 10 s, with a 3 s timeout,
   3 retries and a 30 s start period;
+- `wait: true` with a 90 s `waitTimeout`, or `wait: false` and no `waitTimeout` under
+  `waitForHealthy: false` (see [Readiness](#readiness));
 - `deleteBeforeReplace`: a change that replaces the container removes the old one before it
   creates the new one, since both take the same name, so the listener is down in between.
 
@@ -138,12 +140,20 @@ until it connects.
 
 `watchdog: {host: <address>}` installs a systemd timer on the host that checks the
 `envoy-listener` container 30 seconds after boot and every 60 seconds after that. When the
-container is not running, the timer's script starts it if it is `exited`, `created` or `paused`,
-recreates it if it is missing, and removes and recreates it in any other state, such as
-`restarting`.
+container is not running, the timer's script runs `docker start` on it if it is `exited` or
+`created`, recreates it if it is missing, and removes and recreates it in any other state but
+`paused`, such as `restarting`. A `paused` container stays paused: the script runs `docker start`
+on it too, which Docker refuses, so every run fails until someone unpauses it. The script's text
+is fixed, since any change to it reruns the create command on every host.
 
-`<name>-watchdog` installs it over SSH, logging in as root, so `host` is the bare SSH address with
-no user and no scheme. The host needs systemd, Docker and `jq`. Its create command writes:
+`<name>-watchdog` installs it over SSH from the machine running Pulumi, logging in as root, so
+`host` is the bare SSH address with no user and no scheme. The component gives the SSH connection
+nothing but that address: no key, no password and no host key. pulumi-command v1.2.1 then
+authenticates with the keys of the SSH agent at `SSH_AUTH_SOCK` on that machine, and accepts any
+host key (`provider/pkg/provider/remote/connection.go`, `SSHConfig`). So that agent must hold a key
+root on the host accepts, or the host must accept the login without a key, as Tailscale SSH does.
+A key file that the docker provider's `ssh://` connection reads is not enough. The host needs
+systemd, Docker and `jq`. Its create command writes:
 
 - `/etc/envoy/listener.env`, the container's environment;
 - `/etc/envoy/watchdog.json`, the image, network and health check to recreate the container with;
@@ -217,8 +227,8 @@ stand for your own values.
 
 ### YAML
 
-The whole `Pulumi.yaml` of a project with one listener, reading its seed from a secret config value
-(`pulumi config set --secret natsSeed <seed>`):
+The whole `Pulumi.yaml` of a project with one listener, reading its seed from a secret config
+value:
 
 ```yaml
 name: envoy-listeners
@@ -255,6 +265,19 @@ outputs:
   containerName: ${example-host-a.containerName}
   port: ${example-host-a.port}
 ```
+
+In the project's directory, with your Pulumi backend selected:
+
+```sh
+pulumi stack init <stack>
+pulumi config set --secret natsSeed <seed>
+pulumi preview
+```
+
+The preview plans `+ 5 to create`: the stack, the docker provider `docker-example-host-a`, the
+listener `example-host-a`, and the listener's `example-host-a-image` (a `RemoteImage`) and
+`example-host-a-container` (a `Container`). Its outputs are `containerName: "envoy-listener"` and
+`port: 9020`. `pulumi up` then applies it.
 
 ### TypeScript
 

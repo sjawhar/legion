@@ -899,6 +899,20 @@ jobs:
       - name: Determine next version
         id: version
         run: |
+          # A tag already at this commit is a re-run of a run that pushed it, perhaps without its
+          # release: rebuild and release that version, as release-envoy-listener.yaml does, so the
+          # tag and release steps below take their reuse branches rather than the run skipping.
+          EXISTING_TAG=$(git tag --list 'envoy-infra-v*' --points-at HEAD --sort=-v:refname | head -1)
+          if [ -n "$EXISTING_TAG" ]; then
+            {
+              echo "version=${EXISTING_TAG#envoy-infra-v}"
+              echo "release_tag=$EXISTING_TAG"
+              echo "skip=false"
+            } >> "$GITHUB_OUTPUT"
+            echo "Ensuring release for existing tag $EXISTING_TAG"
+            exit 0
+          fi
+
           PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # The first release is 0.1.0, as the listener's first was: the history of the paths
@@ -1025,6 +1039,10 @@ jobs:
           fi
           git tag "$TAG"
           git push origin "refs/tags/$TAG"
+      # A re-run can find this release already there. gh release create makes a draft, uploads every
+      # asset and only then publishes it, so a published release holds them all and is reused as
+      # is. A draft is what a job that died mid-upload leaves (gh release view finds drafts too), so
+      # this run uploads its own attested assets over it and publishes it.
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
@@ -1032,8 +1050,14 @@ jobs:
           TAG: ${{ steps.version.outputs.release_tag }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $TAG already exists; reusing it"
+          if is_draft=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$is_draft" = true ]; then
+              echo "Release $TAG is an unpublished draft; uploading this run's assets and publishing it"
+              gh release upload "$TAG" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+              gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
+            else
+              echo "Release $TAG already exists; reusing it"
+            fi
           else
             gh release create "$TAG" \
               assets/* \
