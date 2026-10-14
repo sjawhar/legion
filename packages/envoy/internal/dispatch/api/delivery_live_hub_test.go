@@ -991,6 +991,11 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	if _, err := rig.database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
 		t.Fatalf("truncate events: %v", err)
 	}
+	// The retitle commits before the refill: the refill's insert fires 0107's events_notify trigger
+	// itself, so the hub can read the reset and recompute before the test's own notification.
+	if _, err := rig.database.Pool.Exec(t.Context(), `update issues set title = 'Ship every widget' where key = $1`, key); err != nil {
+		t.Fatalf("retitle the issue without an event: %v", err)
+	}
 	if _, err := rig.database.Pool.Exec(t.Context(), `
 		insert into events (project_key, seq, type, actor, payload, notify, created_at)
 		select 'HUB', n, 'user_state.updated', '{"kind":"user","id":"alice"}', '{}', false, now() - interval '1 hour'
@@ -1000,9 +1005,6 @@ func TestAResetEventLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	}
 	if _, err := rig.database.Pool.Exec(t.Context(), `update projects set last_seq = 5 where key = 'HUB'`); err != nil {
 		t.Fatalf("move the project's sequence: %v", err)
-	}
-	if _, err := rig.database.Pool.Exec(t.Context(), `update issues set title = 'Ship every widget' where key = $1`, key); err != nil {
-		t.Fatalf("retitle the issue without an event: %v", err)
 	}
 	notifyChannel(t, rig.database, dispatchEventsChannel, "")
 	delta = conn.delta(t, 3*time.Second, "t")
@@ -1022,7 +1024,10 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 	rig.hub.catchUpNow()
 	_, before := rig.cursors()
 
-	// 500 events no view reads, written without the broker, as another task's would be.
+	// 500 events no view reads, written without the broker, as another task's would be. The insert
+	// fires 0107's events_notify trigger itself, so the hub can catch up past them before the test's
+	// own notification; the mark is taken first so that catch-up counts.
+	start := rig.mark()
 	if _, err := rig.database.Pool.Exec(t.Context(), `
 		insert into events (project_key, seq, type, actor, payload, notify)
 		select 'HUB', (select last_seq from projects where key = 'HUB') + n, 'artifact.version', '{"kind":"user","id":"alice"}', '{}', false
@@ -1034,12 +1039,13 @@ func TestACatchUpPastIgnoredEventsAdvancesTheCursor(t *testing.T) {
 	if err := rig.database.Pool.QueryRow(t.Context(), `select max(id) from events`).Scan(&newest); err != nil {
 		t.Fatalf("read the newest event: %v", err)
 	}
-	start := rig.mark()
 	notifyChannel(t, rig.database, dispatchEventsChannel, "")
 	rig.waitFor(t, start, 3*time.Second, "the catch-up", func(note deliveryHubNote) bool {
 		return note.what == "events caught up" && note.through == newest
 	})
-	if n := rig.count(start, func(note deliveryHubNote) bool { return note.what == "events caught up" && note.from == before }); n != 1 {
+	if n := rig.count(start, func(note deliveryHubNote) bool {
+		return note.what == "events caught up" && note.from == before && note.through == newest
+	}); n != 1 {
 		t.Fatalf("catch-ups from the cursor before the 500 events = %d, want 1", n)
 	}
 	second := rig.mark()
