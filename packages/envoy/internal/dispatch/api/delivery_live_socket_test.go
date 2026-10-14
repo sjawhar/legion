@@ -216,7 +216,8 @@ func (c *socketClient) refusal(t *testing.T, within time.Duration, sub, code str
 }
 
 // closeCode waits within within for the socket to end, counting the messages it is sent first, and
-// answers the close code Dispatch ended it with: 0 for an end with no close frame.
+// answers the close code Dispatch ended it with: 1006 for an end with no close frame, which gorilla
+// reads from the connection's end, and 0 for an error with no code, such as a reset.
 func (c *socketClient) closeCode(t *testing.T, within time.Duration) (code, messages int) {
 	t.Helper()
 	deadline := time.After(within)

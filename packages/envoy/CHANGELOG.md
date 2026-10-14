@@ -697,11 +697,16 @@
 
 ### Fixed
 
-- A Delivery or Pipeline page that stops answering the `GET /ws/delivery` socket's pings now loses
-  the socket with no close frame, which the page reads as 1006, rather than with 1008, which says
-  the caller no longer resolves (LEGION-690). With no read buffer of its own the socket read through
-  the request's connection reader, which cancels the request's context on a read error, so the end
-  of the pong deadline closed it as a policy violation. The page reconnects with backoff either way.
+- The `GET /ws/delivery` socket now gives itself a read buffer, so a page that stops answering its
+  pings loses the socket with no close frame (1006 to the page) whichever gorilla/websocket it is
+  built with (LEGION-690). Without one, the socket depended on what gorilla does with net/http's
+  hijacked reader. The published image builds `packages/envoy` in module mode (its Dockerfile copies
+  no `go.work`) with gorilla v1.5.3, which resets that reader onto the raw connection, so production
+  never sent 1008 here. A workspace build (CI, `go test` from a checkout) links
+  v1.5.4-0.20250319132907-e064f32e3674, which `packages/daemon`'s client-go requires and which keeps
+  the reader on net/http's connection reader; that reader's read error cancels the request's
+  context, so the end of a pong deadline closed the socket with 1008, the code for a caller that no
+  longer resolves. The page reconnects with backoff after either close.
 
 - A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
   line a pasted picture is written as, now shows in the document editor and in a past version,

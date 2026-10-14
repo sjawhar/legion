@@ -45,6 +45,14 @@ const (
 	deliverySocketWriteWait = 10 * time.Second
 	// deliverySocketCloseWait is how long a socket that sent its close frame waits for the page's.
 	deliverySocketCloseWait = time.Second
+	// deliverySocketReadBuffer is the socket's own read buffer, gorilla's default size. Setting one
+	// at all is what matters: with a zero ReadBufferSize, gorilla reuses the bufio reader net/http
+	// hands over at the hijack. The gorilla a workspace build links (v1.5.4-0.20250319132907-
+	// e064f32e3674, which packages/daemon's client-go requires) leaves that reader on net/http's
+	// connection reader, whose read error cancels the request's context, so the writer would close a
+	// page whose pong deadline passed with 1008, as if its caller no longer resolved. The v1.5.3
+	// packages/envoy/go.mod names, which the image builds, resets the reader onto the raw connection.
+	deliverySocketReadBuffer = 4096
 )
 
 // deliverySocket is one open GET /ws/delivery socket, the deliveryLiveConn the hub sends to.
@@ -175,12 +183,7 @@ func (s *server) serveDeliverySocket(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	// A read buffer of the socket's own keeps its reads off the request's connection. With none,
-	// gorilla reads through the bufio reader net/http hands over at the hijack, whose reads still
-	// go through the request's connection reader, and that reader cancels the request's context on
-	// any read error; the writer would then read the end of a pong deadline as the caller no longer
-	// resolving and close with 1008.
-	upgrader := gws.Upgrader{EnableCompression: true, ReadBufferSize: 4096}
+	upgrader := gws.Upgrader{EnableCompression: true, ReadBufferSize: deliverySocketReadBuffer}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // the upgrader has answered the request
