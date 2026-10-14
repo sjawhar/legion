@@ -181,7 +181,7 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 
 func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 	s := newSubcommand("webhook-listener-env",
-		"--machine-id <id> [--nats-url <url>]... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] "+
+		"--machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] "+
 			"--listen-host <h> --host-bridge <h> --nats-replicas <n>", stderr,
 		map[string]string{
 			"machineId":      "machine-id",

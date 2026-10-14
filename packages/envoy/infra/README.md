@@ -512,8 +512,8 @@ Each component refuses these before it registers anything, with an error naming 
 the input:
 
 - `aws:NatsService`: an `authorization` refused under [NATS authorization](#nats-authorization); an
-  empty `configPath` with `authorization`; a `configHeader` line holding a line break; an empty
-  `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
+  empty `configPath` with `authorization`; a `configHeader` line holding a line break, with
+  `authorization`; an empty `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
 - `aws:WebhookListener`: a webhook's input missing while `webhooks` lists it (a blank
   `reviewerAppId` or `mentionTrigger` counts as missing) or given while it does not, each input
   checked before the list; then a `webhooks` other than exactly `["github", "slack"]`; a blank
@@ -529,16 +529,28 @@ no value is refused the same way.
 ### Inputs that take an output
 
 The inputs a program takes from its other resources are Pulumi inputs: the IDs, ARNs and names of
-your resources, the optional secret ARNs and `natsUrls`. Every other input takes a value the
-program knows when it runs, and the plugin refuses another resource's output there, naming the
-input, before the component registers anything. The schema marks those inputs `plain`, but only
-partly: pulumi-go-provider's inference marks a list's or a map's elements and not the list or map,
-and nothing in an object type. So a generated SDK takes an output for `authorization`,
-`configHeader`, `serverArgs`, `tailnetTags`, `webhooks` and `baseTags`, and the plugin refuses it:
+your resources, the optional secret ARNs, `natsUrls`, and each element of `subnetIds`. Every other
+input takes a value the program knows when it runs, and the plugin refuses another resource's
+output there, naming the input, before the component registers anything. The schema marks those
+inputs `plain`, but only partly: pulumi-go-provider's inference marks a list's or a map's elements
+and not the list or map, and nothing in an object type. So a generated SDK takes an output for
+`authorization`, `configHeader`, `serverArgs`, `tailnetTags`, `webhooks` and `baseTags`, and the
+plugin refuses it:
 
 ```text
 envoy-infra:aws:NatsService resource 'example-nats' has a problem: failed to copy inputs for example-nats (envoy-infra:aws:NatsService): copying input "configHeader": expected destination type to implement pulumi.Input or pulumi.Output, got []string
 ```
+
+`subnetIds` is a list of inputs, not an input of a list: each subnet ID may be an output, but the
+list itself must be known when the program runs, since each component counts the subnets to name
+their mount targets and place the service. The generated SDK accepts one output for the whole
+list, such as `subnet_ids=vpc.private_subnet_ids`, and the plugin refuses it:
+
+```text
+copying input "subnetIds": expected destination type to implement pulumi.Input or pulumi.Output, got []pulumi.StringInput
+```
+
+Pass a list with one entry per subnet, each entry a subnet's ID or its output.
 
 ### Secrets stay yours
 
@@ -785,7 +797,7 @@ authorization {
 ### webhook-listener-env
 
 ```text
-envoy-infra render webhook-listener-env --machine-id <id> [--nats-url <url>]... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>
+envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>
 ```
 
 Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
