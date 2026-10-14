@@ -141,11 +141,10 @@ until it connects.
 `watchdog: {host: <address>}` installs a systemd timer on the host that checks the
 `envoy-listener` container 30 seconds after boot and every 60 seconds after that. When the
 container is not running, the timer's script runs `docker start` on it if it is `exited` or
-`created`, recreates it if it is missing, and removes and recreates it in any other state, such as
-`restarting`. A `paused` container stays paused: the script runs `docker start` on it too, which
-Docker refuses, so every run fails until someone unpauses it. The script is the existing Docker-host
-deployment's, byte for byte, so that deployment can move onto this component without a change on
-the host.
+`created`, recreates it if it is missing, and removes and recreates it in any other state but
+`paused`, such as `restarting`. A `paused` container stays paused: the script runs `docker start`
+on it too, which Docker refuses, so every run fails until someone unpauses it. The script's text
+is fixed, since any change to it reruns the create command on every host.
 
 `<name>-watchdog` installs it over SSH from the machine running Pulumi, logging in as root, so
 `host` is the bare SSH address with no user and no scheme. The component gives the SSH connection
