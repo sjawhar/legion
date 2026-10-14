@@ -546,8 +546,9 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("SignInIssuer = %q", boot.SignInIssuer)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": ""}, "DISPATCH_SIGNIN_ISSUER missing")
-			// Cookie identity is Google sign-in: with none of the four, the server refuses to start.
-			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_ISSUER")
+			// Cookie identity is Google sign-in: with none of the sign-in settings, the server refuses to start.
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_ISSUER": "", "DISPATCH_SIGNIN_CLIENT_ID": "", "DISPATCH_SIGNIN_CLIENT_SECRET": "", "DISPATCH_SIGNIN_GROUP": ""},
+				"cookie identity signs people in with Google Workspace: DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET and one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN are required")
 			// The pool main discovers: /auth/start sends the browser to its authorization endpoint.
 			t.Run("router", func(t *testing.T) {
 				if location := startSignIn(t, signInRouter(t, boot, peopleStore(t))).Header().Get("Location"); !strings.HasPrefix(location, pool.URL()+"/") {
@@ -598,7 +599,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			if boot.SignInGroup != "table-group" {
 				t.Errorf("SignInGroup = %q", boot.SignInGroup)
 			}
-			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP missing")
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_GROUP": ""}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN missing")
 			// The group the router's sign-in admits: a member signs in, anyone else is refused. Past
 			// the hour, the membership check main attaches to cookie identity renews the member's
 			// sign-in with the pool against the same group, and signs out a person the pool no
@@ -646,6 +647,22 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					t.Errorf("a member the pool dropped from table-group, past the hour: whoami answered %d %s, want 401", response.Code, response.Body.String())
 				}
 			})
+		},
+		"DISPATCH_SIGNIN_DOMAIN": func(t *testing.T) {
+			google := map[string]string{"DISPATCH_SIGNIN_ISSUER": "https://accounts.google.com", "DISPATCH_SIGNIN_GROUP": ""}
+			domain := func(value string) map[string]string {
+				overrides := map[string]string{"DISPATCH_SIGNIN_DOMAIN": value}
+				for name, value := range google {
+					overrides[name] = value
+				}
+				return overrides
+			}
+			boot := resolveWith(t, domain(" example.com "))
+			if boot.SignInDomain != "example.com" || boot.SignInGroup != "" {
+				t.Errorf("SignInDomain = %q, SignInGroup = %q", boot.SignInDomain, boot.SignInGroup)
+			}
+			refusedWith(t, domain("Example.com"), "DISPATCH_SIGNIN_DOMAIN must be a lowercase domain name such as example.com; got Example.com")
+			refusedWith(t, map[string]string{"DISPATCH_SIGNIN_DOMAIN": "example.com"}, "DISPATCH_SIGNIN_GROUP and DISPATCH_SIGNIN_DOMAIN are both set")
 		},
 		"DISPATCH_IDENTITY_HEADER_TRUSTED": func(t *testing.T) {
 			for _, value := range []string{"", "true"} {

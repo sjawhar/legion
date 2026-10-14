@@ -65,12 +65,14 @@ type bootConfig struct {
 	EnvoyURL       string
 	GitHubAPIBase  string
 	IdentityHeader string
-	// SignInIssuer, SignInClientID, SignInClientSecret and SignInGroup configure Google sign-in
-	// through the sign-in pool (DISPATCH_SIGNIN_*): all four or none; empty means no sign-in.
+	// SignInIssuer, SignInClientID and SignInClientSecret, with exactly one of SignInGroup and
+	// SignInDomain, configure Google sign-in (DISPATCH_SIGNIN_*): through a Cognito sign-in pool
+	// for a group, or with Google directly for a Workspace domain; empty means no sign-in.
 	SignInIssuer       string
 	SignInClientID     string
 	SignInClientSecret string
 	SignInGroup        string
+	SignInDomain       string
 	NATSDisabled       bool
 	TestHooksEnabled   bool
 	// SettleDelay is how long a document waits after a live change before it settles, zero for the
@@ -239,7 +241,10 @@ func main() {
 		slog.Error("dispatch: discover the sign-in issuer", "error", err)
 		os.Exit(1)
 	}
-	if signIn != nil {
+	switch {
+	case signIn != nil && boot.SignInDomain != "":
+		slog.Info("dispatch: signing people in with Google for a Workspace domain", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "domain", boot.SignInDomain)
+	case signIn != nil:
 		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
 	}
 
@@ -501,6 +506,7 @@ func resolveBootConfig(env settingValues) (bootConfig, error) {
 		SignInClientID:     strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_ID")),
 		SignInClientSecret: strings.TrimSpace(env.get("DISPATCH_SIGNIN_CLIENT_SECRET")),
 		SignInGroup:        strings.TrimSpace(env.get("DISPATCH_SIGNIN_GROUP")),
+		SignInDomain:       strings.TrimSpace(env.get("DISPATCH_SIGNIN_DOMAIN")),
 		NATSDisabled:       env.get("DISPATCH_NATS_DISABLED") == "1",
 		TestHooksEnabled:   env.get("DISPATCH_TEST_HOOKS") == "1",
 		WebDist:            env.get("DISPATCH_WEB_DIST"),
@@ -789,7 +795,7 @@ func bootTask(ctx context.Context, timeout time.Duration, failed, done string, t
 // configuration, with every setting the router takes from boot filled in. The settings tests build
 // the router through it, so dropping any hand-off here fails a case.
 func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.AppContextOptions {
-	built.SignInGroup = boot.SignInGroup
+	built.SignInRule = signInRule(boot)
 	built.AgentTokens = boot.AgentTokens
 	built.DefaultProject = boot.DefaultProject
 	built.InsecureCookie = boot.InsecureCookie

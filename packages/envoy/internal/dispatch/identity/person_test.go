@@ -7,12 +7,15 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc"
 )
 
+// dispatchMembers is the group rule the Cognito tests sign in under.
+var dispatchMembers = SignInRule{Group: "dispatch-members"}
+
 func TestPersonIsTheLowercasedEmailTheProviderUsernameCarries(t *testing.T) {
 	email, err := Person(oidc.Claims{
 		Username:  "ExampleIdP_A.B+C@D.example",
 		Groups:    []string{"other-group", "dispatch-members"},
 		Providers: []string{"ExampleIdP"},
-	}, "dispatch-members")
+	}, dispatchMembers)
 	if err != nil {
 		t.Fatalf("Person: %v", err)
 	}
@@ -26,14 +29,14 @@ func TestPersonOutsideTheGroupIsRefusedByName(t *testing.T) {
 		Username:  "ExampleIdP_contractor@d.example",
 		Groups:    []string{"other-group"},
 		Providers: []string{"ExampleIdP"},
-	}, "dispatch-members")
+	}, dispatchMembers)
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("Person outside the group: err = %v, want ErrNotMember", err)
 	}
 	if email != "contractor@d.example" {
 		t.Fatalf("refused person = %q, want the email, so the refusal can name them", email)
 	}
-	if _, err := Person(oidc.Claims{Username: "ExampleIdP_x@d.example", Providers: []string{"ExampleIdP"}}, "dispatch-members"); !errors.Is(err, ErrNotMember) {
+	if _, err := Person(oidc.Claims{Username: "ExampleIdP_x@d.example", Providers: []string{"ExampleIdP"}}, dispatchMembers); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("Person in no group: err = %v, want ErrNotMember", err)
 	}
 }
@@ -49,7 +52,7 @@ func TestPersonRefusesAUsernameNoProviderIssued(t *testing.T) {
 		{Username: "ExampleIdP_two@at@d.example", Groups: []string{"dispatch-members"}, Providers: []string{"ExampleIdP"}},
 		{Username: "_sami@d.example", Groups: []string{"dispatch-members"}, Providers: []string{""}},
 	} {
-		if email, err := Person(claims, "dispatch-members"); !errors.Is(err, ErrNoPerson) {
+		if email, err := Person(claims, dispatchMembers); !errors.Is(err, ErrNoPerson) {
 			t.Errorf("Person(%+v) = %q, %v; want ErrNoPerson", claims, email, err)
 		}
 	}

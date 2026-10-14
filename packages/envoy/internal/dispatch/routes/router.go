@@ -58,11 +58,12 @@ type AppContext struct {
 	Store          *store.Store
 	DefaultProject string
 	ServerURL      string
-	// SignIn is the sign-in pool's authorization code flow and SignInGroup the group a person
-	// must be in to sign in; a nil SignIn is a test/local header-identity or dev sign-in server,
-	// whose /auth/start and /auth/callback answer 503.
-	SignIn      *oidc.CodeFlow
-	SignInGroup string
+	// SignIn is the sign-in issuer's authorization code flow and SignInRule who it admits: the
+	// members of a Cognito pool's group, or the people of a Google Workspace domain. A nil SignIn
+	// is a test/local header-identity or dev sign-in server, whose /auth/start and /auth/callback
+	// answer 503.
+	SignIn     *oidc.CodeFlow
+	SignInRule identity.SignInRule
 	// InsecureCookie drops the Secure attribute from every cookie the router sets, for browsers
 	// reaching Dispatch over plain http (cmd/dispatch: DISPATCH_INSECURE_COOKIE).
 	InsecureCookie bool
@@ -84,7 +85,7 @@ type AppContextOptions struct {
 	People         auth.PeopleStore
 	Identity       identity.Identity
 	SignIn         *oidc.CodeFlow
-	SignInGroup    string
+	SignInRule     identity.SignInRule
 	Store          *store.Store
 	AgentTokens    *auth.SharedAgentTokens
 	DefaultProject string
@@ -126,8 +127,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.People == nil {
 		return nil, fmt.Errorf("BuildAppContext: People store required")
 	}
-	if opts.SignIn != nil && opts.SignInGroup == "" {
-		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInGroup")
+	if opts.SignIn != nil && (opts.SignInRule.Group == "") == (opts.SignInRule.Domain == "") {
+		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInRule naming exactly one of a group or a domain")
 	}
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
@@ -178,7 +179,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		DefaultProject: opts.DefaultProject,
 		ServerURL:      strings.TrimSuffix(opts.ServerURL, "/"),
 		SignIn:         opts.SignIn,
-		SignInGroup:    opts.SignInGroup,
+		SignInRule:     opts.SignInRule,
 		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
@@ -268,7 +269,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 
 // authCallback completes a sign-in the sign-in pool redirected back: it exchanges the code for
 // the person's ID token, names them by the email their Google Workspace username carries, and
-// signs in only a member of SignInGroup, keeping the pool's refresh token to confirm that
+// signs in only a member of SignInRule's group, keeping the pool's refresh token to confirm that
 // membership hourly.
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
@@ -297,7 +298,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
-	email, err := identity.Person(session.Claims, r.ctx.SignInGroup)
+	email, err := identity.Person(session.Claims, r.ctx.SignInRule)
 	if err != nil {
 		slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
 		writeSignInRefusedPage(w, email, err)
@@ -377,7 +378,7 @@ func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) 
 }
 
 func signInUnconfigured(w http.ResponseWriter) {
-	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, DISPATCH_SIGNIN_GROUP)", "SIGNIN_UNCONFIGURED")
+	writeCodeError(w, http.StatusServiceUnavailable, "Google sign-in is not configured on this server (DISPATCH_SIGNIN_ISSUER, DISPATCH_SIGNIN_CLIENT_ID, DISPATCH_SIGNIN_CLIENT_SECRET, one of DISPATCH_SIGNIN_GROUP or DISPATCH_SIGNIN_DOMAIN)", "SIGNIN_UNCONFIGURED")
 }
 
 // ───── static ───────────────────────────────────────────────────────────────

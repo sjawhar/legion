@@ -142,15 +142,15 @@ func newSignInRig(t *testing.T, serverURL string) *signInRig {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}
 	rig := &signInRig{issuer: issuer, people: newMemoryPeople(), sessions: &memorySessionStore{generations: map[string]int64{}}, now: time.Now()}
-	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Group: rigGroup, Now: rig.clock}
+	membership := &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: identity.SignInRule{Group: rigGroup}, Now: rig.clock}
 	rig.ctx, err = BuildAppContext(AppContextOptions{
-		SigningKey:  "signing-key",
-		People:      rig.people,
-		Sessions:    rig.sessions,
-		Identity:    identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
-		SignIn:      flow,
-		SignInGroup: rigGroup,
-		ServerURL:   serverURL,
+		SigningKey: "signing-key",
+		People:     rig.people,
+		Sessions:   rig.sessions,
+		Identity:   identity.CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: membership},
+		SignIn:     flow,
+		SignInRule: identity.SignInRule{Group: rigGroup},
+		ServerURL:  serverURL,
 	})
 	if err != nil {
 		t.Fatalf("build context: %v", err)

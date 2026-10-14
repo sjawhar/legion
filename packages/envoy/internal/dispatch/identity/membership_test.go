@@ -64,7 +64,7 @@ func newMembershipRig(t *testing.T) *membershipRig {
 		People:   rig.people,
 		Sessions: rig.sessions,
 		SignIn:   flow,
-		Group:    memberGroup,
+		Rule:     SignInRule{Group: memberGroup},
 		Now:      func() time.Time { return rig.now },
 	}
 	return rig

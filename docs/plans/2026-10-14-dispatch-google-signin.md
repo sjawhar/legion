@@ -141,18 +141,20 @@ directory.
 
 **Files:** `cmd/dispatch/settings.go`, `signin.go`, `main.go`, `main_test.go`, `settings_test.go`.
 
-- [ ] Test first: a domain with the three and Google's issuer passes; each D1 refusal, with its
+- [x] Test first: a domain with the three and Google's issuer passes; each D1 refusal, with its
   text; the domain beside header identity, beside dev sign-in, and alone; the changed assertions
   listed in D1; a four-setting Cognito deployment passes as today. `TestEverySettingReachesItsReader`
   gets a domain case built on the group case at `settings_test.go:595-650`: resolve under
-  `https://accounts.google.com` with `DISPATCH_SIGNIN_GROUP` empty (`bootEnvironment` sets one,
-  `main_test.go:950-955`) and assert the boot field, then point `boot.SignInIssuer` at the fake
-  issuer's URL before the router subtest, so no test calls Google; plus a refusal, and a router
-  sign-in with Google-shaped claims and an aged confirmation. Run, see them fail.
-- [ ] Add the row; update the issuer row's "all four … or none" (`settings.go:50`), the group row's
+  `https://accounts.google.com` with `DISPATCH_SIGNIN_GROUP` empty (`bootEnvironment`,
+  `settings_test.go:246`, takes `signInEnvironment`, whose group is `main_test.go:42`) and assert
+  the boot field, then point `boot.SignInIssuer` at the fake issuer's URL before the router
+  subtest, so no test calls Google; plus a refusal, and a router sign-in with Google-shaped claims
+  and an aged confirmation (that subtest lands with Task 3, the first commit where a domain
+  sign-in can pass). Run, see them fail.
+- [x] Add the row; update the issuer row's "all four … or none" (`settings.go:50`), the group row's
   Required column (`:55`) and the refusal sentence at `:112`; implement the checks; thread the
   `SignInRule` to the router and membership.
-- [ ] Run `go test -v ./cmd/dispatch/` with `DISPATCH_TEST_DATABASE_URL` set (`scripts/dev-postgres.sh`;
+- [x] Run `go test -v ./cmd/dispatch/` with `DISPATCH_TEST_DATABASE_URL` set (`scripts/dev-postgres.sh`;
   `storetest.Open` skips without it, `storetest.go:51-61`), and confirm the new cases ran, not skipped;
   pass.
 

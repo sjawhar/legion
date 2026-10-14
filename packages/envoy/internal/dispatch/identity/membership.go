@@ -25,16 +25,16 @@ type Refresher interface {
 	Refresh(ctx context.Context, refreshToken string) (oidc.Session, error)
 }
 
-// Membership confirms that a person signed in through the sign-in pool may still use Dispatch: a
-// confirmation younger than MembershipMaxAge stands, and an older one is renewed by refreshing
-// the person's sign-in. A refresh the pool refuses, or one whose ID token no longer names this
-// person in Group, ends every session the person holds: it advances their session generation and
-// forgets their refresh token, so they sign in again or not at all.
+// Membership confirms that a person signed in through the sign-in issuer may still use Dispatch:
+// a confirmation younger than MembershipMaxAge stands, and an older one is renewed by refreshing
+// the person's sign-in. A refresh the issuer refuses, or one whose ID token no longer names this
+// person under Rule, ends every session the person holds: it advances their session generation
+// and forgets their refresh token, so they sign in again or not at all.
 type Membership struct {
 	People   auth.PeopleStore
 	Sessions auth.SessionStore
 	SignIn   Refresher
-	Group    string
+	Rule     SignInRule
 	// Now is the clock confirmations are dated by; nil is time.Now.
 	Now func() time.Time
 
@@ -81,7 +81,7 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	if err != nil {
 		return m.end(ctx, email, err.Error())
 	}
-	person, err := Person(session.Claims, m.Group)
+	person, err := Person(session.Claims, m.Rule)
 	if err != nil {
 		return m.end(ctx, email, err.Error())
 	}
