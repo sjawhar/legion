@@ -15,6 +15,7 @@ module: packages/envoy/internal/dispatch/docs
 related_issues:
   - "LEGION-573"
   - "sjawhar/legion#1944"
+  - "LEGION-752"
 symptoms:
   - "a server rule reads who answered a block from the document tree's own attributes"
   - "a comparison hand-picks the attributes it checks and a review round names one more"
@@ -36,7 +37,7 @@ name on the strength of that tree is recording the peer's claim.
   writing the predicate, list every writer of each input (the HTTP routes *and* the CRDT socket
   path) and write the rule over the table only an authenticated-human route can write. In the
   carry (`docs/approval_carry.go`, `carryApproval`), a block's state, answerer and time are the
-  document's `asks` rows (`loadAskBlocks`, `rowBackedStates`), and the candidates are the rows'
+  document's `asks` rows (`loadAskBlocks`, `rowBackedBlocks`), and the candidates are the rows'
   answerers (`answerers`, `candidateApproval`).
 - A tree node that must agree with a row is not compared field by field: run the server's own
   writer on a copy of the node with the row and require it to change nothing, over the writer's own
@@ -46,7 +47,7 @@ name on the strength of that tree is recording the peer's claim.
   test (`askBlock.asks(model.NewAskEditPrevious(ask))`).
 - A node no row of this document backs, a copy of another document's block, a node settlement
   could not read, and a block id the tree repeats each refuse the whole rule (`askNodes`,
-  `rowBackedStates`). Refuse wherever the indexer you borrow authority from refuses: settlement
+  `rowBackedBlocks`). Refuse wherever the indexer you borrow authority from refuses: settlement
   indexes the first node of a repeated id, so "first node wins" is a door.
 - A consent rule compares against what was consented to. The baseline is the version the human
   approved, `A`, alone; every read is `N`, `A`, or a row, and a third source (the previous version,
@@ -67,16 +68,23 @@ name on the strength of that tree is recording the peer's claim.
 
 ## Tests that pin it
 
-- `TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode`,
+- `TestRowBackedBlocksReadRowsAndRefuseAForgedACopiedAndAnInvalidNode`,
+  `TestAnApprovedVersionsBlocksAreHeldAsTheirRows`,
   `TestAskNodesOfTheCarriedVersionReadEveryBlockOnceAndRefuseARepeatedID`,
   `TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion` (pure, `docs/approval_carry_test.go`).
-- `TestAForgedAnsweredBlockOnTheSocketCarriesNoApproval` and
-  `TestAVersionHoldingARepeatedBlockIDCarriesNothing` (through the live room, `docs`).
+- `TestAForgedAnsweredBlockOnTheSocketCarriesNoApproval`,
+  `TestAVersionHoldingARepeatedBlockIDCarriesNothing` and
+  `TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing` (through the live room, `docs`).
 - `TestAForgedServerAttributeOnADecidedBlockCarriesNothing` (`api/approval_carry_test.go`: one
   subtest per name in `askServerAttributeNames`, through the live attribute path and
   `POST /versions` inside the settle window), `TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry`,
   `TestARestoredBlockAnsweredBeforeTheApprovalCarriesNothing`,
   `TestACopiedBlockPlantedSinceHisApprovalDoesNotCarry`, `TestTwoHumansAnswersInOneVersionDoNotCarry`.
+- `TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing` and
+  `TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing`
+  (`api/approval_carry_approved_test.go`: the approved version held to the rows, the human's
+  approval landing inside the settle window on a version settlement had not yet written the row
+  back into; the `row-true` subtest is the control that carries).
 
 ## Evidence
 
@@ -99,7 +107,14 @@ Dispatch built from the branch against an embedded Postgres, over HTTP and the d
 with the dashboard's own `yjs` + `@hocuspocus/provider`, with the previous round's binary as the
 negative control.
 
-Recorded, not closed, at the merge: the approved version `A`'s nodes are still read on the three
-state attributes (`askBlockStates`, `shownAskState`), so a stored approved version whose decided
-block carried a non-row `selected` compares as unchanged against a row-true `N`; the drift is
-toward the row's truth and attributes nothing, and the PR's fast-follow line names it.
+Recorded at the merge and closed by LEGION-752: the approved version `A`'s nodes were read on the
+three state attributes (`askBlockStates`, `shownAskState`), so a stored approved version whose
+decided block carried a non-row `selected`, `answer`, copy provenance or question compared as
+unchanged against a row-true `N`. `A`'s blocks are now held to `N`'s rows by the same predicate
+as `N`'s own (`blockAsSettlementLeavesIt`, through `heldAsItsRow`), the three-attribute reading
+is gone, and `N`'s blocks travel as their rows; `A`'s nodes are read through `askNodes` as `N`'s
+are, though a stored version's read-back (`pmdoc.ParseRendering`) repairs a repeated block id
+before the carry reads it, so a stored repeat never carried on either side - it shows `A` holding
+a block `N` never had. Pinned by `TestAnApprovedVersionShowingADecisionOtherThanItsRowsCarriesNothing`,
+`TestAnApprovedVersionShowingADecidedBlockUnderOtherWordingCarriesNothing` and
+`TestAnApprovedVersionHoldingARepeatedBlockIDCarriesNothing`.

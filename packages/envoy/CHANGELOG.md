@@ -731,6 +731,21 @@
 
 ### Fixed
 
+- The approval carry holds the version a human approved to the document's asks rows as it holds
+  the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
+  his approval only while the approved version holds a block under the same id whose stored
+  attributes and, for a decided row, wording are what settlement's own writer leaves from that
+  block's row - the whole server-owned set, not `state`, `answered_by` and `answered_at` alone -
+  so an approved version stored inside the settle window, showing a selection, an answer, a copy's
+  provenance or a question other than its row's on a decided block, no longer compares as
+  unchanged against the row-true version his later answer writes: that block is a change, which
+  must be his own answer since his approval, and his answer to another block carries nothing
+  (`stale`, as before the carry existed). The same sequence over an approved version whose block
+  is as its row has it carries, as before. The approved version's blocks are read as the new
+  version's are (`askNodes`); a stored version's read-back repairs a repeated block id before the
+  carry reads it, so a stored version that held an id twice shows a block the new version never
+  had and carried nothing before this change either.
+
 - A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
   line a pasted picture is written as, now shows in the document editor and in a past version,
   drawn from the version's bytes route; before, the editor's `<img>` carried the `dispatch://`
