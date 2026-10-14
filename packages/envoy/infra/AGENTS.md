@@ -33,7 +33,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); and `InputError`, a refusal naming the input it refuses. |
+| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -49,44 +49,53 @@ versions. Never add the module to the root `go.work`.
   also runs outside the plugin, as the unit tests run it under `pulumi.WithMocks`, where no call
   carries one (`host/listener.go`, `listenerType`). `provider.New` serves it through
   `infer.ComponentF`.
-- **Providers.** Before it registers anything, a component calls
-  `providers.Require(ctx.Context(), <token>, <package>, opts...)` for each package it creates
-  resources with, so a missing provider fails naming the component and the package, and no
-  resource falls back to a default provider of the plugin's own SDK version. Its unit test runs it
-  without each provider and asserts nothing registered.
-- **Refusals.** Every refusal names the input. A component refuses every input it holds as a plain
-  value before it registers anything, and its unit test asserts nothing but the test's providers
-  registered. `NewListener` refuses an explicit `port` 0, then calls
-  `core.ListenerConfig.CheckPlain` (a blank `machineId`, a `port` outside 1-65535, a `hostBridge`
-  with surrounding whitespace), then the watchdog's three refusals and a missing provider
-  (`host/listener.go:90-124`). Only `natsUrls`, which may be another resource's output, is checked
-  later: `core.ListenerEnv` runs `CheckPlain` again and then checks each URL, inside the `ApplyT`
-  over `natsUrls` that computes the container's environment (`:147-151`). A bad URL therefore fails
-  the preview or update when the container's `envs` resolve, after the component and its image have
-  registered, not the constructor.
+- **Resolve, then require, then register.** A component's constructor first resolves its inputs in a
+  pure function that needs no engine (`host.resolveListener`): it gives each optional input its
+  default, refuses every input it holds as a plain value, and lists the provider packages the
+  component creates resources with. The constructor then calls
+  `providers.Require(ctx.Context(), <token>, <package>, opts...)` for each of those packages, so a
+  missing provider fails naming the component and the package and no resource falls back to a
+  default provider of the plugin's own SDK version, and only then registers anything. The refusal
+  table runs against the resolver directly; one test drives the constructor with a refused input
+  and one per missing provider, each asserting nothing registered beyond the test's providers. The
+  AWS components refuse in the same order, in `WebhookListenerArgs.validate` and at the top of
+  `NewNatsService`, before they require `aws`, and their refusal tables drive the constructor under
+  mocks, each row asserting that only the provider registered.
+- **Refusals.** Every refusal names the input. `core.ListenerConfig.CheckPlain` holds the checks of
+  the listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`);
+  `core.ListenerEnv` runs it again and then checks each of `natsUrls`, the one field that may be
+  another resource's output, inside the `ApplyT` that computes the container's environment. A bad
+  URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
+  container's `envs` resolve, after the component and its image have registered, not the
+  constructor. The watchdog's create script runs as root on the host (`host.watchdogCreate`), so
+  no value of the environment, which it writes into a heredoc, may hold a control character, and
+  with a watchdog the listener's name, which it echoes in double quotes, may hold no `"`, `$`,
+  backtick, `\` or line break.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
-  output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go:395`, `:764-766`). A
-  field a consumer takes from another resource or stack is a `pulumi.*Input`, as `natsUrls` and
-  `seed` are, and gets a Construct test that sends it as another resource's output and as unknown
-  under preview (`host/construct_test.go`), a path `pulumi.WithMocks` never takes.
+  output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
+  `constructInputsCopyTo` and `copyInputTo`). A field a consumer takes from another resource or
+  stack is a `pulumi.*Input`, as `natsUrls` and `seed` are, and gets a Construct test that sends it
+  as another resource's output and as unknown under preview (`host/construct_test.go`), a path
+  `pulumi.WithMocks` never takes.
 - **Secrets.** Every input holding a secret carries `provider:"secret"`.
 - **Object types.** An object input type has an `Annotate` that sets its token
   (`a.SetToken("host", "Watchdog")`): generated SDKs append `Args` to an input type's name, so the
   Go name would reach consumers as `WatchdogArgsArgs`.
 - **Outputs.** Set a component's output fields after `RegisterComponentResource`, which replaces
   them.
-- **Release contract.** `provider.go`'s `downloadURL` names the release the release job publishes:
-  tag `envoy-infra-v<version>`, asset `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz`
-  with the binary at the archive root. The same release carries the command as
-  `envoy-infra-<os>-<arch>.tar.gz`, holding `envoy-infra-<os>-<arch>/envoy-infra` and its
-  `THIRD_PARTY_NOTICES`, the one directory a mise `github:` pin strips. Changing either side
-  breaks every consumer's install. A commit releases both only when it touches a path
-  `release.yaml` names for them, in its push paths, its `changes` job's `envoy_infra` filter and
-  the bump paths after `--`, so a `packages/envoy` package either command starts compiling in,
-  directly or through another import, goes into all three.
-  `.github/scripts/check-envoy-infra-release-paths.sh` derives that set from `go list -deps` of
-  every command under `cmd/` for every target and fails naming each path and list that misses it.
+- **Release contract.** `provider.go`'s `downloadURL` names the release
+  `.github/workflows/release-envoy-infra.yaml` publishes: tag `envoy-infra-v<version>`, asset
+  `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` with the binary at the archive root.
+  The same release carries the command as `envoy-infra-<os>-<arch>.tar.gz`, holding
+  `envoy-infra-<os>-<arch>/envoy-infra` and its `THIRD_PARTY_NOTICES`, the one directory a mise
+  `github:` pin strips. Changing either side breaks every consumer's install. A commit releases
+  both only when it touches a path that workflow's push paths name and a path
+  `.github/envoy-infra-release-paths` lists (the pathspecs its version step cuts a version from),
+  so a `packages/envoy` package either command starts compiling in, directly or through another
+  import, goes into both. `.github/scripts/check-envoy-infra-release-paths.sh` derives that set
+  from `go list -deps` of every command under `cmd/` for every target and fails naming each path
+  and list that misses it.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
@@ -104,8 +113,9 @@ versions. Never add the module to the root `go.work`.
 no output, log or error. A store's error names the call, the secret and the error's code, never
 the error's text, which can quote the request; the AWS SDK runs with its logger off
 (`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
-and every error and line it returns, for a canary seed. A new store implements `seed.Store` and
-joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+and every error and line it returns, for a canary seed. A new store implements `seed.Store`, its
+`Current` answering an error that matches `seed.ErrNotServed` when it serves no version, which
+`generate` waits out after its write, and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
@@ -115,11 +125,12 @@ fake endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`.
 ## Tests
 
 The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
-(`host/listener_test.go`, `internal/providers/`), the plugin in process through pulumi-go-provider's
-`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`), the seed command
-against a fake `Store` (`seed/seed_test.go`) and the AWS SDK against an `httptest` endpoint speaking
-Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test on any request it does not
-expect (`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
+(`host/listener_test.go`, `internal/providers/`), the refusals against `host.resolveListener`
+directly, the plugin in process through pulumi-go-provider's `integration.NewServer`
+(`provider/provider_test.go`, `host/construct_test.go`), the seed command against a fake `Store`
+(`seed/seed_test.go`) and the AWS SDK against an `httptest` endpoint speaking Secrets Manager's
+JSON 1.1 and STS's query protocol, which fails a test on any request it does not expect
+(`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
 `--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests start nats-server
 containers on this machine's Docker through `testnats`, as do the `natslive` tests
 (`seed/seed_live_test.go`: a generated seed connects, and a client without it is refused, on
@@ -128,15 +139,15 @@ containers on this machine's Docker through `testnats`, as do the `natslive` tes
 
 ```sh
 test -z "$(gofmt -l .)"
-../../../.github/scripts/check-envoy-infra-release-paths.sh
 go vet -tags pulumilive,natslive ./...
 go test ./...
 go test -tags natslive ./core/ ./seed/
 ```
 
-The release path check runs from any directory. Its own tests,
-`.github/scripts/check-envoy-infra-release-paths.test.sh`, run in the `test` job of
-`.github/workflows/pr-and-main.yaml`; run them after changing the check.
+The required `lint` job of `.github/workflows/pr-and-main.yaml` runs the release path check and
+compiles the module's commands for every release target; its `test` job runs the check's own
+tests, `.github/scripts/check-envoy-infra-release-paths.test.sh`. Run those steps from those jobs
+after changing what they cover.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit
@@ -145,14 +156,14 @@ previews with both `same`; a listener with a seed connects to an nkey-authorized
 without never does; and a Go program builds against the SDK `pulumi package add` generates. They
 take:
 
-- the `pulumi` CLI on `PATH`. CI pins v3.268.0 in `.github/actions/install-pulumi`, which the
-  `envoy-smoke` job and release.yaml's `envoy_infra` job both install it through;
+- the `pulumi` CLI on `PATH`, the version `.github/actions/install-pulumi` installs;
 - `ENVOY_SMOKE_IMAGE`, a listener image built beforehand. A live test without it fails at once
   and never builds one itself;
-- `ENVOY_INFRA_DOCKER_PLUGIN`, the path of the docker provider plugin v4.11.0 tarball for this
-  machine's platform, whose SHA-256 the caller has checked. The test binary installs it into a
-  `PULUMI_HOME` it makes for itself in a temporary directory and removes when its tests end, so the
-  CLI downloads no plugin and the caller's own Pulumi home is untouched.
+- `ENVOY_INFRA_DOCKER_PLUGIN`, the path of the docker provider plugin tarball of
+  `pulumitest.DockerPluginVersion` for this machine's platform, whose SHA-256 the caller has
+  checked. The test binary refuses a tarball of another version, installs it into a `PULUMI_HOME`
+  it makes for itself in a temporary directory and removes when its tests end, so the CLI
+  downloads no plugin and the caller's own Pulumi home is untouched.
 
 Each stack runs on a `file://` backend of its own in a temporary directory. Each listener gets a
 container name of its own (`envoy-listener-live-<random>`) and a free port, and reaches only a
@@ -161,22 +172,17 @@ first test that asks for it, and every test runs that build. A package whose tes
 calls `os.Exit(pulumitest.Main(m))` from its `TestMain`, which removes that `PULUMI_HOME` and that
 build.
 
-To run them, from the repository root:
+To run them, install the CLI as `.github/actions/install-pulumi` does and download the docker
+provider plugin as the `envoy-smoke` job's "Download the docker provider plugin the live tests pin"
+step does, each checked against the SHA-256 pinned there; then, from the repository root:
 
 ```sh
-curl -fsSL -o /tmp/pulumi-v3.268.0-linux-x64.tar.gz https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz
-echo '903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b  /tmp/pulumi-v3.268.0-linux-x64.tar.gz' | sha256sum -c -
-tar -xzf /tmp/pulumi-v3.268.0-linux-x64.tar.gz -C /tmp
 docker buildx build --load -t legion-envoy-smoke:local -f packages/envoy/docker/Dockerfile .
-curl -fsSL -o /tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz https://github.com/pulumi/pulumi-docker/releases/download/v4.11.0/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz
-echo '4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  /tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz' | sha256sum -c -
-cd packages/envoy/infra && PATH=/tmp/pulumi:$PATH \
-  ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local \
-  ENVOY_INFRA_DOCKER_PLUGIN=/tmp/pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz \
+cd packages/envoy/infra && ENVOY_SMOKE_IMAGE=legion-envoy-smoke:local \
+  ENVOY_INFRA_DOCKER_PLUGIN=<the tarball> \
   go test -count=1 -tags pulumilive -v -timeout 15m ./host/
 ```
 
 `-count=1` because go's test cache cannot see the image behind a fixed tag, and would replay a
-cached pass against an image that has since changed. In CI the `envoy-smoke` job runs them, each
-input a step of its own (the CLI through `.github/actions/install-pulumi`), and then checks that
-`pulumi package get-schema` reports the version the plugin was built with.
+cached pass against an image that has since changed. In CI the `envoy-smoke` job runs them, and
+then checks that `pulumi package get-schema` reports the version the plugin was built with.

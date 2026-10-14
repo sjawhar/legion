@@ -639,9 +639,19 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			err:    "machineId is required",
 		},
 		{
+			name:   "a machineId with a control character",
+			mutate: func(a *envoyaws.WebhookListenerArgs) { a.MachineId = "example\nmachine" },
+			err:    `machineId contains a control character: "example\nmachine"`,
+		},
+		{
 			name:   "a padded hostBridge",
 			mutate: func(a *envoyaws.WebhookListenerArgs) { a.HostBridge = " 127.0.0.1" },
 			err:    `hostBridge has leading or trailing whitespace: " 127.0.0.1"`,
+		},
+		{
+			name:   "a hostBridge with a control character",
+			mutate: func(a *envoyaws.WebhookListenerArgs) { a.HostBridge = "127.0.0.1\nENVEOF" },
+			err:    `hostBridge contains a control character: "127.0.0.1\nENVEOF"`,
 		},
 		{
 			name:   "a blank listen host",

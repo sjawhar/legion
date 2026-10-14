@@ -231,15 +231,14 @@ func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 		return s.refusedInput(err)
 	}
 	// The component writes each value into its JSON, where a line break is escaped; a line of
-	// this output would end there.
+	// this output would end there. machineId, natsUrls and hostBridge are refused any control
+	// character above, as the component refuses them (core.ListenerConfig.CheckPlain and
+	// core.ListenerEnv), so only the values core does not check are checked here.
 	for _, value := range []struct {
 		flag   string
 		values []string
 	}{
-		{"machine-id", []string{machineID}},
-		{"nats-url", natsURLs},
 		{"listen-host", []string{listenHost}},
-		{"host-bridge", []string{hostBridge}},
 		{"mention-trigger", []string{mentionTrigger}},
 		{"reviewer-app-id", []string{reviewerAppID}},
 	} {

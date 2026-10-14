@@ -25,6 +25,27 @@ a build provenance attestation for every archive.
 
 ### The plugin
 
+The plugin runs on the machine that runs `pulumi`, and logs in to the Docker hosts it deploys to, so
+verify an archive before installing it. Each release's archives carry build provenance from
+`.github/workflows/release-envoy-infra.yaml` on `main`; `--repo` alone would accept an attestation
+from any workflow of this repository, so the command pins the signer:
+
+```sh
+version=<version>
+archive=pulumi-resource-envoy-infra-v$version-<os>-<arch>.tar.gz
+gh release download "envoy-infra-v$version" --repo sjawhar/legion --pattern "$archive"
+gh attestation verify "$archive" --repo sjawhar/legion \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
+  --source-ref refs/heads/main --deny-self-hosted-runners
+pulumi plugin install resource envoy-infra "$version" \
+  --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}' \
+  --checksum "$(sha256sum "$archive" | cut -d' ' -f1)"
+```
+
+`--source-digest <the envoy-infra-v<version> tag's commit>` added to the `verify` pins the commit as
+well. `--checksum` makes `pulumi` refuse a download whose SHA-256 is not the archive's you
+verified. Then add the package to the project:
+
 ```sh
 pulumi package add envoy-infra@<version> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'
 ```
@@ -56,13 +77,13 @@ cloud credentials, so check the archive's provenance before you install it. For 
 ```sh
 gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
 gh attestation verify envoy-infra-linux-amd64.tar.gz --repo sjawhar/legion \
-  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+  --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-infra.yaml@refs/heads/main \
   --source-ref refs/heads/main --deny-self-hosted-runners
 tar -xzf envoy-infra-linux-amd64.tar.gz
 envoy-infra-linux-amd64/envoy-infra --version
 ```
 
-`--cert-identity` pins the signer to this repository's `release.yaml` read from `main`,
+`--cert-identity` pins the signer to this repository's `release-envoy-infra.yaml` read from `main`,
 `--source-ref` to a run started on `main`, and `--deny-self-hosted-runners` to a GitHub-hosted
 runner, so an archive attested by any other workflow, branch or runner in the repository fails;
 `--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
@@ -141,17 +162,25 @@ listener's NATS client then refuses to connect rather than connect without the s
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
 - a blank `machineId`;
+- a `machineId` or `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
 - a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
+- `watchdog` on a listener whose name contains `"`, `$`, a backtick, `\` or a line break, since the
+  watchdog's script echoes the name in double quotes;
 - a missing provider (see [Providers](#providers)).
 
-`natsUrls` may come from another resource or stack, so the listener checks it only when it
-computes the container's environment. That happens at preview, unless `natsUrls` is not known until
-the update. It refuses an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas
-separate the URLs in `NATS_URLS`).
+`natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
+it computes the container's environment. That happens at preview, unless they are not known until
+the update. It refuses an empty `natsUrls`, a URL in it that is blank, contains a comma (commas
+separate the URLs in `NATS_URLS`) or holds a control character, and a blank `seed`.
+
+The watchdog writes the environment, one variable per line, into a heredoc of a script it runs as
+root on the host, so a line break in a value could end the heredoc and run what follows as a
+command. That is why no value may hold a control character, even one the program reads from
+another stack.
 
 ### Providers
 
@@ -518,15 +547,16 @@ the input:
 - `aws:WebhookListener`: a `webhooks` not given at all (give `[]` for a listener with no webhook);
   a webhook's input missing while `webhooks` lists it (a blank `reviewerAppId` or `mentionTrigger`
   counts as missing) or given while it does not, each input checked before the list; then a
-  `webhooks` other than `[]` or exactly `["github", "slack"]`; a blank `machineId`; a `hostBridge`
-  with leading or trailing whitespace; a blank `listenHost`; a `natsReplicas` below 1; an empty
-  `subnetIds`; a `baseTags` holding `service`.
+  `webhooks` other than `[]` or exactly `["github", "slack"]`; a blank `machineId`; a `machineId`
+  or `hostBridge` holding a control character; a `hostBridge` with leading or trailing whitespace;
+  a blank `listenHost`; a `natsReplicas` below 1; an empty `subnetIds`; a `baseTags` holding
+  `service`.
 - Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
 
 `natsUrls` may come from another resource, so the listener checks it when the container's
 definitions are computed, at preview unless it is not known until the update: it refuses an empty
-list, and a URL that is blank or holds a comma. An optional secret ARN that is given but resolves to
-no value is refused the same way.
+list, and a URL that is blank, holds a comma or holds a control character. An optional secret ARN
+that is given but resolves to no value is refused the same way.
 
 ### Inputs that take an output
 
@@ -860,10 +890,12 @@ envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <sec
 ```
 
 The command runs under your own AWS configuration, as the AWS SDK loads it: the environment, then
-the shared configuration and credentials files. `--region` overrides the region it names. With
-`--expect-account`, it first asks STS whose credentials they are and refuses, before any other
-call, unless they are that account's. Pass it whenever you name a secret, so that a seed is never
-written to, or read from, a secret of the same name in another account.
+the shared configuration and credentials files. `--region` overrides the region it names. It
+retrieves your credentials before any call; with none it can use, it stops with `refused: <name>:
+no usable AWS credentials …`. With `--expect-account`, it then asks STS whose credentials they are
+and refuses, before any other call, unless they are that account's. Pass it whenever you name a
+secret, so that a seed is never written to, or read from, a secret of the same name in another
+account.
 
 ### Making a seed
 
@@ -902,9 +934,14 @@ written to, or read from, a secret of the same name in another account.
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
    secret that is absent, is scheduled for deletion or holds any version, deprecated ones
-   included, so it never replaces a seed a client may already read. After the write it lists the
-   versions again and reads back the version Secrets Manager serves by default (`AWSCURRENT`),
-   which must be the one it wrote and derive the public key it prints.
+   included, so it never replaces a seed a client may already read. It prints the public key just
+   before the write, so the key is on your terminal whatever happens next, and the version id once
+   the write answers. After the write it lists the versions again and reads back the version
+   Secrets Manager serves by default (`AWSCURRENT`), which must be the one it wrote and derive the
+   public key it printed. Secrets Manager's reads are eventually consistent, so while the listing
+   shows no version yet, or no version is `AWSCURRENT`, it looks again after pauses of 0.25, 0.5,
+   1, 2 and 4 seconds; if the write is still not shown, it stops with an error after writing. More
+   than one version, or another version served by default, is another writer's race.
 4. Put the public key into the NATS server's authorization as that user's `NKey`, with `HasSeed`
    set: see [NATS authorization](#nats-authorization). It is public, so it may sit in the stack's
    configuration in plain text.
@@ -948,7 +985,7 @@ pasted there must not reach the terminal.
 | Code | Meaning |
 | --- | --- |
 | 0 | Done: `check` printed its line, `generate` wrote the seed and read it back, or `verify` found the stored seed derives the key. |
-| 1 | `verify` found another key or no seed; or `generate` failed after its write. A version may then exist: `generate` prints the public key and version id when it has them, then `error after writing: <what failed>`. Run `check`, and `verify` with that key, before anything else. |
+| 1 | `verify` found another key or no seed; or `generate` failed after it began its write. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
 | 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the AWS error code, as `refused: describe-secret <name> failed: AccessDeniedException`. |
 
 ### The AWS calls each mode makes
@@ -960,7 +997,7 @@ exactly these permissions on the secret:
 | --- | --- | --- |
 | `check` | `DescribeSecret` | `secretsmanager:DescribeSecret` |
 | `verify` | `DescribeSecret`, `GetSecretValue` | `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue` |
-| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, `ListSecretVersionIds`, `GetSecretValue` | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
+| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, `ListSecretVersionIds`, `GetSecretValue`, the last two again after each pause while Secrets Manager has not caught up with the write | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
 
 So a read-only check of a deployment's seed, `check` and `verify`, needs only `DescribeSecret` and
 `GetSecretValue`. `--expect-account` adds `sts:GetCallerIdentity` before them, which needs no

@@ -27,13 +27,12 @@ type Object []Field
 
 // PyJSON returns v as Python's json.dumps writes it with its default separators (", " and ": ")
 // and the options given, so text a Python program rendered can be rendered again byte for byte.
-// v is built from nil, bools, integers, strings, slices and arrays, Objects, and maps with string
-// keys, through interfaces and pointers. A nil slice is an empty list.
+// v is built from nil, bools, integers, strings, slices and arrays, and Objects, through
+// interfaces and pointers. A nil slice is an empty list.
 //
-// A Go map has no key order, so a map is written only with SortKeys; an Object is a dict in the
-// order its fields are given. A float has no spelling that is always Python's repr, a string that
-// is not valid UTF-8 has no Python counterpart, and neither has an Object holding a key twice. Each
-// of these panics: it is the caller's error, never data.
+// A Go map has no key order, so it is no dict: build an Object. A float has no spelling that is
+// always Python's repr, a string that is not valid UTF-8 has no Python counterpart, and neither has
+// an Object holding a key twice. Each of these panics: it is the caller's error, never data.
 func PyJSON(v any, opts PyJSONOptions) string {
 	var b strings.Builder
 	writePyJSON(&b, reflect.ValueOf(v), opts)
@@ -74,17 +73,7 @@ func writePyJSON(b *strings.Builder, v reflect.Value, opts PyJSONOptions) {
 		}
 		b.WriteByte(']')
 	case reflect.Map:
-		if v.Type().Key().Kind() != reflect.String {
-			panic(fmt.Sprintf("core.PyJSON: %s has keys that are not strings", v.Type()))
-		}
-		if !opts.SortKeys {
-			panic("core.PyJSON: a Go map has no key order; set SortKeys")
-		}
-		object := make(Object, 0, v.Len())
-		for iter := v.MapRange(); iter.Next(); {
-			object = append(object, Field{Key: iter.Key().String(), Value: iter.Value().Interface()})
-		}
-		writePyObject(b, object, opts)
+		panic(fmt.Sprintf("core.PyJSON: %s has no key order; build a core.Object, a dict in a known order", v.Type()))
 	case reflect.Float32, reflect.Float64:
 		panic(fmt.Sprintf("core.PyJSON: %s is not supported: Python's float repr is not Go's", v.Type()))
 	default:

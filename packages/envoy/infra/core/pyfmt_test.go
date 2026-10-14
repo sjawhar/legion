@@ -12,11 +12,12 @@ import (
 // Every want below is Python 3.12's own output for the same value: json.dumps with the options
 // named, or shlex.quote and shlex.join.
 func TestPyJSON(t *testing.T) {
-	nested := map[string]any{
-		"b":      map[string]any{"z": 1, "a": []any{"x", true, nil, -7}},
-		"a":      "v",
-		"c":      map[string]any{},
-		"\u00e9": "\u00e9",
+	// Built out of sorted order, so the sort_keys rows show the sort at every depth.
+	nested := core.Object{
+		{Key: "b", Value: core.Object{{Key: "z", Value: 1}, {Key: "a", Value: []any{"x", true, nil, -7}}}},
+		{Key: "a", Value: "v"},
+		{Key: "c", Value: core.Object{}},
+		{Key: "\u00e9", Value: "\u00e9"},
 	}
 	quoting := "q\"b\\<>&\u00e9\u2028\U0001F600"
 	controls := "a\nb\tc\x01\x1f\x7f\b\f\r"
@@ -27,13 +28,13 @@ func TestPyJSON(t *testing.T) {
 		want string
 	}{
 		{
-			name: "nested maps with sort_keys",
+			name: "nested objects with sort_keys",
 			in:   nested,
 			opts: core.PyJSONOptions{SortKeys: true},
 			want: "{\"a\": \"v\", \"b\": {\"a\": [\"x\", true, null, -7], \"z\": 1}, \"c\": {}, \"\u00e9\": \"\u00e9\"}",
 		},
 		{
-			name: "nested maps with sort_keys and ensure_ascii",
+			name: "nested objects with sort_keys and ensure_ascii",
 			in:   nested,
 			opts: core.PyJSONOptions{SortKeys: true, EnsureASCII: true},
 			want: `{"a": "v", "b": {"a": ["x", true, null, -7], "z": 1}, "c": {}, "\u00e9": "\u00e9"}`,
@@ -70,11 +71,14 @@ func TestPyJSON(t *testing.T) {
 	}
 }
 
-// A Go map has no key order, so without SortKeys there is no Python dict order to reproduce; and a
+// A Go map has no key order, so it is no Python dict, and the refusal names the type that is one; a
 // float has no Go spelling that is always Python's repr. Both are the caller's error, not data.
 func TestPyJSONRefusesWhatItCannotSpellAsPython(t *testing.T) {
-	requirePanicNaming(t, "SortKeys", func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{}) })
-	requirePanicNaming(t, "float64", func() { core.PyJSON([]any{1.5}, core.PyJSONOptions{SortKeys: true}) })
+	requirePanicNaming(t, "core.PyJSON: map[string]interface {} has no key order; build a core.Object",
+		func() { core.PyJSON(map[string]any{"a": 1}, core.PyJSONOptions{SortKeys: true}) })
+	requirePanicNaming(t, "core.PyJSON: map[string]int has no key order; build a core.Object",
+		func() { core.PyJSON([]any{map[string]int{"a": 1}}, core.PyJSONOptions{}) })
+	requirePanicNaming(t, "float64", func() { core.PyJSON([]any{1.5}, core.PyJSONOptions{}) })
 }
 
 // An Object is a Python dict built in a known order: PyJSON writes its keys in that order, or

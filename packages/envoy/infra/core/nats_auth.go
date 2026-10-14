@@ -1,15 +1,12 @@
 package core
 
 import (
-	"encoding/base32"
 	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/nats-io/nkeys"
 )
 
 // User is one nkey user of a NATS server's authorization block.
@@ -36,12 +33,6 @@ type Authorization struct {
 
 var userName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$`)
 
-// userKeyText is a user public key's text: the U of its prefix byte and 55 more base32 characters,
-// 35 bytes in all.
-var userKeyText = regexp.MustCompile(`^U[A-Z2-7]{55}$`)
-
-var userKeyEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
-
 // Validate refuses an authorization nats-server would read otherwise than its fields say. Every
 // refusal names the user, by index and name, and the field.
 //
@@ -56,37 +47,11 @@ func (a Authorization) Validate() error {
 	}
 	keyed := 0
 	for i, u := range a.Users {
-		where := fmt.Sprintf("users[%d] %q", i, u.Name)
-		if !userName.MatchString(u.Name) {
-			return fmt.Errorf("%s: name must match %s", where, userName)
+		if err := u.validate(); err != nil {
+			return fmt.Errorf("users[%d] %q: %w", i, u.Name, err)
 		}
-		if u.NKey == "" {
-			if !u.HasSeed {
-				return fmt.Errorf("%s: hasSeed is required for a pending user (no nkey): it is never rendered, so without a seed it stands for nothing", where)
-			}
-			if u.Publish != nil {
-				return fmt.Errorf("%s: publish is set on a pending user (no nkey), which is never rendered", where)
-			}
-			if u.Subscribe != nil {
-				return fmt.Errorf("%s: subscribe is set on a pending user (no nkey), which is never rendered", where)
-			}
-			continue
-		}
-		keyed++
-		if !IsUserPublicKey(u.NKey) {
-			return fmt.Errorf("%s: nkey is not a user public key (U and 55 base32 characters with a valid checksum); give the public key, never a seed", where)
-		}
-		if u.Publish == nil {
-			return fmt.Errorf("%s: publish is required for a user with an nkey", where)
-		}
-		if u.Subscribe == nil {
-			return fmt.Errorf("%s: subscribe is required for a user with an nkey", where)
-		}
-		if err := u.Publish.validate("publish", false); err != nil {
-			return fmt.Errorf("%s: %w", where, err)
-		}
-		if err := u.Subscribe.validate("subscribe", true); err != nil {
-			return fmt.Errorf("%s: %w", where, err)
+		if u.NKey != "" {
+			keyed++
 		}
 	}
 	if keyed == 0 {
@@ -105,38 +70,71 @@ func (a Authorization) Validate() error {
 	if a.NoAuthUser == "" {
 		return nil
 	}
+	switch u, ok := a.user(a.NoAuthUser); {
+	case !ok:
+		return fmt.Errorf("noAuthUser %q names no user", a.NoAuthUser)
+	case u.NKey == "":
+		return fmt.Errorf("noAuthUser %q names a pending user (no nkey); a client presenting no credential becomes a user the server knows", a.NoAuthUser)
+	case u.HasSeed:
+		return fmt.Errorf("noAuthUser %q names a user with a seed (hasSeed); it is the identity of a client presenting no credential, which no seed authenticates", a.NoAuthUser)
+	}
+	return nil
+}
+
+// user returns the user named name: the first, since Validate refuses a name given twice.
+func (a Authorization) user(name string) (User, bool) {
 	for _, u := range a.Users {
-		if u.Name != a.NoAuthUser {
-			continue
+		if u.Name == name {
+			return u, true
 		}
-		if u.NKey == "" {
-			return fmt.Errorf("noAuthUser %q names a pending user (no nkey); a client presenting no credential becomes a user the server knows", a.NoAuthUser)
+	}
+	return User{}, false
+}
+
+// validate refuses one user, naming the field: a name the pattern refuses; for a pending user, no
+// seed or a rule set; for a keyed user, a key that is not a user public key, a direction without
+// rules, or rules nats-server would read otherwise than they say.
+func (u User) validate() error {
+	if !userName.MatchString(u.Name) {
+		return fmt.Errorf("name must match %s", userName)
+	}
+	directions := []struct {
+		field string
+		rules *Rules
+	}{{"publish", u.Publish}, {"subscribe", u.Subscribe}}
+	if u.NKey == "" {
+		if !u.HasSeed {
+			return errors.New("hasSeed is required for a pending user (no nkey): it is never rendered, so without a seed it stands for nothing")
 		}
-		if u.HasSeed {
-			return fmt.Errorf("noAuthUser %q names a user with a seed (hasSeed); it is the identity of a client presenting no credential, which no seed authenticates", a.NoAuthUser)
+		for _, d := range directions {
+			if d.rules != nil {
+				return fmt.Errorf("%s is set on a pending user (no nkey), which is never rendered", d.field)
+			}
 		}
 		return nil
 	}
-	return fmt.Errorf("noAuthUser %q names no user", a.NoAuthUser)
-}
-
-// IsUserPublicKey reports whether key is a user public key: U and 55 base32 characters, whose 35
-// bytes are the user prefix byte, the key and a valid CRC-16/XMODEM checksum. nkeys alone
-// (IsValidPublicUserKey) reads more than that: its base32 decoder skips line breaks, it takes a key
-// of any length, and it masks the prefix byte's low three bits.
-func IsUserPublicKey(key string) bool {
-	if !userKeyText.MatchString(key) || !nkeys.IsValidPublicUserKey(key) {
-		return false
+	if !IsUserPublicKey(u.NKey) {
+		return errors.New("nkey is not a user public key (U and 55 base32 characters with a valid checksum); give the public key, never a seed")
 	}
-	raw, err := userKeyEncoding.DecodeString(key)
-	return err == nil && raw[0] == byte(nkeys.PrefixByteUser)
+	for _, d := range directions {
+		if d.rules == nil {
+			return fmt.Errorf("%s is required for a user with an nkey", d.field)
+		}
+	}
+	for _, d := range directions {
+		if err := d.rules.validate(d.field); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // validate refuses rules nats-server would read otherwise than they say: an empty allow list,
 // which it never reads as "nothing" (an empty subscribe allow sets no restriction at all,
 // server/client.go setPermissions); an entry that is neither a subject pattern nor
-// "<subject> <queue>"; and, where queues are not taken, a queue-scoped entry.
-func (r *Rules) validate(direction string, queues bool) error {
+// "<subject> <queue>"; and a queue-scoped entry outside subscribe, the one direction queue groups
+// scope.
+func (r *Rules) validate(direction string) error {
 	if len(r.Allow) == 0 {
 		return fmt.Errorf(`%s.allow must name at least one entry; write [">"] to mean everything`, direction)
 	}
@@ -149,7 +147,7 @@ func (r *Rules) validate(direction string, queues bool) error {
 			if !isSubjectPattern(subject) || (queued && !isSubjectPattern(queue)) {
 				return fmt.Errorf(`%s[%d] %q is neither a subject pattern nor "<subject> <queue>"`, list.field, i, entry)
 			}
-			if queued && !queues {
+			if queued && direction != "subscribe" {
 				return fmt.Errorf(`%s[%d] %q names a queue group, which scopes only subscriptions; a %s rule is a plain subject`, list.field, i, entry, direction)
 			}
 		}
@@ -203,34 +201,31 @@ func (a Authorization) Render(header []string) (string, error) {
 		b.WriteString("# " + line + "\n")
 	}
 	b.WriteString("authorization {\n  users: [\n")
-	fallback := ""
 	for _, u := range a.Users {
 		if u.NKey == "" {
 			continue
 		}
-		if u.Name == a.NoAuthUser {
-			fallback = u.NKey
-		}
-		user := map[string]any{
-			"nkey":        u.NKey,
-			"permissions": map[string]any{"publish": u.Publish.object(), "subscribe": u.Subscribe.object()},
+		user := Object{
+			{"nkey", u.NKey},
+			{"permissions", Object{{"publish", u.Publish.object()}, {"subscribe", u.Subscribe.object()}}},
 		}
 		b.WriteString("    # " + u.Name + "\n")
 		b.WriteString("    " + PyJSON(user, PyJSONOptions{SortKeys: true}) + "\n")
 	}
 	b.WriteString("  ]\n}\n")
 	if a.NoAuthUser != "" {
+		fallback, _ := a.user(a.NoAuthUser) // Validate has checked it names a keyed user
 		b.WriteString("# " + a.NoAuthUser + ": a client presenting no credential becomes this user\n")
-		b.WriteString("no_auth_user: " + PyJSON(fallback, PyJSONOptions{EnsureASCII: true}) + "\n")
+		b.WriteString("no_auth_user: " + PyJSON(fallback.NKey, PyJSONOptions{EnsureASCII: true}) + "\n")
 	}
 	return b.String(), nil
 }
 
 // object is the rules as the block writes them: deny only when it names an entry.
-func (r *Rules) object() map[string]any {
-	object := map[string]any{"allow": r.Allow}
+func (r *Rules) object() Object {
+	object := Object{{"allow", r.Allow}}
 	if len(r.Deny) > 0 {
-		object["deny"] = r.Deny
+		object = append(object, Field{"deny", r.Deny})
 	}
 	return object
 }

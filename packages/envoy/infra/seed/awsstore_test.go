@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -31,6 +32,7 @@ const (
 	awsSecret  = "example/envoy/nats-nkey-seed-example-host-a"
 	awsAccount = "000000000000"
 	awsRegion  = "us-east-1"
+	awsRoleARN = "arn:aws:iam::" + awsAccount + ":role/example"
 )
 
 type awsVersion struct {
@@ -68,6 +70,10 @@ type fakeAWS struct {
 	// only DescribeSecret and GetSecretValue, and a listing from either is a request the fake does
 	// not expect.
 	generating bool
+	// Eventual consistency: after the write, the next staleLists listings leave out the written
+	// version, and the next staleGets reads find no AWSCURRENT version, as a read just after a
+	// write may.
+	staleLists, staleGets int
 }
 
 func newFakeAWS(t *testing.T) *fakeAWS {
@@ -216,6 +222,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			}
 		}
 		versions := slices.Clone(f.versions)
+		if f.written() && f.staleLists > 0 {
+			f.staleLists--
+			versions = slices.DeleteFunc(versions, func(v awsVersion) bool { return v.id == f.tokens[0] })
+		}
 		if f.racing != nil && f.written() {
 			versions = append(versions, *f.racing)
 		}
@@ -282,6 +292,11 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			f.jsonError(w, awsFailure{"InvalidRequestException", "the secret is scheduled for deletion"}, body)
 			return
 		}
+		if f.written() && f.staleGets > 0 {
+			f.staleGets--
+			f.jsonError(w, awsFailure{"ResourceNotFoundException", "no version has the staging label AWSCURRENT"}, body)
+			return
+		}
 		for _, v := range f.versions {
 			if slices.Contains(v.stages, "AWSCURRENT") {
 				f.answer(w, map[string]any{
@@ -300,13 +315,24 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 
 func (f *fakeAWS) sts(w http.ResponseWriter, body []byte) {
 	form, err := url.ParseQuery(string(body))
-	if err != nil || form.Encode() != "Action=GetCallerIdentity&Version=2011-06-15" {
+	if err != nil {
 		f.reject(w, fmt.Sprintf("STS %s (%v)", body, err))
 		return
 	}
-	f.calls = append(f.calls, "GetCallerIdentity")
+	// AssumeRole is a profile's credential source, which the fake only ever refuses, with the
+	// failure the test names: a test never needs a role's credentials.
+	call := form.Get("Action")
+	switch {
+	case form.Encode() == "Action=GetCallerIdentity&Version=2011-06-15":
+	case call == "AssumeRole" && form.Get("Version") == "2011-06-15" && form.Get("RoleArn") == awsRoleARN &&
+		form.Get("RoleSessionName") != "" && f.failures["AssumeRole"] != (awsFailure{}):
+	default:
+		f.reject(w, fmt.Sprintf("STS %s", body))
+		return
+	}
+	f.calls = append(f.calls, call)
 	w.Header().Set("Content-Type", "text/xml")
-	if failure, ok := f.failures["GetCallerIdentity"]; ok {
+	if failure, ok := f.failures[call]; ok {
 		w.WriteHeader(http.StatusForbidden)
 		fmt.Fprintf(w, `<ErrorResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/"><Error><Type>Sender</Type>`+
 			`<Code>%s</Code><Message>%s</Message></Error><RequestId>00000000-0000-0000-0000-000000000000</RequestId></ErrorResponse>`,
@@ -546,6 +572,35 @@ func TestAWSGenerateAfterItsWrite(t *testing.T) {
 	}
 }
 
+// Secrets Manager's reads are eventually consistent: just after the write, a listing can leave the
+// new version out and GetSecretValue can find no AWSCURRENT version. generate looks again rather
+// than calling either a race or a failed read-back.
+func TestAWSGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
+	SetReadBackWaits(t, 0, 0, 0)
+	rows := []struct {
+		name                  string
+		staleLists, staleGets int
+		calls                 []string
+	}{
+		{"a stale listing", 1, 0, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue",
+			"ListSecretVersionIds", "ListSecretVersionIds", "GetSecretValue"}},
+		{"a stale read", 0, 1, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue",
+			"ListSecretVersionIds", "GetSecretValue", "ListSecretVersionIds", "GetSecretValue"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newFakeAWS(t)
+			f.staleLists, f.staleGets = row.staleLists, row.staleGets
+			serve(t, f)
+			code, out, errs := runAWS(t, f, "generate")
+			require.Equal(t, 0, code, errs)
+			require.Empty(t, errs)
+			require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: "+f.tokens[0]+"\n", out)
+			require.Equal(t, row.calls, f.recorded())
+		})
+	}
+}
+
 // A lost answer is retried with the same ClientRequestToken, so Secrets Manager writes one version.
 func TestAWSGenerateRetriesALostAnswerWithItsToken(t *testing.T) {
 	f := newFakeAWS(t)
@@ -559,6 +614,8 @@ func TestAWSGenerateRetriesALostAnswerWithItsToken(t *testing.T) {
 	require.Contains(t, out, "version id: "+f.tokens[0]+"\n")
 }
 
+// A write whose answer never came may have landed, as here, so the operator gets the public key
+// generate printed before it, and verify can check the secret against it.
 func TestAWSGenerateCallsAnUnansweredWriteUnknownNotRefused(t *testing.T) {
 	f := newFakeAWS(t)
 	f.loseAnswers = 1
@@ -566,10 +623,10 @@ func TestAWSGenerateCallsAnUnansweredWriteUnknownNotRefused(t *testing.T) {
 	t.Setenv("AWS_MAX_ATTEMPTS", "1")
 	code, out, errs := runAWS(t, f, "generate")
 	require.Equal(t, 1, code, errs)
-	require.Empty(t, out)
 	require.Equal(t, "error after writing: put-secret-value "+awsSecret+" failed: RequestSendError; "+
 		"whether a version was written is unknown, run check\n", errs)
 	require.Len(t, f.versions, 1, "the write landed")
+	require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: unknown\n", out)
 }
 
 // A service message can quote the request, and a write's request carries the seed: an AWS error is
@@ -612,6 +669,18 @@ func TestAWSVerify(t *testing.T) {
 		require.Equal(t, 2, code)
 		require.Empty(t, out)
 		require.Equal(t, "refused: get-secret-value "+awsSecret+" failed: AccessDeniedException\n", errs)
+	})
+	// generate waits on a store that serves no version yet; verify, which reads only after
+	// DescribeSecret named an AWSCURRENT version, refuses it at once, naming the AWS error.
+	t.Run("the read finds no AWSCURRENT version", func(t *testing.T) {
+		f := newFakeAWS(t).holding(seedValue)
+		f.failures = map[string]awsFailure{"GetSecretValue": {"ResourceNotFoundException", "no version has the staging label AWSCURRENT"}}
+		serve(t, f)
+		code, out, errs := runAWS(t, f, "verify", "--public-key", public)
+		require.Equal(t, 2, code)
+		require.Empty(t, out)
+		require.Equal(t, "refused: get-secret-value "+awsSecret+" failed: ResourceNotFoundException\n", errs)
+		require.Equal(t, []string{"DescribeSecret", "GetSecretValue"}, f.recorded())
 	})
 }
 
@@ -660,6 +729,48 @@ func TestAWSExpectAccountRunsFirstAndAlone(t *testing.T) {
 		code, _, errs := runAWS(t, f, "check")
 		require.Equal(t, 0, code, errs)
 		require.NotContains(t, f.recorded(), "GetCallerIdentity")
+	})
+}
+
+// With no usable credentials, every mode is refused before any call, STS included, naming the fix.
+// A credential chain that finds nothing fails with a plain Go error whose type names nothing, so
+// the refusal names no class; an AWS answer, such as a profile's role refused for an expired
+// token, keeps its code.
+func TestAWSMissingCredentialsAreRefusedBeforeAnyCall(t *testing.T) {
+	_, public := testnats.User(t)
+	for _, args := range [][]string{{"check"}, {"generate"}, {"verify", "--public-key", public}, {"check", "--expect-account", awsAccount}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			f := newFakeAWS(t)
+			serve(t, f)
+			t.Setenv("AWS_ACCESS_KEY_ID", "")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+			code, out, errs := runAWS(t, f, args...)
+			require.Equal(t, 2, code)
+			require.Empty(t, out)
+			require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials; log in or set AWS_PROFILE\n", errs)
+			require.Empty(t, f.recorded())
+		})
+	}
+	t.Run("a profile whose role STS refuses for an expired token", func(t *testing.T) {
+		f := newFakeAWS(t)
+		f.failures = map[string]awsFailure{"AssumeRole": {"ExpiredToken", "The security token included in the request is expired"}}
+		server := serve(t, f)
+		config := filepath.Join(t.TempDir(), "config")
+		require.NoError(t, os.WriteFile(config, []byte("[profile expired]\nrole_arn = "+awsRoleARN+"\nsource_profile = base\n\n"+
+			"[profile base]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\n"), 0o600))
+		t.Setenv("AWS_CONFIG_FILE", config)
+		t.Setenv("AWS_PROFILE", "expired")
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+		t.Setenv("AWS_MAX_ATTEMPTS", "1")
+		// The SDK builds a profile's STS client before it reads AWS_ENDPOINT_URL (config.go:67, :76),
+		// so only the STS-specific variable keeps this request off the real STS (sts endpoints.go:210-220).
+		t.Setenv("AWS_ENDPOINT_URL_STS", server.URL)
+		code, out, errs := runAWS(t, f, "generate", "--expect-account", awsAccount)
+		require.Equal(t, 2, code)
+		require.Empty(t, out)
+		require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials (ExpiredToken); log in or set AWS_PROFILE\n", errs)
+		require.Equal(t, []string{"AssumeRole"}, f.recorded(), "the credentials' own call, then nothing")
 	})
 }
 

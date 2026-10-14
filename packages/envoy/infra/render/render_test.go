@@ -685,26 +685,28 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			args: listenerFlags(nil, "--nats-url", " "),
 			want: "refused: --nats-url: natsUrls[1] is empty",
 		},
-		// A value no KEY=value line can carry, which the component would write into its JSON.
+		// A control character in a value core checks, refused as the component refuses it: the host
+		// watchdog writes these values into a heredoc.
 		{
 			name: "a line break in --machine-id",
 			args: listenerFlags([]string{"machine-id"}, "--machine-id", "example\nmachine"),
-			want: "refused: --machine-id: holds a line break, which a KEY=value line cannot carry",
+			want: `refused: --machine-id: machineId contains a control character: "example\nmachine"`,
 		},
 		{
 			name: "a carriage return in --nats-url",
 			args: listenerFlags([]string{"nats-url"}, "--nats-url", "nats://example-bus.internal.example:4222\r"),
-			want: "refused: --nats-url: holds a line break, which a KEY=value line cannot carry",
-		},
-		{
-			name: "a line break in --listen-host",
-			args: listenerFlags([]string{"listen-host"}, "--listen-host", "0.0.0.0\n"),
-			want: "refused: --listen-host: holds a line break, which a KEY=value line cannot carry",
+			want: "refused: --nats-url: natsUrls[0] contains a control character",
 		},
 		{
 			name: "a line break in --host-bridge",
 			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", "127.0\n.0.1"),
-			want: "refused: --host-bridge: holds a line break, which a KEY=value line cannot carry",
+			want: `refused: --host-bridge: hostBridge contains a control character: "127.0\n.0.1"`,
+		},
+		// A value no KEY=value line can carry, which the component would write into its JSON.
+		{
+			name: "a line break in --listen-host",
+			args: listenerFlags([]string{"listen-host"}, "--listen-host", "0.0.0.0\n"),
+			want: "refused: --listen-host: holds a line break, which a KEY=value line cannot carry",
 		},
 		{
 			name: "a line break in --mention-trigger",
