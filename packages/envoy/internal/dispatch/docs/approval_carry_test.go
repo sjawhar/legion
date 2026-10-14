@@ -140,10 +140,11 @@ func TestCutDecisionBlocksOfADocumentWithoutBlocksIsItsRendering(t *testing.T) {
 	}
 }
 
-// A block is newly answered when the version before lacks it or holds it with another
-// answered_at, and two people's answers in one version name nobody. The states are read from the
-// fixtures' blocks wherever they stand.
-func TestNewlyAnsweredBlocksNamesTheOneAnswererOfWhatChanged(t *testing.T) {
+// answerers names each person who answered a block of the version once, by canonical login, in
+// sorted order: one answerer under two spellings is one, two people are two, and a version whose
+// blocks are all open or resolved names nobody. The states are read from the fixtures' blocks
+// wherever they stand.
+func TestAnswerersNamesEachAnswererOfTheVersionOnce(t *testing.T) {
 	approvedTree, err := pmdoc.Parse(decisionBlockFixture(t, "approved.md"))
 	if err != nil {
 		t.Fatal(err)
@@ -161,45 +162,75 @@ func TestNewlyAnsweredBlocksNamesTheOneAnswererOfWhatChanged(t *testing.T) {
 	if approved["wave-size"].state != "answered" || approved["wave-size"].answeredBy != "alice" || approved["rollback"].state != "open" {
 		t.Fatalf("approved fixture states = %#v", approved)
 	}
-
-	if login, newly := newlyAnsweredBlocks(answered, approved); !newly || login != "alice" {
-		t.Fatalf("answered since approved = %q, %v; want alice's re-answer and new block", login, newly)
+	if got := answerers(answered); !reflect.DeepEqual(got, []string{"alice"}) {
+		t.Fatalf("answerers(answered) = %q, want alice, who answered both answered blocks", got)
 	}
-	if login, newly := newlyAnsweredBlocks(approved, approved); newly || login != "" {
-		t.Fatalf("approved since itself = %q, %v; want nothing newly answered", login, newly)
-	}
-	if login, newly := newlyAnsweredBlocks(approved, map[string]askBlockState{}); !newly || login != "alice" {
-		t.Fatalf("approved since no version = %q, %v; want its answered block newly answered", login, newly)
+	if got := answerers(approved); !reflect.DeepEqual(got, []string{"alice"}) {
+		t.Fatalf("answerers(approved) = %q, want alice, who answered its one answered block", got)
 	}
 
+	answeredBy := func(by, at string) askBlockState {
+		return askBlockState{state: "answered", answeredBy: by, answeredAt: at}
+	}
 	twoAnswerers := map[string]askBlockState{
-		"one": {state: "answered", answeredBy: "Alice", answeredAt: "2026-10-02T10:00:00Z"},
-		"two": {state: "answered", answeredBy: "bob", answeredAt: "2026-10-02T10:01:00Z"},
+		"one":   answeredBy("Bob", "2026-10-02T10:00:00Z"),
+		"two":   answeredBy("alice", "2026-10-02T10:01:00Z"),
+		"three": answeredBy(" Alice ", "2026-10-02T10:02:00Z"),
+		"four":  {state: "open"},
 	}
-	if login, newly := newlyAnsweredBlocks(twoAnswerers, nil); newly || login != "" {
-		t.Fatalf("two answerers = %q, %v; want no one", login, newly)
+	if got := answerers(twoAnswerers); !reflect.DeepEqual(got, []string{"alice", "bob"}) {
+		t.Fatalf("answerers(two people, one under two spellings) = %q, want alice and bob, sorted", got)
 	}
-	oneAnswererTwice := map[string]askBlockState{
-		"one": {state: "answered", answeredBy: "Alice", answeredAt: "2026-10-02T10:00:00Z"},
-		"two": {state: "answered", answeredBy: " alice ", answeredAt: "2026-10-02T10:01:00Z"},
+	if got := answerers(map[string]askBlockState{"one": {state: "open"}, "two": {state: "resolved"}}); got != nil {
+		t.Fatalf("answerers(open and resolved) = %q, want nobody", got)
 	}
-	if login, newly := newlyAnsweredBlocks(oneAnswererTwice, nil); !newly || login != "alice" {
-		t.Fatalf("one answerer under two spellings = %q, %v; want alice", login, newly)
+	if got := answerers(nil); got != nil {
+		t.Fatalf("answerers(no blocks) = %q, want nobody", got)
 	}
+}
+
+// askNodeOf is the one ask node of the block markdown holds, flagged as flag sets it.
+func askNodeOf(t *testing.T, markdown string, flag func(*askNode)) askNode {
+	t.Helper()
+	tree, err := pmdoc.Parse(markdown)
+	if err != nil {
+		t.Fatalf("parse block %q: %v", markdown, err)
+	}
+	node := askNode{node: firstAsk(tree)}
+	if node.node == nil {
+		t.Fatalf("block %q parsed to no ask node", markdown)
+	}
+	if flag != nil {
+		flag(&node)
+	}
+	return node
 }
 
 // The version just written is trusted for nothing: each block's state is its row's, read as the
 // attributes settlement writes from the row, so a block a stored version holds unchanged compares
-// equal to its row; and a node no row of this document backs - forged on the socket, or not yet
-// indexed - a copy, or one settlement could not read refuses the carry outright.
+// equal to its row; and the block itself must agree with its row. A node no row of this document
+// backs - forged on the socket, or not yet indexed - a copy, or one settlement could not read
+// refuses the carry outright; so does a node whose own attributes show other than its row's state,
+// and the block of a decided row that asks other wording than the row was decided on or that
+// settlement cannot read. An open row's body is free.
 func TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testing.T) {
 	answeredAt := time.Date(2026, 10, 2, 10, 0, 0, 123456000, time.UTC)
 	rows := map[string]model.Ask{
-		"own":  {State: "answered", Answer: &model.AskAnswer{User: "alice", Selected: []string{"Two"}, At: answeredAt}},
-		"open": {State: "open"},
+		"own": {
+			State: "answered", Urgency: "low", Question: "Which region goes first?",
+			Options: []model.AskOption{{Label: "East", Description: "The quiet one."}, {Label: "West", Description: "The busy one."}},
+			Answer:  &model.AskAnswer{User: "alice", Selected: []string{"East"}, At: answeredAt},
+		},
+		"open": {State: "open", Urgency: "med", Question: "How many regions take the first wave?", Options: []model.AskOption{}},
 	}
-	nodes := map[string]askNode{"own": {}, "open": {}}
-	states, backed := rowBackedStates(nodes, rows)
+	const (
+		ownDecided    = `:::ask{#own urgency="low" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-02T10:00:00.123456Z" selected="[&#x22;East&#x22;]"}` + "\n"
+		ownBody       = "Which region goes first?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n"
+		openDirective = `:::ask{#open urgency="med" multiple="false" state="open"}` + "\n"
+	)
+	own := askNodeOf(t, ownDecided+ownBody, nil)
+	open := askNodeOf(t, openDirective+"How many regions take the first wave?\n:::\n", nil)
+	states, backed := rowBackedStates(map[string]askNode{"own": own, "open": open}, rows)
 	want := map[string]askBlockState{
 		"own":  {state: "answered", answeredBy: "alice", answeredAt: "2026-10-02T10:00:00.123456Z"},
 		"open": {state: "open"},
@@ -208,17 +239,45 @@ func TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testi
 		t.Fatalf("row-backed states = %#v, %v; want %#v from the rows", states, backed, want)
 	}
 	for id, ask := range rows {
-		node := &pmdoc.Node{Type: "ask", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: id, "urgency": "med", "multiple": false}}
+		node := &pmdoc.Node{Type: "ask", Attrs: pmdoc.Attrs{pmdoc.BlockIDAttr: id, "urgency": ask.Urgency, "multiple": false}}
 		setAskServerAttributes(node, ask, "", false)
 		if written := askBlockStates(&pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{node}})[id]; written != states[id] {
 			t.Fatalf("block %q as settlement writes it = %#v, its row reads %#v; want them equal", id, written, states[id])
 		}
 	}
+	// An open row's question is still being written: its block may ask what the row does not yet.
+	reworded := askNodeOf(t, openDirective+"How many cloud regions take the first wave?\n\n- Two: The fewest.\n:::\n", nil)
+	if states, backed := rowBackedStates(map[string]askNode{"own": own, "open": reworded}, rows); !backed || !reflect.DeepEqual(states, want) {
+		t.Fatalf("an open row's block reworded: states = %#v, %v; want %#v, the body free", states, backed, want)
+	}
 
+	copied := func(node *askNode) { node.copied = true }
+	invalid := func(node *askNode) { node.invalid = true }
 	for name, nodes := range map[string]map[string]askNode{
-		"a node no row backs": {"own": {}, "forged": {}},
-		"a copied node":       {"own": {}, "copy": {copied: true}},
-		"an invalid node":     {"own": {}, "open": {invalid: true}},
+		"a node no row backs": {"own": own, "forged": askNodeOf(t, `:::ask{#forged urgency="high" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-02T10:00:00Z"}`+"\nForged?\n:::\n", nil)},
+		"a copied node":       {"own": askNodeOf(t, ownDecided+ownBody, copied), "open": open},
+		"an invalid node":     {"own": own, "open": askNodeOf(t, openDirective+"How many regions take the first wave?\n:::\n", invalid)},
+		"a decided row whose node asks other wording": {
+			"own": askNodeOf(t, ownDecided+"Which region goes last?\n\n- East: The quiet one.\n- West: The busy one.\n:::\n", nil), "open": open,
+		},
+		"a decided row whose node asks other options": {
+			"own": askNodeOf(t, ownDecided+"Which region goes first?\n\n- East: The quiet one.\n:::\n", nil), "open": open,
+		},
+		"a decided row whose node settlement cannot read": {
+			"own": askNodeOf(t, ownDecided+"Which region goes first?\n\n- : The quiet one.\n:::\n", nil), "open": open,
+		},
+		"a decided row whose node was inserted again, showing the default open": {
+			"own": askNodeOf(t, `:::ask{#own urgency="low" multiple="false"}`+"\n"+ownBody, nil), "open": open,
+		},
+		"a decided row whose node shows another answerer": {
+			"own": askNodeOf(t, `:::ask{#own urgency="low" multiple="false" state="answered" answered_by="bob" answered_at="2026-10-02T10:00:00.123456Z"}`+"\n"+ownBody, nil), "open": open,
+		},
+		"a decided row whose node shows another answered_at": {
+			"own": askNodeOf(t, `:::ask{#own urgency="low" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-02T10:00:00Z"}`+"\n"+ownBody, nil), "open": open,
+		},
+		"an open row whose node shows answered": {
+			"own": own, "open": askNodeOf(t, `:::ask{#open urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-02T10:00:00Z"}`+"\nHow many regions take the first wave?\n:::\n", nil),
+		},
 	} {
 		if states, backed := rowBackedStates(nodes, rows); backed || states != nil {
 			t.Errorf("%s: row-backed states = %#v, %v; want the carry refused", name, states, backed)
@@ -229,26 +288,37 @@ func TestRowBackedStatesReadRowsAndRefuseAForgedACopiedAndAnInvalidNode(t *testi
 	}
 }
 
-// askNodes reads every ask node of the live tree wherever it stands, with the flags the rule
-// needs: copied_from makes a copy, invalid an unreadable block, and a block carrying neither is
-// plain whatever else its attributes say.
+// askNodes reads every ask node of the live tree wherever it stands, the node itself with the
+// flags the rule needs: copied_from makes a copy, invalid an unreadable block, and a block
+// carrying neither is plain whatever else its attributes say.
 func TestAskNodesOfTheCarriedVersionFlagCopiesAndInvalidBlocksWhereverTheyStand(t *testing.T) {
 	tree, err := pmdoc.Parse(decisionBlockFixture(t, "answered.md"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	want := map[string]askNode{}
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
-		if node.Type == "ask" {
-			switch node.Attrs[pmdoc.BlockIDAttr] {
-			case "rollback":
-				node.Attrs["copied_from"] = "ask-1"
-			case "budget":
-				node.Attrs["invalid"] = `ask block "budget" has an empty question`
-			}
+		if node.Type != "ask" {
+			return true
+		}
+		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
+		switch id {
+		case "rollback":
+			node.Attrs["copied_from"] = "ask-1"
+			want[id] = askNode{node: node, copied: true}
+		case "budget":
+			node.Attrs["invalid"] = `ask block "budget" has an empty question`
+			want[id] = askNode{node: node, invalid: true}
+		default:
+			want[id] = askNode{node: node}
 		}
 		return true
 	})
-	want := map[string]askNode{"wave-size": {}, "rollback": {copied: true}, "regions": {}, "budget": {invalid: true}, "second-wave": {}}
+	for _, id := range []string{"wave-size", "rollback", "regions", "budget", "second-wave"} {
+		if _, held := want[id]; !held {
+			t.Fatalf("the fixture holds no block %q", id)
+		}
+	}
 	if got := askNodes(tree); !reflect.DeepEqual(got, want) {
 		t.Fatalf("askNodes = %#v, want %#v", got, want)
 	}
@@ -258,7 +328,8 @@ func TestAskNodesOfTheCarriedVersionFlagCopiesAndInvalidBlocksWhereverTheyStand(
 }
 
 // The rule over in-memory states: N carries H's approval of A when the two cut to the same text,
-// every block of N not as A held it is H's answer, and every block of A still stands.
+// every block of N not as A held it is H's answer, at least one is not as A held it, and every
+// block of A still stands.
 func TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion(t *testing.T) {
 	answered := func(by, at string) askBlockState {
 		return askBlockState{state: "answered", answeredBy: by, answeredAt: at}
@@ -304,6 +375,15 @@ func TestCarryVerdictOverTheBlocksOfTheApprovedAndTheNewVersion(t *testing.T) {
 		{"an edit outside the blocks", carryInput{
 			login: "alice", blocks: map[string]askBlockState{"wave": answered("alice", "t1")}, approvedCut: text, cut: "Context changed.\n",
 		}, false},
+		{"nothing of his changed: every block as the approved version held it", carryInput{
+			login: "alice", approved: map[string]askBlockState{"wave": answered("alice", "t0"), "region": answered("bob", "t0")},
+			blocks: map[string]askBlockState{"wave": answered("alice", "t0"), "region": answered("bob", "t0")}, approvedCut: text, cut: text,
+		}, false},
+		{"a block he answered before his approval, removed since and restored as it was", carryInput{
+			login: "alice", approved: map[string]askBlockState{"wave": answered("alice", "t0")},
+			blocks: map[string]askBlockState{"wave": answered("alice", "t0")}, approvedCut: text, cut: text,
+		}, false},
+		{"no block on either side", carryInput{login: "alice", approvedCut: text, cut: text}, false},
 	} {
 		if got := carryVerdict(test.input); got != test.carry {
 			t.Errorf("%s: carry = %v, want %v", test.name, got, test.carry)

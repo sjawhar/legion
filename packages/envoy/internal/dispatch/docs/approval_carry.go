@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -16,18 +17,22 @@ import (
 )
 
 // A human's answer to a decision block carries his approval forward. He approved the document at
-// version A; the version his answer writes, N, differs from A only in its ask blocks, and every
-// block of N that is not as A held it - added since, answered or re-answered since, or resolved
-// since - is one he answered: nothing he has not agreed to is in N, so Dispatch records his
-// approval of N in his name, in the transaction that writes N, rather than leaving his approval
-// stale and asking him to approve again what he just decided (LEGION-573).
+// version A; the version his answer writes, N, differs from A only in its ask blocks, every block
+// of N that is not as A held it - added since, answered or re-answered since, or resolved since -
+// is one he answered, and at least one is: nothing he has not agreed to is in N, and something of
+// his is, so Dispatch records his approval of N in his name, in the transaction that writes N,
+// rather than leaving his approval stale and asking him to approve again what he just decided
+// (LEGION-573). N is compared with A alone: the versions between them are read for nothing, so a
+// block that left and came back as A held it is no change of his.
 //
 // Who answered what is read from the asks rows of this document, never from N's blocks: a peer on
 // the document socket writes a block's attributes as it likes, and settlement writes them back
 // from the row only for a block it can read. A block of N that no row of this document backs - a
 // forged one, a copy (copied_from, whose row is another document's), or one whose update the room
 // has not credited yet - or one settlement could not read (invalid) leaves N's decisions unknown,
-// and nothing is carried.
+// and nothing is carried. Nor is anything carried while a block shows other than its row's state,
+// or while a decided block asks other wording than its row was decided on, which settlement writes
+// back (reconcileAskBlocks): until it does, the block shows a decision under words nobody decided.
 
 // carryReason is the reason a carried review records, naming the approval it follows.
 const carryReason = "Carried forward from the approval of version %d: the answer to a decision block was the whole change since it."
@@ -51,10 +56,20 @@ func askBlockStateOf(ask model.Ask) askBlockState {
 	return askBlockState{state: ask.State}
 }
 
-// askNode is one ask node of N: copied when it is a copy of another document's ask
-// (copied_from), invalid when settlement could not read it (invalid, which the live tree holds
-// and no rendering writes).
+// shownAskState is the state node's own server attributes show, as setAskServerAttributes writes
+// them: what a stored version's block says, and what a block of N must agree with its row on.
+func shownAskState(node *pmdoc.Node) askBlockState {
+	state, _ := node.Attrs["state"].(string)
+	answeredBy, _ := node.Attrs["answered_by"].(string)
+	answeredAt, _ := node.Attrs["answered_at"].(string)
+	return askBlockState{state: state, answeredBy: answeredBy, answeredAt: answeredAt}
+}
+
+// askNode is one ask node of N: the node itself, whose attributes and wording are held to its
+// row; copied when it is a copy of another document's ask (copied_from); invalid when settlement
+// could not read it (invalid, which the live tree holds and no rendering writes).
 type askNode struct {
+	node    *pmdoc.Node
 	copied  bool
 	invalid bool
 }
@@ -68,6 +83,13 @@ type carryInput struct {
 	approvedCut, cut string
 }
 
+// approvedVersion is a version a candidate approved as the rule reads it: its blocks as its stored
+// markdown holds them and its cut. Two candidates who approved the same version share one read.
+type approvedVersion struct {
+	blocks map[string]askBlockState
+	cut    string
+}
+
 // carryApproval carries a human's approval to version, just written from rendered, when the
 // answer he gave a decision block is the whole change since the version he approved (the rule
 // above). It returns the events it appended - the open approval request's ask.answered, when one
@@ -79,12 +101,12 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 		return nil, nil
 	}
 	// Every version write runs this, and a document keeps its ask blocks for the rest of its life:
-	// the rows and the version before this one are read only once a carry is possible at all,
-	// which needs an approval of the document by someone.
+	// the rows are read only once a carry is possible at all, which needs an approval of the
+	// document by someone.
 	if approvedByAnyone, err := LatestApprovedReview(ctx, tx, artifactID); err != nil || approvedByAnyone == nil {
 		return nil, err
 	}
-	rows, err := askBlockRows(ctx, tx, artifactID)
+	rows, err := loadAskBlocks(ctx, tx, artifactID)
 	if err != nil {
 		return nil, err
 	}
@@ -92,39 +114,9 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	if !backed {
 		return nil, nil
 	}
-	previous, readable, err := s.storedVersionTree(ctx, tx, artifactID, version.Number-1)
-	if err != nil || !readable {
+	review, err := s.carriedReview(ctx, tx, artifactID, version.Number, rendered.markdown, blocks)
+	if err != nil || review == nil {
 		return nil, err
-	}
-	previousBlocks := askBlockStates(previous)
-	login, newly := newlyAnsweredBlocks(blocks, previousBlocks)
-	if !newly {
-		return nil, nil
-	}
-	review, err := latestReviewBy(ctx, tx, artifactID, login)
-	if err != nil || review == nil || review.State != "approved" {
-		return nil, err
-	}
-	if requested, err := changesRequestedSince(ctx, tx, *review); err != nil || requested {
-		return nil, err
-	}
-	approved, approvedBlocks := previous, previousBlocks
-	if review.Version != version.Number-1 {
-		if approved, readable, err = s.storedVersionTree(ctx, tx, artifactID, review.Version); err != nil || !readable {
-			return nil, err
-		}
-		approvedBlocks = askBlockStates(approved)
-	}
-	approvedCut, err := renderWithoutAskBlocks(approved)
-	if err != nil {
-		return nil, skipUnreadableVersion(artifactID, review.Version, err)
-	}
-	cut, err := CutDecisionBlocks(rendered.markdown)
-	if err != nil {
-		return nil, skipUnreadableVersion(artifactID, version.Number, err)
-	}
-	if !carryVerdict(carryInput{login: login, blocks: blocks, approved: approvedBlocks, approvedCut: approvedCut, cut: cut}) {
-		return nil, nil
 	}
 
 	reason := fmt.Sprintf(carryReason, review.Version)
@@ -153,6 +145,79 @@ func (s *Service) carryApproval(ctx context.Context, tx pgx.Tx, artifactID strin
 	return append(events, event), nil
 }
 
+// carriedReview is the approval version number of artifactID carries, or nil: the one review
+// among the candidates' - each person who answered a block of N (answerers) - whose approval the
+// rule carries (carryVerdict). A candidate's latest review of the document must be an approval
+// with no request for changes newer than it, and its version readable. Two candidates whose
+// approvals both pass cannot happen by the rule's shape, each one's blocks being the other's
+// change; should they, nothing is carried rather than one guessed.
+func (s *Service) carriedReview(ctx context.Context, tx pgx.Tx, artifactID string, number int, markdown string, blocks map[string]askBlockState) (*model.ArtifactReview, error) {
+	candidates := answerers(blocks)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	var carried *model.ArtifactReview
+	var cut string
+	cutOnce := false
+	approved := map[int]approvedVersion{}
+	for _, login := range candidates {
+		review, err := latestReviewBy(ctx, tx, artifactID, login)
+		if err != nil {
+			return nil, err
+		}
+		if review == nil || review.State != "approved" {
+			continue
+		}
+		requested, err := changesRequestedSince(ctx, tx, *review)
+		if err != nil {
+			return nil, err
+		}
+		if requested {
+			continue
+		}
+		if !cutOnce {
+			if cut, err = CutDecisionBlocks(markdown); err != nil {
+				return nil, skipUnreadableVersion(artifactID, number, err)
+			}
+			cutOnce = true
+		}
+		version, cached := approved[review.Version]
+		if !cached {
+			var readable bool
+			version, readable, err = s.readApprovedVersion(ctx, tx, artifactID, review.Version)
+			if err != nil {
+				return nil, err
+			}
+			if !readable {
+				continue
+			}
+			approved[review.Version] = version
+		}
+		if !carryVerdict(carryInput{login: login, blocks: blocks, approved: version.blocks, approvedCut: version.cut, cut: cut}) {
+			continue
+		}
+		if carried != nil {
+			return nil, nil
+		}
+		carried = review
+	}
+	return carried, nil
+}
+
+// readApprovedVersion reads the stored version number of artifactID as the rule compares N with
+// it (storedVersionTree), and whether it could be read.
+func (s *Service) readApprovedVersion(ctx context.Context, tx pgx.Tx, artifactID string, number int) (approvedVersion, bool, error) {
+	tree, readable, err := s.storedVersionTree(ctx, tx, artifactID, number)
+	if err != nil || !readable {
+		return approvedVersion{}, false, err
+	}
+	cut, err := renderWithoutAskBlocks(tree)
+	if err != nil {
+		return approvedVersion{}, false, skipUnreadableVersion(artifactID, number, err)
+	}
+	return approvedVersion{blocks: askBlockStates(tree), cut: cut}, true, nil
+}
+
 // skipUnreadableVersion is carryApproval's answer to a version this parser or renderer refuses: a
 // version an earlier release stored is not this write's to fail for, so the approval is not
 // carried and the refusal is logged; any other error is the write's.
@@ -166,8 +231,9 @@ func skipUnreadableVersion(artifactID string, number int, err error) error {
 }
 
 // askNodes is every ask node tree holds, by block id, wherever it stands: in a blockquote, a list
-// item or another typed block. A repeated id keeps every flag the nodes carrying it set, so a copy
-// or an unreadable block under the id is seen; a nil tree holds none.
+// item or another typed block. A repeated id keeps the first node, as settlement indexes the
+// first, and every flag the nodes carrying it set, so a copy or an unreadable block under the id
+// is seen; a nil tree holds none.
 func askNodes(tree *pmdoc.Node) map[string]askNode {
 	var nodes map[string]askNode
 	pmdoc.Walk(tree, func(node *pmdoc.Node) bool {
@@ -180,46 +246,24 @@ func askNodes(tree *pmdoc.Node) map[string]askNode {
 		id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 		copied, _ := node.Attrs["copied_from"].(string)
 		invalid, _ := node.Attrs["invalid"].(string)
-		seen := nodes[id]
-		nodes[id] = askNode{copied: seen.copied || copied != "", invalid: seen.invalid || invalid != ""}
+		seen, held := nodes[id]
+		if !held {
+			seen.node = node
+		}
+		nodes[id] = askNode{node: seen.node, copied: seen.copied || copied != "", invalid: seen.invalid || invalid != ""}
 		return true
 	})
 	return nodes
 }
 
-// askBlockRows reads every ask of this document anchored to a block, by block id. A plain read:
-// every writer of these rows takes the document's owner row first, which this write holds, and
-// nothing here writes a row (lock_order_test.go).
-func askBlockRows(ctx context.Context, q Queryer, artifactID string) (map[string]model.Ask, error) {
-	rows, err := q.Query(ctx, `
-		select `+AskColumns+`
-		from asks a where a.block_artifact_id = $1 and a.block_id is not null
-	`, artifactID)
-	if err != nil {
-		return nil, fmt.Errorf("read ask blocks: %w", err)
-	}
-	defer rows.Close()
-	asks := map[string]model.Ask{}
-	for rows.Next() {
-		ask, err := ScanAsk(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan ask block: %w", err)
-		}
-		if ask.BlockID == nil {
-			return nil, fmt.Errorf("read ask block without a block id")
-		}
-		asks[*ask.BlockID] = ask
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate ask blocks: %w", err)
-	}
-	return asks, nil
-}
-
 // rowBackedStates is the state of every ask node of N, each from the row of this document that
-// indexes it (rows, by block id), and whether every node has one. A node no row backs, a copy, or
-// a node settlement could not read leaves N's decisions unknown: nothing is returned, and the
-// caller carries nothing.
+// indexes it (rows, by block id), and whether every node is as its row has it. A node no row
+// backs, a copy, or a node settlement could not read leaves N's decisions unknown; a node whose
+// own attributes show other than its row's state is a forgery or a stale write, and the block of
+// a decided row that does not parse or asks other wording than the row was decided on
+// (askBlock.asks, settlement's own test) shows the decision under words nobody decided. For any
+// of them nothing is returned, and the caller carries nothing. An open row's body is free: its
+// question is still being written.
 func rowBackedStates(nodes map[string]askNode, rows map[string]model.Ask) (map[string]askBlockState, bool) {
 	states := make(map[string]askBlockState, len(nodes))
 	for id, node := range nodes {
@@ -227,7 +271,16 @@ func rowBackedStates(nodes map[string]askNode, rows map[string]model.Ask) (map[s
 		if node.copied || node.invalid || !backed {
 			return nil, false
 		}
-		states[id] = askBlockStateOf(ask)
+		state := askBlockStateOf(ask)
+		if shownAskState(node.node) != state {
+			return nil, false
+		}
+		if ask.State != "open" {
+			if block, err := parseAskBlock(node.node); err != nil || !block.asks(model.NewAskEditPrevious(ask)) {
+				return nil, false
+			}
+		}
+		states[id] = state
 	}
 	return states, true
 }
@@ -249,46 +302,39 @@ func askBlockStates(tree *pmdoc.Node) map[string]askBlockState {
 		if states == nil {
 			states = map[string]askBlockState{}
 		}
-		state, _ := node.Attrs["state"].(string)
-		answeredBy, _ := node.Attrs["answered_by"].(string)
-		answeredAt, _ := node.Attrs["answered_at"].(string)
-		states[id] = askBlockState{state: state, answeredBy: answeredBy, answeredAt: answeredAt}
+		states[id] = shownAskState(node)
 		return true
 	})
 	return states
 }
 
-// newlyAnsweredBlocks finds the blocks of N, blocks, answered since the version before it,
-// previous: answered here and absent there, or there with another answered_at. It returns the one
-// canonical login that answered them, and whether there is exactly one: no newly answered block,
-// or two people's answers in one version, is no carry.
-func newlyAnsweredBlocks(blocks, previous map[string]askBlockState) (string, bool) {
-	login, found := "", false
-	for id, block := range blocks {
+// answerers is everyone who answered a block of N, blocks, by canonical login
+// (model.CanonicalLogin), each once, sorted: the candidates whose approval N may carry.
+func answerers(blocks map[string]askBlockState) []string {
+	var logins []string
+	for _, block := range blocks {
 		if block.state != "answered" {
 			continue
 		}
-		if before, held := previous[id]; held && before.answeredAt == block.answeredAt {
-			continue
+		if login := model.CanonicalLogin(block.answeredBy); !slices.Contains(logins, login) {
+			logins = append(logins, login)
 		}
-		answeredBy := model.CanonicalLogin(block.answeredBy)
-		if found && answeredBy != login {
-			return "", false
-		}
-		login, found = answeredBy, true
 	}
-	return login, found
+	slices.Sort(logins)
+	return logins
 }
 
 // carryVerdict is the rule over the states alone: N carries H's approval of A when the two cut to
 // the same text, every block of N that is not as A held it - added since A, answered or
-// re-answered since by anyone, or resolved since, which is nobody's answer - is answered by H, and
-// every block of A still stands in N. A block A held unchanged, whoever answered it before his
-// approval, is content he approved and stays out of the test.
+// re-answered since by anyone, or resolved since, which is nobody's answer - is answered by H, at
+// least one block of N is not as A held it, and every block of A still stands in N. A block A held
+// unchanged, whoever answered it before his approval, is content he approved and stays out of the
+// test; a version whose every block A held unchanged holds nothing new of his and carries nothing.
 func carryVerdict(input carryInput) bool {
 	if input.approvedCut != input.cut {
 		return false
 	}
+	changed := false
 	for id, block := range input.blocks {
 		if before, held := input.approved[id]; held && before == block {
 			continue
@@ -296,6 +342,10 @@ func carryVerdict(input carryInput) bool {
 		if block.state != "answered" || model.CanonicalLogin(block.answeredBy) != input.login {
 			return false
 		}
+		changed = true
+	}
+	if !changed {
+		return false
 	}
 	for id := range input.approved {
 		if _, held := input.blocks[id]; !held {

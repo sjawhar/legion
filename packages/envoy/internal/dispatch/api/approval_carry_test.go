@@ -439,14 +439,58 @@ func TestAnAnswerCarriesWhenAnAgentEditInsideAnotherBlockLandsInItsVersion(t *te
 
 	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
 	reviseDocument(t, handler, issue.PrimaryArtifactID, "Which region goes first?", "Which cloud region goes first?", 3)
-	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/3", nil, "alice")
-	markdown := decodeBody[struct {
-		Markdown string `json:"markdown"`
-	}](t, version).Markdown
+	markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 3)
 	if !strings.Contains(markdown, `answered_by="alice"`) || !strings.Contains(markdown, "Which cloud region goes first?") {
 		t.Fatalf("version 3 = %s, want it to hold both the answer and the agent's edit", markdown)
 	}
 	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 3, 2, nil)
+}
+
+// versionMarkdown is the markdown of the document's version number.
+func versionMarkdown(t *testing.T, handler http.Handler, artifactID string, number int) string {
+	t.Helper()
+	version := dispatchRequest(t, handler, http.MethodGet, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d", artifactID, number), nil, "alice")
+	if version.Code != http.StatusOK {
+		t.Fatalf("read version %d: status=%d body=%s", number, version.Code, version.Body.String())
+	}
+	return decodeBody[struct {
+		Markdown string `json:"markdown"`
+	}](t, version).Markdown
+}
+
+// Stale: the agent rewords an answered block in the version the human's answer writes. The human
+// answered the first block and approved; the agent added a second, which the human answers, and
+// the agent's edit of the first block's question, through the edits route, versions in the route's
+// own transaction while the answer still waits for its settlement, so one version holds both. The
+// cut leaves both blocks out and every block is his, but the first now shows his answer under
+// wording nobody decided: a decided block must ask what its row was decided on, so nothing is
+// carried. Settlement then writes the decided wording back, and that version - the one he approved
+// plus his answer to the second block - carries.
+func TestARewordOfAnAnsweredBlockInTheAnswersVersionDoesNotCarry(t *testing.T) {
+	handler := settlingCarryHandler(t, time.Second)
+	issue := createInteractionIssue(t, handler, "TEST", "Reword under the answer", "Context\n\n"+regionAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	for id, ask := range insertDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, waveAsk, 3, map[string]string{"wave": "How many regions take the first wave?"}) {
+		asks[id] = ask
+	}
+
+	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
+	reviseDocument(t, handler, issue.PrimaryArtifactID, "Which region goes first?", "Which region goes last?", 4)
+	markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4)
+	if strings.Count(markdown, `answered_by="alice"`) != 2 || !strings.Contains(markdown, "Which region goes last?") {
+		t.Fatalf("version 4 = %s, want it to hold both answers and the agent's reword", markdown)
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 5)
+	restored := versionMarkdown(t, handler, issue.PrimaryArtifactID, 5)
+	if strings.Count(restored, `answered_by="alice"`) != 2 || !strings.Contains(restored, "Which region goes first?") || strings.Contains(restored, "goes last?") {
+		t.Fatalf("version 5 = %s, want settlement to have written the decided wording back under both answers", restored)
+	}
+	requireCarriedReview(t, handler, issue.PrimaryArtifactID, 5, 2, nil)
 }
 
 // The human changes his answer. The block's answered_at moves, so the block is newly answered
@@ -584,6 +628,49 @@ func TestAnAnswerAfterABlockHeApprovedWasRemovedDoesNotCarry(t *testing.T) {
 	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
 }
 
+// Stale: the agent deletes a block the human answered and approved, then inserts it again with
+// its id and wording. Its row stays answered - settlement retracts only an open ask - so the row
+// says the block he answered is back, with no action of his. The inserted block shows open until
+// settlement writes the row's answer back into it, and a block that shows other than its row's
+// state carries nothing; once it does, the version holds every block as the approved version held
+// it, which is nothing new of his. Neither version carries.
+func TestADeletedAndRestoredAnsweredBlockCarriesNothing(t *testing.T) {
+	handler := approvalCarryHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Answered block restored", "Context\n\n"+regionAsk)
+	asks := indexedDecisionBlocks(t, handler, issue.Key, issue.PrimaryArtifactID, map[string]string{"region": "Which region goes first?"})
+	answerDecisionBlock(t, handler, asks["region"], "alice", []string{"East"}, "", nil)
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
+	reviewDocument(t, handler, issue.PrimaryArtifactID, "alice", "approved", "")
+	deleted := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "delete", "block": "region"}},
+	})
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete the answered block: status=%d body=%s", deleted.Code, deleted.Body.String())
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 3)
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+
+	restored := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"actor": sessionActor(),
+		"ops":   []map[string]string{{"op": "insert", "after": "end", "markdown": regionAsk}},
+	})
+	if restored.Code != http.StatusOK {
+		t.Fatalf("insert the answered block again: status=%d body=%s", restored.Code, restored.Body.String())
+	}
+	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 4)
+	if markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 4); !strings.Contains(markdown, `:::ask{#region urgency="low" multiple="false" state="open"}`) {
+		t.Fatalf("version 4 = %s, want the block inserted again, showing open", markdown)
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+	awaitDocumentText(t, handler, issue.PrimaryArtifactID, "the row's answer written back into the restored block",
+		contains(`:::ask{#region urgency="low" multiple="false" state="answered" answered_by="alice"`), nil)
+	if ask := readBlockAsk(t, handler, asks["region"]); ask.State != "answered" || ask.Answer == nil || ask.Answer.User != "alice" {
+		t.Fatalf("the block's ask after the delete and the insert = state %q answer %#v, want alice's answer kept", ask.State, ask.Answer)
+	}
+	requireNoCarry(t, handler, issue.PrimaryArtifactID, 1, "stale")
+}
+
 // Stale: a block the approved version held open was answered by another human after his
 // approval, and his own answer to a block added since would carry that decision into his name.
 // The cut text is the same and every added block is his, so only the comparison of each block
@@ -648,10 +735,7 @@ func TestTwoHumansAnswersInOneVersionDoNotCarry(t *testing.T) {
 	answerDecisionBlock(t, handler, asks["wave"], "alice", []string{"Two"}, "", nil)
 	answerDecisionBlock(t, handler, asks["region"], "bob", []string{"East"}, "", nil)
 	waitForArtifactVersion(t, handler, issue.PrimaryArtifactID, 2)
-	version := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions/2", nil, "alice")
-	markdown := decodeBody[struct {
-		Markdown string `json:"markdown"`
-	}](t, version).Markdown
+	markdown := versionMarkdown(t, handler, issue.PrimaryArtifactID, 2)
 	if !strings.Contains(markdown, `answered_by="alice"`) || !strings.Contains(markdown, `answered_by="bob"`) {
 		t.Fatalf("version 2 = %s, want both answers in it", markdown)
 	}
