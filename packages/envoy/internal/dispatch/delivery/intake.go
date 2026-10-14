@@ -46,9 +46,9 @@ type Intake struct {
 	github *githubapp.Client
 }
 
-// NewIntake builds an Intake. natsClient must already be connected and hold no other JetStream
-// subscription, which the intake's bind would replace (bus.Client.Subscribe): StartIntakes gives it
-// a client of its own.
+// NewIntake builds an Intake. natsClient must already be connected and belong to the intake alone:
+// the intake's bind and any other Subscribe on that client replace each other
+// (bus.Client.Subscribe). StartIntakes gives it a client of its own.
 func NewIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *Intake {
 	return &Intake{nats: natsClient, pool: pool, github: github}
 }
@@ -296,7 +296,9 @@ func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*nat
 // and calling AddConsumer again with a freshly generated one on every restart would try to change a
 // durable's config out from under itself rather than resuming its cursor. Unlike the listener's own
 // consumer, this package skips the rolling-deploy bind-retry/backoff machinery
-// (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet.
+// (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet. It subscribes through
+// client.Subscribe, which replaces the one JetStream subscription a bus.Client holds, so each
+// durable bound here takes a client of its own.
 func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bool) {
 	js := client.JS()
 	name, subject := wanted.Durable, wanted.FilterSubject

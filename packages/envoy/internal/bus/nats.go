@@ -100,6 +100,11 @@ type recoverableSubscription struct {
 	binding chan struct{}
 }
 
+// Client is a NATS connection that publishes notifications and holds at most one JetStream
+// subscription and one core subscription, which it keeps across a reconnect and binds again on a
+// connection it dials to replace a closed one. Subscribe replaces the JetStream subscription and
+// SubscribeCore the core one, each unsubscribing the handle the previous call returned, so a
+// caller that needs two durables takes one Client per durable.
 type Client struct {
 	Conn                        *nats.Conn
 	js                          nats.JetStreamContext
@@ -365,7 +370,7 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
-// Subscribe creates the listener's recoverable JetStream subscription. The client keeps one
+// Subscribe creates the client's recoverable JetStream subscription. The client keeps one
 // JetStream subscription: a later call unsubscribes the handle an earlier one returned.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()

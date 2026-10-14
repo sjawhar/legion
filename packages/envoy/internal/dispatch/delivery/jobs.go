@@ -80,8 +80,8 @@ func (realJobClock) Now() time.Time { return time.Now() }
 
 func (realJobClock) AfterFunc(d time.Duration, f func()) jobTimer { return time.AfterFunc(d, f) }
 
-// NewJobIntake builds a JobIntake. natsClient must already be connected and hold no other
-// JetStream subscription, as for NewIntake.
+// NewJobIntake builds a JobIntake. natsClient must already be connected and belong to the job
+// intake alone, as for NewIntake.
 func NewJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *JobIntake {
 	return newJobIntake(natsClient, pool, github, realJobClock{})
 }
