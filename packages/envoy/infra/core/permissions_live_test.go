@@ -53,12 +53,12 @@ type natsServer interface {
 
 func TestHostPermissionsOnRealServers(t *testing.T) {
 	listener := buildListener(t)
-	for _, image := range []struct{ name, ref string }{{"2.10", testnats.Image}, {"hub", testnats.HubImage}} {
-		t.Run(image.name, func(t *testing.T) {
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
 			t.Parallel()
 			t.Run("the listener reaches healthy and a session as the same user receives", func(t *testing.T) {
 				t.Parallel()
-				seed, server, uri := startHostServer(t, image.ref, core.HostPermissions(liveMachineID))
+				seed, server, uri := startHostServer(t, image.Ref, core.HostPermissions(liveMachineID))
 				process, port := startListener(t, listener, uri, seed)
 				t.Logf("healthy /healthz body: %s", requireHealthy(t, process, port))
 
@@ -103,7 +103,7 @@ func TestHostPermissionsOnRealServers(t *testing.T) {
 				grant.Publish.Allow = slices.DeleteFunc(grant.Publish.Allow, func(entry string) bool { return entry == removed })
 				require.Len(t, grant.Publish.Allow, held-1, "the grant does not hold %s", removed)
 
-				seed, server, uri := startHostServer(t, image.ref, grant)
+				seed, server, uri := startHostServer(t, image.Ref, grant)
 				process, port := startListener(t, listener, uri, seed)
 				requireNeverHealthy(t, port)
 				// The removed subject is what the server refused, and all it refused: the listener

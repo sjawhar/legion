@@ -731,6 +731,13 @@
 
 ### Fixed
 
+- The `GET /ws/delivery` socket gives itself a read buffer, so a page that stops answering its
+  pings loses the socket with no close frame (1006 to the page) under any gorilla/websocket
+  (LEGION-690). Without one, a build linking a gorilla that keeps net/http's hijacked reader (every
+  workspace build, through `packages/daemon`'s client-go) could close it with 1008, the code for a
+  caller that no longer resolves, depending on a race. The published image, built in module mode
+  with gorilla v1.5.3, never did. The page reconnects with backoff after either close.
+
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
   his approval only while the approved version holds a block under the same id whose stored

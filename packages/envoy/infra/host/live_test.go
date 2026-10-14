@@ -34,10 +34,10 @@ func TestMain(m *testing.M) { os.Exit(pulumitest.Main(m)) }
 const healthWindow = 60 * time.Second
 
 // dockerProvider is the explicit docker provider each program passes its listener, at the version
-// the first consumer pins.
+// the first consumer pins, the one the test binary installs (pulumitest.DockerPluginVersion).
 var dockerProvider = map[string]any{
 	"type":    "pulumi:providers:docker",
-	"options": map[string]any{"version": "4.11.0"},
+	"options": map[string]any{"version": pulumitest.DockerPluginVersion},
 }
 
 // freePorts returns n distinct loopback ports nothing listens on, holding each until all are

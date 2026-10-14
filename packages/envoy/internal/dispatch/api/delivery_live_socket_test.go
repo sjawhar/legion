@@ -74,12 +74,13 @@ func (rig *deliverySocketRig) sockets(t *testing.T, n int) []*deliverySocket {
 }
 
 // socketClient is one page's GET /ws/delivery connection. Once it reads, every message it is sent
-// lands in frames, and ended closes when the connection ends, with err saying how.
+// lands in frames, and ended closes when the connection ends, with err saying how and endedAt when.
 type socketClient struct {
-	conn   *gws.Conn
-	frames chan []byte
-	ended  chan struct{}
-	err    error
+	conn    *gws.Conn
+	frames  chan []byte
+	ended   chan struct{}
+	err     error
+	endedAt time.Time
 }
 
 // open dials the socket, failing the test unless the upgrade succeeds; it reads nothing until read.
@@ -125,10 +126,12 @@ func (c *socketClient) read() *socketClient {
 			kind, data, err := c.conn.ReadMessage()
 			if err != nil {
 				c.err = err
+				c.endedAt = time.Now()
 				return
 			}
 			if kind != gws.TextMessage {
 				c.err = fmt.Errorf("a message of kind %d", kind)
+				c.endedAt = time.Now()
 				return
 			}
 			c.frames <- data
@@ -223,7 +226,8 @@ func (c *socketClient) refusal(t *testing.T, within time.Duration, sub, code str
 }
 
 // closeCode waits within within for the socket to end, counting the messages it is sent first, and
-// answers the close code Dispatch ended it with: 0 for an end with no close frame.
+// answers the close code Dispatch ended it with: 1006 for an end with no close frame, which gorilla
+// reads from the connection's end, and 0 for an error with no code, such as a reset.
 func (c *socketClient) closeCode(t *testing.T, within time.Duration) (code, messages int) {
 	t.Helper()
 	deadline := time.After(within)
@@ -237,7 +241,7 @@ func (c *socketClient) closeCode(t *testing.T, within time.Duration) (code, mess
 			if errors.As(c.err, &closed) {
 				return closed.Code, messages
 			}
-			t.Logf("the socket ended with no close frame: %v", c.err)
+			t.Logf("the socket ended with an error that carries no close code: %v", c.err)
 			return 0, messages
 		case <-deadline:
 			t.Fatalf("the socket was still open after %s", within)
@@ -423,9 +427,11 @@ func TestABearerMayReadTheSocket(t *testing.T) {
 
 // A bearer revoked while its socket is open loses the socket at the next heartbeat's resolution, as
 // the document socket and the event stream do: the request's context ends, and the socket closes
-// with 1008.
+// with 1008. The heartbeat is a second, so the client's pong, which gorilla's default handler
+// writes, has a heartbeat to meet the pong deadline on a loaded runner: the socket must last until
+// the revocation, and a pong timeout would end it first.
 func TestARevokedBearerClosesItsSocketWithPolicyViolation(t *testing.T) {
-	const heartbeat = 200 * time.Millisecond
+	const heartbeat = time.Second
 	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	minted := mintAgentToken(t, rig.handler)
 	client := rig.dial(t, withBearer(minted.Token))
@@ -492,9 +498,16 @@ func TestAFrameOverTheReadLimitClosesTheSocket(t *testing.T) {
 
 	// A resume's revisions may run to megabytes: a frame under 8 MiB is read, and this one is answered
 	// for its view, which names no kind. The answer comes only once all 7 MiB have arrived and been
-	// parsed, so its wait is throughputWait.
+	// parsed, so its wait is throughputWait, and so is the write's: it is one frame, which only the
+	// server's pong deadline, twice the heartbeat, would otherwise end if the transfer stalled.
 	revisions := strings.Repeat("0", 7<<20)
-	client.sendText(t, []byte(`{"type":"subscribe","sub":"r","view":{"kind":"bogus"},"resume":{"seq":"0","revs":{"items":{},"maps":{},"counts":{},"fields":{"f":"`+revisions+`"}}}}`))
+	subscribe := []byte(`{"type":"subscribe","sub":"r","view":{"kind":"bogus"},"resume":{"seq":"0","revs":{"items":{},"maps":{},"counts":{},"fields":{"f":"` + revisions + `"}}}}`)
+	written := throughputWait(t)
+	_ = client.conn.SetWriteDeadline(time.Now().Add(written))
+	if err := client.conn.WriteMessage(gws.TextMessage, subscribe); err != nil {
+		t.Fatalf("write the 7 MiB subscribe frame within throughputWait (%s): %v", written, err)
+	}
+	_ = client.conn.SetWriteDeadline(time.Time{})
 	client.refusal(t, throughputWait(t), "r", "INVALID_FRAME")
 
 	// One over it closes the socket with 1009. gorilla compares a frame's declared length with the
@@ -641,8 +654,12 @@ func TestTheTestHookClosesEveryDeliverySocket(t *testing.T) {
 	})
 }
 
+// A page that answers each ping keeps its socket, idle, across many heartbeats. The heartbeat is a
+// second, so the page's first pong has a heartbeat to arrive before the pong deadline, two
+// heartbeats after the socket opened, and a loaded runner that delays it most of a heartbeat still
+// meets it. A page that answers no ping, which a short heartbeat ends quickly, is the next test's.
 func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
-	const heartbeat = 200 * time.Millisecond
+	const heartbeat = time.Second
 	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
 	answering := rig.open(t, gws.DefaultDialer, asUser("alice"))
 	var pings atomic.Int32
@@ -651,30 +668,55 @@ func TestPingsKeepAnIdleSocketOpen(t *testing.T) {
 		return answering.conn.WriteControl(gws.PongMessage, []byte(data), time.Now().Add(time.Second))
 	})
 	answering.read()
-	silent := rig.open(t, gws.DefaultDialer, asUser("bob"))
-	silent.conn.SetPingHandler(func(string) error { return nil })
-	opened := time.Now()
-	silent.read()
 
-	// A page that answers no ping is closed once two heartbeats pass without a pong.
-	select {
-	case <-silent.ended:
-		if waited := time.Since(opened); waited < heartbeat || waited > 2*heartbeat+time.Second {
-			t.Fatalf("the silent page's socket ended %s after it opened, want about two heartbeats (%s)", waited, 2*heartbeat)
-		}
-	case <-time.After(2*heartbeat + 3*time.Second):
-		t.Fatal("a page that answers no ping kept its socket")
-	}
-
-	// A page that answers each ping keeps its socket, idle, across many heartbeats.
-	time.Sleep(time.Until(opened.Add(6 * heartbeat)))
+	// Four heartbeats is twice the pong deadline, so the page still holds its socket only through
+	// its pongs.
+	time.Sleep(4 * heartbeat)
 	if !answering.open() {
 		t.Fatalf("an idle page that answers every ping lost its socket: %v", answering.err)
 	}
-	if got := pings.Load(); got < 4 {
-		t.Fatalf("the idle page was pinged %d times in six heartbeats, want one each", got)
+	if got := pings.Load(); got < 3 {
+		t.Fatalf("the idle page was pinged %d times in four heartbeats, want one each", got)
 	}
 	rig.sockets(t, 1)
+}
+
+// A page that answers no ping is closed once two heartbeats pass without a pong. It has gone or
+// stopped reading, so the socket sends it no close frame: the connection ends, which gorilla and a
+// browser report as 1006, and the page reconnects with backoff, as after every close but 1012
+// (packages/dispatch/web/src/api/delivery-live.ts, lost). 1008 would say its caller no longer
+// resolves.
+func TestAPageThatAnswersNoPingLosesItsSocketWithNoCloseFrame(t *testing.T) {
+	const heartbeat = 200 * time.Millisecond
+	rig := newDeliverySocketRig(t, testServerOptions{streamHeartbeat: heartbeat}, nil)
+	// Where a page that answers no ping ends with the wrong close, it does so through a race in the
+	// writer, so one silent page would show a regression only in some runs. Eight pages, each racing
+	// on its own, make it fail nearly every run: at an even race a run misses with odds of 1 in 256.
+	const silentPages = 8
+	silent := make([]*socketClient, silentPages)
+	opened := make([]time.Time, silentPages)
+	for i := range silent {
+		silent[i] = rig.open(t, gws.DefaultDialer, asUser("bob"))
+		silent[i].conn.SetPingHandler(func(string) error { return nil })
+		opened[i] = time.Now()
+		silent[i].read()
+	}
+
+	for i, page := range silent {
+		select {
+		case <-page.ended:
+			if waited := page.endedAt.Sub(opened[i]); waited < heartbeat || waited > 2*heartbeat+time.Second {
+				t.Errorf("silent page %d's socket ended %s after it opened, want about two heartbeats (%s)", i, waited, 2*heartbeat)
+			}
+			var closed *gws.CloseError
+			if !errors.As(page.err, &closed) || closed.Code != gws.CloseAbnormalClosure {
+				t.Errorf("silent page %d's socket ended with %v, want an end with no close frame (1006)", i, page.err)
+			}
+		case <-time.After(2*heartbeat + 3*time.Second):
+			t.Errorf("silent page %d, which answers no ping, kept its socket", i)
+		}
+	}
+	rig.sockets(t, 0)
 }
 
 func TestAnIdleDeliverySocketIsSentAHeartbeat(t *testing.T) {

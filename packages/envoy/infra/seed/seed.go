@@ -5,10 +5,7 @@
 package seed
 
 import (
-	"bytes"
 	"context"
-	"encoding/base32"
-	"encoding/binary"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +13,7 @@ import (
 	"maps"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/nats-io/nkeys"
 
@@ -40,7 +38,8 @@ type Store interface {
 	// version id means that version was written; one without may follow a write that landed.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
-	// clears it once read.
+	// clears it once read. When the store finds no version to serve, the error matches
+	// ErrNotServed.
 	Current(ctx context.Context, name string) (version string, value []byte, err error)
 }
 
@@ -68,6 +67,21 @@ var ErrRefused = errors.New("seed: refused")
 // key: its value is no user seed or derives another key, or the store does not serve the newest
 // version it names. The command exits 1.
 var ErrMismatch = errors.New("seed: the stored value does not derive the public key")
+
+// ErrNotServed is matched by a Store's Current error when the store finds no version of the secret
+// to serve by default, as it may for a moment after a write. A version the store finds and will not
+// serve, such as a disabled newest version on Secret Manager, is a failure of its own.
+var ErrNotServed = errors.New("seed: the store serves no version")
+
+// notServed is a store's error that reads as its own and matches ErrNotServed.
+type notServed struct{ error }
+
+func (notServed) Is(target error) bool { return target == ErrNotServed }
+
+// readBackWaits are the pauses generate takes, in turn, while the store does not yet show the
+// version it wrote: both stores' reads are eventually consistent, Secrets Manager's and Secret
+// Manager's listings and its latest alias, so a listing or a read right after a write can miss it.
+var readBackWaits = []time.Duration{250 * time.Millisecond, 500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
 
 type refusal struct{ msg string }
 
@@ -137,9 +151,15 @@ func existing(d Description, name string) error {
 // secret that is absent, scheduled for deletion or holds any version, so it never replaces a seed a
 // client may already read. It then lists the versions again, to check the secret holds that version
 // alone, and reads back the version served by default, which must be that version and derive the
-// public key it returns. Once Put has written a version, every error comes with the public key and
-// the version id.
+// public key it returns. Once Put has been called, every return carries the public key, and the
+// version id when Put answered one: a version may exist, and verify needs the key to check it.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
+	return generate(ctx, s, name, func(string) {})
+}
+
+// generate is Generate, calling announce with the public key just before Put is called, so the
+// command can print the key before anything is written.
+func generate(ctx context.Context, s Store, name string, announce func(publicKey string)) (publicKey, version string, err error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", "", refuse("%v", err)
@@ -169,31 +189,24 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 		return "", "", refuse("read the public key of the nkey user made for %s: %v", name, err)
 	}
 
+	announce(publicKey)
 	version, err = s.Put(ctx, name, value)
 	if err != nil {
 		if version == "" {
-			return "", "", afterWritef("%v; whether a version was written is unknown, run check", err)
+			return publicKey, "", afterWritef("%v; whether a version was written is unknown, run check", err)
 		}
 		return publicKey, version, afterWritef("%v", err)
 	}
-	held, err = s.Versions(ctx, name)
+	read, stored, err := readBack(ctx, s, name, version)
 	if err != nil {
-		return publicKey, version, afterWritef("version %s was written, but listing versions afterwards failed: %v", version, err)
-	}
-	if held != 1 {
-		return publicKey, version, afterWritef("%s now holds %d version(s), not only version %s: another writer raced "+
-			"this one. Run verify with the public key above before committing it", name, held, version)
-	}
-	read, stored, err := s.Current(ctx, name)
-	if err != nil {
-		return publicKey, version, afterWritef("version %s was written, but reading it back failed: %v", version, err)
+		return publicKey, version, err
 	}
 	defer clear(stored)
 	if read != version {
 		return publicKey, version, afterWritef("version %s was written, but %s serves version %s by default: another "+
 			"writer raced this one. Run verify with the public key above before committing it", version, name, read)
 	}
-	derived, err := publicKeyOf(stored)
+	derived, err := core.UserSeedPublicKey(stored)
 	if err != nil {
 		return publicKey, version, afterWritef("version %s was written, but it reads back as no user seed: %v", version, err)
 	}
@@ -201,6 +214,47 @@ func Generate(ctx context.Context, s Store, name string) (publicKey, version str
 		return publicKey, version, afterWritef("version %s was written, but it does not derive the public key above", version)
 	}
 	return publicKey, version, nil
+}
+
+// readBack lists the secret's versions after generate wrote version, then reads the version the
+// store serves by default. A listing of no version, or a store serving none, is a store that has
+// not caught up with the write yet, so it looks again after each of readBackWaits. More than one
+// version is another writer's race at once; so is a version served by default other than the
+// written one, which the caller reports. Every error is an error after the write.
+func readBack(ctx context.Context, s Store, name, version string) (read string, stored []byte, err error) {
+	for attempt := 0; ; attempt++ {
+		held, err := s.Versions(ctx, name)
+		if err != nil {
+			return "", nil, afterWritef("version %s was written, but listing versions afterwards failed: %v", version, err)
+		}
+		if held > 1 {
+			return "", nil, afterWritef("%s now holds %d version(s), not only version %s: another writer raced "+
+				"this one. Run verify with the public key above before committing it", name, held, version)
+		}
+		if held == 1 {
+			read, stored, err = s.Current(ctx, name)
+			if err == nil {
+				return read, stored, nil
+			}
+			if !errors.Is(err, ErrNotServed) {
+				return "", nil, afterWritef("version %s was written, but reading it back failed: %v", version, err)
+			}
+		}
+		if attempt == len(readBackWaits) {
+			var waited time.Duration
+			for _, wait := range readBackWaits {
+				waited += wait
+			}
+			return "", nil, afterWritef("version %s was written, but %s did not show it within %s: the store has not "+
+				"caught up. Run check, then verify with the public key above", version, name, waited)
+		}
+		select {
+		case <-ctx.Done():
+			return "", nil, afterWritef("version %s was written, but looking for it again was stopped (%v). Run check, "+
+				"then verify with the public key above", version, ctx.Err())
+		case <-time.After(readBackWaits[attempt]):
+		}
+	}
 }
 
 // Verify returns the line saying whether the seed the store serves by default derives
@@ -239,7 +293,7 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 		return "", refuse("%v", err)
 	}
 	defer clear(stored)
-	derived, err := publicKeyOf(stored)
+	derived, err := core.UserSeedPublicKey(stored)
 	if err != nil {
 		return fmt.Sprintf("%s %s (version %s) is not an nkey user seed: %v", name, label, version, err), ErrMismatch
 	}
@@ -247,93 +301,6 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 		return fmt.Sprintf("%s %s (version %s) derives %s: no", name, label, version, publicKey), ErrMismatch
 	}
 	return fmt.Sprintf("%s %s (version %s) derives %s: yes", name, label, version, publicKey), nil
-}
-
-// seedLength is a user seed's decoded length: two prefix bytes, the 32 bytes of the ed25519 seed and
-// a CRC-16.
-const seedLength = 2 + 32 + 2
-
-// publicKeyOf returns the public key of value, which must be a user seed spelled exactly as nkeys
-// writes one. It decides why a value is none in this order: not base32, not 36 bytes once decoded,
-// a checksum that does not match, not a seed's prefix byte, a seed of another type than a user's,
-// and a spelling nkeys would not write for its bytes. Its errors never quote value.
-func publicKeyOf(value []byte) (string, error) {
-	raw, ok := decodeBase32(value)
-	if !ok {
-		return "", errors.New("the value is not base32")
-	}
-	defer clear(raw)
-	if len(raw) != seedLength {
-		return "", fmt.Errorf("the value decodes to %d bytes, not the 36 of a seed", len(raw))
-	}
-	if crc16(raw[:seedLength-2]) != binary.LittleEndian.Uint16(raw[seedLength-2:]) {
-		return "", errors.New("the value's checksum does not match")
-	}
-	if nkeys.PrefixByte(raw[0]&0xF8) != nkeys.PrefixByteSeed {
-		return "", errors.New("the value is not a seed (wrong prefix byte)")
-	}
-	if nkeys.PrefixByte((raw[0]&0x07)<<5|(raw[1]&0xF8)>>3) != nkeys.PrefixByteUser {
-		return "", errors.New("the value is a seed, but not a user's")
-	}
-	private := raw[2 : seedLength-2]
-	canonical, err := nkeys.EncodeSeed(nkeys.PrefixByteUser, private)
-	if err != nil {
-		return "", err
-	}
-	defer clear(canonical)
-	// The last character carries two bits no byte uses, so two spellings decode alike; only the
-	// one nkeys writes is taken, which makes every one-character change a refusal.
-	if !bytes.Equal(canonical, value) {
-		return "", errors.New("the value is not the canonical encoding of its seed")
-	}
-	user, err := nkeys.FromRawSeed(nkeys.PrefixByteUser, private)
-	if err != nil {
-		return "", err
-	}
-	defer user.Wipe()
-	return user.PublicKey()
-}
-
-const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
-
-// decodeBase32 decodes value as RFC 4648 base32 after padding it to a multiple of eight
-// characters, and reports false for anything else: a byte outside the alphabet and '=' (a line
-// break, which Go's decoder alone would skip, or a lowercase letter), or padding out of place.
-func decodeBase32(value []byte) ([]byte, bool) {
-	for _, b := range value {
-		if b != '=' && strings.IndexByte(base32Alphabet, b) < 0 {
-			return nil, false
-		}
-	}
-	padded := make([]byte, len(value), len(value)+7)
-	copy(padded, value)
-	for len(padded)%8 != 0 {
-		padded = append(padded, '=')
-	}
-	raw := make([]byte, base32.StdEncoding.DecodedLen(len(padded)))
-	n, err := base32.StdEncoding.Decode(raw, padded)
-	clear(padded)
-	if err != nil {
-		clear(raw)
-		return nil, false
-	}
-	return raw[:n], true
-}
-
-// crc16 is CRC-16/XMODEM, the checksum nkeys appends to a key, little-endian.
-func crc16(data []byte) uint16 {
-	var crc uint16
-	for _, b := range data {
-		crc ^= uint16(b) << 8
-		for range 8 {
-			if crc&0x8000 != 0 {
-				crc = crc<<1 ^ 0x1021
-			} else {
-				crc <<= 1
-			}
-		}
-	}
-	return crc
 }
 
 // Stores opens each store the command's --store names: in region when it is not "", and, when
@@ -345,6 +312,39 @@ type Stores map[string]func(ctx context.Context, region, account string) (Store,
 // nameRules refuse, before a store opens, a --name that store cannot hold, without quoting it: the
 // refusal of an open names the secret, and a seed may have been pasted there.
 var nameRules = map[string]func(name string) error{GCPSecretManager: gcpName}
+
+// mode is one of the command's modes: it returns the line the command prints on stdout last, "" for
+// none, and its error. Only generate writes to stdout itself, to print the public key before its
+// write.
+type mode func(ctx context.Context, s Store, name, publicKey string, stdout io.Writer) (string, error)
+
+var modes = map[string]mode{
+	"check": func(ctx context.Context, s Store, name, _ string, _ io.Writer) (string, error) {
+		return Check(ctx, s, name)
+	},
+	"generate": generateMode,
+	"verify": func(ctx context.Context, s Store, name, publicKey string, _ io.Writer) (string, error) {
+		return Verify(ctx, s, name, publicKey)
+	},
+}
+
+// generateMode prints the public key on stdout before the write, so it is on the terminal whatever
+// the write and the checks after it do, the process ending among them, and returns the version id
+// line once the write was tried: "unknown" when Put answered no version.
+func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer) (string, error) {
+	announced := false
+	_, version, err := generate(ctx, s, name, func(publicKey string) {
+		fmt.Fprintf(stdout, "public key: %s\n", publicKey)
+		announced = true
+	})
+	if !announced {
+		return "", err
+	}
+	if version == "" {
+		version = "unknown"
+	}
+	return "version id: " + version, err
+}
 
 const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
 
@@ -386,12 +386,12 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("a mode is required")
 	}
 	mode := args[0]
-	switch mode {
-	case "-h", "-help", "--help":
+	if mode == "-h" || mode == "-help" || mode == "--help" {
 		fs.Usage()
 		return 0
-	case "check", "generate", "verify":
-	default:
+	}
+	run, ok := modes[mode]
+	if !ok {
 		// Not echoed: a seed pasted in its place must not reach the terminal.
 		return usage("the mode is check, generate or verify")
 	}
@@ -419,50 +419,31 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	if rule := nameRules[store]; rule != nil {
 		if err := rule(name); err != nil {
-			fmt.Fprintf(stderr, "refused: %v\n", err)
-			return 2
+			return exitCode(stderr, refuse("%v", err))
 		}
 	}
 
 	s, err := stores[store](ctx, region, account)
 	if err != nil {
-		fmt.Fprintf(stderr, "refused: %s: %v\n", name, err)
-		return 2
+		return exitCode(stderr, refuse("%s: %v", name, err))
 	}
-	switch mode {
-	case "check":
-		line, err := Check(ctx, s, name)
-		if err != nil {
-			return report(stderr, err)
-		}
+	line, err := run(ctx, s, name, publicKey, stdout)
+	if line != "" {
 		fmt.Fprintln(stdout, line)
-	case "generate":
-		public, version, err := Generate(ctx, s, name)
-		if version != "" {
-			fmt.Fprintf(stdout, "public key: %s\nversion id: %s\n", public, version)
-		}
-		if err != nil {
-			return report(stderr, err)
-		}
-	default:
-		line, err := Verify(ctx, s, name, publicKey)
-		if line != "" {
-			fmt.Fprintln(stdout, line)
-		}
-		if errors.Is(err, ErrMismatch) {
-			return 1
-		}
-		if err != nil {
-			return report(stderr, err)
-		}
 	}
-	return 0
+	return exitCode(stderr, err)
 }
 
-// report writes err on stderr and returns its exit code: 2 for a refusal, 1 for an error after a
-// write.
-func report(stderr io.Writer, err error) int {
-	if errors.Is(err, ErrRefused) {
+// exitCode writes err on stderr and returns the command's exit code: 0 for none; 1 for ErrMismatch,
+// whose line is already on stdout, so it writes nothing; 2 for a refusal; and 1 for any other error,
+// which comes after a write.
+func exitCode(stderr io.Writer, err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, ErrMismatch):
+		return 1
+	case errors.Is(err, ErrRefused):
 		fmt.Fprintf(stderr, "refused: %v\n", err)
 		return 2
 	}

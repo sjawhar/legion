@@ -66,14 +66,32 @@
 #            main's manifest only when main held a version above the newest
 #            tag, which only a hand edit makes, and the tags decide every next
 #            version anyway.
+# push-tag:  push the local tag <tag> to $GITHUB_REPOSITORY on GitHub over SSH
+#            with the deploy key in $DEPLOY_KEY, for a job whose checkout keeps
+#            no credential. The key and GitHub's host keys, pinned below, go
+#            into a directory of its own that only the runner's user can read,
+#            removed when push-tag exits, pushed or not. ssh reads no config
+#            file, offers only that key, never prompts, and refuses any host
+#            key but the pinned ones; GitHub publishes them at
+#            `gh api meta --jq .ssh_keys`, which release-push.test.sh compares
+#            with these when it can reach GitHub.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version>}
+command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag>}
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
 # leading zero reads as octal).
 is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
+
+# github_known_hosts: GitHub's SSH host keys, the only ones push-tag accepts.
+github_known_hosts() {
+  cat <<'KNOWN_HOSTS'
+github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl
+github.com ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBEmKSENjQEezOmxkZMy7opKgwFB9nkt5YRrYMjNuG5N87uRgg6CLrbo5wAdT/y6v0mKV0U2w0WZ2YB/++Tpockg=
+github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+VTTvDP6mHBL9j1aNUkY4Ue1gvwnGLVlOhGeYrnZaMgRK6+PKCUXaDbC7qtbW8gIkhL7aGCsOr/C56SJMy/BCZfxd1nWzAOxSDPgVsmerOBYfNqltV9/hWCqBywINIR+5dIg6JTJ72pcEpEjcYgXkE2YEFXV1JHnsKgbLWNlhScqb2UmyRkQyytRLtL+38TGxkxCflmO+5Z8CSSNY7GidjMIZ7Q4zMjA2n1nGrlTDkzwDCsw+wqFPGQA179cnfGWOWRVruj16z6XyvxvjJwbz0wQZ75XK5tKSb7FNyeIEs4TT4jk+S4dhPeAUC5y+bDYirYgM4GC7uEnztnZyaVWQ7B381AK4Qdrwt51ZqExKbQpTUNn+EjqoTwvqNj4kqx5QUCI0ThS/YkOxJCXmPUWZbhjpCg56i+2aB6CmK2JGhn57K5mj0MNdBXA4/WnwH6XoPWJzK5Nyu2zB3nAZp+S5hpQs+p1vN1/wsjk=
+KNOWN_HOSTS
+}
 
 # fail_outstanding <reason>: fail push-main after the release itself succeeded.
 # Writes the ::error:: annotation and, under GitHub Actions, the job summary.
@@ -251,6 +269,22 @@ case "$command" in
         fail_outstanding "Resolving the $manifest version-line conflict onto main ($upstream) failed; the rebase was aborted."
       fi
     done
+    ;;
+  push-tag)
+    tag=${2:?tag}
+    : "${DEPLOY_KEY:?DEPLOY_KEY holds the deploy key push-tag pushes with}"
+    : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY names the repository push-tag pushes to}"
+    ssh_dir=$(mktemp -d)
+    trap 'rm -rf "$ssh_dir"' EXIT
+    (
+      umask 077
+      printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
+      github_known_hosts > "$ssh_dir/known_hosts"
+    )
+    printf -v key '%q' "$ssh_dir/key"
+    printf -v known_hosts '%q' "$ssh_dir/known_hosts"
+    GIT_SSH_COMMAND="ssh -F /dev/null -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$known_hosts -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes" \
+      git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$tag"
     ;;
   *)
     echo "::error::unknown release-push command: $command"

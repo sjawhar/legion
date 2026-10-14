@@ -5,35 +5,14 @@ package seed_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/nats-io/nkeys"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/seed"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
-
-// connectWith connects to uri as the nkey user whose seed is seed, or with no credential when seed
-// is "".
-func connectWith(uri, seed string) (*natsgo.Conn, error) {
-	opts := []natsgo.Option{natsgo.Timeout(time.Second), natsgo.NoReconnect()}
-	if seed != "" {
-		user, err := nkeys.FromSeed([]byte(seed))
-		if err != nil {
-			return nil, err
-		}
-		defer user.Wipe()
-		public, err := user.PublicKey()
-		if err != nil {
-			return nil, err
-		}
-		opts = append(opts, natsgo.Nkey(public, user.Sign))
-	}
-	return natsgo.Connect(uri, opts...)
-}
 
 // The handoff a consumer relies on: the server's authorization takes the public key Generate
 // returned, and a client takes the seed the store holds. That client connects; one with no
@@ -60,19 +39,19 @@ func TestAGeneratedSeedReachesNATS(t *testing.T) {
 			_, uri := testnats.StartImageConfig(t, image.Ref, config, []string{"-js"}, false)
 
 			t.Run("a client with the stored seed connects", func(t *testing.T) {
-				conn, err := connectWith(uri, stored)
+				conn, err := testnats.ConnectSeed(t, uri, stored)
 				require.NoError(t, err)
 				defer conn.Close()
 				require.NoError(t, conn.Publish("envoy.example.probe", []byte("hello")))
 				require.NoError(t, conn.Flush())
 			})
 			t.Run("a client with no credential is refused", func(t *testing.T) {
-				_, err := connectWith(uri, "")
+				_, err := testnats.ConnectSeed(t, uri, "")
 				require.ErrorIs(t, err, natsgo.ErrAuthorization)
 			})
 			t.Run("a client with another user's seed is refused", func(t *testing.T) {
 				other, _ := testnats.User(t)
-				_, err := connectWith(uri, other)
+				_, err := testnats.ConnectSeed(t, uri, other)
 				require.ErrorIs(t, err, natsgo.ErrAuthorization)
 			})
 		})

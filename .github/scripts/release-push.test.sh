@@ -2,8 +2,9 @@
 # Tests for `release-push.sh push-main`: the version-bump push and its
 # same-package race resolution (LEGION-75), and its re-run cases; for
 # `release-push.sh tagged`, which finds the tag an earlier attempt pushed and
-# refuses one whose name is not <prefix>X.Y.Z; and for `release-push.sh
-# release`, which makes a GitHub release carry the run's assets.
+# refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
+# release`, which makes a GitHub release carry the run's assets; and for
+# `release-push.sh push-tag`, which pushes a tag with the deploy key.
 #
 # Each push-main case builds a bare origin holding one seed commit
 # (packages/pkg at 1.0.0 plus a README) and two clones, a and b. Clone a plays
@@ -16,7 +17,11 @@
 # from several checkouts. The `release` cases run against a stub `gh` first on
 # PATH, which answers `gh release view` for a release that does not exist, is a
 # draft or is published, can fail an upload, an edit or a create, and logs
-# every call it gets.
+# every call it gets. The `push-tag` cases push to a local bare origin through
+# a URL rewrite, and two more reach github.com itself: one with the pinned host
+# keys, one with a copy of the script whose pinned key GitHub does not hold.
+# Those, and a comparison of the pinned keys with `gh api meta`, print a SKIP
+# line and count nothing when the network or a gh sign-in is missing.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
@@ -422,5 +427,118 @@ check "no asset: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 release_run none "" --draft pkg-v1.0.1 "Pkg v1.0.1" a.tgz
 check "an unknown option: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 
-summary "release-push.sh push-main, tagged and release"
+echo
+echo "Case: push-tag pushes a tag with the deploy key and leaves no key behind"
+# The push goes to git@github.com:<repo>.git; GIT_CONFIG_* rewrites that to a local bare origin,
+# so git pushes locally and the key directory is all the script under test makes. A
+# pre-receive hook records what the directory held while the push ran.
+pt="$work/pt"
+mkdir -p "$pt/tmp"
+git init -q --bare "$pt/origin.git"
+git init -q -b main "$pt/a"
+identity "$pt/a"
+git -C "$pt/a" commit -q --allow-empty -m seed
+git -C "$pt/a" tag pkg-v1.0.1
+ssh-keygen -q -t ed25519 -N '' -C release-push-test -f "$pt/deploy"
+cat > "$pt/origin.git/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+find "$TMPDIR" -type f -printf '%m %f\n' | sort > "$PUSH_TAG_SEEN"
+[ -z "${PUSH_TAG_REJECT:-}" ]
+HOOK
+chmod +x "$pt/origin.git/hooks/pre-receive"
+# push_tag <tag> [VAR=value...]: runs `release-push.sh push-tag <tag>` in clone a with the deploy
+# key, a fresh TMPDIR and the rewrite to the local origin; leaves its exit code in rc, its output
+# in out, what the hook saw in seen and what TMPDIR holds afterwards in left.
+push_tag() {
+  local tag=$1
+  shift
+  rm -rf "$pt/tmp" && mkdir "$pt/tmp"
+  : > "$pt/seen"
+  set +e
+  out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" PUSH_TAG_SEEN="$pt/seen" GITHUB_REPOSITORY=example/repo \
+    DEPLOY_KEY="$(<"$pt/deploy")" GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.$pt/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
+    "$@" "$release_push" push-tag "$tag" 2>&1)
+  rc=$?
+  set -e
+  seen=$(<"$pt/seen")
+  left=$(find "$pt/tmp" -mindepth 1 | wc -l)
+}
+push_tag pkg-v1.0.1
+check "pushes: exits 0" "$(is "$rc" 0)"
+check "pushes: origin holds the tag, at the clone's commit" \
+  "$(is "$(git -C "$pt/origin.git" rev-parse -q --verify refs/tags/pkg-v1.0.1)" "$(git -C "$pt/a" rev-parse pkg-v1.0.1)")"
+check "pushes: the key and the pinned host keys were owner-only while the push ran" \
+  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
+check "pushes: nothing is left in TMPDIR" "$(is "$left" 0)"
+# A tag origin lacks, so the push reaches the hook (one origin already holds is up to date).
+git -C "$pt/a" tag pkg-v1.0.2
+push_tag pkg-v1.0.2 PUSH_TAG_REJECT=1
+check "a rejected push: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "a rejected push: the key was written for it" "$(contains "$seen" '^600 key$')"
+check "a rejected push: nothing is left in TMPDIR" "$(is "$left" 0)"
+check "a rejected push: origin has no such tag" \
+  "$(is "$(git -C "$pt/origin.git" tag -l pkg-v1.0.2)" "")"
+push_tag pkg-v1.0.1 DEPLOY_KEY=
+check "no DEPLOY_KEY: exits non-zero, naming it" "$([ "$rc" != 0 ] && contains "$out" 'DEPLOY_KEY' || echo false)"
+check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
+
+echo
+echo "Case: push-tag holds GitHub's host keys and refuses any other"
+# These reach github.com over SSH with a throwaway key no repository trusts, so each push is
+# refused; what matters is which refusal. Without the network they are skipped, not counted.
+if timeout 10 bash -c '</dev/tcp/github.com/22' 2>/dev/null; then
+  # github_push <script> [VAR=value...]: runs <script> push-tag against a repository that does not
+  # exist, with the throwaway key; leaves rc, out and left as push_tag does.
+  github_push() {
+    local script=$1
+    shift
+    rm -rf "$pt/tmp" && mkdir "$pt/tmp"
+    set +e
+    out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" GITHUB_REPOSITORY=sjawhar/release-push-test-nonexistent \
+      DEPLOY_KEY="$(<"$pt/deploy")" "$@" "$script" push-tag pkg-v1.0.1 2>&1)
+    rc=$?
+    set -e
+    left=$(find "$pt/tmp" -mindepth 1 | wc -l)
+  }
+  github_push "$release_push"
+  check "the pinned keys: GitHub's host key is accepted and the throwaway key refused" \
+    "$([ "$rc" != 0 ] && contains "$out" 'Permission denied (publickey)' || echo false)"
+  check "the pinned keys: nothing is left in TMPDIR" "$(is "$left" 0)"
+  # A copy of the script whose only pinned key is one GitHub does not hold.
+  mkdir -p "$pt/swapped"
+  ssh-keygen -q -t ed25519 -N '' -f "$pt/swapped/other"
+  python3 - "$release_push" "$pt/swapped/release-push.sh" "$(cut -d' ' -f2 "$pt/swapped/other.pub")" <<'PY'
+import re
+import sys
+
+source, target, other = sys.argv[1:]
+text = open(source).read()
+pinned = re.findall(r"(?m)^github\.com \S+ \S+$", text)
+assert len(pinned) == 3, pinned
+text = re.sub(r"(?m)^github\.com ssh-ed25519 \S+$", "github.com ssh-ed25519 " + other, text)
+text = re.sub(r"(?m)^github\.com (ecdsa-sha2-nistp256|ssh-rsa) \S+\n", "", text)
+open(target, "w").write(text)
+PY
+  chmod +x "$pt/swapped/release-push.sh"
+  github_push "$pt/swapped/release-push.sh"
+  check "a swapped host key: exits non-zero, the host key refused before any login" \
+    "$([ "$rc" != 0 ] && contains "$out" 'REMOTE HOST IDENTIFICATION HAS CHANGED\|Host key verification failed' || echo false)"
+  check "a swapped host key: no login was tried" "$(is "$(contains "$out" 'Permission denied (publickey)')" false)"
+  check "a swapped host key: nothing is left in TMPDIR" "$(is "$left" 0)"
+else
+  echo "  SKIP: the host-key cases (github.com:22 is unreachable)"
+fi
+
+echo
+echo "Case: push-tag's pinned host keys are the ones GitHub publishes"
+# A rotation shows up here first. It needs gh signed in and the network, and is skipped without.
+if command -v gh >/dev/null && published=$(gh api meta --jq '.ssh_keys[]' 2>/dev/null) && [ -n "$published" ]; then
+  pinned=$(sed -n 's/^github\.com //p' "$release_push" | sort)
+  check "the pinned keys equal gh api meta's ssh_keys" "$(is "$pinned" "$(sort <<<"$published")")"
+else
+  echo "  SKIP: the published-keys comparison (gh api meta failed: no gh, no sign-in or no network)"
+fi
+
+summary "release-push.sh push-main, tagged, release and push-tag"
 

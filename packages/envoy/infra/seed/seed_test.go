@@ -58,6 +58,10 @@ type fakeStore struct {
 	readBack                []byte   // what Current answers instead of the stored value
 	racing                  *version // another writer's version, which lands with Put's
 	lateWriter              *version // another writer's version, which lands just before Current reads and is served
+	beforePut               func()   // runs as Put is called, before it writes
+	// An eventually consistent store: after the write, the next lagVersions listings count the
+	// versions as they were before it, and the next lagCurrent reads find no version served.
+	lagVersions, lagCurrent int
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
@@ -129,12 +133,19 @@ func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
 	if len(f.puts) > 0 && f.versionsErrAfterPut != nil {
 		return 0, f.versionsErrAfterPut
 	}
+	if len(f.puts) > 0 && f.lagVersions > 0 {
+		f.lagVersions--
+		return len(f.versions) - len(f.puts), nil
+	}
 	return len(f.versions), nil
 }
 
 func (f *fakeStore) Put(_ context.Context, name string, value []byte) (string, error) {
 	f.calls = append(f.calls, "put")
 	f.named(name)
+	if f.beforePut != nil {
+		f.beforePut()
+	}
 	f.puts = append(f.puts, bytes.Clone(value))
 	if f.putErr != nil {
 		return "", f.putErr
@@ -159,6 +170,10 @@ func (f *fakeStore) Current(_ context.Context, name string) (string, []byte, err
 	}
 	if f.newest && f.unreadable != "" {
 		return "", nil, errors.New("access-secret-version " + secretName + "/versions/latest failed: FailedPrecondition")
+	}
+	if len(f.puts) > 0 && f.lagCurrent > 0 {
+		f.lagCurrent--
+		return "", nil, fmt.Errorf("get-secret-value %s failed: ResourceNotFoundException (%w)", name, seed.ErrNotServed)
 	}
 	if len(f.puts) > 0 && f.lateWriter != nil {
 		f.versions = append(f.versions, *f.lateWriter)
@@ -558,46 +573,47 @@ func TestVerifyReportsAStoredValueThatIsNoUserSeed(t *testing.T) {
 	}
 }
 
-// After the write, generate exits 1, never 2, and its stdout already holds the public key and the
-// version id when Put answered one.
+// After the write, generate exits 1, never 2. Its stdout already holds the public key, which it
+// printed before the write, and the version id Put answered, or "unknown" when Put answered none:
+// a version may exist either way, and verify needs the key.
 func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 	otherSeed, _ := testnats.User(t)
 	rows := []struct {
-		name        string
-		store       func(*fakeStore) *fakeStore
-		want        string
-		printsTheV1 bool
+		name    string
+		store   func(*fakeStore) *fakeStore
+		want    string
+		version string
 	}{
 		{"put fails", func(f *fakeStore) *fakeStore {
 			f.putErr = errors.New("put-secret-value " + secretName + " failed: RequestSendError")
 			return f
-		}, "whether a version was written is unknown, run check", false},
+		}, "whether a version was written is unknown, run check", "unknown"},
 		{"put writes a version that is not served", func(f *fakeStore) *fakeStore {
 			f.putErrAfterWrite = errors.New("version v1 was written but is not AWSCURRENT; run check")
 			return f
-		}, "version v1 was written but is not AWSCURRENT; run check", true},
+		}, "version v1 was written but is not AWSCURRENT; run check", "v1"},
 		{"listing afterwards fails", func(f *fakeStore) *fakeStore {
 			f.versionsErrAfterPut = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
 			return f
 		}, "version v1 was written, but listing versions afterwards failed: list-secret-version-ids " + secretName +
-			" failed: ThrottlingException", true},
+			" failed: ThrottlingException", "v1"},
 		{"another writer raced it", func(f *fakeStore) *fakeStore {
 			f.racing = &version{id: "their-version", value: []byte(otherSeed)}
 			return f
 		}, secretName + " now holds 2 version(s), not only version v1: another writer raced this one. " +
-			"Run verify with the public key above before committing it", true},
+			"Run verify with the public key above before committing it", "v1"},
 		{"another writer's version is served by the read-back", func(f *fakeStore) *fakeStore {
 			f.lateWriter = &version{id: "their-version", value: []byte(otherSeed)}
 			return f
-		}, "version v1 was written, but " + secretName + " serves version their-version by default: another writer raced this one", true},
+		}, "version v1 was written, but " + secretName + " serves version their-version by default: another writer raced this one", "v1"},
 		{"reading back fails", func(f *fakeStore) *fakeStore {
 			f.currentErr = errors.New("get-secret-value " + secretName + " failed: DecryptionFailure")
 			return f
-		}, "version v1 was written, but reading it back failed: get-secret-value " + secretName + " failed: DecryptionFailure", true},
+		}, "version v1 was written, but reading it back failed: get-secret-value " + secretName + " failed: DecryptionFailure", "v1"},
 		{"it reads back as another seed", func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed); return f },
-			"version v1 was written, but it does not derive the public key above", true},
+			"version v1 was written, but it does not derive the public key above", "v1"},
 		{"it reads back as no seed", func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed[:5] + "A" + readmeSeed[6:]); return f },
-			"version v1 was written, but it reads back as no user seed: the value's checksum does not match", true},
+			"version v1 was written, but it reads back as no user seed: the value's checksum does not match", "v1"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -607,19 +623,97 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 			require.True(t, strings.HasPrefix(errs, "error after writing: "), errs)
 			require.Contains(t, errs, row.want)
 			require.NotContains(t, errs, "refused")
-			lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-			if row.printsTheV1 {
-				kp, err := nkeys.FromSeed(store.puts[0])
-				require.NoError(t, err)
-				public, err := kp.PublicKey()
-				require.NoError(t, err)
-				require.Equal(t, []string{"public key: " + public, "version id: v1"}, lines)
-			} else {
-				require.Empty(t, out)
-			}
+			public := publicKeyOfSeed(t, store.puts[0])
+			require.Equal(t, "public key: "+public+"\nversion id: "+row.version+"\n", out)
 			requireNoValue(t, store, out, errs)
+
+			direct := row.store(newStore(t))
+			got, version, err := seed.Generate(context.Background(), direct, secretName)
+			require.Error(t, err)
+			require.Equal(t, publicKeyOfSeed(t, direct.puts[0]), got, "Generate returns the key on every path after Put")
+			require.Equal(t, strings.TrimSuffix(row.version, "unknown"), version)
 		})
 	}
+}
+
+// publicKeyOfSeed is the public key of a user seed, by nkeys.
+func publicKeyOfSeed(t *testing.T, seed []byte) string {
+	t.Helper()
+	kp, err := nkeys.FromSeed(seed)
+	require.NoError(t, err)
+	public, err := kp.PublicKey()
+	require.NoError(t, err)
+	return public
+}
+
+// Right after the write, an eventually consistent store may list no version yet, or serve none by
+// default. generate looks again after each of its pauses, and is satisfied once it sees its own
+// version alone and reads it back; a store still lagging after the last pause fails as an error
+// after writing, naming no race.
+func TestGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
+	seed.SetReadBackWaits(t, 0, 0, 0)
+	rows := []struct {
+		name                    string
+		lagVersions, lagCurrent int
+		calls                   []string
+	}{
+		{"the listing lags", 2, 0, []string{"describe", "versions", "put", "versions", "versions", "versions", "current"}},
+		{"the read-back lags", 0, 2, []string{"describe", "versions", "put", "versions", "current", "versions", "current", "versions", "current"}},
+		{"both lag", 1, 1, []string{"describe", "versions", "put", "versions", "versions", "current", "versions", "current"}},
+		{"the last look sees it", 3, 0, []string{"describe", "versions", "put", "versions", "versions", "versions", "versions", "current"}},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			store := newStore(t)
+			store.lagVersions, store.lagCurrent = row.lagVersions, row.lagCurrent
+			code, out, errs, _ := run(t, store, mode("generate")...)
+			require.Equal(t, 0, code, errs)
+			require.Empty(t, errs)
+			require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\nversion id: v1\n", out)
+			require.Equal(t, row.calls, store.calls)
+		})
+	}
+	for _, lag := range []struct {
+		name              string
+		versions, current int
+	}{{"the listing", 4, 0}, {"the read-back", 0, 4}} {
+		t.Run(lag.name+" lags past the last pause", func(t *testing.T) {
+			store := newStore(t)
+			store.lagVersions, store.lagCurrent = lag.versions, lag.current
+			code, out, errs, _ := run(t, store, mode("generate")...)
+			require.Equal(t, 1, code, errs)
+			require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\nversion id: v1\n", out)
+			require.Equal(t, "error after writing: version v1 was written, but "+secretName+" did not show it within 0s: "+
+				"the store has not caught up. Run check, then verify with the public key above\n", errs)
+			afterPut := store.calls[slices.Index(store.calls, "put")+1:]
+			require.Equal(t, 4, countOf(afterPut, "versions"), "one look after the write and one after each of the three pauses: %v", afterPut)
+		})
+	}
+}
+
+func countOf(calls []string, call string) int {
+	n := 0
+	for _, c := range calls {
+		if c == call {
+			n++
+		}
+	}
+	return n
+}
+
+// generate prints the public key before it writes the seed, so the key is on the terminal whatever
+// the write and the checks after it do, the process ending among them.
+func TestGeneratePrintsThePublicKeyBeforeItsWrite(t *testing.T) {
+	store := newStore(t)
+	var out, errs bytes.Buffer
+	printed := "(Put was not called)"
+	store.beforePut = func() { printed = out.String() }
+	code := seed.Command(context.Background(), mode("generate"), &out, &errs,
+		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
+	require.Equal(t, 0, code, errs.String())
+	public := publicKeyOfSeed(t, store.puts[0])
+	require.Equal(t, "public key: "+public+"\n", printed)
+	require.Equal(t, "public key: "+public+"\nversion id: v1\n", out.String())
 }
 
 // The canary seed, and every value a store holds or is handed, appears in no byte the command

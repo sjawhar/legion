@@ -50,7 +50,8 @@ on:
   # plugins (packages/pi-envoy, packages/pi-legion, with packages/pi-shared, packages/envoy-client,
   # packages/contracts), the skills and the prepack that stages them, the Go module and its build
   # inputs (packages/daemon, go.work, go.work.sum), and packages/envoy (copied whole for its
-  # agent-secrets binary); the scripts that write its third-party notices; the OMP pin (.omp-pin);
+  # agent-secrets binary) but its packages/envoy/infra module, which the .dockerignore drops; the
+  # scripts that write its third-party notices; the OMP pin (.omp-pin);
   # the context's .dockerignore; and this workflow. The final `legion probe-image` runs the image's
   # own `legion` and both plugins, so a PR that breaks any of them fails here instead of merging and
   # publishing nothing.
@@ -79,6 +80,7 @@ on:
       - go.work
       - go.work.sum
       - packages/envoy/**
+      - "!packages/envoy/infra/**"
       - .omp-pin
       - .dockerignore
       - .github/workflows/worker-image.yaml
