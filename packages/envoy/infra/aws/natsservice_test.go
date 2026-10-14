@@ -18,6 +18,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
+	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"github.com/stretchr/testify/require"
 
@@ -133,14 +134,12 @@ type outputs struct {
 
 // run constructs a component named example-nats with args, passing it an aws provider when
 // withProvider is set, and returns what the mocks saw, the component's outputs and the run's error.
-// RunErr waits for the outputs' applies; mu orders their writes before the read.
+// It awaits each output inside the program: an output made from a plain value joins no work group,
+// so RunErr does not wait for an apply on it.
 func run(t *testing.T, args *envoyaws.NatsServiceArgs, withProvider bool) (*mocks, outputs, error) {
 	t.Helper()
 	m := &mocks{}
-	var (
-		mu  sync.Mutex
-		out outputs
-	)
+	var out outputs
 	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
 		var opts []pulumi.ResourceOption
 		if withProvider {
@@ -159,17 +158,14 @@ func run(t *testing.T, args *envoyaws.NatsServiceArgs, withProvider bool) (*mock
 			&out.logGroupName: n.LogGroupName, &out.taskDefinitionArn: n.TaskDefinitionArn,
 			&out.internalURL: n.InternalUrl, &out.metricNamespace: n.MetricNamespace,
 		} {
-			output.ApplyT(func(v string) string {
-				mu.Lock()
-				defer mu.Unlock()
-				*dest = v
-				return v
-			})
+			result, err := internals.UnsafeAwaitOutput(ctx.Context(), output)
+			if err != nil {
+				return err
+			}
+			*dest = result.Value.(string)
 		}
 		return nil
 	}, pulumi.WithMocks("p", "s", m))
-	mu.Lock()
-	defer mu.Unlock()
 	return m, out, err
 }
 
@@ -578,8 +574,8 @@ func TestNatsServiceRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 }
 
 // The plugin's Construct copies a consumer's inputs into NatsServiceArgs, and refuses a
-// plain-typed field whose input carries a dependency or is unknown (Pulumi SDK v3.265.0
-// go/pulumi/provider.go:394-395), a path pulumi.WithMocks never takes. These tests send every
+// plain-typed field whose input carries a dependency (Pulumi SDK v3.265.0
+// go/pulumi/provider.go:765-766), a path pulumi.WithMocks never takes. These tests send every
 // Input field as an output of another resource, then unknown as under preview.
 
 // upstream is the resource the Input fields come from.

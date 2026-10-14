@@ -46,7 +46,7 @@ type NatsServiceArgs struct {
 
 	// Values a consumer feeds from other resources are Inputs: a remote component's construct
 	// refuses a plain field whose input carries a dependency (Pulumi SDK v3.265.0
-	// go/pulumi/provider.go:394-395), and infer marks a plain field `plain` in the schema.
+	// go/pulumi/provider.go:765-766), and infer marks a plain field `plain` in the schema.
 	Region           string               `pulumi:"region"` // the containers' awslogs-region
 	VpcId            pulumi.StringInput   `pulumi:"vpcId"`
 	SubnetIds        []pulumi.StringInput `pulumi:"subnetIds"`       // a slice, so the component knows how many mount targets to register
