@@ -187,9 +187,10 @@ main is a new version, one that changes nothing in the plugin included.
 `claude plugin update claude-envoy@legion-plugins` installs main's current tree, which the next
 Claude Code session loads. Claude Code's background auto-update does the same once it is on for
 `legion-plugins`, which it is not by default: **Enable auto-update** on the marketplace under
-`/plugin` **Marketplaces**, or `"autoUpdate": true` on its `extraKnownMarketplaces` entry in
-managed settings. A `version` in either file would hold every install at the tree it was first
-installed from until someone changed the string, so a test holds both files to none.
+`/plugin` **Marketplaces**, or set `"autoUpdate": true` beside `source` on the marketplace's
+`extraKnownMarketplaces` entry, in whichever settings file declares it. A `version` in either
+file would hold every install at the tree it was first installed from until someone changed the
+string, so a test holds both files to none.
 `package.json`'s version plays no part in an update.
 
 ## Enable the channel
