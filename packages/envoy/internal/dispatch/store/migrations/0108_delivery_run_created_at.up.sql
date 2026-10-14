@@ -3,10 +3,9 @@
 -- the head commit's time cannot decide it, since a repository that merges through GitHub's merge
 -- queue writes the merge commit before GitHub records the merge, and started_at cannot either,
 -- since a re-run moves it to the re-run's start. Null on a row stored before this column existed,
--- where readers take started_at (DeliveryRun.Created, store.go's runCreatedAt): a resumable
--- backfill step for the deploy kind (delivery.Reconcile.backfillCreatedAt, progress row
--- 'backfill/created_at/deploy') re-lists the last 28 days once, filling it; no row is rewritten
--- here.
+-- where readers take started_at (DeliveryRun.Created, store.go's runCreatedAt): the resumable
+-- backfill (delivery.Reconcile.backfillRuns, step 'backfill/created_at/deploy') re-lists the last
+-- 28 days of deploy runs once, filling it; no row is rewritten here.
 alter table delivery_runs add column created_at timestamptz;
 -- ListRuns and ListPullRequestsWaitingAt filter and order deploy runs by their creation time, read
 -- through the same coalesce. ListRuns was the one reader of delivery_runs_kind_started, on

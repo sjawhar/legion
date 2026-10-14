@@ -220,8 +220,8 @@ type deliveryTimelineWithMeasures struct {
 // deliveryPopulation is every read the timeline's and the measures' answers for one window and
 // query make, as stored, before anything is computed from them: the population pull requests
 // merged in the window, the deploy repository's pull requests still waiting at its start, the
-// deploy runs on main by head commit from its start (containment's input) and by start inside it
-// (the measures'), each with its jobs, the open unowned P0 issues, the session groups, the titles
+// deploy runs on main GitHub created from its start (containment's input) and those started inside
+// it (the measures'), each with its jobs, the open unowned P0 issues, the session groups, the titles
 // of the sessions and the facts of the issues those pull requests name, and the components of
 // those issues' projects. Nothing that computes from it reads again (derive), so the live hub
 // keeps it and computes a later window from it narrowed (narrowedTo) without a read.
@@ -288,8 +288,8 @@ type deliveryWaitingRow struct {
 }
 
 // readDeliveryPopulation is every read the timeline's and the measures' answers for one window and
-// query make (the population pull requests, the deploy runs on main listed from `from` by head
-// commit with their jobs, the measures' runs started in the window with their jobs, and the
+// query make (the population pull requests, the deploy runs on main GitHub created at or after
+// `from` with their jobs, the measures' runs started in the window with their jobs, and the
 // unowned P0 list); nothing that computes from it reads again. With withWaiting it also reads the
 // deploy repository's pull requests still waiting at `from` (ListPullRequestsWaitingAt), resolved
 // through the same issue and session lookups so the timeline's waiting line filters them alike;

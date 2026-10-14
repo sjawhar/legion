@@ -229,7 +229,8 @@ func TestBackfillRunsAdvancesOneFinishedHourAtATime(t *testing.T) {
 }
 
 // TestBackfillRunsKeepsItsFailuresOutOfTheHealthState: a pass whose backfill hits a rate limit
-// while every regular step succeeds records the reconcile as healthy.
+// while every regular step succeeds records the reconcile as healthy. The pass runs both deploy
+// backfills, the branch-and-event one and the created_at one, each recording its progress row.
 func TestBackfillRunsKeepsItsFailuresOutOfTheHealthState(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
@@ -272,6 +273,10 @@ func TestBackfillRunsKeepsItsFailuresOutOfTheHealthState(t *testing.T) {
 	through, beganAt, found := deployBackfill(t, reconcile)
 	if !found || through.Before(before.Add(-BackfillWindow-time.Second)) || beganAt.Before(before.Add(-time.Second)) || beganAt.After(after.Add(time.Second)) {
 		t.Fatalf("backfill row = {%v, %v, %t}, want began at this pass and through 28 days before it", through, beganAt, found)
+	}
+	created, err := readBackfillProgress(ctx, pool, createdAtBackfillStep, runsProgressScope("acme/widgets", backfillWorkflow))
+	if err != nil || !created.found || created.beganAt.Before(before.Add(-time.Second)) || created.beganAt.After(after.Add(time.Second)) {
+		t.Fatalf("created_at backfill row = %+v, %v, want one begun at this pass", created, err)
 	}
 }
 

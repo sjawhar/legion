@@ -131,7 +131,7 @@ export async function seedMeasuresFixture(): Promise<void> {
     `INSERT INTO delivery_runs (
        repo, run_id, kind, head_sha, head_commit_at, started_at, created_at, completed_at, conclusion, url, head_branch, event
      ) VALUES
-       ('acme/widgets', 501, 'deploy', 'aaa101', '2026-09-05T12:30:00Z', '2026-09-05T12:00:00Z', '2026-09-05T12:30:00Z',
+      ('acme/widgets', 501, 'deploy', 'aaa101', '2026-09-05T12:30:00Z', '2026-09-05T12:01:00Z', '2026-09-05T12:01:00Z',
         '2026-09-05T13:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/501', 'main', 'push'),
        ('acme/widgets', 502, 'deploy', 'aaa102', '2026-09-06T13:30:00Z', '2026-09-06T13:35:00Z', '2026-09-06T13:35:00Z',
         '2026-09-06T14:05:00Z', 'success', 'https://github.com/acme/widgets/actions/runs/502', 'main', 'push'),

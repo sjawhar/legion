@@ -402,8 +402,8 @@
       "run_id": 501,
       "head_sha": "aaa101",
       "head_commit_at": "2026-09-05T12:30:00Z",
-      "started_at": "2026-09-05T12:00:00Z",
-      "created_at": "2026-09-05T12:30:00Z",
+      "started_at": "2026-09-05T12:01:00Z",
+      "created_at": "2026-09-05T12:01:00Z",
       "completed_at": "2026-09-05T13:05:00Z",
       "conclusion": "success",
       "production": {
