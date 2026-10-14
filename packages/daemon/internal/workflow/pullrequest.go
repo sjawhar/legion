@@ -80,11 +80,19 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, &pr, "")
 }
 
+// pullRequestSynchronized records the pull request's new head and what the move leaves standing
+// (classify.AdvancePullRequestHead, headMoved). In reviewing the head's arrival re-asks the round
+// (settleRound), since it is what the approval is judged against: the approved head arriving over a
+// handoff push lets the approval stand, and the new head of a code push that was on its way shows
+// the approval does not cover it (classify.ApprovalStands, classify.CodeOnItsWay). In implementing
+// a head that arrives once the implementer has completed is the pull request its completion waited
+// for.
 func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact intake.PullRequestSynchronized) (intake.Result, error) {
 	pr, err := e.store.PullRequestByBranch(ctx, tx, fact.Repo, fact.Branch)
 	if err != nil || pr == nil || classify.LateLifecycle(fact.UpdatedAt, pr.HeadUpdatedAt) {
 		return intake.Result{}, err
 	}
+	prior := *pr
 	if fact.HeadSHA != "" && fact.HeadSHA != pr.HeadSHA {
 		*pr = classify.AdvancePullRequestHead(*pr, fact.HeadSHA)
 	}
@@ -99,14 +107,22 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if err := e.headMoved(ctx, tx, *issue, pr); err != nil {
 		return intake.Result{}, err
 	}
-	if issue.Phase != phase.Implementing {
-		return intake.Result{}, nil
-	}
-	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
-	if err != nil || row.HandoffCommit == "" {
+	switch issue.Phase {
+	case phase.Reviewing:
+		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
+		if err != nil {
+			return intake.Result{}, err
+		}
+		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), byPush)
 		return intake.Result{}, err
+	case phase.Implementing:
+		row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
+		if err != nil || row.HandoffCommit == "" {
+			return intake.Result{}, err
+		}
+		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
 	}
-	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
+	return intake.Result{}, nil
 }
 
 func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.Result, error) {
@@ -125,11 +141,16 @@ func (e *Engine) push(ctx context.Context, tx pgx.Tx, fact intake.Push) (intake.
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return intake.Result{}, err
 	}
-	// A push classified after its head arrived can be what lets an approval of an earlier head
-	// stand, or what shows the current head carries code the approved one does not, so the round
-	// is settled again.
+	// A push classified after its head arrived can complete the carry of a code head's red to the
+	// handoff head that replaced it (classify.SettlementFor), which sends the work back as the
+	// settlement would have (standingRed); otherwise it can be what lets an approval of an earlier
+	// head stand, or what shows the current head carries code the approved one does not, so the
+	// round is settled again.
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
 	if err != nil || issue == nil || issue.Phase != phase.Reviewing {
+		return intake.Result{}, err
+	}
+	if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
 		return intake.Result{}, err
 	}
 	reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)

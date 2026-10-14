@@ -31,12 +31,7 @@ type Config struct {
 	MaxFixAttempts int
 	Linger         time.Duration
 	MergeQueueRole string
-	// ReviewWorkflows is the project's `review_workflows`: the paths of the required workflows it
-	// declares as review workflows, which fail on their own findings. A red that only they make is
-	// the reviewer's round's to decide in testing and reviewing (classify.RedOnlyByReviewWorkflows);
-	// any other red required workflow sends the work back. Empty declares none.
-	ReviewWorkflows []string
-	Clock           func() time.Time
+	Clock          func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
 	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
@@ -421,13 +416,7 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterFailed, "", row, pr, "")
 		}
 		if fact.Verdict == "pass" {
-			// A red only declared review workflows make stayed with the round (classify.RedSendsBack),
-			// so the reviewer it now starts is told it, and what the round owes it.
-			reason := ""
-			if pr != nil && classify.RedOnlyByReviewWorkflows(*pr, e.cfg.ReviewWorkflows) {
-				reason = redAt(*pr) + reviewWorkflowsToAdjudicate
-			}
-			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, reason)
+			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterPassed, "", row, pr, "")
 		}
 	case phase.Reviewing:
 		_, err := e.settleRound(ctx, tx, *issue, row, pr, round{}, byCompletion)
@@ -547,17 +536,22 @@ func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.Ret
 	if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 		return intake.Result{}, err
 	}
-	// A review round held open may already have both of its halves: the reviewer completed before
-	// the hold, and its review was recorded while held. The round ends here (reviewRound), or goes
-	// back to implementing on a red code head that settled while held, and the reviewer is started
-	// only if it is still open - a second completion of the same commit would be refused as not new.
-	// A round its reviewer completed that nothing would end is stuck: the reviewer's task says why,
-	// so the restarted reviewer decides it. The architect, who ordered the retry, is told nothing: a
-	// notice now would read as the reviewer's answer to its request.
+	// A settlement that reached the issue while it was held from reviewing, where nothing moves,
+	// is acted on first: a red standing for the head sends the work back to implementing as it would
+	// have on arrival (standingRed), and no reviewer is started. Otherwise a review round held open
+	// may already have both of its halves - the reviewer completed before the hold, and its review
+	// was recorded while held - and ends here (reviewRound); the reviewer is started only if the
+	// round is still open, since a second completion of the same commit would be refused as not
+	// new. A round its reviewer completed that nothing would end is stuck: the reviewer's task says
+	// why, so the restarted reviewer decides it. The architect, who ordered the retry, is told
+	// nothing: a notice now would read as the reviewer's answer to its request.
 	reason := "retry held phase"
 	if from == phase.Reviewing {
 		pr, err := e.store.PullRequest(ctx, tx, issue.Key)
 		if err != nil {
+			return intake.Result{}, err
+		}
+		if moved, err := e.standingRed(ctx, tx, *issue, pr); err != nil || moved {
 			return intake.Result{}, err
 		}
 		reviewer, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
@@ -669,12 +663,14 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	// turn is still finishing (supervise rows are unordered, record.Postgres's ClaimDue). From then on
 	// the finished role answers questions read-only: a completion it reports is refused, since it no
 	// longer works the issue's phase (handoff), and a task queued for a phase the issue has left is
-	// dropped rather than sent (supervise.Deps's PhaseHolds). A move between two phases of one role
-	// hands the running worker the new phase's task once its turn is over. A move no completion
-	// records — CI settling red while the role at work had not completed (takenOver) — waits for that
-	// role's turn instead: the next role's start interrupts it and acts once it is over.
+	// dropped rather than sent (supervise.Deps's PhaseHolds). A move between two phases of one role -
+	// retro back to implementing on a red - hands the running worker the new phase's task once its
+	// turn is over, as any start of a working claim does. A move no completion records - CI settling
+	// red while the tester tested, the reviewer reviewed a round it had not completed, or the merger
+	// worked toward READY (takenOver) - waits for that role's turn instead: the next role's start
+	// interrupts it and acts once it is over.
 	starting := RoleFor(row.To)
-	quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from)
+	quiesce, err := e.takenOver(ctx, tx, issue.Key, trigger, from, row.To)
 	if err != nil {
 		return err
 	}
@@ -712,16 +708,20 @@ func noticeFor(trigger TriggerKind, from phase.Phase, handoff record.PhaseRow, r
 }
 
 // takenOver is the role a transition on trigger out of from takes the phase from while that role
-// may still be at work in it: CI settled red in testing, or in reviewing before the reviewer
-// completed its round. Every other move is a completion's (the outgoing worker's turn reports it
-// once its handoff is committed and pushed), the outgoing role's own request (a backward move from
-// inside its turn), or a reviewer's round it already completed, and takes over from nobody.
-func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from phase.Phase) (claim.Role, error) {
+// may still be at work in it: CI settled red while the tester tested, while the reviewer reviewed a
+// round it had not completed, or while the merger worked toward its READY. Every other move is a
+// completion's (the outgoing worker's turn reports it once its handoff is committed and pushed),
+// the outgoing role's own request (a backward move from inside its turn), or a reviewer's round it
+// already completed, and takes over from nobody. Nor does a move between two phases of one role -
+// retro back to implementing - take the phase from anyone: the implementer keeps its turn and is
+// handed the new phase's task once it ends, and a start may not wait on its own role
+// (record.SuperviseRequest's Quiesce).
+func (e *Engine) takenOver(ctx context.Context, tx pgx.Tx, issue string, trigger TriggerKind, from, to phase.Phase) (claim.Role, error) {
 	if trigger != TriggerChecksRed {
 		return "", nil
 	}
 	leaving := RoleFor(from)
-	if leaving == "" {
+	if leaving == "" || leaving == RoleFor(to) {
 		return "", nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue, leaving)
