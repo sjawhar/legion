@@ -25,3 +25,6 @@ packages/envoy/**/*_test.go
 packages/envoy/internal/integration/
 packages/envoy/internal/smoke/
 packages/envoy/deploy/
+# The envoy-infra Pulumi plugin, a module of its own that no image builds. Leaving it out keeps a
+# change there from building and pushing a worker image.
+packages/envoy/infra/
