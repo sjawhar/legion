@@ -346,6 +346,12 @@ jobs:
 
           EXISTING_TAG=$(git tag --list 'legion-envoy-v*' --points-at HEAD --sort=-v:refname | head -1)
           if [ -n "$EXISTING_TAG" ]; then
+            # A tag's name is chosen by whoever pushed it; release only a plain version.
+            if ! [[ ${EXISTING_TAG#legion-envoy-v} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              printf -v shown '%q' "$EXISTING_TAG"
+              echo "::error::$shown, the legion-envoy-v tag at HEAD, is not legion-envoy-vX.Y.Z; refusing it"
+              exit 1
+            fi
             {
               echo "tag=$EXISTING_TAG"
               echo "should_release=true"
