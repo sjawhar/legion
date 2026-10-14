@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"maps"
 	"slices"
-	"strconv"
-	"strings"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/cloudwatch"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ecs"
@@ -14,26 +12,13 @@ import (
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/servicediscovery"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
-	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/infra/aws/rendering"
 	"github.com/sjawhar/envoy/infra/internal/providers"
 )
 
 // webhookListenerType is the component's token, registered as a constant for the reason
 // natsServiceType gives.
 const webhookListenerType = "envoy-infra:aws:WebhookListener"
-
-const (
-	// listenerPort is the port the listener serves in the task: its webhooks, /v1 and /healthz,
-	// and the port the target group sends traffic to.
-	listenerPort = 9020
-	// listenerContainerName names the task's one container, which the service attaches to the
-	// target group and whose log streams it prefixes.
-	listenerContainerName = "envoy-listener"
-)
-
-// supportedWebhooks is the one webhooks list this version takes: the list whose container
-// definitions the reference renders, byte for byte, and the only one a consumer passes.
-var supportedWebhooks = []string{"github", "slack"}
 
 // WebhookListenerArgs are the inputs of an envoy-infra:aws:WebhookListener. Every field that holds
 // a value of the deployment is required and has no default.
@@ -165,7 +150,7 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 	readPolicy := func(suffix string, arn pulumi.StringOutput) error {
 		policy, err := iam.NewRolePolicy(ctx, name+suffix, &iam.RolePolicyArgs{
 			Role:   args.ExecutionRoleName,
-			Policy: arn.ApplyT(secretReadPolicy).(pulumi.StringOutput),
+			Policy: arn.ApplyT(rendering.SecretReadPolicy).(pulumi.StringOutput),
 		}, child...)
 		if err != nil {
 			return err
@@ -197,31 +182,20 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 		optional("slackSigningSecretArn", args.SlackSigningSecretArn),
 		optional("seedSecretArn", args.SeedSecretArn),
 	).ApplyT(func(v []any) (string, error) {
-		c := listenerContainer{
+		c := rendering.ListenerContainer{
 			Image:                  args.Image,
-			MachineId:              args.MachineId,
-			NatsUrls:               v[0].([]string),
-			ListenHost:             args.ListenHost,
-			HostBridge:             args.HostBridge,
-			NatsReplicas:           args.NatsReplicas,
-			Webhooks:               args.Webhooks,
+			Env:                    args.environment(v[0].([]string)),
 			GitHubWebhookSecretArn: v[3].(string),
 			SlackSigningSecretArn:  v[4].(string),
 			ApiTokenSecretArn:      v[2].(string),
 			LogGroup:               v[1].(string),
 			Region:                 args.Region,
 		}
-		if args.MentionTrigger != nil {
-			c.MentionTrigger = *args.MentionTrigger
-		}
-		if args.ReviewerAppId != nil {
-			c.ReviewerAppId = *args.ReviewerAppId
-		}
 		if args.SeedSecretArn != nil {
 			seed := v[5].(string)
 			c.SeedSecretArn = &seed
 		}
-		definitions, err := listenerContainerDefinitions(c)
+		definitions, err := rendering.ListenerContainerDefinitions(c)
 		if err != nil {
 			return "", fmt.Errorf("%s %s: %w", webhookListenerType, name, err)
 		}
@@ -273,8 +247,8 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 		LoadBalancers: ecs.ServiceLoadBalancerArray{
 			ecs.ServiceLoadBalancerArgs{
 				TargetGroupArn: args.TargetGroupArn,
-				ContainerName:  pulumi.String(listenerContainerName),
-				ContainerPort:  pulumi.Int(listenerPort),
+				ContainerName:  pulumi.String(rendering.ListenerContainerName),
+				ContainerPort:  pulumi.Int(rendering.ListenerPort),
 			},
 		},
 		ServiceRegistries: ecs.ServiceServiceRegistriesArgs{RegistryArn: cloudMap.Arn},
@@ -287,25 +261,16 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 		return nil, err
 	}
 
-	for _, signal := range logSignals {
-		for _, filter := range signal.filters {
-			if _, err := cloudwatch.NewLogMetricFilter(ctx, name+"-"+filter.name, &cloudwatch.LogMetricFilterArgs{
-				LogGroupName: logGroup.Name,
-				Pattern:      pulumi.String(filter.pattern),
-				MetricTransformation: cloudwatch.LogMetricFilterMetricTransformationArgs{
-					Name:         pulumi.String(signal.metric),
-					Namespace:    pulumi.String(args.MetricNamespace),
-					Value:        pulumi.String("1"),
-					DefaultValue: pulumi.String("0"),
-				},
-			}, child...); err != nil {
+	for _, signal := range rendering.ListenerLogSignals {
+		for _, filter := range signal.MetricFilters(name, args.MetricNamespace) {
+			if err := newMetricFilter(ctx, filter, logGroup.Name, child); err != nil {
 				return nil, err
 			}
 		}
-		if _, err := cloudwatch.NewMetricAlarm(ctx, name+"-"+signal.alarm, &cloudwatch.MetricAlarmArgs{
-			AlarmDescription:   pulumi.String(fmt.Sprintf(signal.description, args.LogGroupName)),
+		if _, err := cloudwatch.NewMetricAlarm(ctx, signal.AlarmName(name), &cloudwatch.MetricAlarmArgs{
+			AlarmDescription:   pulumi.String(signal.Description(args.LogGroupName)),
 			Namespace:          pulumi.String(args.MetricNamespace),
-			MetricName:         pulumi.String(signal.metric),
+			MetricName:         pulumi.String(signal.MetricName()),
 			Statistic:          pulumi.String("Sum"),
 			Period:             pulumi.Int(300),
 			EvaluationPeriods:  pulumi.Int(1),
@@ -326,50 +291,23 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 	comp.ServiceName = service.Name
 	comp.LogGroupName = logGroup.Name
 	comp.TaskDefinitionArn = task.Arn
-	comp.InternalUrl = pulumi.Sprintf("http://%s.%s:%d", cloudMap.Name, args.CloudMapNamespaceName, listenerPort)
+	comp.InternalUrl = pulumi.Sprintf("http://%s.%s:%d", cloudMap.Name, args.CloudMapNamespaceName, rendering.ListenerPort)
 	return comp, nil
 }
 
 // validate refuses the inputs NewWebhookListener cannot build a working listener from, each error
-// naming its input. A webhook input is checked against webhooks before the list itself, so each
-// refusal is the one its input earns: a listed webhook's missing input, an unlisted webhook's
-// input that would otherwise be dropped silently, then a list this version does not take.
+// naming its input: each webhook's secret ARN against webhooks, then the environment's plain
+// inputs (rendering.ListenerEnv.Check), then the service's.
 func (args *WebhookListenerArgs) validate() error {
-	set := func(v *string) bool { return v != nil && strings.TrimSpace(*v) != "" }
-	for _, in := range []struct {
-		webhook, field string
-		given, set     bool // given at all; given with a value the listener can use
-	}{
-		{"github", "githubWebhookSecretArn", args.GitHubWebhookSecretArn != nil, args.GitHubWebhookSecretArn != nil},
-		// The listener refuses to start without it.
-		{"github", "reviewerAppId", args.ReviewerAppId != nil, set(args.ReviewerAppId)},
-		// The listener would fall back to a trigger of its own without it.
-		{"github", "mentionTrigger", args.MentionTrigger != nil, set(args.MentionTrigger)},
-		{"slack", "slackSigningSecretArn", args.SlackSigningSecretArn != nil, args.SlackSigningSecretArn != nil},
-	} {
-		listed := slices.Contains(args.Webhooks, in.webhook)
-		if listed && !in.set {
-			return fmt.Errorf("%s is required with webhook %q", in.field, in.webhook)
-		}
-		if !listed && in.given {
-			return fmt.Errorf("%s is given for webhook %q, which webhooks does not list", in.field, in.webhook)
-		}
-	}
-	if !slices.Equal(args.Webhooks, supportedWebhooks) {
-		return fmt.Errorf("webhooks %q is not supported: this version takes exactly %q", args.Webhooks, supportedWebhooks)
-	}
-	// The environment's fields known at construct; natsUrls may be known only later, and the
-	// container definitions' apply refuses a bad one.
-	if err := (core.ListenerConfig{MachineID: args.MachineId, Port: listenerPort, HostBridge: args.HostBridge}).CheckPlain(); err != nil {
+	if err := rendering.CheckWebhookInputs(args.Webhooks, []rendering.WebhookInput{
+		{Webhook: "github", Field: "githubWebhookSecretArn", Given: args.GitHubWebhookSecretArn != nil, Set: args.GitHubWebhookSecretArn != nil},
+		{Webhook: "slack", Field: "slackSigningSecretArn", Given: args.SlackSigningSecretArn != nil, Set: args.SlackSigningSecretArn != nil},
+	}); err != nil {
 		return err
 	}
-	// The listener binds 127.0.0.1 when ENVOY_LISTEN_HOST is blank, where the target group cannot
-	// reach it.
-	if strings.TrimSpace(args.ListenHost) == "" {
-		return errors.New("listenHost is required: the listener binds 127.0.0.1 without it")
-	}
-	if args.NatsReplicas < 1 {
-		return fmt.Errorf("natsReplicas %d is below 1", args.NatsReplicas)
+	// natsUrls may be known only later; the container definitions' apply refuses a bad one.
+	if err := args.environment(nil).Check(); err != nil {
+		return err
 	}
 	if len(args.SubnetIds) == 0 {
 		return errors.New("subnetIds names no subnet: the service has nowhere to place its task")
@@ -380,212 +318,24 @@ func (args *WebhookListenerArgs) validate() error {
 	return nil
 }
 
+// environment returns the inputs the container's environment is made of, with natsUrls.
+func (args *WebhookListenerArgs) environment(natsUrls []string) rendering.ListenerEnv {
+	return rendering.ListenerEnv{
+		MachineId:      args.MachineId,
+		NatsUrls:       natsUrls,
+		ListenHost:     args.ListenHost,
+		HostBridge:     args.HostBridge,
+		NatsReplicas:   args.NatsReplicas,
+		Webhooks:       args.Webhooks,
+		ReviewerAppId:  args.ReviewerAppId,
+		MentionTrigger: args.MentionTrigger,
+	}
+}
+
 // dependsOnInput orders a child after the resources in's value comes from. A value used only for
 // ordering reaches no input of the child, so the dependencies a consumer's output carries into the
 // component would otherwise be lost; DependsOnInputs takes the dependencies of the output it is
 // given, which are in's.
 func dependsOnInput(in pulumi.StringInput) pulumi.ResourceOption {
 	return pulumi.DependsOnInputs(in.ToStringOutput().ApplyT(func(string) []pulumi.Resource { return nil }).(pulumi.ResourceArrayOutput))
-}
-
-// secretReadPolicy is the execution-role policy that reads the secret at arn into a container, as
-// the reference's json.dumps writes it.
-func secretReadPolicy(arn string) string {
-	return core.PyJSON(core.Object{
-		{Key: "Version", Value: "2012-10-17"},
-		{Key: "Statement", Value: []core.Object{{
-			{Key: "Effect", Value: "Allow"},
-			{Key: "Action", Value: []string{"secretsmanager:GetSecretValue"}},
-			{Key: "Resource", Value: arn},
-		}}},
-	}, core.PyJSONOptions{EnsureASCII: true})
-}
-
-// listenerContainer holds what the listener task's container takes from the component's inputs
-// and children.
-type listenerContainer struct {
-	Image          string
-	MachineId      string
-	NatsUrls       []string
-	ListenHost     string
-	HostBridge     string
-	NatsReplicas   int
-	Webhooks       []string
-	MentionTrigger string // written only with github
-	ReviewerAppId  string // written only with github
-
-	GitHubWebhookSecretArn string // written only with github
-	SlackSigningSecretArn  string // written only with slack
-	ApiTokenSecretArn      string
-	SeedSecretArn          *string // nil injects no seed
-
-	LogGroup string
-	Region   string
-}
-
-// listenerContainerDefinitions returns the listener task's container definitions. The AWS
-// provider compares every string in them byte for byte, so they are written as json.dumps writes
-// the reference's list: its dict order, ensure_ascii on. The environment is core.ListenerEnv's,
-// with the listen host after the port where the reference lists it, then the replicas and the
-// webhooks: ENVOY_WEBHOOKS only when one is listed, the GitHub variables only with github, and
-// each webhook's secret only with its webhook.
-func listenerContainerDefinitions(c listenerContainer) (string, error) {
-	env, err := core.ListenerEnv(core.ListenerConfig{
-		MachineID: c.MachineId, NATSURLs: c.NatsUrls, Port: listenerPort, HostBridge: c.HostBridge,
-	})
-	if err != nil {
-		return "", err
-	}
-	gitHub, slack := slices.Contains(c.Webhooks, "github"), slices.Contains(c.Webhooks, "slack")
-
-	var variables []core.Object
-	for _, entry := range env {
-		name, value, _ := strings.Cut(entry, "=")
-		variables = append(variables, environment(name, value))
-		if name == "PORT" {
-			variables = append(variables, environment("ENVOY_LISTEN_HOST", c.ListenHost))
-		}
-	}
-	variables = append(variables, environment("ENVOY_NATS_REPLICAS", strconv.Itoa(c.NatsReplicas)))
-	if len(c.Webhooks) > 0 {
-		variables = append(variables, environment("ENVOY_WEBHOOKS", strings.Join(c.Webhooks, ",")))
-	}
-	if gitHub {
-		variables = append(variables,
-			environment("ENVOY_GITHUB_MENTION_TRIGGER", c.MentionTrigger),
-			environment("ENVOY_REVIEWER_APP_ID", c.ReviewerAppId),
-		)
-	}
-
-	var secrets []core.Object
-	if gitHub {
-		secrets = append(secrets, secret("ENVOY_GITHUB_WEBHOOK_SECRET", c.GitHubWebhookSecretArn))
-	}
-	if slack {
-		secrets = append(secrets, secret("ENVOY_SLACK_SIGNING_SECRET", c.SlackSigningSecretArn))
-	}
-	secrets = append(secrets, secret("ENVOY_API_TOKEN", c.ApiTokenSecretArn))
-	if c.SeedSecretArn != nil {
-		secrets = append(secrets, secret(core.EnvNATSSeed, *c.SeedSecretArn))
-	}
-
-	listener := core.Object{
-		{Key: "name", Value: listenerContainerName},
-		{Key: "image", Value: c.Image},
-		{Key: "essential", Value: true},
-		{Key: "command", Value: []string{"/usr/local/bin/envoy-listener"}},
-		{Key: "portMappings", Value: []core.Object{portMapping(listenerPort)}},
-		{Key: "environment", Value: variables},
-		{Key: "secrets", Value: secrets},
-		// `hostname -i` is the task's ENI address in awsvpc mode, the interface the target group
-		// probes, so a listener bound to loopback fails here too. It prints every address the
-		// name resolves to; the first one keeps a dual-stack ENI from breaking the probe.
-		{Key: "healthCheck", Value: healthCheck(
-			fmt.Sprintf(`curl -sf "http://$(hostname -i | cut -d' ' -f1):%d/healthz" || exit 1`, listenerPort), 30)},
-		{Key: "logConfiguration", Value: logConfiguration(c.LogGroup, c.Region, listenerContainerName)},
-	}
-	return core.PyJSON([]core.Object{listener}, core.PyJSONOptions{EnsureASCII: true}), nil
-}
-
-func secret(name, arn string) core.Object {
-	return core.Object{{Key: "name", Value: name}, {Key: "valueFrom", Value: arn}}
-}
-
-// logSignal is one kind of listener log line that pages: its filters count the line's shapes into
-// one metric, and one alarm pages on that metric.
-type logSignal struct {
-	alarm, metric string // each named after the component's name: <name>-<alarm>
-	filters       []struct{ name, pattern string }
-	description   string // the log group's name is written at %s
-}
-
-// logSignals are the listener's log lines that page. Each alarm pages on one matching line in
-// five minutes and delivers the OK transition too, so the channel sees the signal stop: the next
-// period is 0 (lines arrived, none matched, the filters' default value) or missing (no lines,
-// not breaching), and either clears it. A stopped listener is not these alarms' signal.
-//
-// The JSON lines are matched by field selectors and the plain lines are anchored on their date and
-// time: a quoted or unanchored term would also match an INFO line whose payload quotes the phrase.
-var logSignals = []logSignal{
-	{
-		// A JetStream publish that did not complete: the delivery path's slog JSON line
-		// (cmd/listener/delivery.go) and a webhook handler's plain log line
-		// (internal/webhook/webhook.go, deliveryFailed).
-		alarm:  "publish-failure",
-		metric: "PublishFailures",
-		filters: []struct{ name, pattern string }{
-			{"publish-failure-filter", `{ $.level = "ERROR" && $.msg = "listener exception publish failed" }`},
-			{"webhook-publish-failure-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github||source=slack||source=ghostwispr, verb=publish, result=failed*, ...]`},
-		},
-		description: "Envoy listener could not publish to JetStream (`listener exception publish failed` or " +
-			"`<webhook> publish failed`, e.g. `nats: no response from stream`) — a delivery from the " +
-			"Dispatch GitHub App (legion-envoy) waits for Dispatch's redelivery sweep, a Slack event is " +
-			"retried by Slack three times with backoff and lost only if every attempt fails, any other " +
-			"GitHub sender's delivery answered 503 is lost, and delivery-exception notices are lost; read " +
-			"%s for the nats error.",
-	},
-	{
-		// A delivery NATS can never take, answered 422 (internal/webhook/webhook.go's refusal
-		// branch): one filter for each length of the action that logs it, matching `refused*` where
-		// a failure says `failed`.
-		alarm:  "webhook-refused",
-		metric: "WebhookRefusals",
-		filters: []struct{ name, pattern string }{
-			{"webhook-publish-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github||source=slack||source=ghostwispr, verb=publish, result=refused*, ...]`},
-			{"ci-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=record, result=refused*, ...]`},
-			{"ci-head-suite-record-refused-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, source=github, w1=ci, w2=head||w2=suite, w3=record, result=refused*, ...]`},
-		},
-		description: "Envoy listener refused a webhook delivery (`<source> publish refused`, `github ci record refused` " +
-			"or `github ci suite record refused`, answered 422): the envelope is past what NATS takes or the " +
-			"commit's CI record is past its bound, the same input is refused on every attempt, and Dispatch's " +
-			"redelivery sweep does not retry a 4xx, so the delivery is lost (a refused CI record leaves its " +
-			"commit overflowed, never settling). Read %s for the refusal's reason; the fix is " +
-			"a cap in legion's normalizer or a CI bound, not the NATS server's limits.",
-	},
-	{
-		// A start that dropped another deployment's overlapping stream subject: the WARN the bus
-		// logs through Go's default handler (internal/bus/stream.go), so date, time and level
-		// anchor it.
-		alarm:  "stream-subject-dropped",
-		metric: "StreamSubjectsDropped",
-		filters: []struct{ name, pattern string }{
-			{"stream-subject-dropped-filter", `[date=%^\d{4}/\d{2}/\d{2}$%, time=%^\d{2}:\d{2}:\d{2}$%, level=WARN, w1=envoy, w2=nats, w3=stream, w4=subject, w5=replaced, w6=by, w7=an, w8=overlapping, w9=one, ...]`},
-		},
-		description: "An Envoy listener start dropped another deployment's `ENVOY_NOTIFICATIONS` subject " +
-			"because it overlaps one of its own (`envoy nats stream subject replaced by an " +
-			"overlapping one`) — that deployment receives nothing on the dropped subject until " +
-			"it starts again; read %s for the dropped and kept subjects, then " +
-			"reconcile the subject lists across the deployments.",
-	},
-	{
-		// A start that refused its durable consumer and exits (cmd/listener/main.go).
-		alarm:  "durable-refused",
-		metric: "DurableRefusals",
-		filters: []struct{ name, pattern string }{
-			{"durable-refused-filter", `{ $.level = "ERROR" && $.msg = "subscribe refused, shutting down" }`},
-		},
-		description: "An Envoy listener start refused its durable consumer (`subscribe refused, shutting " +
-			"down`): the durable carries an idle heartbeat or an ack policy other than explicit, " +
-			"which NATS cannot change in place, so every replacement task exits 1 while the old task " +
-			"keeps serving, until the circuit breaker rolls the deployment back and the apply fails. " +
-			"Read %s for the " +
-			"durable and the setting, then recreate the durable by the recipe in sjawhar/legion " +
-			"packages/envoy/AGENTS.md (Operational notes), which keeps its cursor.",
-	},
-	{
-		// A start that gave up binding its durable subscription and exits (cmd/listener/main.go,
-		// after cmd/listener/durable.go's deadline).
-		alarm:  "subscribe-exhausted",
-		metric: "SubscribesExhausted",
-		filters: []struct{ name, pattern string }{
-			{"subscribe-exhausted-filter", `{ $.level = "ERROR" && $.msg = "subscribe failed after max attempts, shutting down" }`},
-		},
-		description: "An Envoy listener start gave up setting up its durable subscription 135 s after its first " +
-			"attempt (`subscribe failed after max attempts, shutting down`). ECS had already stopped the " +
-			"old task, so every replacement exits 1 the same way once its own bind gives up. Read the " +
-			"line's `error` in %s: `consumer is already bound to a subscription` " +
-			"means something still holds the durable's push binding (find it with `nats consumer " +
-			"info ENVOY_NOTIFICATIONS listener-<machine id>`, push_bound, and stop it); any other " +
-			"error is JetStream failing the consumer lookup, create or update.",
-	},
 }

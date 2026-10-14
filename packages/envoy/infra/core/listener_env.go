@@ -2,8 +2,6 @@
 package core
 
 import (
-	"errors"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -28,20 +26,21 @@ type ListenerConfig struct {
 
 // CheckPlain refuses what ListenerEnv would refuse of the fields a component knows when it is
 // constructed: every field but NATSURLs, which may come from another resource or stack and so be
-// known only later. A component calls it before it registers anything.
+// known only later. A component calls it before it registers anything. Each refusal is an
+// InputError.
 //
 // The listener requires ENVOY_MACHINE_ID and refuses it blank (internal/config/config.go), and
 // reads ENVOY_HOST_BRIDGE untrimmed into every local delivery's URL (internal/session/session.go),
 // so a host bridge with surrounding whitespace is refused. A Port of 0 means 9020.
 func (c ListenerConfig) CheckPlain() error {
 	if strings.TrimSpace(c.MachineID) == "" {
-		return errors.New("machineId is required")
+		return InputErrorf("machineId", "machineId is required")
 	}
 	if port := c.port(); port < 1 || port > 65535 {
-		return fmt.Errorf("port %d is outside 1-65535", c.Port)
+		return InputErrorf("port", "port %d is outside 1-65535", c.Port)
 	}
 	if strings.TrimSpace(c.HostBridge) != c.HostBridge {
-		return fmt.Errorf("hostBridge has leading or trailing whitespace: %q", c.HostBridge)
+		return InputErrorf("hostBridge", "hostBridge has leading or trailing whitespace: %q", c.HostBridge)
 	}
 	return nil
 }
@@ -58,22 +57,23 @@ func (c ListenerConfig) port() int {
 //
 // It refuses what CheckPlain refuses, then each of NATSURLs: the listener refuses NATS_URLS blank
 // (internal/config/config.go) and splits it on commas, so a URL holding a comma or nothing is
-// refused here, by its index. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server
-// bus.LocalNATSURL does not vouch for, since the listener refuses such a server without it.
+// refused here, by its index. Each refusal is an InputError. ENVOY_ALLOW_REMOTE_NATS=1 is set
+// exactly when a URL names a server bus.LocalNATSURL does not vouch for, since the listener refuses
+// such a server without it.
 func ListenerEnv(c ListenerConfig) ([]string, error) {
 	if err := c.CheckPlain(); err != nil {
 		return nil, err
 	}
 	if len(c.NATSURLs) == 0 {
-		return nil, errors.New("natsUrls needs at least one URL")
+		return nil, InputErrorf("natsUrls", "natsUrls needs at least one URL")
 	}
 	remote := false
 	for i, u := range c.NATSURLs {
 		if strings.TrimSpace(u) == "" {
-			return nil, fmt.Errorf("natsUrls[%d] is empty", i)
+			return nil, InputErrorf("natsUrls", "natsUrls[%d] is empty", i)
 		}
 		if strings.Contains(u, ",") {
-			return nil, fmt.Errorf("natsUrls[%d] contains a comma, which separates URLs in NATS_URLS", i)
+			return nil, InputErrorf("natsUrls", "natsUrls[%d] contains a comma, which separates URLs in NATS_URLS", i)
 		}
 		if !bus.LocalNATSURL(u) {
 			remote = true

@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
+	"github.com/sjawhar/envoy/infra/aws/rendering"
 	"github.com/sjawhar/envoy/infra/core"
 )
 
@@ -14,15 +15,15 @@ import (
 // exampleArgs' values with its config header replaced by exampleArgs' configHeader.
 
 // containers returns the container configuration args give: the values NewNatsService passes.
-func containers(t *testing.T, args *envoyaws.NatsServiceArgs) envoyaws.ContainerConfig {
+func containers(t *testing.T, args *envoyaws.NatsServiceArgs) rendering.NatsContainers {
 	t.Helper()
 	var authorization *core.Authorization
 	if args.Authorization != nil {
 		authorization = args.Authorization.Core()
 	}
-	launch, err := envoyaws.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
+	launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
 	require.NoError(t, err)
-	return envoyaws.ContainerConfig{
+	return rendering.NatsContainers{
 		NatsImage:        args.NatsImage,
 		Launch:           launch,
 		TailscaleImage:   args.TailscaleImage,
@@ -46,7 +47,7 @@ func TestContainerDefinitionsMatchTheReferenceGoldens(t *testing.T) {
 		t.Run(c.golden, func(t *testing.T) {
 			args := exampleArgs()
 			args.Authorization = c.authorization
-			require.Equal(t, readGolden(t, c.golden), envoyaws.ContainerDefinitions(containers(t, args)))
+			require.Equal(t, readGolden(t, c.golden), rendering.NatsContainerDefinitions(containers(t, args)))
 		})
 	}
 }
@@ -60,19 +61,19 @@ func TestContainerDefinitionsEphemeralTailnetKey(t *testing.T) {
 	golden := readGolden(t, "nats-unauthorized.golden")
 	require.Equal(t, 1, strings.Count(golden, "?ephemeral=false&"))
 	require.Equal(t, strings.Replace(golden, "?ephemeral=false&", "?ephemeral=true&", 1),
-		envoyaws.ContainerDefinitions(containers(t, args)))
+		rendering.NatsContainerDefinitions(containers(t, args)))
 }
 
 func TestNatsLaunch(t *testing.T) {
 	t.Run("without authorization the image's entrypoint runs nats-server with the arguments", func(t *testing.T) {
-		launch, err := envoyaws.NatsLaunch(nil, nil, []string{"-js", "-m", "8222"}, "")
+		launch, err := rendering.NatsLaunch(nil, nil, []string{"-js", "-m", "8222"}, "")
 		require.NoError(t, err)
 		require.Equal(t, []core.Field{{Key: "command", Value: []string{"nats-server", "-js", "-m", "8222"}}}, launch)
 	})
 	t.Run("with authorization a shell writes the configuration and execs nats-server on it", func(t *testing.T) {
 		args := exampleArgs()
 		authorization := args.Authorization.Core()
-		launch, err := envoyaws.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
+		launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
 		require.NoError(t, err)
 		script, err := authorization.StartScript(args.ConfigHeader, args.ServerArgs, args.ConfigPath)
 		require.NoError(t, err)

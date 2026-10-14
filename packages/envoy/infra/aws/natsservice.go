@@ -16,6 +16,7 @@ import (
 	"github.com/pulumi/pulumi-go-provider/infer"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"github.com/sjawhar/envoy/infra/aws/rendering"
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
 )
@@ -153,7 +154,7 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	if args.Authorization != nil {
 		authorization = args.Authorization.core()
 	}
-	launch, err := natsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
+	launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
 	if err != nil {
 		return refuse(err)
 	}
@@ -223,7 +224,7 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	}
 
 	definitions := pulumi.All(logGroup.Name, args.TailnetClientSecretArn).ApplyT(func(v []any) string {
-		return containerDefinitions(containerConfig{
+		return rendering.NatsContainerDefinitions(rendering.NatsContainers{
 			NatsImage:        args.NatsImage,
 			Launch:           launch,
 			TailscaleImage:   args.TailscaleImage,
@@ -303,23 +304,8 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 		return nil, err
 	}
 
-	for _, filter := range []struct{ name, pattern, metric string }{
-		{"route-disconnect", `"Router connection closed"`, "RouteDisconnections"},
-		{"slow-consumer", `"Slow Consumer Detected"`, "SlowConsumers"},
-		{"jetstream-error", `?"JetStream out of" ?"JetStream failed to store" ?"JetStream being DISABLED" ?"NO quorum, stalled"`, "JetStreamErrors"},
-		// nats-server's own log text for a refused credential and a denied subject.
-		{"auth-error", `?"authentication error" ?"Subscription Violation" ?"Publish Violation"`, "AuthErrors"},
-	} {
-		if _, err := cloudwatch.NewLogMetricFilter(ctx, args.MetricFilterLogicalNamePrefix+"-"+filter.name+"-filter", &cloudwatch.LogMetricFilterArgs{
-			LogGroupName: logGroup.Name,
-			Pattern:      pulumi.String(filter.pattern),
-			MetricTransformation: cloudwatch.LogMetricFilterMetricTransformationArgs{
-				Name:         pulumi.String(filter.metric),
-				Namespace:    pulumi.String(args.MetricNamespace),
-				Value:        pulumi.String("1"),
-				DefaultValue: pulumi.String("0"),
-			},
-		}, child...); err != nil {
+	for _, filter := range rendering.NatsMetricFilters(args.MetricFilterLogicalNamePrefix, args.MetricNamespace) {
+		if err := newMetricFilter(ctx, filter, logGroup.Name, child); err != nil {
 			return nil, err
 		}
 	}
@@ -331,7 +317,7 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	comp.EfsId = data.fileSystem.ID().ToStringOutput()
 	comp.LogGroupName = logGroup.Name
 	comp.TaskDefinitionArn = task.Arn
-	comp.InternalUrl = pulumi.Sprintf("nats://%s.%s:%d", cloudMap.Name, args.CloudMapNamespaceName, natsClientPort)
+	comp.InternalUrl = pulumi.Sprintf("nats://%s.%s:%d", cloudMap.Name, args.CloudMapNamespaceName, rendering.NatsClientPort)
 	comp.MetricNamespace = pulumi.String(args.MetricNamespace).ToStringOutput()
 	return comp, nil
 }

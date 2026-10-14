@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
+	"github.com/sjawhar/envoy/infra/aws/rendering"
 )
 
 const (
@@ -576,22 +577,24 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 
 // listenerContainer returns the container configuration args give: the values NewWebhookListener
 // passes its container definitions.
-func listenerContainer(t *testing.T, args *envoyaws.WebhookListenerArgs) envoyaws.ListenerContainer {
+func listenerContainer(t *testing.T, args *envoyaws.WebhookListenerArgs) rendering.ListenerContainer {
 	t.Helper()
 	var urls []string
 	for _, u := range args.NatsUrls.(pulumi.StringArray) {
 		urls = append(urls, literal(t, u))
 	}
-	c := envoyaws.ListenerContainer{
-		Image:                  args.Image,
-		MachineId:              args.MachineId,
-		NatsUrls:               urls,
-		ListenHost:             args.ListenHost,
-		HostBridge:             args.HostBridge,
-		NatsReplicas:           args.NatsReplicas,
-		Webhooks:               args.Webhooks,
-		MentionTrigger:         *args.MentionTrigger,
-		ReviewerAppId:          *args.ReviewerAppId,
+	c := rendering.ListenerContainer{
+		Image: args.Image,
+		Env: rendering.ListenerEnv{
+			MachineId:      args.MachineId,
+			NatsUrls:       urls,
+			ListenHost:     args.ListenHost,
+			HostBridge:     args.HostBridge,
+			NatsReplicas:   args.NatsReplicas,
+			Webhooks:       args.Webhooks,
+			ReviewerAppId:  args.ReviewerAppId,
+			MentionTrigger: args.MentionTrigger,
+		},
 		GitHubWebhookSecretArn: literal(t, args.GitHubWebhookSecretArn.(pulumi.StringInput)),
 		SlackSigningSecretArn:  literal(t, args.SlackSigningSecretArn.(pulumi.StringInput)),
 		ApiTokenSecretArn:      literal(t, args.ApiTokenSecretArn),
@@ -616,7 +619,7 @@ func TestListenerContainerDefinitionsMatchTheReferenceGoldens(t *testing.T) {
 		t.Run(c.golden, func(t *testing.T) {
 			args := exampleListenerArgs()
 			args.SeedSecretArn = c.seed
-			definitions, err := envoyaws.ListenerContainerDefinitions(listenerContainer(t, args))
+			definitions, err := rendering.ListenerContainerDefinitions(listenerContainer(t, args))
 			require.NoError(t, err)
 			require.Equal(t, readGolden(t, c.golden), definitions)
 		})
@@ -659,8 +662,8 @@ func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T
 			args := exampleListenerArgs()
 			args.SeedSecretArn = nil
 			c := listenerContainer(t, args)
-			c.Webhooks = row.webhooks
-			definitions, err := envoyaws.ListenerContainerDefinitions(c)
+			c.Env.Webhooks = row.webhooks
+			definitions, err := rendering.ListenerContainerDefinitions(c)
 			require.NoError(t, err)
 			require.Equal(t, row.want, definitions)
 		})
