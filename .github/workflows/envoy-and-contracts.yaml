@@ -54,6 +54,11 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+      # The envoy-infra-go job's release path check reads release.yaml's envoy_infra job and the
+      # plugin's target list.
+      - ".github/workflows/release.yaml"
+      - ".github/envoy-infra-targets.json"
+      - ".github/scripts/check-envoy-infra-release-paths.sh"
   pull_request:
     paths:
       - "packages/envoy/**"
@@ -95,6 +100,9 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+      - ".github/workflows/release.yaml"
+      - ".github/envoy-infra-targets.json"
+      - ".github/scripts/check-envoy-infra-release-paths.sh"
   merge_group:
     types: [checks_requested]
 
@@ -121,6 +129,7 @@ jobs:
       envoy: ${{ steps.filter.outputs.envoy }}
       envoy_e2e_local: ${{ steps.filter.outputs.envoy_e2e_local }}
       envoy_image: ${{ steps.filter.outputs.envoy_image }}
+      envoy_infra_release: ${{ steps.filter.outputs.envoy_infra_release }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
       pi_shared: ${{ steps.filter.outputs.pi_shared }}
@@ -185,6 +194,13 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
+            # What envoy-infra-go's release path check reads beyond the Go modules `envoy` holds:
+            # release.yaml's envoy_infra job, the plugin's target list and the check itself. Its
+            # own filter, so a release.yaml change runs that job alone and not the whole Go suite.
+            envoy_infra_release:
+              - '.github/workflows/release.yaml'
+              - '.github/envoy-infra-targets.json'
+              - '.github/scripts/check-envoy-infra-release-paths.sh'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
             # this: that would run the whole Go suite on every Dispatch pull request.
@@ -848,10 +864,10 @@ jobs:
   # the Envoy binaries and the daemon build with, and every go command below runs in that
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too; tests
   # that start NATS take testnats.Image, pulled first for the reason envoy-go's own pull step
-  # gives.
+  # gives. It also runs on a change to what its release path check reads (envoy_infra_release).
   envoy-infra-go:
     needs: changes
-    if: needs.changes.outputs.envoy == 'true'
+    if: needs.changes.outputs.envoy == 'true' || needs.changes.outputs.envoy_infra_release == 'true'
     runs-on: ubuntu-24.04
     env:
       TESTCONTAINERS_RYUK_DISABLED: "true"
@@ -882,6 +898,10 @@ jobs:
             exit 1
           fi
         working-directory: packages/envoy/infra
+      # release.yaml's envoy_infra job releases the plugin only for a commit to a path it names,
+      # so its push paths, filter and bump paths must cover every package the plugin compiles in.
+      - name: Check release.yaml's envoy_infra paths cover every package the plugin compiles in
+        run: .github/scripts/check-envoy-infra-release-paths.sh
       - name: Vet envoy-infra, its live-test tags included
         run: go vet -tags pulumilive,natslive ./...
         working-directory: packages/envoy/infra
