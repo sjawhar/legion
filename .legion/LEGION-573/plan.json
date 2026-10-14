@@ -127,6 +127,14 @@
       "outcome": {
         "kind": "unchanged"
       }
+    },
+    {
+      "spec": "The comparison names only the blocks added since the approved version as the ones that must carry his answer; a block the approved version already held is outside its words.",
+      "plan": "Condition 2.2.4 tests every decision block of the new version that is not as the approved version held it (added since, answered or re-answered since by anyone, or resolved since) and requires it to be his answer; a block answered before his approval and untouched since is content he approved and stays out. Decided by the architect on the first testing round (Envoy e492cea1f11ad15f80fc1bbe15091432, confirmed 3d4a59f1d75d041455b6c81d828b0655); plan.md version 2 records it as departure 3.",
+      "evidence": "The tester's PROOF-14: a second human answered a block the approved version held open after the approval, then the approver answered a block the agent added, and the literal rule carried his approval over the other person's decision unread, against the spec's own principle that his answer carries his approval only when it is the whole change.",
+      "outcome": {
+        "kind": "unchanged"
+      }
     }
   ]
 }
