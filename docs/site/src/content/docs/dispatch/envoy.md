@@ -139,13 +139,10 @@ Keep the API private: only `/webhook/...` needs to be reachable from GitHub.
 
 ### With Pulumi
 
-The `envoy-infra` Pulumi plugin runs the listener on a Docker host as the component
-`envoy-infra:host:Listener`, from a Pulumi program in any language. It sets the listener's machine
-id, NATS URLs, port, host bridge and NATS seed from the component's inputs, but no listen host, API
-token or webhook route, so the listener serves only on the host's loopback. The plugin's
-[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) covers
-installing it with `pulumi package add`, the component's inputs, examples in YAML and TypeScript,
-and moving an existing deployment onto it.
+The `envoy-infra` Pulumi plugin runs the listener on a Docker host from a Pulumi program in any
+language, as the component `envoy-infra:host:Listener`. Its
+[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
+install it, what it deploys and which settings it sets.
 
 ### Health and readiness
 

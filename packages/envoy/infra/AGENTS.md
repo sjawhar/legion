@@ -47,8 +47,12 @@ versions. Never add the module to the root `go.work`.
   resources with, so a missing provider fails naming the component and the package, and no
   resource falls back to a default provider of the plugin's own SDK version. Its unit test runs it
   without each provider and asserts nothing registered.
-- **Refuse before registering.** Validate every input first, with an error naming the input. A
-  refusal that needs an output's value comes from the `ApplyT` that reads it.
+- **Refusals.** Every refusal names the input. `NewListener` refuses what it can check from its
+  arguments alone (the port range, the watchdog's three refusals) and a missing provider before it
+  registers anything (`host/listener.go:87-114`). What `core.ListenerEnv` checks (`machineId`, each
+  of `natsUrls`, `hostBridge`) is refused later, by the `ApplyT` over `natsUrls` that computes the
+  container's environment (`:141-145`), after the component and its image have registered: the
+  error fails the preview or update when the container's `envs` resolve, not the constructor.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go:395`, `:764-766`). A
@@ -63,7 +67,12 @@ versions. Never add the module to the root `go.work`.
   them.
 - **Release contract.** `provider.go`'s `downloadURL` names the release the release job publishes:
   tag `envoy-infra-v<version>`, asset `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz`
-  with the binary at the archive root. Changing one side breaks every consumer's install.
+  with the binary at the archive root. Changing one side breaks every consumer's install. A commit
+  releases the plugin only when it touches a path `release.yaml` names for it, in its push paths,
+  its `changes` job's `envoy_infra` filter and the bump paths after `--`, so a `packages/envoy`
+  package the plugin starts compiling in, directly or through another import, goes into all three.
+  `.github/scripts/check-envoy-infra-release-paths.sh` derives that set from `go list -deps` for
+  every target and fails naming each path and list that misses it.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
@@ -78,9 +87,14 @@ runs, from `packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
+../../../.github/scripts/check-envoy-infra-release-paths.sh
 go vet -tags pulumilive,natslive ./...
 go test ./...
 ```
+
+The release path check runs from any directory. Its own tests,
+`.github/scripts/check-envoy-infra-release-paths.test.sh`, run in the `test` job of
+`.github/workflows/pr-and-main.yaml`; run them after changing the check.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit
