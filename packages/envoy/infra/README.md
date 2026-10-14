@@ -453,9 +453,20 @@ Three inputs work otherwise:
   then be a key the tailnet still accepts. It asks for `<h>` while the old node still holds it, so
   Tailscale names it `<h>-1` ([machine names](https://tailscale.com/docs/concepts/machine-names)),
   and `natsUrl` names the old node, which goes offline when the old group is deleted. The old disk
-  is left detached in the old zone. To move a hub to another zone, remove its node from the tailnet
-  before the update, so that the new node takes `<h>`, and set a `tailnetAuthKey` the tailnet
-  accepts.
+  is left detached in the old zone. To move a hub to another zone:
+
+  1. Set `zone`, and a `tailnetAuthKey` the tailnet accepts, and run `pulumi up`. It returns once
+     it has deleted the old group, and with it the old VM.
+  2. Remove the old node from the tailnet
+     ([remove a device](https://tailscale.com/docs/features/access-control/device-management/how-to/remove)).
+     Not before `pulumi up` returns: a removed node whose VM still runs logs in again with the key
+     that VM fetched at boot, if the key is reusable and unexpired and the tailnet does not
+     require device approval, and takes `<h>` back.
+  3. Rename the new node from `<h>-1` to `<h>` (Edit machine name, on the machine names page
+     above), which also renames it in MagicDNS.
+
+  Until the rename, `natsUrl` names the old, offline node, so the hub's clients reconnect only
+  after it, to the new VM's empty stream.
 
 ## What a first Google Cloud deployment proves
 
