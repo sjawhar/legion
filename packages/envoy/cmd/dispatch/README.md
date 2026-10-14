@@ -227,7 +227,10 @@ lowercase email:
   new one (a failed revoke records nothing, so the retry revokes again), logged
   `msg="dispatch: a sign-in under another Google account ended every session of the address"`
   at WARN with the email, and the hourly confirmation ends them when the
-  refreshed token's `sub` is not the recorded one. Group mode neither reads nor
+  refreshed token's `sub` is not the recorded one. A sign-in whose address
+  another account signs in to between its record and its cookie gets
+  `409 SIGNIN_SUPERSEDED` and no cookie: after reading the session generation
+  the callback checks that the row still records its `sub`. Group mode neither reads nor
   writes `sub`, so there the old holder of a reassigned address keeps the
   cookies they have until their cookie expires, 30 days after it was issued,
   unless the pool user is removed from `DISPATCH_SIGNIN_GROUP` or disabled.

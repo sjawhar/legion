@@ -93,7 +93,7 @@ func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "record person")
 		return
 	}
-	if !r.issueSession(w, req, email) {
+	if !r.issueSession(w, req, email, "") {
 		return
 	}
 	slog.Warn("dispatch: dev sign-in minted a session cookie", "email", email, "remote_addr", req.RemoteAddr)

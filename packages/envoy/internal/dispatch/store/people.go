@@ -155,7 +155,10 @@ func (s *PgPeopleStore) Membership(ctx context.Context, email string) (auth.Pers
 
 // Confirm records a refresh that confirmed email's membership. With subject set, a domain-mode
 // confirmation, it writes only while the row still records that Google account
-// (auth.PeopleStore.Confirm); a row another account signed in to since is left as it is.
+// (auth.PeopleStore.Confirm); a row another account signed in to since is left as it is, and the
+// confirmation still returns nil. That is safe: the one request whose refresh it was passed its
+// generation check before the refresh, and the other account's sign-in advanced the generation,
+// so that browser's next request fails the check.
 func (s *PgPeopleStore) Confirm(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
 	if _, err := s.pool.Exec(ctx, `update people set refresh_token = $2, confirmed_at = $3 where email = $1 and ($4::text = '' or sub is not distinct from $4::text)`, email, s.seal.seal(email, refreshToken), confirmedAt, subject); err != nil {
 		return fmt.Errorf("confirm membership of %q: %w", email, err)

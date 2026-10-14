@@ -70,6 +70,8 @@ type memoryPeopleStore struct {
 	mu       sync.Mutex
 	people   map[string]auth.PersonMembership
 	sessions *memorySessionStore
+	// afterSignIn, when set, runs once after the next SignIn returns (SignIn).
+	afterSignIn func()
 }
 
 func newMemoryPeople() *memoryPeopleStore {
@@ -86,6 +88,14 @@ func (s *memoryPeopleStore) Record(_ context.Context, email string) error {
 }
 
 func (s *memoryPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
+	// afterSignIn runs once, after this sign-in has committed and released the store: a test's
+	// window between a sign-in's commit and its cookie.
+	defer func() {
+		if hook := s.afterSignIn; hook != nil {
+			s.afterSignIn = nil
+			hook()
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership := s.people[email]
@@ -580,6 +590,30 @@ func TestOAuthStateCookieMatchesCookieMode(t *testing.T) {
 				t.Errorf("callback set no dsession cookie: %v", response.Result().Cookies())
 			}
 		})
+	}
+}
+
+// Another Google account's sign-in to the same address that commits after a sign-in has recorded
+// its own account and before that sign-in's cookie is issued: the earlier sign-in gets no working
+// session, since its cookie would carry the generation the later one advanced to.
+func TestDomainSignInGetsNoSessionWhenAnotherAccountTakesTheAddressBeforeItsCookie(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	rig.people.afterSignIn = func() {
+		if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "google-subject-2", "refresh-2", time.Now()); err != nil {
+			t.Errorf("the other account's sign-in: %v", err)
+		}
+	}
+	response := rig.signIn(t, googleClaims("google-subject-1"))
+	if cookie := sessionCookie(response); cookie != nil {
+		if whoami := rig.whoami(cookie); whoami.Code != http.StatusUnauthorized {
+			t.Fatalf("the earlier account's cookie: whoami %d %s, want 401", whoami.Code, whoami.Body.String())
+		}
+	}
+	if response.Code == http.StatusFound {
+		t.Errorf("the callback answered 302 to %q, want a refusal: the address belongs to another account now", response.Header().Get("Location"))
+	}
+	if generation, _, _ := rig.sessions.CurrentSessionGeneration(context.Background(), rigGoogleEmail); generation != 1 {
+		t.Errorf("session generation %d, want 1: the other account's sign-in ended the address's sessions", generation)
 	}
 }
 

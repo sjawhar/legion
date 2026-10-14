@@ -320,7 +320,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "record sign-in")
 		return
 	}
-	if !r.issueSession(w, req, email) {
+	if !r.issueSession(w, req, email, subject) {
 		return
 	}
 	http.Redirect(w, req, pending.next, http.StatusFound)
@@ -329,7 +329,14 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 // issueSession ensures the person's session generation and sets the session cookie a sign-in
 // issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
 // both mint through it, so a local dev sign-in carries exactly the cookie a pool sign-in does.
-func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email string) bool {
+//
+// subject is the Google account a domain-mode sign-in just recorded, empty otherwise. After the
+// generation is read, the address's row must still record that account: another account's
+// sign-in that commits before that read has already ended the address's sessions and taken the
+// address, and one that commits after it advances the generation past the one the cookie carries.
+// So a cookie is issued only when the read generation predates any such sign-in; otherwise the
+// answer is 409 and no cookie.
+func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, subject string) bool {
 	generation := int64(0)
 	if r.ctx.Sessions != nil {
 		var err error
@@ -337,6 +344,19 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email st
 		if err != nil {
 			slog.Error("dispatch: ensure session generation failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "session generation")
+			return false
+		}
+	}
+	if subject != "" {
+		membership, _, err := r.ctx.People.Membership(req.Context(), email)
+		if err != nil {
+			slog.Error("dispatch: read the account the sign-in recorded failed", "email", email, "error", err)
+			writeError(w, http.StatusInternalServerError, "record sign-in")
+			return false
+		}
+		if membership.Subject != subject {
+			slog.Warn("dispatch: sign-in superseded: another Google account signed in to the address before its cookie", "email", email)
+			writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
 			return false
 		}
 	}
