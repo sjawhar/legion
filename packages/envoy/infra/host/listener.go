@@ -83,9 +83,19 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 	if args.Port != nil {
 		port = *args.Port
 	}
-	// core.ListenerEnv reads 0 as its default port, which would leave the health check on port 0.
-	if port < 1 || port > 65535 {
-		return nil, fmt.Errorf("%s %s: port %d is outside 1-65535", listenerType, name, port)
+	hostBridge := ""
+	if args.HostBridge != nil {
+		hostBridge = *args.HostBridge
+	}
+	// core reads a Port of 0 as its default, which would leave the health check on port 0.
+	if port == 0 {
+		return nil, fmt.Errorf("%s %s: port 0 is outside 1-65535", listenerType, name)
+	}
+	// Every field of the listener's environment but natsUrls is known here; natsUrls may be
+	// another resource's output, so ListenerEnv checks it when the container's envs resolve.
+	plain := core.ListenerConfig{MachineID: args.MachineID, Port: port, HostBridge: hostBridge}
+	if err := plain.CheckPlain(); err != nil {
+		return nil, fmt.Errorf("%s %s: %w", listenerType, name, err)
 	}
 	if args.Watchdog != nil {
 		// The watchdog's files and units are fixed per host and name the container envoy-listener.
@@ -134,14 +144,10 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 		return nil, err
 	}
 
-	hostBridge := ""
-	if args.HostBridge != nil {
-		hostBridge = *args.HostBridge
-	}
 	listenerEnv := args.NatsUrls.ToStringArrayOutput().ApplyT(func(urls []string) ([]string, error) {
-		return core.ListenerEnv(core.ListenerConfig{
-			MachineID: args.MachineID, NATSURLs: urls, Port: port, HostBridge: hostBridge,
-		})
+		config := plain
+		config.NATSURLs = urls
+		return core.ListenerEnv(config)
 	}).(pulumi.StringArrayOutput)
 	envs := listenerEnv
 	if args.Seed != nil {

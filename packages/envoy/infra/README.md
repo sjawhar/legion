@@ -129,19 +129,18 @@ listener's NATS client then refuses to connect rather than connect without the s
 
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
+- a blank `machineId`;
 - a `port` outside 1-65535;
+- a `hostBridge` with leading or trailing whitespace;
 - `watchdog` with a `containerName` other than `envoy-listener`;
 - `watchdog` with `seed`;
 - a `watchdog.host` containing `@` or `://`;
 - a missing provider (see [Providers](#providers)).
 
-It refuses these when it computes the container's environment, which is at preview unless
-`natsUrls` is not known until the update:
-
-- a blank `machineId`;
-- an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas separate the URLs
-  in `NATS_URLS`);
-- a `hostBridge` with leading or trailing whitespace.
+`natsUrls` may come from another resource or stack, so the listener checks it only when it
+computes the container's environment. That happens at preview, unless `natsUrls` is not known until
+the update. It refuses an empty `natsUrls`, or a URL in it that is blank or contains a comma (commas
+separate the URLs in `NATS_URLS`).
 
 ## Providers
 
