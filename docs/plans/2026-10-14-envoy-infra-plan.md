@@ -732,7 +732,7 @@ func IsUserPublicKey(key string) bool
 // why the value is none, in a fixed order, never quoting it (nkey.go:36-75).
 func UserSeedPublicKey(value []byte) (string, error)
 // SeedRefusal is the refusal of a value that holds an nkey seed (bus.HoldsSeed,
-// packages/envoy/internal/bus/nkey.go:72-103), naming its path, never the value (nkey.go:77-83).
+// packages/envoy/internal/bus/nkey.go:72-113), naming its path, never the value (nkey.go:77-83).
 func SeedRefusal(field string) error
 
 // Object is a Python dict in a known order; PyJSON writes its keys in that order, or sorted under
@@ -938,19 +938,19 @@ behaviour is the reference implementation's, with these additions:
   - an `--expect-account` that is not 12 digits (`:55-57`), or given empty, which `Command`
     refuses as a usage error before the store opens (`seed.go:435-437`);
   - a seed anywhere the AWS configuration carries one into a client, named by where it came from
-    and never quoted (`bus.HoldsSeed`, `packages/envoy/internal/bus/nkey.go:72-103`, finds one of
-    any type in any spelling: whole or inside a longer value, in either case, percent-encoded,
-    with its last character's unused bits changed, or split by `.`, `-`, `_` or whitespace). Before
-    any client is built (`checkedAWSConfig`, `awsstore.go:94-133`): `--region`; every `AWS_`
-    environment variable and `_X_AMZN_TRACE_ID`, since the SDK reads no other (`:135-155`); the
-    default paths of the shared config and credentials files; on a failed load, the profile the
-    loader reads, read on its own, then the load error's text, since the loader quotes profile
-    names, paths and invalid values; after the load, every string of every shared config profile
-    the loader read, each `source_profile` as a profile of its own, and of the resolved
-    `aws.Config` (`configSeed`, `:157-320`). After the clients are built and before any request,
-    the Secrets Manager endpoint and STS's, regional and global, resolved with each client's own
-    resolver (`endpointSeed`, `:333-378`), since the SDK resolves an endpoint only as it sends a
-    request;
+    and never quoted (`bus.HoldsSeed`, `packages/envoy/internal/bus/nkey.go:72-113`, finds one of
+    any type in any spelling: whole or inside a longer value, in either case, percent-encoded up to
+    three times, with its last character's unused bits changed, or split by `.`, `-`, `_` or
+    whitespace). Before any client is built (`checkedAWSConfig`, `awsstore.go:94-133`):
+    `--region`; every `AWS_` environment variable and `_X_AMZN_TRACE_ID`, since the SDK reads no
+    other (`:135-155`); the default paths of the shared config and credentials files; on a failed
+    load, the profile the loader reads, read on its own, then the load error's text, since the
+    loader quotes profile names, paths and invalid values; after the load, every string of every
+    shared config profile the loader read, each `source_profile` as a profile of its own, and of
+    the resolved `aws.Config` (`configSeed`, `:157-320`). After the clients are built and before
+    any request, the Secrets Manager endpoint and STS's, regional and global, resolved with each
+    client's own resolver (`endpointSeed`, `:333-378`), since the SDK resolves an endpoint only as
+    it sends a request;
   - no region from `--region` or the AWS configuration (`:62-64`);
   - a Secrets Manager endpoint the configuration overrides that is not `https`, unless its host is
     `localhost` or a loopback address, since the seed would cross a network in plain text
@@ -1606,6 +1606,12 @@ Hardening considered and not taken (the coordinator's ruling, recorded with #195
   or split within one value by a character other than `.`, `-`, `_` or whitespace: `bus.HoldsSeed`
   reads base32 in either case and percent-encoding, the spellings nkeys, base32 decoders and URLs
   give a seed, and decoding every other scheme a value might use would be an open-ended guess.
+- Refusing a seed percent-encoded more than three times. `bus.HoldsSeed` decodes at most three
+  levels (`maxPercentDecodes`), which covers every double or triple encoding a nested URL or
+  configuration value gives, and stops early at a decoding that changes nothing. The bound keeps
+  its cost linear in the value, at most four scans and three decoded copies: decoding until
+  nothing changes cost a scan and a copy per level, quadratic on a long `%2525…` value (16 KiB
+  took 2 s, and 1 MiB would take 524,288 levels).
 
 ## End-to-end verification plan
 
@@ -1683,7 +1689,7 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   `packages/envoy/internal/testnats/` is inside `release-envoy-listener.yaml`'s push paths and bump
   pathspec (`release-envoy-listener.yaml:14-16, 381-387`), so #1951's squash commit starts a
   listener release run, and a `feat` or `fix` title cuts a `legion-envoy` version.
-- `packages/envoy/internal/bus` (slice 2). New: `HoldsSeed` (`nkey.go:72-103`), the seed
+- `packages/envoy/internal/bus` (slice 2). New: `HoldsSeed` (`nkey.go:72-113`), the seed
   detector, moved from `infra/core` so #1961's SOCKS5 proxy check can share it; `bus` can never
   import `infra/core`, and the infra module already imports `bus`. Callers: `git grep -n
   'bus\.HoldsSeed' -- packages/` → `infra/core/nats_auth.go`, `infra/core/listener_env.go`,

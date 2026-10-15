@@ -551,11 +551,12 @@ A seed of any nkey type (operator, server, cluster, account, user or curve) is f
 spelling a reader or a decoder takes for it: whole or inside a longer value, such as a path or any
 part of a URL; in either case; with its last character's two unused bits changed, which nkeys
 itself reads; padded with `=`; split by `.`, `-`, `_` or whitespace, as across DNS labels or
-wrapped lines; or percent-encoded, once or more. A seed split over two values, or by any other
-character, is not found, since neither part decodes as a seed. The refusal names where the value
-came from, never the value, as `refused: <name>: AWS_ENDPOINT_URL: an nkey seed, which is never
-AWS configuration (not echoed)` or `refused: <name>: the shared config's profile "example":
-source_profile: …`.
+wrapped lines; or percent-encoded up to three times, which covers a URL nested in a URL. A seed
+percent-encoded more often, split over two values, or split by any other character, is not found:
+the check decodes three times at most, so its cost stays linear in the value, and neither part of
+a split seed decodes as a seed. The refusal names where the value came from, never the value, as
+`refused: <name>: AWS_ENDPOINT_URL: an nkey seed, which is never AWS configuration (not echoed)`
+or `refused: <name>: the shared config's profile "example": source_profile: …`.
 
 ### Exit codes
 
