@@ -20,9 +20,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go"
+	smithyendpoints "github.com/aws/smithy-go/endpoints"
 	"github.com/aws/smithy-go/logging"
-
-	"github.com/sjawhar/envoy/infra/core"
 )
 
 // AWSSecretsManager is the --store value of AWS Secrets Manager.
@@ -41,50 +40,31 @@ const firstVersionToken = "037f74cb-0e19-4a2d-b95f-6fba44b44b4d"
 
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
-// awsConfigEnv are the environment variables the SDK's configuration loader takes a region or a
-// profile name from (aws-sdk-go-v2/config v1.33.9 env_config.go:105-112, :352-353).
-var awsConfigEnv = []string{"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"}
-
 // OpenAWS opens Secrets Manager under the caller's own AWS configuration (the environment, then the
-// shared files), in region when it is not "". Before any call it refuses a configured Secrets
-// Manager endpoint a seed would cross a network to in plain text (endpointCheck), and credentials
-// it cannot retrieve, naming the fix. With account, it then refuses unless sts:GetCallerIdentity
-// answers that account; Describe holds the secret itself to that account too, so a seed never
-// lands in, or is read from, another account's secret of the same name.
-//
-// A region or a profile name that is an nkey user seed is refused first, naming where it came
-// from and never the value (awsConfigSeed): the loader quotes a profile it cannot find, and a
-// region reaches every request's signature and the ARN check's refusal.
+// shared files), in region when it is not "". Before any client is built or any credential
+// retrieved, it refuses a seed anywhere that configuration carries one (checkedAWSConfig); then a
+// seed in the endpoints the command sends to, as the two clients resolve them (endpointSeed), and
+// a configured Secrets Manager endpoint a seed would cross a network to in plain text
+// (endpointCheck); then credentials it cannot retrieve, naming the fix. Building a client sends
+// nothing: the first request is the credentials' own. With account, it then refuses unless
+// sts:GetCallerIdentity answers that account; Describe holds the secret itself to that account
+// too, so a seed never lands in, or is read from, another account's secret of the same name.
 func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	if account != "" && !awsAccountID.MatchString(account) {
 		return nil, refuse("--expect-account is a 12-digit AWS account id")
 	}
-	if isSeed(region) {
-		return nil, awsConfigSeed("--region")
-	}
-	for _, name := range awsConfigEnv {
-		if isSeed(os.Getenv(name)) {
-			return nil, awsConfigSeed(name)
-		}
-	}
-	cfg, err := loadAWSConfig(ctx, region)
-	// The environment's profile is checked above, so a missing profile that is a seed is one the
-	// shared config names, as a source_profile.
-	var missing config.SharedConfigProfileNotExistError
-	if errors.As(err, &missing) && isSeed(missing.Profile) {
-		return nil, awsConfigSeed("a profile the shared config names")
-	}
+	cfg, err := checkedAWSConfig(ctx, region)
 	if err != nil {
-		return nil, refuse("load the AWS configuration: %v", err)
+		return nil, err
 	}
 	if cfg.Region == "" {
 		return nil, refuse("no AWS region: pass --region, or name one in AWS_REGION or the profile")
 	}
-	// --region and the environment are checked above, so a seed here is the shared config's.
-	if isSeed(cfg.Region) {
-		return nil, awsConfigSeed(fmt.Sprintf("the region of the shared config's profile %q", sharedConfigProfile(cfg)))
-	}
 	client := secretsmanager.NewFromConfig(cfg)
+	identity := sts.NewFromConfig(cfg)
+	if source := endpointSeed(ctx, client.Options(), identity.Options()); source != "" {
+		return nil, awsConfigSeed(source)
+	}
 	if err := endpointCheck(client.Options().BaseEndpoint); err != nil {
 		return nil, err
 	}
@@ -98,15 +78,301 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 		return nil, refuse("no usable AWS credentials; log in or set AWS_PROFILE")
 	}
 	if account != "" {
-		identity, err := sts.NewFromConfig(cfg).GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
+		answer, err := identity.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 		if err != nil {
 			return nil, refuse("sts get-caller-identity failed: %s", errorClass(err))
 		}
-		if got := aws.ToString(identity.Account); got != account {
+		if got := aws.ToString(answer.Account); got != account {
 			return nil, refuse("these credentials are for account %s, but --expect-account is %s; use that account's credentials", got, account)
 		}
 	}
 	return &awsStore{client: client, region: cfg.Region, account: account}, nil
+}
+
+// checkedAWSConfig loads the caller's AWS configuration and refuses a seed (holdsSeed) anywhere in
+// what it carries into a client, naming where it came from and never the value (awsConfigSeed).
+// --region, the environment the SDK reads and the files' default paths are checked before loading,
+// since the loader's own errors quote values: a profile it cannot find, an AWS_MAX_ATTEMPTS that is
+// no number. A load error that still quotes a seed quotes the files'. After loading, configSeed
+// checks every profile the loader read and the resolved aws.Config.
+func checkedAWSConfig(ctx context.Context, region string) (aws.Config, error) {
+	if holdsSeed(region) {
+		return aws.Config{}, awsConfigSeed("--region")
+	}
+	if name := awsEnvironmentSeed(); name != "" {
+		return aws.Config{}, awsConfigSeed(name)
+	}
+	for _, file := range []struct{ source, path string }{
+		{"the shared config file's default path", config.DefaultSharedConfigFilename()},
+		{"the shared credentials file's default path", config.DefaultSharedCredentialsFilename()},
+	} {
+		if holdsSeed(file.path) {
+			return aws.Config{}, awsConfigSeed(file.source)
+		}
+	}
+	cfg, err := loadAWSConfig(ctx, region)
+	if err != nil {
+		if source := failedLoadSeed(ctx); source != "" {
+			return aws.Config{}, awsConfigSeed(source)
+		}
+		var missing config.SharedConfigProfileNotExistError
+		switch {
+		case errors.As(err, &missing) && holdsSeed(missing.Profile):
+			return aws.Config{}, awsConfigSeed("a profile the shared config names")
+		case holdsSeed(err.Error()):
+			return aws.Config{}, awsConfigSeed("a value the shared config or credentials file holds")
+		}
+		return aws.Config{}, refuse("load the AWS configuration: %v", err)
+	}
+	if source := configSeed(cfg); source != "" {
+		return aws.Config{}, awsConfigSeed(source)
+	}
+	return cfg, nil
+}
+
+// awsEnvironmentSeed names the first variable, in name order, of the environment the SDK reads that
+// holds a seed, or returns "". The SDK reads only AWS_ variables, the per-service endpoint
+// variables AWS_ENDPOINT_URL_<SERVICE> among them, and _X_AMZN_TRACE_ID, which it sends as the
+// X-Amzn-Trace-Id header on Lambda (aws-sdk-go-v2 v1.47.3 aws/middleware/recursion_detection.go),
+// so every such variable is checked, whether this SDK version reads it or not.
+func awsEnvironmentSeed() string {
+	var names []string
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(name, "AWS_") || name == "_X_AMZN_TRACE_ID" {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	for _, name := range slices.Compact(names) {
+		if holdsSeed(os.Getenv(name)) {
+			return name
+		}
+	}
+	return ""
+}
+
+// configSeed names where the loaded configuration holds a seed, or returns "": each shared config
+// profile the loader read (sharedConfigSeed), then every string of the resolved aws.Config. The
+// environment was checked before loading.
+func configSeed(cfg aws.Config) string {
+	for _, source := range cfg.ConfigSources {
+		if shared, ok := source.(config.SharedConfig); ok {
+			if where := sharedConfigSeed(shared); where != "" {
+				return where
+			}
+		}
+	}
+	if path, ok := seedPath(reflect.ValueOf(cfg)); ok {
+		return "the resolved AWS configuration's " + path
+	}
+	return ""
+}
+
+// failedLoadSeed reads, for a load that failed, the shared config profile the loader reads, from
+// the files it reads, on its own, and names where that profile holds a seed, or returns "". A
+// failure that comes after the files are read, such as an mfa_serial with no token provider, then
+// still names the seed rather than the failure.
+func failedLoadSeed(ctx context.Context) string {
+	env, err := config.NewEnvConfig()
+	if err != nil {
+		return ""
+	}
+	profile := env.SharedConfigProfile
+	if profile == "" {
+		profile = config.DefaultSharedConfigProfile
+	}
+	shared, err := config.LoadSharedConfigProfile(ctx, profile, func(o *config.LoadSharedConfigOptions) {
+		if env.SharedConfigFile != "" {
+			o.ConfigFiles = []string{env.SharedConfigFile}
+		}
+		if env.SharedCredentialsFile != "" {
+			o.CredentialsFiles = []string{env.SharedCredentialsFile}
+		}
+		o.Logger = logging.Nop{}
+	})
+	if err != nil {
+		return ""
+	}
+	return sharedConfigSeed(shared)
+}
+
+// sharedConfigSeed names where a shared config profile, or the source profile it names, as a
+// profile of its own, holds a seed (profileSeed), or returns "".
+func sharedConfigSeed(shared config.SharedConfig) string {
+	for level := &shared; level != nil; level = level.Source {
+		if where := profileSeed(*level); where != "" {
+			return where
+		}
+	}
+	return ""
+}
+
+// profileSeed names where one shared config profile holds a seed, by its ini key, or returns "".
+// Its source profile is left to the caller, as a level of its own named by its own profile name,
+// which is the source_profile this level has already checked.
+func profileSeed(c config.SharedConfig) string {
+	if holdsSeed(c.Profile) {
+		return "the name of a profile the shared config reads"
+	}
+	c.Source = nil
+	path, ok := seedPath(reflect.ValueOf(c))
+	if !ok {
+		return ""
+	}
+	return fmt.Sprintf("the shared config's profile %q: %s", c.Profile, sharedConfigKey(path))
+}
+
+// sharedConfigKeys are the ini keys of config.SharedConfig's string fields, by seedPath's path
+// (aws-sdk-go-v2/config v1.33.9 shared_config.go:40-130). A field the map lacks is named by its path.
+var sharedConfigKeys = map[string]string{
+	"Credentials.AccessKeyID":     "aws_access_key_id",
+	"Credentials.SecretAccessKey": "aws_secret_access_key",
+	"Credentials.SessionToken":    "aws_session_token",
+	"Credentials.Source":          "the path of its credentials file",
+	"Credentials.AccountID":       "aws_account_id",
+	"CredentialSource":            "credential_source",
+	"CredentialProcess":           "credential_process",
+	"WebIdentityTokenFile":        "web_identity_token_file",
+	"SSOSessionName":              "sso_session",
+	"SSOSession.Name":             "sso_session",
+	"SSOSession.SSORegion":        "the sso_region of its sso-session",
+	"SSOSession.SSOStartURL":      "the sso_start_url of its sso-session",
+	"SSORegion":                   "sso_region",
+	"SSOStartURL":                 "sso_start_url",
+	"SSOAccountID":                "sso_account_id",
+	"SSORoleName":                 "sso_role_name",
+	"RoleARN":                     "role_arn",
+	"ExternalID":                  "external_id",
+	"MFASerial":                   "mfa_serial",
+	"RoleSessionName":             "role_session_name",
+	"SourceProfileName":           "source_profile",
+	"Region":                      "region",
+	"EC2IMDSEndpoint":             "ec2_metadata_service_endpoint",
+	"CustomCABundle":              "ca_bundle",
+	"AppID":                       "sdk_ua_app_id",
+	"BaseEndpoint":                "endpoint_url",
+	"ServicesSectionName":         "services",
+	"Services.ServiceValues":      "a service its services section names",
+	"AuthSchemePreference":        "auth_scheme_preference",
+	"LoginSession":                "login_session",
+}
+
+// sharedConfigKey names path, a seedPath of config.SharedConfig, by its ini key.
+func sharedConfigKey(path string) string {
+	if key, ok := sharedConfigKeys[path]; ok {
+		return key
+	}
+	if rest, ok := strings.CutPrefix(path, "Services.ServiceValues["); ok {
+		service, key, _ := strings.Cut(strings.TrimSuffix(rest, "]"), "][")
+		if key == "" {
+			return "a key of the " + service + " section of its services section"
+		}
+		return "the " + service + " " + key + " of its services section"
+	}
+	return path
+}
+
+// seedPath returns where in v a string holds a seed (holdsSeed): exported field names joined by
+// ".", and map keys in brackets. It follows pointers, slices and maps, never interfaces or
+// functions, which hold code rather than configuration. A map key that holds a seed ends the path
+// at its map, so the path never quotes it.
+func seedPath(v reflect.Value) (string, bool) {
+	switch v.Kind() {
+	case reflect.String:
+		return "", holdsSeed(v.String())
+	case reflect.Pointer:
+		if v.IsNil() {
+			return "", false
+		}
+		return seedPath(v.Elem())
+	case reflect.Slice, reflect.Array:
+		for i := range v.Len() {
+			if path, ok := seedPath(v.Index(i)); ok {
+				return path, true
+			}
+		}
+	case reflect.Map:
+		keys := v.MapKeys()
+		slices.SortFunc(keys, func(a, b reflect.Value) int { return strings.Compare(fmt.Sprint(a), fmt.Sprint(b)) })
+		for _, key := range keys {
+			if _, ok := seedPath(key); ok {
+				return "", true
+			}
+			if path, ok := seedPath(v.MapIndex(key)); ok {
+				return fieldPath("["+fmt.Sprint(key)+"]", path), true
+			}
+		}
+	case reflect.Struct:
+		for i := range v.NumField() {
+			field := v.Type().Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			if path, ok := seedPath(v.Field(i)); ok {
+				return fieldPath(field.Name, path), true
+			}
+		}
+	}
+	return "", false
+}
+
+// fieldPath joins name and the path inside it.
+func fieldPath(name, rest string) string {
+	switch {
+	case rest == "":
+		return name
+	case strings.HasPrefix(rest, "["):
+		return name + rest
+	}
+	return name + "." + rest
+}
+
+// endpointSeed resolves the endpoints the command sends to with the clients' own resolvers, the
+// parameters bound as each client binds them (bindEndpointParams in secretsmanager v1.50.4 and sts
+// v1.51.4 endpoints.go): Secrets Manager's, and STS's, regional and global. It names one whose URL
+// or headers hold a seed, or returns "". holdsSeed reads every part of a URL: path, query,
+// fragment and userinfo, percent-encoded or not. The SDK resolves an endpoint only as it sends a
+// request, so this resolves them before the first one; an endpoint that fails to resolve is one no
+// request is sent to either.
+func endpointSeed(ctx context.Context, secrets secretsmanager.Options, identity sts.Options) string {
+	holds := func(endpoint smithyendpoints.Endpoint, err error) bool {
+		if err != nil {
+			return false
+		}
+		if holdsSeed(endpoint.URI.String()) {
+			return true
+		}
+		for _, values := range endpoint.Headers {
+			if slices.ContainsFunc(values, holdsSeed) {
+				return true
+			}
+		}
+		return false
+	}
+	if holds(secrets.EndpointResolverV2.ResolveEndpoint(ctx, secretsmanager.EndpointParameters{
+		Region:       aws.String(secrets.Region),
+		UseDualStack: aws.Bool(secrets.EndpointOptions.UseDualStackEndpoint == aws.DualStackEndpointStateEnabled),
+		UseFIPS:      aws.Bool(secrets.EndpointOptions.UseFIPSEndpoint == aws.FIPSEndpointStateEnabled),
+		Endpoint:     secrets.BaseEndpoint,
+	})) {
+		return "the Secrets Manager endpoint"
+	}
+	for _, global := range []bool{false, true} {
+		if holds(identity.EndpointResolverV2.ResolveEndpoint(ctx, sts.EndpointParameters{
+			Region:            aws.String(identity.Region),
+			UseDualStack:      aws.Bool(identity.EndpointOptions.UseDualStackEndpoint == aws.DualStackEndpointStateEnabled),
+			UseFIPS:           aws.Bool(identity.EndpointOptions.UseFIPSEndpoint == aws.FIPSEndpointStateEnabled),
+			Endpoint:          identity.BaseEndpoint,
+			UseGlobalEndpoint: aws.Bool(global),
+		})) {
+			if global {
+				return "the STS global endpoint"
+			}
+			return "the STS endpoint"
+		}
+	}
+	return ""
 }
 
 // loadAWSConfig loads the caller's AWS configuration with the SDK's logging off: its logger and its
@@ -123,27 +389,10 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 	return config.LoadDefaultConfig(ctx, options...)
 }
 
-// isSeed reports whether value is an nkey user seed, as core.UserSeedPublicKey reads one.
-func isSeed(value string) bool {
-	_, err := core.UserSeedPublicKey([]byte(value))
-	return err == nil
-}
-
-// awsConfigSeed refuses a value of the AWS configuration that is an nkey user seed, naming source,
-// where it came from.
+// awsConfigSeed refuses a value of the AWS configuration that holds an nkey user seed, naming
+// source, where it came from.
 func awsConfigSeed(source string) error {
 	return refuse("%s: an nkey user seed, which is never AWS configuration (not echoed)", source)
-}
-
-// sharedConfigProfile names the shared config profile cfg was loaded from: the environment's,
-// which is checked to be no seed, or "default".
-func sharedConfigProfile(cfg aws.Config) string {
-	for _, source := range cfg.ConfigSources {
-		if shared, ok := source.(config.SharedConfig); ok && shared.Profile != "" {
-			return shared.Profile
-		}
-	}
-	return "default"
 }
 
 // endpointCheck refuses a configured Secrets Manager endpoint (AWS_ENDPOINT_URL,

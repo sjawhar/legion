@@ -377,6 +377,21 @@ func (f *fakeAWS) recorded() []string {
 	return slices.Clone(f.calls)
 }
 
+// requests counts every request that reached f, expected or not.
+func (f *fakeAWS) requests() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls) + len(f.unexpected)
+}
+
+// forgetUnexpected drops the requests f did not expect, for a control run whose request is the
+// point rather than a failure.
+func (f *fakeAWS) forgetUnexpected() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.unexpected = nil
+}
+
 // serve starts f and points the AWS configuration of the process at it, as an operator's
 // environment does: AWS_ENDPOINT_URL, which the SDK takes as every client's BaseEndpoint, and
 // static credentials, with no profile, no shared file and no instance metadata.

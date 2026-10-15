@@ -13,6 +13,7 @@ import (
 	"maps"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,6 +93,51 @@ func (e *afterWrite) Error() string { return e.msg }
 
 func afterWritef(format string, args ...any) error {
 	return &afterWrite{msg: fmt.Sprintf(format, args...)}
+}
+
+// seedLength is the length of an nkey user seed as nkeys spells it: 36 bytes, unpadded base32.
+const seedLength = 58
+
+// holdsSeed reports whether text holds a seed core.UserSeedPublicKey accepts, anywhere in it:
+// every run of 58 base32 letters is tried, in the text and, when it percent-encodes anything, in
+// the text decoded. So a seed is found in a file path, an error message, or any part of a URL.
+func holdsSeed(text string) bool {
+	return base32Seed(text) || strings.Contains(text, "%") && base32Seed(percentDecoded(text))
+}
+
+// base32Seed reports whether any seedLength run of base32 letters in text is a user seed.
+func base32Seed(text string) bool {
+	run := 0
+	for i := range len(text) {
+		if c := text[i]; 'A' <= c && c <= 'Z' || '2' <= c && c <= '7' {
+			run++
+			if run >= seedLength {
+				if _, err := core.UserSeedPublicKey([]byte(text[i+1-seedLength : i+1])); err == nil {
+					return true
+				}
+			}
+			continue
+		}
+		run = 0
+	}
+	return false
+}
+
+// percentDecoded decodes each %XX in text, keeping every other byte, a % that encodes nothing
+// included.
+func percentDecoded(text string) string {
+	var b strings.Builder
+	for i := 0; i < len(text); i++ {
+		if text[i] == '%' && i+2 < len(text) {
+			if v, err := strconv.ParseUint(text[i+1:i+3], 16, 8); err == nil {
+				b.WriteByte(byte(v))
+				i += 2
+				continue
+			}
+		}
+		b.WriteByte(text[i])
+	}
+	return b.String()
 }
 
 // Check returns the report line for the secret: absent, scheduled for deletion, or present with or
@@ -406,13 +452,13 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	// A flag's value reaches the result lines, the refusals and the store's requests (--name is
 	// every line's subject and the secret id it sends, --region the endpoint the SDK resolves), so a
-	// value that is an nkey user seed is refused naming the flag, before the store opens. Visit
-	// visits the flags in name order.
+	// value that holds an nkey user seed (holdsSeed), whole or inside it, is refused naming the
+	// flag, before the store opens. Visit visits the flags in name order.
 	given := map[string]bool{}
 	var seeded []string
 	fs.Visit(func(f *flag.Flag) {
 		given[f.Name] = true
-		if _, err := core.UserSeedPublicKey([]byte(f.Value.String())); err == nil {
+		if holdsSeed(f.Value.String()) {
 			seeded = append(seeded, "--"+f.Name)
 		}
 	})

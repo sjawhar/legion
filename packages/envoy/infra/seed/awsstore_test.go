@@ -3,8 +3,10 @@ package seed
 import (
 	"bytes"
 	"context"
+	"encoding/pem"
 	"errors"
 	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +14,8 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	smithy "github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
@@ -538,53 +542,335 @@ func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 	require.Empty(t, f.recorded())
 }
 
-// The AWS configuration a region or a profile name comes from is not a flag, so Command cannot
-// check it: the store refuses one that is an nkey user seed before any call, naming where it came
-// from and not the value. Otherwise the loader quotes a profile it cannot find ("failed to get
-// shared config profile, <name>"), and a region reaches the request's signature and the ARN check's
-// refusal. --region is not given, so the region is the configuration's.
+// The resolved configuration, and the endpoints the two clients resolve with the SDK's own
+// resolvers, are checked as well, so a seed the sources above would all miss, as one the SDK
+// assembled would be, is still refused. A clean configuration resolves AWS's own endpoints.
+func TestAWSResolvedConfigurationAndEndpointsHoldNoSeed(t *testing.T) {
+	seedValue, _ := testnats.User(t)
+	ctx := context.Background()
+	withSeed := aws.String("https://example.invalid/" + seedValue)
+	require.Equal(t, "the resolved AWS configuration's AppID", configSeed(aws.Config{AppID: seedValue}))
+	require.Equal(t, "the resolved AWS configuration's BaseEndpoint", configSeed(aws.Config{BaseEndpoint: withSeed}))
+	require.Empty(t, configSeed(aws.Config{Region: awsRegion, AppID: "example-app"}))
+
+	secrets := func(endpoint *string) secretsmanager.Options {
+		return secretsmanager.Options{Region: awsRegion, BaseEndpoint: endpoint, EndpointResolverV2: secretsmanager.NewDefaultEndpointResolverV2()}
+	}
+	identity := func(endpoint *string) sts.Options {
+		return sts.Options{Region: awsRegion, BaseEndpoint: endpoint, EndpointResolverV2: sts.NewDefaultEndpointResolverV2()}
+	}
+	require.Equal(t, "the Secrets Manager endpoint", endpointSeed(ctx, secrets(withSeed), identity(nil)))
+	require.Equal(t, "the STS endpoint", endpointSeed(ctx, secrets(nil), identity(withSeed)))
+	require.Empty(t, endpointSeed(ctx, secrets(nil), identity(nil)))
+}
+
+// configCase is the AWS configuration one row of TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall
+// builds: the fake every endpoint points at, and a directory for the row's files.
+type configCase struct {
+	t   *testing.T
+	f   *fakeAWS
+	url string // the fake's URL, http://127.0.0.1:<port>
+	dir string
+}
+
+func (c configCase) env(pairs ...string) {
+	for i := 0; i+1 < len(pairs); i += 2 {
+		c.t.Setenv(pairs[i], pairs[i+1])
+	}
+}
+
+// file writes text to name in the row's directory and returns its path.
+func (c configCase) file(name, text string) string {
+	c.t.Helper()
+	path := filepath.Join(c.dir, name)
+	require.NoError(c.t, os.WriteFile(path, []byte(text), 0o600))
+	return path
+}
+
+func (c configCase) config(text string) { c.env("AWS_CONFIG_FILE", c.file("config", text)) }
+
+func (c configCase) credentials(text string) {
+	c.env("AWS_SHARED_CREDENTIALS_FILE", c.file("credentials", text))
+}
+
+// noEnvCredentials clears the static credentials serve gives the environment, so the profile or
+// the provider a row configures supplies them.
+func (c configCase) noEnvCredentials() { c.env("AWS_ACCESS_KEY_ID", "", "AWS_SECRET_ACCESS_KEY", "") }
+
+// withRole is a profile "example" assuming awsRoleARN from a profile "base" with static keys.
+func withRole(extra string) string {
+	return "[profile example]\nrole_arn = " + awsRoleARN + "\nsource_profile = base\n" + extra +
+		"\n[profile base]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\n"
+}
+
+// caBundle is a PEM certificate, as a CA bundle holds; the endpoints are plain http on loopback,
+// so the SDK loads it and never uses it.
+func caBundle(t *testing.T) string {
+	server := httptest.NewTLSServer(nil)
+	defer server.Close()
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw}))
+}
+
+// percentEncoded spells every byte of text as %XX.
+func percentEncoded(text string) string {
+	var b strings.Builder
+	for i := range len(text) {
+		fmt.Fprintf(&b, "%%%02X", text[i])
+	}
+	return b.String()
+}
+
+// Every string the AWS configuration carries into a client is checked for a seed before any client
+// is built or any credential retrieved: the environment the SDK reads (every AWS_ variable and the
+// Lambda trace id), the shared config and credentials files' paths, every value of every profile
+// the loader reads, source profiles included, and the resolved endpoints, in every part of their
+// URLs. A row puts a seed in one place; the refusal names that place, never the value, and no
+// request reaches the fake. Each row's clean subtest is its control: the same configuration with a
+// clean value in place of the seed is not refused, and reaches the request unless the row says the
+// SDK stops before any request with a clean value too. --region is not given.
 func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
 	seedValue, _ := testnats.User(t)
+	pemText := caBundle(t)
 	const notEchoed = ": an nkey user seed, which is never AWS configuration (not echoed)"
-	config := func(t *testing.T, text string) {
-		t.Helper()
-		path := filepath.Join(t.TempDir(), "config")
-		require.NoError(t, os.WriteFile(path, []byte(text), 0o600))
-		t.Setenv("AWS_CONFIG_FILE", path)
-	}
+	profile := func(name, key string) string { return fmt.Sprintf("the shared config's profile %q: %s", name, key) }
 	rows := []struct {
 		name  string
-		setup func(t *testing.T)
-		want  string
+		args  []string // check's flags beyond --store and --name
+		setup func(c configCase, v string)
+		want  string // the source the refusal names
+		clean string // the value of the control run
+		// reach is whether the control run reaches the fake, or runs a credential_process. It is
+		// false where the SDK stops before any request with that configuration, clean or not.
+		reach bool
 	}{
-		{"AWS_REGION", func(t *testing.T) { t.Setenv("AWS_REGION", seedValue) }, "AWS_REGION" + notEchoed},
-		{"AWS_DEFAULT_REGION", func(t *testing.T) { t.Setenv("AWS_DEFAULT_REGION", seedValue) }, "AWS_DEFAULT_REGION" + notEchoed},
-		{"AWS_PROFILE", func(t *testing.T) { t.Setenv("AWS_PROFILE", seedValue) }, "AWS_PROFILE" + notEchoed},
-		{"AWS_DEFAULT_PROFILE", func(t *testing.T) { t.Setenv("AWS_DEFAULT_PROFILE", seedValue) }, "AWS_DEFAULT_PROFILE" + notEchoed},
-		{"the default profile's region", func(t *testing.T) { config(t, "[default]\nregion = "+seedValue+"\n") },
-			`the region of the shared config's profile "default"` + notEchoed},
-		{"a named profile's region", func(t *testing.T) {
-			config(t, "[profile example]\nregion = "+seedValue+"\n")
-			t.Setenv("AWS_PROFILE", "example")
-		}, `the region of the shared config's profile "example"` + notEchoed},
-		{"a source_profile", func(t *testing.T) {
-			config(t, "[profile example]\nregion = "+awsRegion+"\nrole_arn = "+awsRoleARN+"\nsource_profile = "+seedValue+"\n")
-			t.Setenv("AWS_PROFILE", "example")
-		}, "a profile the shared config names" + notEchoed},
+		// The environment.
+		{name: "AWS_REGION", setup: func(c configCase, v string) { c.env("AWS_REGION", v) }, want: "AWS_REGION", clean: awsRegion, reach: true},
+		{name: "AWS_DEFAULT_REGION", setup: func(c configCase, v string) { c.env("AWS_REGION", "", "AWS_DEFAULT_REGION", v) },
+			want: "AWS_DEFAULT_REGION", clean: awsRegion, reach: true},
+		{name: "AWS_PROFILE", setup: func(c configCase, v string) {
+			c.config("[profile " + v + "]\nregion = " + awsRegion + "\n")
+			c.env("AWS_PROFILE", v)
+		}, want: "AWS_PROFILE", clean: "example", reach: true},
+		{name: "AWS_DEFAULT_PROFILE", setup: func(c configCase, v string) {
+			c.config("[profile " + v + "]\nregion = " + awsRegion + "\n")
+			c.env("AWS_DEFAULT_PROFILE", v)
+		}, want: "AWS_DEFAULT_PROFILE", clean: "example", reach: true},
+		{name: "AWS_CONFIG_FILE", setup: func(c configCase, v string) {
+			c.env("AWS_CONFIG_FILE", c.file(v, "[default]\nregion = "+awsRegion+"\n"))
+		}, want: "AWS_CONFIG_FILE", clean: "config", reach: true},
+		{name: "AWS_SHARED_CREDENTIALS_FILE", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_SHARED_CREDENTIALS_FILE", c.file(v, "[default]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\n"))
+		}, want: "AWS_SHARED_CREDENTIALS_FILE", clean: "credentials", reach: true},
+		{name: "HOME, the files' default directory", setup: func(c configCase, v string) {
+			home := filepath.Join(c.dir, v)
+			require.NoError(c.t, os.MkdirAll(filepath.Join(home, ".aws"), 0o700))
+			require.NoError(c.t, os.WriteFile(filepath.Join(home, ".aws", "config"), []byte("[default]\nregion = "+awsRegion+"\n"), 0o600))
+			c.env("HOME", home, "AWS_CONFIG_FILE", "", "AWS_SHARED_CREDENTIALS_FILE", "")
+		}, want: "the shared config file's default path", clean: "home", reach: true},
+		{name: "AWS_ENDPOINT_URL's path", setup: func(c configCase, v string) { c.env("AWS_ENDPOINT_URL", c.url+"/"+v) },
+			want: "AWS_ENDPOINT_URL", clean: "clean-path", reach: true},
+		{name: "AWS_ENDPOINT_URL's path, percent-encoded", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL", c.url+"/"+percentEncoded(v))
+		}, want: "AWS_ENDPOINT_URL", clean: "clean-path", reach: true},
+		{name: "AWS_ENDPOINT_URL's query key", setup: func(c configCase, v string) { c.env("AWS_ENDPOINT_URL", c.url+"/?"+v+"=1") },
+			want: "AWS_ENDPOINT_URL", clean: "key", reach: true},
+		{name: "AWS_ENDPOINT_URL's query value", setup: func(c configCase, v string) { c.env("AWS_ENDPOINT_URL", c.url+"/?key="+v) },
+			want: "AWS_ENDPOINT_URL", clean: "value", reach: true},
+		{name: "AWS_ENDPOINT_URL's fragment", setup: func(c configCase, v string) { c.env("AWS_ENDPOINT_URL", c.url+"/#"+v) },
+			want: "AWS_ENDPOINT_URL", clean: "fragment", reach: true},
+		{name: "AWS_ENDPOINT_URL's user", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL", "http://"+v+"@"+strings.TrimPrefix(c.url, "http://")+"/")
+		}, want: "AWS_ENDPOINT_URL", clean: "user", reach: true},
+		{name: "AWS_ENDPOINT_URL's password", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL", "http://user:"+v+"@"+strings.TrimPrefix(c.url, "http://")+"/")
+		}, want: "AWS_ENDPOINT_URL", clean: "password", reach: true},
+		{name: "AWS_ENDPOINT_URL_SECRETS_MANAGER's path", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL_SECRETS_MANAGER", c.url+"/"+v)
+		}, want: "AWS_ENDPOINT_URL_SECRETS_MANAGER", clean: "clean-path", reach: true},
+		{name: "AWS_ENDPOINT_URL_STS's path", args: []string{"--expect-account", awsAccount},
+			setup: func(c configCase, v string) { c.env("AWS_ENDPOINT_URL_STS", c.url+"/"+v) },
+			want:  "AWS_ENDPOINT_URL_STS", clean: "clean-path", reach: true},
+		{name: "AWS_ACCESS_KEY_ID", setup: func(c configCase, v string) { c.env("AWS_ACCESS_KEY_ID", v) },
+			want: "AWS_ACCESS_KEY_ID", clean: "AKIDCLEAN", reach: true},
+		{name: "AWS_SECRET_ACCESS_KEY", setup: func(c configCase, v string) { c.env("AWS_SECRET_ACCESS_KEY", v) },
+			want: "AWS_SECRET_ACCESS_KEY", clean: "clean-signing-key", reach: true},
+		{name: "AWS_SESSION_TOKEN", setup: func(c configCase, v string) { c.env("AWS_SESSION_TOKEN", v) },
+			want: "AWS_SESSION_TOKEN", clean: "example-token", reach: true},
+		{name: "AWS_SDK_UA_APP_ID", setup: func(c configCase, v string) { c.env("AWS_SDK_UA_APP_ID", v) },
+			want: "AWS_SDK_UA_APP_ID", clean: "example-app", reach: true},
+		{name: "AWS_MAX_ATTEMPTS", setup: func(c configCase, v string) { c.env("AWS_MAX_ATTEMPTS", v) },
+			want: "AWS_MAX_ATTEMPTS", clean: "2", reach: true},
+		{name: "AWS_CA_BUNDLE", setup: func(c configCase, v string) { c.env("AWS_CA_BUNDLE", c.file(v, pemText)) },
+			want: "AWS_CA_BUNDLE", clean: "ca.pem", reach: true},
+		{name: "AWS_ROLE_ARN", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_ROLE_ARN", "arn:aws:iam::"+awsAccount+":role/"+v, "AWS_WEB_IDENTITY_TOKEN_FILE", c.file("token", "example-token"))
+		}, want: "AWS_ROLE_ARN", clean: "example", reach: true},
+		{name: "AWS_ROLE_SESSION_NAME", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_ROLE_ARN", awsRoleARN, "AWS_ROLE_SESSION_NAME", v, "AWS_WEB_IDENTITY_TOKEN_FILE", c.file("token", "example-token"))
+		}, want: "AWS_ROLE_SESSION_NAME", clean: "example-session", reach: true},
+		{name: "AWS_WEB_IDENTITY_TOKEN_FILE", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_ROLE_ARN", awsRoleARN, "AWS_WEB_IDENTITY_TOKEN_FILE", c.file(v, "example-token"))
+		}, want: "AWS_WEB_IDENTITY_TOKEN_FILE", clean: "token", reach: true},
+		{name: "AWS_CONTAINER_CREDENTIALS_FULL_URI", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_CONTAINER_CREDENTIALS_FULL_URI", c.url+"/"+v)
+		}, want: "AWS_CONTAINER_CREDENTIALS_FULL_URI", clean: "credentials", reach: true},
+		{name: "AWS_CONTAINER_AUTHORIZATION_TOKEN", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_CONTAINER_CREDENTIALS_FULL_URI", c.url+"/credentials", "AWS_CONTAINER_AUTHORIZATION_TOKEN", v)
+		}, want: "AWS_CONTAINER_AUTHORIZATION_TOKEN", clean: "example-token", reach: true},
+		{name: "AWS_EC2_METADATA_SERVICE_ENDPOINT", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_EC2_METADATA_DISABLED", "false", "AWS_EC2_METADATA_SERVICE_ENDPOINT", c.url+"/"+v)
+		}, want: "AWS_EC2_METADATA_SERVICE_ENDPOINT", clean: "metadata", reach: true},
+		{name: "_X_AMZN_TRACE_ID, on Lambda", setup: func(c configCase, v string) {
+			c.env("AWS_LAMBDA_FUNCTION_NAME", "example", "_X_AMZN_TRACE_ID", "Root="+v)
+		}, want: "_X_AMZN_TRACE_ID", clean: "1-example", reach: true},
+		{name: "an AWS_ variable the SDK does not read", setup: func(c configCase, v string) { c.env("AWS_EXAMPLE_UNREAD", v) },
+			want: "AWS_EXAMPLE_UNREAD", clean: "example", reach: true},
+
+		// The shared config and credentials files.
+		{name: "the default profile's region", setup: func(c configCase, v string) {
+			c.env("AWS_REGION", "")
+			c.config("[default]\nregion = " + v + "\n")
+		}, want: profile("default", "region"), clean: awsRegion, reach: true},
+		{name: "a named profile's region", setup: func(c configCase, v string) {
+			c.env("AWS_REGION", "", "AWS_PROFILE", "example")
+			c.config("[profile example]\nregion = " + v + "\n")
+		}, want: profile("example", "region"), clean: awsRegion, reach: true},
+		{name: "a source_profile that does not exist", setup: func(c configCase, v string) {
+			c.env("AWS_PROFILE", "example")
+			c.config("[profile example]\nrole_arn = " + awsRoleARN + "\nsource_profile = " + v + "\n")
+		}, want: "a profile the shared config names", clean: "missing"},
+		{name: "a source_profile that exists", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_PROFILE", "example")
+			c.config("[profile example]\nrole_arn = " + awsRoleARN + "\nsource_profile = " + v + "\n\n[profile " + v +
+				"]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\n")
+		}, want: profile("example", "source_profile"), clean: "base", reach: true},
+		{name: "a source profile's own value", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_PROFILE", "example")
+			c.config("[profile example]\nrole_arn = " + awsRoleARN + "\nsource_profile = base\n\n[profile base]\naws_access_key_id = " + v +
+				"\naws_secret_access_key = example-signing-key\n")
+		}, want: profile("base", "aws_access_key_id"), clean: "AKIDEXAMPLE", reach: true},
+		{name: "role_arn", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_PROFILE", "example")
+			c.config("[profile example]\nrole_arn = arn:aws:iam::" + awsAccount + ":role/" + v + "\nsource_profile = base\n\n[profile base]\n" +
+				"aws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\n")
+		}, want: profile("example", "role_arn"), clean: "example", reach: true},
+		{name: "role_session_name", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_PROFILE", "example")
+			c.config(withRole("role_session_name = " + v + "\n"))
+		}, want: profile("example", "role_session_name"), clean: "example-session", reach: true},
+		{name: "external_id", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_PROFILE", "example")
+			c.config(withRole("external_id = " + v + "\n"))
+		}, want: profile("example", "external_id"), clean: "example-external-id", reach: true},
+		{name: "mfa_serial", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.env("AWS_PROFILE", "example")
+			c.config(withRole("mfa_serial = arn:aws:iam::" + awsAccount + ":mfa/" + v + "\n"))
+		}, want: profile("example", "mfa_serial"), clean: "example"},
+		{name: "credential_source", setup: func(c configCase, v string) {
+			c.env("AWS_PROFILE", "example")
+			c.config("[profile example]\nrole_arn = " + awsRoleARN + "\ncredential_source = " + v + "\n")
+		}, want: profile("example", "credential_source"), clean: "Environment", reach: true},
+		{name: "credential_process", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			process := c.file("process", "#!/bin/sh\nprintf '%s' \"$*\" > '"+filepath.Join(c.dir, "process-ran")+"'\nexit 1\n")
+			require.NoError(c.t, os.Chmod(process, 0o700))
+			c.config("[default]\ncredential_process = " + process + " " + v + "\n")
+		}, want: profile("default", "credential_process"), clean: "clean", reach: true},
+		{name: "web_identity_token_file", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.config("[default]\nrole_arn = " + awsRoleARN + "\nweb_identity_token_file = " + c.file(v, "example-token") + "\n")
+		}, want: profile("default", "web_identity_token_file"), clean: "token", reach: true},
+		{name: "sso_session", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.config("[default]\nsso_session = " + v + "\nsso_account_id = " + awsAccount + "\nsso_role_name = example\n\n[sso-session " + v +
+				"]\nsso_region = " + awsRegion + "\nsso_start_url = https://example.invalid/start\n")
+		}, want: profile("default", "sso_session"), clean: "example"},
+		{name: "an sso-session's sso_region", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.config("[default]\nsso_session = example\nsso_account_id = " + awsAccount + "\nsso_role_name = example\n\n[sso-session example]\n" +
+				"sso_region = " + v + "\nsso_start_url = https://example.invalid/start\n")
+		}, want: profile("default", "the sso_region of its sso-session"), clean: awsRegion},
+		{name: "an sso-session's sso_start_url", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.config("[default]\nsso_session = example\nsso_account_id = " + awsAccount + "\nsso_role_name = example\n\n[sso-session example]\n" +
+				"sso_region = " + awsRegion + "\nsso_start_url = https://example.invalid/" + v + "\n")
+		}, want: profile("default", "the sso_start_url of its sso-session"), clean: "start"},
+		{name: "endpoint_url's path", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL", "")
+			c.config("[default]\nendpoint_url = " + c.url + "/" + v + "\n")
+		}, want: profile("default", "endpoint_url"), clean: "clean-path", reach: true},
+		{name: "a services section's Secrets Manager endpoint_url", setup: func(c configCase, v string) {
+			c.config("[default]\nservices = example\n\n[services example]\nsecrets_manager =\n  endpoint_url = " + c.url + "/" + v + "\n")
+		}, want: profile("default", "the secrets_manager endpoint_url of its services section"), clean: "clean-path", reach: true},
+		{name: "a services section's STS endpoint_url", args: []string{"--expect-account", awsAccount}, setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL_STS", "")
+			c.config("[default]\nservices = example\n\n[services example]\nsts =\n  endpoint_url = " + c.url + "/" + v + "\n")
+		}, want: profile("default", "the sts endpoint_url of its services section"), clean: "clean-path", reach: true},
+		{name: "aws_access_key_id", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.credentials("[default]\naws_access_key_id = " + v + "\naws_secret_access_key = example-signing-key\n")
+		}, want: profile("default", "aws_access_key_id"), clean: "AKIDEXAMPLE", reach: true},
+		{name: "aws_session_token", setup: func(c configCase, v string) {
+			c.noEnvCredentials()
+			c.credentials("[default]\naws_access_key_id = AKIDEXAMPLE\naws_secret_access_key = example-signing-key\naws_session_token = " + v + "\n")
+		}, want: profile("default", "aws_session_token"), clean: "example-token", reach: true},
+		{name: "sdk_ua_app_id", setup: func(c configCase, v string) { c.config("[default]\nsdk_ua_app_id = " + v + "\n") },
+			want: profile("default", "sdk_ua_app_id"), clean: "example-app", reach: true},
+		{name: "ca_bundle", setup: func(c configCase, v string) { c.config("[default]\nca_bundle = " + c.file(v, pemText) + "\n") },
+			want: profile("default", "ca_bundle"), clean: "ca.pem", reach: true},
+		{name: "max_attempts", setup: func(c configCase, v string) { c.config("[default]\nmax_attempts = " + v + "\n") },
+			want: "a value the shared config or credentials file holds", clean: "2", reach: true},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
-			f := newFakeAWS(t)
-			serve(t, f)
-			row.setup(t)
-			var out, errs bytes.Buffer
-			code := Command(context.Background(), []string{"check", "--store", AWSSecretsManager, "--name", awsSecret},
-				&out, &errs, Stores{AWSSecretsManager: OpenAWS})
-			require.NotContains(t, out.String()+errs.String(), seedValue, "the seed reached an output")
-			require.Equal(t, 2, code, errs.String())
-			require.Empty(t, out.String())
-			require.Equal(t, "refused: "+awsSecret+": "+row.want+"\n", errs.String())
-			require.Empty(t, f.recorded(), "no request carried it")
+			for _, run := range []struct {
+				name  string
+				value string
+			}{{"seed", seedValue}, {"clean", row.clean}} {
+				t.Run(run.name, func(t *testing.T) {
+					f := newFakeAWS(t)
+					server := serve(t, f)
+					c := configCase{t: t, f: f, url: server.URL, dir: t.TempDir()}
+					home := filepath.Join(c.dir, "home")
+					require.NoError(t, os.Mkdir(home, 0o700))
+					// Every endpoint a credential provider may call is the fake, so no run reaches AWS.
+					c.env("HOME", home, "AWS_REGION", awsRegion, "AWS_ENDPOINT_URL_STS", server.URL,
+						"AWS_ENDPOINT_URL_SSO", server.URL, "AWS_ENDPOINT_URL_SSO_OIDC", server.URL)
+					row.setup(c, run.value)
+					var out, errs bytes.Buffer
+					args := append([]string{"check", "--store", AWSSecretsManager, "--name", awsSecret}, row.args...)
+					code := Command(context.Background(), args, &out, &errs, Stores{AWSSecretsManager: OpenAWS})
+					_, statErr := os.Stat(filepath.Join(c.dir, "process-ran"))
+					ran := statErr == nil
+					if run.name == "clean" {
+						require.NotContains(t, errs.String(), notEchoed, "a clean configuration is not refused as a seed")
+						if row.reach {
+							require.True(t, f.requests() > 0 || ran, "the clean configuration reaches the request; stderr %q", errs.String())
+						}
+						f.forgetUnexpected()
+						return
+					}
+					require.NotContains(t, out.String()+errs.String(), seedValue, "the seed reached an output")
+					require.Zero(t, f.requests(), "no request reached the fake")
+					require.False(t, ran, "no credential_process ran")
+					require.Equal(t, 2, code, errs.String())
+					require.Empty(t, out.String())
+					require.Equal(t, "refused: "+awsSecret+": "+row.want+notEchoed+"\n", errs.String())
+				})
+			}
 		})
 	}
 }
