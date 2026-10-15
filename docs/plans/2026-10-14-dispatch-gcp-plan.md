@@ -80,8 +80,8 @@ The coordinator's decisions inside those rulings, which this plan implements and
    proxies to Dispatch on `127.0.0.1:8766`; its SOCKS5 proxy (`TS_SOCKS5_SERVER`) carries the NATS
    connections of Dispatch and of the pod's `envoy-listener` to the hub's MagicDNS name on 4222;
    its state lives in a Kubernetes Secret (`TS_KUBE_SECRET`) the pod's service account may read and
-   write. No Tailscale Kubernetes operator, no Helm. The device's tag is `tag:dispatch`, owned by
-   the deployment's automation tag.
+   write. No Tailscale Kubernetes operator, no Helm. The device carries a tag of its own
+   (`tag:example-dispatch` here), owned by the deployment's automation tag.
 2. **The bus gains a SOCKS5 dialer.** One setting that, when set, routes every bus NATS connection
    through a SOCKS5 proxy at that address, sending the host name unresolved so tailscaled resolves
    MagicDNS names. Dispatch reads it through its settings table, the listener through the bus's
@@ -110,9 +110,9 @@ The coordinator's decisions inside those rulings, which this plan implements and
    `internal/providers`' rule that no resource falls back to a default provider. R20 below chooses
    its kubeconfig's user.
 6. **The consumer** (its own plan, in the deployment repository) runs `gcp:Dispatch` from a Pulumi
-   program in Go and extends its tailnet policy with `tag:dispatch` and the grants
-   `autogroup:member` and `tag:envoy-host` to `tag:dispatch:443`, `tag:dispatch` to
-   `tag:envoy-hub:4222`.
+   program in Go and extends its tailnet policy with the device's tag and the grants
+   `autogroup:member` and the hosts' tag to `tag:example-dispatch:443`, `tag:example-dispatch` to
+   `tag:example-hub:4222` (the hosts' tag is `tag:example-host`).
 
 Not in this version (the spec's list): meaning search (keyword search only, since embeddings use
 AWS Bedrock, `settings.go:124-126`'s `COHERE_API_KEY` row says so); an S3 file store (files stay in
@@ -274,8 +274,8 @@ one `bus.Client` (`cmd/dispatch/main.go:371,374` → `bindDurableConsumer` → `
 `delivery/intake.go:350`), and that client keeps one JetStream subscription, unsubscribing the
 earlier one when a second registers (`internal/bus/nats.go:368-379,420-438`), so only one durable
 stays `PushBound` and a production Dispatch with a GitHub App silently stops delivering on one
-intake today. The plan gate found it by reading (the lines above, at `main`); lane
-`ImplIntakeFix` reproduces it in `TestBothIntakesKeepTheirSubscriptions` and fixes it in its own
+intake today. The plan gate found it by reading (the lines above, at `main`); a separate change
+reproduces it in `TestBothIntakesKeepTheirSubscriptions` and fixes it in its own
 PR against `main` (branch `fix-dispatch-intake-subscriptions`), not in this stack. Slice 6's E14
 asserts both durables `PushBound`, which holds only once that PR is merged and has reached the
 stack; Task 6.3 says so. The fix reaches the stack from the bottom: `envoy-infra` (slice 1)
@@ -1109,7 +1109,7 @@ deployment at the component).
   ("Which image runs where" under Slices: `envoy-dispatch-integration`, slice 6's head merging
   `dispatch-google-signin`, built by `release-envoy-listener.yaml`'s `workflow_dispatch` and pinned
   by digest), after that deployment's hub holds Dispatch's user (Task 6.4) and its tailnet policy
-  carries `tag:dispatch`. That plan's tester
+  carries `tag:example-dispatch`. That plan's tester
   records the result there; this PR gets a summary of outcomes and durations with placeholders only:
   no project, tailnet, host name, address or account.
 - [ ] The slice's PR, stacked on slice 6's; after merge, `release-envoy-infra.yaml`'s `envoy-infra-v*` tag goes
@@ -1164,7 +1164,7 @@ The numbering continues `docs/plans/2026-10-14-envoy-infra-plan.md`'s table.
 | E14. The real `envoy-dispatch` under `core.DispatchPermissions` refuses nothing on 2.10 and on the hub image; without the delivery durable's create it never binds the durable and the server names the subject | 6 | infrastructure | real nats-server and Postgres containers, this branch's `envoy-dispatch` | CI runner | Task 6.3, `envoy-infra-go` natslive |
 | E15. `gcp:NatsHub` renders a Dispatch user from `dispatchMachineId`; two of the three forms are refused before registration | 6 | infrastructure | `go test ./gcp/` under mocks | CI runner | Task 6.4 |
 | E16. `gcp:Dispatch` registers every child with the listed inputs, secrets only in the Secrets, the goldens, Construct's handling of outputs and unknowns, every refusal | 7 | infrastructure | `go test ./gcp/ ./provider/` | CI runner | Tasks 7.2-7.5 |
-| E17. The first Google Cloud deployment: `pulumi up` creates the cluster, the database and the pod; the pod is `4/4` Ready; both `/healthz` answer from inside the pod; the Tailscale node joins as `tag:dispatch`; a member on the tailnet opens `https://<h>.<tailnet>` and signs in with a Workspace account; an account outside the domain is refused; a personal token minted in the UI drives the `dispatch` CLI; an issue's events reach a tailnet client subscribed to `notifications.dispatch.>` on the hub; the SPA's live updates (SSE) and a document's editor (websocket) work through Serve; `kubectl delete pod` recreates the one pod and the site is back inside two minutes; the instance has no public IP and backups and PITR on | 7 | infrastructure | the deployment's own stack, applied from the laptop with the branch's plugin, then from CI with the release | its operator; prerequisites: the hub applied with Dispatch's user, the policy with `tag:dispatch`, `roles/cloudsql.client` granted to the pod's principal by the consumer's bootstrap, the Google client, HTTPS enabled on the tailnet, `gke-gcloud-auth-plugin` installed | the deployment's plan (Task 7.7) |
+| E17. The first Google Cloud deployment: `pulumi up` creates the cluster, the database and the pod; the pod is `4/4` Ready; both `/healthz` answer from inside the pod; the Tailscale node joins as `tag:example-dispatch`; a member on the tailnet opens `https://<h>.<tailnet>` and signs in with a Workspace account; an account outside the domain is refused; a personal token minted in the UI drives the `dispatch` CLI; an issue's events reach a tailnet client subscribed to `notifications.dispatch.>` on the hub; the SPA's live updates (SSE) and a document's editor (websocket) work through Serve; `kubectl delete pod` recreates the one pod and the site is back inside two minutes; the instance has no public IP and backups and PITR on | 7 | infrastructure | the deployment's own stack, applied from the laptop with the branch's plugin, then from CI with the release | its operator; prerequisites: the hub applied with Dispatch's user, the policy with `tag:example-dispatch`, `roles/cloudsql.client` granted to the pod's principal by the consumer's bootstrap, the Google client, HTTPS enabled on the tailnet, `gke-gcloud-auth-plugin` installed | the deployment's plan (Task 7.7) |
 | E18. Negative controls in the first deployment: a request to `https://<h>.<tailnet>` from a device off the tailnet is refused (no route); the pod's service account cannot read a secret it was not granted (`kubectl exec … -- curl` to Secret Manager for another secret answers 403); the hub refuses a client with no seed (slice 4's E9) | 7 | infrastructure | the deployment, from the laptop | its operator | the deployment's plan |
 
 Legion's own end-to-end stages (`scripts/e2e/stage*.sh`) exercise none of the changed paths. The
@@ -1224,8 +1224,8 @@ New contracts (`ENVOY_NATS_SOCKS5_PROXY`, `core.DispatchPermissions`, `gcp:NatsU
 | `secrets` create, and get/update/patch on the Tailscale state Secret | the same Kubernetes service account | `gcp:Dispatch`'s Role and RoleBinding | the Kubernetes API server | E17 (the node keeps its identity across `kubectl delete pod`) |
 | `secretmanager.secrets.setIamPolicy` on the seed secret (to create the accessor) | the consumer's deploy identity | its bootstrap's `roles/secretmanager.admin` | GCP IAM | E17's first `pulumi up` from CI |
 | Writing the Namespace, RBAC objects and Deployment through the cluster's API | the consumer's deploy identity | its bootstrap's `roles/editor` (`container.*`), as the cluster's creator `[INFERENCE]` | GKE IAM, the API server | E17's first `pulumi up` from CI |
-| Joining the tailnet as `tag:dispatch` | the pod's Tailscale node, with the consumer's auth key | the consumer's tailnet policy (`tagOwners`) and its minted key | Tailscale | E17 (the node appears tagged) |
-| Reaching `tag:dispatch:443`; Dispatch reaching `tag:envoy-hub:4222` | members and `tag:envoy-host` devices; the Dispatch node | the consumer's tailnet policy grants | Tailscale | E17, E18 |
+| Joining the tailnet as `tag:example-dispatch` | the pod's Tailscale node, with the consumer's auth key | the consumer's tailnet policy (`tagOwners`) and its minted key | Tailscale | E17 (the node appears tagged) |
+| Reaching `tag:example-dispatch:443`; Dispatch reaching `tag:example-hub:4222` | members and `tag:example-host` devices; the Dispatch node | the consumer's tailnet policy grants | Tailscale | E17, E18 |
 | Signing in | a verified account of the configured Workspace domain | the Google client the consumer creates, `signInClientId`/`signInClientSecret`/`signInDomain` | Dispatch's domain rule (the sign-in plan's D5) | E17 (an outside account refused) |
 | Reading the Kubernetes API as the operator | whoever runs `pulumi` or `kubectl` | `gke-gcloud-auth-plugin` under that machine's gcloud credentials | GKE IAM | E17 |
 
