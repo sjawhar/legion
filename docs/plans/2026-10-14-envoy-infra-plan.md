@@ -1572,8 +1572,9 @@ own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also refus
 input: a seed (`bus.HoldsSeed`: any type, either case, whole, inside a longer value, split by
 `.`, `-`, `_` or whitespace, or percent-encoded) in a string input the hub itself carries
 (hostname, tags, zone, machine type, images, a user's machine id), by the input's path and never
-its value, leaving a user's name and rule entries to core's refusal, and in `network` or
-`subnetwork` once they resolve; a hostname outside its rule, no tags or a tag outside
+its value, leaving a user's name and rule entries to core's refusal, and in `network`,
+`subnetwork` and the secret `tailnetAuthKey` once they resolve, the key's value kept secret and
+never quoted; a hostname outside its rule, no tags or a tag outside
 `^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or `machineType`, a `diskSizeGb` below 1, no
 `tailnetAuthKey`, and `subnetwork` without `network`. Only `tailnetAuthKey`, `network` and
 `subnetwork` take another resource's output.

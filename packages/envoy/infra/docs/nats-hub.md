@@ -56,11 +56,12 @@ The hub refuses these before it registers anything, with an error naming the inp
   input the hub carries into the user data, a child or a refusal: `hostname`, a tag, `zone`,
   `machineType`, an image, or a user's `machineId`. The error names the input by its path and never
   its value, as `users[0].machineId: an nkey user seed, which is never an input of the hub (not
-  echoed)`. `network` and `subnetwork` may come from another resource, so a seed in either fails
-  the preview or update once it resolves, with the same error, before any child is registered with
-  it. A seed in a user's `name` or a rule entry is refused by the authorization, as
-  [The hub's users](#the-hubs-users) says, and a seed as a user's `nkey` is refused as an `nkey`
-  that is no public key, without quoting it;
+  echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another resource, so a seed
+  in any of them fails the preview or update once it resolves, with the same error, before any
+  child is registered with it: a NATS seed passed as the Tailscale key is refused before a Secret
+  Manager version holds it, and the error never carries the secret. A seed in a user's `name` or a
+  rule entry is refused by the authorization, as [The hub's users](#the-hubs-users) says, and a
+  seed as a user's `nkey` is refused as an `nkey` that is no public key, without quoting it;
 - a `hostname` outside the rule above;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;

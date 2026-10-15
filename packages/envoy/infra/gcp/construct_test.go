@@ -1,6 +1,7 @@
 package gcp_test
 
 import (
+	"strings"
 	"testing"
 
 	p "github.com/pulumi/pulumi-go-provider"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 // The plugin's Construct copies a consumer's inputs into NatsHubArgs, and refuses a plain-typed
@@ -109,6 +111,34 @@ func TestConstructTakesAnUnknownAuthKeyAndNetworkUnderPreview(t *testing.T) {
 	data, _ := pulumitest.Plain(m.One(t, versionType).Inputs["secretData"])
 	require.True(t, data.IsComputed(), "the secret version's secretData is unknown, not %s", data.TypeString())
 	requireNatsURL(t, resp)
+}
+
+// tailnetAuthKey is a secret Input, which the hub reads only once it resolves: a value holding an
+// nkey seed is refused then, naming the input and never the value, so no Secret Manager version
+// is written with it and no registration carries it, plainly or as a secret. The key arrives as a
+// secret from another resource, as a consumer's does, and in each spelling the detector reads.
+func TestConstructRefusesASeedAsTheTailnetAuthKey(t *testing.T) {
+	seed, _ := testnats.User(t)
+	for name, value := range map[string]string{
+		"a seed":                  seed,
+		"a lowercase seed":        strings.ToLower(seed),
+		"a seed inside a tskey":   "tskey-auth-" + seed,
+		"a seed split by hyphens": splitSeed(seed, "-"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			inputs := plainInputs()
+			inputs["tailnetAuthKey"] = property.New(value).WithSecret(true).WithDependencies([]resource.URN{upstream})
+			m, _, err := construct(t, inputs, false)
+			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: tailnetAuthKey: an nkey user seed, "+
+				"which is never an input of the hub (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			for _, r := range m.Registrations() {
+				for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
+				}
+			}
+		})
+	}
 }
 
 // A plain field is for a literal: Construct refuses one whose input carries a dependency, before

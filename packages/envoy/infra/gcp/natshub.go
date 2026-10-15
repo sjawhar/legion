@@ -194,8 +194,8 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 // core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
 // hub's own user refusals name a user by its index alone (authorization). A user's nkey is core's
 // too: it refuses any nkey that is not a user public key, a seed included, without quoting it.
-// tailnetAuthKey is a secret, which reaches the secret version alone; network and subnetwork are
-// Inputs, checked when they resolve (refuseSeed).
+// tailnetAuthKey and network and subnetwork are Inputs, checked once they resolve
+// (refuseSeedInSecret, refuseSeed).
 func seededInput(args *NatsHubArgs) (string, bool) {
 	type field struct{ path, value string }
 	fields := []field{{"hostname", args.Hostname}, {"zone", args.Zone}, {"natsImage", args.NatsImage},
@@ -233,6 +233,19 @@ func refuseSeed(value pulumi.StringPtrInput, hub, input string) pulumi.StringPtr
 		}
 		return v, nil
 	}).(pulumi.StringPtrOutput)
+}
+
+// refuseSeedInSecret is value, the secret tailnetAuthKey, as a secret, with a value holding an nkey
+// seed refused once it resolves: the output fails naming input and never the value, so no secret
+// version is written with it. ApplyT keeps value's secretness, and ToSecret marks the result
+// secret whatever value's own marking.
+func refuseSeedInSecret(value pulumi.StringInput, hub, input string) pulumi.StringOutput {
+	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
+		if bus.HoldsSeed(v) {
+			return "", fmt.Errorf("%s: %w", hub, seedRefused(input))
+		}
+		return v, nil
+	})).(pulumi.StringOutput)
 }
 
 // authorization maps the users onto core's: each a keyed user with a seed, whose permissions are
@@ -312,7 +325,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 	}
 	version, err := secretmanager.NewSecretVersion(ctx, keySecret, &secretmanager.SecretVersionArgs{
 		Secret:     secret.ID(),
-		SecretData: pulumi.ToSecret(args.TailnetAuthKey.ToStringOutput()).(pulumi.StringOutput),
+		SecretData: refuseSeedInSecret(args.TailnetAuthKey, natsHubType+" "+name, "tailnetAuthKey"),
 	}, child)
 	if err != nil {
 		return nil, err

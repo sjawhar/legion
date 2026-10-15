@@ -305,6 +305,31 @@ func plainStrings(v resource.PropertyValue) []string {
 	return nil
 }
 
+// allStrings returns every string v holds, a secret's included.
+func allStrings(v resource.PropertyValue) []string {
+	switch {
+	case v.IsSecret():
+		return allStrings(v.SecretValue().Element)
+	case v.IsString():
+		return []string{v.StringValue()}
+	case v.IsArray():
+		var out []string
+		for _, e := range v.ArrayValue() {
+			out = append(out, allStrings(e)...)
+		}
+		return out
+	case v.IsObject():
+		var out []string
+		for _, e := range v.ObjectValue() {
+			out = append(out, allStrings(e)...)
+		}
+		return out
+	case v.IsOutput():
+		return allStrings(v.OutputValue().Element)
+	}
+	return nil
+}
+
 // await returns the value o resolves to. It runs inside the program, so the value is read on the
 // test's goroutine, after the engine resolved it.
 func await(t *testing.T, o pulumi.StringOutput) string {
@@ -564,7 +589,8 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 // inside a longer value, split by '.', '-', '_' or whitespace, or percent-encoded. A user's name and
 // rule entries are core's to refuse (TestNatsHubPassesOnCoresSeedRefusalOfUsers); a seed as a
 // user's nkey is core's to refuse, unquoted (the resolver table's "a user whose public key is a
-// seed"); and tailnetAuthKey, a secret that reaches the secret version alone, is not checked.
+// seed"); and tailnetAuthKey, a secret Input, is checked once it resolves
+// (TestConstructRefusesASeedAsTheTailnetAuthKey).
 func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
 	inside := "example-" + seed

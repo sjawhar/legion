@@ -97,8 +97,9 @@ versions. Never add the module to the root `go.work`.
   `Check`'s refusals of `machineId`, `port` and `hostBridge` through one call, so it has one row.
   A store's tests assert the store's own answers, and `seed_test.go` the modes' messages over them.
   The hub reads none of its Inputs by value at construct: its resolver checks only that
-  `tailnetAuthKey` is set and that `subnetwork` comes with `network`, and `network` and
-  `subnetwork` are checked for a seed once they resolve (`gcp.refuseSeed`). Its resolver refuses a
+  `tailnetAuthKey` is set and that `subnetwork` comes with `network`; `network`, `subnetwork` and
+  the secret `tailnetAuthKey` are checked for a seed once they resolve (`gcp.refuseSeed`,
+  `gcp.refuseSeedInSecret`, which keeps the key secret and never quotes it). Its resolver refuses a
   seed (`bus.HoldsSeed`) in every string input the hub itself carries first (`gcp.seededInput`:
   hostname, tags, zone, machine type, images, each user's machine id), naming the input's path
   and never its value; a string input added to the hub joins that list, with a row in
