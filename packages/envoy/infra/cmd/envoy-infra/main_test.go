@@ -59,7 +59,8 @@ func noStore(t *testing.T) seed.Stores {
 	}}
 }
 
-// brokenStdout fails every write, as a closed stdout does.
+// brokenStdout fails every write, as stdout on a full disk (/dev/full) does. A closed stdout does
+// not: the Go runtime opens it on the null device, where writes succeed.
 type brokenStdout struct{}
 
 func (brokenStdout) Write([]byte) (int, error) {
@@ -194,5 +195,50 @@ func TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting(t *testing.T) {
 	}
 	if want := "error after writing: put-secret-value " + name + " failed: canceled; whether a version was written is unknown, run check\n"; stderr.String() != want {
 		t.Errorf("stderr %q, want %q", stderr.String(), want)
+	}
+}
+
+// TestGenerateRefusesANullStdout: generate whose stdout is the null device would print the public
+// key nowhere and write the seed, so it refuses before any call. A closed stdout is the same case,
+// since the Go runtime opens a closed fd 0-2 on the null device at start (runtime/fds_unix.go).
+func TestGenerateRefusesANullStdout(t *testing.T) {
+	const name = "example/envoy/nats-nkey-seed-example-host-a"
+	binary := filepath.Join(t.TempDir(), "envoy-infra")
+	buildCLI(t, binary)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("generate made a call with a null stdout: %q", r.Header.Get("X-Amz-Target"))
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	defer server.Close()
+	home := t.TempDir()
+	env := []string{
+		"PATH=/usr/bin:/bin", "HOME=" + home,
+		"AWS_ENDPOINT_URL=" + server.URL, "AWS_ACCESS_KEY_ID=AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY=example-signing-key",
+		"AWS_CONFIG_FILE=" + filepath.Join(home, "config"), "AWS_SHARED_CREDENTIALS_FILE=" + filepath.Join(home, "credentials"),
+		"AWS_EC2_METADATA_DISABLED=true",
+	}
+	args := []string{"seed", "generate", "--store", "aws-secrets-manager", "--name", name, "--region", "us-east-1"}
+	want := "refused: " + name + ": stdout is the null device, where the public key would be lost (a closed stdout is " +
+		"one too: Go opens it on /dev/null); send stdout somewhere you can read. Nothing was written\n"
+	for _, c := range []struct {
+		name string
+		cmd  *exec.Cmd
+	}{
+		// os/exec gives a command with no Stdout the null device.
+		{"stdout on /dev/null", exec.Command(binary, args...)},
+		{"stdout closed", exec.Command("/bin/sh", append([]string{"-c", `exec "$0" "$@" >&-`, binary}, args...)...)},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			c.cmd.Env, c.cmd.Stderr = env, &stderr
+			err := c.cmd.Run()
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) || exit.ExitCode() != 2 {
+				t.Fatalf("generate ended with %v, want exit 2; stderr %q", err, stderr.String())
+			}
+			if stderr.String() != want {
+				t.Errorf("stderr %q, want %q", stderr.String(), want)
+			}
+		})
 	}
 }

@@ -88,7 +88,9 @@ The documentation's getting-started pages cover each part:
   `packages/envoy/scripts/dev-broker.sh`, starts a broker with example rules and fake secrets. The
   [quickstart](https://sjawhar.github.io/legion/broker/quickstart/) then uses a secret from an agent
   session.
-- **Envoy.** [Running the listener](https://sjawhar.github.io/legion/dispatch/envoy/#running-the-listener)
+- **Envoy on your machine.** [Running Envoy on one machine](https://sjawhar.github.io/legion/dispatch/envoy/#running-envoy-on-one-machine)
+  starts NATS and the listener with one Compose file, for agent sessions on that machine to
+  message each other. [Running the listener](https://sjawhar.github.io/legion/dispatch/envoy/#running-the-listener)
   lists its settings and health checks.
 - **Legion.** [Running Legion](https://sjawhar.github.io/legion/legion/running-legion/) is the
   operator's guide: the cluster, the two GitHub Apps, `legion.yaml` and the model route.

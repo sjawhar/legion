@@ -550,18 +550,21 @@ target, so a platform-only break fails the pull request.
 of Step 1, plus `workflow_dispatch`; `permissions: {}` at the top; workflow-level
 `concurrency: {group: release-envoy-infra-${{ github.ref }}, cancel-in-progress: false}`, so one
 run's publish always tags before the next run's build versions; waiting on no other release. Two
-jobs, both `if: github.ref == 'refs/heads/main'`:
+jobs; only `build` carries `if: github.ref == 'refs/heads/main'`, and `publish` runs only after it:
 - `build` (`contents: read`, checkout with full history and `persist-credentials: false`): the
   version step, `go vet -tags pulumilive ./...` and `go test ./...` in the module, the per-target
-  build with `-trimpath`, the notices, `SHA256SUMS`, the smoke test, then `upload-artifact` of
-  `assets/` and the version as job outputs. It runs the module's code and every module it links,
-  so it holds no write scope and no secret.
+  build with `-trimpath`, the notices, the smoke test, then `upload-artifact` of the archives and
+  the version as a job output. It runs the module's code and every module it links, so it holds no
+  write scope, no secret and no OIDC token.
 - `publish` (`needs: build`; `contents: write`, `id-token: write`, `attestations: write`): runs no
-  Go, Pulumi or plugin code. It refuses a tag other than `envoy-infra-v$VERSION` or a `VERSION`
-  that isn't plain X.Y.Z; downloads the artifact and requires exactly the expected file names
-  (one archive per target in its own checkout of the targets file, plus `SHA256SUMS`); runs
-  `sha256sum -c SHA256SUMS`; attests; pushes the tag with the deploy key through
-  `release-push.sh push-tag`; and releases. Build chooses the bytes, never the names.
+  Go, Pulumi or plugin code. It refuses a `VERSION` that isn't plain X.Y.Z (`is_plain_version`),
+  derives the tag itself as `envoy-infra-v$VERSION`, and through `release-push.sh handed` requires
+  exactly the expected archives, as regular files (one per target in its own checkout of the
+  targets file, and per archive kind). It then writes `SHA256SUMS` over that list itself, so
+  the sums are publish's own record of the bytes it was handed. It pushes the tag with the deploy
+  key through `release-push.sh push-tag`, attests the archives only after the tag is pushed (a
+  refused tag leaves no attestation), and releases. Build chooses the bytes, never the names or
+  their sums.
 
 The version step:
 
@@ -584,9 +587,9 @@ writes (`:286-297`). Build per target with `CGO_ENABLED=0`, `-trimpath` and
 with the binary and notices at the archive root. Smoke the linux/amd64 binary with the pinned
 Pulumi CLI:
 `pulumi package get-schema <binary> | jq -e --arg v "$VERSION" '.version == $v and .pluginDownloadURL == "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"'`.
-In `publish`, attest provenance with `actions/attest-build-provenance` on exactly the archives
-(consumers run `gh attestation verify` on them), then push the tag and release through
-`release-push.sh tagged`, `push-tag` and `release`, as the other release workflows do.
+In `publish`, once the tag is pushed, attest provenance with `actions/attest-build-provenance` on
+exactly the archives (consumers run `gh attestation verify` on them), then release through
+`release-push.sh release`, as the other release workflows do.
 
 - [ ] **Step 3: R3.** In `release-envoy-listener.yaml` add `- "!packages/envoy/infra/**"` after
 `- "packages/envoy/**"` and `':(exclude)packages/envoy/infra'` after `--` in the bump. Run
@@ -644,6 +647,21 @@ written here.
   (build tag `natslive`: the real-server tests), `nkey.go` (`IsUserPublicKey` and
   `UserSeedPublicKey`, the one strict nkey parser `core` and `seed` share), `nkey_test.go`,
   `pyfmt.go`, `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
+- Modify: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`; create
+  `core/input_error.go`. `ListenerConfig` loses `NATSURLs`: `Check()` refuses the config once,
+  before a component registers anything, and `Env(natsURLs)` adds the URLs when they are known and
+  checks only those, replacing slice 1's `CheckPlain` and `ListenerEnv` with the same refusal
+  texts. Each refusal is a `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
+  `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
+  its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
+  3 and 4 build on this API.
+- Create: `packages/envoy/infra/internal/pulumitest/mocks.go`, `mocks_test.go`: the mock engine
+  and Construct harness every component's tests share. `Mocks` records each registration
+  (`One`, `Types`, `Registrations`) and answers with the inputs as state, less any unknown (the
+  SDK fails to unmarshal a secret-wrapped unknown in a mock's state), plus what its `Computed`
+  adds; `Construct` serves the plugin in process and constructs a component; `Plain` unwraps a
+  secret. host's tests run on it and keep only their `Computed` (an image's `imageId`); the gcp
+  and aws layers move onto it.
 - Modify: `packages/envoy/internal/testnats/nats.go`:
   - add `const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"`
     on one line beside `Image` (`nats.go:41-46`), and `var Images`, the two with each one's short
@@ -687,8 +705,9 @@ type Authorization struct {
 func (a Authorization) Validate() error
 // Render returns the authorization block: the header lines, each as "# <line>", then the block.
 func (a Authorization) Render(header []string) (string, error)
-// StartScript returns the `sh -c` script that writes Render's text to path and execs nats-server.
-func (a Authorization) StartScript(header []string, serverArgs []string, path string) (string, error)
+// StartScript returns the `sh -c` script that writes Render's text to configPath and execs
+// nats-server. Each refusal is an InputError naming its input.
+func (a Authorization) StartScript(configHeader, serverArgs []string, configPath string) (string, error)
 
 // IsUserPublicKey reports whether key is a user public key: 56 base32 characters whose 35 bytes
 // are the user prefix byte, the key and a valid checksum (nkey.go:29-34).
@@ -707,7 +726,7 @@ type Object []Field
 ```
 
 These semantics are ported from the reference implementation, and the unit tests pin each one:
-- **What is refused** (`nats_auth.go:44-153, 188-198, 236-264`). Every refusal of a user names it,
+- **What is refused** (`nats_auth.go:44-153, 194-214, 252-293`). Every refusal of a user names it,
   by index and name, and the field.
   - No users.
   - Every user pending. That would render a block with no users, which is R7's case.
@@ -726,16 +745,25 @@ These semantics are ported from the reference implementation, and the unit tests
     of dot-separated non-empty tokens, with `*` and `>` only as whole tokens and `>` only last, and
     with no whitespace, control or surrogate character (Unicode categories Cc and Cs, and
     `unicode.IsSpace` plus U+001C-U+001F).
-  - A queue-scoped entry on the publish side.
+  - A queue-scoped entry on the publish side, or in `subscribe.deny`: nats-server before 2.15
+    enforces a queue-scoped subscribe deny more loosely than it reads (v2.10.29
+    `server/client.go:3044-3051`, `:1199-1203`), and `testnats.Image` is 2.10.29.
   - Duplicate names, or duplicate keys.
   - A `NoAuthUser` that names no user, names a pending user, or names a user with `HasSeed`.
-  - In `Render`, a header line holding `\r` or `\n` (`:194-198`).
-  - In `StartScript`, an empty path (`:237-239`), and a server argument that sets `-c`, `-config`,
-    `-user`, `-pass` or `-auth`, with one dash or two and with or without `=value`, named by index
-    and flag and never by value (`:240-246, 255-264`). nats-server parses its arguments with Go's
-    flag package and takes a flag's last value, so a later `-c` would load another file in place of
-    the rendered one, and the others would add a credential beside its nkey users (nats-server
-    v2.10.29 `server/opts.go:5343-5345, 5350-5351`).
+  - A header line holding `\r` or `\n` (`checkHeader`, `:204-214`), in `Render` and `StartScript`.
+  - In `StartScript`, an empty `configPath` (`:262-264`), and a server argument that sets `-c`,
+    `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or `-routes`, with one dash
+    or two and with or without `=value`, named by index and flag and never by value (`:265-271,
+    279-293`). nats-server parses its arguments with Go's flag package and takes a flag's last
+    value, so a later `-c` would load another file in place of the rendered one, `-user`, `-pass`
+    and `-auth` would add a credential beside its nkey users, and the route flags would open or
+    solicit a route the block, having no cluster authorization, leaves unauthenticated (nats-server
+    v2.10.29 `server/opts.go:5343-5345, 5350-5351, 5368-5370`).
+  - `StartScript`'s refusals are `InputError`s naming the input as a component's schema does, in
+    the order it checks them (`:252-277`): `authorization` (Validate's refusal, prefixed
+    `authorization: `; Validate runs once), `configPath`, `serverArgs`, and `configHeader`
+    (prefixed `configHeader: `). A caller passes each on as it is, with no sorting of core's
+    errors. `Render`'s refusals are plain errors.
 - **How the block is rendered.** The lines are, in order:
   - each header line as `# <line>`;
   - `authorization {`;
@@ -866,14 +894,16 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error)
 The CLI is `envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <secret id>
 [--region <r>] [--expect-account <id>] [--public-key U…]`, and `envoy-infra --version`, which
 prints the version the release stamps in (`main.go:17, 35-41`). `--help`, at either level, prints
-the usage and exits 0. An unknown command or mode is a usage error, exit 2, and is not echoed,
-since a seed may have been pasted there (`main.go:42-52`, `seed.go:375-379`); other usage errors
-exit 2 too (`:367-401`). An interrupt or SIGTERM cancels the command's context instead of killing
+the usage and exits 0. An unknown command or mode, and a flag the command does not take or a
+malformed one, is a usage error, exit 2, and is not echoed, since a seed may have been pasted there
+(`main.go:42-52`, `seed.go:362-408`); other usage errors exit 2 too, a defined flag missing its value
+named (`:398-424`). An interrupt or SIGTERM cancels the command's context instead of killing
 it, so a write in flight ends as an unanswered write does, below (`main.go:19-28`). Its behaviour
 is the reference implementation's, with these additions:
 - **Before any Secrets Manager call or the account check** (`awsstore.go:39-62`), it refuses,
   exit 2:
-  - an `--expect-account` that is not 12 digits (`:40-42`);
+  - an `--expect-account` that is not 12 digits (`:40-42`), or given empty, which `Command`
+    refuses as a usage error before the store opens (`seed.go:401-403`);
   - no region from `--region` or the AWS configuration (`:47-49`);
   - a Secrets Manager endpoint the configuration overrides that is not `https`, unless its host is
     `localhost` or a loopback address, since the seed would cross a network in plain text
@@ -886,10 +916,13 @@ is the reference implementation's, with these additions:
   refuses one in another region than the client's, one in another account than `--expect-account`,
   and an answer with no Secrets Manager ARN (`awsstore.go:121-161`).
 - **`generate`** (`seed.go:135-233, 308-330`). It refuses unless the secret exists, is not
-  scheduled for deletion, and holds no version, deprecated ones included. It prints
+  scheduled for deletion, holds no version, deprecated ones included, and is served by default in
+  no version, which `DescribeSecret` answers even while the listing has not caught up. It prints
   `public key: U…` before it writes, and writes nothing if that print fails (`:165-167`). It writes
-  the bare `SU…` seed string with `PutSecretValue`, whose `ClientRequestToken` the SDK fills and
-  resends on a retry, and requires `AWSCURRENT` among the stages returned (`awsstore.go:196-212`).
+  the bare `SU…` seed string with `PutSecretValue` under one fixed `ClientRequestToken`, which the
+  SDK resends on a retry; a first version another run wrote with another seed is
+  `ResourceExistsException`, a refusal, exit 2, after which no `version id` line is printed. It
+  requires `AWSCURRENT` among the stages returned (`awsstore.go:196-212`).
   It then re-lists the versions and reads the value back, which must be the version it wrote and
   derive the printed key. Secrets Manager's reads are eventually consistent, so while the listing
   shows no version or the store serves none, it looks again after pauses of 0.25, 0.5, 1, 2 and
@@ -907,7 +940,9 @@ is the reference implementation's, with these additions:
   `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>`, exit 1, the reason
   `core.UserSeedPublicKey`'s, never quoting the value.
 - **A result that cannot be printed** is never exit 0: `check`'s or `verify`'s line is a refusal,
-  exit 2 (`seed.go:297-302`), and `--version`'s exit 1 (`main.go:36-39`).
+  exit 2 (`seed.go:297-302`), and `--version`'s exit 1 (`main.go:36-39`). `generate` with stdout on
+  the null device, which a closed stdout is too, since the Go runtime opens a closed fd 0-2 on it,
+  refuses before the store opens, exit 2 (`seed.go:418-421, 430-445`).
 - **Secrecy.** The seed never reaches argv, stdout, stderr, a log or an error message, and the AWS
   SDK's logging is off (`awsstore.go:78-87`).
 
@@ -938,18 +973,19 @@ The store uses aws-sdk-go-v2, pinned at the versions the tech stack line records
 - [ ] **Extend `release-envoy-infra.yaml`.** In the `build` job, which holds no write scope and no
   secret, the per-target loop also builds `./cmd/envoy-infra` with `-trimpath` and the version
   stamped in, writes its notices, and packs `envoy-infra-$os-$arch.tar.gz`
-  (`release-envoy-infra.yaml:220-228`). Each archive holds `envoy-infra-$os-$arch/envoy-infra` and
+  (`release-envoy-infra.yaml:215-223`). Each archive holds `envoy-infra-$os-$arch/envoy-infra` and
   `envoy-infra-$os-$arch/THIRD_PARTY_NOTICES`, packed file by file, so unlike the `legion`
-  archives it has no directory entry (`:228`). `SHA256SUMS` lists both kinds (`:230`); the smoke
-  test checks `envoy-infra --version` against the release's version (`:253-255`); the archives
-  reach `publish` in the uploaded artifact (`:256-262`). In `publish`, the check of what `build`
-  handed over expects the command's archive beside the plugin's for each target,
-  `archives+=("envoy-infra-$os-$arch.tar.gz")`, and refuses a missing or extra one (`:318-321`);
-  its `subjects` output, both kinds, is what the attestation covers (`:378`): the CLI writes seeds
-  under its operator's credentials. The version step's `go list -deps ./cmd/...` reads every
-  command, so a change under `cmd/envoy-infra/` or `seed/` alone cuts a version, with no list to
-  edit. `pr-and-main.yaml`'s envoy-infra loop compiles `./cmd/...` and writes the command's notices
-  for each target (`pr-and-main.yaml:149-159`).
+  archives it has no directory entry (`:223`). The smoke test checks `envoy-infra --version`
+  against the release's version (`:247-249`), and the archives reach `publish` in the uploaded
+  artifact (`:251-256`). In `publish`, the step that checks the hand-over names the command's
+  archive beside the plugin's for each target, `archives+=("envoy-infra-$os-$arch.tar.gz")`
+  (`:302`); `release-push.sh handed` refuses a missing or extra archive and prints the tag
+  (`:304`), `publish` writes `SHA256SUMS` over both kinds (`:305`), and its `subjects` output, both
+  kinds, is what the attestation covers, after the tag step (`:337`): the CLI writes seeds under its
+  operator's credentials. The version step's `go list -deps ./cmd/...` reads every command, so a
+  change under `cmd/envoy-infra/` or `seed/` alone cuts a version, with no list to edit.
+  `pr-and-main.yaml`'s envoy-infra loop compiles `./cmd/...` and writes the command's notices for
+  each target (`pr-and-main.yaml:149-159`).
 
   mise's `github:` backend strips the archive's one directory, though it has no directory entry:
   checked with mise 2026.8.10 on an archive packed by the release step's own `tar` line, served
@@ -1619,17 +1655,17 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   `/etc/nats/nats-server.conf` rather than the NATS module's `/etc/nats.conf`
   (`nats.go:225-250, 328-334`), and wait with `awaitAuth`, which keeps `answering`'s messages;
   their signatures and what they enforce are unchanged. `git grep -n -e
-  'testnats.StartNkeyAuthorized(' -e 'testnats.StartNkeyGranted('` →
-  `daemon/internal/daemon/natsseed_test.go:37,81`,
-  `daemon/internal/natsauth/natsauth_test.go:66,88`, `envoy/infra/host/live_test.go:262`,
-  `envoy/internal/bus/core_permission_test.go:28`, `envoy/internal/bus/nkey_test.go:70,105`,
-  `envoy/internal/dispatch/outbox/core_denied_test.go:32`,
-  all passing at `8a4c7882`: the daemon's run locally, the rest in that head's `envoy-go` (with its
-  Postgres, `envoy-and-contracts.yaml:759-772`) and `envoy-smoke` jobs (Envoy and Contracts run
-  38674653570). `packages/envoy/internal/testnats/` is inside `release-envoy-listener.yaml`'s push
-  paths and bump pathspec (`release-envoy-listener.yaml:14-16, 381-387`), so #1951's squash commit
-  starts a listener release run, and a `feat` or `fix` title would cut a `legion-envoy` version
-  with no change to the image or the binaries.
+  'testnats.StartNkeyAuthorized(' -e 'testnats.StartNkeyGranted(' -- packages/envoy` →
+  `envoy/infra/host/live_test.go:262`, `envoy/internal/bus/core_permission_test.go:28`,
+  `envoy/internal/bus/nkey_test.go:70,105`, `envoy/internal/dispatch/outbox/core_denied_test.go:32`,
+  all passing at `8a4c7882` in that head's `envoy-go` (with its Postgres,
+  `envoy-and-contracts.yaml:759-772`) and `envoy-smoke` jobs (Envoy and Contracts run
+  38674653570). `packages/daemon` has a `testnats` of its own
+  (`github.com/sjawhar/legion/daemon/internal/testnats`), which this change does not touch.
+  `packages/envoy/internal/testnats/` is inside `release-envoy-listener.yaml`'s push paths and bump
+  pathspec (`release-envoy-listener.yaml:14-16, 381-387`), so #1951's squash commit starts a
+  listener release run, and a `feat` or `fix` title would cut a `legion-envoy` version with no
+  change to the image or the binaries.
 - `core.Authorization`, `User` and `Rules` (slice 3) gain JSON keys, the names the
   `aws:Authorization` input spells its fields with, which `render nats-start-script` reads its file
   by, refusing a key in another letter case. Before slice 3 nothing coded those types as JSON;
@@ -1649,7 +1685,7 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
 | `secretsmanager:GetSecretValue` on the API token and the seed | the listener's execution role | `aws:WebhookListener`'s role-policy children | AWS IAM | E11 (policies unchanged) |
 | `roles/secretmanager.secretAccessor` on the hub's tailnet auth key | the hub VM's service account | `gcp:NatsHub`'s `SecretIamMember` | Secret Manager IAM | E9 (the VM joins only if it reads the key) |
 | Writing a host's seed secret | the operator running `envoy-infra seed generate` | the operator's role in the consumer's account or project (the consumer's plan names it) | Secrets Manager or Secret Manager IAM | E8 |
-| `contents: write`, `id-token: write`, `attestations: write`, deploy-key tag push | `release-envoy-infra.yaml`'s job (the deploy key on its tag step only) | the job's `permissions` block and `secrets.DEPLOY_KEY` | GitHub | E5 (the first release run) |
+| `contents: write`, `id-token: write`, `attestations: write`, deploy-key tag push | `release-envoy-infra.yaml`'s `publish` job (the deploy key on its tag step only; `build` holds `contents: read` only) | the job's `permissions` block and `secrets.DEPLOY_KEY` | GitHub | E5 (the first release run) |
 | Root on a watchdog host (writes `/etc/envoy`, `/usr/local/bin`, systemd units) | `root` at the consumer's `watchdog.host`, pulumi-command's default user | that host's SSH configuration | the host | E4 when the existing deployment has a watchdog; otherwise not exercised |
 
 ## Evidence

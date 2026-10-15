@@ -571,11 +571,11 @@ the input:
 
 - `aws:NatsService`: a `configHeader` or `configPath` missing while `authorization` is given (an
   empty `configPath` counts as missing) or given while it is not, each checked before the
-  authorization; then an `authorization` refused under [NATS authorization](#nats-authorization); a
-  `configHeader` line holding a line break; a `serverArgs` entry that sets nats-server's `-c`,
-  `-config`, `-user`, `-pass` or `-auth`, with `authorization` (see `StartScript` under
-  [NATS authorization](#nats-authorization)); an empty `subnetIds`; an empty `tailnetTags`; a
-  `baseTags` holding `service`.
+  authorization; then, as `StartScript` checks them (see
+  [NATS authorization](#nats-authorization)), an `authorization` it refuses, a `serverArgs` entry
+  that sets nats-server's `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`,
+  `-cluster_listen` or `-routes`, and a `configHeader` line holding a line break; an empty
+  `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
 - `aws:WebhookListener`: a `webhooks` not given at all (give `[]` for a listener with no webhook);
   a webhook's input missing while `webhooks` lists it (a blank `reviewerAppId` or `mentionTrigger`
   counts as missing) or given while it does not, each input checked before the list; then a
@@ -947,10 +947,12 @@ any call, it refuses a Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL
 it is this machine's loopback address, since a seed would cross the network in plain text; and it
 retrieves your credentials, and with none it can use, it stops with `refused: <name>: no usable
 AWS credentials …`. With `--expect-account`, it then asks STS whose credentials they are and
-refuses, before any other call, unless they are that account's. STS and Secrets Manager each
-resolve their own endpoint, so the secret is checked too: `DescribeSecret`, every mode's first
-call, answers the secret's ARN, and the command refuses a secret in another region than the one it
-sends to, and with `--expect-account` one in another account, before it reads or writes a seed.
+refuses, before any other call, unless they are that account's; an empty `--expect-account`, as
+`--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage error, never a skipped
+check. STS and Secrets Manager each resolve their own endpoint, so the secret is checked too:
+`DescribeSecret`, every mode's first call, answers the secret's ARN, and the command refuses a
+secret in another region than the one it sends to, and with `--expect-account` one in another
+account, before it reads or writes a seed.
 Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
 from, a secret of the same name in another account.
 
@@ -990,12 +992,16 @@ from, a secret of the same name in another account.
    ```
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
-   secret that is absent, is scheduled for deletion or holds any version, deprecated ones
-   included, so it never replaces a seed a client may already read. It prints the public key just
-   before the write, so the key is on your terminal whatever happens next, and the version id once
-   the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
-   somewhere you can read: `>/dev/null`, or a closed stdout, which a Go program sees as
-   `/dev/null`, discards the key with nothing to tell. After the write it lists the versions again
+   secret that is absent, is scheduled for deletion, holds any version, deprecated ones included, or
+   is already served by default, even when the versions listing, which Secrets Manager answers
+   eventually consistently, does not show it yet, so it never replaces a seed a client may already
+   read. Every write uses one fixed `ClientRequestToken`, so a second run's first-version write with
+   another seed, racing this one, is refused (`ResourceExistsException`, exit 2) rather than written
+   beside it, and the key that run printed is not stored. It prints the public key just before the
+   write, so the key is on your terminal whatever happens next, and the version id once the write
+   answers. If it cannot print the key, it writes nothing and exits 2. With stdout on the null
+   device it refuses before any call, exit 2, since the key would be lost: `>/dev/null`, and a
+   closed stdout, which a Go program sees as `/dev/null`. After the write it lists the versions again
    and reads back the version Secrets Manager serves by default (`AWSCURRENT`), which must be the
    one it wrote and derive the public key it printed. Secrets Manager's reads are eventually
    consistent, so while the listing shows no version yet, or no version is `AWSCURRENT`, it looks
@@ -1080,7 +1086,7 @@ camelCase (`users[].name`, `nkey`, `publish`, `subscribe`, `allow`, `deny`, `has
 | --- | --- |
 | `Users[].Name` | The user's name: lowercase letters, digits and hyphens, 1 to 48 characters, starting and ending with a letter or digit. |
 | `Users[].NKey` | The user's public key, `U` and 55 more characters, as `envoy-infra seed generate` prints it. Empty for a pending user. |
-| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
+| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe allow entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
 | `Users[].HasSeed` | The consumer stores a seed for this user. |
 | `NoAuthUser` | Optional: the name of a keyed user without a seed, whom a client presenting no credential becomes. |
 
@@ -1104,6 +1110,10 @@ An authorization is refused, with an error naming the field and, for a user's fi
   tokens, none empty, with `*` and `>` only as whole tokens and `>` only last, and no whitespace
   or control character anywhere;
 - a `<subject> <queue>` entry under `Publish`, since a queue group scopes only subscriptions;
+- a `<subject> <queue>` entry in `Subscribe.Deny`, which nats-server before 2.15 enforces more
+  loosely than it reads: beside a plain deny of the same subject it re-allows every other queue
+  group, and alone it misses a wildcard subscription that covers its subject. Deny the plain
+  subject, or narrow `Subscribe.Allow`;
 - a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line
@@ -1132,10 +1142,14 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
 path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
-argument that sets `-c`, `-config`, `-user`, `-pass` or `-auth` (with one dash or two, and with or
-without `=`), naming its index: nats-server takes the last value of a flag, so a later `-c` would
-load another file in place of the rendered one, and the others would add a credential beside its
-nkey users.
+argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or
+`-routes` (with one dash or two, and with or without `=`), naming its index: nats-server takes the
+last value of a flag, so a later `-c` would load another file in place of the rendered one;
+`-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
+has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
+and a server routed to it would see every message its users publish. Each of its refusals is a
+`core.InputError` naming the input it refuses: `authorization`, `configPath`, `serverArgs` or
+`configHeader`.
 
 ## Changing the module
 

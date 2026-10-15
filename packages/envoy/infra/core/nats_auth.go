@@ -133,8 +133,11 @@ func (u User) validate() error {
 // validate refuses rules nats-server would read otherwise than they say: an empty allow list,
 // which it never reads as "nothing" (an empty subscribe allow sets no restriction at all,
 // server/client.go setPermissions); an entry that is neither a subject pattern nor
-// "<subject> <queue>"; and a queue-scoped entry outside subscribe, the one direction queue groups
-// scope.
+// "<subject> <queue>"; a queue-scoped entry outside subscribe, the one direction queue groups
+// scope; and a queue-scoped subscribe deny, which nats-server before 2.15 enforces more loosely
+// than it reads. Beside a plain deny it re-allows every other queue group, and alone it misses a
+// wildcard subscription that covers its subject (v2.10.29 server/client.go:3044-3051, the deny
+// filter at :1199-1203; v2.15.1 fixes both at :3454 and :1398-1402).
 func (r *Rules) validate(direction string) error {
 	if len(r.Allow) == 0 {
 		return fmt.Errorf(`%s.allow must name at least one entry; write [">"] to mean everything`, direction)
@@ -150,6 +153,9 @@ func (r *Rules) validate(direction string) error {
 			}
 			if queued && direction != "subscribe" {
 				return fmt.Errorf(`%s[%d] %q names a queue group, which scopes only subscriptions; a %s rule is a plain subject`, list.field, i, entry, direction)
+			}
+			if queued && list.field == "subscribe.deny" {
+				return fmt.Errorf(`%s[%d] %q names a queue group; nats-server before 2.15 does not enforce a queue-scoped subscribe deny as written: write a plain subject, or narrow subscribe.allow`, list.field, i, entry)
 			}
 		}
 	}
@@ -190,13 +196,26 @@ func (a Authorization) Render(header []string) (string, error) {
 	if err := a.Validate(); err != nil {
 		return "", err
 	}
-	// nats-server's config lexer ends a comment at \n or \r (conf/lex.go isNL), so a header line
-	// holding either would carry the rest of it out of the comment and into the configuration.
+	if err := checkHeader(header); err != nil {
+		return "", err
+	}
+	return a.render(header), nil
+}
+
+// checkHeader refuses a header line holding a line break. nats-server's config lexer ends a comment
+// at \n or \r (conf/lex.go isNL), so a line holding either would carry the rest of it out of the
+// comment and into the configuration.
+func checkHeader(header []string) error {
 	for i, line := range header {
 		if strings.ContainsAny(line, "\r\n") {
-			return "", fmt.Errorf("header[%d] holds a line break; each header line is one comment line", i)
+			return fmt.Errorf("header[%d] holds a line break; each header line is one comment line", i)
 		}
 	}
+	return nil
+}
+
+// render is Render's text, for an authorization Validate accepts and a header checkHeader accepts.
+func (a Authorization) render(header []string) string {
 	var b strings.Builder
 	for _, line := range header {
 		b.WriteString("# " + line + "\n")
@@ -219,7 +238,7 @@ func (a Authorization) Render(header []string) (string, error) {
 		b.WriteString("# " + a.NoAuthUser + ": a client presenting no credential becomes this user\n")
 		b.WriteString("no_auth_user: " + PyJSON(fallback.NKey, PyJSONOptions{EnsureASCII: true}) + "\n")
 	}
-	return b.String(), nil
+	return b.String()
 }
 
 // object is the rules as the block writes them: deny only when it names an entry.
@@ -231,12 +250,18 @@ func (r *Rules) object() Object {
 	return object
 }
 
-// StartScript returns the `sh -c` script that writes Render's text to path and execs nats-server
-// with --config path and serverArgs. It refuses a server argument that would set aside the
-// rendered authorization (authorizationFlags), as an InputError naming serverArgs.
-func (a Authorization) StartScript(header []string, serverArgs []string, path string) (string, error) {
-	if path == "" {
-		return "", errors.New("path is required: the start script writes the configuration there")
+// StartScript returns the `sh -c` script that writes Render's text to configPath and execs
+// nats-server with --config configPath and serverArgs. It refuses a server argument that would set
+// aside the rendered authorization (authorizationFlags). Each refusal is an InputError naming its
+// input as a component's schema does: authorization (Validate's refusal, run once here),
+// configPath, serverArgs and configHeader, checked in that order, so a caller passes a refusal on
+// as it is.
+func (a Authorization) StartScript(configHeader, serverArgs []string, configPath string) (string, error) {
+	if err := a.Validate(); err != nil {
+		return "", InputErrorf("authorization", "authorization: %w", err)
+	}
+	if configPath == "" {
+		return "", InputErrorf("configPath", "configPath is required with authorization: the start script writes the configuration there")
 	}
 	for i, arg := range serverArgs {
 		name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")
@@ -245,21 +270,25 @@ func (a Authorization) StartScript(header []string, serverArgs []string, path st
 			return "", InputErrorf("serverArgs", "serverArgs[%d] sets nats-server's -%s, which %s", i, name, why)
 		}
 	}
-	text, err := a.Render(header)
-	if err != nil {
-		return "", err
+	if err := checkHeader(configHeader); err != nil {
+		return "", InputErrorf("configHeader", "configHeader: %w", err)
 	}
-	command := append([]string{"nats-server", "--config", path}, serverArgs...)
-	return "set -eu; printf '%s' " + ShellQuote(text) + " > " + ShellQuote(path) + "; exec " + ShellJoin(command), nil
+	command := append([]string{"nats-server", "--config", configPath}, serverArgs...)
+	return "set -eu; printf '%s' " + ShellQuote(a.render(configHeader)) + " > " + ShellQuote(configPath) + "; exec " + ShellJoin(command), nil
 }
 
 // authorizationFlags are the nats-server flags a server argument must not set, with what each does
 // to the rendered authorization. nats-server parses its arguments with Go's flag package, so each
-// takes one dash or two (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351).
+// takes one dash or two (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351, :5368-5370).
+// The rendered block has no cluster authorization, so a route opened or solicited by a flag is
+// unauthenticated, and a server routed to it sees every message its users publish.
 var authorizationFlags = map[string]string{
-	"c":      "loads another configuration file in place of the rendered one",
-	"config": "loads another configuration file in place of the rendered one",
-	"auth":   "adds a token beside the rendered nkey users",
-	"user":   "adds a user beside the rendered nkey users",
-	"pass":   "sets a password beside the rendered nkey users",
+	"c":              "loads another configuration file in place of the rendered one",
+	"config":         "loads another configuration file in place of the rendered one",
+	"auth":           "adds a token beside the rendered nkey users",
+	"user":           "adds a user beside the rendered nkey users",
+	"pass":           "sets a password beside the rendered nkey users",
+	"cluster":        "opens or solicits a route that no client permission binds",
+	"cluster_listen": "opens or solicits a route that no client permission binds",
+	"routes":         "opens or solicits a route that no client permission binds",
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -56,6 +57,9 @@ type fakeStore struct {
 	// An eventually consistent store: after the write, the next lagVersions listings count the
 	// versions as they were before it, and the next lagCurrent reads find no version served.
 	lagVersions, lagCurrent int
+	// listsNone makes every listing before a write count no version, as a listing that has not
+	// caught up with another writer's first version does.
+	listsNone bool
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
@@ -99,6 +103,9 @@ func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
 	}
 	if len(f.puts) > 0 && f.versionsErrAfterPut != nil {
 		return 0, f.versionsErrAfterPut
+	}
+	if len(f.puts) == 0 && f.listsNone {
+		return 0, nil
 	}
 	if len(f.puts) > 0 && f.lagVersions > 0 {
 		f.lagVersions--
@@ -273,6 +280,12 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 		{"generate: one version", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) }, "already holds 1 version(s)"},
 		// A version without the default label is still a seed someone may have read.
 		{"generate: two versions", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed, readmeSeed) }, "already holds 2 version(s)"},
+		// DescribeSecret names a version served by default, though the listing, which is eventually
+		// consistent, does not show it yet: a client may already read that seed.
+		{"generate: a served version the listing does not show", mode("generate"), func(f *fakeStore) *fakeStore {
+			f.listsNone = true
+			return f.holding(readmeSeed)
+		}, "already serves version v1 by default (AWSCURRENT)"},
 		{"generate: describe fails", mode("generate"), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f }, "AccessDeniedException"},
 		{"generate: listing versions fails", mode("generate"), func(f *fakeStore) *fakeStore {
 			f.versionsErr = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
@@ -537,6 +550,28 @@ func countOf(calls []string, call string) int {
 	return n
 }
 
+// putRefusal is a store's refusal of a write: another writer's first version, with another value,
+// is already there, so this one wrote nothing.
+type putRefusal struct{}
+
+func (putRefusal) Error() string {
+	return "put-secret-value " + secretName + " failed: ResourceExistsException; another generate wrote this secret's first version"
+}
+func (putRefusal) Is(target error) bool { return target == seed.ErrRefused }
+
+// A Put the store refuses wrote nothing: generate exits 2 with the refusal, and after the public key
+// it printed before the write, it prints no version id, since no version holds that key.
+func TestGenerateRefusesWhenTheStoreRefusesItsWrite(t *testing.T) {
+	store := newStore(t)
+	store.putErr = putRefusal{}
+	code, out, errs, _ := run(t, store, mode("generate")...)
+	require.Equal(t, 2, code)
+	require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\n", out)
+	require.Equal(t, "refused: put-secret-value "+secretName+" failed: ResourceExistsException; another generate "+
+		"wrote this secret's first version; nothing was written, and the public key above is not stored\n", errs)
+	requireNoValue(t, store, out, errs)
+}
+
 // generate prints the public key before it writes the seed, so the key is on the terminal whatever
 // the write and the checks after it do, the process ending among them.
 func TestGeneratePrintsThePublicKeyBeforeItsWrite(t *testing.T) {
@@ -575,6 +610,31 @@ func commandWith(store *fakeStore, stdout io.Writer, args ...string) (code int, 
 	code = seed.Command(context.Background(), args, stdout, &errs,
 		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
 	return code, errs.String()
+}
+
+// generate with stdout on the null device would print its key nowhere, so it refuses before the
+// store opens. check and verify write nothing, so they still run: a script may want only the exit
+// code.
+func TestGenerateRefusesANullStdoutBeforeOpeningTheStore(t *testing.T) {
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = null.Close() })
+	store := newStore(t)
+	opened := 0
+	stores := seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) {
+		opened++
+		return store, nil
+	}}
+	var errs bytes.Buffer
+	code := seed.Command(context.Background(), mode("generate"), null, &errs, stores)
+	require.Equal(t, 2, code)
+	require.Equal(t, "refused: "+secretName+": stdout is the null device, where the public key would be lost (a closed "+
+		"stdout is one too: Go opens it on /dev/null); send stdout somewhere you can read. Nothing was written\n", errs.String())
+	require.Zero(t, opened)
+
+	errs.Reset()
+	require.Equal(t, 0, seed.Command(context.Background(), mode("check"), null, &errs, stores), errs.String())
+	require.Equal(t, []string{"describe"}, store.calls)
 }
 
 // generate never writes a seed whose public key it could not print: a print that fails is a
@@ -686,6 +746,7 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 // A usage error exits 2 with the usage text, before the store is opened, and echoes no argument a
 // seed could have been pasted into.
 func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
+	const notEchoed = "envoy-infra seed: a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)\n"
 	rows := []struct {
 		name string
 		args []string
@@ -699,9 +760,18 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 		{"verify without a public key", mode("verify"), "--public-key is required by verify"},
 		{"a public key for check", mode("check", "--public-key", readmePublicKey), "--public-key is accepted by verify only"},
 		{"a public key for generate", mode("generate", "--public-key", readmePublicKey), "--public-key is accepted by verify only"},
-		// There is no seed flag: a seed never reaches argv on purpose.
-		{"a seed flag", mode("generate", "--seed", readmeSeed), "flag provided but not defined: -seed"},
-		{"a seed flag with =", mode("generate", "--seed="+readmeSeed), "flag provided but not defined: -seed"},
+		// An empty value, which `--expect-account "$ACCOUNT"` becomes with the variable unset, is
+		// not "not given": it is refused before the store opens.
+		{"an empty --expect-account for check", mode("check", "--expect-account", ""), "--expect-account is given empty"},
+		{"an empty --expect-account for generate", mode("generate", "--expect-account="), "--expect-account is given empty"},
+		// There is no seed flag: a seed never reaches argv on purpose. A flag word the command does
+		// not take is not echoed, since a seed pasted with a leading dash would be that word; a
+		// defined flag missing its value is named, as only defined names can be.
+		{"a seed flag", mode("generate", "--seed", readmeSeed), notEchoed},
+		{"a seed flag with =", mode("generate", "--seed="+readmeSeed), notEchoed},
+		{"a seed as a flag", mode("check", "-"+readmeSeed), notEchoed},
+		{"a seed after three dashes", mode("check", "---"+readmeSeed), notEchoed},
+		{"a flag missing its value", mode("verify", "--public-key"), "flag needs an argument: -public-key"},
 		{"an argument after the flags", mode("generate", readmeSeed), "unexpected arguments after the flags"},
 	}
 	for _, row := range rows {
@@ -713,6 +783,7 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 			require.Contains(t, errs, row.want)
 			require.Contains(t, errs, "usage: envoy-infra seed {check|generate|verify}")
 			require.NotContains(t, errs, readmeSeed)
+			require.NotContains(t, errs, "seed=")
 			require.Zero(t, o.calls)
 			require.Empty(t, store.calls)
 		})
