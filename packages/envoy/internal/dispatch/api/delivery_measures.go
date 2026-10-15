@@ -92,7 +92,7 @@ func deliveryMeasuresCompute(settings delivery.DeliverySettings, pop deliveryPop
 // that run, before the facets (derived.shipped), so deploys_with_prs belongs to the deploy, not the
 // filter. The measures route and the timeline both answer through it, so the two never disagree.
 func deliveryMeasuresOver(settings delivery.DeliverySettings, pop deliveryPopulation, derived deliveryDerived, from, to, now time.Time) deliveryMeasuresResponse {
-	applies, _ := delivery.ProductionApplies(pop.windowRuns, pop.windowJobs, settings.ProductionJobName)
+	applies := delivery.ProductionApplies(pop.windowRuns, pop.windowJobs, settings.Production()).Applies
 	reached := map[int64]bool{}
 	for _, apply := range applies {
 		reached[apply.RunID] = true

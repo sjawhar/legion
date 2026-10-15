@@ -244,6 +244,27 @@ func (l *busLogs) attempts(level, msg string) []int {
 	return found
 }
 
+// count is how many records with message msg the client named name has logged so far.
+func (l *busLogs) count(name, msg string) int {
+	found := 0
+	for _, line := range l.lines() {
+		if line == "" {
+			continue
+		}
+		var record struct {
+			Msg  string
+			Name string
+		}
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			panic(fmt.Sprintf("decode the bus log record %q: %v", line, err))
+		}
+		if record.Name == name && record.Msg == msg {
+			found++
+		}
+	}
+	return found
+}
+
 func captureBusLogs(t *testing.T) *busLogs {
 	t.Helper()
 	logs := &busLogs{}

@@ -158,7 +158,7 @@ func startBackfill(t *testing.T, reconcile *Reconcile, through, beganAt time.Tim
 
 func (r *Reconcile) backfillDeploys(t *testing.T, now time.Time) {
 	t.Helper()
-	r.backfillRuns(t.Context(), backfillStep(DeliveryRunKindDeploy), "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, now)
+	r.backfillRuns(t.Context(), backfillStep(DeliveryRunKindDeploy), "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, Production{}, now)
 }
 
 // TestBackfillRunsAdvancesOneFinishedHourAtATime: GitHub lists a window newest first, so the
@@ -535,7 +535,7 @@ func TestBackfillRunsLeavesTheRegularStepAlone(t *testing.T) {
 	if calls := fake.listingCalls(); len(calls) != 0 {
 		t.Fatalf("the finished backfill listed %v, want nothing", calls)
 	}
-	if err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, now); err != nil {
+	if err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, Production{}, now); err != nil {
 		t.Fatalf("reconcileWorkflow: %v", err)
 	}
 	calls := fake.listingCalls()
@@ -590,7 +590,7 @@ func TestCreatedAtBackfillFillsDeployRunsAfterTheRunsBackfillFinished(t *testing
 		t.Fatalf("run before the created_at backfill = %+v, %v: want no created_at, read as its started_at", before, err)
 	}
 
-	reconcile.backfillRuns(ctx, createdAtBackfillStep, "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, hourA.Add(time.Hour))
+	reconcile.backfillRuns(ctx, createdAtBackfillStep, "acme", "widgets", "acme/widgets", backfillWorkflow, DeliveryRunKindDeploy, Production{}, hourA.Add(time.Hour))
 	if calls := fake.listingCalls(); !slices.Equal(calls, []string{hourWindow(hourA) + " page 1"}) {
 		t.Fatalf("the created_at backfill listed %v, want hour A once", calls)
 	}

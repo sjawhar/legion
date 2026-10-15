@@ -680,7 +680,12 @@ func (c *Client) ensureConn() error {
 // reconnecting is waited for, until it reconnects, ctx ends or the client stops: with the
 // reconnect buffer off, a publish while reconnecting would otherwise fail at once, and a webhook
 // that fails answers 503 to a sender that does not redeliver. A closed connection is replaced by
-// dialling a new one, unless the client is stopped.
+// dialling a new one, unless the client is stopped. Callers that find the same connection closed
+// at once (the recovery its ClosedCB starts, and a publish) each dial one, and only the first to
+// finish replaces it: the others close theirs and serve with that one. So every connection the
+// client dials is either c.Conn, which Close and Drain close, or closed already; one left open
+// beside it would outlive Close, and, with MaxReconnect -1, reconnect forever once its server is
+// gone.
 func (c *Client) ensureConnWithContext(ctx context.Context) error {
 	for {
 		c.mu.Lock()
@@ -694,42 +699,55 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		if c.stopped() {
 			return errStopped
 		}
-		if conn == nil || conn.IsClosed() {
-			break
+		if conn != nil && !conn.IsClosed() {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
+			case <-c.stopCh:
+				return errStopped
+			case <-time.After(10 * time.Millisecond):
+			}
+			continue
 		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("bus: waiting for NATS to reconnect: %w", ctx.Err())
-		case <-c.stopCh:
+
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.onReconnect, c.onClosed)
+		if err != nil {
+			return err
+		}
+		js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
+		if err != nil {
+			nc.Close()
+			return err
+		}
+
+		c.mu.Lock()
+		// Drain and Close read c.Conn under c.mu after stopping the client, so checking here, under
+		// the same lock, means a connection dialled while they ran is either theirs to close or
+		// never installed.
+		if c.stopped() {
+			c.mu.Unlock()
+			nc.Close()
 			return errStopped
-		case <-time.After(10 * time.Millisecond):
 		}
-	}
-
-	nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.onReconnect, c.onClosed)
-	if err != nil {
-		return err
-	}
-	js, err := nc.JetStream(nats.MaxWait(10 * time.Second))
-	if err != nil {
-		nc.Close()
-		return err
-	}
-
-	c.mu.Lock()
-	// Drain and Close read c.Conn under c.mu after stopping the client, so checking here, under the
-	// same lock, means a connection dialled while they ran is either theirs to close or never
-	// installed.
-	if c.stopped() {
+		if c.Conn != conn {
+			// Another caller replaced the closed connection first. Its replacement is the one to
+			// serve with, so this one closes without its callbacks: its ClosedCB would start a
+			// recovery of a client that has a connection, and its DisconnectedErrCB would log
+			// "envoy nats disconnected" under the client's name, as if the connection it serves with
+			// had dropped. The line below says what happened instead.
+			c.mu.Unlock()
+			nc.SetClosedHandler(nil)
+			nc.SetDisconnectErrHandler(nil)
+			nc.Close()
+			slog.Info("envoy nats discarded a second replacement connection", slog.String("name", c.name))
+			continue
+		}
+		c.Conn = nc
+		c.js = js
+		c.connEvents++
 		c.mu.Unlock()
-		nc.Close()
-		return errStopped
+		return nil
 	}
-	c.Conn = nc
-	c.js = js
-	c.connEvents++
-	c.mu.Unlock()
-	return nil
 }
 
 func usesCoreTransport(topic string) bool {

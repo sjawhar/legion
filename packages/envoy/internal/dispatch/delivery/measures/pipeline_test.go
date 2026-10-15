@@ -366,22 +366,76 @@ func TestDeployJobTimingsFollowEachNamedJob(t *testing.T) {
 		jobsByRun[id] = rows
 	}
 
-	timings := DeployJobs(runs, jobsByRun, []string{stagingE2EJob, stagingApplyJob, productionApplyJob, "never-run / job"}, pipelineDays)
+	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{
+		{CardID: "staging_e2e", Production: delivery.Production{JobNames: []string{stagingE2EJob}}},
+		{CardID: "staging_apply", Production: delivery.Production{JobNames: []string{stagingApplyJob}}},
+		{CardID: "production_apply", Production: delivery.Production{JobNames: []string{productionApplyJob}}},
+		{CardID: "never", Production: delivery.Production{JobNames: []string{"never-run / job"}}},
+	}, pipelineDays)
 	if len(timings) != 4 {
-		t.Fatalf("timings = %d, want one per name", len(timings))
+		t.Fatalf("timings = %d, want one per card", len(timings))
 	}
-	e2e := timings[stagingE2EJob]
+	e2e := timings["staging_e2e"]
 	if e2e.Job != stagingE2EJob {
 		t.Errorf("staging_e2e.job = %q, want %q", e2e.Job, stagingE2EJob)
 	}
 	assertCell(t, "staging_e2e.days[6]", e2e.Days[6].Cell, 2, new(55.0), new(67.0), 1, 1, 1, new(0.5))
-	assertCell(t, "staging_apply.days[6]", timings[stagingApplyJob].Days[6].Cell, 3, new(8.0), new(8.8), 3, 0, 0, new(1.0))
-	assertCell(t, "production_apply.total", timings[productionApplyJob].Total, 1, new(9.0), new(9.0), 1, 0, 0, new(1.0))
-	never := timings["never-run / job"]
+	assertCell(t, "staging_apply.days[6]", timings["staging_apply"].Days[6].Cell, 3, new(8.0), new(8.8), 3, 0, 0, new(1.0))
+	assertCell(t, "production_apply.total", timings["production_apply"].Total, 1, new(9.0), new(9.0), 1, 0, 0, new(1.0))
+	never := timings["never"]
 	if never.Job != "never-run / job" || len(never.Days) != 7 {
 		t.Errorf("never-run timing = {job %q, %d days}, want its name and 7 days", never.Job, len(never.Days))
 	}
 	assertCell(t, "never-run.total", never.Total, 0, nil, nil, 0, 0, 0, nil)
+}
+
+// TestTheProductionCardMergesItsNamesAndCountsOnlyAppliedJobs proves one card follows both names
+// of a renamed production job while excluding a job whose configured apply step was skipped.
+func TestTheProductionCardMergesItsNamesAndCountsOnlyAppliedJobs(t *testing.T) {
+	const oldName, newName, step = "production-apply / production-apply", "production / production-apply", "Run ./.github/actions/apply"
+	var runs []delivery.DeliveryRun
+	jobsByRun := map[int64][]delivery.DeliveryRunJob{}
+	for id, jobs := range map[int64]map[string]deployResult{
+		1: {oldName: {"success", 9}},
+		2: {newName: {"success", 11}},
+		3: {newName: {"success", 1}},
+	} {
+		run, rows := deployRun(id, 32, jobs)
+		for i := range rows {
+			if rows[i].Name == newName || rows[i].Name == oldName {
+				rows[i].ApplyStep = new(step)
+				rows[i].ApplyStepConclusion = new(delivery.DeliveryJobConclusionSuccess)
+				if id == 3 {
+					rows[i].ApplyStepConclusion = new(delivery.DeliveryJobConclusionSkipped)
+				}
+			}
+		}
+		runs = append(runs, run)
+		jobsByRun[id] = rows
+	}
+	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{{CardID: "production_apply", Production: delivery.Production{JobNames: []string{newName, oldName}, ApplyStep: new(step)}}}, pipelineDays)
+	if timings["production_apply"].Job != newName+" or "+oldName {
+		t.Errorf("job = %q, want both names", timings["production_apply"].Job)
+	}
+	assertCell(t, "production_apply.total", timings["production_apply"].Total, 2, new(10.0), new(10.8), 2, 0, 0, new(1.0))
+}
+
+// TestProductionCardUsesOneAppliedListedJobPerRun proves a run holding both names of a renamed
+// production job contributes only its applied job, not its stood-down predecessor, to one card.
+func TestProductionCardUsesOneAppliedListedJobPerRun(t *testing.T) {
+	const stoodDownName, appliedName, step = "production-apply / production-apply", "production / production-apply", "Run apply"
+	started, stoodDownAt, appliedAt := at(32, 8, 0), at(32, 9, 10), at(32, 9, 30)
+	run := delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 5, Kind: delivery.DeliveryRunKindDeploy, StartedAt: started,
+		CompletedAt: new(appliedAt), Conclusion: new(delivery.DeliveryRunConclusionSuccess), URL: runURL(5),
+	}
+	timings := DeployJobs([]delivery.DeliveryRun{run}, map[int64][]delivery.DeliveryRunJob{run.RunID: {
+		{Name: stoodDownName, StartedAt: new(at(32, 9, 0)), CompletedAt: new(stoodDownAt), Conclusion: new(delivery.DeliveryJobConclusionSuccess), ApplyStep: new(step), ApplyStepConclusion: new(delivery.DeliveryJobConclusionSkipped)},
+		{Name: appliedName, StartedAt: new(at(32, 9, 0)), CompletedAt: new(appliedAt), Conclusion: new(delivery.DeliveryJobConclusionSuccess), ApplyStep: new(step), ApplyStepConclusion: new(delivery.DeliveryJobConclusionSuccess)},
+	}}, []DeployJobCard{{
+		CardID: "production_apply", Production: delivery.Production{JobNames: []string{stoodDownName, appliedName}, ApplyStep: new(step)},
+	}}, pipelineDays)
+	assertCell(t, "production_apply.total", timings["production_apply"].Total, 1, new(30.0), new(30.0), 1, 0, 0, new(1.0))
 }
 
 func assertLeadTimeCell(t *testing.T, name string, got LeadTimeCell, n int, median, p90, maximum *float64) {

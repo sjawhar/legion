@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
@@ -43,12 +44,20 @@ type FetchedRun struct {
 	Event        *string // GitHub's event (push, pull_request, workflow_dispatch, ...); nil likewise
 }
 
-// FetchedJob is one job of a FetchedRun.
+// FetchedJob is one job of a FetchedRun, with its steps: the apply step's result is what tells a
+// production job that applied from one that stood down (Production.Conclusion).
 type FetchedJob struct {
 	Name        string
 	StartedAt   *time.Time
 	CompletedAt *time.Time
 	Conclusion  *string
+	Steps       []FetchedStep
+}
+
+// FetchedStep is one step of a FetchedJob: its name and GitHub's raw conclusion, nil while it runs.
+type FetchedStep struct {
+	Name       string
+	Conclusion *string
 }
 
 // workflowRunsPageSize bounds one page of the Actions run listing, so that a page fits inside
@@ -224,6 +233,12 @@ type jobItem struct {
 	Conclusion  *string    `json:"conclusion"`
 	StartedAt   *time.Time `json:"started_at"`
 	CompletedAt *time.Time `json:"completed_at"`
+	Steps       []stepItem `json:"steps"`
+}
+
+type stepItem struct {
+	Name       string  `json:"name"`
+	Conclusion *string `json:"conclusion"`
 }
 
 // ListWorkflowRunJobs lists every job of one run's latest attempt via GET
@@ -272,7 +287,13 @@ func DecodeJobsPage(body []byte) ([]FetchedJob, int, error) {
 	}
 	jobs := make([]FetchedJob, len(payload.Jobs))
 	for i, j := range payload.Jobs {
-		jobs[i] = FetchedJob{Name: j.Name, StartedAt: j.StartedAt, CompletedAt: j.CompletedAt, Conclusion: j.Conclusion}
+		steps := make([]FetchedStep, len(j.Steps))
+		for n, step := range j.Steps {
+			steps[n] = FetchedStep{Name: step.Name, Conclusion: step.Conclusion}
+		}
+		jobs[i] = FetchedJob{
+			Name: j.Name, StartedAt: j.StartedAt, CompletedAt: j.CompletedAt, Conclusion: j.Conclusion, Steps: steps,
+		}
 	}
 	return jobs, payload.TotalCount, nil
 }
@@ -290,13 +311,25 @@ func StoredRun(repo string, kind DeliveryRunKind, run FetchedRun) DeliveryRun {
 }
 
 // RunJobs is one run's fetched jobs as intake and the reconcile store them (UpsertRunJobs), each
-// GitHub conclusion mapped to the schema's (mapJobConclusion).
-func RunJobs(repo string, runID int64, fetched []FetchedJob) []DeliveryRunJob {
+// GitHub conclusion mapped to the schema's (mapJobConclusion). A job production lists, while it names
+// an apply step, also records that step's name and its mapped conclusion (nil when the job lists no
+// such step, or the step still runs), which Production.Conclusion reads.
+func RunJobs(repo string, runID int64, fetched []FetchedJob, production Production) []DeliveryRunJob {
 	jobs := make([]DeliveryRunJob, len(fetched))
 	for i, job := range fetched {
 		jobs[i] = DeliveryRunJob{
 			Repo: repo, RunID: runID, Name: job.Name, StartedAt: job.StartedAt,
 			CompletedAt: job.CompletedAt, Conclusion: mapJobConclusion(job.Conclusion),
+		}
+		if production.ApplyStep == nil || !slices.Contains(production.JobNames, job.Name) {
+			continue
+		}
+		jobs[i].ApplyStep = production.ApplyStep
+		for _, step := range job.Steps {
+			if step.Name == *production.ApplyStep {
+				jobs[i].ApplyStepConclusion = mapJobConclusion(step.Conclusion)
+				break
+			}
 		}
 	}
 	return jobs

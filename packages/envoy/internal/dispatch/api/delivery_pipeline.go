@@ -33,6 +33,12 @@ type deliveryPipelineResponse struct {
 	Freshness         delivery.DeliveryFreshnessView `json:"freshness"`
 }
 
+const (
+	pipelineProductionApplyCard measures.DeployJobCardID = "production_apply"
+	pipelineStagingE2ECard      measures.DeployJobCardID = "staging_e2e"
+	pipelineStagingApplyCard    measures.DeployJobCardID = "staging_apply"
+)
+
 // deliveryPipelinePRChecks is the PR-checks workflow's part of the Pipeline page: its whole runs'
 // timing, its slowest jobs and the jobs that failed in the last 24 hours, both lists never null.
 type deliveryPipelinePRChecks struct {
@@ -127,33 +133,50 @@ func deliveryPipelineCompute(settings delivery.DeliverySettings, pop pipelinePop
 		rollup = *settings.PRChecksRollupJobName
 	}
 	run, slowest, failing := measures.PRChecks(pop.checks.Runs, pop.checks.Jobs, days, at, rollup)
-	names := []string{settings.ProductionJobName}
-	for _, name := range []*string{settings.StagingE2EJobName, settings.StagingApplyJobName} {
-		if name != nil {
-			names = append(names, *name)
+	cards := []measures.DeployJobCard{{
+		CardID:     pipelineProductionApplyCard,
+		Production: settings.Production(),
+	}}
+	for _, optional := range []struct {
+		cardID measures.DeployJobCardID
+		name   *string
+	}{
+		{pipelineStagingE2ECard, settings.StagingE2EJobName},
+		{pipelineStagingApplyCard, settings.StagingApplyJobName},
+	} {
+		if optional.name == nil {
+			continue
 		}
+		cards = append(cards, measures.DeployJobCard{
+			CardID:     optional.cardID,
+			Production: delivery.Production{JobNames: []string{*optional.name}},
+		})
 	}
-	deployJobs := measures.DeployJobs(pop.deploys.Runs, pop.deploys.Jobs, names, days)
-	optional := func(name *string) *measures.DeployJobTiming {
-		if name == nil {
-			return nil
-		}
-		return new(deployJobs[*name])
-	}
+	timings := measures.DeployJobs(pop.deploys.Runs, pop.deploys.Jobs, cards, days)
+	stagingE2E := optionalDeployJobTiming(timings, pipelineStagingE2ECard)
+	stagingApply := optionalDeployJobTiming(timings, pipelineStagingApplyCard)
 	derived := pop.leadTimes.derive(settings)
 	mergeToProduction, openedToMerge := measures.LeadTimes(derived.measuresPRs(), days)
 	return deliveryPipelineResponse{
 		Days:              days,
 		ComputedAt:        now,
 		PRChecks:          deliveryPipelinePRChecks{Run: run, SlowestJobs: slowest, FailingJobs: failing},
-		StagingE2E:        optional(settings.StagingE2EJobName),
-		StagingApply:      optional(settings.StagingApplyJobName),
-		ProductionApply:   deployJobs[settings.ProductionJobName],
+		StagingE2E:        stagingE2E,
+		StagingApply:      stagingApply,
+		ProductionApply:   timings[pipelineProductionApplyCard],
 		MergeToProduction: mergeToProduction,
 		OpenedToMerge:     openedToMerge,
 		Targets:           measures.DefaultTargets,
 		Freshness:         derived.freshness,
 	}
+}
+
+func optionalDeployJobTiming(timings map[measures.DeployJobCardID]measures.DeployJobTiming, card measures.DeployJobCardID) *measures.DeployJobTiming {
+	timing, exists := timings[card]
+	if !exists {
+		return nil
+	}
+	return &timing
 }
 
 // narrowedTo is the population for a later `at`: when at's UTC day moved, the runs started before
