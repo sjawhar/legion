@@ -92,9 +92,10 @@ type PermissionsArgs struct {
 // Annotate names the type gcp:Permissions in the schema, for the reason NATSUserArgs's gives.
 func (p *PermissionsArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Permissions") }
 
-// RulesArgs are one direction's rules, as core.Rules takes them.
+// RulesArgs are one direction's rules, as core.Rules takes them. allow is required, since core
+// refuses an empty one.
 type RulesArgs struct {
-	Allow []string `pulumi:"allow,optional"`
+	Allow []string `pulumi:"allow"`
 	Deny  []string `pulumi:"deny,optional"`
 }
 

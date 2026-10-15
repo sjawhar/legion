@@ -63,6 +63,16 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 	// WatchdogArgs would reach consumers as WatchdogArgsArgs.
 	require.Equal(t, "#/types/envoy-infra:host:Watchdog", listener.InputProperties["watchdog"].Ref)
 	require.Equal(t, "#/types/envoy-infra:host:Adopt", listener.InputProperties["adopt"].Ref)
+	require.Contains(t, schema.Types, "envoy-infra:host:Watchdog")
+	require.Contains(t, schema.Types, "envoy-infra:host:Adopt")
+}
+
+// The schema's object types are each component's own, and no others.
+func TestSchemaHoldsTheComponentsTypesAlone(t *testing.T) {
+	var schema struct {
+		Types map[string]json.RawMessage `json:"types"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
 	require.ElementsMatch(t, []string{
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:Rules",
@@ -70,15 +80,6 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 }
 
 func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
-	prov, err := provider.New()
-	require.NoError(t, err)
-	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
-		integration.WithProvider(prov))
-	require.NoError(t, err)
-
-	resp, err := server.GetSchema(p.GetSchemaRequest{})
-	require.NoError(t, err)
-
 	type property struct {
 		Type   string `json:"type"`
 		Secret bool   `json:"secret"`
@@ -96,9 +97,10 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 		} `json:"resources"`
 		Types map[string]struct {
 			Properties map[string]property `json:"properties"`
+			Required   []string            `json:"required"`
 		} `json:"types"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(resp.Schema), &schema))
+	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
 	hub, ok := schema.Resources["envoy-infra:gcp:NatsHub"]
 	require.True(t, ok, "the schema lists envoy-infra:gcp:NatsHub")
 	require.True(t, hub.IsComponent)
@@ -120,4 +122,6 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Equal(t, "#/types/envoy-infra:gcp:Permissions", user.Properties["permissions"].Ref)
 	require.Equal(t, "#/types/envoy-infra:gcp:Rules",
 		schema.Types["envoy-infra:gcp:Permissions"].Properties["publish"].Ref)
+	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
+	require.ElementsMatch(t, []string{"allow"}, schema.Types["envoy-infra:gcp:Rules"].Required)
 }
