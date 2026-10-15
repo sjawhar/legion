@@ -1580,10 +1580,13 @@ death_charge() {
 # missed, gives CLAIM a new task, and returns 1. The task goes through the daemon (legion claims
 # deliver), since a Dispatch message (send_agent) sets no delivery of the daemon's and a death in
 # the turn it starts would be charged nothing either. It asks for the reading the deployment
-# instructions give a phase worker's first message, so its turn lasts about as long as that one's.
+# instructions give a phase worker's first message and, as those instructions ask of an implementer
+# on its task line, the `sleep 300` that keeps the turn open while the next end lands: on a loaded
+# host the kill takes up to a minute, and the daemon's own task line for a relaunch is read by a
+# resumed session that answers in seconds, which is how a run lost three ends after their turns.
 hold_end_charged() {
   local claim=$1 charge out
-  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, then reply WAITING and wait for the targeted message. Change nothing."
+  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, run \`sleep 300\` as one bash call (timeout 600 seconds), then reply WAITING and wait for the targeted message. Change nothing."
   charge=$(death_charge "$claim" "$ended_incarnation") ||
     fail "the daemon log has no death of $claim's process $ended_incarnation, which the proof ended"
   if [ "$charge" != uncharged ]; then
@@ -3011,8 +3014,13 @@ approved, and its architect only waits. Apart from that, do not act until
 a targeted human Dispatch message gives the next exact proof operation. A phase worker's first
 message is the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`): it names your
 phase and is not that message. Read what your role says to read, then reply WAITING and wait for
-the targeted message. Follow that instruction precisely, use the Go-daemon Legion tools and
-handoffs, and do not create work outside the issue's smoke branch.
+the targeted message. An implementer, on the daemon's task line and on a new task for the same
+phase (one that says its previous process was ended), runs `sleep 300` as one bash call (its
+timeout set to 600 seconds) before it replies WAITING: the proof holds a tree by ending an
+implementer's launches while its task is outstanding, an end that lands after the task's turn is
+over charges nothing, and the end takes up to a minute to land on a loaded host, so that turn must
+last long enough to be ended inside. Follow that instruction precisely, use the Go-daemon Legion
+tools and handoffs, and do not create work outside the issue's smoke branch.
 
 ## Scope of this proof
 
