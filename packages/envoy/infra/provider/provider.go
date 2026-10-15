@@ -5,6 +5,7 @@ import (
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi-go-provider/infer"
 
+	"github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/host"
 )
@@ -23,6 +24,11 @@ func New() (p.Provider, error) {
 		WithPluginDownloadURL(downloadURL).
 		// The default, <repository>/sdk/go/<package>, is not a path Go accepts as a module.
 		WithGoImportPath("github.com/sjawhar/envoy/infra/sdk/go/envoyinfra").
-		WithComponents(infer.ComponentF(host.NewListener), infer.ComponentF(gcp.NewNatsHub)).
+		WithComponents(
+			infer.ComponentF(host.NewListener),
+			infer.ComponentF(aws.NewNatsService),
+			infer.ComponentF(aws.NewWebhookListener),
+			infer.ComponentF(gcp.NewNatsHub),
+		).
 		Build()
 }

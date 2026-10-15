@@ -2,9 +2,10 @@
 
 The Go module `github.com/sjawhar/envoy/infra`, which builds `pulumi-resource-envoy-infra`, the
 Pulumi plugin whose components deploy Envoy, and `envoy-infra`, the command whose `seed` writes a
-NATS user's nkey seed into a secret store. What the plugin deploys, each component's inputs and
-refusals, how an operator installs it and how an existing deployment moves onto it are in
-`packages/envoy/infra/README.md`. This file is what changing the module needs on top of that.
+NATS user's nkey seed into a secret store and whose `render` prints what the AWS components
+register. What the plugin deploys, each component's inputs and refusals, how an operator installs
+it and how an existing deployment moves onto it are in `packages/envoy/infra/README.md`. This file
+is what changing the module needs on top of that.
 
 ## Its own workspace
 
@@ -31,11 +32,14 @@ versions. Never add the module to the root `go.work`.
 | Path | What it holds |
 | --- | --- |
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
-| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
+| `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
 | `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), and the error naming and version paging both share (`errors.go`). |
+| `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
+| `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
+| `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
 | `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the key fetcher's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
 | `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
@@ -59,21 +63,26 @@ versions. Never add the module to the root `go.work`.
   registers anything. The refusal table runs against the resolver directly, through an
   `export_test.go` (`host.ResolveListener`, `gcp.ResolveNatsHub`); one test drives the constructor
   with a refused input and one per missing provider, each asserting nothing registered beyond the
-  test's providers.
+  test's providers. The AWS components resolve in `NatsServiceArgs.validate` and
+  `WebhookListenerArgs.validate`.
 - **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
-  listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`), run once
-  before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one value that may be
-  another resource's output, and checks only those, inside the `ApplyT` that computes the
-  container's environment. A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the
-  preview or update when the container's `envs` resolve, after the component and its image have
-  registered, not the constructor. The watchdog's create script runs as root on the host
-  (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
-  a control character, and with a watchdog the listener's name, which it echoes in double quotes,
-  may hold no `"`, `$`, backtick, `\` or line break. Each table tests its own refusals: core's are
-  in `core`, and a component's or a command's table holds its own plus one row for each input whose
-  core refusal it passes on, showing where that refusal goes. The hub reads none of its Inputs by
-  value: its resolver checks only that `tailnetAuthKey` is set and that `subnetwork` comes with
-  `network`.
+  listener's environment that the resolver can make (`machineId`, `port`, `listenHost`,
+  `hostBridge`), run once before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one
+  value that may be another resource's output, and checks only those, inside the `ApplyT` that
+  computes the container's environment. A bad URL, like a blank `seed` in its own `ApplyT`,
+  therefore fails the preview or update when the container's `envs` resolve, after the component
+  and its image have registered, not the constructor. The watchdog's create script runs as root on
+  the host (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc,
+  may hold a control character, and with a watchdog the listener's name, which it echoes in double
+  quotes, may hold no `"`, `$`, backtick, `\` or line break. An input that belongs to another (a
+  webhook's secret, `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and
+  `configPath` to `authorization`) is required while its owner is present and refused while it is
+  not, where the component would drop it: one rule, `rendering.CheckOwnedInputs`, which both AWS
+  components' `validate` and `rendering.ListenerEnv.Check` call. Each table tests its own
+  refusals: core's are in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a
+  component's or a command's table holds its own plus one row for each input whose shared refusal
+  it passes on, showing where that refusal goes. The hub reads none of its Inputs by value: its
+  resolver checks only that `tailnetAuthKey` is set and that `subnetwork` comes with `network`.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
@@ -131,6 +140,13 @@ versions. Never add the module to the root `go.work`.
   the code that sends it moves onto that name, so the client and its grant share one spelling.
   `core/permissions_test.go` writes each set out by hand, as a check independent of those names. A
   change to a set changes every hub's rendered authorization, and so replaces every hub's VM.
+- **One source for a rendering.** What an AWS component writes into a resource and a program may
+  need outside Pulumi lives in `aws/rendering`, which imports neither Pulumi nor the AWS provider's
+  SDK, so `envoy-infra` links neither. The component and the `render` subcommand call the same
+  function; a subcommand never rebuilds a rendering. `render/render_test.go` runs each component
+  under mocks and pins each subcommand's output to the inputs the component registers for the same
+  values. A refusal both share is a `core.InputError` naming the component's input, and the
+  subcommand maps that input to its flag (`refusedInput`, which panics on an input no flag sets).
 
 ## The seed command
 

@@ -279,7 +279,7 @@ its first `pulumi up`:
 The whole `Pulumi.yaml` of a project with one hub in the project `example-project`, reading the
 tailnet auth key from a secret config value. `example-hub`, `example-project`, the
 `example.invalid` images and each `<...>` are placeholders for your own values. Its users are
-`example-host-a`, the host whose listener [the module's first example](../README.md#a-listener-in-yaml)
+`example-host-a`, the host whose listener [the module's YAML example](../README.md#yaml)
 runs, and `example-operator`, a client with permissions of its own. Their public keys are the
 placeholders `core`'s tests use: put in the ones `envoy-infra seed generate` printed for your users.
 

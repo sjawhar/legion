@@ -90,7 +90,7 @@ func TestVersionStandsAlone(t *testing.T) {
 	if stdout.Len() != 0 {
 		t.Errorf("stdout %q, want none", stdout.String())
 	}
-	if !strings.Contains(stderr.String(), "envoy-infra: the command is seed, or --version alone\n") {
+	if !strings.Contains(stderr.String(), "envoy-infra: the command is seed or render, or --version alone\n") {
 		t.Errorf("stderr %q does not say what the command takes", stderr.String())
 	}
 	if strings.Contains(stderr.String(), canary) {
@@ -98,13 +98,17 @@ func TestVersionStandsAlone(t *testing.T) {
 	}
 }
 
-// TestHelpNamesVersion: the usage names --version beside the seed command's own usage.
+// TestHelpNamesVersion: the usage names --version beside the seed and render commands' own usage.
 func TestHelpNamesVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run(context.Background(), []string{"--help"}, &stdout, &stderr, noStore(t)); code != 0 {
 		t.Fatalf("exit %d, want 0", code)
 	}
-	for _, line := range []string{"usage: envoy-infra --version\n", "usage: envoy-infra seed {check|generate|verify}"} {
+	for _, line := range []string{
+		"usage: envoy-infra --version\n",
+		"usage: envoy-infra seed {check|generate|verify}",
+		"usage: envoy-infra render {nats-start-script|webhook-listener-env|metric-filters}",
+	} {
 		if !strings.Contains(stderr.String(), line) {
 			t.Errorf("the usage lacks %q: %q", line, stderr.String())
 		}
@@ -124,6 +128,19 @@ func TestTheCommandKnowsBothStores(t *testing.T) {
 	}
 	if want := "envoy-infra seed: --store is one of: aws-secrets-manager, gcp-secret-manager\n"; !strings.Contains(stderr.String(), want) {
 		t.Errorf("stderr %q lacks %q", stderr.String(), want)
+	}
+}
+
+// TestRenderPrintsToStdout: `envoy-infra render` runs the render command, which opens no store.
+func TestRenderPrintsToStdout(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	args := []string{"render", "metric-filters", "--component", "nats-service", "--metric-namespace", "example/NATS",
+		"--logical-name-prefix", "example-bus", "--json"}
+	if code := run(context.Background(), args, &stdout, &stderr, noStore(t)); code != 0 {
+		t.Fatalf("exit %d, want 0; stderr %q", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"logicalName": "example-bus-route-disconnect-filter"`) || stderr.Len() != 0 {
+		t.Errorf("stdout %q, stderr %q; want the NATS service's filters and no stderr", stdout.String(), stderr.String())
 	}
 }
 
