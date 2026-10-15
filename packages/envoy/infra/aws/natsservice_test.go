@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/provider"
 )
 
@@ -211,6 +212,26 @@ func exampleAuthorization() *envoyaws.AuthorizationArgs {
 			{Name: "example-pending", HasSeed: true},
 		},
 		NoAuthUser: "example-fallback",
+	}
+}
+
+// `envoy-infra render nats-start-script` reads the authorization input into core's types by their
+// JSON keys, so each core field's key is the schema's name of the input field it mirrors.
+func TestCoreAuthorizationKeysAreTheSchemasNames(t *testing.T) {
+	for _, pair := range [][2]reflect.Type{
+		{reflect.TypeFor[envoyaws.AuthorizationArgs](), reflect.TypeFor[core.Authorization]()},
+		{reflect.TypeFor[envoyaws.UserArgs](), reflect.TypeFor[core.User]()},
+		{reflect.TypeFor[envoyaws.RulesArgs](), reflect.TypeFor[core.Rules]()},
+	} {
+		args, mirror := pair[0], pair[1]
+		require.Equal(t, args.NumField(), mirror.NumField(), "%s mirrors %s field for field", args, mirror)
+		for i := range args.NumField() {
+			field := args.Field(i)
+			coreField, ok := mirror.FieldByName(field.Name)
+			require.True(t, ok, "%s has %s", mirror, field.Name)
+			schemaName, _, _ := strings.Cut(field.Tag.Get("pulumi"), ",")
+			require.Equal(t, schemaName, coreField.Tag.Get("json"), "%s.%s's JSON key", mirror, field.Name)
+		}
 	}
 }
 

@@ -539,6 +539,22 @@ func TestNatsStartScriptRefusals(t *testing.T) {
 			args: with(writeFile(t, `{"users": [{"name": "example-host-a", "seed": "x"}]}`)),
 			want: `refused: --authorization-file: json: unknown field "seed"`,
 		},
+		// Keys are spelled as the schema spells them; encoding/json alone would match any case.
+		{
+			name: "an --authorization-file with a top-level key in another case",
+			args: with(writeFile(t, strings.Replace(authorizationJSON, `"users"`, `"USERS"`, 1))),
+			want: `refused: --authorization-file: key "USERS" is spelled "users" in the schema`,
+		},
+		{
+			name: "an --authorization-file with a user's key in another case",
+			args: with(writeFile(t, strings.Replace(authorizationJSON, `"nkey"`, `"NKey"`, 1))),
+			want: `refused: --authorization-file: users[0]: key "NKey" is spelled "nkey" in the schema`,
+		},
+		{
+			name: "an --authorization-file with a rule's key in another case",
+			args: with(writeFile(t, strings.Replace(authorizationJSON, `"allow"`, `"Allow"`, 1))),
+			want: `refused: --authorization-file: users[0].publish: key "Allow" is spelled "allow" in the schema`,
+		},
 		{
 			name: "an --authorization-file holding two values",
 			args: with(writeFile(t, authorizationJSON+"\n{}")),

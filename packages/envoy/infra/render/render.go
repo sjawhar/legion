@@ -11,7 +11,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/envoy/infra/aws/rendering"
@@ -160,8 +162,9 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return s.refused("authorization-file", err)
 	}
-	// encoding/json matches each key to the core.Authorization field of that name, which is the
-	// schema's property name of the aws:Authorization input; a key no field has is refused.
+	// encoding/json matches each key to the core.Authorization field whose JSON key, the schema's
+	// property name of the aws:Authorization input, it equals in any letter case, and refuses a key
+	// no field has; spelledAsSchema then refuses a key in another case.
 	var authorization core.Authorization
 	decoder := json.NewDecoder(bytes.NewReader(text))
 	decoder.DisallowUnknownFields()
@@ -170,6 +173,9 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 	}
 	if _, err := decoder.Token(); err != io.EOF {
 		return s.refused("authorization-file", errors.New("holds something after its JSON value"))
+	}
+	if err := spelledAsSchema(text, authorization); err != nil {
+		return s.refused("authorization-file", err)
 	}
 
 	script, err := rendering.NatsStartScript(authorization, header, serverArgs, configPath)
@@ -290,4 +296,60 @@ func metricFilters(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprint(stdout, out.String())
 	return 0
+}
+
+// spelledAsSchema refuses a key of the JSON value text, which decoded was decoded from, that is
+// spelled otherwise than its field's JSON key. decoded encodes with every field's key, so each key
+// of text must be one of the keys at its place there.
+func spelledAsSchema(text []byte, decoded any) error {
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return err
+	}
+	var given, want any
+	if err := json.Unmarshal(text, &given); err != nil {
+		return err
+	}
+	if err := json.Unmarshal(canonical, &want); err != nil {
+		return err
+	}
+	return sameKeys("", given, want)
+}
+
+// sameKeys refuses the first key of given, a JSON value at path, that want has no key of that
+// spelling for at the same place.
+func sameKeys(path string, given, want any) error {
+	switch g := given.(type) {
+	case map[string]any:
+		w := want.(map[string]any)
+		for _, key := range slices.Sorted(maps.Keys(g)) {
+			if _, ok := w[key]; !ok {
+				at := ""
+				if path != "" {
+					at = path + ": "
+				}
+				for spelled := range w {
+					if strings.EqualFold(spelled, key) {
+						return fmt.Errorf("%skey %q is spelled %q in the schema", at, key, spelled)
+					}
+				}
+				return fmt.Errorf("%skey %q is not in the schema", at, key)
+			}
+			next := key
+			if path != "" {
+				next = path + "." + key
+			}
+			if err := sameKeys(next, g[key], w[key]); err != nil {
+				return err
+			}
+		}
+	case []any:
+		w := want.([]any)
+		for i := range g {
+			if err := sameKeys(fmt.Sprintf("%s[%d]", path, i), g[i], w[i]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
