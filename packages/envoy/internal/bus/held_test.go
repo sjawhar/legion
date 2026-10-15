@@ -53,6 +53,11 @@ func TestAnotherSubscriptionOnOneTransportIsRefused(t *testing.T) {
 			if err != nil {
 				t.Fatalf("subscribe %s: %v", held, err)
 			}
+			// A SUB is asynchronous on the wire: flush it, so the server holds it before the
+			// publisher's message arrives from another connection.
+			if err := client.Conn.Flush(); err != nil {
+				t.Fatalf("flush the subscription: %v", err)
+			}
 			if _, err := subscribe(refused.otherSubject, refused.otherQueue, func(*nats.Msg) {}); !errors.Is(err, bus.ErrSubscriptionHeld) {
 				t.Fatalf("subscribe %s (queue %q) beside %s (queue %q) = %v, want ErrSubscriptionHeld",
 					refused.otherSubject, refused.otherQueue, held, refused.queue, err)
