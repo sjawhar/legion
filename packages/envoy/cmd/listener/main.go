@@ -195,6 +195,9 @@ func runSelfHealthMonitor(
 	failures := 0
 	terminalFailures := 0
 	disconnectedFailures := 0
+	// readsDisconnected classifies every probe result, the one right after a rebuild included, so
+	// the disconnected count is the same run of probes wherever in the loop they fall.
+	readsDisconnected := func() bool { return connected != nil && !connected() }
 	for {
 		select {
 		case <-ctx.Done():
@@ -205,7 +208,7 @@ func runSelfHealthMonitor(
 		if err != nil {
 			failures++
 			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
-			if connected != nil && !connected() {
+			if readsDisconnected() {
 				disconnectedFailures++
 				terminalFailures = 0
 				if disconnectedFailures >= disconnectedFailureThreshold {
@@ -235,6 +238,10 @@ func runSelfHealthMonitor(
 					// increment: only a healthy read is a recovery.
 					if err = probe(); err != nil {
 						logger.Warn("self-health probe after rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", err.Error()))
+						if readsDisconnected() {
+							// The connected branch above reset the count, so this probe starts it.
+							disconnectedFailures = 1
+						}
 					}
 				}
 			}

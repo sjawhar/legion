@@ -3757,16 +3757,18 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	}
 }
 
-// TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection is the three-hour outage this
+// TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection is the sustained disconnection this
 // threshold exists for: isUnrecoverableSelfHealthFailure reads every failure as transient while
 // NATS is disconnected, by design, so the rebuild path never runs and terminalFailures never
 // advances. Before disconnectedFailureThreshold existed, nothing else in the monitor bounded that
 // state, and a connection that never recovered on its own - a broken tunnel nats.go kept retrying
 // without ever reaching the server - left the listener logging this WARN forever with nothing
-// asking its runtime for a fresh process.
+// asking its runtime for a fresh process. The bound is exactly twenty probes, ten minutes at the
+// production interval.
 func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T) {
 	stuck := errors.New("nats: outbound buffer limit exceeded")
-	probe := func() error { return stuck }
+	var probes atomic.Int32
+	probe := func() error { probes.Add(1); return stuck }
 	// Mirrors isUnrecoverableSelfHealthFailure's own rule while disconnected: never terminal, so
 	// rebuild must never run for this failure.
 	isUnrecoverable := func(error) bool { return false }
@@ -3775,15 +3777,18 @@ func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T
 	rebuild := func() error { rebuilds.Add(1); return nil }
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	terminated := make(chan struct{}, 1)
+	terminatedAt := make(chan int32, 1)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, connected, rebuild,
-			func() { terminated <- struct{}{} }, time.Millisecond, 3)
+			func() { terminatedAt <- probes.Load() }, time.Millisecond, 3)
 	}()
 	select {
-	case <-terminated:
+	case got := <-terminatedAt:
+		if got != 20 {
+			t.Fatalf("the monitor terminated after %d disconnected probes, want exactly 20", got)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the monitor never terminated a disconnected probe that never recovered")
 	}
@@ -3794,6 +3799,56 @@ func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T
 	}
 	if got := rebuilds.Load(); got != 0 {
 		t.Fatalf("rebuilds = %d, want 0: a disconnected client is never rebuilt", got)
+	}
+}
+
+// TestRunSelfHealthMonitor_CountsADisconnectedProbeAfterARebuild guards the probe the monitor runs
+// right after a successful rebuild: when NATS drops during it, that probe is the first of the
+// twenty, so a connected terminal failure, a rebuild, and then a disconnection that never recovers
+// end in a restart after exactly twenty disconnected probes, not twenty-one.
+func TestRunSelfHealthMonitor_CountsADisconnectedProbeAfterARebuild(t *testing.T) {
+	terminal := errors.New("interest watcher stopped")
+	outage := errors.New("interest kv: nats: outbound buffer limit exceeded")
+	var calls, disconnectedProbes atomic.Int32
+	var disconnected atomic.Bool
+	probe := func() error {
+		if calls.Add(1) == 1 {
+			return terminal
+		}
+		// The probe right after the rebuild, and every one after it, reads NATS as gone.
+		disconnected.Store(true)
+		disconnectedProbes.Add(1)
+		return outage
+	}
+	var rebuilds atomic.Int32
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminatedAt := make(chan int32, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe,
+			func(err error) bool { return errors.Is(err, terminal) },
+			func() bool { return !disconnected.Load() },
+			func() error { rebuilds.Add(1); return nil },
+			// A terminal bound well past twenty, so only the disconnected bound can end the run.
+			func() { terminatedAt <- disconnectedProbes.Load() }, time.Millisecond, 100)
+	}()
+	select {
+	case got := <-terminatedAt:
+		if got != 20 {
+			t.Fatalf("the monitor terminated after %d disconnected probes, the post-rebuild probe among them, want exactly 20", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor never terminated a disconnection that began on the probe after a rebuild")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the monitor did not return after terminating")
+	}
+	if got := rebuilds.Load(); got != 1 {
+		t.Fatalf("rebuilds = %d, want 1", got)
 	}
 }
 
