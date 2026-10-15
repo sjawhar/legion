@@ -18,11 +18,14 @@
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
 #    `permissions` of its own when the workflow declares none (a job with neither runs under
-#    whatever the repository grants, which this check cannot read), and its last step is exactly
-#    `run: .github/scripts/release-push.sh no-credential`, with no `if:` and no
-#    `continue-on-error:`: no condition can gate the tripwire away and no error tolerance can let
-#    its failure pass. (A build that fails before it reaches the tripwire publishes nothing anyway:
-#    its publish job needs it.)
+#    whatever the repository grants, which this check cannot read), carries no
+#    `continue-on-error:` (GitHub reports such a job as a success to the jobs that need it, failed
+#    tripwire and all), and its last step is exactly `run: .github/scripts/release-push.sh
+#    no-credential`, with no `if:` and no `continue-on-error:`, under bash or sh (its `shell:`,
+#    else the job's `defaults.run.shell`, else the workflow's; a `cat {0}` there would print the
+#    tripwire instead of running it): no condition or error tolerance, on the step or on the job,
+#    can gate the tripwire away or let its failure pass, and a shell is what runs it. (A build
+#    that fails before it reaches the tripwire publishes nothing anyway: its publish job needs it.)
 # 3. Every `actions/checkout` (its owner and repository compared lower-cased, as GitHub resolves
 #    them) sets `persist-credentials: false` (the boolean), so no token is left in the checkout for
 #    a later step.
@@ -36,13 +39,15 @@
 # `run:` runs under — its `shell:`, else the job's `defaults.run.shell`, else the workflow's, else
 # bash — is not bash or sh (a body under python, pwsh, node or cmd is a program this check cannot
 # read), or when a word in command position of its `run:` is one of DEPENDENCY_COMMANDS, is `npm`
-# with any subcommand but those on NPM_ALLOWED (view, and publish of a `.tgz`), is `docker` with
-# one of DOCKER_DEPENDENCY (build, run, compose, exec) or a long form on DOCKER_DEPENDENCY_LONG
-# (`docker container run`, `docker image build`, `docker buildx build`, …), or is a path with a
+# with any subcommand but those on NPM_ALLOWED (view, and publish of a `.tgz` named right after
+# it), is `docker` with one of DOCKER_DEPENDENCY (build, run, compose, exec) or a long form on
+# DOCKER_DEPENDENCY_LONG (`docker container run`, `docker image build`, `docker buildx build`, …),
+# past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), or is a path with a
 # `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`, `out/x`,
 # `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command position
-# is found by splitting each line of the `run:` on the shell's separators (`;`, `&&`, `||`, `|`,
-# `(`, `{`, `$(` and backticks; `${{ … }}` expressions are elided first), dropping comments,
+# is found by joining backslash-continued lines, then splitting each line of the `run:` on the
+# shell's separators (`;`, `&&`, `||`, `|`, `(`, `{`, `$(` and backticks; `${{ … }}` expressions
+# are elided first), dropping comments,
 # leading `VAR=value` assignments and the keywords that precede a command (if, then, for, do, time,
 # exec, env, …), and taking the first word left; an interpreter there (one of INTERPRETERS: bash,
 # sh, dash, zsh, source, `.`) is looked through, past its flags and the option name an `-o`, `+o`,
@@ -127,18 +132,26 @@ DEPENDENCY_COMMANDS = {
     "python", "python3", "pip", "uv", "cargo", "sudo",
 }
 # npm runs a package's scripts under every subcommand (install, ci, exec, run, test, …) but these
-# two: view reads the registry, and publish of a tarball (a later word ending in `.tgz`) uploads
-# the tarball it is handed and runs no package script. A publish of a directory runs the package's
-# prepack, so it is dependency code: NO_TARBALL says why.
+# two: view reads the registry, and publish of a tarball (the word right after `publish` ending in
+# `.tgz`, where the release jobs put it) uploads the tarball it is handed and runs no package
+# script. A publish of a directory runs the package's prepack, so it is dependency code, and a
+# `.tgz` behind a flag is one (`npm publish --tag x.tgz` publishes the directory under the tag
+# x.tgz): NO_TARBALL says why.
 NPM_ALLOWED = {"view", "publish"}
 NO_TARBALL = "without a tarball argument (a directory publish runs the package's prepack)"
 # docker runs a container's code under these, and under the long forms of the same on
 # DOCKER_DEPENDENCY_LONG; `docker login`, `docker buildx imagetools`, `docker image ls` and
-# `docker container ls` move only credentials, manifests and listings.
+# `docker container ls` move only credentials, manifests and listings. The subcommand is the first
+# word past docker's global options: every leading `-` word, and the value after one on
+# DOCKER_GLOBAL_VALUES (`--config /tmp/c`, `-H tcp://x`; `--config=/tmp/c` is one word already).
 DOCKER_DEPENDENCY = {"build", "run", "compose", "exec"}
 DOCKER_DEPENDENCY_LONG = {
     ("container", "run"), ("container", "exec"), ("image", "build"), ("buildx", "build"),
     ("buildx", "bake"),
+}
+DOCKER_GLOBAL_VALUES = {
+    "--config", "-c", "--context", "-H", "--host", "-l", "--log-level", "--tlscacert",
+    "--tlscert", "--tlskey",
 }
 # The shells whose `run:` the tokeniser below reads, by the first word of the shell the step runs
 # under: its `shell:`, else the job's `defaults.run.shell`, else the workflow's, else bash
@@ -245,7 +258,7 @@ def words_of(segment: str) -> list[str]:
 def commands_of(run: str) -> list[list[str]]:
     """Each simple command of a `run:`, as its words with the command first."""
     commands = []
-    for line in EXPRESSION.sub("EXPR", run).splitlines():
+    for line in EXPRESSION.sub("EXPR", run).replace("\\\n", " ").splitlines():
         for segment in SEPARATORS.split(line):
             segment = segment.strip()
             if not segment or segment.startswith("#"):
@@ -292,14 +305,20 @@ def dependency_command(words: list[str]) -> str | None:
             return f"'{command}'"
         if words[1] not in NPM_ALLOWED:
             return f"'npm {words[1]}'"
-        if words[1] == "publish" and not any(word.endswith(".tgz") for word in words[2:]):
-            return f"'npm publish' {NO_TARBALL}"
+        if words[1] == "publish":
+            tarball = words[2] if len(words) > 2 else ""
+            if tarball.startswith("-") or not tarball.endswith(".tgz"):
+                return f"'npm publish' {NO_TARBALL}"
         return None
     if command == "docker":
-        if len(words) > 1 and words[1] in DOCKER_DEPENDENCY:
-            return f"'docker {words[1]}'"
-        if tuple(words[1:3]) in DOCKER_DEPENDENCY_LONG:
-            return f"'docker {words[1]} {words[2]}'"
+        rest = words[1:]
+        while rest and rest[0].startswith("-"):
+            if rest.pop(0) in DOCKER_GLOBAL_VALUES and rest:
+                rest.pop(0)
+        if rest and rest[0] in DOCKER_DEPENDENCY:
+            return f"'docker {rest[0]}'"
+        if tuple(rest[:2]) in DOCKER_DEPENDENCY_LONG:
+            return f"'docker {rest[0]} {rest[1]}'"
         return None
     path = PATH_PREFIX.sub("", command)
     if DEPENDENCY_PATH.search(path) and path != RELEASE_PUSH:
@@ -307,18 +326,21 @@ def dependency_command(words: list[str]) -> str | None:
     return None
 
 
-def shell_of(step: Mapping, job: Mapping, workflow: Mapping) -> str:
-    """The first word of the shell the step's `run:` runs under: its own `shell:`, else the job's
-    `defaults.run.shell`, else the workflow's, else bash, GitHub's default on Linux."""
-    shells = [step.get("shell")]
+def shell_of(step: Mapping, job: Mapping, workflow: Mapping) -> tuple[str, int | None]:
+    """The first word of the shell the step's `run:` runs under, and the line of the `shell:` that
+    sets it: the step's own, else the job's `defaults.run.shell`, else the workflow's, else bash,
+    GitHub's default on Linux, set nowhere."""
+    scopes = [step]
     for scope in (job, workflow):
         defaults = scope.get("defaults")
         run = defaults.get("run") if isinstance(defaults, Mapping) else None
-        shells.append(run.get("shell") if isinstance(run, Mapping) else None)
-    for shell in shells:
+        if isinstance(run, Mapping):
+            scopes.append(run)
+    for scope in scopes:
+        shell = scope.get("shell")
         if isinstance(shell, str):
-            return (shell.split() or [""])[0]
-    return "bash"
+            return (shell.split() or [""])[0], scope.lines.get("shell")
+    return "bash", None
 
 
 def dependency_code(step: Mapping, job: Mapping, workflow: Mapping) -> str | None:
@@ -330,7 +352,7 @@ def dependency_code(step: Mapping, job: Mapping, workflow: Mapping) -> str | Non
         found.append(f"uses '{uses}'")
     run = step.get("run")
     if isinstance(run, str):
-        interpreter = shell_of(step, job, workflow)
+        interpreter, _ = shell_of(step, job, workflow)
         if interpreter not in SHELLS:
             found.append(f"runs its body under shell '{interpreter}', not bash or sh")
         else:
@@ -505,8 +527,9 @@ def check_job(
         build_jobs += 1
         index, step, found = dependency[0]
         what = f"{describe(step, index)} {found}"
-        # 2. No credential, a known token, and the tripwire last, with nothing that could gate it
-        # away (`if:`) or let its failure pass (`continue-on-error:`).
+        # 2. No credential, a known token, no error tolerance on the job, and the tripwire last,
+        # under a shell, with nothing that could gate it away (`if:`) or let its failure pass
+        # (`continue-on-error:`).
         if "permissions" not in job and "permissions" not in workflow:
             problem(
                 path, job_line,
@@ -528,6 +551,12 @@ def check_job(
                     f"job '{name}' runs dependency code ({what}), but its text names "
                     f"{secret.group(0)}; a build job holds no secret but GITHUB_TOKEN",
                 )
+        if "continue-on-error" in job:
+            problem(
+                path, job.lines["continue-on-error"],
+                f"job '{name}' runs dependency code ({what}), but carries 'continue-on-error:', "
+                f"which reports a failed tripwire as success to the jobs that need it",
+            )
         last = steps[-1]
         run = last.get("run")
         if not (isinstance(run, str) and run.strip() == TRIPWIRE and "uses" not in last):
@@ -544,6 +573,13 @@ def check_job(
                         f"job '{name}' runs dependency code ({what}), so its tripwire step must "
                         f"carry no '{key}:'",
                     )
+            shell, shell_line = shell_of(last, job, workflow)
+            if shell not in SHELLS:
+                problem(
+                    path, shell_line or line_of(last, job_line),
+                    f"job '{name}' runs dependency code ({what}), so its tripwire step must run "
+                    f"under bash or sh (found '{shell}'), which is what runs {TRIPWIRE}",
+                )
 
 
 loaded: dict[Path, tuple[Mapping, Mapping]] = {}

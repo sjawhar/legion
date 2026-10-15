@@ -77,11 +77,12 @@ LISTENER=.github/workflows/release-envoy-listener.yaml
 INFRA=.github/workflows/release-envoy-infra.yaml
 
 # write_green <workflows dir>: the trio in its intended shape. release.yaml: a build job (install,
-# setup-bun, a `go build` behind `&&`, upload, tripwire), two credentialed publish jobs (one with
-# setup-node and `npm publish`), a plain job that runs no dependency code and a reusable-workflow
-# call with no steps. The listener: a docker build job (`packages: write`, a build-push) and
-# release_publish in its concurrency group, with `docker buildx imagetools create`. Infra: a
-# build job (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job.
+# setup-bun, a `go build` behind `&&`, upload, tripwire), two credentialed publish jobs (setup-node,
+# `npm publish` of the handed tarball, the tag push, a GitHub release and the bump push), a plain
+# job that runs no dependency code and a reusable-workflow call with no steps. The listener: a
+# docker build job (`packages: write`, a build-push) and release_publish in its concurrency group,
+# with `docker buildx imagetools create`. Infra: a build job (install-pulumi, `pulumi package
+# get-schema`, tripwire) and a publish job.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -136,18 +137,24 @@ jobs:
         env:
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
         run: |
-          file="sjawhar-pi-envoy-$VERSION.tgz"
-          tag=$(.github/scripts/release-push.sh handed pi-envoy-v "$VERSION" tarball "$file")
-          { echo "tag=$tag"; echo "file=$file"; } >> "$GITHUB_OUTPUT"
+          stem="sjawhar-pi-envoy-$VERSION"
+          tag=$(.github/scripts/release-push.sh handed pi-envoy-v "$VERSION" tarball "$stem.tgz")
+          { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
       - name: Publish to npm
         env:
-          FILE: ${{ steps.handed.outputs.file }}
+          STEM: ${{ steps.handed.outputs.stem }}
         run: npm publish "tarball/$STEM.tgz" --access public --provenance
       - name: Push tag
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           TAG: ${{ steps.handed.outputs.tag }}
         run: .github/scripts/release-push.sh push-tag "$TAG"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.handed.outputs.tag }}
+          STEM: ${{ steps.handed.outputs.stem }}
+        run: .github/scripts/release-push.sh release "$TAG" "Pi Envoy v1" "tarball/$STEM.tgz"
       - name: Push version bump
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
@@ -178,18 +185,24 @@ jobs:
         env:
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
         run: |
-          file="sjawhar-pi-legion-$VERSION.tgz"
-          tag=$(.github/scripts/release-push.sh handed pi-legion-v "$VERSION" tarball "$file")
-          { echo "tag=$tag"; echo "file=$file"; } >> "$GITHUB_OUTPUT"
+          stem="sjawhar-pi-legion-$VERSION"
+          tag=$(.github/scripts/release-push.sh handed pi-legion-v "$VERSION" tarball "$stem.tgz")
+          { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
       - name: Publish to npm
         env:
-          FILE: ${{ steps.handed.outputs.file }}
+          STEM: ${{ steps.handed.outputs.stem }}
         run: npm publish "tarball/$STEM.tgz" --access public --provenance
       - name: Push tag
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
           TAG: ${{ steps.handed.outputs.tag }}
         run: .github/scripts/release-push.sh push-tag "$TAG"
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.handed.outputs.tag }}
+          STEM: ${{ steps.handed.outputs.stem }}
+        run: .github/scripts/release-push.sh release "$TAG" "Pi Legion v1" "tarball/$STEM.tgz"
       - name: Push version bump
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
@@ -755,5 +768,81 @@ check "names bun behind a quoted eval" "$(contains "$out" "step 'Eval quoted' ru
 check "names bun behind a bare eval" "$(contains "$out" "step 'Eval bare' runs 'bun'")"
 check "names docker's long forms as written, and not its listings" \
   "$(contains "$out" "step 'Docker long forms' runs 'docker container run', 'docker image build', 'docker buildx bake', 'docker container exec'; dependency code")"
+
+echo "case: a build job with continue-on-error"
+root=$(fixture build-continue-on-error)
+mutate "$root/$RELEASE" $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n' $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n    continue-on-error: true\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job's key at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    continue-on-error: true$'): job 'pi_envoy_build' runs dependency code (.*), but carries 'continue-on-error:', which reports a failed tripwire as success to the jobs that need it")"
+check "does not name the tripwire step, which carries none" "$(is "$(contains "$out" "tripwire step must carry no")" false)"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: a build job whose defaults.run.shell is cat {0}, which prints the tripwire instead of running it"
+root=$(fixture build-shell-cat)
+mutate "$root/$RELEASE" $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n' $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: \'cat {0}\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the tripwire's shell at the job's shell line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" "^        shell: 'cat {0}'$"): job 'pi_envoy_build' runs dependency code (.*), so its tripwire step must run under bash or sh (found 'cat'), which is what runs .github/scripts/release-push.sh no-credential")"
+check "reports that one problem only: the build job's other steps may run under anything" \
+  "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: a workflow-level defaults.run.shell that is an interpreter reaches the build job's tripwire"
+root=$(fixture workflow-shell-python-tripwire)
+mutate "$root/$RELEASE" $'permissions: {}\n' $'permissions: {}\ndefaults:\n  run:\n    shell: python\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the tripwire's shell at the workflow's shell line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    shell: python$'): job 'pi_envoy_build' runs dependency code (.*), so its tripwire step must run under bash or sh (found 'python'), which is what runs .github/scripts/release-push.sh no-credential")"
+check "names a credentialed job's step under the same shell" \
+  "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Publish to npm' runs its body under shell 'python', not bash or sh")"
+
+echo "case: a tripwire step with its own shell: python"
+root=$(fixture tripwire-shell-python)
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh no-credential\n' $'        shell: python\n        run: .github/scripts/release-push.sh no-credential\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the tripwire's shell at the step's shell line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^        shell: python$'): job 'pi_envoy_build' runs dependency code (.*), so its tripwire step must run under bash or sh (found 'python')")"
+
+echo "case: a tripwire step whose own shell is a bash template under a job default of pwsh"
+root=$(fixture tripwire-shell-template)
+mutate "$root/$RELEASE" $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n' $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n    defaults:\n      run:\n        shell: pwsh\n'
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh no-credential\n' $'        shell: bash -e {0}\n        run: .github/scripts/release-push.sh no-credential\n'
+run_check "$root"
+check "exits 0: the step's bash wins over the job's pwsh" "$(is "$status" 0)"
+
+echo "case: npm publish with a .tgz behind a flag in a credentialed job"
+root=$(fixture npm-publish-tgz-behind-flag)
+add_publish_step "$root" $'      - name: Publish under a tag\n        run: npm publish --tag x.tgz\n      - name: Publish with an otp\n        run: npm publish --otp 1.tgz\n      - name: Publish under a one-word tag\n        run: npm publish --tag=x.tgz\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+for step in 'Publish under a tag' 'Publish with an otp' 'Publish under a one-word tag'; do
+  check "names '$step' as a publish without a tarball" \
+    "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step '$step' runs 'npm publish' without a tarball argument (a directory publish runs the package's prepack)")"
+done
+check "does not name the publish of the handed tarball, right after publish" "$(is "$(contains "$out" "step 'Publish to npm'")" false)"
+
+echo "case: docker's global options before its subcommand in a credentialed job"
+root=$(fixture docker-global-options)
+add_publish_step "$root" $'      - name: Global config\n        run: docker --config /tmp/c run alpine\n      - name: Global host\n        run: docker -H tcp://x:2375 run alpine\n      - name: Global log level\n        run: docker --log-level debug container run alpine\n      - name: Global one-word and boolean\n        run: |\n          docker --config=/tmp/c run alpine\n          docker -D build .\n      - name: Global config before imagetools\n        run: docker --config /tmp/c buildx imagetools create --tag x y\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names docker run behind --config" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Global config' runs 'docker run'")"
+check "names docker run behind -H" "$(contains "$out" "step 'Global host' runs 'docker run'")"
+check "names docker container run behind --log-level" "$(contains "$out" "step 'Global log level' runs 'docker container run'")"
+check "names docker run behind --config=value and docker build behind -D" \
+  "$(contains "$out" "step 'Global one-word and boolean' runs 'docker run', 'docker build'")"
+check "does not name imagetools behind --config" "$(is "$(contains "$out" "step 'Global config before imagetools'")" false)"
+
+echo "case: a backslash-continued command is one command, not one per line"
+root=$(fixture backslash-continuation)
+add_publish_step "$root" $'      - name: Hand over a long list\n        run: |\n          .github/scripts/release-push.sh handed pi-envoy-v "$VERSION" tarball \\\n            scripts/not-a-command.tgz \\\n            out/not-a-command-either.tgz\n      - name: Install across lines\n        run: |\n          bun \\\n            install --frozen-lockfile\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "does not read a continued argument line as a command" "$(is "$(contains "$out" "step 'Hand over a long list'")" false)"
+check "still names the command a continuation starts" "$(contains "$out" "step 'Install across lines' runs 'bun'")"
 
 summary "check-release-credentials.sh"
