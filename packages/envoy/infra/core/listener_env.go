@@ -62,6 +62,9 @@ func (c ListenerConfig) Check() error {
 	if strings.ContainsFunc(c.HostBridge, unicode.IsControl) {
 		return InputErrorf("hostBridge", "hostBridge contains a control character: %q", c.HostBridge)
 	}
+	if bus.HoldsSeed(c.ListenHost) {
+		return InputErrorf("listenHost", "%w", SeedRefusal("listenHost"))
+	}
 	if strings.ContainsFunc(c.ListenHost, unicode.IsControl) {
 		return InputErrorf("listenHost", "listenHost contains a control character: %q", c.ListenHost)
 	}
