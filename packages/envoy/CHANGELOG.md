@@ -323,6 +323,15 @@
 
 ### Changed
 
+- **Breaking:** `GET` and `PUT /api/v1/settings/delivery` replace
+  `production_job_name` with `production_job_names` (a string array) and
+  `production_apply_step_name`. `PUT` trims each name and refuses an empty list, a blank name or a
+  duplicate with `DELIVERY_SETTINGS_INPUT`. Migrations 0109 and 0110 retain the old database column
+  through one rollout while recording the configured apply step and its conclusion for listed jobs.
+  A production job that succeeds without that step succeeding does not count as a deploy. Warnings
+  name every configured production job and a missing apply step, and the Pipeline card's `job`
+  joins the names it follows with `or`.
+
 - **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
   `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
   `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
