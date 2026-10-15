@@ -1208,9 +1208,16 @@ deployment; the live test below re-proves it against this branch's listener.)
   its default unserved answers an `*Unserved` carrying that version, which `verify` matches with
   `errors.As`. `Store.Label()` names the default (`AWSCURRENT` or `latest`). `check`'s lines are one
   shape for every store: `<name>: present; <label>: no`, `<label>: yes (version <id>)`, and
-  `<label>: version <id> is <STATE>`. Each `--store` value is a `StoreType{Open, CheckName, Help}`,
-  so `Command` names no store; the stores share `failed(call, resource, err)` and a
-  `countVersions` page loop that refuses a repeated page token (`errors.go`).
+  `<label>: version <id> is <STATE>`. So Secret Manager's lines are `<name>: present; latest: no`,
+  `<name>: present; latest: yes (version <n>)` and `<name>: present; latest: version <n> is <STATE>`,
+  in place of the `present, no versions` and `latest: version <n>` this task first named. The AWS
+  lines are the reference script's, which E10 compares byte for byte, and stay so: `check` and
+  `verify` against the in-repo AWS fake print the same bytes at `7fa35cf1` and at `39879394` for
+  every state of the dump (absent, scheduled for deletion, empty, a deprecated version alone, one
+  and two versions, a value that is no seed). Each `--store` value is a
+  `StoreType{Open, CheckName, Help}`, so `Command` names no store; the stores share
+  `failed(call, resource, err)` and a `countVersions` page loop that refuses a repeated page token
+  (`errors.go`).
 - [x] The store implements `Store` over `cloud.google.com/go/secretmanager/apiv1` v1.22.0:
   - `Describe` uses `GetSecret`, a secret with an `expire_time` being scheduled for deletion, then
     `GetSecretVersion` on `versions/latest` for the default's number and state (metadata, no value).
