@@ -34,7 +34,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `HoldsSeed`, which finds a user seed anywhere in a value, whole, inside it or percent-encoded, and is the one seed detector every layer calls (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), the error naming and version paging both share (`errors.go`), and the contract every store's tests run (`store_contract_test.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -169,15 +169,18 @@ a `State` when the store will not serve it, and its `Current` answers an error t
 a `*seed.Unserved` when the version it names is one it will not serve. Every mode reads those
 alone, so no store's kind is a branch in `seed.go`. Its `Put` must refuse a second first version
 with an error matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each
-find the secret empty, and only the store sees both writes. Its tests run `testStoreContract`
-(`seed/store_contract_test.go`). Secrets Manager refuses a second first version itself, through the
-one `ClientRequestToken` every first write sends. Secret Manager has no conditional add, so the GCP
-store reads `versions/1` by number just before its add and refuses when it exists, which leaves one
-window, a round trip wide: two runs whose reads both precede both adds both write, as versions 1
-and 2. The run that wrote version 2 always ends in an error after writing that says what happened,
-that the other run's key does not derive the served seed, and the commands that recover
-(`gcloud secrets versions …`, then `check` and `verify`); the run that wrote version 1 does too if
-its read-back sees version 2, and succeeds if not
+find the secret empty, and only the store sees both writes. Its opener refuses a seed
+(`core.HoldsSeed`) in any string its configuration carries into a client, before any request, as
+the AWS store's `checkedAWSConfig` and `endpointSeed` and the GCP store's `gcpConfigEnv` check do:
+a seed in a profile name or an endpoint's path is sent or quoted as surely as one in a flag. Its
+tests run `testStoreContract` (`seed/store_contract_test.go`). Secrets Manager refuses a second
+first version itself, through the one `ClientRequestToken` every first write sends. Secret Manager
+has no conditional add, so the GCP store reads `versions/1` by number just before its add and
+refuses when it exists, which leaves one window, a round trip wide: two runs whose reads both
+precede both adds both write, as versions 1 and 2. The run that wrote version 2 always ends in an
+error after writing that says what happened, that the other run's key does not derive the served
+seed, and the commands that recover (`gcloud secrets versions …`, then `check` and `verify`); the
+run that wrote version 1 does too if its read-back sees version 2, and succeeds if not
 (`TestGCPOverlappingGenerateRunsWhoseReadsBothPrecedeBothAdds`). The store keeps that window rather
 than close it with a claim (an etag-guarded `UpdateSecret` before the add), which would add
 `secretmanager.secrets.update` to `generate`'s grant and leave a dead run's claim for someone to

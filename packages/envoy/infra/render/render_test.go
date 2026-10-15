@@ -3,6 +3,7 @@ package render_test
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -661,7 +662,7 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 		{
 			name: "a --nats-replicas that is not a number", usage: true,
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "two"),
-			want: `invalid value "two" for flag -nats-replicas`,
+			want: "envoy-infra render webhook-listener-env: --nats-replicas: a malformed value (not echoed: a seed may have been pasted there)",
 		},
 		{
 			name: "an argument after the flags", usage: true,
@@ -695,6 +696,199 @@ func TestMetricFiltersRefusals(t *testing.T) {
 		{name: "no --json", usage: true, args: with("--json"), want: "envoy-infra render metric-filters: --json is required"},
 		{name: "an argument after the flags", usage: true, args: with("", "extra"), want: "envoy-infra render metric-filters: unexpected arguments after the flags"},
 	})
+}
+
+// testSeed is nats-io's vector user seed (nkeys v0.4.15 README.md line 45). nearSeed is it with one
+// letter changed: 58 base32 letters that are no seed, which render takes like any other value.
+const (
+	testSeed = "SUAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY"
+	nearSeed = "SUAKYAHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY"
+)
+
+// percentEncoded spells every byte of text as %XX.
+func percentEncoded(text string) string {
+	var b strings.Builder
+	for i := range len(text) {
+		fmt.Fprintf(&b, "%%%02X", text[i])
+	}
+	return b.String()
+}
+
+// requireNoSeed requires text to hold no twelve letters of testSeed in a row, nor any of it
+// percent-encoded.
+func requireNoSeed(t *testing.T, stream, text string) {
+	t.Helper()
+	for i := range len(testSeed) - 11 {
+		require.NotContains(t, text, testSeed[i:i+12], "%s holds part of the seed", stream)
+	}
+	require.NotContains(t, text, percentEncoded(testSeed[:12]), "%s holds part of the seed, percent-encoded", stream)
+}
+
+// A seed reaches render's output three ways: a flag's value, which the rendering prints; the flag
+// package's own messages, which quote an undefined flag word and a value it cannot parse; and the
+// refusals of core and rendering, which quote a value, a user's name and a subject from the
+// authorization file. Each is refused, naming the flag or the file's field and never the value.
+func TestRenderNeverEchoesASeed(t *testing.T) {
+	require.Equal(t, testSeed[:5]+"A"+testSeed[6:], nearSeed)
+	const seedFlag = ": an nkey user seed, which is never an argument (not echoed)"
+	const seedInFile = ": an nkey user seed, which the file never holds (not echoed)"
+	const malformed = "a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)"
+	const malformedValue = ": a malformed value (not echoed: a seed may have been pasted there)"
+	nats := func(file string, rest ...string) []string {
+		return append([]string{"nats-start-script", "--authorization-file", file, "--config-path", "/tmp/nats-server.conf"}, rest...)
+	}
+	filters := func(rest ...string) []string {
+		return append([]string{"metric-filters", "--component", "nats-service"}, rest...)
+	}
+	valid := writeFile(t, authorizationJSON)
+	seededPath := filepath.Join(t.TempDir(), testSeed+".json")
+	require.NoError(t, os.WriteFile(seededPath, []byte(authorizationJSON), 0o600))
+	inFile := func(old, new string) string {
+		require.Equal(t, 1, strings.Count(authorizationJSON, old), "%q occurs once", old)
+		return writeFile(t, strings.Replace(authorizationJSON, old, new, 1))
+	}
+
+	for _, row := range []refusal{
+		// A flag's value, which the rendering would print.
+		{name: "--machine-id", args: listenerFlags([]string{"machine-id"}, "--machine-id", testSeed), want: "refused: --machine-id" + seedFlag},
+		{
+			name: "--nats-url, in its userinfo",
+			args: listenerFlags([]string{"nats-url"}, "--nats-url", "nats://"+testSeed+"@hub.internal.example:4222"),
+			want: "refused: --nats-url" + seedFlag,
+		},
+		{
+			name: "--nats-url, percent-encoded in its path",
+			args: listenerFlags([]string{"nats-url"}, "--nats-url", "nats://hub.internal.example:4222/"+percentEncoded(testSeed)),
+			want: "refused: --nats-url" + seedFlag,
+		},
+		{name: "--reviewer-app-id", args: listenerFlags([]string{"reviewer-app-id"}, "--reviewer-app-id", testSeed), want: "refused: --reviewer-app-id" + seedFlag},
+		{name: "--mention-trigger", args: listenerFlags([]string{"mention-trigger"}, "--mention-trigger", "@"+testSeed), want: "refused: --mention-trigger" + seedFlag},
+		{name: "--listen-host", args: listenerFlags([]string{"listen-host"}, "--listen-host", testSeed), want: "refused: --listen-host" + seedFlag},
+		{
+			name: "--machine-id and --mention-trigger, both named",
+			args: listenerFlags([]string{"machine-id", "mention-trigger"}, "--machine-id", testSeed, "--mention-trigger", testSeed),
+			want: "refused: --machine-id, --mention-trigger" + seedFlag,
+		},
+		{name: "--config-header", args: nats(valid, "--config-header", "Rendered for "+testSeed), want: "refused: --config-header" + seedFlag},
+		{name: "--server-arg", args: nats(valid, "--server-arg", "--server_name="+testSeed), want: "refused: --server-arg" + seedFlag},
+		{name: "--config-path", args: nats(valid, "--config-path", "/tmp/"+testSeed+".conf"), want: "refused: --config-path" + seedFlag},
+		{name: "--authorization-file's path", args: nats(seededPath), want: "refused: --authorization-file" + seedFlag},
+		{
+			name: "--logical-name-prefix",
+			args: filters("--metric-namespace", "example/NATS", "--logical-name-prefix", testSeed, "--json"),
+			want: "refused: --logical-name-prefix" + seedFlag,
+		},
+		{
+			name: "--metric-namespace",
+			args: filters("--metric-namespace", "example/"+testSeed, "--logical-name-prefix", "example-bus", "--json"),
+			want: "refused: --metric-namespace" + seedFlag,
+		},
+		// The flag package's own messages, which quote what they cannot take.
+		{
+			name: "an undefined flag word", usage: true,
+			args: listenerFlags(nil, "--"+testSeed),
+			want: "envoy-infra render webhook-listener-env: " + malformed,
+		},
+		{
+			name: "an undefined flag word with a value", usage: true,
+			args: nats(valid, "-"+testSeed+"=1"),
+			want: "envoy-infra render nats-start-script: " + malformed,
+		},
+		{
+			name: "--nats-replicas, which is no number", usage: true,
+			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", testSeed),
+			want: "envoy-infra render webhook-listener-env: --nats-replicas" + malformedValue,
+		},
+		{
+			name: "--json, which is no boolean", usage: true,
+			args: filters("--metric-namespace", "example/NATS", "--logical-name-prefix", "example-bus", "--json="+testSeed),
+			want: "envoy-infra render metric-filters: --json" + malformedValue,
+		},
+		// A refusal of core or rendering, which quotes the value it refuses.
+		{name: "--webhook, which webhooks quotes", args: listenerFlags([]string{"webhook"}, "--webhook", testSeed), want: "refused: --webhook" + seedFlag},
+		{
+			name: "--host-bridge, which its whitespace refusal quotes",
+			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", " "+testSeed),
+			want: "refused: --host-bridge" + seedFlag,
+		},
+		{
+			name: "a user's name in --authorization-file",
+			args: nats(inFile(`"name": "example-listener"`, `"name": "`+testSeed+`"`)),
+			want: "refused: --authorization-file: users[0].name" + seedInFile,
+		},
+		{
+			name: "a user's nkey in --authorization-file",
+			args: nats(inFile("UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", testSeed)),
+			want: "refused: --authorization-file: users[0].nkey" + seedInFile,
+		},
+		{
+			name: "a publish subject in --authorization-file",
+			args: nats(inFile(`"envoy.example.>"`, `"envoy.`+testSeed+`.>"`)),
+			want: "refused: --authorization-file: users[0].publish.allow[0]" + seedInFile,
+		},
+		{
+			name: "a publish deny in --authorization-file",
+			args: nats(inFile(`"envoy.example.private"`, `"envoy.`+testSeed+`"`)),
+			want: "refused: --authorization-file: users[0].publish.deny[0]" + seedInFile,
+		},
+		{
+			name: "a subscribe queue group in --authorization-file",
+			args: nats(inFile(`"legion.work workers"`, `"legion.work `+testSeed+`"`)),
+			want: "refused: --authorization-file: users[1].subscribe.allow[1]" + seedInFile,
+		},
+		{
+			name: "noAuthUser in --authorization-file",
+			args: nats(inFile(`"noAuthUser": "example-fallback"`, `"noAuthUser": "`+testSeed+`"`)),
+			want: "refused: --authorization-file: noAuthUser" + seedInFile,
+		},
+		{
+			name: "a key in --authorization-file",
+			args: nats(inFile(`"hasSeed": true
+    },
+    {
+      "name": "example-daemon"`, `"`+testSeed+`": true
+    },
+    {
+      "name": "example-daemon"`)),
+			want: "refused: --authorization-file: users[0]: a key holding an nkey user seed (not echoed)",
+		},
+		{
+			name: "--authorization-file that is not JSON",
+			args: nats(writeFile(t, `{"users": `+testSeed+`}`)),
+			want: "refused: --authorization-file" + seedInFile,
+		},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			stdout, stderr, code := run(row.args...)
+			require.Equal(t, 2, code, stderr)
+			require.Empty(t, stdout)
+			require.Contains(t, stderr, row.want)
+			require.Equal(t, row.usage, strings.Contains(stderr, "usage: envoy-infra render"), "the usage is printed exactly on a usage error: %q", stderr)
+			requireNoSeed(t, "stderr", stderr)
+			requireNoSeed(t, "stdout", stdout)
+		})
+	}
+
+	// The same shapes, with 58 base32 letters that are no seed, render as any value does.
+	nearFile := writeFile(t, strings.Replace(authorizationJSON, `"envoy.example.>"`, `"envoy.`+nearSeed+`.>"`, 1))
+	nearPath := filepath.Join(t.TempDir(), nearSeed+".json")
+	require.NoError(t, os.WriteFile(nearPath, []byte(authorizationJSON), 0o600))
+	for _, control := range []struct {
+		name string
+		args []string
+	}{
+		{"webhook-listener-env", listenerFlags([]string{"machine-id", "mention-trigger"}, "--machine-id", nearSeed, "--mention-trigger", "@"+nearSeed)},
+		{"nats-start-script", nats(nearFile, "--config-header", "Rendered for "+nearSeed, "--server-arg", "--server_name="+nearSeed)},
+		{"nats-start-script, by a path", nats(nearPath, "--config-path", "/tmp/"+nearSeed+".conf")},
+		{"metric-filters", filters("--metric-namespace", "example/NATS", "--logical-name-prefix", nearSeed, "--json")},
+	} {
+		t.Run("control: "+control.name, func(t *testing.T) {
+			stdout, stderr, code := run(control.args...)
+			require.Equal(t, 0, code, stderr)
+			require.Empty(t, stderr)
+			require.Contains(t, stdout, nearSeed)
+		})
+	}
 }
 
 func TestRenderUsage(t *testing.T) {

@@ -871,6 +871,12 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 		{"a seed as --public-key", mode("verify", "--public-key", readmeSeed), seedIn("--public-key")},
 		{"a seed as --store", []string{"check", "--store", readmeSeed, "--name", secretName}, seedIn("--store")},
 		{"a seed in two flags", []string{"check", "--store", "fake-store", "--name", readmeSeed, "--region", readmeSeed}, seedIn("--name, --region")},
+		// Inside a value too: a secret id or a region holding a seed reaches the same lines and
+		// requests as one that is a seed.
+		{"a seed inside --name", []string{"check", "--store", "fake-store", "--name", "example/" + readmeSeed}, seedIn("--name")},
+		{"a seed inside --region", mode("check", "--region", "us-east-1/"+readmeSeed), seedIn("--region")},
+		{"a seed inside --expect-account, percent-encoded", mode("check", "--expect-account", "%"+fmt.Sprintf("%X", readmeSeed[0])+readmeSeed[1:]),
+			seedIn("--expect-account")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
