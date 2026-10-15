@@ -4,8 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
+	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -886,4 +890,139 @@ func TestJetStreamPublishRetainsLegionIssueNotices(t *testing.T) {
 	if got.EventID != item.EventID {
 		t.Fatalf("retained notice event = %q, want %q", got.EventID, item.EventID)
 	}
+}
+
+// A closed connection is replaced once, however many callers find it closed at once: the recovery
+// its ClosedCB starts and a publish each dial a replacement, and the one that installs second
+// closes its own and uses the first's. Otherwise the first is orphaned, still connected, and Close
+// leaves it running; with MaxReconnect -1 it then reconnects forever once its server is gone. The
+// server's own count of client connections (its monitoring endpoint, /connz) shows it. The publish
+// that races the recovery arrives once: the connection the second dialler closes carries nothing,
+// since ensureConnWithContext never hands it to its caller. An observer of its own counts it.
+//
+// The discarded connection closes without its callbacks. Its ClosedCB would log a second
+// `envoy nats connection closed` and start a recovery, and its DisconnectedErrCB would log a second
+// `envoy nats disconnected`, so each round's close logs each of those once and starts one
+// recovery. Not every close races (the publish can find the recovery's connection already
+// installed), so the test closes again until one does, and the discard's own line shows it did.
+func TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen(t *testing.T) {
+	unsetNkeyEnvironment(t)
+	ctr, uri := testnats.StartImageConfig(t, testnats.Image, "jetstream {}\nhttp_port: 8222\n", []string{"-js"}, true)
+	ctx := context.Background()
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		t.Fatalf("NATS host: %v", err)
+	}
+	port, err := ctr.MappedPort(ctx, "8222/tcp")
+	if err != nil {
+		t.Fatalf("NATS monitoring port: %v", err)
+	}
+	const name = "replaced-once"
+	// connections is how many connections the server holds under the client's name, which nats.go
+	// sends in its CONNECT, so the observer's own connection is not counted.
+	connections := func() int {
+		t.Helper()
+		response, err := http.Get("http://" + net.JoinHostPort(host, port.Port()) + "/connz")
+		if err != nil {
+			t.Fatalf("read /connz: %v", err)
+		}
+		defer response.Body.Close()
+		var connz struct {
+			Connections []struct {
+				Name string `json:"name"`
+			} `json:"connections"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
+			t.Fatalf("decode /connz: %v", err)
+		}
+		open := 0
+		for _, connection := range connz.Connections {
+			if connection.Name == name {
+				open++
+			}
+		}
+		return open
+	}
+	// settle waits up to within for the server to hold want of the client's connections, and fails
+	// with the count it last read.
+	settle := func(want int, within time.Duration, when string) {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for open := connections(); open != want; open = connections() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d connection(s) open %s, want %d", open, when, want)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	logs := captureBusLogs(t)
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(name))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	t.Cleanup(client.Close)
+	observer, err := natsgo.Connect(uri)
+	if err != nil {
+		t.Fatalf("connect the observer: %v", err)
+	}
+	t.Cleanup(observer.Close)
+	var mu sync.Mutex
+	arrived := map[string]int{}
+	if _, err := observer.Subscribe("notifications.github.acme.widgets.push.branch.main", func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if json.Unmarshal(msg.Data, &item) == nil {
+			mu.Lock()
+			arrived[item.DedupeKey]++
+			mu.Unlock()
+		}
+	}); err != nil {
+		t.Fatalf("observer subscribe: %v", err)
+	}
+	if err := observer.Flush(); err != nil {
+		t.Fatalf("observer flush: %v", err)
+	}
+	arrivals := func(key string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return arrived[key]
+	}
+	publishOnce(t, client, "before-the-close")
+
+	const maxRounds = 5
+	rounds := 0
+	for logs.count(name, "envoy nats discarded a second replacement connection") == 0 {
+		if rounds == maxRounds {
+			t.Fatalf("in %d closes the publish never raced the recovery to replace the connection", maxRounds)
+		}
+		rounds++
+		key := fmt.Sprintf("after-close-%d", rounds)
+		client.Conn.Close()
+		publishOnce(t, client, key)
+		waitFor(t, 5*time.Second, "the publish after the close to reach the observer", func() bool { return arrivals(key) > 0 })
+		// A second copy would come on the same server's next deliveries: a round trip and a pause
+		// leave it time to, and the discarded connection's callbacks, which run on its own
+		// goroutine, time to log.
+		if err := observer.Flush(); err != nil {
+			t.Fatalf("observer flush: %v", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		if got := arrivals(key); got != 1 {
+			t.Fatalf("the publish after close %d arrived %d times, want 1", rounds, got)
+		}
+		settle(1, 15*time.Second, "once the publish and the recovery have replaced the closed one")
+	}
+	t.Logf("close %d raced: the publish and the recovery each replaced the closed connection", rounds)
+	for _, msg := range []string{"envoy nats connection closed", "envoy nats disconnected", "envoy nats recovery attempt"} {
+		if got := logs.count(name, msg); got != rounds {
+			t.Errorf("%d %q records after %d close(s), want one each: the discarded connection's callbacks ran", got, msg, rounds)
+		}
+	}
+	if got := logs.count(name, "envoy nats recovery: already healthy"); got != 0 {
+		t.Errorf("%d %q records, want none: the discarded connection's close started a recovery", got, "envoy nats recovery: already healthy")
+	}
+
+	observer.Close()
+	client.Close()
+	settle(0, 5*time.Second, "after Close")
 }
