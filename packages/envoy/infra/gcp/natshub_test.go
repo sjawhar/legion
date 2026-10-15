@@ -494,22 +494,22 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
-			err: []string{`users[0] "example-host-a"`, "machineId", "permissions"},
+			err: []string{`users[0]: machineId and permissions are both set`},
 		},
 		{
 			name: "a user naming neither a machine id nor permissions",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions = nil },
-			err:  []string{`users[1] "example-operator"`, "machineId", "permissions"},
+			err:  []string{`users[1]: name machineId, for its host's permission set, or permissions`},
 		},
 		{
 			name: "a user with an empty machine id",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef("") },
-			err:  []string{`users[0] "example-host-a"`, "machineId"},
+			err:  []string{`users[0]: machineId is empty`},
 		},
 		{
 			name: "a user without a public key",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[0].NKey = "" },
-			err:  []string{`users[0] "example-host-a"`, "nkey"},
+			err:  []string{`users[0]: nkey is required`},
 		},
 		{
 			name: "a user whose public key is a seed",
@@ -556,14 +556,15 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
-// A seed in any plain input the hub renders, registers or quotes in a refusal is refused naming
+// A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone and machine type, which reach the group and the
-// template; the images and each user's name, machine id and rules, which reach the user data or
-// core's refusals. The seed is found as bus.HoldsSeed finds it: whole, inside a longer value, or
-// percent-encoded. A seed as a user's nkey is core's to refuse, unquoted (the resolver table's
-// "a user whose public key is a seed"), and tailnetAuthKey, a secret that reaches the secret
-// version alone, is not checked.
+// template; the images, which reach the user data; and a user's machine id, which the hub turns
+// into that user's rules. The seed is found as bus.HoldsSeed finds it: any type, either case, whole,
+// inside a longer value, split by '.', '-', '_' or whitespace, or percent-encoded. A user's name and
+// rule entries are core's to refuse (TestNatsHubPassesOnCoresSeedRefusalOfUsers); a seed as a
+// user's nkey is core's to refuse, unquoted (the resolver table's "a user whose public key is a
+// seed"); and tailnetAuthKey, a secret that reaches the secret version alone, is not checked.
 func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
 	inside := "example-" + seed
@@ -581,14 +582,7 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a seed in the Tailscale image", "tailscaleImage", func(a *gcp.NatsHubArgs) {
 			a.TailscaleImage = "example.invalid/" + seed + digest
 		}},
-		{"a seed as a user's name", "users[1].name", func(a *gcp.NatsHubArgs) { a.Users[1].Name = seed }},
 		{"a seed inside a machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(inside) }},
-		{"a seed in a publish allow entry", "users[1].permissions.publish.allow[0]", func(a *gcp.NatsHubArgs) {
-			a.Users[1].Permissions.Publish.Allow = []string{"notifications." + seed}
-		}},
-		{"a seed percent-encoded in a subscribe deny entry", "users[1].permissions.subscribe.deny[0]", func(a *gcp.NatsHubArgs) {
-			a.Users[1].Permissions.Subscribe.Deny = []string{percentEncoded(seed)}
-		}},
 		// A reader or a decoder takes a seed in lowercase, or split by '.', '-', '_' or whitespace, as
 		// the seed.
 		{"a lowercase seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = lower }},
@@ -621,6 +615,60 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 			row.edit(args)
 			err := gcp.ResolveNatsHub(args)
 			require.EqualError(t, err, row.input+": an nkey user seed, which is never an input of the hub (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+		})
+	}
+}
+
+// core.Authorization refuses a seed in a user's name or a rule entry before any refusal of its own
+// quotes it, naming the path and never the value, and the hub passes that refusal on as it is.
+// The hub's own refusals of a user name it by its index alone, so a seed in the name never reaches
+// one: they come before core reads the names.
+func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
+	seed, _ := testnats.User(t)
+	lower := strings.ToLower(seed)
+	for _, row := range []struct {
+		name string
+		edit func(*gcp.NatsHubArgs)
+		want string
+	}{
+		{"a seed as a user's name", func(a *gcp.NatsHubArgs) { a.Users[1].Name = seed },
+			"users[1]: name holds an nkey seed (not echoed)"},
+		{"a lowercase seed as a user's name", func(a *gcp.NatsHubArgs) { a.Users[1].Name = lower },
+			"users[1]: name holds an nkey seed (not echoed)"},
+		{"a user's name split by a hyphen", func(a *gcp.NatsHubArgs) { a.Users[1].Name = splitSeed(lower, "-") },
+			"users[1]: name holds an nkey seed (not echoed)"},
+		{"a seed in a publish allow entry", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions.Publish.Allow = []string{"notifications." + seed}
+		}, `users[1] "example-operator": publish.allow[0] holds an nkey seed (not echoed)`},
+		{"a seed percent-encoded in a subscribe deny entry", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions.Subscribe.Deny = []string{percentEncoded(seed)}
+		}, `users[1] "example-operator": subscribe.deny[0] holds an nkey seed (not echoed)`},
+		{"a lowercase seed in a publish deny entry", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions.Publish.Deny = []string{"notifications." + lower}
+		}, `users[1] "example-operator": publish.deny[0] holds an nkey seed (not echoed)`},
+		{"a subscribe allow entry split across subject tokens", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions.Subscribe.Allow = []string{"notifications." + splitSeed(seed, ".")}
+		}, `users[1] "example-operator": subscribe.allow[0] holds an nkey seed (not echoed)`},
+		// The hub's own refusals of a user come first, and name it by its index alone.
+		{"a seed as the name of a user with no nkey", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Name, a.Users[1].NKey = seed, ""
+		}, "users[1]: nkey is required"},
+		{"a seed as the name of a user naming both a machine id and permissions", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Name, a.Users[1].MachineID = seed, pulumi.StringRef("example-host-b")
+		}, "users[1]: machineId and permissions are both set; name one"},
+		{"a seed as the name of a user naming neither", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Name, a.Users[1].Permissions = lower, nil
+		}, "users[1]: name machineId, for its host's permission set, or permissions"},
+		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
+			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
+		}, "users[0]: machineId is empty"},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := exampleArgs()
+			row.edit(args)
+			err := gcp.ResolveNatsHub(args)
+			require.EqualError(t, err, row.want)
 			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 		})
 	}

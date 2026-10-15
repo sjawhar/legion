@@ -51,14 +51,16 @@ naming the input. So the cloud-config is known at preview.
 
 The hub refuses these before it registers anything, with an error naming the input:
 
-- an nkey user seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: whole, inside a
-  longer value, or percent-encoded), in any plain input the user data, a child or a refusal would
-  carry: `hostname`, a tag, `zone`, `machineType`, an image, or a user's `name`, `machineId` or
-  rule entry. The error names the input by its path and never its value, as
-  `users[1].name: an nkey user seed, which is never an input of the hub (not echoed)`. `network`
-  and `subnetwork` may come from another resource, so a seed in either fails the preview or update
-  once it resolves, with the same error, before any child is registered with it. A seed as a user's
-  `nkey` is refused as an `nkey` that is no public key, without quoting it;
+- an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
+  whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in an
+  input the hub carries into the user data, a child or a refusal: `hostname`, a tag, `zone`,
+  `machineType`, an image, or a user's `machineId`. The error names the input by its path and never
+  its value, as `users[0].machineId: an nkey user seed, which is never an input of the hub (not
+  echoed)`. `network` and `subnetwork` may come from another resource, so a seed in either fails
+  the preview or update once it resolves, with the same error, before any child is registered with
+  it. A seed in a user's `name` or a rule entry is refused by the authorization, as
+  [The hub's users](#the-hubs-users) says, and a seed as a user's `nkey` is refused as an `nkey`
+  that is no public key, without quoting it;
 - a `hostname` outside the rule above;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;
@@ -93,11 +95,15 @@ refuses every client without the seed of one of `users`. The rendered file, head
 `# Rendered by envoy-infra. Public keys only.`, is `/etc/nats/nats-server.conf` on the VM; the
 VM's metadata holds it in the clear.
 
-A user is refused, named as `users[<index>] "<name>"`, when it names both `machineId` and
-`permissions` or neither, when its `machineId` or `nkey` is empty, and for each of the
-authorization's own refusals under [NATS authorization](../README.md#nats-authorization), such as
-a name of another form or one two users share, an `nkey` that is not a user public key (a
-seed included), or an empty `allow`.
+A user is refused when it names both `machineId` and `permissions` or neither, or when its
+`machineId` or `nkey` is empty, named by its index alone, as `users[1]: nkey is required`, since
+these come before the authorization has checked the names. It is refused too for each of the
+authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
+`users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
+user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
+user's name or a rule entry before any of those, naming the path and not the value, as
+`users[1]: name holds an nkey seed (not echoed)` or
+`users[1] "example-operator": publish.allow[0] holds an nkey seed (not echoed)`.
 
 ## What the hub's VM runs
 

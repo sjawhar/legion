@@ -99,10 +99,12 @@ versions. Never add the module to the root `go.work`.
   The hub reads none of its Inputs by value at construct: its resolver checks only that
   `tailnetAuthKey` is set and that `subnetwork` comes with `network`, and `network` and
   `subnetwork` are checked for a seed once they resolve (`gcp.refuseSeed`). Its resolver refuses a
-  seed (`bus.HoldsSeed`) in every plain string input first, naming the input's path and never its
-  value (`gcp.seededInput`), since every one reaches the user data, a child's inputs or a refusal
-  that quotes it; a string input added to the hub joins that list, with a row in
-  `TestNatsHubRefusesASeedInAnyPlainInput`.
+  seed (`bus.HoldsSeed`) in every string input the hub itself carries first (`gcp.seededInput`:
+  hostname, tags, zone, machine type, images, each user's machine id), naming the input's path
+  and never its value; a string input added to the hub joins that list, with a row in
+  `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and rule entries are core's to refuse,
+  and the hub's own user refusals, which run before core's, name a user by its index alone
+  (`TestNatsHubPassesOnCoresSeedRefusalOfUsers`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,

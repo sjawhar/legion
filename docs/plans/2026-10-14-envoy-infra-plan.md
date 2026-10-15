@@ -1569,11 +1569,14 @@ the cloud-neutral type `aws:NatsService`'s users take too, whose `allow` is requ
 refuses an empty one, and the key field is `nkey`, as `aws:User` names it: one shape for a NATS
 user in both clouds, and the `gcp` package imports no `aws` package. The schema names the hub's
 own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also refuses, naming the
-input: a seed (`bus.HoldsSeed`: whole, inside a longer value, or percent-encoded) in any plain
-string input, by the input's path and never its value, and in `network` or `subnetwork` once they
-resolve; a hostname outside its rule, no tags or a tag outside `^tag:[A-Za-z][A-Za-z0-9-]*$`, an
-empty zone or `machineType`, a `diskSizeGb` below 1, no `tailnetAuthKey`, and `subnetwork` without
-`network`. Only `tailnetAuthKey`, `network` and `subnetwork` take another resource's output.
+input: a seed (`bus.HoldsSeed`: any type, either case, whole, inside a longer value, split by
+`.`, `-`, `_` or whitespace, or percent-encoded) in a string input the hub itself carries
+(hostname, tags, zone, machine type, images, a user's machine id), by the input's path and never
+its value, leaving a user's name and rule entries to core's refusal, and in `network` or
+`subnetwork` once they resolve; a hostname outside its rule, no tags or a tag outside
+`^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or `machineType`, a `diskSizeGb` below 1, no
+`tailnetAuthKey`, and `subnetwork` without `network`. Only `tailnetAuthKey`, `network` and
+`subnetwork` take another resource's output.
 
 Resources (pulumi-gcp v10.1.0), all children, each named after the hostname rather than the
 component, after `providers.Require(..., "gcp")`:
