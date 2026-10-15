@@ -620,12 +620,18 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
 
 ### Task 1.6: production check, after merge
 
-- [ ] Once #1946 is merged and `release-envoy-infra.yaml` has run: record the run id and the
+- [x] Once #1946 is merged and `release-envoy-infra.yaml` has run: record the run id and the
   `envoy-infra-v<v>` tag; from an empty directory, `pulumi package add envoy-infra@<v> --server 'https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}'`
   succeeds, and `pulumi preview` of a YAML program with one explicit `pulumi:providers:docker` and
   one `envoy-infra:host:Listener` plans creates of exactly the stack, that provider, the component,
   its `docker:index/remoteImage:RemoteImage` and its `docker:index/container:Container`. Record the
   commands and output on #1946.
+  - Passed on 2026-10-15: `envoy-infra-v0.1.0` from `release-envoy-infra.yaml` run 38684872348,
+    tagged at `131ccd0a`; `SHA256SUMS --check` OK; the pinned `gh attestation verify` exited 0; a
+    copy with one byte corrupted was refused; `plugin install --checksum` worked; `package add`
+    recorded 0.1.0; the YAML preview planned `{"create": 5}`: the stack, the docker provider,
+    `host:Listener`, the `RemoteImage` and the `Container`. Record:
+    https://github.com/sjawhar/legion/pull/1946#issuecomment-6185319853
 
 ---
 
