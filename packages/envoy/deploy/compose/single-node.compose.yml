@@ -24,8 +24,8 @@ services:
       retries: 3
       start_period: 5s
     volumes:
-      # The ENVOY_NOTIFICATIONS stream and Envoy's key-value buckets: a restart keeps each
-      # session's subscriptions and role claims and the last 72 hours of events.
+      # The ENVOY_NOTIFICATIONS stream and Envoy's key-value buckets: a restart keeps the last 72
+      # hours of events, and the subscriptions and role claims of every session still running.
       - nats-data:/data
 
   listener:

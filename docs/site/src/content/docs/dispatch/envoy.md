@@ -162,13 +162,14 @@ deliveries in progress finish, then exits with a non-zero code so a restart poli
 own and the listener in front of it, both on `127.0.0.1` only. The agent sessions on that machine
 register, subscribe, claim roles and send each other messages through it. Nothing on another
 machine reaches it, and no GitHub or Slack webhook arrives, so no pull request or check events
-reach the sessions.
+reach the sessions. NATS takes no credential, so every user on the machine can read and send
+messages through it: run it on a machine whose users you trust.
 
-You need Docker Engine with the Compose plugin (`docker compose version` answers) and a checkout
-of this repository; the images are public. The two services listen on `4222` (NATS), `8222` (NATS
-monitoring) and `9020` (the listener). When something else on the machine uses one, move it in
-`.env` (`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port wherever a
-command or the `envoy.json` below names the default.
+You need Linux with Docker Engine and the Compose plugin (`docker compose version` answers), and a
+checkout of this repository; the images are public. The two services listen on `4222` (NATS),
+`8222` (NATS monitoring) and `9020` (the listener). When something else on the machine uses one,
+move it in `.env` (`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port
+wherever a command or the `envoy.json` below names the default.
 
 1. Write the machine's settings:
 
@@ -177,9 +178,10 @@ command or the `envoy.json` below names the default.
    cp -n single-node.env.example .env
    ```
 
-   Set `ENVOY_MACHINE_ID` in `.env` to what `hostname` prints; the file says what its other
-   settings do. The other compose files here read the same `.env`, so `cp -n` leaves one that
-   already exists alone (it may print `not replacing`): add to it the template's settings it lacks.
+   Set `ENVOY_MACHINE_ID` in `.env` to what `hostname -s` prints, with no `.` in it; the file says
+   what its other settings do. The other compose files here read the same `.env`, so `cp -n` leaves
+   one that already exists alone (it may print `not replacing`): add to it the template's settings
+   it lacks.
 
 2. Start it:
 
@@ -226,8 +228,9 @@ command or the `envoy.json` below names the default.
    `envoy_send`.
 
 NATS keeps the event stream and Envoy's key-value buckets in the `envoy-single-node_nats-data`
-volume. A restart keeps each session's subscriptions and role claims and the last 72 hours of
-events, and a running session renews its registration every two minutes.
+volume. A restart keeps the last 72 hours of events, and the subscriptions and role claims of every
+session still running. A running session renews its registration every two minutes; once it stops,
+Envoy drops its subscriptions and role claims within minutes.
 
 | Task | Command, from `packages/envoy/deploy/compose` |
 | --- | --- |
