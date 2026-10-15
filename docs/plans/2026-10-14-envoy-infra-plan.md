@@ -652,9 +652,15 @@ written here.
 **Files:**
 - Create: `packages/envoy/infra/core/nats_auth.go`, `nats_auth_test.go`, `nats_auth_live_test.go`
   (build tag `natslive`: the real-server tests), `nkey.go` (`IsUserPublicKey` and
-  `UserSeedPublicKey`, the one strict nkey parser `core` and `seed` share, and `HoldsSeed`, the one
-  seed detector every layer that echoes or sends a value calls), `nkey_test.go`, `pyfmt.go`,
-  `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
+  `UserSeedPublicKey`, the one strict nkey parser `core` and `seed` share, and `SeedRefusal`),
+  `nkey_test.go`, `pyfmt.go`, `pyfmt_test.go`, `testdata/authorization.golden`,
+  `testdata/start-script.golden`
+- Modify: `packages/envoy/internal/bus/nkey.go`, `nkey_test.go`: `HoldsSeed`, the one seed
+  detector every layer that echoes or sends a value calls, #1961's SOCKS5 proxy check among them.
+  It lives in `bus` because the infra module already imports `bus` (core reuses
+  `bus.NkeySeedEnvVar`) and `bus` can never import infra. It is a pure function, so a process that
+  links `bus` without calling it carries none of it: Dispatch's, the listener's, `mcp`'s and
+  `natstail`'s binaries hold no `HoldsSeed` symbol.
 - Modify: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`; create
   `core/input_error.go`. `ListenerConfig` loses `NATSURLs`: `Check()` refuses the config once,
   before a component registers anything, and `Env(natsURLs)` runs `Check` again, so no caller
@@ -662,8 +668,11 @@ written here.
   slice 1's `CheckPlain` and `ListenerEnv` with the same refusal texts. Each refusal is a
   `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
   `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
-  its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
-  3 and 4 build on this API.
+  its refusal table keeps one row for core's refusals, showing where they go. `resolveListener`
+  first refuses a seed in the listener's name and in its own string inputs (`image`,
+  `containerName`, `watchdog.host`, `adopt.*`) with `core.SeedRefusal`, and
+  `construct_test.go` shows every input but `seed` refused through Construct, naming the input.
+  The sibling slices 3 and 4 build on this API.
 - Create: `packages/envoy/infra/internal/pulumitest/mocks.go`, `mocks_test.go`: the mock engine
   and Construct harness every component's tests share. `Mocks` records each registration
   (`One`, `Types`, `Registrations`) and answers with the inputs as state, less any unknown (the
@@ -723,15 +732,14 @@ func (a Authorization) Render(header []string) (string, error)
 func (a Authorization) StartScript(configHeader, serverArgs []string, configPath string) (string, error)
 
 // IsUserPublicKey reports whether key is a user public key: 56 base32 characters whose 35 bytes
-// are the user prefix byte, the key and a valid checksum (nkey.go:30-35).
+// are the user prefix byte, the key and a valid checksum (nkey.go:29-34).
 func IsUserPublicKey(key string) bool
 // UserSeedPublicKey returns the public key of a user seed spelled exactly as nkeys writes one, or
-// why the value is none, in a fixed order, never quoting it (nkey.go:37-76).
+// why the value is none, in a fixed order, never quoting it (nkey.go:36-75).
 func UserSeedPublicKey(value []byte) (string, error)
-// HoldsSeed reports whether text holds a user seed UserSeedPublicKey accepts: whole, inside a
-// longer value or percent-encoded. It answers only true or false and never formats the value
-// (nkey.go:78-124).
-func HoldsSeed(text string) bool
+// SeedRefusal is the refusal of a value that holds an nkey seed (bus.HoldsSeed,
+// packages/envoy/internal/bus/nkey.go:72-103), naming its path, never the value (nkey.go:77-83).
+func SeedRefusal(field string) error
 
 // Object is a Python dict in a known order; PyJSON writes its keys in that order, or sorted under
 // SortKeys (pyfmt.go:18-26).
@@ -743,15 +751,24 @@ type Object []Field
 ```
 
 These semantics are ported from the reference implementation, and the unit tests pin each one:
-- **What is refused** (`nats_auth.go:44-153, 194-214, 252-293`). Every refusal of a user names it,
-  by index and name, and the field.
+- **What is refused** (`nats_auth.go:52-206, 233-262, 300-348`; `listener_env.go:42-65, 78-115`).
+  Every refusal of a user names it, by index and name, and the field.
+  - First, a value that holds an nkey seed of any type, in any spelling (`bus.HoldsSeed`), refused
+    with `core.SeedRefusal`, which names its path and never the value: a user's name, a rule entry
+    (allow or deny, publish or subscribe, a queue group included) and `noAuthUser` (`seedField`,
+    `nats_auth.go:105-136`, checked before any refusal quotes a name or an entry), a header line
+    (`checkHeader`), `StartScript`'s `configPath` and each server argument (`:314-320`), and the
+    listener's `machineId`, `hostBridge` and each NATS URL (`listener_env.go:46-48, 55-57, 87-89`),
+    as an `InputError` naming that input. Each of these reaches a `%q` refusal, the rendered block,
+    the start script or the environment otherwise. An NKey field needs none: one that is not a
+    user public key is refused without being quoted.
   - No users.
   - Every user pending. That would render a block with no users, which is R7's case.
   - A name that fails the pattern.
-  - A pending user without `HasSeed`: it is never rendered, so it stands for nothing (`:106-108`).
+  - A pending user without `HasSeed`: it is never rendered, so it stands for nothing (`:150-152`).
   - A pending user that declares rules.
   - A keyed user missing either rule.
-  - An NKey that is not a user public key: `core.IsUserPublicKey` (`nkey.go:30-35`), which takes
+  - An NKey that is not a user public key: `core.IsUserPublicKey` (`nkey.go:29-34`), which takes
     `U` plus 55 base32 characters, strictly decoded, whose 35 bytes carry the user prefix byte and
     a valid CRC-16/XMODEM. It is stricter than `nkeys.IsValidPublicUserKey`, whose decoder skips
     line breaks, takes a key of any length and masks the prefix byte's low bits; `lenientKeys`
@@ -767,17 +784,17 @@ These semantics are ported from the reference implementation, and the unit tests
     `server/client.go:3044-3051`, `:1199-1203`), and `testnats.Image` is 2.10.29.
   - Duplicate names, or duplicate keys.
   - A `NoAuthUser` that names no user, names a pending user, or names a user with `HasSeed`.
-  - A header line holding `\r` or `\n` (`checkHeader`, `:204-214`), in `Render` and `StartScript`.
-  - In `StartScript`, an empty `configPath` (`:262-264`), and a server argument that sets `-c`,
+  - A header line holding `\r` or `\n` (`checkHeader`, `:248-262`), in `Render` and `StartScript`.
+  - In `StartScript`, an empty `configPath` (`:311-313`), and a server argument that sets `-c`,
     `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or `-routes`, with one dash
-    or two and with or without `=value`, named by index and flag and never by value (`:265-271,
-    279-293`). nats-server parses its arguments with Go's flag package and takes a flag's last
+    or two and with or without `=value`, named by index and flag and never by value (`:317-326,
+    334-348`). nats-server parses its arguments with Go's flag package and takes a flag's last
     value, so a later `-c` would load another file in place of the rendered one, `-user`, `-pass`
     and `-auth` would add a credential beside its nkey users, and the route flags would open or
     solicit a route the block, having no cluster authorization, leaves unauthenticated (nats-server
     v2.10.29 `server/opts.go:5343-5345, 5350-5351, 5368-5370`).
   - `StartScript`'s refusals are `InputError`s naming the input as a component's schema does, in
-    the order it checks them (`:252-277`): `authorization` (Validate's refusal, prefixed
+    the order it checks them (`:300-332`): `authorization` (Validate's refusal, prefixed
     `authorization: `; Validate runs once), `configPath`, `serverArgs`, and `configHeader`
     (prefixed `configHeader: `). A caller passes each on as it is, with no sorting of core's
     errors. `Render`'s refusals are plain errors.
@@ -804,7 +821,7 @@ These semantics are ported from the reference implementation, and the unit tests
   for Task 3.x's container definitions too. `PyJSONOptions` has `SortKeys` and `EnsureASCII`. With
   `EnsureASCII`, every non-ASCII character is written as `\uXXXX`, using surrogate pairs above
   U+FFFF, as Python does. A dict is a `core.Object`, written in its order or sorted under
-  `SortKeys`; `Render` builds each user as one (`nats_auth.go:208-213`). `PyJSON` panics on a Go
+  `SortKeys`; `Render` builds each user as one (`nats_auth.go:275-280`). `PyJSON` panics on a Go
   map, which has no key order, and names `core.Object` as the fix; on a float; on a string that is
   not valid UTF-8; and on an `Object` holding a key twice (`pyfmt.go:28-40, 75-80, 88-95, 119-122`).
 
@@ -909,35 +926,37 @@ const AWSSecretsManager = "aws-secrets-manager"
 func OpenAWS(ctx context.Context, region, account string) (Store, error)
 ```
 
-(`seed.go:29-52, 59-67, 99, 136, 248, 281, 357`; `awsstore.go:30, 54`.)
+(`seed.go:30-53, 60-68, 100, 137, 249, 282, 358`; `awsstore.go:30, 54`.)
 
 The CLI is `envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <secret id>
 [--region <r>] [--expect-account <id>] [--public-key U…]`, and `envoy-infra --version`, which
 prints the version the release stamps in (`main.go:17, 35-41`). `--help`, at either level, prints
 the usage and exits 0. An unknown command or mode, and a flag the command does not take or a
 malformed one, is a usage error, exit 2, and is not echoed, since a seed may have been pasted there
-(`main.go:42-52`, `seed.go:360-406`); other usage errors exit 2 too, a defined flag missing its
-value named (`:396-406, 422-437`). So is a flag whose value holds an nkey user seed, whole or
-inside it (`core.HoldsSeed`): `--name` and `--region` reach every line, the refusals and the
-store's requests, so any flag holding a seed is refused naming the flag and not the value, before
-the store opens (`seed.go:407-421`). An interrupt or SIGTERM cancels the command's context instead
+(`main.go:42-52`, `seed.go:361-407`); other usage errors exit 2 too, a defined flag missing its
+value named (`:397-407, 423-438`). So is a flag whose value holds an nkey seed, in any spelling
+(`bus.HoldsSeed`): `--name` and `--region` reach every line, the refusals and the store's
+requests, so any flag holding a seed is refused naming the flag and not the value, before the
+store opens (`seed.go:408-422`). An interrupt or SIGTERM cancels the command's context instead
 of killing it, so a write in flight ends as an unanswered write does, below (`main.go:19-28`). Its
 behaviour is the reference implementation's, with these additions:
 - **Before any request or credential retrieval** (`awsstore.go:54-81`), it refuses, exit 2:
   - an `--expect-account` that is not 12 digits (`:55-57`), or given empty, which `Command`
-    refuses as a usage error before the store opens (`seed.go:434-436`);
+    refuses as a usage error before the store opens (`seed.go:435-437`);
   - a seed anywhere the AWS configuration carries one into a client, named by where it came from
-    and never quoted (`core.HoldsSeed`, `nkey.go:78-124`, finds one whole, inside a path or any
-    part of a URL, or percent-encoded). Before any client is built (`checkedAWSConfig`,
-    `awsstore.go:94-133`): `--region`; every `AWS_` environment variable and `_X_AMZN_TRACE_ID`,
-    since the SDK reads no other (`:135-155`); the default paths of the shared config and
-    credentials files; on a failed load, the profile the loader reads, read on its own, then the
-    load error's text, since the loader quotes profile names, paths and invalid values; after the
-    load, every string of every shared config profile the loader read, each `source_profile` as
-    a profile of its own, and of the resolved `aws.Config` (`configSeed`, `:157-320`). After the
-    clients are built and before any request, the Secrets Manager endpoint and STS's, regional
-    and global, resolved with each client's own resolver (`endpointSeed`, `:333-378`), since the
-    SDK resolves an endpoint only as it sends a request;
+    and never quoted (`bus.HoldsSeed`, `packages/envoy/internal/bus/nkey.go:72-103`, finds one of
+    any type in any spelling: whole or inside a longer value, in either case, percent-encoded,
+    with its last character's unused bits changed, or split by `.`, `-`, `_` or whitespace). Before
+    any client is built (`checkedAWSConfig`, `awsstore.go:94-133`): `--region`; every `AWS_`
+    environment variable and `_X_AMZN_TRACE_ID`, since the SDK reads no other (`:135-155`); the
+    default paths of the shared config and credentials files; on a failed load, the profile the
+    loader reads, read on its own, then the load error's text, since the loader quotes profile
+    names, paths and invalid values; after the load, every string of every shared config profile
+    the loader read, each `source_profile` as a profile of its own, and of the resolved
+    `aws.Config` (`configSeed`, `:157-320`). After the clients are built and before any request,
+    the Secrets Manager endpoint and STS's, regional and global, resolved with each client's own
+    resolver (`endpointSeed`, `:333-378`), since the SDK resolves an endpoint only as it sends a
+    request;
   - no region from `--region` or the AWS configuration (`:62-64`);
   - a Secrets Manager endpoint the configuration overrides that is not `https`, unless its host is
     `localhost` or a loopback address, since the seed would cross a network in plain text
@@ -949,10 +968,10 @@ behaviour is the reference implementation's, with these additions:
   endpoints separately, so `Describe`, every mode's first call, also parses the secret's ARN and
   refuses one in another region than the client's, one in another account than `--expect-account`,
   and an answer with no Secrets Manager ARN (`awsstore.go:429-472`).
-- **`generate`** (`seed.go:136-243, 318-341`). It refuses unless the secret exists, is not
+- **`generate`** (`seed.go:137-244, 319-342`). It refuses unless the secret exists, is not
   scheduled for deletion, holds no version, deprecated ones included, and is served by default in
   no version, which `DescribeSecret` answers even while the listing has not caught up. It prints
-  `public key: U…` before it writes, and writes nothing if that print fails (`:172-174`). It
+  `public key: U…` before it writes, and writes nothing if that print fails (`:173-175`). It
   writes the bare `SU…` seed string with `PutSecretValue` under one fixed `ClientRequestToken`,
   which the SDK resends on a retry; a first version another run wrote with another seed is
   `ResourceExistsException`, a refusal, exit 2, after which no `version id` line is printed. It
@@ -960,23 +979,23 @@ behaviour is the reference implementation's, with these additions:
   It then re-lists the versions and reads the value back, which must be the version it wrote and
   derive the printed key. Secrets Manager's reads are eventually consistent, so while the listing
   shows no version or the store serves none, it looks again after pauses of 0.25, 0.5, 1, 2 and
-  4 s (`seed.go:72, 204-243`); more than one version, or another version served, is another
+  4 s (`seed.go:73, 205-244`); more than one version, or another version served, is another
   writer's race at once. It prints `version id: <id>`, or `version id: unknown` when the write
   never answered. Every failure after the write is `error after writing: <what failed>`, exit 1,
-  including a version id it cannot print (`seed.go:175-201, 334-339, 467-482`).
+  including a version id it cannot print (`seed.go:176-202, 335-340, 468-483`).
 - **`check`.** It prints exactly one of the reference script's three lines: `<name>: absent`,
   `<name>: present, scheduled for deletion (<date>)`, or
-  `<name>: present; AWSCURRENT: yes (version <id>)|no` (`seed.go:97-113`).
-- **`verify`** (`seed.go:245-275`). It refuses, exit 2, a `--public-key` that is not a user public
+  `<name>: present; AWSCURRENT: yes (version <id>)|no` (`seed.go:98-114`).
+- **`verify`** (`seed.go:246-276`). It refuses, exit 2, a `--public-key` that is not a user public
   key, without echoing it, and a secret with no `AWSCURRENT` version. Otherwise it compares the key
   derived from the `AWSCURRENT` value with `--public-key` and prints one of the reference's three
   lines: `<name> AWSCURRENT (version <id>) derives <key>: yes`, exit 0; `…: no`, exit 1; or
   `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>`, exit 1, the reason
   `core.UserSeedPublicKey`'s, never quoting the value.
 - **A result that cannot be printed** is never exit 0: `check`'s or `verify`'s line is a refusal,
-  exit 2 (`seed.go:305-312`), and `--version`'s exit 1 (`main.go:36-39`). `generate` with stdout on
+  exit 2 (`seed.go:306-313`), and `--version`'s exit 1 (`main.go:36-39`). `generate` with stdout on
   the null device, which a closed stdout is too, since the Go runtime opens a closed fd 0-2 on it,
-  refuses before the store opens, exit 2 (`seed.go:438-441, 450-465`).
+  refuses before the store opens, exit 2 (`seed.go:439-442, 451-466`).
 - **Secrecy.** The seed never reaches argv, stdout, stderr, a log or an error message, and the AWS
   SDK's logging is off (`awsstore.go:380-392`).
 
@@ -1615,7 +1634,7 @@ Items to verify, each with the row that settles it and where its result goes:
 - `envoy-infra seed generate` against the real Secrets Manager. E10 ran `check` and `verify`
   read-only against the existing deployment's live seed, so the write path (`PutSecretValue`, its
   `AWSCURRENT` stage, the re-list and the read-back waits in
-  `packages/envoy/infra/seed/seed.go:136-243`) is shown only against the in-repo fake endpoint (the
+  `packages/envoy/infra/seed/seed.go:137-244`) is shown only against the in-repo fake endpoint (the
   first seed a consumer generates with a released CLI; that consumer's PR).
 - `gh attestation verify` with the README's flags on an envoy-infra archive, the plugin's and the
   command's (`packages/envoy/infra/README.md:32-34, 73-75`): no release has an attestation to
@@ -1630,8 +1649,17 @@ Hardening considered and not taken (the coordinator's ruling, recorded with #195
   whenever a secret is named.
 - Keeping the seed out of immutable Go strings. `Put` hands the SDK the seed as a `SecretString`,
   a Go string the process cannot clear (`awsstore.go:510`), and `Current` reads one back
-  (`:541`). The read-back byte slices are cleared and the key pair wiped (`seed.go:162, 189, 266`).
+  (`:541`). The read-back byte slices are cleared and the key pair wiped (`seed.go:163, 190, 267`).
   This is memory hygiene only: nothing reaches an output, a log or an error.
+- Refusing a seed split over two values, as `AWS_REGION` holding its first 29 characters and
+  `AWS_DEFAULT_REGION` the rest. This is a known limit: a fragment cannot be validated as a seed,
+  since only the whole seed carries its prefix and checksum, so no detector finds one without
+  knowing the seed; and no AWS source joins the two values, so neither the run's request nor its
+  output carries a whole seed.
+- Refusing a seed in an encoding a reader has to know to apply, such as base64 or hex of its text,
+  or split within one value by a character other than `.`, `-`, `_` or whitespace: `bus.HoldsSeed`
+  reads base32 in either case and percent-encoding, the spellings nkeys, base32 decoders and URLs
+  give a seed, and decoding every other scheme a value might use would be an open-ended guess.
 
 ## End-to-end verification plan
 
@@ -1708,8 +1736,17 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   (`github.com/sjawhar/legion/daemon/internal/testnats`), which this change does not touch.
   `packages/envoy/internal/testnats/` is inside `release-envoy-listener.yaml`'s push paths and bump
   pathspec (`release-envoy-listener.yaml:14-16, 381-387`), so #1951's squash commit starts a
-  listener release run, and a `feat` or `fix` title would cut a `legion-envoy` version with no
-  change to the image or the binaries.
+  listener release run, and a `feat` or `fix` title cuts a `legion-envoy` version.
+- `packages/envoy/internal/bus` (slice 2). New: `HoldsSeed` (`nkey.go:72-103`), the seed
+  detector, moved from `infra/core` so #1961's SOCKS5 proxy check can share it; `bus` can never
+  import `infra/core`, and the infra module already imports `bus`. Callers: `git grep -n
+  'bus\.HoldsSeed' -- packages/` → `infra/core/nats_auth.go`, `infra/core/listener_env.go`,
+  `infra/seed/seed.go`, `infra/seed/awsstore.go`, `infra/host/listener.go`. It is a pure function,
+  and the listener, Dispatch, `mcp` and `natstail`, which link `bus`, call it nowhere: `go tool nm`
+  finds no `HoldsSeed` symbol in any of them. Their binaries still differ from the previous
+  commit's, since a build ID hashes each package's source and `nkey.go`'s line table moves, but
+  not in behaviour. The path is inside the same listener push paths and bump pathspec as
+  `testnats`, so whether #1951's squash cuts a listener version is unchanged.
 - `core.Authorization`, `User` and `Rules` (slice 3) gain JSON keys, the names the
   `aws:Authorization` input spells its fields with, which `render nats-start-script` reads its file
   by, refusing a key in another letter case. Before slice 3 nothing coded those types as JSON;
