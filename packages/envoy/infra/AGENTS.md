@@ -33,7 +33,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `HoldsSeed`, which finds a user seed anywhere in a value, whole, inside it or percent-encoded, and is the one seed detector every layer calls (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -141,8 +141,8 @@ and every error and line it returns, for a canary seed. A new store implements `
 `Current` answering an error that matches `seed.ErrNotServed` when it serves no version, which
 `generate` waits out after its write. Its `Put` must refuse a second first version with an error
 matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each find the
-secret empty, and only the store sees both writes. Its opener refuses a seed (`holdsSeed`) in any
-string its configuration carries into a client, before any request, as the AWS store's
+secret empty, and only the store sees both writes. Its opener refuses a seed (`core.HoldsSeed`) in
+any string its configuration carries into a client, before any request, as the AWS store's
 `checkedAWSConfig` and `endpointSeed` do: a seed in a profile name or an endpoint's path is sent
 or quoted as surely as one in a flag. Its tests run `testStoreContract`
 (`seed/store_contract_test.go`), and it joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
