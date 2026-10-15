@@ -231,10 +231,18 @@ func (r *Rules) object() Object {
 }
 
 // StartScript returns the `sh -c` script that writes Render's text to path and execs nats-server
-// with --config path and serverArgs.
+// with --config path and serverArgs. It refuses a server argument that would set aside the
+// rendered authorization (authorizationFlags), as an InputError naming serverArgs.
 func (a Authorization) StartScript(header []string, serverArgs []string, path string) (string, error) {
 	if path == "" {
 		return "", errors.New("path is required: the start script writes the configuration there")
+	}
+	for i, arg := range serverArgs {
+		name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")
+		if why, ok := authorizationFlags[name]; ok && strings.HasPrefix(arg, "-") {
+			// The value is not quoted: after -pass or -auth it is a credential.
+			return "", InputErrorf("serverArgs", "serverArgs[%d] sets nats-server's -%s, which %s", i, name, why)
+		}
 	}
 	text, err := a.Render(header)
 	if err != nil {
@@ -242,4 +250,15 @@ func (a Authorization) StartScript(header []string, serverArgs []string, path st
 	}
 	command := append([]string{"nats-server", "--config", path}, serverArgs...)
 	return "set -eu; printf '%s' " + ShellQuote(text) + " > " + ShellQuote(path) + "; exec " + ShellJoin(command), nil
+}
+
+// authorizationFlags are the nats-server flags a server argument must not set, with what each does
+// to the rendered authorization. nats-server parses its arguments with Go's flag package, so each
+// takes one dash or two (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351).
+var authorizationFlags = map[string]string{
+	"c":      "loads another configuration file in place of the rendered one",
+	"config": "loads another configuration file in place of the rendered one",
+	"auth":   "adds a token beside the rendered nkey users",
+	"user":   "adds a user beside the rendered nkey users",
+	"pass":   "sets a password beside the rendered nkey users",
 }

@@ -564,6 +564,11 @@ func TestNatsStartScriptRefusals(t *testing.T) {
 			args: with(valid, "--config-header", "one\ntwo"),
 			want: "refused: --config-header: configHeader: header[0] holds a line break",
 		},
+		{
+			name: "a --server-arg that sets a password beside the rendered users",
+			args: with(valid, "--server-arg", "--jetstream", "--server-arg", "--pass=example"),
+			want: "refused: --server-arg: serverArgs[1] sets nats-server's -pass, which sets a password beside the rendered nkey users",
+		},
 	})
 }
 

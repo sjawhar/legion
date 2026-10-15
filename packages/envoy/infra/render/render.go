@@ -142,6 +142,7 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 		map[string]string{
 			"authorization": "authorization-file",
 			"configHeader":  "config-header",
+			"serverArgs":    "server-arg",
 			"configPath":    "config-path",
 		})
 	var authorizationFile, configPath string

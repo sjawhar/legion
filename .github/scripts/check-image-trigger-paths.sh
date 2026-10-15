@@ -79,9 +79,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-# The path model this check shares with check-envoy-infra-release-paths.sh: workflow_paths.py,
-# beside this script in the repository it checks. PYTHONDONTWRITEBYTECODE keeps the import from
-# leaving a __pycache__ in the tree.
+# The path model this check reads workflows with: workflow_paths.py, beside this script in the
+# repository it checks. PYTHONDONTWRITEBYTECODE keeps the import from leaving a __pycache__ in the
+# tree.
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 <<'PY'
 import json
 import posixpath

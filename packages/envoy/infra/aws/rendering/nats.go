@@ -1,6 +1,7 @@
 package rendering
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -146,7 +147,8 @@ func NatsLaunch(authorization *core.Authorization, header, serverArgs []string, 
 // the service has an authorization: it writes the rendered configuration (public keys only) to
 // configPath and execs nats-server on it, serverArgs still setting JetStream and the ports. The
 // component launches the container with it and `envoy-infra render nats-start-script` prints it.
-// Each refusal is a core.InputError naming the component's input.
+// Each refusal is a core.InputError naming the component's input: StartScript's own names
+// serverArgs, and any other it returns is a header line's.
 func NatsStartScript(authorization core.Authorization, configHeader, serverArgs []string, configPath string) (string, error) {
 	if err := authorization.Validate(); err != nil {
 		return "", core.InputErrorf("authorization", "authorization: %w", err)
@@ -155,6 +157,10 @@ func NatsStartScript(authorization core.Authorization, configHeader, serverArgs 
 		return "", core.InputErrorf("configPath", "configPath is required with authorization: the start script writes the configuration there")
 	}
 	script, err := authorization.StartScript(configHeader, serverArgs, configPath)
+	var refused *core.InputError
+	if errors.As(err, &refused) {
+		return "", err
+	}
 	if err != nil {
 		return "", core.InputErrorf("configHeader", "configHeader: %w", err)
 	}

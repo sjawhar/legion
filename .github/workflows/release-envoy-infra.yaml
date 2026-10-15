@@ -2,7 +2,7 @@ name: Release envoy-infra
 
 # The envoy-infra Pulumi plugin and the envoy-infra command (packages/envoy/infra), released
 # together on an envoy-infra-v* tag of the commit the run checked out, as two archives per target
-# (the build step says what each holds). The plugin's schema names that release as its download
+# (build's build step says what each holds). The plugin's schema names that release as its download
 # URL, so `pulumi package add envoy-infra@<version> --server <that URL>` installs it, and
 # packages/envoy/infra/README.md ("Install") gives the commands that verify each archive first.
 # Nothing is committed: a Go module carries no version file, so the tag alone records the version,
@@ -10,67 +10,70 @@ name: Release envoy-infra
 on:
   push:
     branches: [main]
-    # The plugin's and the command's inputs: their module, every package of packages/envoy they
-    # compile in, the manifests that set the versions they build with (the module's own go.work
-    # binds packages/envoy), the notices script that writes their archives' notices, the list of
-    # the targets they build, the list of the paths a version is cut from, and this workflow.
-    # .github/scripts/check-envoy-infra-release-paths.sh fails the build when this list misses a
-    # package either compiles in or a path .github/envoy-infra-release-paths names.
+    # Every input the plugin's and the command's builds read: packages/envoy (their module, and
+    # through its go.work the Envoy module whose packages they compile in), the notices script that
+    # writes their archives' notices, the list of the targets they build, the Pulumi CLI install the
+    # smoke test runs, and this workflow. Which of them cut a version, the version step decides from
+    # what the two compile.
     paths:
-      - "packages/envoy/infra/**"
-      - "packages/envoy/internal/bus/**"
-      - "packages/envoy/internal/contracts/**"
-      - "packages/envoy/go.mod"
-      - "packages/envoy/go.sum"
+      - "packages/envoy/**"
       - "scripts/go-third-party-notices.sh"
       - ".github/envoy-infra-targets.json"
-      - ".github/envoy-infra-release-paths"
+      - ".github/actions/install-pulumi/**"
       - ".github/workflows/release-envoy-infra.yaml"
   workflow_dispatch:
 
-# The release job declares its own permissions; nothing runs under this workflow-level default.
+# Every job declares its own permissions (build, publish below); nothing runs under this
+# workflow-level default.
 permissions: {}
 
+# One run of a ref at a time, build and publish together, so a main run's version step always sees
+# the tag the main run before it pushed. A pending main run GitHub drops in favor of a newer one
+# loses nothing: the version step bumps from the last tag to HEAD, not this commit alone. Each ref
+# has a group of its own, so a dispatch from another branch, which releases nothing, never takes a
+# pending main run's place.
+concurrency:
+  group: release-envoy-infra-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  release:
-    # Only main releases them: a workflow_dispatch from another branch skips this job.
+  # Versions, vets, tests, builds and smoke-tests the plugin and the command, and hands their
+  # archives to publish as an artifact. It runs the module's code and every third-party module it
+  # links, so it holds no write scope and no secret: whatever that code does to this VM (a planted
+  # binary on the path, an environment variable for later steps, the runner's memory) never meets
+  # the deploy key, the write token or the OIDC token, which publish holds on a VM of its own.
+  build:
+    # Only main releases them: a workflow_dispatch from another branch skips this job, and publish
+    # with it.
     if: github.ref == 'refs/heads/main'
-    concurrency:
-      # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
-      # loses nothing: the version step bumps from the last tag to HEAD, not this commit alone.
-      group: release-envoy-infra
-      cancel-in-progress: false
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
-    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
-    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      skip: ${{ steps.version.outputs.skip }}
     steps:
-      # No credential is left in the checkout: the deploy key reaches the "Tag release" step alone,
-      # not the build, the Pulumi CLI or the plugin binary the smoke test runs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/infra/go.mod
+          cache-dependency-path: |
+            packages/envoy/infra/go.sum
+            packages/envoy/go.sum
       - name: Determine next version
         id: version
         run: |
-          # The paths a version is cut from, one pathspec per line: the plugin compiles in the Envoy
-          # packages they name and renders grants from their exported subject names, so a commit to
-          # one of them, or to any package the command compiles in, releases both, under one tag.
-          # .github/scripts/check-envoy-infra-release-paths.sh holds the list to `go list -deps`
-          # and to this workflow's push paths.
-          mapfile -t paths < .github/envoy-infra-release-paths
-
           # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
           # HEAD, where the range below would be empty and skip the release it never finished.
           # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
-          # not envoy-infra-vX.Y.Z): "Tag release" accepts its own tag at this commit and "Create
-          # GitHub release" reuses a published release and publishes a draft one. The job tags the
-          # commit it checked out and commits no bump, so `tagged` takes no package directory.
+          # not envoy-infra-vX.Y.Z): publish's "Tag release" accepts its own tag at this commit and
+          # its "Create GitHub release" reuses a published release and publishes a draft one. The
+          # workflow tags the commit it checked out and commits no bump, so `tagged` takes no
+          # package directory.
           TAGGED=$(.github/scripts/release-push.sh tagged envoy-infra-v)
           if [ -n "$TAGGED" ]; then
             {
@@ -85,7 +88,7 @@ jobs:
           PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # The first release is 0.1.0, as the listener's first was: the history of the paths
-            # above predates the plugin, and its breaking commits say nothing about its API.
+            # below predates the plugin, and its breaking commits say nothing about its API.
             VERSION="0.1.0"
             {
               echo "version=$VERSION"
@@ -98,6 +101,50 @@ jobs:
           # release-bump.sh refuses a previous version that is not X.Y.Z, since the newest tag's name
           # is whatever its pusher chose.
           PREV_VERSION="${PREV_TAG#envoy-infra-v}"
+
+          # The paths a version is cut from, as the build defines them: every directory of the
+          # workspace's own modules (the main modules of packages/envoy/infra/go.work) that the
+          # plugin or the command compiles in (every command under ./cmd/), for each target
+          # .github/envoy-infra-targets.json lists, since GOOS and GOARCH decide which files, and so
+          # which imports, a build compiles in; the go.mod and go.sum of each of those modules and
+          # the go.work and go.work.sum binding them, which set the versions they build with; and
+          # the notices script and the target list, which decide what the archives hold. A commit
+          # touching none of them, such as one to the module's README or its live-test harness, cuts
+          # no version.
+          infra=packages/envoy/infra
+          paths=(scripts/go-third-party-notices.sh .github/envoy-infra-targets.json)
+          # add <absolute path>: the path relative to the checkout. Every path the plugin builds
+          # from must lie under packages/envoy, which the push paths cover whole: a path elsewhere,
+          # such as a module go.work binds outside it, is refused, since a push touching only that
+          # path would start no run.
+          add() {
+            case $1 in
+              "$PWD"/packages/envoy/*) paths+=("${1#"$PWD"/}") ;;
+              *) echo "::error::$1, a path the plugin builds from, is outside packages/envoy, which the push paths cover"; exit 1 ;;
+            esac
+          }
+          targets=$(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json)
+          [ -n "$targets" ] || { echo "::error::.github/envoy-infra-targets.json lists no envoy-infra target"; exit 1; }
+          for target in $targets; do
+            dirs=$(CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go -C "$infra" list -deps \
+              -f '{{with .Module}}{{if .Main}}{{$.Dir}}{{end}}{{end}}' ./cmd/...)
+            while IFS= read -r dir; do
+              [ -z "$dir" ] || add "$dir/"
+            done <<< "$dirs"
+          done
+          gomods=$(go -C "$infra" list -m -f '{{.GoMod}}')
+          while IFS= read -r gomod; do
+            add "$gomod"
+            [ ! -f "${gomod%.mod}.sum" ] || add "${gomod%.mod}.sum"
+          done <<< "$gomods"
+          gowork=$(go -C "$infra" env GOWORK)
+          add "$gowork"
+          [ ! -f "$gowork.sum" ] || add "$gowork.sum"
+          sorted=$(printf '%s\n' "${paths[@]}" | sort -u)
+          mapfile -t paths <<< "$sorted"
+          echo "A version is cut from commits to:"
+          printf '  %s\n' "${paths[@]}"
+
           # The notices script and the target list are runtime inputs of the archives, so any change
           # to one needs a new tag rather than a CI-only rebuild. release-bump.sh reads a
           # --patch-path only when it is also one of the paths after --.
@@ -123,16 +170,22 @@ jobs:
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
           echo "Bumping $PREV_TAG -> envoy-infra-v${VERSION}"
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      # The module's vet, both live-test tags included, and its unit tests, before anything is
+      # built: envoy-and-contracts.yaml's envoy-infra-go job, which runs them on a pull request, is
+      # not a required check, so the release checks the behaviour it publishes itself, as
+      # release-envoy-listener.yaml runs its container smoke test inside its release job before it
+      # publishes. Vet compiles the live tests without running them; the unit tests start no
+      # container, so this job needs no Docker.
+      - name: Vet envoy-infra, its live-test tags included
         if: steps.version.outputs.skip != 'true'
-        with:
-          go-version-file: packages/envoy/infra/go.mod
-          cache-dependency-path: |
-            packages/envoy/infra/go.sum
-            packages/envoy/go.sum
-      # CGO_ENABLED=0: static binaries, so a linux archive runs on any distribution. Two archives per
-      # target .github/envoy-infra-targets.json lists (the pull request's notices check reads the
-      # same list):
+        run: go -C packages/envoy/infra vet -tags pulumilive,natslive ./...
+      - name: Unit test envoy-infra
+        if: steps.version.outputs.skip != 'true'
+        run: go -C packages/envoy/infra test ./...
+      # CGO_ENABLED=0: static binaries, so a linux archive runs on any distribution. -trimpath keeps
+      # the runner's directories out of the binaries, so they do not depend on where they were
+      # built. Two archives per target .github/envoy-infra-targets.json lists (the pull request's
+      # notices check reads the same list):
       # - the plugin, under the name Pulumi requests from the schema's download URL,
       #   pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz, with the binary and
       #   THIRD_PARTY_NOTICES at its root, where Pulumi looks for the binary;
@@ -156,7 +209,7 @@ jobs:
             arch=${target#*/}
             dir="out/$os-$arch"
             mkdir -p "$dir"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -buildvcs=false \
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -trimpath -buildvcs=false \
               -ldflags "-X main.version=$VERSION" \
               -o "$GITHUB_WORKSPACE/$dir/pulumi-resource-envoy-infra" ./cmd/pulumi-resource-envoy-infra
             (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
@@ -166,7 +219,7 @@ jobs:
               pulumi-resource-envoy-infra THIRD_PARTY_NOTICES
             cli="envoy-infra-$os-$arch"
             mkdir -p "out/$cli"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -buildvcs=false \
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -trimpath -buildvcs=false \
               -ldflags "-X main.version=$VERSION" \
               -o "$GITHUB_WORKSPACE/out/$cli/envoy-infra" ./cmd/envoy-infra
             (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
@@ -200,23 +253,134 @@ jobs:
           cli_version=$(out/envoy-infra-linux-amd64/envoy-infra --version)
           echo "envoy-infra --version: $cli_version"
           test "$cli_version" = "$VERSION"
-      # Build provenance for both kinds of archive: the plugin's, which Pulumi installs, and the
-      # command's, which writes seeds under its operator's credentials. The list is one glob per
-      # line. The release below uploads these exact files, with SHA256SUMS. A consumer verifies an
-      # archive against this workflow's signing identity before installing it, with the commands
-      # packages/envoy/infra/README.md ("Install") gives for each.
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+      # The archives and SHA256SUMS, exactly as built and smoke-tested, for publish.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.version.outputs.skip != 'true'
         with:
-          subject-path: |
-            assets/pulumi-resource-envoy-infra-v*.tar.gz
-            assets/envoy-infra-*.tar.gz
+          name: envoy-infra-assets
+          path: assets/
+          if-no-files-found: error
+
+  # Checks what build hands over, attests build's archives, tags the commit and releases them. It
+  # runs no Go, no Pulumi CLI, no plugin and no command, only its own check, release-push.sh and the
+  # pinned actions below, so the scopes and the deploy key it holds never meet the code build runs.
+  publish:
+    needs: build
+    if: needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
+    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
+    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      # For release-push.sh and the tag, with every tag (the existing-tag check below reads them).
+      # No credential is left in the checkout: the deploy key reaches the "Tag release" step alone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: envoy-infra-assets
+          path: assets
+      # build chooses the archives' bytes, not their names. The version must be X.Y.Z and the tag
+      # envoy-infra-v<version>; assets/ must hold exactly the archives this checkout's target list
+      # names, each a regular file, and SHA256SUMS; and SHA256SUMS must list each archive once, with
+      # its bytes, before anything is attested or uploaded. The step hands the attestation and the
+      # release that explicit list.
+      - name: Check build's version, tag and archives
+        id: assets
+        env:
+          TAG: ${{ needs.build.outputs.release_tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          if ! [[ $VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            printf -v shown '%q' "$VERSION"
+            echo "::error::build's version $shown is not X.Y.Z; refusing it"
+            exit 1
+          fi
+          if [ "$TAG" != "envoy-infra-v$VERSION" ]; then
+            printf -v shown '%q' "$TAG"
+            echo "::error::build's tag $shown is not envoy-infra-v$VERSION; refusing it"
+            exit 1
+          fi
+
+          # The archives the release ships for each target this checkout lists, one line per kind.
+          archives=()
+          targets=$(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json)
+          [ -n "$targets" ] || { echo "::error::.github/envoy-infra-targets.json lists no envoy-infra target"; exit 1; }
+          for target in $targets; do
+            os=${target%/*}
+            arch=${target#*/}
+            archives+=("pulumi-resource-envoy-infra-v$VERSION-$os-$arch.tar.gz")
+            archives+=("envoy-infra-$os-$arch.tar.gz")
+          done
+          expected=("${archives[@]}" SHA256SUMS)
+          # is_one_of <name> <list...>: whether <name> is one of <list>.
+          is_one_of() {
+            local name=$1 candidate
+            shift
+            for candidate in "$@"; do [ "$candidate" != "$name" ] || return 0; done
+            return 1
+          }
+
+          missing=()
+          for name in "${expected[@]}"; do
+            { [ -f "assets/$name" ] && [ ! -L "assets/$name" ]; } || missing+=("$name")
+          done
+          extra=()
+          while IFS= read -r -d '' entry; do
+            is_one_of "${entry#assets/}" "${expected[@]}" || extra+=("${entry#assets/}")
+          done < <(find assets -mindepth 1 -print0)
+          if [ ${#missing[@]} -gt 0 ] || [ ${#extra[@]} -gt 0 ]; then
+            [ ${#missing[@]} -eq 0 ] || echo "::error::build's artifact lacks $(printf '%q ' "${missing[@]}")"
+            [ ${#extra[@]} -eq 0 ] || echo "::error::build's artifact holds what the release does not ship: $(printf '%q ' "${extra[@]}")"
+            exit 1
+          fi
+
+          listed=()
+          while IFS= read -r line || [ -n "$line" ]; do
+            if ! [[ $line =~ ^[0-9a-f]{64}\ \ (.+)$ ]] || ! is_one_of "${BASH_REMATCH[1]}" "${archives[@]}"; then
+              printf -v shown '%q' "$line"
+              echo "::error::SHA256SUMS holds a line that is not '<sha256>  <archive>': $shown"
+              exit 1
+            fi
+            listed+=("${BASH_REMATCH[1]}")
+          done < assets/SHA256SUMS
+          for name in "${archives[@]}"; do
+            count=0
+            for entry in "${listed[@]}"; do [ "$entry" != "$name" ] || count=$((count + 1)); done
+            [ "$count" = 1 ] || { echo "::error::SHA256SUMS lists $name $count times, not once"; exit 1; }
+          done
+          if ! (cd assets && sha256sum --check --strict SHA256SUMS); then
+            echo "::error::an archive's bytes do not match SHA256SUMS; refusing build's artifact"
+            exit 1
+          fi
+
+          {
+            echo "subjects<<SUBJECTS"
+            printf 'assets/%s\n' "${archives[@]}"
+            echo "SUBJECTS"
+            echo "files<<FILES"
+            printf 'assets/%s\n' "${expected[@]}"
+            echo "FILES"
+          } >> "$GITHUB_OUTPUT"
+      # Build provenance for both kinds of archive the check above lists: the plugin's, which Pulumi
+      # installs, and the command's, which writes seeds under its operator's credentials. The release
+      # below uploads them exactly, with SHA256SUMS. A consumer verifies an archive against this
+      # workflow's signing identity before installing it, with the commands
+      # packages/envoy/infra/README.md ("Install") gives for each.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.assets.outputs.subjects }}
       # The only step that holds the deploy key. release-push.sh push-tag writes it to a directory
       # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       - name: Tag release
-        if: steps.version.outputs.skip != 'true'
         env:
-          TAG: ${{ steps.version.outputs.release_tag }}
+          TAG: ${{ needs.build.outputs.release_tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
@@ -226,11 +390,16 @@ jobs:
           git tag "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
       - name: Create GitHub release
-        if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.release_tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.build.outputs.release_tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          FILES: ${{ steps.assets.outputs.files }}
         # release-push.sh `release`: creates the release, reuses a published one, or publishes a
-        # draft an earlier attempt left, with this run's assets.
-        run: .github/scripts/release-push.sh release "$TAG" "envoy-infra v$VERSION" assets/*
+        # draft an earlier attempt left, with the files the check above listed.
+        run: |
+          assets=()
+          while IFS= read -r file; do
+            [ -z "$file" ] || assets+=("$file")
+          done <<< "$FILES"
+          .github/scripts/release-push.sh release "$TAG" "envoy-infra v$VERSION" "${assets[@]}"

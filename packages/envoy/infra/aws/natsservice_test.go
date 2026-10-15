@@ -549,6 +549,11 @@ func TestNatsServiceRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			err:    "configHeader: header[0] holds a line break",
 		},
 		{
+			name:   "a server argument that loads another configuration, with authorization",
+			mutate: func(a *envoyaws.NatsServiceArgs) { a.ServerArgs = append(a.ServerArgs, "-c", "/tmp/other.conf") },
+			err:    "serverArgs[7] sets nats-server's -c, which loads another configuration file in place of the rendered one",
+		},
+		{
 			name:   "no subnet",
 			mutate: func(a *envoyaws.NatsServiceArgs) { a.SubnetIds = nil },
 			err:    "subnetIds names no subnet",

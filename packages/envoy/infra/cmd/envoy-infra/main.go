@@ -38,7 +38,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, stores se
 		return render.Command(args[1:], stdout, stderr)
 	}
 	if len(args) == 1 && args[0] == "--version" {
-		fmt.Fprintln(stdout, version)
+		if _, err := fmt.Fprintln(stdout, version); err != nil {
+			fmt.Fprintf(stderr, "envoy-infra: could not print the version: %v\n", err)
+			return 1
+		}
 		return 0
 	}
 	help := len(args) > 0 && (args[0] == "-h" || args[0] == "-help" || args[0] == "--help")
