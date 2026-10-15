@@ -726,8 +726,9 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 		},
 		"ENVOY_NATS_SOCKS5_PROXY": func(t *testing.T) {
-			if err := natsConnect(map[string]string{"ENVOY_NATS_SOCKS5_PROXY": "socks5://127.0.0.1:1055"}, localNATS); err == nil || !strings.Contains(err.Error(), "ENVOY_NATS_SOCKS5_PROXY") {
-				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=socks5://127.0.0.1:1055: err = %v, want a refusal naming it", err)
+			// With the reach opted in, the refusal is the address check's: a URL is not host:port.
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": "socks5://127.0.0.1:1055"}, localNATS); err == nil || errors.Is(err, bus.ErrRemoteNATS) || !strings.Contains(err.Error(), "ENVOY_NATS_SOCKS5_PROXY") || !strings.Contains(err.Error(), "is a URL") {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=socks5://127.0.0.1:1055: err = %v, want the address refused as a URL, naming the setting", err)
 			}
 			// The connect dials the proxy and hands it localNATS's address. This proxy refuses
 			// every request, so the connect makes the bus's ten attempts a second apart, about ten
