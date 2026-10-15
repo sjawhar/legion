@@ -2729,6 +2729,12 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 
 begin prerequisites
 for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+# The host's jq compiles and runs lib/stage4b-tools.jq over its fixture: repository-tools and
+# full-agent-tools read every tool result through it, and a jq that aborts compiling the library
+# (jq 1.8.2 did, on a def chain reached through an include) would otherwise fail the run an hour in.
+session_jq "$root/scripts/e2e/lib/testdata/stage4b-tools-session.jsonl" -e 'include "stage4b-tools"; tool_ran("eval") and tool_result_answered("lsp"; "hover"; "func") and (tool_ran("notebook") | not)' >/dev/null 2>"$work/jq-tools-check" ||
+  fail "the host's $(jq --version) cannot run lib/stage4b-tools.jq over lib/testdata/stage4b-tools-session.jsonl: $(tr '\n' ' ' <"$work/jq-tools-check")"
+note "$(jq --version) runs lib/stage4b-tools.jq"
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
