@@ -177,8 +177,7 @@ const disconnectedFailureThreshold = 20
 // count is its own, advanced only while connected reads false and reset the
 // moment it reads true again, so it never mixes with a transient failure that
 // happens while the client is connected (an unclassified JetStream timeout,
-// say), which keeps retrying under the unbounded path above exactly as
-// before.
+// say), which keeps retrying under the unbounded path above.
 func runSelfHealthMonitor(
 	ctx context.Context,
 	logger *logging.Logger,
@@ -207,8 +206,13 @@ func runSelfHealthMonitor(
 		err := probe()
 		if err != nil {
 			failures++
-			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
-			if readsDisconnected() {
+			disconnected := readsDisconnected()
+			bound := threshold
+			if disconnected {
+				bound = disconnectedFailureThreshold
+			}
+			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", bound), slog.String("error", err.Error()))
+			if disconnected {
 				disconnectedFailures++
 				terminalFailures = 0
 				if disconnectedFailures >= disconnectedFailureThreshold {

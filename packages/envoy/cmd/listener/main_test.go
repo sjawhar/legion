@@ -3760,10 +3760,10 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 // TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection is the sustained disconnection this
 // threshold exists for: isUnrecoverableSelfHealthFailure reads every failure as transient while
 // NATS is disconnected, by design, so the rebuild path never runs and terminalFailures never
-// advances. Before disconnectedFailureThreshold existed, nothing else in the monitor bounded that
-// state, and a connection that never recovered on its own - a broken tunnel nats.go kept retrying
-// without ever reaching the server - left the listener logging this WARN forever with nothing
-// asking its runtime for a fresh process. The bound is exactly twenty probes, ten minutes at the
+// advances, and disconnectedFailureThreshold is the one bound on that state: a connection that
+// never recovers on its own (a broken tunnel nats.go keeps retrying without ever reaching the
+// server) ends in a restart rather than a listener logging this WARN forever. The bound is
+// exactly twenty probes, ten minutes at the
 // production interval.
 func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T) {
 	stuck := errors.New("nats: outbound buffer limit exceeded")
@@ -3895,9 +3895,9 @@ func TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailu
 
 // TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoveries guards the resets
 // of disconnectedFailureThreshold's count: brief outages, each shorter than the bound and each
-// ended by a probe that reads connected (a healthy probe, or a failure while connected), must never
-// add up to a restart, however many of them a listener rides out. Without the resets, three NATS
-// restarts of a few probe intervals each terminate a listener that recovered in place every time.
+// ended by a probe that reads connected (a healthy probe, or a failure while connected), never add
+// up to a restart, however many of them a listener rides out, since each connected probe starts
+// the count again.
 func TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoveries(t *testing.T) {
 	for _, tc := range []struct {
 		name string
