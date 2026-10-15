@@ -111,15 +111,18 @@ type NatsHub struct {
 	InstanceGroup pulumi.StringOutput `pulumi:"instanceGroup"` // the group's name
 }
 
-// settings are a hub's plain inputs, validated, with the defaults applied.
+// settings are a hub's plain inputs, validated, with the defaults applied, and what they render:
+// the VM's cloud-config, from vm, as its user data.
 type settings struct {
 	vm          vm
+	userData    string
 	zone        string
 	machineType string
 	diskSizeGb  int
 }
 
-// newSettings validates args and renders the NATS configuration. Every refusal names the input.
+// newSettings validates args and renders the NATS configuration and the VM's user data. Every
+// refusal names the input.
 func newSettings(args *NatsHubArgs) (settings, error) {
 	if !hostnameRule.MatchString(args.Hostname) {
 		return settings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
@@ -178,6 +181,9 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 		tailscaleImage: args.TailscaleImage,
 		natsConf:       conf,
 	}
+	if s.userData, err = s.vm.userData(); err != nil {
+		return settings{}, fmt.Errorf("render the cloud-config: %w", err)
+	}
 	return s, nil
 }
 
@@ -227,10 +233,6 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 	s, err := newSettings(args)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", natsHubType, name, err)
-	}
-	userData, err := s.vm.userData()
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: render the cloud-config: %w", natsHubType, name, err)
 	}
 	if err := providers.Require(ctx.Context(), natsHubType, "gcp", opts...); err != nil {
 		return nil, err
@@ -337,7 +339,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 			Scopes: pulumi.StringArray{pulumi.String(cloudPlatformScope)},
 		},
 		Tags:     pulumi.StringArray{pulumi.String(hubName)},
-		Metadata: pulumi.StringMap{"user-data": pulumi.String(userData)},
+		Metadata: pulumi.StringMap{"user-data": pulumi.String(s.userData)},
 	}, child)
 	if err != nil {
 		return nil, err

@@ -50,17 +50,16 @@ versions. Never add the module to the root `go.work`.
   `infer.ComponentF`.
 - **Resolve, then require, then register.** A component's constructor first resolves its inputs in a
   pure function that needs no engine (`host.resolveListener`, `gcp.newSettings`): it gives each
-  optional input its default and refuses every input it holds as a plain value, and the listener's
-  also lists the provider packages the component creates resources with (the hub's is always
-  `gcp`). The constructor then calls `providers.Require(ctx.Context(), <token>, <package>, opts...)`
-  for each of those packages, so a missing provider fails naming the component and the package and
-  no resource falls back to a default provider of the plugin's own SDK version, and only then
-  registers anything. The refusal table runs against the resolver directly; one test drives the
-  constructor with a refused input and one per missing provider, each asserting nothing registered
-  beyond the test's providers.
-  The hub's resolver also renders the authorization, and its constructor renders the cloud-config
-  before it requires the provider (`gcp/natshub.go:122-235`); its refusal table drives the
-  constructor for every row (`gcp/natshub_test.go`).
+  optional input its default, refuses every input it holds as a plain value and renders what those
+  inputs alone decide (the hub's authorization and its VM's user data), and the listener's also
+  lists the provider packages the component creates resources with (the hub's is always `gcp`).
+  The constructor then calls `providers.Require(ctx.Context(), <token>, <package>, opts...)` for
+  each of those packages, so a missing provider fails naming the component and the package and no
+  resource falls back to a default provider of the plugin's own SDK version, and only then
+  registers anything. The refusal table runs against the resolver directly, through an
+  `export_test.go` (`host.ResolveListener`, `gcp.ResolveNatsHub`); one test drives the constructor
+  with a refused input and one per missing provider, each asserting nothing registered beyond the
+  test's providers.
 - **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
   listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`), run once
   before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one value that may be
@@ -161,12 +160,14 @@ endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`, and
 ## Tests
 
 The unit tests need neither the Pulumi CLI nor Docker. They run components under
-`pulumi.WithMocks` (`host/listener_test.go`, `gcp/natshub_test.go`, `internal/providers/`), the
-listener's refusals against `host.resolveListener` directly, the plugin in process through
-pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`,
-`gcp/construct_test.go`), the hub's cloud-config against its golden (`gcp/cloudconfig_test.go`), the
-key fetcher's script under `/bin/sh` against `httptest` fakes of the metadata server and Secret
-Manager, with a `sleep` stub first on its `PATH` that records each wait (`gcp/fetch_key_test.go`,
+`pulumi.WithMocks`, the components' tests on `internal/pulumitest`'s mock engine with only their
+provider's computed outputs added (`host/listener_test.go`, `gcp/natshub_test.go`) and
+`internal/providers/` on a mock of its own, the refusals against each resolver directly, the
+plugin in process through pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`,
+and `host/construct_test.go` and `gcp/construct_test.go` through `pulumitest.Construct`), the
+hub's cloud-config against its golden (`gcp/cloudconfig_test.go`), the key fetcher's script under
+`/bin/sh` against `httptest` fakes of the metadata server and Secret Manager, with a `sleep` stub
+first on its `PATH` that records each wait (`gcp/fetch_key_test.go`,
 which needs `curl`, `jq`, `base64` and `mktemp` on this machine and fails, never skips, without
 one), the joined script under `/bin/sh` with `docker` and `sleep` stubbed
 (`gcp/tailnet_joined_test.go`, which needs `jq`), the data disk's format and mount entries under

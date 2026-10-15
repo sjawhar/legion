@@ -376,7 +376,9 @@ func TestNatsHubRefusesAMissingProviderBeforeRegistering(t *testing.T) {
 	require.Empty(t, m.Types())
 }
 
-func TestNatsHubRefusesInvalidInputsBeforeRegistering(t *testing.T) {
+// The resolver refuses every invalid input, naming it, with no engine; the constructor's own test
+// below shows a refusal stops it before anything registers.
+func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 	user, err := nkeys.CreateUser()
 	require.NoError(t, err)
 	seed, err := user.Seed()
@@ -532,16 +534,24 @@ func TestNatsHubRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			args := exampleArgs()
 			c.edit(args)
-			m, err := run(t, args, nil, true)
+			err := gcp.ResolveNatsHub(args)
 			require.Error(t, err)
-			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: ")
 			for _, want := range c.err {
 				require.ErrorContains(t, err, want)
 			}
 			require.NotContains(t, err.Error(), authKey)
-			require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 		})
 	}
+}
+
+// A refused input stops the constructor, named as the hub and its name, before it registers
+// anything beyond the test's provider.
+func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
+	args := exampleArgs()
+	args.Hostname = "ab-"
+	m, err := run(t, args, nil, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:NatsHub example-hub: hostname "ab-"`)
+	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
 // The names GCP gets from the hostname, for the shortest and longest hostname the rule admits:
