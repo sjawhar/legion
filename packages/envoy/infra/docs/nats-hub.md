@@ -19,7 +19,7 @@ A hub whose `hostname` is `<h>` registers these resources, each a child of the h
 | `<h>-health-checks` | `gcp:compute/firewall:Firewall` | The hub's one firewall rule: tcp/8222 from Google's health-check ranges, `130.211.0.0/22` and `35.191.0.0/16`, to the VM's network tag `<h>-hub`. |
 | `<h>-healthz` | `gcp:compute/healthCheck:HealthCheck` | An HTTP check of NATS's `/healthz` on port 8222, every 10 seconds, unhealthy after 6 failures. |
 | `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet (see [The VM's external address](#the-vms-external-address)), the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
-| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from 300 seconds after the VM is created, and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, since its first VM fetches the key when it boots, and `pulumi up` waits until it is `STABLE`. |
+| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from an initial delay after the VM is created that covers the first boot's read of the data disk (see [The first boot's read](#the-first-boots-read)), and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, since its first VM fetches the key when it boots, and `pulumi up` waits until it is `STABLE`. |
 
 Every resource is in the gcp provider's project. The template's name is `<h>-` and a suffix the
 provider adds, and the network, the firewall rule, the health check and the group are named after
@@ -39,7 +39,8 @@ and `instanceGroup`, the group's name.
 | `tags` | required | The tailnet tags the VM advertises when it joins, each `tag:<name>`. At least one. |
 | `zone` | required | The zone of the VM and its data disk, such as `us-central1-a`. Changing it makes a new group, with a new data disk: see [Updating a hub](#updating-a-hub). |
 | `machineType` | `e2-small` | The VM's machine type. |
-| `diskSizeGb` | `20` | The size, in GB, of the data disk the group creates for the hub's first VM. |
+| `diskType` | `pd-balanced` | The type of the data disk the group creates for the hub's first VM: `pd-balanced` or `pd-ssd`, the types whose documented read rates the first boot's read of the disk is timed by (see [The first boot's read](#the-first-boots-read)). |
+| `diskSizeGb` | `20` | The size, in GB, of that disk: at most 252 for `pd-balanced` and 506 for `pd-ssd`, the largest whose first-boot read fits the group's initial delay. |
 | `natsImage` | required | The NATS server image, pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Its entrypoint takes nats-server's arguments, as the official `nats` image's does. |
 | `tailscaleImage` | required | Tailscale's image, pinned the same way. The unit configures it through containerboot's `TS_*` variables, as Tailscale's own image reads them. |
 | `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address and takes the network's rules for all its instances, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, its sshd is reachable from the internet: see [The VM's external address](#the-vms-external-address). May come from another resource or stack. |
@@ -54,21 +55,29 @@ The hub refuses these before it registers anything, with an error naming the inp
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in an
   input the hub carries into the user data, a child or a refusal: `hostname`, a tag, `zone`,
-  `machineType`, an image, or a user's `machineId`. The error names the input by its path and never
-  its value, as `users[0].machineId: an nkey user seed, which is never an input of the hub (not
-  echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another resource, so a seed
-  in any of them fails the preview or update once it resolves, with the same error, before any
-  child is registered with it: a NATS seed passed as the Tailscale key is refused before a Secret
-  Manager version holds it, and the error never carries the secret. A seed in a user's `name` or a
-  rule entry is refused by the authorization, as [The hub's users](#the-hubs-users) says, and a
-  seed as a user's `nkey` is refused as an `nkey` that is no public key, without quoting it;
+  `machineType`, `diskType`, an image, or a user's `machineId`. The error names the input by its
+  path and never its value, as `users[0].machineId: an nkey user seed, which is never an input of
+  the hub (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another
+  resource, so a seed in any of them fails the preview or update once it resolves, with the same
+  error, before any child is registered with it: a NATS seed passed as the Tailscale key is refused
+  before a Secret Manager version holds it, and the error never carries the secret. A seed in a
+  user's `name` or a rule entry is refused by the authorization, as
+  [The hub's users](#the-hubs-users) says, and a seed as a user's `nkey` is refused as an `nkey`
+  that is no public key, without quoting it;
 - a `hostname` outside the rule above;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;
 - an empty `zone`;
 - an image that is not `<name>@sha256:<64 lowercase hex digits>`, with only letters, digits and
   `._/:-` in `<name>`: whitespace, `$` or `%` would split or expand the unit's command;
-- an empty `machineType`, or a `diskSizeGb` below 1;
+- an empty `machineType` or `diskType`, or a `diskSizeGb` below 1;
+- a `diskType` other than `pd-balanced` or `pd-ssd`: `pd-standard` reads 0.12 MiB/s per GiB with
+  no baseline, so its first-boot read takes over 8,500 s at any size, past the most the group
+  waits, and an E2 VM, as the default `e2-small` is, attaches `hyperdisk-balanced` only by
+  arrangement with Google's account team;
+- a `diskSizeGb` above the largest for its `diskType`, with an error naming that size, as
+  `diskSizeGb 253 is too large for a pd-balanced data disk: … the largest diskSizeGb that fits is
+  252`;
 - no `tailnetAuthKey`;
 - `subnetwork` without `network`, since the firewall rule needs the network;
 - no `users`, or a user refused as [The hub's users](#the-hubs-users) lists;
@@ -116,20 +125,29 @@ so cloud-init applies the hub's cloud-config at every boot. The whole document, 
 
 `bootcmd` runs first, in this order:
 
-1. It loads the `tun` module unless `/dev/net/tun` exists.
-2. It formats the data disk, `/dev/disk/by-id/google-data`, as ext4 only when `blkid -p` finds no
-   filesystem on it (exit status 2) and its first MiB reads, whole, as zeros, as a new persistent
-   disk's does. blkid also exits 2 for a filesystem whose primary superblock is damaged, which
-   `e2fsck` can repair from a backup superblock, and for a device it cannot open, so any disk but
-   a blank one is left as it is, with a line on stderr naming why, such as
-   `envoy-infra: /dev/disk/by-id/google-data holds data but no filesystem blkid knows; not formatting it`.
-3. It runs `fsck.ext4 -p` on the disk, and mounts it at `/mnt/disks/data` only when fsck left no
-   error it could not fix (exit status below 4); otherwise it says so on stderr and leaves it
-   unmounted. An unmounted disk keeps NATS and Tailscale down, since their units refuse to start
-   without it, until an operator repairs the disk and restarts the VM. It then makes `nats/` and
-   `tailscale/` under the mount point.
-4. It makes `/run/envoy`, mode 0700, and an empty `/run/envoy/tailnet-auth-key`, mode 0600, so
-   the key's bind mount into the Tailscale container is always of a file.
+1. It loads the `tun` module unless `/dev/net/tun` exists, and makes the mount point,
+   `/mnt/disks/data`.
+2. It mounts the data disk, `/dev/disk/by-id/google-data`, formatting it first only when it is
+   proven empty end to end: `blkid -p` finds no filesystem on it (exit status 2), and GNU `cmp`,
+   which COS ships, reads the whole device, as many bytes as `blockdev --getsize64` reports,
+   against `/dev/zero` and finds only zeros. cmp stops at the first byte that is not zero. A disk
+   blkid finds a filesystem on is not read: it is checked with `fsck.ext4 -p` and mounted when fsck
+   left no error it could not fix (exit status below 4). Every other disk is left unmounted and
+   unwritten. Among them is an ext4 disk whose first MiB or primary superblock was zeroed: blkid
+   finds no filesystem on it, yet it still holds its data, which `e2fsck` can reach from a backup
+   superblock and `mkfs.ext4`'s discard would destroy.
+3. A disk left unmounted gets one line, at every boot that leaves it, naming the device and the
+   reason and nothing the disk holds, as
+   `envoy-hub: data disk /dev/disk/by-id/google-data left unmounted: blkid finds no filesystem on it, and it does not read as zeros to its end; see docs/nats-hub.md, "Repairing the data disk"`.
+   The other reasons are `blkid -p exited <n>`, `blockdev --getsize64 exited <n>` or
+   `cmp exited <n> reading it` after blkid found no filesystem, `mkfs.ext4 exited <n>`,
+   `fsck.ext4 -p exited <n>` and `mount exited <n>`. An unmounted disk keeps NATS and Tailscale
+   down, since their units refuse to start without it, so the group recreates the VM on the same
+   disk, again and again, and no boot formats it: see
+   [Repairing the data disk](#repairing-the-data-disk).
+4. It makes `nats/` and `tailscale/` under the mount point, `/run/envoy`, mode 0700, and an empty
+   `/run/envoy/tailnet-auth-key`, mode 0600, so the key's bind mount into the Tailscale container
+   is always of a file.
 
 `write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the key fetcher to
 `/etc/envoy/fetch-tailnet-key`, the joined script to `/etc/envoy/tailnet-joined` and five systemd
@@ -213,19 +231,135 @@ stays empty, and the node comes up from its state. A node removed from the tailn
 not log in again; to have it join anew, put a new key in `tailnetAuthKey`, run `pulumi up`, delete
 `/mnt/disks/data/tailnet-joined` on the VM and restart it.
 
-The group reattaches the same disk to every later VM, so a later `diskSizeGb`, which changes only
-the template, should leave the disk at the size it was created with. Google Cloud's documentation
-implies this without saying it, and a first deployment confirms it (see
+The group reattaches the same disk to every later VM, so a later `diskSizeGb` or `diskType`, which
+changes only the template, should leave the disk at the size and type it was created with. Google
+Cloud's documentation implies this without saying it, and a first deployment confirms it (see
 [What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
-Deleting the hub leaves the disk, detached, in `zone`, as the preserved-state page documents, and
-leaves the hub's node on the tailnet; remove both yourself once you no longer need them.
+Keep both at the disk's own values: the group's initial delay is derived from them. Deleting the
+hub leaves the disk, detached, in `zone`, as the preserved-state page documents, and leaves the
+hub's node on the tailnet; remove both yourself once you no longer need them.
+
+### The first boot's read
+
+A boot on a disk blkid finds no filesystem on reads the whole disk before it formats it: the
+first boot does, on a new disk, and so does every boot on a disk it leaves unmounted. A boot on
+the hub's own ext4 disk reads nothing. The group's initial delay, the time it waits after creating
+a VM before the health check counts, is derived so that the read fits, in seconds:
+
+```text
+initialDelaySec = 300 + ceil(1.25 × (S + S/64 + 1024) / R)
+```
+
+`S` is the disk's size in MiB, `diskSizeGb` × 1024 (taking GB as GiB, the larger reading), and `R`
+the read rate assumed for `diskType`, in MiB/s. 300 seconds cover the boot and the two image
+pulls. `S` is the read, and `S/64` and 1024 MiB are what `mkfs.ext4` writes, its inode tables (256
+bytes per 16 KiB, all written at once) and at most 1 GiB of journal. A quarter more is the margin.
+`R` is 100 MiB/s for `pd-balanced`, below the 140 MiB/s baseline Google Cloud documents for it,
+and 200 MiB/s for `pd-ssd`, its documented floor: an E2 shared-core VM, as `e2-small` is, reads a
+persistent disk at 200 MiB/s at most, below `pd-ssd`'s 240 MiB/s baseline
+([persistent disk performance](https://cloud.google.com/compute/docs/disks/performance)). The
+default, 20 GiB of `pd-balanced`, waits 573 seconds. A group waits at most 3600 seconds, so the
+largest disks are 252 GiB of `pd-balanced` (3589 seconds) and 506 GiB of `pd-ssd` (3596), and the
+hub refuses a larger `diskSizeGb`. Once the delay has passed, the health check, every 10 seconds
+and unhealthy after 6 failures, finds a VM still reading unhealthy within another minute, and
+the group recreates it; the next boot reads from the start again. `pulumi up` waits for the group
+to be stable, which a group is once its VMs are running and healthy
+([MIG status](https://cloud.google.com/compute/docs/instance-groups/getting-info-about-migs)), so
+the group's create and update timeouts are the initial delay after the provider's own 15 minutes
+(pulumi-gcp v10.1.0's upstream `resource_compute_instance_group_manager.go:49-53`): 24 minutes 33
+seconds by default.
+
+On a Linux workstation, cmp itself reads far faster than those rates: GNU cmp 3.10, reading a loop
+device over a sparse file against `/dev/zero` as the entry does, took 18.1 seconds for 20 GiB
+(1133 MiB/s), 222.7 for 252 GiB (1158 MiB/s) and 458.2 for 506 GiB (1131 MiB/s). A sparse file's
+holes are read from no disk, so these numbers are cmp's and the kernel's cost alone, on a faster
+CPU than an e2-small's shared core, and say nothing of a persistent disk's rate, which only a
+first deployment measures (see
+[What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
+
+## Repairing the data disk
+
+A disk the boot leaves unmounted (see [What the hub's VM runs](#what-the-hubs-vm-runs)) keeps NATS
+down, so the health check fails and, once the initial delay has passed, the group recreates the
+VM on the same disk. Nothing writes a disk the boot refuses, so the next VM refuses it again, with
+the same line, and the group recreates that one too: the loop goes on, and no boot formats the
+disk, until the disk is repaired. To repair it, stop the group's repairs, keep a snapshot, repair
+the disk on the hub's own VM, which keeps it attached, restart the VM, then undo each step.
+
+The commands below follow gcloud 561.0.0's help for each and parse under it; none has been run
+against a real group. `<group>` is the hub's `instanceGroup` output, `<zone>` its `zone` and `<h>`
+its `hostname`.
+
+1. Stop the group recreating the VM. The health check stays; the group no longer repairs a failed
+   or unhealthy VM:
+
+   ```sh
+   gcloud compute instance-groups managed update <group> --zone <zone> --default-action-on-vm-failure=do-nothing
+   ```
+
+2. Find the VM, its data disk and its network, and read the line naming why the disk is unmounted
+   (the data disk is the one whose `deviceName` is `data`; `<disk>` and `<network>` are the last
+   part of its `source` and of the network's link):
+
+   ```sh
+   gcloud compute instance-groups managed list-instances <group> --zone <zone>
+   gcloud compute instances describe <vm> --zone <zone> --format='yaml(disks[].deviceName,disks[].source,networkInterfaces[].network)'
+   gcloud compute instances get-serial-port-output <vm> --zone <zone> | grep 'envoy-hub: data disk'
+   ```
+
+3. Keep a snapshot of the disk before anything writes it:
+
+   ```sh
+   gcloud compute disks snapshot <disk> --zone <zone> --snapshot-names=<h>-data-before-repair
+   ```
+
+4. Reach the VM. The network the hub creates admits no SSH, so add a rule for the range IAP's TCP
+   forwarding connects from
+   ([IAP TCP forwarding](https://cloud.google.com/iap/docs/using-tcp-forwarding)), for the VM's
+   tag alone, and connect through IAP, which needs `roles/iap.tunnelResourceAccessor`:
+
+   ```sh
+   gcloud compute firewall-rules create <h>-repair-ssh --network <network> --allow tcp:22 --source-ranges 35.235.240.0/20 --target-tags <h>-hub
+   gcloud compute ssh <vm> --zone <zone> --tunnel-through-iap
+   ```
+
+5. On the VM, repair the disk as its line says. For a filesystem whose primary superblock, or
+   first MiB, is gone, check it from the first backup superblock, at block 32768 of the 4 KiB
+   blocks `mkfs.ext4` makes on a disk of 1 GiB or more, and let e2fsck fix what it finds:
+
+   ```sh
+   sudo e2fsck -fy -b 32768 -B 4096 /dev/disk/by-id/google-data
+   ```
+
+   e2fsck exits 1 when it has fixed errors. A disk that holds nothing worth keeping, such as one
+   whose first format stopped partway, is formatted only by your decision:
+   `sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data`.
+
+6. Restart the VM, so that its boot finds the filesystem and mounts the disk, and check that the
+   line is gone and the health check turns `HEALTHY`:
+
+   ```sh
+   gcloud compute instances reset <vm> --zone <zone>
+   ```
+
+7. Undo steps 4 and 1, and delete the snapshot once the hub is healthy and you no longer need it:
+
+   ```sh
+   gcloud compute firewall-rules delete <h>-repair-ssh
+   gcloud compute instance-groups managed update <group> --zone <zone> --default-action-on-vm-failure=repair
+   gcloud compute snapshots delete <h>-data-before-repair
+   ```
+
+Whether the line reaches the serial console, whether `do-nothing` stops the loop, and whether
+e2fsck's repair, on a real disk, leaves what JetStream needs are for a first deployment to show
+(see [What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
 
 ## Updating a hub
 
 An instance template cannot change once it is created
 ([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
 holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskSizeGb`, `network` or
+`tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskType`, `diskSizeGb`, `network` or
 `subnetwork` makes a new template. The group then replaces its VM at once (`PROACTIVE`, minimal
 action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
 unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
@@ -266,7 +400,7 @@ Three inputs work otherwise:
 ## What a first Google Cloud deployment proves
 
 The unit tests run the hub under Pulumi's mocks, check its cloud-config against the golden, and
-run the key fetcher, the joined script and the data disk's entries under `/bin/sh` against fakes
+run the key fetcher, the joined script and the data disk's entry under `/bin/sh` against fakes
 and stubs; the seed command's Secret Manager store runs against a fake too. None of them runs
 Google Cloud, COS or a tailnet, so the first deployment is where these hold or fail. Watch them on
 its first `pulumi up`:
@@ -276,17 +410,25 @@ its first `pulumi up`:
   with Tailscale v1.104.1's image, and reports `"BackendState": "Running"` once the node has
   joined, so `tailnet-joined` empties the key file and writes its marker.
 - The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and a new persistent
-  disk's first MiB reads as zeros, so the first boot formats it; `fsck.ext4` runs on COS as its
+  disk reads as zeros to its end, so the first boot formats it; `fsck.ext4` runs on COS as its
   documentation shows; and after `gcloud compute instance-groups managed recreate-instances` the
-  new VM finds its filesystem (`blkid -p` exits 0) rather than formatting it, and keeps the stream
-  and its tailnet node.
-- Two statements this README takes from Google Cloud's documentation: a later `diskSizeGb` leaves
-  the kept data disk at the size it was created with, and deleting the hub leaves that disk
-  behind, detached (see [The hub's data disk](#the-hubs-data-disk)).
+  new VM finds its filesystem (`blkid -p` exits 0), reads nothing and formats nothing, and keeps
+  the stream and its tailnet node.
+- How long the first boot's read of a real persistent disk takes, unmeasured: the initial delay
+  assumes 100 MiB/s for `pd-balanced` and 200 MiB/s for `pd-ssd` (see
+  [The first boot's read](#the-first-boots-read)). The first boot's serial output, or
+  `journalctl -b` on the VM, shows when the read began and when `mkfs.ext4` ran.
+- The line a disk left unmounted gets reaches the serial console and the journal, and the steps of
+  [Repairing the data disk](#repairing-the-data-disk), none run against a real group:
+  `--default-action-on-vm-failure=do-nothing` stops the group recreating the VM, and IAP's SSH
+  reaches COS.
+- Two statements this README takes from Google Cloud's documentation: a later `diskSizeGb` or
+  `diskType` leaves the kept data disk at the size and type it was created with, and deleting the
+  hub leaves that disk behind, detached (see [The hub's data disk](#the-hubs-data-disk)).
 - The health check turns `HEALTHY` through COS's host firewall once `nats-firewall` has run, and
   `pulumi up`'s wait for `STABLE` ends within the provider's timeout despite autohealing's
-  300-second initial delay. Google Cloud accepts `maxSurgeFixed: 0` with `maxUnavailableFixed: 1`
-  on a zonal group of one, and the template's `namePrefix`.
+  initial delay, 573 seconds for the default disk. Google Cloud accepts `maxSurgeFixed: 0` with
+  `maxUnavailableFixed: 1` on a zonal group of one, and the template's `namePrefix`.
 - Clients reach 4222 over the tailnet through `nats-firewall`'s rule, added with COS's own
   `/sbin/iptables` as the health checks' is, whichever backend Tailscale v1.104.1's image writes
   its own accept rule for `tailscale0` with. `iptables -V` on the VM names COS's backend; under

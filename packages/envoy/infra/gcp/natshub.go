@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/compute"
 	"github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp/secretmanager"
@@ -26,6 +27,7 @@ const natsHubType = "envoy-infra:gcp:NatsHub"
 
 const (
 	defaultMachineType = "e2-small"
+	defaultDiskType    = "pd-balanced"
 	defaultDiskSizeGb  = 20
 	natsPort           = 4222
 	// monitorPort is nats-server's monitoring port, whose /healthz the group's health check reads.
@@ -39,6 +41,55 @@ const (
 	// confHeader heads the rendered configuration file, which the VM's metadata holds in the clear.
 	confHeader = "Rendered by envoy-infra. Public keys only."
 )
+
+// groupWait is the provider's own create and update timeout for an instance group manager
+// (pulumi-gcp v10.1.0's upstream resource_compute_instance_group_manager.go:49-53).
+const groupWait = 15 * time.Minute
+
+// The group's initial delay, the time it waits after creating a VM before the health check counts:
+// bootAndPullsSec of it is the VM's boot and its two image pulls, and the rest the first boot's
+// read and format of the data disk (initialDelaySec). A group takes at most maxInitialDelaySec.
+const (
+	bootAndPullsSec    = 300
+	maxInitialDelaySec = 3600
+)
+
+// diskReadRates are the data disk types the hub takes, each with the rate, in MiB/s, the first
+// boot's full read of the disk is assumed to run at. pd-balanced's is below its documented 140
+// MiB/s baseline; pd-ssd's is its documented floor, the 200 MiB/s read limit of an E2 shared-core
+// VM, as e2-small is, which is below pd-ssd's 240 MiB/s baseline
+// (https://cloud.google.com/compute/docs/disks/performance). Neither rate is measured.
+var diskReadRates = map[string]int{"pd-balanced": 100, "pd-ssd": 200}
+
+// refusedDiskTypes are disk types the hub refuses for the data disk with a reason of their own;
+// every other type but those of diskReadRates is refused too.
+var refusedDiskTypes = map[string]string{
+	"pd-standard": "its documented read is 0.12 MiB/s per GiB with no baseline, so the first boot's " +
+		"full read of the disk takes over 8,500 s at any size, and the group waits at most 3600 s",
+	"hyperdisk-balanced": "an E2 VM, as the default machineType e2-small is, attaches Hyperdisk " +
+		"Balanced only by arrangement with Google's account team",
+}
+
+// initialDelaySec is the group's initial delay for a data disk of sizeGb read at rate MiB/s. The
+// first boot reads a disk blkid finds no filesystem on to its end before it formats it
+// (dataDiskEntry), so the delay is
+//
+//	300 + ceil(1.25 × (S + S/64 + 1024) / R) seconds
+//
+// with S = sizeGb × 1024 MiB, R = rate, and a quarter more as the margin: 300 s for the boot and
+// the image pulls, then the read of S, and mkfs.ext4's writes, S/64 of inode tables (256 bytes per
+// 16 KiB, all written at once) and at most 1024 MiB of journal. sizeGb is taken as GiB, the larger
+// reading of Compute Engine's GB. Callers keep sizeGb at or below maxDiskSizeGb(rate).
+func initialDelaySec(sizeGb, rate int) int {
+	work := sizeGb*1024 + sizeGb*16 + 1024
+	return bootAndPullsSec + (5*work+4*rate-1)/(4*rate)
+}
+
+// maxDiskSizeGb is the largest sizeGb whose initialDelaySec at rate is at most maxInitialDelaySec:
+// ceil(5w/4R) <= 3300 holds while w = 1040 × sizeGb + 1024 <= 2640 × R.
+func maxDiskSizeGb(rate int) int {
+	return ((maxInitialDelaySec-bootAndPullsSec)*4*rate/5 - 1024) / 1040
+}
 
 var (
 	// hostnameRule makes the hostname a DNS label (RFC 1035 §2.3.1: a letter first, a letter or
@@ -63,6 +114,7 @@ type NatsHubArgs struct {
 	Tags           []string           `pulumi:"tags"`                 // "tag:<name>", at least one
 	Zone           string             `pulumi:"zone"`                 // e.g. us-central1-a
 	MachineType    *string            `pulumi:"machineType,optional"` // default "e2-small"
+	DiskType       *string            `pulumi:"diskType,optional"`    // default "pd-balanced"
 	DiskSizeGb     *int               `pulumi:"diskSizeGb,optional"`  // default 20
 	NatsImage      string             `pulumi:"natsImage"`            // pinned: <name>@sha256:<digest>
 	TailscaleImage string             `pulumi:"tailscaleImage"`       // pinned: <name>@sha256:<digest>
@@ -106,13 +158,15 @@ type NatsHub struct {
 }
 
 // settings are a hub's plain inputs, validated, with the defaults applied, and what they render:
-// the VM's cloud-config, from vm, as its user data.
+// the VM's cloud-config, from vm, as its user data, and the group's initial delay.
 type settings struct {
-	vm          vm
-	userData    string
-	zone        string
-	machineType string
-	diskSizeGb  int
+	vm              vm
+	userData        string
+	zone            string
+	machineType     string
+	diskType        string
+	diskSizeGb      int
+	initialDelaySec int
 }
 
 // newSettings validates args and renders the NATS configuration and the VM's user data. Every
@@ -143,12 +197,27 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 				image.field, image.ref)
 		}
 	}
-	s := settings{zone: args.Zone, machineType: defaultMachineType, diskSizeGb: defaultDiskSizeGb}
+	s := settings{zone: args.Zone, machineType: defaultMachineType, diskType: defaultDiskType, diskSizeGb: defaultDiskSizeGb}
 	if args.MachineType != nil {
 		if *args.MachineType == "" {
 			return settings{}, errors.New("machineType is empty; leave it unset for " + defaultMachineType)
 		}
 		s.machineType = *args.MachineType
+	}
+	if args.DiskType != nil {
+		if *args.DiskType == "" {
+			return settings{}, errors.New("diskType is empty; leave it unset for " + defaultDiskType)
+		}
+		s.diskType = *args.DiskType
+	}
+	rate, ok := diskReadRates[s.diskType]
+	if !ok {
+		reason, own := refusedDiskTypes[s.diskType]
+		if !own {
+			reason = "the hub takes pd-balanced or pd-ssd, the types whose documented read rates the " +
+				"first boot's full read of the disk is timed by"
+		}
+		return settings{}, fmt.Errorf("diskType %q: %s", s.diskType, reason)
 	}
 	if args.DiskSizeGb != nil {
 		if *args.DiskSizeGb < 1 {
@@ -156,6 +225,12 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 		}
 		s.diskSizeGb = *args.DiskSizeGb
 	}
+	if largest := maxDiskSizeGb(rate); s.diskSizeGb > largest {
+		return settings{}, fmt.Errorf("diskSizeGb %d is too large for a %s data disk: the first boot reads "+
+			"the disk whole, at an assumed %d MiB/s, before it formats it, and the group waits at most %d s "+
+			"for that; the largest diskSizeGb that fits is %d", s.diskSizeGb, s.diskType, rate, maxInitialDelaySec, largest)
+	}
+	s.initialDelaySec = initialDelaySec(s.diskSizeGb, rate)
 	if args.TailnetAuthKey == nil {
 		return settings{}, errors.New("tailnetAuthKey is required")
 	}
@@ -187,10 +262,11 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 // seededInput names the first plain input of args that the hub itself carries and that holds an
 // nkey seed (bus.HoldsSeed: any type, either case, whole, inside a longer value, split by '.', '-',
 // '_' or whitespace, or percent-encoded), by its path and never its value: the hostname and the
-// tags, quoted by the hub's own refusals and written into the user data; the zone and the machine
-// type, the group's and the template's inputs; the images, written into the user data; and each
-// user's machine id, which the hub turns into that user's rules before core sees them, so core's
-// refusal would name a rule entry the user never wrote. A user's name and rule entries are core's:
+// tags, quoted by the hub's own refusals and written into the user data; the zone, the machine
+// type and the disk type, the group's and the template's inputs, the disk type also quoted by its
+// refusal; the images, written into the user data; and each user's machine id, which the hub
+// turns into that user's rules before core sees them, so core's refusal would name a rule entry
+// the user never wrote. A user's name and rule entries are core's:
 // core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
 // hub's own user refusals name a user by its index alone (authorization). A user's nkey is core's
 // too: it refuses any nkey that is not a user public key, a seed included, without quoting it.
@@ -205,6 +281,9 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 	}
 	if args.MachineType != nil {
 		fields = append(fields, field{"machineType", *args.MachineType})
+	}
+	if args.DiskType != nil {
+		fields = append(fields, field{"diskType", *args.DiskType})
 	}
 	for i, u := range args.Users {
 		if u.MachineID != nil {
@@ -390,6 +469,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 				Boot:       pulumi.Bool(false),
 				AutoDelete: pulumi.Bool(false),
 				DiskSizeGb: pulumi.Int(s.diskSizeGb),
+				DiskType:   pulumi.String(s.diskType),
 			},
 		},
 		NetworkInterfaces: compute.InstanceTemplateNetworkInterfaceArray{compute.InstanceTemplateNetworkInterfaceArgs{
@@ -412,7 +492,10 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 	}
 
 	// The VM fetches the key at its first boot, so its group is created once the key's version
-	// and the account's access to it exist.
+	// and the account's access to it exist. pulumi up waits for the group to be stable, which it
+	// is once its VM is healthy, so a create or update may wait for the first boot's read of the
+	// data disk: its timeout is the initial delay after the provider's own (groupWait).
+	wait := (time.Duration(s.initialDelaySec)*time.Second + groupWait).String()
 	group, err := compute.NewInstanceGroupManager(ctx, hostname, &compute.InstanceGroupManagerArgs{
 		BaseInstanceName: pulumi.String(hostname),
 		Zone:             pulumi.String(s.zone),
@@ -426,7 +509,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		}},
 		AutoHealingPolicies: compute.InstanceGroupManagerAutoHealingPoliciesArgs{
 			HealthCheck:     health.SelfLink,
-			InitialDelaySec: pulumi.Int(300),
+			InitialDelaySec: pulumi.Int(s.initialDelaySec),
 		},
 		UpdatePolicy: compute.InstanceGroupManagerUpdatePolicyArgs{
 			Type:                pulumi.String("PROACTIVE"),
@@ -437,7 +520,8 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		},
 		WaitForInstances:       pulumi.Bool(true),
 		WaitForInstancesStatus: pulumi.String("STABLE"),
-	}, child, pulumi.DependsOn([]pulumi.Resource{version, accessor}))
+	}, child, pulumi.DependsOn([]pulumi.Resource{version, accessor}),
+		pulumi.Timeouts(&pulumi.CustomTimeouts{Create: wait, Update: wait}))
 	if err != nil {
 		return nil, err
 	}

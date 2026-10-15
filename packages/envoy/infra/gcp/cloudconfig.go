@@ -63,19 +63,9 @@ type writeFile struct {
 // document returns the VM's cloud-config.
 //
 // bootcmd runs first at every boot. It loads the tun module unless the kernel already has the
-// device. It formats the data disk only when blkid finds no filesystem on it (exit status 2) and
-// its first MiB reads, whole, as zeros, as a new persistent disk's does. blkid exits 2 too on a
-// filesystem whose primary superblock is damaged, which e2fsck can repair from a backup superblock
-// and mkfs.ext4's discard would destroy, and on a device it cannot open: every disk but a blank one
-// is left as it is, with a line on stderr. It checks the disk with fsck.ext4 -p, as Container-
-// Optimized OS's documentation does before a mount
-// (https://cloud.google.com/container-optimized-os/docs/concepts/disks-and-filesystem), and mounts
-// it, with the options Compute Engine documents for a persistent disk
-// (https://cloud.google.com/compute/docs/disks/format-mount-disk-linux), only when fsck left no
-// error it could not fix (exit status below 4). An unmounted disk keeps both containers down:
-// their units refuse to start unless it is mounted. It makes the directories the two containers
-// keep their state in, and leaves the key file empty and readable by root alone, so that
-// tailscaled's bind mount is always of a file.
+// device, then formats and mounts the data disk with dataDiskEntry. It makes the directories the
+// two containers keep their state in, and leaves the key file empty and readable by root alone, so
+// that tailscaled's bind mount is always of a file.
 //
 // write_files holds the NATS configuration, the key fetcher and the units; runcmd loads the units
 // and starts them in order. They are started, never enabled: /etc does not outlive the boot.
@@ -93,18 +83,8 @@ func (v vm) document() cloudConfig {
 	return cloudConfig{
 		Bootcmd: []string{
 			"test -c /dev/net/tun || modprobe tun",
-			"d=" + dataDevice + "; blkid -p \"$d\" >/dev/null; s=$?; " +
-				"if [ $s -eq 0 ]; then :; " +
-				"elif [ $s -ne 2 ]; then echo \"envoy-infra: blkid -p $d exited $s; not formatting it\" >&2; " +
-				"elif [ \"$(head -c 1048576 \"$d\" 2>/dev/null | wc -c)\" -ne 1048576 ]; then " +
-				"echo \"envoy-infra: $d does not read; not formatting it\" >&2; " +
-				"elif [ -n \"$(head -c 1048576 \"$d\" | tr -d '\\000' | head -c 1)\" ]; then " +
-				"echo \"envoy-infra: $d holds data but no filesystem blkid knows; not formatting it\" >&2; " +
-				"else mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard \"$d\"; fi",
 			"mkdir -p " + dataMount,
-			"d=" + dataDevice + "; fsck.ext4 -p \"$d\"; s=$?; " +
-				"if [ $s -lt 4 ]; then mount -o discard,defaults \"$d\" " + dataMount + "; " +
-				"else echo \"envoy-infra: fsck.ext4 -p $d exited $s; not mounting it\" >&2; fi",
+			dataDiskEntry,
 			"mkdir -p " + dataMount + "/nats " + dataMount + "/tailscale",
 			"mkdir -p -m 0700 " + keyDir,
 			"install -m 0600 /dev/null " + keyPath,
@@ -113,6 +93,38 @@ func (v vm) document() cloudConfig {
 		Runcmd:     runcmd,
 	}
 }
+
+// dataDiskEntry formats the data disk only when it is proven empty end to end: blkid finds no
+// filesystem on it (exit status 2) and cmp reads the whole device, blockdev's size of it, against
+// /dev/zero, stopping at the first byte that is not zero. Container-Optimized OS ships GNU cmp
+// (diffutils), which takes a length over 4 GiB, as busybox's does not. A disk blkid finds a
+// filesystem on is not read: it is checked with fsck.ext4 -p, as Container-Optimized OS's
+// documentation does before a mount
+// (https://cloud.google.com/container-optimized-os/docs/concepts/disks-and-filesystem), and mounted,
+// with the options Compute Engine documents for a persistent disk
+// (https://cloud.google.com/compute/docs/disks/format-mount-disk-linux), when fsck left no error it
+// could not fix (exit status below 4). Every other disk is left unmounted and unwritten, among them
+// a filesystem whose first MiB or primary superblock was zeroed, whose data e2fsck can still reach
+// from a backup superblock and mkfs.ext4's discard would destroy. The entry then prints one line
+// naming the device and the reason and nothing the disk holds, at every boot that refuses it; an
+// unmounted disk keeps both containers down, since their units refuse to start without it.
+const dataDiskEntry = `d=` + dataDevice + `
+data_disk() {
+  blkid -p "$d" >/dev/null; s=$?
+  if [ "$s" -eq 2 ]; then
+    size=$(blockdev --getsize64 "$d") || { why="blkid finds no filesystem on it, and blockdev --getsize64 exited $?"; return 1; }
+    cmp -s -n "$size" /dev/zero "$d"; s=$?
+    if [ "$s" -eq 1 ]; then why="blkid finds no filesystem on it, and it does not read as zeros to its end"; return 1; fi
+    if [ "$s" -ne 0 ]; then why="blkid finds no filesystem on it, and cmp exited $s reading it"; return 1; fi
+    mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$d" || { why="mkfs.ext4 exited $?"; return 1; }
+  elif [ "$s" -ne 0 ]; then
+    why="blkid -p exited $s"; return 1
+  fi
+  fsck.ext4 -p "$d"; s=$?
+  if [ "$s" -ge 4 ]; then why="fsck.ext4 -p exited $s"; return 1; fi
+  mount -o discard,defaults "$d" ` + dataMount + ` || { why="mount exited $?"; return 1; }
+}
+data_disk || echo "envoy-hub: data disk $d left unmounted: $why; see docs/nats-hub.md, \"Repairing the data disk\"" >&2`
 
 // unitFile is one of the VM's systemd units: its file name under unitDir, and its text.
 type unitFile struct{ name, text string }
