@@ -215,8 +215,9 @@ its variable, and use that port wherever a command below names the default.
    [Connecting an agent](/legion/dispatch/for-agents/#connecting-an-agent) describes.
 
 4. Start an agent session with the Envoy plugin for its host: for Oh My Pi, `@sjawhar/pi-envoy`
-   10.0.0 or later (`omp plugin install @sjawhar/pi-envoy`), then `omp`. Check that it
-   registered:
+   10.0.0 or later (`omp plugin install @sjawhar/pi-envoy`), then `omp`. A session reads
+   `envoy.json` when it starts, so restart any session that was already running: `/reload-plugins`
+   does not reload it. Check that it registered:
 
    ```sh
    curl http://127.0.0.1:9020/v1/sessions
