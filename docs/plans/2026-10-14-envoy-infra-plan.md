@@ -1323,7 +1323,11 @@ are gone, they read them from this command.
     literal prefix, not from the component's own name).
 
   A test pins each subcommand's output against the component's recorded inputs under mocks for the
-  same arguments. That keeps one source.
+  same arguments. That keeps one source. Every flag's value reaches the output, and the flag
+  package's messages and core's refusals quote values, so render refuses an nkey user seed
+  (`core.HoldsSeed`) in any flag's value or anywhere in the `--authorization-file`, naming the flag
+  or the file's field, and reports an undefined flag or an unparseable value without quoting it, as
+  `envoy-infra seed` does; a test row each pins the three ways, never echoing the seed.
 - [x] **README.** Document:
   - `aws:NatsService` and `aws:WebhookListener`'s inputs, with a Python example using placeholders;
   - R11-R15, written for an operator;
