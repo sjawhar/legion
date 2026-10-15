@@ -442,3 +442,104 @@ func TestAJobsReadThatFailsIsLoggedAndTheRunIsReadAtItsEnd(t *testing.T) {
 		t.Fatalf("the backfill skips run 500 after a failed read (%v), want it listed", err)
 	}
 }
+
+// concurrentJobClock is a jobClock whose timers all fire at once, each on a goroutine of its own,
+// when the test calls fireAll: the way a backlog that drains faster than jobQuiet ends every run's
+// burst together.
+type concurrentJobClock struct {
+	mu     sync.Mutex
+	timers []func()
+}
+
+// unstoppableTimer is the timer concurrentJobClock hands back; each run is scheduled once here,
+// so nothing stops one.
+type unstoppableTimer struct{}
+
+func (unstoppableTimer) Stop() bool { return false }
+
+func (c *concurrentJobClock) Now() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
+
+func (c *concurrentJobClock) AfterFunc(_ time.Duration, f func()) jobTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.timers = append(c.timers, f)
+	return unstoppableTimer{}
+}
+
+// fireAll starts every timer's function on a goroutine of its own and returns the group they run
+// in.
+func (c *concurrentJobClock) fireAll() *sync.WaitGroup {
+	c.mu.Lock()
+	timers := c.timers
+	c.timers = nil
+	c.mu.Unlock()
+	var fired sync.WaitGroup
+	for _, f := range timers {
+		fired.Go(f)
+	}
+	return &fired
+}
+
+// TestTheJobIntakeReadsAtMostABoundedNumberOfRunsAtOnce: when many tracked runs' bursts end
+// together, as on the first start after an outage drains its backlog, the job intake asks GitHub for
+// at most reconcilePartialConcurrency runs' jobs at a time, and reads every run once. Unbounded, it
+// opened one listing per run at once, which past GitHub's 100 concurrent requests rate-limits the
+// App.
+func TestTheJobIntakeReadsAtMostABoundedNumberOfRunsAtOnce(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	const runs = 3 * reconcilePartialConcurrency
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	for id := int64(600); id < 600+runs; id++ {
+		if err := UpsertRun(ctx, pool, changeTestRun(id, DeliveryRunKindDeploy, started.Add(-time.Minute), started)); err != nil {
+			t.Fatalf("seed run %d: %v", id, err)
+		}
+	}
+	var inFlight, most, reads atomic.Int32
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}/jobs", func(w http.ResponseWriter, _ *http.Request) {
+		now := inFlight.Add(1)
+		for seen := most.Load(); now > seen && !most.CompareAndSwap(seen, now); seen = most.Load() {
+		}
+		<-release
+		inFlight.Add(-1)
+		reads.Add(1)
+		mustEncode(t, w, map[string]any{"total_count": 1, "jobs": []map[string]any{
+			{"name": "build", "started_at": "2026-09-03T12:00:00Z", "completed_at": "2026-09-03T12:04:00Z", "conclusion": "success"},
+		}})
+	})
+	github := fake.newTestClient()
+	// Registered after the fake's server, so it runs first: the server's Close waits for the
+	// handlers it holds.
+	t.Cleanup(releaseOnce)
+
+	clock := &concurrentJobClock{}
+	jobs := newJobIntake(nil, pool, github, clock)
+	for id := int64(600); id < 600+runs; id++ {
+		jobs.schedule(runKey{repo: "acme/widgets", runID: id})
+	}
+	fired := clock.fireAll()
+	// Runs before the pool's and the fake's cleanups, so no read outlives the test into them.
+	t.Cleanup(func() {
+		releaseOnce()
+		fired.Wait()
+	})
+	waitFor(t, 20*time.Second, func() bool { return inFlight.Load() >= reconcilePartialConcurrency }, func() string {
+		return fmt.Sprintf("%d jobs reads in flight, want %d", inFlight.Load(), reconcilePartialConcurrency)
+	})
+	// Every run's burst has ended; give the rest a moment to start reads they should not.
+	time.Sleep(500 * time.Millisecond)
+	if got := most.Load(); got != reconcilePartialConcurrency {
+		t.Fatalf("%d of %d runs' jobs read at once, want at most %d", got, runs, reconcilePartialConcurrency)
+	}
+
+	releaseOnce()
+	fired.Wait()
+	if got := reads.Load(); got != runs {
+		t.Fatalf("jobs reads = %d, want one for each of the %d runs", got, runs)
+	}
+	if got := most.Load(); got != reconcilePartialConcurrency {
+		t.Fatalf("%d runs' jobs read at once by the end, want at most %d", got, reconcilePartialConcurrency)
+	}
+}
