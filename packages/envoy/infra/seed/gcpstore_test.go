@@ -154,6 +154,9 @@ type fakeGCP struct {
 	// added, the next lagList listings leave it out and the next lagAccess reads of latest answer
 	// NOT_FOUND, as they do for a secret with no version.
 	lagList, lagAccess int
+	// The same before the store's write: until it adds a version, the listing leaves out the first
+	// unlisted versions the secret holds, and latest the first unnamed ones.
+	unlisted, unnamed int
 }
 
 func newFakeGCP(t *testing.T) *fakeGCP {
@@ -244,10 +247,14 @@ func (f *fakeGCP) GetSecretVersion(_ context.Context, req *secretmanagerpb.GetSe
 	if !proto.Equal(req, &secretmanagerpb.GetSecretVersionRequest{Name: gcpLatestOf}) {
 		return nil, f.reject("GetSecretVersion " + prototext.Format(req) + ": the latest version alone")
 	}
-	if !f.exists || len(f.versions) == 0 {
+	visible := f.versions
+	if f.added == 0 {
+		visible = visible[f.unnamed:]
+	}
+	if !f.exists || len(visible) == 0 {
 		return nil, f.notFound()
 	}
-	newest := f.versions[len(f.versions)-1]
+	newest := visible[len(visible)-1]
 	return &secretmanagerpb.SecretVersion{Name: versionName(newest.number), State: newest.state}, nil
 }
 
@@ -272,6 +279,9 @@ func (f *fakeGCP) ListSecretVersions(_ context.Context, req *secretmanagerpb.Lis
 	}
 	// Secret Manager lists the newest version first.
 	versions := slices.Clone(f.versions)
+	if f.added == 0 {
+		versions = versions[f.unlisted:]
+	}
 	if f.added > 0 && f.lagList > 0 {
 		f.lagList--
 		versions = versions[:len(versions)-f.added]
@@ -476,11 +486,25 @@ func TestGCPGenerateRefusesBeforeWriting(t *testing.T) {
 		want  string
 		lists int
 	}{
+		// Describe's read of latest names the newest version whatever its state: generate refuses
+		// on it before it lists, so neither eventually consistent read alone lets a write through.
 		// A destroyed version holds no value, but a client may have read the seed it held.
-		{"a destroyed version", func(f *fakeGCP) *fakeGCP { return f.with("", destroyed) }, "already holds 1 version(s)", 1},
-		{"a disabled version", func(f *fakeGCP) *fakeGCP { return f.with(seedValue, disabled) }, "already holds 1 version(s)", 1},
-		{"versions on every page", func(f *fakeGCP) *fakeGCP {
-			f.pageSize = 2
+		{"a destroyed version", func(f *fakeGCP) *fakeGCP { return f.with("", destroyed) },
+			"already holds version 1, which latest names", 0},
+		{"a disabled version", func(f *fakeGCP) *fakeGCP { return f.with(seedValue, disabled) },
+			"already holds version 1, which latest names", 0},
+		{"a version latest names and the listing leaves out", func(f *fakeGCP) *fakeGCP {
+			f.unlisted = 1
+			return f.with(seedValue, enabled)
+		}, "already holds version 1, which latest names", 0},
+		// The listing counts what latest does not name yet, destroyed versions included, across
+		// every page.
+		{"a destroyed version only the listing shows", func(f *fakeGCP) *fakeGCP {
+			f.unnamed = 1
+			return f.with("", destroyed)
+		}, "already holds 1 version(s)", 1},
+		{"versions on every page, which latest does not name yet", func(f *fakeGCP) *fakeGCP {
+			f.pageSize, f.unnamed = 2, 3
 			return f.with("", destroyed).with(seedValue, disabled).with(seedValue, enabled)
 		}, "already holds 3 version(s)", 2},
 		{"a listing that repeats its page token", func(f *fakeGCP) *fakeGCP { f.repeatToken = true; return f },
@@ -582,6 +606,25 @@ func TestGCPGenerateCallsAFailedWriteUnknownNotRefused(t *testing.T) {
 		"whether a version was written is unknown, run check\n", errs)
 	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}, f.recorded(),
 		"one AddSecretVersion, not retried, and no call after it")
+}
+
+// Secret Manager numbers a secret's versions from 1, one more for each (resources.proto,
+// SecretVersion.name), so a write answered with any other number shows the secret held a version
+// both eventually consistent reads before the write, latest and the listing, missed: an error after
+// the write, with nothing read back.
+func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
+	earlier, _ := testnats.User(t)
+	f := newFakeGCP(t).with(earlier, enabled)
+	f.unlisted, f.unnamed = 1, 1
+	serveGCP(t, f)
+	code, out, errs := runGCP(t, f, "generate")
+	require.Equal(t, 1, code, errs)
+	require.Equal(t, 1, f.added)
+	require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[1].value)+"\nversion id: 2\n", out)
+	require.Equal(t, "error after writing: version 2 was written, not version 1: "+gcpSecret+" held a version "+
+		"neither latest nor the listing showed before the write; run check\n", errs)
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}, f.recorded(),
+		"no read-back after the write")
 }
 
 // Secret Manager's listings and its latest alias are eventually consistent: only an access by
