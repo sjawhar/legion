@@ -73,11 +73,10 @@ def _mapping_with_line(loader, node):
 
 LineLoader.add_constructor(yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _mapping_with_line)
 
-WORKFLOWS = [
-    Path(".github/workflows/release.yaml"),
-    Path(".github/workflows/release-envoy-listener.yaml"),
-    Path(".github/workflows/release-envoy-infra.yaml"),
-]
+RELEASE = Path(".github/workflows/release.yaml")
+LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
+INFRA = Path(".github/workflows/release-envoy-infra.yaml")
+WORKFLOWS = [RELEASE, LISTENER, INFRA]
 
 # What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it.
 WRITE_SCOPES = ("contents", "id-token", "attestations")
@@ -444,8 +443,8 @@ def required_job(path: Path, name: str, must: str) -> tuple[Mapping, int] | None
 
 
 # 4. The two npm publishes that push a bump to main run one after the other.
-if WORKFLOWS[0] in loaded:
-    path = WORKFLOWS[0]
+if RELEASE in loaded:
+    path = RELEASE
     must = "must need 'pi_envoy_publish', so the two bump commits to main never race"
     if found := required_job(path, "pi_legion_publish", must):
         job, job_line = found
@@ -458,8 +457,8 @@ if WORKFLOWS[0] in loaded:
             )
 
 # 5. The listener's publish job moves `latest` and tags one run at a time, and finishes.
-if WORKFLOWS[1] in loaded:
-    path = WORKFLOWS[1]
+if LISTENER in loaded:
+    path = LISTENER
     must = (
         "must run in concurrency group 'release-envoy-listener' with 'cancel-in-progress: false', "
         "the boolean"

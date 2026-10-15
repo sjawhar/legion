@@ -152,8 +152,9 @@ KNOWN_HOSTS
 # deploy_key_env: make this process's git reach GitHub over SSH with the deploy
 # key in $DEPLOY_KEY (the header's push-tag paragraph): the key and GitHub's
 # host keys go into a directory only the runner's user can read, removed when
-# the script exits, and GIT_SSH_COMMAND points ssh at them and nothing else.
-# $DEPLOY_KEY and $GITHUB_REPOSITORY are required before anything is made.
+# the script exits, GIT_SSH_COMMAND points ssh at them and nothing else, and $remote is the
+# repository's SSH URL on GitHub. $DEPLOY_KEY and $GITHUB_REPOSITORY are required before anything
+# is made.
 deploy_key_env() {
   : "${DEPLOY_KEY:?DEPLOY_KEY holds the deploy key to reach GitHub with}"
   : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY names the repository on GitHub}"
@@ -168,6 +169,7 @@ deploy_key_env() {
   printf -v key '%q' "$ssh_dir/key"
   printf -v known_hosts '%q' "$ssh_dir/known_hosts"
   export GIT_SSH_COMMAND="ssh -F /dev/null -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$known_hosts -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes"
+  remote="git@github.com:$GITHUB_REPOSITORY.git"
 }
 
 # pushed_tag <tag-prefix> [<package-dir>]: print the release tag an earlier
@@ -188,7 +190,7 @@ pushed_tag() {
     }; then
       if ! is_plain_version "${candidate#"$prefix"}"; then
         printf -v shown '%q' "$candidate"
-        echo "::error::release-push.sh tagged: $shown, the release tag for this checkout, is not ${prefix}X.Y.Z; refusing it" >&2
+        echo "::error::release-push.sh $command: $shown, the release tag for this checkout, is not ${prefix}X.Y.Z; refusing it" >&2
         return 1
       fi
       echo "$candidate"
@@ -322,13 +324,9 @@ case "$command" in
         exit 1
       fi
     fi
-    # What goes to $GITHUB_OUTPUT is checked once more right before it is printed.
+    # release-bump.sh's answer is checked once more right before it goes to $GITHUB_OUTPUT.
     if [ -n "$version" ] && ! is_plain_version "$version"; then
       echo "::error::release-push.sh version: the version $(quote_all "$version") is not X.Y.Z; refusing it" >&2
-      exit 1
-    fi
-    if [ "$skip" != true ] && [ "$skip" != false ]; then
-      echo "::error::release-push.sh version: skip is $(quote_all "$skip"), not true or false; refusing it" >&2
       exit 1
     fi
     echo "$log" >&2
@@ -403,7 +401,6 @@ case "$command" in
     version=${3:?released version}
     manifest="$package_dir/package.json"
     deploy_key_env
-    remote="git@github.com:$GITHUB_REPOSITORY.git"
     for attempt in 1 2 3 4 5; do
       # HEAD:refs/heads/main pushes from a detached HEAD as well as a branch.
       git push "$remote" HEAD:refs/heads/main && exit 0
@@ -461,7 +458,7 @@ case "$command" in
   push-tag)
     tag=${2:?tag}
     deploy_key_env
-    git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$tag"
+    git push "$remote" "refs/tags/$tag"
     ;;
   handed)
     if [ $# -lt 5 ]; then
