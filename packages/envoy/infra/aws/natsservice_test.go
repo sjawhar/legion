@@ -241,7 +241,7 @@ func exampleArgs() *envoyaws.NatsServiceArgs {
 		Authorization: exampleAuthorization(),
 		ConfigHeader:  []string{"Rendered by envoy-infra from placeholder inputs.", "Public keys only."},
 		ServerArgs:    []string{"--jetstream", "--store_dir", "/data", "--port", "4222", "--http_port", "8222"},
-		ConfigPath:    "/tmp/nats-server.conf",
+		ConfigPath:    pulumi.StringRef("/tmp/nats-server.conf"),
 
 		NatsImage:              "example.registry/nats:placeholder",
 		TailscaleImage:         "example.registry/tailscale@sha256:" + strings.Repeat("0", 64),
@@ -273,6 +273,12 @@ func exampleArgs() *envoyaws.NatsServiceArgs {
 		MetricNamespace:               "example/NATS",
 		MetricFilterLogicalNamePrefix: "example-bus",
 	}
+}
+
+// noAuthorization makes args a service with no authorization: none of authorization, configHeader
+// and configPath given. Its container definitions are nats-unauthorized.golden.
+func noAuthorization(a *envoyaws.NatsServiceArgs) {
+	a.Authorization, a.ConfigHeader, a.ConfigPath = nil, nil, nil
 }
 
 func readGolden(t *testing.T, name string) string {
@@ -435,15 +441,15 @@ func requireChildren(t *testing.T, want map[string]child, got map[string]registr
 // definition's container definitions differ, each the reference's golden.
 func TestNatsServiceRegistersTheReferenceChildren(t *testing.T) {
 	for _, row := range []struct {
-		golden        string
-		authorization *envoyaws.AuthorizationArgs
+		golden string
+		mutate func(*envoyaws.NatsServiceArgs)
 	}{
-		{"nats-authorized.golden", exampleAuthorization()},
-		{"nats-unauthorized.golden", nil},
+		{"nats-authorized.golden", func(*envoyaws.NatsServiceArgs) {}},
+		{"nats-unauthorized.golden", noAuthorization},
 	} {
 		t.Run(row.golden, func(t *testing.T) {
 			args := exampleArgs()
-			args.Authorization = row.authorization
+			row.mutate(args)
 			m, out, err := run(t, args, true)
 			require.NoError(t, err)
 
@@ -551,7 +557,7 @@ func requireAdopted(t *testing.T, want map[string]child, children map[string]reg
 // sidecar's script and nothing else.
 func TestNatsServiceEphemeralTailnetKey(t *testing.T) {
 	args := exampleArgs()
-	args.Authorization = nil
+	noAuthorization(args)
 	args.TailnetEphemeral = true
 	m, _, err := run(t, args, true)
 	require.NoError(t, err)
@@ -581,10 +587,32 @@ func TestNatsServiceValidate(t *testing.T) {
 			mutate: func(a *envoyaws.NatsServiceArgs) { a.Authorization.Users[0].NKey = "UNOTAKEY" },
 			err:    `authorization: users[0] "example-listener"`,
 		},
+		// configHeader and configPath belong to authorization: required with it, and refused
+		// without it, where the launch would drop them.
+		{
+			name:   "an authorization with no config header",
+			mutate: func(a *envoyaws.NatsServiceArgs) { a.ConfigHeader = nil },
+			err:    "configHeader is required with authorization",
+		},
 		{
 			name:   "an authorization with no config path",
-			mutate: func(a *envoyaws.NatsServiceArgs) { a.ConfigPath = "" },
+			mutate: func(a *envoyaws.NatsServiceArgs) { a.ConfigPath = nil },
 			err:    "configPath is required with authorization",
+		},
+		{
+			name:   "an authorization with a blank config path",
+			mutate: func(a *envoyaws.NatsServiceArgs) { a.ConfigPath = pulumi.StringRef("") },
+			err:    "configPath is required with authorization",
+		},
+		{
+			name:   "a config header with no authorization",
+			mutate: func(a *envoyaws.NatsServiceArgs) { a.Authorization = nil },
+			err:    "configHeader is given for authorization, which is not given",
+		},
+		{
+			name:   "a config path with no authorization",
+			mutate: func(a *envoyaws.NatsServiceArgs) { a.Authorization, a.ConfigHeader = nil, nil },
+			err:    "configPath is given for authorization, which is not given",
 		},
 		{
 			name:   "a config header line holding a line break",
@@ -619,6 +647,9 @@ func TestNatsServiceValidate(t *testing.T) {
 		})
 	}
 	require.NoError(t, exampleArgs().Validate())
+	unauthorized := exampleArgs()
+	noAuthorization(unauthorized)
+	require.NoError(t, unauthorized.Validate())
 }
 
 func TestNatsServiceRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
@@ -764,6 +795,20 @@ func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
 		require.Contains(t, children[dep.child].rpc.GetPropertyDependencies()[dep.input].GetUrns(), string(upstream),
 			"%s's %s depends on the resource its input comes from", dep.child, dep.input)
 	}
+}
+
+// A consumer that runs NATS with no authorization leaves configHeader and configPath out too, and
+// Construct takes that: the service registers the unauthorized golden's container.
+func TestConstructTakesNoAuthorizationWithoutItsInputs(t *testing.T) {
+	args := exampleArgs()
+	noAuthorization(args)
+	in := inputs(t, args, fromUpstream)
+	for _, name := range []string{"authorization", "configHeader", "configPath"} {
+		require.NotContains(t, in, name)
+	}
+	m, _, err := construct(t, natsServiceType, "example-nats", in, false)
+	require.NoError(t, err)
+	requireChildren(t, exampleChildren(t, "nats-unauthorized.golden"), m.children(t))
 }
 
 func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {

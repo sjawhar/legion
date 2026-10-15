@@ -90,6 +90,11 @@ func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
 	}
 	// Generated SDKs append Args to an object type's name for its input type.
 	require.Equal(t, "#/types/envoy-infra:aws:Authorization", nats.InputProperties["authorization"].Ref)
+	// Every input is required but the authorization and what belongs to it, and the optional
+	// settings.
+	require.ElementsMatch(t, []string{
+		"authorization", "configHeader", "configPath", "tailnetEphemeral", "waitForSteadyState", "adopt",
+	}, optionalInputs(nats.InputProperties, nats.RequiredInputs))
 }
 
 func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) {

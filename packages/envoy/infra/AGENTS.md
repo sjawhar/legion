@@ -68,7 +68,11 @@ versions. Never add the module to the root `go.work`.
   registered, not the constructor. The watchdog's create script runs as root on the host
   (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
   a control character, and with a watchdog the listener's name, which it echoes in double quotes,
-  may hold no `"`, `$`, backtick, `\` or line break. Each table tests its own refusals: core's are
+  may hold no `"`, `$`, backtick, `\` or line break. An input that belongs to another (a webhook's
+  secret, `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and `configPath` to
+  `authorization`) is required while its owner is present and refused while it is not, where the
+  component would drop it: one rule, `rendering.CheckOwnedInputs`, which both AWS components'
+  `validate` and `rendering.ListenerEnv.Check` call. Each table tests its own refusals: core's are
   in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a
   command's table holds its own plus one row for each input whose shared refusal it passes on,
   showing where that refusal goes.

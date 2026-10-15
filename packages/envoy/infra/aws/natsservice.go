@@ -31,10 +31,12 @@ const nfsPort = 2049
 // of the deployment is required and has no default.
 type NatsServiceArgs struct {
 	// The authorization, as core.Authorization takes it; nil runs NATS with no authorization block.
+	// configHeader and configPath belong to it: required with it, and refused without it, since only
+	// its start script writes a configuration.
 	Authorization *AuthorizationArgs `pulumi:"authorization,optional"`
-	ConfigHeader  []string           `pulumi:"configHeader"` // the rendered config's header lines
+	ConfigHeader  []string           `pulumi:"configHeader,optional"` // the rendered config's header lines
 	ServerArgs    []string           `pulumi:"serverArgs"`
-	ConfigPath    string             `pulumi:"configPath"` // where the task's shell writes the config
+	ConfigPath    *string            `pulumi:"configPath,optional"` // where the task's shell writes the config
 
 	NatsImage              string             `pulumi:"natsImage"`
 	TailscaleImage         string             `pulumi:"tailscaleImage"`
@@ -290,14 +292,23 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 }
 
 // validate refuses the inputs NewNatsService cannot build a working service from, each error
-// naming its input: the authorization, configPath, configHeader and serverArgs (through
-// rendering.NatsLaunch), then the service's. It returns the NATS container's launch.
+// naming its input: configHeader and configPath against authorization, then the authorization,
+// configHeader and serverArgs (through rendering.NatsLaunch), then the service's. It returns the
+// NATS container's launch.
 func (args *NatsServiceArgs) validate() ([]core.Field, error) {
-	var authorization *core.Authorization
-	if args.Authorization != nil {
-		authorization = args.Authorization.core()
+	owner := rendering.Owner{Name: "authorization", Present: args.Authorization != nil, Absent: "which is not given"}
+	if err := rendering.CheckOwnedInputs([]rendering.OwnedInput{
+		{Owner: owner, Field: "configHeader", Given: args.ConfigHeader != nil, Set: args.ConfigHeader != nil},
+		{Owner: owner, Field: "configPath", Given: args.ConfigPath != nil, Set: args.ConfigPath != nil && *args.ConfigPath != ""},
+	}); err != nil {
+		return nil, err
 	}
-	launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
+	var authorization *core.Authorization
+	configPath := ""
+	if args.Authorization != nil {
+		authorization, configPath = args.Authorization.core(), *args.ConfigPath
+	}
+	launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, configPath)
 	if err != nil {
 		return nil, err
 	}

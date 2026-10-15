@@ -292,12 +292,12 @@ func (args *WebhookListenerArgs) validate() error {
 		return errors.New("webhooks is required: give [] for a listener with no webhook")
 	}
 	arns := args.webhookSecretArns()
-	inputs := make([]rendering.WebhookInput, len(rendering.Webhooks))
+	inputs := make([]rendering.OwnedInput, len(rendering.Webhooks))
 	for i, w := range rendering.Webhooks {
 		given := arns[w.Name] != nil
-		inputs[i] = rendering.WebhookInput{Webhook: w.Name, Field: w.SecretInput, Given: given, Set: given}
+		inputs[i] = rendering.OwnedInput{Owner: rendering.WebhookOwner(args.Webhooks, w.Name), Field: w.SecretInput, Given: given, Set: given}
 	}
-	if err := rendering.CheckWebhookInputs(args.Webhooks, inputs); err != nil {
+	if err := rendering.CheckOwnedInputs(inputs); err != nil {
 		return err
 	}
 	// natsUrls may be known only later; the container definitions' apply refuses a bad one.

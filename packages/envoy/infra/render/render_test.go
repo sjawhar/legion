@@ -175,7 +175,7 @@ func natsArgs() *envoyaws.NatsServiceArgs {
 		Authorization: exampleAuthorization(),
 		ConfigHeader:  []string{"Rendered by envoy-infra from placeholder inputs.", "Public keys only."},
 		ServerArgs:    []string{"--jetstream", "--store_dir", "/data", "--port", "4222", "--http_port", "8222"},
-		ConfigPath:    "/tmp/nats-server.conf",
+		ConfigPath:    pulumi.StringRef("/tmp/nats-server.conf"),
 
 		NatsImage:              "example.registry/nats:placeholder",
 		TailscaleImage:         "example.registry/tailscale@sha256:" + strings.Repeat("0", 64),
@@ -285,7 +285,9 @@ func TestNatsStartScriptIsTheScriptNatsServiceLaunches(t *testing.T) {
 			configPath:    "/tmp/nats-server.conf",
 		},
 		{
-			name: "no header line, one server argument, no fallback user",
+			// No --config-header is the component's configHeader [], not configHeader left out.
+			name:   "no header line, one server argument, no fallback user",
+			header: []string{},
 			file: `{"users": [{"name": "example-host-a", "nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", ` +
 				`"publish": {"allow": [">"]}, "subscribe": {"allow": [">"]}, "hasSeed": true}]}`,
 			authorization: &envoyaws.AuthorizationArgs{Users: []envoyaws.UserArgs{{
@@ -307,7 +309,7 @@ func TestNatsStartScriptIsTheScriptNatsServiceLaunches(t *testing.T) {
 			require.Empty(t, stderr)
 
 			in := natsArgs()
-			in.Authorization, in.ConfigHeader, in.ServerArgs, in.ConfigPath = c.authorization, c.header, c.serverArgs, c.configPath
+			in.Authorization, in.ConfigHeader, in.ServerArgs, in.ConfigPath = c.authorization, c.header, c.serverArgs, pulumi.StringRef(c.configPath)
 			m := registered(t, func(ctx *pulumi.Context, opts pulumi.ResourceOption) error {
 				_, err := envoyaws.NewNatsService(ctx, "example-nats", in, opts)
 				return err

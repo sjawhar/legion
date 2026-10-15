@@ -35,26 +35,10 @@ var Webhooks = []Webhook{
 // listener mounts no webhook route, and github then slack.
 var supportedWebhooks = [][]string{{}, {"github", "slack"}}
 
-// WebhookInput is one input of a WebhookListener that belongs to a webhook.
-type WebhookInput struct {
-	Webhook, Field string
-	Given, Set     bool // given at all; given with a value the listener can use
-}
-
-// CheckWebhookInputs refuses, in order, each listed webhook's input that is not set and each
-// unlisted webhook's input that is given, which would otherwise be dropped silently. Each refusal
-// is a core.InputError.
-func CheckWebhookInputs(webhooks []string, inputs []WebhookInput) error {
-	for _, in := range inputs {
-		listed := slices.Contains(webhooks, in.Webhook)
-		if listed && !in.Set {
-			return core.InputErrorf(in.Field, "%s is required with webhook %q", in.Field, in.Webhook)
-		}
-		if !listed && in.Given {
-			return core.InputErrorf(in.Field, "%s is given for webhook %q, which webhooks does not list", in.Field, in.Webhook)
-		}
-	}
-	return nil
+// WebhookOwner is the webhook named name as the Owner of its inputs: present while webhooks lists
+// it.
+func WebhookOwner(webhooks []string, name string) Owner {
+	return Owner{Name: fmt.Sprintf("webhook %q", name), Present: slices.Contains(webhooks, name), Absent: "which webhooks does not list"}
 }
 
 // ListenerEnv holds the inputs of a WebhookListener that its container's non-secret environment
@@ -78,11 +62,12 @@ type ListenerEnv struct {
 // does not take. Each refusal is a core.InputError.
 func (e ListenerEnv) Check() error {
 	set := func(v *string) bool { return v != nil && strings.TrimSpace(*v) != "" }
-	if err := CheckWebhookInputs(e.Webhooks, []WebhookInput{
+	github := WebhookOwner(e.Webhooks, "github")
+	if err := CheckOwnedInputs([]OwnedInput{
 		// The listener refuses to start without it.
-		{Webhook: "github", Field: "reviewerAppId", Given: e.ReviewerAppId != nil, Set: set(e.ReviewerAppId)},
+		{Owner: github, Field: "reviewerAppId", Given: e.ReviewerAppId != nil, Set: set(e.ReviewerAppId)},
 		// The listener would fall back to a trigger of its own without it.
-		{Webhook: "github", Field: "mentionTrigger", Given: e.MentionTrigger != nil, Set: set(e.MentionTrigger)},
+		{Owner: github, Field: "mentionTrigger", Given: e.MentionTrigger != nil, Set: set(e.MentionTrigger)},
 	}); err != nil {
 		return err
 	}

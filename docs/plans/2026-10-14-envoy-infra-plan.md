@@ -1006,11 +1006,13 @@ text), and `testdata/nats-*.golden`. Modify `provider.go` (register), `go.mod` a
 ```go
 type NatsServiceArgs struct {
 	// The authorization, as core.Authorization takes it; nil runs NATS with no authorization
-	// block, as the reference's launch does when a stack declares none.
+	// block, as the reference's launch does when a stack declares none. configHeader and
+	// configPath belong to it: required with it and refused without it (rendering.CheckOwnedInputs,
+	// the listener's rule for a webhook's inputs).
 	Authorization *AuthorizationArgs `pulumi:"authorization,optional"`
-	ConfigHeader  []string           `pulumi:"configHeader"`   // the rendered config's header lines
+	ConfigHeader  []string           `pulumi:"configHeader,optional"` // the rendered config's header lines
 	ServerArgs    []string           `pulumi:"serverArgs"`
-	ConfigPath    string             `pulumi:"configPath"`     // where the task's shell writes the config
+	ConfigPath    *string            `pulumi:"configPath,optional"`   // where the task's shell writes the config
 
 	NatsImage           string `pulumi:"natsImage"`
 	TailscaleImage         string             `pulumi:"tailscaleImage"`

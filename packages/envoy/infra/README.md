@@ -458,9 +458,9 @@ system), `logGroupName`, `taskDefinitionArn`, `metricNamespace` and `internalUrl
 | Input | Default | What it is |
 | --- | --- | --- |
 | `authorization` | unset | The server's nkey authorization, an `aws:Authorization` ([NATS authorization](#nats-authorization)). Unset, NATS runs with no authorization block. |
-| `configHeader` | required | The rendered configuration's header lines, each written as a `# ` comment. |
+| `configHeader` | with `authorization` | The rendered configuration's header lines, each written as a `# ` comment; `[]` for none. Required with `authorization` and refused without it, since only its start script writes a configuration. |
 | `serverArgs` | required | `nats-server`'s arguments: JetStream, its store directory, the ports. With `authorization` they follow `--config <configPath>`. |
-| `configPath` | required | Where the start script writes the configuration in the container. Read only with `authorization`. |
+| `configPath` | with `authorization` | Where the start script writes the configuration in the container. Required with `authorization` and refused without it. |
 | `natsImage`, `tailscaleImage` | required | The two containers' images. |
 | `tailnetHostname` | required | The sidecar's node name, `TS_HOSTNAME`. |
 | `tailnetTags` | required | The tags the node advertises, joined with `,` into `--advertise-tags`: at least one, since an auth key made from an OAuth client must advertise one. |
@@ -569,11 +569,13 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 Each component refuses these before it registers anything, with an error naming the component and
 the input:
 
-- `aws:NatsService`: an `authorization` refused under [NATS authorization](#nats-authorization); an
-  empty `configPath` with `authorization`; a `configHeader` line holding a line break, with
-  `authorization`; a `serverArgs` entry that sets nats-server's `-c`, `-config`, `-user`, `-pass`
-  or `-auth`, with `authorization` (see `StartScript` under [NATS authorization](#nats-authorization));
-  an empty `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
+- `aws:NatsService`: a `configHeader` or `configPath` missing while `authorization` is given (an
+  empty `configPath` counts as missing) or given while it is not, each checked before the
+  authorization; then an `authorization` refused under [NATS authorization](#nats-authorization); a
+  `configHeader` line holding a line break; a `serverArgs` entry that sets nats-server's `-c`,
+  `-config`, `-user`, `-pass` or `-auth`, with `authorization` (see `StartScript` under
+  [NATS authorization](#nats-authorization)); an empty `subnetIds`; an empty `tailnetTags`; a
+  `baseTags` holding `service`.
 - `aws:WebhookListener`: a `webhooks` not given at all (give `[]` for a listener with no webhook);
   a webhook's input missing while `webhooks` lists it (a blank `reviewerAppId` or `mentionTrigger`
   counts as missing) or given while it does not, each input checked before the list; then a
@@ -856,7 +858,8 @@ component registers it, with no newline after it. The file holds the component's
 input as JSON, keyed as the schema spells it (`users`, each with `name`, `nkey`, `publish` and
 `subscribe` with `allow` and `deny`, and `hasSeed`; `noAuthUser`); a key it does not have, a key in
 another letter case, or anything after the one JSON value, is refused. Give `--config-header` once
-per line and `--server-arg` once per argument, in order. For a file with one user:
+per line, none for the component's `configHeader: []`, and `--server-arg` once per argument, in
+order. For a file with one user:
 
 ```json
 {"users": [{"name": "example-listener", "nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "publish": {"allow": [">"]}, "subscribe": {"allow": [">"]}, "hasSeed": true}]}
