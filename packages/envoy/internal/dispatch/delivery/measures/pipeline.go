@@ -370,8 +370,8 @@ type DeployJobCard struct {
 // start to its completion when timed, and the day its run started. The caller passes the deploy
 // workflow's push runs on main started in the shown days. A run without a followed job, or whose job
 // is not counted, adds nothing; every card gets a timing, all of its days empty when no run lists
-// its jobs, and its job field is its names joined by " or ". A name two cards follow counts for the
-// first.
+// its jobs, and its job field is its names joined by " or ". A run adds no more than one sample to a
+// card, from its Production.Job. A name two cards follow counts for the first.
 func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, cards []DeployJobCard, days []string) map[DeployJobCardID]DeployJobTiming {
 	samples := make([][]Sample, len(cards))
 	cardOf := map[string]int{}
@@ -382,14 +382,23 @@ func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 			}
 		}
 	}
+	cardJobs := make([][]delivery.DeliveryRunJob, len(cards))
 	for _, run := range runs {
-		runDay := utcDay(run.StartedAt)
+		for i := range cardJobs {
+			cardJobs[i] = cardJobs[i][:0]
+		}
 		for _, job := range jobsByRun[run.RunID] {
-			i, followed := cardOf[job.Name]
-			if !followed {
+			if i, followed := cardOf[job.Name]; followed {
+				cardJobs[i] = append(cardJobs[i], job)
+			}
+		}
+		runDay := utcDay(run.StartedAt)
+		for i, jobs := range cardJobs {
+			job := cards[i].Job(jobs)
+			if job == nil {
 				continue
 			}
-			outcome, ok := OutcomeOf(cards[i].Conclusion(job))
+			outcome, ok := OutcomeOf(cards[i].Conclusion(*job))
 			if !ok {
 				continue
 			}

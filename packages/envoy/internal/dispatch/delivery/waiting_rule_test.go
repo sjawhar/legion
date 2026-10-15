@@ -25,6 +25,13 @@ type waitingRun struct {
 	jobName             string
 	stoodDown           bool
 	withoutStepData     bool
+	jobs                []waitingRunJob
+}
+
+type waitingRunJob struct {
+	name                       string
+	done                       time.Time
+	stoodDown, withoutStepData bool
 }
 
 // waitingPR is one merged pull request a waiting-rule history holds.
@@ -110,6 +117,8 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleForProductionJobNamesAndStepData(
 		production Production
 		runs       []waitingRun
 		prs        []waitingPR
+		at         time.Time
+		want       map[int]string
 	}{
 		{
 			name:       "both production job names",
@@ -122,6 +131,8 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleForProductionJobNamesAndStepData(
 				{waitingRepo, 701, day(1).Add(-time.Hour)},
 				{waitingRepo, 702, day(1).Add(time.Hour)},
 			},
+			at:   day(4),
+			want: map[int]string{},
 		},
 		{
 			name:       "listed job without apply step data",
@@ -129,18 +140,35 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleForProductionJobNamesAndStepData(
 			runs: []waitingRun{
 				{id: 403, branch: "main", head: day(1).Add(-time.Hour), created: new(day(1)), started: day(1), done: day(1).Add(time.Hour), result: DeliveryJobConclusionSuccess, withoutStepData: true},
 			},
-			prs: []waitingPR{{waitingRepo, 703, day(1).Add(-time.Hour)}},
+			prs:  []waitingPR{{waitingRepo, 703, day(1).Add(-time.Hour)}},
+			at:   day(4),
+			want: map[int]string{},
+		},
+		{
+			name:       "later listed job applied",
+			production: Production{JobNames: []string{renamedWaitingJob, waitingJob}, ApplyStep: new(waitingStep)},
+			runs: []waitingRun{{
+				id: 404, branch: "main", head: day(1).Add(-time.Hour), created: new(day(1)), started: day(1),
+				done: day(1).Add(3 * time.Hour), result: DeliveryJobConclusionSuccess,
+				jobs: []waitingRunJob{
+					{name: renamedWaitingJob, done: day(1).Add(time.Hour), stoodDown: true},
+					{name: waitingJob, done: day(1).Add(2 * time.Hour)},
+				},
+			}},
+			prs:  []waitingPR{{waitingRepo, 704, day(1).Add(-time.Hour)}},
+			at:   day(1).Add(90 * time.Minute),
+			want: map[int]string{704: shipment(new(int64(404)), new(day(1).Add(2*time.Hour)))},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			seedWaitingHistory(t, ctx, pool, test.runs, test.prs)
-			sqlSet, goSet := waitingSets(t, ctx, pool, day(4), test.production)
+			sqlSet, goSet := waitingSets(t, ctx, pool, test.at, test.production)
 			if !maps.Equal(sqlSet, goSet) {
 				t.Fatalf("waiting set:\n  SQL (ListPullRequestsWaitingAt): %s\n  Go (FirstShippingApply):        %s",
 					describeWaiting(sqlSet), describeWaiting(goSet))
 			}
-			if len(goSet) != 0 {
-				t.Fatalf("Go waiting set = %s, want no waiting pull requests", describeWaiting(goSet))
+			if !maps.Equal(goSet, test.want) {
+				t.Fatalf("Go waiting set = %s, want %s", describeWaiting(goSet), describeWaiting(test.want))
 			}
 		})
 	}
@@ -227,23 +255,37 @@ func seedWaitingHistory(t *testing.T, ctx context.Context, pool *store.Pool, run
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		conclusion := new(DeliveryJobConclusionSuccess)
-		if run.stoodDown {
-			conclusion = new(DeliveryJobConclusionSkipped)
+		jobs := run.jobs
+		if len(jobs) == 0 {
+			jobs = []waitingRunJob{{
+				name: run.jobName, done: run.done, stoodDown: run.stoodDown, withoutStepData: run.withoutStepData,
+			}}
 		}
-		jobName := run.jobName
-		if jobName == "" {
-			jobName = waitingJob
+		rows := make([]DeliveryRunJob, 0, len(jobs))
+		for _, job := range jobs {
+			name := job.name
+			if name == "" {
+				name = waitingJob
+			}
+			done := job.done
+			if done.IsZero() {
+				done = run.done
+			}
+			conclusion := new(DeliveryJobConclusionSuccess)
+			if job.stoodDown {
+				conclusion = new(DeliveryJobConclusionSkipped)
+			}
+			applyStep, applyStepConclusion := new(waitingStep), conclusion
+			if job.withoutStepData {
+				applyStep, applyStepConclusion = nil, nil
+			}
+			rows = append(rows, DeliveryRunJob{
+				Repo: waitingRepo, RunID: run.id, Name: name, StartedAt: &started, CompletedAt: &done,
+				Conclusion: new(run.result), ApplyStep: applyStep, ApplyStepConclusion: applyStepConclusion,
+			})
 		}
-		applyStep, applyStepConclusion := new(waitingStep), conclusion
-		if run.withoutStepData {
-			applyStep, applyStepConclusion = nil, nil
-		}
-		if err := UpsertRunJobs(ctx, pool, waitingRepo, run.id, []DeliveryRunJob{{
-			Repo: waitingRepo, RunID: run.id, Name: jobName, StartedAt: &started, CompletedAt: &done,
-			Conclusion: new(run.result), ApplyStep: applyStep, ApplyStepConclusion: applyStepConclusion,
-		}}, true); err != nil {
-			t.Fatalf("seed run %d's job: %v", run.id, err)
+		if err := UpsertRunJobs(ctx, pool, waitingRepo, run.id, rows, true); err != nil {
+			t.Fatalf("seed run %d's jobs: %v", run.id, err)
 		}
 	}
 	for _, pr := range prs {

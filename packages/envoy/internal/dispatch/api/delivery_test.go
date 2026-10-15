@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -181,6 +182,68 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 	}
 	if len(otherBody.Runs) != 1 || len(otherBody.Runs[0].PRs) != 1 || otherBody.Runs[0].PRs[0].ID != "acme/widgets#1" {
 		t.Fatalf("repo=acme/other filter: runs[0].prs = %+v, want the shipped acme/widgets#1 whatever the facets", otherBody.Runs)
+	}
+}
+
+// TestDeliveryProductionRuleSelectsLaterAppliedListedJob keeps every delivery reader on the
+// applied job when one run holds two listed names: the first job stood down, the second applied.
+func TestDeliveryProductionRuleSelectsLaterAppliedListedJob(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx, pool := t.Context(), database.Pool
+	const stoodDownName, appliedName, step = "production-apply / production-apply", "production / production-apply", "Run apply"
+	settings := delivery.DeliverySettings{
+		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+		ProductionJobNames: []string{stoodDownName, appliedName}, ProductionApplyStepName: new(step),
+		PRChecksWorkflowPath: ".github/workflows/pr-checks.yml", PopulationAuthors: []string{"octocat"},
+	}
+	if _, err := delivery.PutSettings(ctx, pool, settings, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	merged := time.Date(2024, 4, 1, 10, 0, 0, 0, time.UTC)
+	created, started := merged.Add(time.Minute), merged.Add(2*time.Hour)
+	stoodDownAt, appliedAt := started.Add(time.Hour), started.Add(2*time.Hour)
+	runSuccess, jobSuccess, jobSkipped := delivery.DeliveryRunConclusionSuccess, delivery.DeliveryJobConclusionSuccess, delivery.DeliveryJobConclusionSkipped
+	run := delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 704, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "deadbeef",
+		HeadCommitAt: created, CreatedAt: &created, StartedAt: started, CompletedAt: new(appliedAt), Conclusion: &runSuccess,
+		URL: "https://github.com/acme/widgets/actions/runs/704", HeadBranch: new("main"), Event: new("push"),
+	}
+	jobs := []delivery.DeliveryRunJob{
+		{Repo: run.Repo, RunID: run.RunID, Name: stoodDownName, StartedAt: new(started), CompletedAt: new(stoodDownAt), Conclusion: &jobSuccess, ApplyStep: new(step), ApplyStepConclusion: &jobSkipped},
+		{Repo: run.Repo, RunID: run.RunID, Name: appliedName, StartedAt: new(started), CompletedAt: new(appliedAt), Conclusion: &jobSuccess, ApplyStep: new(step), ApplyStepConclusion: &jobSuccess},
+	}
+	if err := delivery.UpsertRun(ctx, pool, run); err != nil {
+		t.Fatalf("seed run: %v", err)
+	}
+	if err := delivery.UpsertRunJobs(ctx, pool, run.Repo, run.RunID, jobs, true); err != nil {
+		t.Fatalf("seed run jobs: %v", err)
+	}
+	pr := delivery.DeliveryPullRequest{Repo: run.Repo, Number: 704, Title: "feat: applied", URL: "https://github.com/acme/widgets/pull/704", Author: "octocat", CreatedAt: &merged, MergedAt: &merged}
+	if err := delivery.UpsertPullRequest(ctx, pool, pr); err != nil {
+		t.Fatalf("seed pull request: %v", err)
+	}
+	production := settings.Production()
+	applies := delivery.ProductionApplies([]delivery.DeliveryRun{run}, map[int64][]delivery.DeliveryRunJob{run.RunID: jobs}, production).Applies
+	if len(applies) != 1 || applies[0].RunID != run.RunID || !applies[0].CompletedAt.Equal(appliedAt) {
+		t.Fatalf("containment applies = %+v, want run %d at %s", applies, run.RunID, appliedAt)
+	}
+	waiting, err := delivery.ListPullRequestsWaitingAt(ctx, pool, run.Repo, production, stoodDownAt.Add(30*time.Minute))
+	if err != nil {
+		t.Fatalf("list waiting pull requests: %v", err)
+	}
+	if len(waiting) != 1 || waiting[0].DeployRun == nil || *waiting[0].DeployRun != run.RunID || waiting[0].DeployedAt == nil || !waiting[0].DeployedAt.Equal(appliedAt) {
+		t.Fatalf("SQL waiting result = %+v, want run %d at %s", waiting, run.RunID, appliedAt)
+	}
+	timing := measures.DeployJobs([]delivery.DeliveryRun{run}, map[int64][]delivery.DeliveryRunJob{run.RunID: jobs}, []measures.DeployJobCard{{
+		CardID: "production_apply", Production: production,
+	}}, measures.ShownDays(appliedAt))["production_apply"]
+	if timing.Total.N != 1 || timing.Total.Success != 1 {
+		t.Fatalf("Pipeline production timing = %+v, want one applied job", timing.Total)
+	}
+	body := getDeliveryTimeline(t, handler, "from="+merged.Add(-time.Hour).Format(time.RFC3339)+"&to="+appliedAt.Add(time.Hour).Format(time.RFC3339))
+	if len(body.Runs) != 1 || body.Runs[0].Production == nil || body.Runs[0].Production.Conclusion == nil ||
+		*body.Runs[0].Production.Conclusion != jobSuccess || body.Runs[0].Production.CompletedAt == nil || !body.Runs[0].Production.CompletedAt.Equal(appliedAt) {
+		t.Fatalf("timeline production = %+v, want success at %s", body.Runs, appliedAt)
 	}
 }
 

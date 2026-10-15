@@ -420,6 +420,24 @@ func TestTheProductionCardMergesItsNamesAndCountsOnlyAppliedJobs(t *testing.T) {
 	assertCell(t, "production_apply.total", timings["production_apply"].Total, 2, new(10.0), new(10.8), 2, 0, 0, new(1.0))
 }
 
+// TestProductionCardUsesOneAppliedListedJobPerRun proves a run holding both names of a renamed
+// production job contributes only its applied job, not its stood-down predecessor, to one card.
+func TestProductionCardUsesOneAppliedListedJobPerRun(t *testing.T) {
+	const stoodDownName, appliedName, step = "production-apply / production-apply", "production / production-apply", "Run apply"
+	started, stoodDownAt, appliedAt := at(32, 8, 0), at(32, 9, 10), at(32, 9, 30)
+	run := delivery.DeliveryRun{
+		Repo: "acme/widgets", RunID: 5, Kind: delivery.DeliveryRunKindDeploy, StartedAt: started,
+		CompletedAt: new(appliedAt), Conclusion: new(delivery.DeliveryRunConclusionSuccess), URL: runURL(5),
+	}
+	timings := DeployJobs([]delivery.DeliveryRun{run}, map[int64][]delivery.DeliveryRunJob{run.RunID: {
+		{Name: stoodDownName, StartedAt: new(at(32, 9, 0)), CompletedAt: new(stoodDownAt), Conclusion: new(delivery.DeliveryJobConclusionSuccess), ApplyStep: new(step), ApplyStepConclusion: new(delivery.DeliveryJobConclusionSkipped)},
+		{Name: appliedName, StartedAt: new(at(32, 9, 0)), CompletedAt: new(appliedAt), Conclusion: new(delivery.DeliveryJobConclusionSuccess), ApplyStep: new(step), ApplyStepConclusion: new(delivery.DeliveryJobConclusionSuccess)},
+	}}, []DeployJobCard{{
+		CardID: "production_apply", Production: delivery.Production{JobNames: []string{stoodDownName, appliedName}, ApplyStep: new(step)},
+	}}, pipelineDays)
+	assertCell(t, "production_apply.total", timings["production_apply"].Total, 1, new(30.0), new(30.0), 1, 0, 0, new(1.0))
+}
+
 func assertLeadTimeCell(t *testing.T, name string, got LeadTimeCell, n int, median, p90, maximum *float64) {
 	t.Helper()
 	if got.N != n {

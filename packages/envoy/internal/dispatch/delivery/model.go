@@ -51,15 +51,31 @@ func (s DeliverySettings) Production() Production {
 	return Production{JobNames: s.ProductionJobNames, ApplyStep: s.ProductionApplyStepName}
 }
 
-// Job is the run's production job: the first of jobs whose name the rule lists, or nil. No run of a
-// deploy workflow holds two listed names (a rename replaces one job with another).
+// Job is the run's production job: among listed jobs, the earliest-completing one whose conclusion
+// as a production deploy is success. When no listed job qualifies, it falls back to the first
+// listed job so callers still read a failed, skipped, or incomplete production job.
 func (p Production) Job(jobs []DeliveryRunJob) *DeliveryRunJob {
+	var first, selected *DeliveryRunJob
 	for i := range jobs {
-		if slices.Contains(p.JobNames, jobs[i].Name) {
-			return &jobs[i]
+		job := &jobs[i]
+		if !slices.Contains(p.JobNames, job.Name) {
+			continue
+		}
+		if first == nil {
+			first = job
+		}
+		conclusion := p.Conclusion(*job)
+		if conclusion == nil || *conclusion != DeliveryJobConclusionSuccess || job.CompletedAt == nil {
+			continue
+		}
+		if selected == nil || job.CompletedAt.Before(*selected.CompletedAt) {
+			selected = job
 		}
 	}
-	return nil
+	if selected != nil {
+		return selected
+	}
+	return first
 }
 
 // Conclusion is job's conclusion as a production deploy reads it: skipped for a job that succeeded
