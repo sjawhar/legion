@@ -975,6 +975,15 @@ rm "$nc/home/.ssh/id_ed25519"
 no_credential
 check "known_hosts alone in ~/.ssh: exits 0, clean" "$(is "$rc|$(contains "$out" '^no credential reachable$')" '0|true')"
 rm -r "$nc/home/.ssh"
+mkdir "$nc/elsewhere" && printf 'not a key\n' > "$nc/elsewhere/id_rsa" && ln -s "$nc/elsewhere" "$nc/home/.ssh"
+no_credential
+check "a symlinked .ssh directory holding a key: exits 1, following it" \
+  "$(is "$rc|$(contains "$out" ' id_rsa$')|$(contains "$out" '^::error::~/\.ssh holds entries other than known_hosts$')" '1|true|true')"
+rm "$nc/home/.ssh"
+printf 'not a directory\n' > "$nc/home/.ssh"
+no_credential
+check "a regular file at .ssh: exits 1, refusing it" "$(is "$rc|$(contains "$out" '^::error::~/\.ssh is not a directory$')" '1|true')"
+rm "$nc/home/.ssh"
 printf 'not a config [\n' > "$nc/bad.gitconfig"
 no_credential GIT_CONFIG_GLOBAL="$nc/bad.gitconfig"
 check "an unreadable git configuration: exits 1, naming git config's exit code" \

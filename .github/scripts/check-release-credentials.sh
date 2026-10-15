@@ -2,37 +2,48 @@
 # The release workflows keep every credential away from the code the releases are built from. Each
 # release is a build job, which runs the dependencies' code (install, pack, build, test, smoke) and
 # holds no write scope and no secret, and a publish job, which holds the credentials and runs no
-# dependency code: only release-push.sh, git, gh, jq, sha256sum, npm and a handful of pinned
-# actions, with no cache restored and the deploy key in the env of the one or two steps that push.
-# This check pins that shape, so a later edit cannot undo it quietly:
+# dependency code: only release-push.sh, git, gh, jq, sha256sum, npm view and npm publish and a
+# handful of pinned actions, with no cache restored and the deploy key in the env of the one or two
+# steps that push. This check pins that shape, so a later edit cannot undo it quietly:
 #
 # 1. A credentialed job — one whose `permissions` grants contents, id-token or attestations: write
 #    (the workflow's `permissions` when the job declares none, as GitHub gives it), or whose text
-#    anywhere names `secrets.DEPLOY_KEY` — (a) runs no dependency code, (b) uses only the actions
-#    on CREDENTIALED_USES below, (c) sets `cache-mode: none`, and (d) names the deploy key only as
-#    `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the step-level `env:` of a step whose `run:` calls
-#    `release-push.sh push-tag` or `push-main`.
+#    anywhere names the deploy key, `secrets.DEPLOY_KEY` or by index `secrets['DEPLOY_KEY']` —
+#    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
+#    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
+#    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh push-tag`
+#    or `push-main`.
 # 2. A build job — one that runs dependency code — holds none of those three write scopes and no
-#    `secrets.DEPLOY_KEY` text, and its last step is exactly `run: .github/scripts/release-push.sh
-#    no-credential`, with no `if:`, so the tripwire always runs.
-# 3. Every `actions/checkout` sets `persist-credentials: false` (the boolean), so no token is left
-#    in the checkout for a later step.
+#    `secrets` reference but `secrets.GITHUB_TOKEN` (so no deploy key, by dot or by index, no other
+#    secret and no `toJSON(secrets)`), declares `permissions` of its own when the workflow declares
+#    none (a job with neither runs under whatever the repository grants, which this check cannot
+#    read), and its last step is exactly `run: .github/scripts/release-push.sh no-credential`, with
+#    no `if:`, so the tripwire always runs.
+# 3. Every `actions/checkout` (its owner and repository compared lower-cased, as GitHub resolves
+#    them) sets `persist-credentials: false` (the boolean), so no token is left in the checkout for
+#    a later step.
 # 4. release.yaml's pi_legion_publish needs pi_envoy_publish: both end in `release-push.sh
 #    push-main`, whose rebase repair handles one package's bump at a time.
 # 5. release-envoy-listener.yaml's release_publish runs in the concurrency group
 #    `release-envoy-listener` with `cancel-in-progress: false`.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
-# step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, or when a word in
-# command position of its `run:` is one of DEPENDENCY_COMMANDS, is `docker build` / `docker buildx
-# build`, or is a path with a `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`,
-# `out/x`, `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command
-# position is found by splitting each line of the `run:` on the shell's separators (`;`, `&&`,
-# `||`, `|`, `(`, `{`, `$(` and backticks; `${{ … }}` expressions are elided first), dropping
-# comments, leading `VAR=value` assignments and the keywords that precede a command (if, then, for,
-# do, time, exec, env, …), and taking the first word left. A variable in command position
-# (`"$tool" build`), a command behind `sh -c '…'`, `xargs` or `nohup`, or a program not on the list
-# passes here; the job-level tripwire (`release-push.sh no-credential`) and review hold the rest.
+# step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when its `shell:`
+# is not bash or sh (a body under python, pwsh, node or cmd is a program this check cannot read),
+# or when a word in command position of its `run:` is one of DEPENDENCY_COMMANDS, is `npm` with
+# any subcommand but those on NPM_ALLOWED (view, publish), is `docker` with one of
+# DOCKER_DEPENDENCY (build, run, compose, exec) or `docker buildx build`, or is a path with a
+# `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`, `out/x`,
+# `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command position
+# is found by splitting each line of the `run:` on the shell's separators (`;`, `&&`, `||`, `|`,
+# `(`, `{`, `$(` and backticks; `${{ … }}` expressions are elided first), dropping comments,
+# leading `VAR=value` assignments and the keywords that precede a command (if, then, for, do, time,
+# exec, env, …), and taking the first word left; an interpreter there (one of INTERPRETERS: bash,
+# sh, dash, zsh, source, `.`) is looked through, past its flags, to the word after it (`bash
+# scripts/x.sh` runs `scripts/x.sh`), and the script string behind its `-c` is split the same way
+# (`sh -c 'bun install'` runs `bun`). A variable in command position (`"$tool" build`), a command
+# behind `xargs` or `nohup`, or a program not on the list passes here; the job-level tripwire
+# (`release-push.sh no-credential`) and review hold the rest.
 #
 # Scope: exactly the three release workflows named in WORKFLOWS, every job that has `steps:`. A job
 # that calls a reusable workflow (`uses:` and no steps, release.yaml's worker_image) is out of
@@ -78,19 +89,42 @@ LISTENER = Path(".github/workflows/release-envoy-listener.yaml")
 INFRA = Path(".github/workflows/release-envoy-infra.yaml")
 WORKFLOWS = [RELEASE, LISTENER, INFRA]
 
-# What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it.
+# What makes a job credentialed: one of these scopes, or the deploy key's name anywhere in it, by
+# dot or by index (`secrets.DEPLOY_KEY`, `secrets['DEPLOY_KEY']`, `secrets["DEPLOY_KEY"]`).
 WRITE_SCOPES = ("contents", "id-token", "attestations")
-DEPLOY_KEY_TEXT = "secrets.DEPLOY_KEY"
+DEPLOY_KEY_REF = re.compile(r"secrets\s*(\.\s*DEPLOY_KEY\b|\[\s*['\"]DEPLOY_KEY['\"]\s*\])")
 DEPLOY_KEY_VALUE = re.compile(r"\$\{\{\s*secrets\.DEPLOY_KEY\s*\}\}")
 RELEASE_PUSH = ".github/scripts/release-push.sh"
 TRIPWIRE = f"{RELEASE_PUSH} no-credential"
 PUSH_COMMANDS = ("release-push.sh push-tag", "release-push.sh push-main")
+# A secret other than GITHUB_TOKEN, which a build job must not hold: `secrets.X` or `secrets['X']`
+# for any X but GITHUB_TOKEN, `toJSON(secrets)` (the context and functions are case-insensitive,
+# as are secret names), or a bare `secrets` inside a `${{ … }}` expression (`${{ secrets }}`,
+# `${{ fromJSON(secrets) }}`), matched whole. A `secrets` right after a word character, `.`, `/` or
+# `-` is part of another name (`agent-secrets/bin`), not the context.
+OTHER_SECRET = re.compile(
+    r"(?<![\w./-])secrets\s*(?:\.\s*(?!GITHUB_TOKEN\b)\w+|\[\s*(?!['\"]GITHUB_TOKEN['\"]\s*\])[^\]]*\])"
+    r"|\btojson\s*\(\s*secrets\s*\)"
+    r"|\$\{\{(?:(?!\}\}).)*?(?<![\w./-])secrets\b(?!\s*[.\[])(?:(?!\}\}).)*\}\}",
+    re.IGNORECASE,
+)
 
 # What makes a step run dependency code.
 DEPENDENCY_COMMANDS = {
     "bun", "bunx", "go", "node", "npx", "pulumi", "mise", "make",
     "python", "python3", "pip", "uv", "cargo", "sudo",
 }
+# npm runs a package's scripts under every subcommand (install, ci, exec, run, test, …) but these
+# two: view reads the registry, and publish of a tarball uploads the tarball it is handed and runs
+# no package script.
+NPM_ALLOWED = {"view", "publish"}
+# docker runs a container's code under these (and `docker buildx build`); `docker login` and
+# `docker buildx imagetools` move only credentials and manifests.
+DOCKER_DEPENDENCY = {"build", "run", "compose", "exec"}
+# The shells whose `run:` the tokeniser below reads, by the first word of the step's `shell:`
+# (GitHub's `bash`, `sh` or a template such as `bash -e {0}`); any other is an interpreter whose
+# body it cannot read.
+SHELLS = {"bash", "sh"}
 DEPENDENCY_USES = (
     "actions/setup-go",
     "./.github/actions/setup-bun",
@@ -103,7 +137,8 @@ DEPENDENCY_PATH = re.compile(r"(^|/)(scripts|out)/")
 # What a word sheds to become a path relative to the checkout: $GITHUB_WORKSPACE/, ./ and ../.
 PATH_PREFIX = re.compile(r"^(\$\{?GITHUB_WORKSPACE\}?/)?(\.\.?/)*")
 
-# The only actions a credentialed job may use, compared before the `@`.
+# The only actions a credentialed job may use, compared before the `@` and lower-cased (GitHub
+# resolves `Actions/Checkout@…` too).
 CREDENTIALED_USES = {
     "actions/checkout",
     "actions/download-artifact",
@@ -120,6 +155,9 @@ SKIP_WORDS = {
     "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "in",
     "time", "exec", "env", "!", "{", "}", "case", "esac",
 }
+# Transparent in command position: the command is the word after the interpreter and its flags,
+# or each command of the script string after its `-c`.
+INTERPRETERS = {"bash", "sh", "dash", "zsh", "source", "."}
 
 
 def strip_comment(segment: str) -> str:
@@ -190,12 +228,27 @@ def commands_of(run: str) -> list[list[str]]:
             segment = segment.strip()
             if not segment or segment.startswith("#"):
                 continue
-            words = words_of(strip_comment(segment))
-            while words and (ASSIGNMENT.match(words[0]) or words[0] in SKIP_WORDS):
-                words.pop(0)
-            if words:
-                commands.append(words)
+            commands += command_of(words_of(strip_comment(segment)))
     return commands
+
+
+def command_of(words: list[str]) -> list[list[str]]:
+    """The command the words run, after the assignments and keywords before it: the words from the
+    command on; or, when the command is an interpreter, the command it is handed (`bash -e
+    scripts/x.sh` runs `scripts/x.sh`), or each command of the script string behind its `-c`
+    (`sh -c 'bun install && go build'` runs `bun install` and `go build`)."""
+    while words and (ASSIGNMENT.match(words[0]) or words[0] in SKIP_WORDS):
+        words.pop(0)
+    if not words:
+        return []
+    if words[0] not in INTERPRETERS:
+        return [words]
+    words.pop(0)
+    while words and words[0].startswith("-"):
+        flag = words.pop(0)
+        if "c" in flag and not flag.startswith("--"):
+            return commands_of(words[0]) if words else []
+    return command_of(words)
 
 
 def dependency_command(words: list[str]) -> str | None:
@@ -203,11 +256,15 @@ def dependency_command(words: list[str]) -> str | None:
     command = words[0]
     if command in DEPENDENCY_COMMANDS:
         return command
+    if command == "npm":
+        if len(words) < 2 or words[1].startswith("-"):
+            return command
+        return None if words[1] in NPM_ALLOWED else f"npm {words[1]}"
     if command == "docker":
-        if words[1:2] == ["build"]:
-            return "docker build"
         if words[1:3] == ["buildx", "build"]:
             return "docker buildx build"
+        if len(words) > 1 and words[1] in DOCKER_DEPENDENCY:
+            return f"docker {words[1]}"
         return None
     path = PATH_PREFIX.sub("", command)
     if DEPENDENCY_PATH.search(path) and path != RELEASE_PUSH:
@@ -216,12 +273,17 @@ def dependency_command(words: list[str]) -> str | None:
 
 
 def dependency_code(step: Mapping) -> str | None:
-    """How the step runs dependency code (`runs 'bun'`, `uses 'actions/setup-go@…'`), or None."""
+    """How the step runs dependency code (`runs 'bun'`, `uses 'actions/setup-go@…'`, `runs its body
+    under shell 'python', not bash or sh`), or None."""
     found = []
     uses = step.get("uses")
-    if isinstance(uses, str) and uses.startswith(DEPENDENCY_USES):
+    if isinstance(uses, str) and uses.lower().startswith(DEPENDENCY_USES):
         found.append(f"uses '{uses}'")
     run = step.get("run")
+    shell = step.get("shell")
+    if isinstance(shell, str) and (interpreter := (shell.split() or [""])[0]) not in SHELLS:
+        found.append(f"runs its body under shell '{interpreter}', not bash or sh")
+        run = None
     if isinstance(run, str):
         commands = []
         for words in commands_of(run):
@@ -244,28 +306,28 @@ def write_scopes(job: Mapping, workflow: Mapping) -> list[str]:
     return [scope for scope in WRITE_SCOPES if permissions.get(scope) == "write"]
 
 
-def deploy_key_sites(node, path=(), line=0) -> list[tuple[tuple, int, object]]:
-    """Every key and value under node whose text names secrets.DEPLOY_KEY: (path, line, value)."""
-    sites = []
+def texts_of(node, path=(), line=0) -> list[tuple[tuple, int, str]]:
+    """Every key and every string value under node, with where it is: (path, line, text)."""
+    texts = []
     if isinstance(node, Mapping):
         for key, value in node.items():
             key_line = node.lines.get(key, line)
-            if DEPLOY_KEY_TEXT in str(key):
-                sites.append((path + (key,), key_line, key))
-            sites += deploy_key_sites(value, path + (key,), key_line)
+            texts.append((path + (key,), key_line, str(key)))
+            texts += texts_of(value, path + (key,), key_line)
     elif isinstance(node, list):
         for index, item in enumerate(node):
-            sites += deploy_key_sites(item, path + (index,), line)
-    elif DEPLOY_KEY_TEXT in str(node):
-        sites.append((path, line, node))
-    return sites
+            texts += texts_of(item, path + (index,), line)
+    elif isinstance(node, str):
+        texts.append((path, line, node))
+    return texts
 
 
-def deploy_key_allowed(steps: list, path: tuple, value) -> bool:
-    """`DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the env of a step that pushes, and nothing else."""
+def deploy_key_allowed(steps: list, path: tuple, text: str) -> bool:
+    """`DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` in the env of a step that pushes, and nothing else:
+    the dot form, exactly, as the one value of that key."""
     if len(path) != 4 or path[0] != "steps" or path[2:] != ("env", "DEPLOY_KEY"):
         return False
-    if not isinstance(value, str) or not DEPLOY_KEY_VALUE.fullmatch(value.strip()):
+    if not DEPLOY_KEY_VALUE.fullmatch(text.strip()):
         return False
     run = steps[path[1]].get("run")
     return isinstance(run, str) and any(push in run for push in PUSH_COMMANDS)
@@ -309,7 +371,8 @@ def check_job(
         )
         return
     scopes = write_scopes(job, workflow)
-    key_sites = deploy_key_sites(job, line=job_line)
+    texts = texts_of(job, line=job_line)
+    key_sites = [(site, line, text) for site, line, text in texts if DEPLOY_KEY_REF.search(text)]
     dependency = [
         (index, step, found) for index, step in enumerate(steps) if (found := dependency_code(step))
     ]
@@ -317,7 +380,7 @@ def check_job(
     # 3. Every checkout leaves no token behind, whatever the job holds.
     for index, step in enumerate(steps):
         uses = step.get("uses")
-        if not (isinstance(uses, str) and uses.startswith("actions/checkout@")):
+        if not (isinstance(uses, str) and uses.lower().startswith("actions/checkout@")):
             continue
         with_ = step.get("with")
         if isinstance(with_, Mapping) and "persist-credentials" in with_:
@@ -349,7 +412,7 @@ def check_job(
         # 1b. Only the allow-listed actions.
         for index, step in enumerate(steps):
             uses = step.get("uses")
-            if isinstance(uses, str) and uses.split("@", 1)[0] not in CREDENTIALED_USES:
+            if isinstance(uses, str) and uses.split("@", 1)[0].lower() not in CREDENTIALED_USES:
                 problem(
                     path, step.lines.get("uses", line_of(step, job_line)),
                     f"job '{name}' holds a credential, but {describe(step, index)} uses '{uses}', "
@@ -367,8 +430,8 @@ def check_job(
                 f"no cache ({found})",
             )
         # 1d. The deploy key reaches only the steps that push.
-        for key_path, line, value in key_sites:
-            if not deploy_key_allowed(steps, key_path, value):
+        for key_path, line, text in key_sites:
+            if not deploy_key_allowed(steps, key_path, text):
                 problem(
                     path, line,
                     f"job '{name}' names secrets.DEPLOY_KEY at {describe_site(steps, key_path)}; "
@@ -380,19 +443,28 @@ def check_job(
         build_jobs += 1
         index, step, found = dependency[0]
         what = f"{describe(step, index)} {found}"
-        # 2. No credential, and the tripwire last.
+        # 2. No credential, a known token, and the tripwire last.
+        if "permissions" not in job and "permissions" not in workflow:
+            problem(
+                path, job_line,
+                f"job '{name}' runs dependency code ({what}), but declares no permissions and the "
+                f"workflow declares none, so its token is whatever the repository grants a job "
+                f"that declares no permissions, which this check cannot read; set 'permissions: "
+                f"contents: read' on the job",
+            )
         for scope in scopes:
             line = job.lines.get("permissions") or workflow.lines.get("permissions", job_line)
             held = f"holds '{scope}: write'"
             if "permissions" not in job:
                 held += " through the workflow's permissions, having none of its own"
             problem(path, line, f"job '{name}' runs dependency code ({what}), but {held}")
-        if key_sites:
-            problem(
-                path, key_sites[0][1],
-                f"job '{name}' runs dependency code ({what}), but its text names "
-                f"secrets.DEPLOY_KEY",
-            )
+        for _, line, text in texts:
+            if secret := OTHER_SECRET.search(text):
+                problem(
+                    path, line,
+                    f"job '{name}' runs dependency code ({what}), but its text names "
+                    f"{secret.group(0)}; a build job holds no secret but GITHUB_TOKEN",
+                )
         last = steps[-1]
         run = last.get("run")
         if not (isinstance(run, str) and run.strip() == TRIPWIRE and "uses" not in last):

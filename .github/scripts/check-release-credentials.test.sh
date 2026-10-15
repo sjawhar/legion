@@ -641,4 +641,36 @@ check "exits 1" "$(is "$status" 1)"
 check "names the file, without a traceback" "$(contains "$out" "^::error::$RELEASE is not valid YAML")"
 check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
 
+echo "case: a build job holding another secret and the whole secrets context"
+root=$(fixture build-other-secrets)
+mutate "$root/$RELEASE" $'        run: bun install --frozen-lockfile\n' $'        env:\n          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}\n          ALL: ${{ toJSON(secrets) }}\n        run: bun install --frozen-lockfile\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the secret at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'NPM_TOKEN:'): job 'pi_envoy_build' runs dependency code (.*), but its text names secrets.NPM_TOKEN; a build job holds no secret but GITHUB_TOKEN")"
+check "names the whole secrets context" \
+  "$(contains "$out" "job 'pi_envoy_build' runs dependency code (.*), but its text names \${{ toJSON(secrets) }}; a build job holds no secret but GITHUB_TOKEN")"
+check "the listener's docker job, whose login holds secrets.GITHUB_TOKEN, is not named" \
+  "$(is "$(contains "$out" "job 'docker'")" false)"
+
+echo "case: docker run in a credentialed job (docker buildx imagetools, docker login and docker buildx version stay allowed)"
+root=$(fixture docker-run)
+add_publish_step "$root" $'      - name: Smoke the image\n        run: docker run alpine sh\n      - name: Inspect the image\n        run: docker buildx imagetools inspect x && docker login ghcr.io && docker buildx version\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names docker run" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Smoke the image' runs 'docker run'")"
+check "does not name the inspect step" "$(is "$(contains "$out" "step 'Inspect the image'")" false)"
+
+echo "case: a checkout written Actions/Checkout, without persist-credentials"
+root=$(fixture checkout-casing)
+mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n        with:\n          fetch-depth: 0\n          persist-credentials: false\n' "      - uses: Actions/Checkout@$SHA"$'\n        with:\n          fetch-depth: 0\n' 1
+mutate "$root/$RELEASE" "      - uses: actions/checkout@$SHA"$'\n' "      - uses: Actions/Checkout@$SHA"$'\n' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the build job's checkout at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^      - uses: Actions/Checkout@'): job 'pi_envoy_build' step 'Actions/Checkout@$SHA' must set 'persist-credentials: false', the boolean, so no token is left in the checkout (it is not set)")"
+check "the credentialed job's Actions/Checkout, with persist-credentials: false, is on the allow-list" \
+  "$(is "$(contains "$out" "not on the checker's allow-list")" false)"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
 summary "check-release-credentials.sh"

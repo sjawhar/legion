@@ -548,12 +548,18 @@ case "$command" in
     esac
     # shellcheck disable=SC2088 # the label of the listing, not a path
     echo "~/.ssh:"
-    if [ -d ~/.ssh ]; then
-      ls -la ~/.ssh
-      if [ -n "$(find ~/.ssh -mindepth 1 ! -name known_hosts)" ]; then
+    # The trailing slash follows a ~/.ssh that is a symlink to a directory; anything else at that
+    # path (a file, a dangling link) is no runner's own and is refused like a key.
+    if [ -d ~/.ssh/ ]; then
+      ls -la ~/.ssh/
+      if [ -n "$(find ~/.ssh/ -mindepth 1 ! -name known_hosts)" ]; then
         echo "::error::~/.ssh holds entries other than known_hosts"
         status=1
       fi
+    elif [ -e ~/.ssh ] || [ -L ~/.ssh ]; then
+      ls -la ~/.ssh
+      echo "::error::~/.ssh is not a directory"
+      status=1
     else
       echo "  absent"
     fi
