@@ -18,11 +18,12 @@ def session_entries: split("\n")[] | fromjson?;
 # result's text blocks joined by newlines (an image or any other block contributes nothing), and
 # arguments the paired call's call_arguments as JSON text, so a checkpoint can tell which call a
 # result answered (the hover among lsp's results, the control among codegraph's). A result whose
-# call is not in the session (a session truncated before its call) is no tool's.
+# call is not in the session (a session truncated before its call) is no tool's, and a call whose id
+# is no string is no call (from_entries would refuse it).
 def tool_results(name):
   [session_entries] as $entries
   | ([$entries[] | select(.type == "message" and .message.role == "assistant")
-      | .message.content[]? | select(calls(name)) | {key: .id, value: (call_arguments | tostring)}] | from_entries) as $calls
+      | .message.content[]? | select(calls(name)) | select(.id | strings) | {key: .id, value: (call_arguments | tostring)}] | from_entries) as $calls
   | [$entries[] | select(.type == "message" and .message.role == "toolResult")
       | select((.message.toolCallId | strings) | in($calls))
       | {toolCallId: .message.toolCallId,

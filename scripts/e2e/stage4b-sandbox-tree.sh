@@ -1580,13 +1580,13 @@ death_charge() {
 # missed, gives CLAIM a new task, and returns 1. The task goes through the daemon (legion claims
 # deliver), since a Dispatch message (send_agent) sets no delivery of the daemon's and a death in
 # the turn it starts would be charged nothing either. It asks for the reading the deployment
-# instructions give a phase worker's first message and, as those instructions ask of an implementer
-# on its task line, the `sleep 300` that keeps the turn open while the next end lands: on a loaded
-# host the kill takes up to a minute, and the daemon's own task line for a relaunch is read by a
-# resumed session that answers in seconds, which is how a run lost three ends after their turns.
+# instructions give a phase worker's first message and, of every role that receives it, directly,
+# the `sleep 300` that keeps the turn open while the next end lands: on a loaded host the kill
+# takes up to a minute, and the daemon's own task line for a relaunch is read by a resumed session
+# that answers in seconds, which is how a run lost three ends after their turns.
 hold_end_charged() {
   local claim=$1 charge out
-  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, then reply WAITING and wait for the targeted message, after the \`sleep 300\` the proof's instructions ask of an implementer on a new task. Change nothing."
+  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, then reply WAITING and wait for the targeted message; before you reply WAITING, whatever your role, run \`sleep 300\` as one bash call (its timeout 600 seconds), so this turn stays open while the proof ends your process. Change nothing."
   charge=$(death_charge "$claim" "$ended_incarnation") ||
     fail "the daemon log has no death of $claim's process $ended_incarnation, which the proof ended"
   if [ "$charge" != uncharged ]; then
@@ -4303,15 +4303,16 @@ begin full-agent-tools
 # (lib/stage4b-tools.jq), never from the model's words: eval in Python and in JavaScript, the browser
 # driven from eval, web_search, bash over the toolchain, write, edit and read, and a task subagent.
 # The GitHub identity is the App login GraphQL's viewer answers (REST /user is refused for an
-# installation token), in the role's own bash and in the subagent it dispatches, which must act as
-# the same App and never the other: the implementer and the merger are legion-implementer[bot],
-# every other role legion-reviewer[bot] (role_app, lib/workflow.sh). The subagent's own session,
-# beside its parent's, must hold that bash result and end in an accepted yield. The control:
-# notebook, a tool nothing asked for, has no result in any session, since a result is the tool's by
-# the call it answers. This is dispatch://LEGION-578's integration check on a running pod: criteria
-# 1 (the tools), 3 (the toolchain), 4 (no role refused) and 5 (plain gh as the role's App, in
-# subagents too). The five instructions are sent first and waited for after, so the roles run at
-# once; the browser is asserted in every role, since the criterion is every role, not one per pod.
+# installation token), read from the `gh api graphql` call's own result, in the role's bash and in
+# the subagent it dispatches, which must act as the same App and never the other: the implementer
+# and the merger are legion-implementer[bot], every other role legion-reviewer[bot] (role_app,
+# lib/workflow.sh). The subagent's own session, beside its parent's, must hold that bash result and
+# end in an accepted yield. The control: notebook, a tool nothing asked for, has no result in any
+# session, since a result is the tool's by the call it answers. This is dispatch://LEGION-578's
+# integration check on a running pod: criteria 1 (the tools), 3 (the toolchain), 4 (no role
+# refused) and 5 (plain gh as the role's App, in subagents too). The five instructions are sent
+# first and waited for after, so the roles run at once; the browser is asserted in every role, since
+# the criterion is every role, not one per pod.
 # The merger does less, and is left waiting for the READY instruction done sends.
 issue_phase "$tree1" merging >/dev/null || fail "$tree1 left merging before the full-agent-tools operation: $(daemon_state | jq -c --arg i "$tree1" '.issues[$i].phase')"
 on_tree "$tree1" wait_for_worker "$tree1" merger
@@ -4353,13 +4354,15 @@ for role in architect planner implementer tester reviewer; do
   tool_result_said "$excerpt" web_search "https://" ||
     fail "$role: no web_search result carries an https:// URL; its web_search results: $(tool_result_quotes "$excerpt" web_search)"
   for want in "go version go" "Python 3" "curl " "gh version" "git version"; do
-    tool_result_said "$excerpt" bash "$want" ||
-      fail "$role: no bash result carries '$want', so the toolchain chain did not run through; its bash results: $(tool_result_quotes "$excerpt" bash)"
+    tool_result_answered "$excerpt" bash 'go version &&' "$want" ||
+      fail "$role: no result of the toolchain chain (a bash call whose command carries 'go version &&') carries '$want'; its bash results: $(tool_result_quotes "$excerpt" bash)"
   done
-  tool_result_said "$excerpt" read "edited $nonce" || tool_result_said "$excerpt" edit "edited $nonce" ||
-    fail "$role: neither a read nor an edit result carries 'edited $nonce', so the edit did not land; its edit results: $(tool_result_quotes "$excerpt" edit); its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
-  tool_result_said "$excerpt" bash "$app" ||
-    fail "$role: no bash result carries $app, so gh api graphql did not answer as the role's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  tool_result_said "$excerpt" edit "edited $nonce" ||
+    fail "$role: no edit result carries 'edited $nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
+  tool_result_said "$excerpt" read "edited $nonce" ||
+    fail "$role: no read result carries 'edited $nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
+  tool_result_answered "$excerpt" bash 'gh api graphql' "$app" ||
+    fail "$role: no result of a bash call running gh api graphql carries $app, so gh did not answer as the role's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
   ! tool_result_said "$excerpt" bash "$other" ||
     fail "$role: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
   tool_result_said "$excerpt" task "$app" ||
@@ -4383,10 +4386,12 @@ merger_other=$(role_app reviewer)
 excerpt=$evidence/full-agent-tools/merger.jsonl
 claim_session_text "$tree1" merger | awk -v mark="$merger_nonce" 'found || index($0, mark) { found = 1; print }' >"$excerpt" ||
   fail "the merger on $tree1 has no readable session"
-tool_result_said "$excerpt" read "edited $merger_nonce" || tool_result_said "$excerpt" edit "edited $merger_nonce" ||
-  fail "merger: neither a read nor an edit result carries 'edited $merger_nonce'; its edit results: $(tool_result_quotes "$excerpt" edit); its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
-tool_result_said "$excerpt" bash "$merger_app" ||
-  fail "merger: no bash result carries $merger_app, so gh api graphql did not answer as the merger's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+tool_result_said "$excerpt" edit "edited $merger_nonce" ||
+  fail "merger: no edit result carries 'edited $merger_nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
+tool_result_said "$excerpt" read "edited $merger_nonce" ||
+  fail "merger: no read result carries 'edited $merger_nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
+tool_result_answered "$excerpt" bash 'gh api graphql' "$merger_app" ||
+  fail "merger: no result of a bash call running gh api graphql carries $merger_app, so gh did not answer as the merger's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
 ! tool_result_said "$excerpt" bash "$merger_other" ||
   fail "merger: a bash result carries $merger_other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
 ! tool_ran "$excerpt" notebook || fail "the merger's session shows the notebook tool ran, which nothing asked for"
@@ -5077,35 +5082,35 @@ note "the controller's session is under $profile_agent/sessions; $HOME/.omp/prof
 # (skill://legion-controller). The pi-envoy plugin renders a delivery into the session as TOON
 # (envoy-client's renderInbound): the payload, parsed, is the card's `message` block, where a list
 # of one reads `openCapabilities[1]: secrets` and a list of two `openCapabilities[2]: a,b`, so the
-# list is read from that line, and a tick without it names no gap. This window is before
-# full-agent-negative, the first checkpoint that opens a live row (web-search on tree 3's planner),
-# so every tick the controller has received so far names exactly the rows boot found open:
-# secrets, and pool-capacity when the pool scaled for the probe; model-fallback and resource-limits
-# are present, so the daemon names neither. The daemon that reported the gap keeps running: every
-# checkpoint after this one is that evidence. tick_open_capabilities prints one object per tick
-# delivery in the controller's sessions: the list, and the delivery trimmed.
+# list is read from that line, and a tick without it names no gap (lib/controller-ticks.jq). This
+# window is before full-agent-negative, the first checkpoint that opens a live row (web-search on
+# tree 3's planner), so every tick the controller has received so far names exactly the open rows
+# of the daemon running when it was sent: secrets, and pool-capacity when that daemon's probe found
+# the pool cold; model-fallback and resource-limits are present, so the daemon names neither. The
+# daemon that reported the gap keeps running: every checkpoint after this one is that evidence.
+# tick_open_capabilities prints one object per tick delivery in the controller's sessions: the
+# list, and the delivery trimmed.
 tick_open_capabilities() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    jq -R -s -c --arg tick "$(notice_needle tick "$project")" '
-      [split("\n")[] | fromjson? | select(.type == "custom_message" and .customType == "envoy-message")
-        | (if (.content | type) == "string" then .content else ([.content[]? | select(.type == "text") | .text] | join("\n")) end)
-        | select(contains($tick))
-        | {open: ((capture("\\n *openCapabilities\\[[0-9]+\\]: *(?<list>[^\\n]*)") // {list: ""}).list
-                  | split(",") | map(ltrimstr(" ") | rtrimstr(" ") | select(. != ""))),
-           delivery: (gsub("\\s+"; " ") | .[0:300])}][]' "$file"
+    jq -R -s -c -L "$root/scripts/e2e/lib" --arg tick "$(notice_needle tick "$project")" 'include "controller-ticks"; controller_ticks($tick)[]' "$file"
   done
 }
 # The daemon's periodic tick (controller_wake_interval_seconds: 60) reaches the controller's session.
 controller_ticked() { tick_open_capabilities | jq -s -e 'length > 0' >/dev/null; }
 until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_ticked
 tick_open_capabilities | jq -s . >"$evidence/controller-ticks.json"
-# The tick names what boot found open, no more and no less: secrets, and pool-capacity when the
-# pool scaled for the probe (boot's open_rows), never model-fallback or resource-limits.
-jq -e --argjson open "$open_rows" 'length > 0 and all(.[]; .open == $open)' "$evidence/controller-ticks.json" >/dev/null ||
-  fail "the tick deliveries in the controller session do not each carry openCapabilities $open_rows, the rows boot found open: $(jq -c . "$evidence/controller-ticks.json")"
-note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities $(jq -c '[.[].open] | unique | .[]' "$evidence/controller-ticks.json"), the open rows boot reported"
+# The tick names the running daemon's open rows, no more and no less, and those still name secrets.
+# Not boot's set: restart-mid-tree, address-moved-env-same-pod and address-moved-stream-new-pod each
+# ran a new `legion start`, every start re-probes the image, pool-capacity is that probe's own verdict
+# (packages/daemon/internal/capabilities/deployment.go), and a tick carries the running daemon's
+# Open() (packages/daemon/internal/admit/admit.go), so a run that scaled the pool at boot and found it
+# warm at the restarts would carry ["secrets"] against boot's two rows. Boot's set is kept for the note.
+daemon_open_rows=$(daemon_state | jq -c '[.capabilities[] | select(.status == "open") | .name]')
+jq -e -L "$root/scripts/e2e/lib" --argjson open "$daemon_open_rows" 'include "controller-ticks"; ticks_name_open($open)' "$evidence/controller-ticks.json" >/dev/null ||
+  fail "the tick deliveries in the controller session do not each carry openCapabilities $daemon_open_rows, the running daemon's open rows (boot's were $open_rows), or those rows no longer name secrets: $(jq -c . "$evidence/controller-ticks.json")"
+note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities $(jq -c '[.[].open] | unique | .[]' "$evidence/controller-ticks.json"), the running daemon's open rows $daemon_open_rows (boot's: $open_rows)"
 pass
 
 begin full-agent-negative

@@ -246,4 +246,39 @@ describe("the library", () => {
     ]);
     expect(jqOver(text, 'tool_ran("read")')).toBe(true);
   });
+
+  test("a call whose id is no string is dropped, and the real call's result is kept", () => {
+    const text = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "toolCall", id: null, name: "read", arguments: { path: "x" } },
+            { type: "toolCall", id: "toolu_9", name: "read", arguments: { path: "y" } },
+          ],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "read",
+          toolCallId: "toolu_9",
+          content: [{ type: "text", text: "y's content" }],
+        },
+      },
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
+    // from_entries refuses a null key, which would exit 5 and throw here.
+    expect(jqOver(text, 'tool_results("read")')).toEqual([
+      {
+        toolCallId: "toolu_9",
+        isError: false,
+        text: "y's content",
+        arguments: '{"path":"y"}',
+      },
+    ]);
+  });
 });
