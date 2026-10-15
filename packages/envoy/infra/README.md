@@ -1033,7 +1033,7 @@ from, a secret of the same name in another account.
    again after pauses of 0.25, 0.5, 1, 2 and 4 seconds; if the write is still not shown, it stops
    with an error after writing. More than one version, or another version served by default, is
    another writer's race.
-4. Put the public key into the NATS server's authorization as that user's `NKey`, with `HasSeed`
+4. Put the public key into the NATS server's authorization as that user's `nkey`, with `hasSeed`
    set: see [NATS authorization](#nats-authorization). It is public, so it may sit in the stack's
    configuration in plain text.
 5. Verify that the secret serves the seed of that key:
@@ -1134,28 +1134,27 @@ describes.
 `core.Authorization` is a NATS server's nkey authorization: the users it knows by public key, what
 each may publish and subscribe to, and the user a client presenting no credential becomes. A NATS
 server's configuration is rendered from it, so it holds public keys only. `aws:NatsService` takes
-it as its `authorization` input, an `aws:Authorization` of `aws:User`s, whose properties are these
-fields in camelCase (`users[].name`, `nkey`, `publish`, `subscribe`, `allow`, `deny`, `hasSeed`,
-`noAuthUser`); `envoy-infra render nats-start-script` reads the same from its file. A user's
+it as its `authorization` input, an `aws:Authorization` of `aws:User`s, with the properties below;
+`envoy-infra render nats-start-script` reads the same from its file, keyed the same way. A user's
 `publish` and `subscribe` are each a `nats:Rules`, the one rules type every NATS component takes,
 whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs.
 
-| Field | What it is |
+| Input | What it is |
 | --- | --- |
-| `Users[].Name` | The user's name: lowercase letters, digits and hyphens, 1 to 48 characters, starting and ending with a letter or digit. |
-| `Users[].NKey` | The user's public key, `U` and 55 more characters, as `envoy-infra seed generate` prints it. Empty for a pending user. |
-| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe allow entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
-| `Users[].HasSeed` | The consumer stores a seed for this user. |
-| `NoAuthUser` | Optional: the name of a keyed user without a seed, whom a client presenting no credential becomes. |
+| `users[].name` | The user's name: lowercase letters, digits and hyphens, 1 to 48 characters, starting and ending with a letter or digit. |
+| `users[].nkey` | The user's public key, `U` and 55 more characters, as `envoy-infra seed generate` prints it. Empty for a pending user. |
+| `users[].publish`, `users[].subscribe` | Each an `allow` list and an optional `deny` list of subject patterns. A subscribe `allow` entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
+| `users[].hasSeed` | The consumer stores a seed for this user. |
+| `noAuthUser` | Optional: the name of a keyed user without a seed, whom a client presenting no credential becomes. |
 
-A user with no `NKey` is pending: it stands for a seed whose key the server is not told yet, such
-as one whose secret is declared but not yet written. It needs `HasSeed`, takes no rules and is not
+A user with no `nkey` is pending: it stands for a seed whose key the server is not told yet, such
+as one whose secret is declared but not yet written. It needs `hasSeed`, takes no rules and is not
 rendered.
 
 An authorization is refused, with an error naming the field and, for a user's field, the user as
 `users[<index>] "<name>"`, when it has:
 
-- a name, an `Allow` or `Deny` entry (a queue group included) or a `NoAuthUser` that holds an nkey
+- a name, an `allow` or `deny` entry (a queue group included) or a `noAuthUser` that holds an nkey
   seed, in any spelling listed under "What `check` and `verify` print". This is checked first, and
   the error names the field by its path and never the value, as `users[0] "example-listener":
   publish.allow[1] holds an nkey seed (not echoed)`, or `users[0]: name holds …` for a name: every
@@ -1163,27 +1162,27 @@ An authorization is refused, with an error naming the field and, for a user's fi
 - no users, or only pending ones: nats-server reads an authorization block with no users as no
   authentication at all;
 - a name that is not of the form above, or a name or a key two users share;
-- a pending user without `HasSeed`, or with `Publish` or `Subscribe`;
-- a keyed user without `Publish` or without `Subscribe`;
-- an `NKey` that is not a user public key: `U` and 55 base32 characters, whose bytes are the user
+- a pending user without `hasSeed`, or with `publish` or `subscribe`;
+- a keyed user without `publish` or without `subscribe`;
+- an `nkey` that is not a user public key: `U` and 55 base32 characters, whose bytes are the user
   prefix, the key and a valid CRC-16 checksum. A seed given there is refused too;
-- an empty `Allow`: nats-server reads an empty subscribe allow list as no restriction. Write
+- an empty `allow`: nats-server reads an empty subscribe allow list as no restriction. Write
   `[">"]` to mean everything;
 - an entry that is neither a subject pattern nor `<subject> <queue>`. A pattern is dot-separated
   tokens, none empty, with `*` and `>` only as whole tokens and `>` only last, and no whitespace
   or control character anywhere;
-- a `<subject> <queue>` entry under `Publish`, since a queue group scopes only subscriptions;
-- a `<subject> <queue>` entry in `Subscribe.Deny`, which nats-server before 2.15 enforces more
+- a `<subject> <queue>` entry under `publish`, since a queue group scopes only subscriptions;
+- a `<subject> <queue>` entry in `subscribe.deny`, which nats-server before 2.15 enforces more
   loosely than it reads: beside a plain deny of the same subject it re-allows every other queue
   group, and alone it misses a wildcard subscription that covers its subject. Deny the plain
-  subject, or narrow `Subscribe.Allow`;
-- a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
+  subject, or narrow `subscribe.allow`;
+- a `noAuthUser` that names no user, a pending user or a user with `hasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line
 break or an nkey seed. Then comes the block: a comment naming each keyed user, in order, and
 the user as one JSON object, with keys sorted, non-ASCII characters as they are, and `deny` only
-when it names an entry. With a `NoAuthUser`, `no_auth_user` follows it, naming that user's key.
-For three keyed users, a pending `example-pending` and `NoAuthUser` `example-fallback`, `core`'s
+when it names an entry. With a `noAuthUser`, `no_auth_user` follows it, naming that user's key.
+For three keyed users, a pending `example-pending` and `noAuthUser` `example-fallback`, `core`'s
 tests pin this text:
 
 ```text
