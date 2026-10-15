@@ -14,8 +14,10 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/refe
 
 ## Workspace restrictions
 
-Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" new`; never `jj describe` or
-`jj split` the working-copy commit you found at the turn's start. Do not change another phase's
+Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-graph -T 'empty'`.
+When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` holds only your own
+resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
+working-copy commit you found at the turn's start. Do not change another phase's
 bookmark. Make only path-scoped logical commits with
 `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Each red test you write goes in the
 repository's own test suite as its own commit, and the `evidence` of its `failures` entry names
