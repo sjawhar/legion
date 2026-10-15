@@ -731,11 +731,15 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 		if c.Conn != conn {
 			// Another caller replaced the closed connection first. Its replacement is the one to
-			// serve with, so this one closes without its ClosedCB, which would start a recovery of a
-			// client that has a connection.
+			// serve with, so this one closes without its callbacks: its ClosedCB would start a
+			// recovery of a client that has a connection, and its DisconnectedErrCB would log
+			// "envoy nats disconnected" under the client's name, as if the connection it serves with
+			// had dropped. The line below says what happened instead.
 			c.mu.Unlock()
 			nc.SetClosedHandler(nil)
+			nc.SetDisconnectErrHandler(nil)
 			nc.Close()
+			slog.Info("envoy nats discarded a second replacement connection", slog.String("name", c.name))
 			continue
 		}
 		c.Conn = nc
