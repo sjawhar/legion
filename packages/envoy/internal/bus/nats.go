@@ -64,9 +64,10 @@ func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 	return func(o *connectOpts) { o.environment = lookup }
 }
 
-// WithName names the client to the NATS server, in place of "envoy": the name the server's
-// connection listings (its /connz endpoint, `nats server report connections`) show for the
-// connection the client dials first and for each one it dials to replace a closed one.
+// WithName names the client, in place of "envoy": the name the NATS server's connection listings
+// (its /connz endpoint, `nats server report connections`) show for the connection the client dials
+// first and for each one it dials to replace a closed one, and the name field of the client's
+// lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest).
 func WithName(name string) ConnectOption {
 	return func(o *connectOpts) { o.name = name }
 }
@@ -174,19 +175,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.ReconnectBufSize = -1
 	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
 		if err != nil {
-			slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
+			slog.Info("envoy nats disconnected", slog.String("name", name), slog.String("error", err.Error()))
 			return
 		}
-		slog.Info("envoy nats disconnected")
+		slog.Info("envoy nats disconnected", slog.String("name", name))
 	}
 	opts.ReconnectedCB = func(nc *nats.Conn) {
-		slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
+		slog.Info("envoy nats reconnected", slog.String("name", name), slog.String("url", nc.ConnectedUrl()))
 		if reconnectCB != nil {
 			reconnectCB(nc)
 		}
 	}
 	opts.ClosedCB = func(_ *nats.Conn) {
-		slog.Info("envoy nats connection closed")
+		slog.Info("envoy nats connection closed", slog.String("name", name))
 		if closedCB != nil {
 			closedCB()
 		}
@@ -215,10 +216,10 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			level = slog.LevelWarn
 		}
 		if sub != nil {
-			slog.Log(context.Background(), level, "envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
+			slog.Log(context.Background(), level, "envoy nats async error", slog.String("name", name), slog.String("subject", sub.Subject), slog.String("error", err.Error()))
 			return
 		}
-		slog.Log(context.Background(), level, "envoy nats async error", slog.String("error", err.Error()))
+		slog.Log(context.Background(), level, "envoy nats async error", slog.String("name", name), slog.String("error", err.Error()))
 	}
 	return opts
 }

@@ -19,8 +19,11 @@ import (
 // TestWithNameNamesEveryConnectionTheClientDials: the server lists a client's connection under the
 // name WithName gives it, and the connection the client dials to replace a closed one under the
 // same name, while a client given no name stays "envoy". An operator reading the server's
-// connections can then tell Dispatch's intakes from its publisher and from every listener.
+// connections can then tell Dispatch's intakes from its publisher and from every listener. The
+// client's lifecycle log lines carry the same name, so a line such as `envoy nats connection
+// closed` says which of a process's clients it came from.
 func TestWithNameNamesEveryConnectionTheClientDials(t *testing.T) {
+	logs := captureBusLogs(t)
 	ctx := context.Background()
 	container, err := tcnats.Run(ctx, testnats.Image, testcontainers.WithCmd("-js", "-m", "8222"))
 	testcontainers.CleanupContainer(t, container)
@@ -56,13 +59,34 @@ func TestWithNameNamesEveryConnectionTheClientDials(t *testing.T) {
 	for {
 		listed = connections()
 		if replaced := listed["dispatch-intake"]; len(replaced) == 1 && replaced[0] != first[0] {
-			return
+			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("after the client replaced connection %d the server lists %v, want a new connection named dispatch-intake", first[0], listed)
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+
+	// One line from a connection callback, one from the recovery.
+	for _, message := range []string{"envoy nats connection closed", "envoy nats recovery successful"} {
+		for !loggedWithName(logs, message, "dispatch-intake") {
+			if time.Now().After(deadline) {
+				t.Fatalf("no %q record with name dispatch-intake among:\n%s", message, logs.String())
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+}
+
+// loggedWithName reports whether logs holds a record with message msg whose name is name.
+func loggedWithName(logs *busLogs, msg, name string) bool {
+	for _, line := range logs.lines() {
+		var record struct{ Msg, Name string }
+		if json.Unmarshal([]byte(line), &record) == nil && record.Msg == msg && record.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // serverConnections reads the open connections of the server container runs from its monitoring
