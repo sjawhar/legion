@@ -371,10 +371,8 @@ type DeployJobCard struct {
 // first.
 func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, cards []DeployJobCard, days []string) []DeployJobTiming {
 	samples := make([][]Sample, len(cards))
-	productions := make([]delivery.Production, len(cards))
 	cardOf := map[string]int{}
 	for i, card := range cards {
-		productions[i] = delivery.Production{JobNames: card.Names, ApplyStep: card.ApplyStep}
 		for _, name := range card.Names {
 			if _, taken := cardOf[name]; !taken {
 				cardOf[name] = i
@@ -388,7 +386,8 @@ func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 			if !followed {
 				continue
 			}
-			outcome, ok := OutcomeOf(productions[i].Conclusion(job))
+			production := delivery.Production{JobNames: cards[i].Names, ApplyStep: cards[i].ApplyStep}
+			outcome, ok := OutcomeOf(production.Conclusion(job))
 			if !ok {
 				continue
 			}
