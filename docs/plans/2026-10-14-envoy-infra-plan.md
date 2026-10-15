@@ -1307,6 +1307,19 @@ type WebhookListener struct {
   without the seed, and (Task 3.4) none. The component takes `[]` or exactly `["github", "slack"]`
   and refuses any other list, naming it.
 - [x] **Tests,** as in Task 3.1, including its construct test.
+- [x] **A seed in any input** (with #1951's `bus.HoldsSeed`). Both AWS components refuse an nkey
+  seed, any type and spelling, where it enters, as core and `host:Listener` do, naming the input by
+  its path and never the value: the component's name; every plain string input, by reflection over
+  the args (`aws.seededPlainInput`, so a new field is covered without a list); and every Input once
+  it resolves, wrapped before any child takes it (`aws.refuseSeedInputs`), so no child is
+  registered with it. That covers the secret ARNs, which are Inputs, and an authorization's nkeys,
+  which core also refuses unquoted when they are not public keys. `aws/seeds_test.go` constructs
+  each component through Construct once per input (35 NatsService rows, 34 WebhookListener rows,
+  and the name), with a seed and with a clean value of the same shape. Each seeded row requires the
+  refusal and that no registration, alias, output or error carries the seed; each clean row
+  requires that the value reaches the run. A further test requires a row for every string input of
+  each schema. A clean input renders exactly as before: the goldens, the parity check and the
+  registration dump are unchanged.
 - [x] **Commit** `feat(envoy-infra): aws:WebhookListener`.
 - [x] **Adoption rehearsal, as run** (at `2b7e8c30`): as Task 3.1's, the listener's 19 resources at
   root level, then the component with `adopt: true`, previewed: `create: 6` (the component, and the

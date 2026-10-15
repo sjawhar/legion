@@ -576,6 +576,12 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 Each component refuses these before it registers anything, with an error naming the component and
 the input:
 
+- Either, first: a name, or any plain string input, that holds an nkey seed of any type and in any
+  spelling (`bus.HoldsSeed`), named by its path (`authorization.users[1].name`, `tailnetTags[1]`,
+  `baseTags[env]`, or `a key of baseTags`) and never quoted, as `<path> holds an nkey seed (not
+  echoed)`. Every one of them reaches a refusal, a registered name, tag or alias, a resource's
+  inputs or the container definitions. An authorization's `nkey` is such an input too, and core
+  also refuses any nkey that is not a user public key without quoting it.
 - `aws:NatsService`: a `configHeader` or `configPath` missing while `authorization` is given (an
   empty `configPath` counts as missing) or given while it is not, each checked before the
   authorization; then, as `StartScript` checks them (see
@@ -595,7 +601,9 @@ the input:
 `natsUrls` may come from another resource, so the listener checks it when the container's
 definitions are computed, at preview unless it is not known until the update: it refuses an empty
 list, and a URL that is blank, holds a comma or holds a control character. An optional secret ARN
-that is given but resolves to no value is refused the same way.
+that is given but resolves to no value is refused the same way. Every input that takes an output,
+the secret ARNs included, is refused once it resolves to a value holding a seed, naming its path,
+so no child is registered with it.
 
 ### Inputs that take an output
 

@@ -74,8 +74,12 @@ versions. Never add the module to the root `go.work`.
   any spelling (`bus.HoldsSeed`), is refused where it enters, before anything quotes or renders
   it, with `core.SeedRefusal`, which names its path and never the value: core refuses one in the
   authorization's names, rule entries and `noAuthUser`, in `Render`'s and `StartScript`'s inputs,
-  and in the listener's `machineId`, `hostBridge` and NATS URLs; a component refuses one in its
-  name and its own string inputs (`host.stringInputs`). Only an input that is a seed, such as
+  and in the listener's `machineId`, `listenHost`, `hostBridge` and NATS URLs; a component refuses
+  one in its name and its own string inputs: host's listed in `host.stringInputs`, the AWS
+  components' every plain string by reflection over their args (`aws.seededPlainInput`), and every
+  Input once it resolves, by wrapping it before any child takes it (`aws.refuseSeedInputs`), so no
+  child is registered with one. `aws/seeds_test.go` has a Construct row per input and a test that
+  every string input of the schema has one. Only an input that is a seed, such as
   `host:Listener`'s `seed`, takes one. An input that belongs to another (a webhook's secret,
   `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and `configPath` to
   `authorization`) is required while its owner is present and refused while it is not, where the
