@@ -37,8 +37,9 @@ func refuseRemoteNATS(urls []string, lookup func(string) (string, bool)) error {
 	if allow, _ := lookup(AllowRemoteEnvVar); allow == "1" {
 		return nil
 	}
-	if proxy, set := lookup(SOCKS5ProxyEnvVar); set {
-		return fmt.Errorf("%w: %s=%s sends every connection through a proxy, which chooses the server (set %s=1 to reach it)", ErrRemoteNATS, SOCKS5ProxyEnvVar, proxy, AllowRemoteEnvVar)
+	if _, set := lookup(SOCKS5ProxyEnvVar); set {
+		// Not the value: a proxy can be written with credentials, and this refusal is logged.
+		return fmt.Errorf("%w: %s is set, which sends every connection through a proxy that chooses the server (set %s=1 to reach it)", ErrRemoteNATS, SOCKS5ProxyEnvVar, AllowRemoteEnvVar)
 	}
 	for _, raw := range urls {
 		if LocalNATSURL(raw) {

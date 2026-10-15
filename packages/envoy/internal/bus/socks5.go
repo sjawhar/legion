@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -19,32 +20,64 @@ import (
 // process's resolver does not (tailscaled's SOCKS5 server and MagicDNS) connects to them.
 const SOCKS5ProxyEnvVar = "ENVOY_NATS_SOCKS5_PROXY"
 
-// CheckSOCKS5Proxy refuses a proxy address that is not host:port: one with a scheme, no host, or
-// no port number. Its error names the value and not the setting, which its caller names.
+// CheckSOCKS5Proxy refuses a proxy address that is not host:port: whitespace around it, a scheme,
+// a host that is neither an IP address (a zone allowed) nor a DNS name (dnsName), or a port that is
+// not a number from 1 to 65535. Its error says what is wrong with the value and never prints it,
+// since an operator can write a proxy with credentials in it and a refusal reaches the process's
+// log; its caller names the setting.
 func CheckSOCKS5Proxy(value string) error {
 	if value == "" {
-		return errors.New("empty; want host:port")
+		return errors.New("is empty; want host:port")
+	}
+	if strings.TrimSpace(value) != value {
+		return errors.New("has whitespace around it; want host:port")
 	}
 	if strings.Contains(value, "://") {
-		return fmt.Errorf("%q is a URL; want host:port, with no scheme", value)
+		return errors.New("is a URL; want host:port, with no scheme")
 	}
 	host, port, err := net.SplitHostPort(value)
 	if err != nil {
-		return fmt.Errorf("%q is not host:port: %w", value, err)
+		return errors.New("is not host:port (an IPv6 host goes in brackets)")
 	}
 	if host == "" {
-		return fmt.Errorf("%q names no host; want host:port", value)
+		return errors.New("names no host; want host:port")
 	}
-	if number, err := strconv.ParseUint(port, 10, 16); err != nil || number == 0 {
-		return fmt.Errorf("%q has no port number; want host:port", value)
+	if _, err := netip.ParseAddr(host); err != nil && !dnsName(host) {
+		return errors.New("names a host that is neither an IP address nor a DNS name; want host:port")
+	}
+	if port == "" || strings.Trim(port, "0123456789") != "" {
+		return errors.New("has no port number; want host:port")
+	}
+	if number, err := strconv.ParseUint(port, 10, 64); err != nil || number == 0 || number > 65535 {
+		return errors.New("has a port out of range 1-65535")
 	}
 	return nil
 }
 
+// dnsName reports whether host is a syntactic DNS name: at most 253 bytes, one trailing dot
+// allowed, of labels of 1 to 63 letters, digits and hyphens.
+func dnsName(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for label := range strings.SplitSeq(host, ".") {
+		if label == "" || len(label) > 63 {
+			return false
+		}
+		for _, b := range []byte(label) {
+			if !('a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9' || b == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // socks5Dialer is the nats.CustomDialer a proxied connect installs. Each Dial is bounded by
 // timeout, the bus's connect timeout, since nats.go applies its own only to its default dialer.
-// It records the last error a Dial returned, for the message connectWithContext builds when
-// nats.go reports only ErrNoServers (nats.go discards "connection refused"). The record is safe
+// It records the last error a Dial returned, which connectWithContext names when nats.go reports
+// only ErrNoServers (nats.go discards "connection refused"). The record is safe
 // for concurrent use: nats.go dials from its own reconnect goroutine (nats.go@v1.50.0:3038,
 // doReconnect → createConn) while a later recovery dial on the bus's goroutine reads it.
 type socks5Dialer struct {
@@ -88,7 +121,7 @@ func socks5Proxy(lookup func(string) (string, bool)) (*socks5Dialer, error) {
 		return nil, nil
 	}
 	if err := CheckSOCKS5Proxy(address); err != nil {
-		return nil, fmt.Errorf("%s: %w", SOCKS5ProxyEnvVar, err)
+		return nil, fmt.Errorf("%s %w", SOCKS5ProxyEnvVar, err)
 	}
 	// proxy.SOCKS5 hands a host that is not an IP address to the proxy as a domain name, unresolved
 	// (AddrTypeFQDN), and its Dialer bounds the handshake by the context Dial passes (ContextDialer).

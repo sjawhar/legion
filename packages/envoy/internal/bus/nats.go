@@ -282,10 +282,15 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 		case <-timer.C:
 		}
 	}
-	// nats.go answers a refused dial with ErrNoServers alone, which names no address; the error the
-	// proxy's dial returned names the proxy and the refusal.
-	if dialer != nil && errors.Is(lastErr, nats.ErrNoServers) {
-		return nil, fmt.Errorf("bus: no NATS server reached through the SOCKS5 proxy %s=%s: %w", SOCKS5ProxyEnvVar, dialer.Address(), cmp.Or(dialer.LastError(), lastErr))
+	if dialer != nil {
+		// A connect through a proxy that fails names the setting and the proxy, whatever failed: a
+		// dial error comes back with the proxy's address but not the setting, and a refused dial as
+		// nats.go's ErrNoServers alone, which names neither, so the proxy's own dial error stands in
+		// for it. The address carries no credentials: CheckSOCKS5Proxy admits none.
+		if errors.Is(lastErr, nats.ErrNoServers) {
+			lastErr = cmp.Or(dialer.LastError(), lastErr)
+		}
+		return nil, fmt.Errorf("bus: NATS connect through the SOCKS5 proxy %s=%s failed: %w", SOCKS5ProxyEnvVar, dialer.Address(), lastErr)
 	}
 	return nil, lastErr
 }

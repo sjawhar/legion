@@ -398,50 +398,63 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 	requireConnects(t, fake, []socksRequest{{addressType: addressType, address: server}})
 }
 
-// A proxy nothing listens on fails the connect naming the setting, the proxy, and the dial's own
-// error: nats.go answers a refused dial with its bare ErrNoServers ("nats: no servers available
-// for connection"), which names none of them. Each connect makes the bus's ten attempts a second
-// apart, so each subtest takes about ten seconds; they run in parallel.
-func TestADeadProxyFailsTheConnectNamingIt(t *testing.T) {
-	const dead = "127.0.0.1:1"
+// A connect through the proxy that fails names the setting and the proxy's address, whatever the
+// failure: a proxy nothing listens on, which nats.go answers with its bare ErrNoServers ("nats: no
+// servers available for connection") so the dial's own error is named too; a proxy that closes the
+// connection without answering; and a proxy host that resolves nowhere. nats.go hands back the
+// last two as the dial's error, which names the proxy's address and not the setting. Each connect
+// makes the bus's ten attempts a second apart, so each subtest takes about ten seconds; they run in
+// parallel.
+func TestAFailedConnectThroughAProxyNamesIt(t *testing.T) {
 	urls := []string{"nats://" + unresolvable}
-	for name, connect := range map[string]func() error{
-		"Connect": func() error {
-			client, err := bus.Connect(urls, bus.WithEnvironment(proxied(dead)))
-			if err == nil {
-				client.Close()
-			}
-			return err
-		},
-		"Dial": func() error {
-			conn, err := bus.Dial("socks5-test", urls, proxied(dead))
-			if err == nil {
-				conn.Close()
-			}
-			return err
-		},
+	silent := startFakeSOCKS5(t, "127.0.0.1:1")
+	for _, proxy := range []struct {
+		name, address string
+		also          []string
+	}{
+		{"nothing listens", "127.0.0.1:1", []string{"connection refused"}},
+		{"closes without answering", silent.addr, nil},
+		{"resolves nowhere", "proxy.example.test:1080", nil},
 	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			err := connect()
-			if err == nil {
-				t.Fatalf("%s through a proxy nothing listens on succeeded", name)
-			}
-			for _, want := range []string{bus.SOCKS5ProxyEnvVar, dead, "connection refused"} {
-				if !strings.Contains(err.Error(), want) {
-					t.Errorf("%s error %q does not name %q", name, err, want)
+		for name, connect := range map[string]func(string) error{
+			"Connect": func(address string) error {
+				client, err := bus.Connect(urls, bus.WithEnvironment(proxied(address)))
+				if err == nil {
+					client.Close()
 				}
-			}
-		})
+				return err
+			},
+			"Dial": func(address string) error {
+				conn, err := bus.Dial("socks5-test", urls, proxied(address))
+				if err == nil {
+					conn.Close()
+				}
+				return err
+			},
+		} {
+			t.Run(proxy.name+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				err := connect(proxy.address)
+				if err == nil {
+					t.Fatalf("%s through a proxy that %s succeeded", name, proxy.name)
+				}
+				for _, want := range append([]string{bus.SOCKS5ProxyEnvVar, proxy.address}, proxy.also...) {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("%s error %q does not name %q", name, err, want)
+					}
+				}
+			})
+		}
 	}
 }
 
 // A proxy address that is not host:port is refused at once, before anything dials, naming the
-// setting: a URL, an address with no port, one with no host, ports that are not a port number,
-// and a value set but empty. Any dial would take the bus's ten attempts a second apart, and a
-// failed dial through a proxy names the setting too, so "at once" is under a second. The server
-// URL is the fake itself, so a connect that ignored the setting and dialled directly would reach
-// it.
+// setting: a URL, an address with no port, one with no host, ports that are not a port number or
+// out of range, whitespace around the value or inside it, a host that is neither an IP address nor
+// a DNS name (userinfo, a path, a control byte, an empty label, a label or a name too long), and a
+// value set but empty. Any dial would take the bus's ten attempts a second apart, and a failed dial
+// through a proxy names the setting too, so "at once" is under a second. The server URL is the fake
+// itself, so a connect that ignored the setting and dialled directly would reach it.
 func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 	fake := startFakeSOCKS5(t, "127.0.0.1:1")
 	urls := []string{"nats://" + fake.addr}
@@ -461,7 +474,15 @@ func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 			return err
 		},
 	}
-	for _, value := range []string{"socks5://127.0.0.1:1055", "127.0.0.1", ":1055", "127.0.0.1:socks", "127.0.0.1:0", "127.0.0.1:65536", ""} {
+	malformed := []string{
+		"socks5://127.0.0.1:1055", "127.0.0.1", ":1055", "127.0.0.1:socks", "127.0.0.1:+1",
+		"127.0.0.1:0", "127.0.0.1:65536", "",
+		" 127.0.0.1:1055", "\t127.0.0.1:1055", "127.0.0.1:1055 ", "127.0.0.1:1055\n", "127.0.0.1 :1055",
+		"a\nb:1055", "a\x00b:1055", "user@127.0.0.1:1055", "proxy/path:1055", "proxy..example:1055",
+		"proxy_sidecar:1055", strings.Repeat("a", 64) + ".example:1055",
+		strings.Repeat("abcdefg.", 32) + "example:1055",
+	}
+	for _, value := range malformed {
 		for name, connect := range connects {
 			started := time.Now()
 			err := connect(proxied(value))
@@ -473,7 +494,52 @@ func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 			}
 		}
 	}
+	for _, value := range []string{"127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:99999999999999999999999"} {
+		if err := bus.CheckSOCKS5Proxy(value); err == nil || !strings.Contains(err.Error(), "out of range") {
+			t.Errorf("CheckSOCKS5Proxy(%q) = %v, want the port refused as out of range", value, err)
+		}
+	}
 	if accepted := fake.accepted.Load(); accepted != 0 {
 		t.Fatalf("the server URL accepted %d connections, want none", accepted)
+	}
+}
+
+// A host:port whose host is an IP address, with or without a zone, or a DNS name passes the check,
+// as does a port written with leading zeros or the highest port.
+func TestAWellFormedProxyIsAccepted(t *testing.T) {
+	for _, value := range []string{
+		"127.0.0.1:1055", "[::1]:1055", "[fe80::1%eth0]:1055", "localhost:1055", "localhost.:1055",
+		"127.0.0.1:01055", "127.0.0.1:65535", "proxy.example.test:1080", "tailscale-sidecar:1055",
+		strings.Repeat("a", 63) + ".example:1055", strings.Repeat("abcdefg.", 30) + "example.test:1055",
+	} {
+		if err := bus.CheckSOCKS5Proxy(value); err != nil {
+			t.Errorf("CheckSOCKS5Proxy(%q) = %v, want it accepted", value, err)
+		}
+	}
+}
+
+// A proxy value can carry credentials (an operator who writes it as a URL, as ALL_PROXY settings
+// are written), and a refusal ends up in the process's log, so no refusal prints the value: not the
+// remote-reach refusal of a run that has not opted in, and not the address check's.
+func TestARefusalNeverPrintsTheProxyValue(t *testing.T) {
+	const secret = "hunter2"
+	for _, value := range []string{"socks5://user:" + secret + "@proxy.example:1080", "user:" + secret + "@127.0.0.1:1055", secret + "@127.0.0.1:1055"} {
+		if err := bus.CheckSOCKS5Proxy(value); err == nil || strings.Contains(err.Error(), secret) {
+			t.Errorf("CheckSOCKS5Proxy(%q) = %v, want a refusal that does not print the value", value, err)
+		}
+		for _, environment := range []map[string]string{
+			{bus.SOCKS5ProxyEnvVar: value},
+			{bus.SOCKS5ProxyEnvVar: value, bus.AllowRemoteEnvVar: "1"},
+		} {
+			errs := map[string]error{}
+			_, errs["Connect"] = bus.Connect([]string{"nats://127.0.0.1:1"}, bus.WithEnvironment(lookupOf(environment)))
+			_, errs["ConnectOwningStream"] = bus.ConnectOwningStream([]string{"nats://127.0.0.1:1"}, bus.WithEnvironment(lookupOf(environment)))
+			_, errs["Dial"] = bus.Dial("socks5-test", []string{"nats://127.0.0.1:1"}, lookupOf(environment))
+			for name, err := range errs {
+				if err == nil || !strings.Contains(err.Error(), bus.SOCKS5ProxyEnvVar) || strings.Contains(err.Error(), secret) {
+					t.Errorf("%s with %v: %v, want a refusal naming %s and not printing the value", name, environment, err, bus.SOCKS5ProxyEnvVar)
+				}
+			}
+		}
 	}
 }
