@@ -2,61 +2,60 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T20:00:34Z",
+  "completed": "2026-10-15T21:09:52Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "round": 2,
-  "reviewedHead": "6cf18c50abfa0ce011d3b8f6e8e38c7dfd0ea026",
-  "ciHead": "4ee312ac70a2592dada486384f70b38877102e06",
-  "ci": "Required set from main's ruleset: lint, typecheck, test, pr-title (branch protection: none). Newest pull_request run head 4ee312ac; its check-runs: lint, typecheck, test, pr-title all completed/success (Tests run 38793179060, PR Title run 38793292477 as the body's CI line says; the Legion Envoy and Contracts run at that head was in_progress, not required). compare 4ee312ac...6cf18c50 touches only .legion/.",
-  "threads": "Eight threads from round 1, each with the implementer's `Fixed in …` reply and resolved. Replied on all eight in my own words at this round; accepted seven (PRRT_kwDORFy7ds6s66UA, …UJ, …UR, …Ub, …Uj, …Uw, …U8); the Critical push-main thread PRRT_kwDORFy7ds6s66T3 still stands, narrowed, and I unresolved it (the mutation succeeded for the review App).",
-  "proofLines": "E2E (implementer) rounds 1-3 and E2E (tester) round 3 present with surfaces, commands, observations, heads and negative controls. The Contract change census is present; its two searches re-run at the head give exactly the workflow hits it lists (the only extra hits are fixture text in check-release-credentials.test.sh).",
-  "thermonuclear": "Pair run at 4ee312ac (new fingerprint): deep-review drove the real release-push.sh against a bare origin and found two branch-dispatch shapes that still land on main (manifest-only commit at the release version with arbitrary content; a merge commit with an older first parent that resets main's tree), both reproduced by the reviewer; code-quality found the tripwire pinned by text not execution (job-level continue-on-error; non-shell defaults.run.shell on the build job). Harnesses: check-release-credentials.test.sh 135/135; release-push.test.sh 249/251 (the two github.com host-key cases need an ssh binary the pod lacks); the real workflows pass the checker.",
+  "round": 3,
+  "reviewedHead": "eceb72d004df072bc059c20415a4027a8bd50931",
+  "ciHead": "b260042886232813edbe84fba6ce2a8205fcc937",
+  "ci": "Required set from main's ruleset: lint, typecheck, test, pr-title. Newest pull_request run head b2600428; its check-runs: lint, typecheck, test, pr-title all completed/success (Tests run 38802597920, PR Title run 38802671436 as the body's CI line says). compare b2600428...eceb72d0 touches only .legion/.",
+  "threads": "Sixteen threads: the eight round-1 and eight round-2 threads each carry the implementer's `Fixed in …` reply and are resolved. Replied on the eight I had open at this round (the Critical PRRT_kwDORFy7ds6s66T3 and the seven round-2 threads) and accepted all eight after driving the fixes myself: the merge-commit and manifest-with-extra-content shapes refused, the legit older-parent race rebased and landed, the root commit refused through the sink; every round-2 checker mutation exits 1.",
+  "proofLines": "E2E (implementer) rounds 1-4 and E2E (tester) round 4 present; the Contract change census unchanged and still exact.",
+  "thermonuclear": "Pair run at b2600428 (new fingerprint): deep-review re-attacked push-main (closed) and found one regression this push introduced — the checker's backslash-continuation join runs before comment stripping, so a `# … \\` comment hides the next command in a credentialed step (reproduced by the reviewer; bash runs the hidden line) — plus Minors; code-quality found the content checks positional (inside parent == upstream) so the superseded-version drop path drops a doctored commit unchecked (nothing pushed), §4 overstating that, `only_bump`'s wrong clause, a missing stale-branch harness case, and fast-follow structure. Harnesses: check-release-credentials.test.sh 162/162; release-push.test.sh 279/281 (the two github.com host-key cases need an ssh binary the pod lacks); the real workflows pass the checker.",
   "verdict": "changes_requested",
-  "critical": 1,
+  "critical": 0,
   "important": 1,
   "minor": 5,
   "keyFindings": [
     {
-      "severity": "critical",
-      "file": ".github/scripts/release-push.sh:437",
-      "description": "The one-commit rule counts commits against the fetched tip (:428) but diffs paths against HEAD^ (:437) and never checks the manifest's content, so a workflow_dispatch from a branch still writes main through the deploy key: (A) a branch whose one commit over main's tip edits only the manifest and already carries the release version (so `tag` commits nothing) lands with any other content in that file — reproduced: a `scripts.postinstall` under the author's own subject; (B) a merge commit whose first parent is an older main commit and second parent main's tip, tree = old tree + bump, passes both tests and fast-forwards main back to the old tree — reproduced: a file deleted and another reverted on origin/main, rc 0. The header (:64-70) and the body's 'a branch's commits never land on main' are false. Fix: before every push require HEAD^ == the fetched tip (else the rebase path), `git diff --name-only $upstream HEAD` == the manifest, and the manifest differing from main's copy in `.version` alone, set to `$version`; two harness cases (the merge shape, the manifest-with-extra-content shape) refused with origin untouched."
-    },
-    {
       "severity": "important",
-      "file": ".github/scripts/check-release-credentials.sh:540",
-      "description": "Rule 2 refuses `if:`/`continue-on-error:` on the tripwire step only. A job-level `continue-on-error: true` on a build job (GitHub reports the failed job as `success` to `needs`, so its publish job runs) and a job-level `defaults: run: shell: 'cat {0}'` (the tripwire's body is printed, never run) each leave the checker green on a copy of the real release.yaml, while the header sentence rewritten this round says no error tolerance can let the tripwire's failure pass. Refuse `continue-on-error` on the build job and require `shell_of(last, job, workflow)` in SHELLS; two fixtures."
+      "file": ".github/scripts/check-release-credentials.sh:261",
+      "description": "`.replace(\"\\\\\\n\", \" \")` joins backslash-continued lines before comments are stripped, so a comment ending in a backslash swallows the next line: `# keep the toolchain pinned \\` then `bun install --frozen-lockfile` in envoy_plugin_publish's Push tag step (DEPLOY_KEY in its env) leaves the checker green while bash runs the install (a `#` comment ends at the newline; verified `printf '# c \\\\\\necho RAN\\n' | bash` prints RAN). An escaped trailing backslash (`printf 'x' \\\\` then `bun install`) is swallowed the same way. Before this push both shapes were caught. Fix: strip each line's comment before joining and join only a real continuation (`(?<!\\\\)\\\\\\n`); two fixtures beside the existing backslash-continuation case."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.sh:295",
-      "description": "The `.tgz` word is matched anywhere after `publish`, so `npm publish --tag x.tgz` (a directory publish, which runs prepack) passes; require the word right after `publish` to be the tarball."
+      "file": ".github/scripts/release-push.sh:457",
+      "description": "The path and content checks run only inside `if [ \"$parent\" = \"$upstream\" ]`, so a doctored commit whose parent is an older main commit is refused only on attempt 2 after a rebase, and when main's manifest already holds the version or a later one the superseded-version exit (:490-503) drops it unchecked with exit 0 — nothing pushed, but §4 of the solution doc (:168-173) says 'refused rather than dropped'. Check against `$parent` before the `if` (identical to today's checks when parent == upstream) and add the stale-branch doctored case (2g) the header's 'checked again there' claims; or state the drop in §4."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.sh:298",
-      "description": "`docker --config <dir> run …` / `docker -H <host> run …` pass: only words[1] and words[1:3] are read. Skip docker's leading global flags, or add the shape to the header's documented pass-through list."
+      "file": ".github/scripts/release-push.sh:429",
+      "description": "`only_bump` ends 'HEAD's parent must be main's tip', which is not the rule (an older parent is rebased), and is appended to five refusals it does not explain; say what is enforced — main's manifest with .version = v$version and nothing else."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/release-push.sh:428",
-      "description": "The four new bare command substitutions in push-main (:423, :428, :433, :437) exit under set -e with git's bare message and no `::error::`/summary (a parentless HEAD: `fatal: ambiguous argument 'HEAD^'`, rc 128) — the sink class the PR's own solution doc §3 names; route them through fail_outstanding."
+      "file": ".github/scripts/check-release-credentials.sh:556",
+      "description": "`job.lines[\"continue-on-error\"]` is indexed directly where every other site uses `.lines.get(key, fallback)`, and the message states an effect ('reports a failed tripwire as success') that is false for `continue-on-error: false`; state the rule as the step-level sibling does."
     },
     {
       "severity": "minor",
-      "file": "docs/solutions/github/release-bump-push-resolves-one-conflict-shape-and-routes-every-failure-through-one-sink.md:152",
-      "description": "§4, edited by this PR, still says 'Nothing at the point of use asserts that' and that a second file in the bump commit would be dropped silently; push-main now refuses a bump touching a second file before any push (case 2b). Rewrite that passage."
+      "file": ".github/scripts/check-release-credentials.sh:141",
+      "description": "NO_TARBALL says 'without a tarball argument' for `npm publish --access public x.tgz`, a legal order with the tarball present; name the rule ('the tarball must be the word right after publish')."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.test.sh:144",
-      "description": "The green fixture's publish steps bind `FILE: ${{ steps.handed.outputs.file }}` while their run lines read `$STEM.tgz` (:134-145, :176-187): the fixture no longer models release.yaml; mirror the `stem` output."
+      "file": "docs/solutions/github/release-bump-push-resolves-one-conflict-shape-and-routes-every-failure-through-one-sink.md:168",
+      "description": "§4's conclusion 'refused rather than dropped or pushed' overstates the superseded-version exit, which still drops a doctored commit unchecked (exit 0, nothing pushed); becomes true with the parent-side check above, else say so."
     }
+  ],
+  "hardening": [
+    "The manifest check is sorted-JSON equality: a BOM, duplicate keys (last-wins in every reader found) and the blob's mode bit can land in the exact-bump shape, as can a bump commit's subject without [skip ci]; churn, not execution. Say 'as JSON' where the header, §4 and only_bump say '.version alone'.",
+    "`docker -Dl debug run` (a pflag cluster ending in a value-taking short) hides the subcommand; document in the header's pass-through list or consume the next word.",
+    "`npm publish x.tgz` where x.tgz is a committed directory is a name test, not a type test."
   ],
   "notProvenRisk": [
     "`docker buildx imagetools create` without docker/setup-buildx-action is proven only on the first merge-triggered listener run.",
     "`agent-secrets --version` and `go version -m` in release_build first execute on the merge-triggered listener run.",
-    "The listener's `--expect` recompute makes a benign race a red release_publish needing a whole-run re-run.",
-    "Checker pass-through class documented in its header: a variable in command position, `xargs`/`nohup`, an unlisted program."
+    "The listener's `--expect` recompute makes a benign race a red release_publish needing a whole-run re-run."
   ],
-  "fastFollow": "dispatch://LEGION-772 (the reusable npm publish workflow, the listener's one job-level flag, the shared LineLoader) plus, from this round: push-main's conflict-abort clause for a second path is unreachable under the new pre-push rule (release-push.sh:471-480, header :86-89) and the loop fetches main twice per attempt (:422, :449); the chain comments at release.yaml:785-789/:982-986 and rule 4's wording say a different-package race would fail the later push, where case 4 shows the rebase handles it; rule 4 pins one link of a three-job chain; worker-image.yaml:7's input description still says 'the `legion` job' (that file is out of this issue's scope and on the image's trigger paths)."
+  "fastFollow": "dispatch://LEGION-772 as filed, plus: push-main could construct the bump commit on the fetched tip instead of validating and rebasing a consumed one (the validation chain, the rebase and the conflict resolver then go); release-push.test.sh crossed 1000 lines and splits along its subcommand seams; a `fetch_main` helper for the duplicated fetch/rev-parse pair; the checker's green fixture could mirror the real `if npm view …; else npm publish …; fi` shape."
 }
