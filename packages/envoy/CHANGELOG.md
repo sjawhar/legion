@@ -744,6 +744,15 @@
 
 ### Fixed
 
+- A bus client whose NATS connection closes while a publish is in flight now replaces it once,
+  and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close
+  starts and the publish each dialled a replacement, and both were installed in turn, so the
+  first was left connected and was never closed. Once its server went away it reconnected forever,
+  once a second, in the listener, Dispatch or any other process holding a `bus.Client`. Now the
+  second to finish closes its own connection, logs `envoy nats discarded a second replacement
+  connection`, and serves with the first. Its close logs no `envoy nats disconnected` and starts
+  no recovery. No message is lost or sent twice: the discarded connection never carried one.
+
 - Dispatch's job intake now receives job events (LEGION-690). It shared Dispatch's publisher
   client with the delivery intake, and a `bus.Client` held one JetStream subscription, so
   whichever intake bound second unsubscribed the other, whose durable then sat unbound with its
