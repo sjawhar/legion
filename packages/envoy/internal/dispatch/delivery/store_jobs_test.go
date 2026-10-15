@@ -128,6 +128,46 @@ func TestALateReadNeverUndoesAFinishedJob(t *testing.T) {
 	}
 }
 
+// TestRunJobApplyStepRoundTripsAndResistsALateRead proves step data follows the job's existing
+// monotonic upsert rule: a later finished listing replaces a running listing, while a stale
+// running listing cannot erase the finished result.
+func TestRunJobApplyStepRoundTripsAndResistsALateRead(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	if err := UpsertRun(ctx, pool, changeTestRun(806, DeliveryRunKindDeploy, started, started)); err != nil {
+		t.Fatalf("UpsertRun: %v", err)
+	}
+	const step = "Run ./.github/actions/apply"
+	skipped := DeliveryJobConclusionSkipped
+	running := DeliveryRunJob{
+		Repo: "acme/widgets", RunID: 806, Name: "production / production-apply", StartedAt: &started,
+		ApplyStep: new(step), ApplyStepConclusion: &skipped,
+	}
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 806, []DeliveryRunJob{running}, false); err != nil {
+		t.Fatalf("store running job: %v", err)
+	}
+	finished := started.Add(10 * time.Minute)
+	success := DeliveryJobConclusionSuccess
+	running.CompletedAt, running.Conclusion, running.ApplyStepConclusion = &finished, &success, &success
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 806, []DeliveryRunJob{running}, true); err != nil {
+		t.Fatalf("store finished job: %v", err)
+	}
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 806, []DeliveryRunJob{{
+		Repo: "acme/widgets", RunID: 806, Name: running.Name, StartedAt: &started, ApplyStep: new(step),
+	}}, false); err != nil {
+		t.Fatalf("store stale running job: %v", err)
+	}
+	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 806)
+	if err != nil {
+		t.Fatalf("ListRunJobs: %v", err)
+	}
+	if len(jobs) != 1 || jobs[0].ApplyStep == nil || *jobs[0].ApplyStep != step ||
+		jobs[0].ApplyStepConclusion == nil || *jobs[0].ApplyStepConclusion != DeliveryJobConclusionSuccess ||
+		jobs[0].CompletedAt == nil || !jobs[0].CompletedAt.Equal(finished) {
+		t.Fatalf("stored job = %+v, want the finished apply step result", jobs)
+	}
+}
+
 // TestAListingThatRepeatsAJobNameStoresItAsWritingEachInTurn: two jobs of one run may share a name,
 // and the one statement that writes a run's jobs folds them by the rule a write follows, so a
 // finished one wins over an unfinished one whichever GitHub listed first.

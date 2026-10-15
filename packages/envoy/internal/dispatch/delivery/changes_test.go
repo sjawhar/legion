@@ -452,7 +452,7 @@ func TestRunJobAndGroupAndSettingsChangesAreLogged(t *testing.T) {
 	if changes := changesAfter(t, ctx, pool, before); len(changes) != 0 {
 		t.Fatalf("settings written again unchanged logged %+v, want nothing", changes)
 	}
-	settings.ProductionJobName = "widgets-release / production"
+	settings.ProductionJobNames = []string{"widgets-release / production"}
 	if _, err := PutSettings(ctx, pool, settings, actor); err != nil {
 		t.Fatalf("PutSettings changed: %v", err)
 	}

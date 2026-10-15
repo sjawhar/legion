@@ -4,14 +4,13 @@
 // whose run GitHub created after the PR's merge (DeliveryRun.Created). Creation, not the head
 // commit's timestamp, decides it: a repository that merges through GitHub's merge queue writes the
 // merge commit before GitHub records the merge, so the run that shipped a pull request can have a
-// head commit timed before its merged_at, while a push run is created only once its push has
-// landed. Unlike the prototype, which matches a job name against a set of alternate spellings of
-// one job (APPLY_JOBS), this schema configures one exact job name
-// (delivery_settings.production_job_name), so matching is a direct equality check against one
-// job's name within a run rather than set membership.
+// head commit timed before its merged_at, while a push run is created only once its push has landed.
+// Unlike the prototype, which matches alternate spellings of one job (APPLY_JOBS), this schema
+// configures a list of exact production job names (delivery_settings.production_job_names).
 package delivery
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -28,93 +27,89 @@ type Apply struct {
 
 // UnmatchedRun is a successfully concluded run that holds no production job and is not shown to
 // have skipped it, with the name of every job it holds: a misconfigured or renamed
-// production_job_name otherwise produces zero deploys forever, silently, so each caller warns
-// about it, naming every job the run actually has (the Python prototype's own
+// production_job_names setting otherwise produces zero deploys forever, silently, so each caller
+// warns about it, naming every job the run actually has (the Python prototype's own
 // `successful_applies` raises for this case).
 type UnmatchedRun struct {
 	Run      DeliveryRun
 	JobNames []string
 }
 
-// ProductionApplies is every successful production deploy among runs, and every successfully
-// concluded run among them that holds no production job. For each run, the job named
-// settings.production_job_name among jobsByRun[run.RunID] must exist, have concluded with
-// Conclusion == DeliveryJobConclusionSuccess, and have a non-nil CompletedAt; a run with no such
-// job, or whose matching job did not succeed, is not an apply. A run that concluded successfully
-// overall but holds no job by that name is an UnmatchedRun, unless it skipped its production job
-// (skippedCaller) and the name is shown to be a real job's: some run of runs holds a job by
-// exactly that name. Without that, a typo whose first part happens to name a job a run skipped
-// (`staging-apply / production-apply` beside a skipped `staging-apply`) would read as a skipped
-// call in every run and never be named. The cost is that a listing in which no run holds the
-// production job, such as a stretch with no production deploy, sets apart each of its successful
-// runs. Applies are sorted by CompletedAt ascending; unmatched runs keep runs' order.
-func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, productionJobName string) ([]Apply, []UnmatchedRun) {
-	var applies []Apply
+// ProductionRuns is ProductionApplies' verdict on a listing of runs: every deploy, sorted by
+// CompletedAt; every successfully concluded run that holds no production job and is not shown to have
+// skipped it; and every run whose production job succeeded, read for the configured apply step, while
+// listing no step of that name (a misnamed step would otherwise count no deploy, silently).
+type ProductionRuns struct {
+	Applies     []Apply
+	Unmatched   []UnmatchedRun
+	StepMissing []DeliveryRun
+}
+
+// ProductionApplies judges runs by production (Production.Job, Production.Conclusion). A run is a
+// deploy when its production job's conclusion as Production.Conclusion reads it is success and the
+// job has a CompletedAt. A successful run holding no listed job is unmatched unless it skipped the
+// caller of a listed name (skippedCaller) that some run of runs holds exactly: without that, a typo
+// whose first part names a job a run skipped would read as a skipped call in every run and never be
+// named. The cost is that a listing in which no run holds a listed job, such as a stretch with no
+// production deploy, sets apart each of its successful runs. Unmatched runs keep runs' order.
+func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, production Production) ProductionRuns {
+	var judged ProductionRuns
 	type missing struct {
-		run     DeliveryRun
-		skipped bool
+		run        DeliveryRun
+		skippedFor []string
 	}
 	var missed []missing
-	nameIsReal := false
+	real := map[string]bool{}
 	for _, run := range runs {
-		var match *DeliveryRunJob
-		skipped := false
-		for i, job := range jobsByRun[run.RunID] {
-			if job.Name == productionJobName {
-				match = &jobsByRun[run.RunID][i]
-				break
-			}
-			skipped = skipped || skippedCaller(job, productionJobName)
-		}
+		jobs := jobsByRun[run.RunID]
+		match := production.Job(jobs)
 		if match == nil {
 			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
-				missed = append(missed, missing{run: run, skipped: skipped})
+				m := missing{run: run}
+				for _, job := range jobs {
+					for _, name := range production.JobNames {
+						if skippedCaller(job, name) {
+							m.skippedFor = append(m.skippedFor, name)
+						}
+					}
+				}
+				missed = append(missed, m)
 			}
 			continue
 		}
-		nameIsReal = true
-		if match.Conclusion == nil || *match.Conclusion != DeliveryJobConclusionSuccess {
+		real[match.Name] = true
+		if production.ApplyStep != nil && match.Conclusion != nil && *match.Conclusion == DeliveryJobConclusionSuccess &&
+			match.ApplyStep != nil && *match.ApplyStep == *production.ApplyStep && match.ApplyStepConclusion == nil {
+			judged.StepMissing = append(judged.StepMissing, run)
+		}
+		conclusion := production.Conclusion(*match)
+		if conclusion == nil || *conclusion != DeliveryJobConclusionSuccess || match.CompletedAt == nil {
 			continue
 		}
-		if match.CompletedAt == nil {
-			continue
-		}
-		applies = append(applies, Apply{
-			RunID:       run.RunID,
-			CompletedAt: *match.CompletedAt,
-			CreatedAt:   run.Created(),
-		})
+		judged.Applies = append(judged.Applies, Apply{RunID: run.RunID, CompletedAt: *match.CompletedAt, CreatedAt: run.Created()})
 	}
-
-	// A run of the listing holding the configured job shows the name is real, so a run that
-	// skipped its caller skipped that job rather than matching a typo by chance.
-	var unmatched []UnmatchedRun
 	for _, m := range missed {
-		if m.skipped && nameIsReal {
+		if slices.ContainsFunc(m.skippedFor, func(name string) bool { return real[name] }) {
 			continue
 		}
 		names := make([]string, 0, len(jobsByRun[m.run.RunID]))
 		for _, job := range jobsByRun[m.run.RunID] {
 			names = append(names, job.Name)
 		}
-		unmatched = append(unmatched, UnmatchedRun{Run: m.run, JobNames: names})
+		judged.Unmatched = append(judged.Unmatched, UnmatchedRun{Run: m.run, JobNames: names})
 	}
-
-	sort.Slice(applies, func(i, j int) bool {
-		return applies[i].CompletedAt.Before(applies[j].CompletedAt)
-	})
-	return applies, unmatched
+	sort.Slice(judged.Applies, func(i, j int) bool { return judged.Applies[i].CompletedAt.Before(judged.Applies[j].CompletedAt) })
+	return judged
 }
 
-// skippedCaller reports whether job could be a skipped call of a reusable workflow that holds the
-// production job. GitHub names a reusable workflow's job `<caller> / <job>`, but when it skips the
-// calling job it runs none of the called workflow's jobs and lists the call under its caller's
-// name alone. So a production job named `production-apply / production-apply` appears in a run
-// that skipped it as a skipped `production-apply`, and one nested deeper,
-// `deploy / production / apply`, as a skipped `deploy / production` (or `deploy`, when the outer
-// call was skipped). The name alone cannot tell such a call from an unrelated skipped job that
-// shares the first part of a typo, which is why ProductionApplies also asks that some run hold
-// the configured job.
+// skippedCaller reports whether job could be a skipped call of a reusable workflow that holds a
+// listed production job. GitHub names a reusable workflow's job `<caller> / <job>`, but when it
+// skips the calling job it runs none of the called workflow's jobs and lists the call under its
+// caller's name alone. So a production job named `production-apply / production-apply` appears in
+// a run that skipped it as `production-apply`, and one nested deeper, `deploy / production / apply`,
+// as `deploy / production` (or `deploy`, when the outer call was skipped). The name alone cannot
+// tell such a call from an unrelated skipped job that shares the first part of a typo, which is why
+// ProductionApplies also asks that some run hold the listed name.
 func skippedCaller(job DeliveryRunJob, productionJobName string) bool {
 	return job.Conclusion != nil && *job.Conclusion == DeliveryJobConclusionSkipped &&
 		strings.HasPrefix(productionJobName, job.Name+" / ")

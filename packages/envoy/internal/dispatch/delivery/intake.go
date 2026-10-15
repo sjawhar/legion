@@ -530,7 +530,7 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliveryS
 		// jobs too and will complete them.
 		return fmt.Errorf("fetch jobs of run %d: %w", runID, err)
 	}
-	jobs := RunJobs(repoFull, runID, fetchedJobs)
+	jobs := RunJobs(repoFull, runID, fetchedJobs, settings.Production())
 	return UpsertRunJobs(ctx, in.pool, repoFull, runID, jobs, JobsComplete(jobs))
 }
 

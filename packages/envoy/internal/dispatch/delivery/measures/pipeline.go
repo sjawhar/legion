@@ -5,6 +5,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
@@ -100,7 +101,8 @@ type JobTiming struct {
 	Timing
 }
 
-// DeployJobTiming is one deploy-workflow job's timing, by the job name it follows.
+// DeployJobTiming is one deploy-workflow job's timing, by the job names it follows, joined by
+// " or ".
 type DeployJobTiming struct {
 	Job string `json:"job"`
 	Timing
@@ -351,25 +353,42 @@ func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Del
 	return failing
 }
 
-// DeployJobs is the timing of each job named in names, read from runs in one pass
-// (pipeline.py:170-185): each matching job's outcome, its minutes from its start to its completion
-// when timed, and the day its run started. The caller passes the deploy workflow's push runs on
-// main started in the shown days; a run without a named job, or whose job is not counted, adds
-// nothing to it, and every name gets a timing, all of its days empty when no run lists it.
-func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, names []string, days []string) map[string]DeployJobTiming {
-	samples := make(map[string][]Sample, len(names))
-	for _, name := range names {
-		samples[name] = nil
+// DeployJobCard is one Pipeline card's jobs: every name it follows (a renamed job's old and new
+// names, so history and new runs both count) and, for the production card, the apply step whose
+// success makes a successful job a deploy (delivery.Production.Conclusion).
+type DeployJobCard struct {
+	Names     []string
+	ApplyStep *string
+}
+
+// DeployJobs is each card's timing, in cards' order, read from runs in one pass
+// (pipeline.py:170-185): each followed job's outcome (its conclusion as the card's
+// delivery.Production reads it, so a job that applied nothing is not counted), its minutes from its
+// start to its completion when timed, and the day its run started. The caller passes the deploy
+// workflow's push runs on main started in the shown days. A run without a followed job, or whose job
+// is not counted, adds nothing; every card gets a timing, all of its days empty when no run lists
+// its jobs, and its job field is its names joined by " or ". A name two cards follow counts for the
+// first.
+func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, cards []DeployJobCard, days []string) []DeployJobTiming {
+	samples := make([][]Sample, len(cards))
+	productions := make([]delivery.Production, len(cards))
+	cardOf := map[string]int{}
+	for i, card := range cards {
+		productions[i] = delivery.Production{JobNames: card.Names, ApplyStep: card.ApplyStep}
+		for _, name := range card.Names {
+			if _, taken := cardOf[name]; !taken {
+				cardOf[name] = i
+			}
+		}
 	}
 	for _, run := range runs {
 		runDay := utcDay(run.StartedAt)
-		// A run never repeats a job name (delivery_run_jobs' key), so each name matches at most once.
 		for _, job := range jobsByRun[run.RunID] {
-			named, followed := samples[job.Name]
+			i, followed := cardOf[job.Name]
 			if !followed {
 				continue
 			}
-			outcome, ok := OutcomeOf(job.Conclusion)
+			outcome, ok := OutcomeOf(productions[i].Conclusion(job))
 			if !ok {
 				continue
 			}
@@ -377,12 +396,12 @@ func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 			if outcome.timed() {
 				sample.Minutes = elapsedMinutes(job.StartedAt, job.CompletedAt)
 			}
-			samples[job.Name] = append(named, sample)
+			samples[i] = append(samples[i], sample)
 		}
 	}
-	timings := make(map[string]DeployJobTiming, len(names))
-	for name, jobSamples := range samples {
-		timings[name] = DeployJobTiming{Job: name, Timing: ComputeTiming(jobSamples, days)}
+	timings := make([]DeployJobTiming, len(cards))
+	for i, card := range cards {
+		timings[i] = DeployJobTiming{Job: strings.Join(card.Names, " or "), Timing: ComputeTiming(samples[i], days)}
 	}
 	return timings
 }

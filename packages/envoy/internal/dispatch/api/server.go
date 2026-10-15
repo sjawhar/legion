@@ -248,20 +248,20 @@ type server struct {
 	// deliverySockets is every open GET /ws/delivery socket, which the test hook drops.
 	deliverySockets deliverySocketSet
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
-	// warned holds no production job, so a read that judges a run again does not warn about it
-	// again. Nothing evicts an entry: the map holds one per (repo, run, configured job name) it has
-	// warned about, which is the runs a misconfigured production_job_name sets apart until it is
-	// fixed and the successful runs of a listing that held no production deploy, and a restart
-	// empties it.
+	// warned holds no production job or no configured apply step, so a read that judges a run again
+	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
+	// names and apply step that it has warned about, until the configuration is fixed or the process
+	// restarts.
 	warnedUnmatchedRuns sync.Map
 }
 
-// warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured
-// production job name.
+// warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured set of
+// production job names and optional apply step.
 type warnedProductionRun struct {
-	repo    string
-	runID   int64
-	jobName string
+	repo      string
+	runID     int64
+	jobNames  string
+	applyStep string
 }
 
 // queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader

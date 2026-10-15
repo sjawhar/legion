@@ -127,28 +127,32 @@ func deliveryPipelineCompute(settings delivery.DeliverySettings, pop pipelinePop
 		rollup = *settings.PRChecksRollupJobName
 	}
 	run, slowest, failing := measures.PRChecks(pop.checks.Runs, pop.checks.Jobs, days, at, rollup)
-	names := []string{settings.ProductionJobName}
+	cards := []measures.DeployJobCard{{Names: settings.ProductionJobNames, ApplyStep: settings.ProductionApplyStepName}}
 	for _, name := range []*string{settings.StagingE2EJobName, settings.StagingApplyJobName} {
 		if name != nil {
-			names = append(names, *name)
+			cards = append(cards, measures.DeployJobCard{Names: []string{*name}})
 		}
 	}
-	deployJobs := measures.DeployJobs(pop.deploys.Runs, pop.deploys.Jobs, names, days)
+	timings := measures.DeployJobs(pop.deploys.Runs, pop.deploys.Jobs, cards, days)
+	next := 1
 	optional := func(name *string) *measures.DeployJobTiming {
 		if name == nil {
 			return nil
 		}
-		return new(deployJobs[*name])
+		timing := timings[next]
+		next++
+		return &timing
 	}
+	stagingE2E, stagingApply := optional(settings.StagingE2EJobName), optional(settings.StagingApplyJobName)
 	derived := pop.leadTimes.derive(settings)
 	mergeToProduction, openedToMerge := measures.LeadTimes(derived.measuresPRs(), days)
 	return deliveryPipelineResponse{
 		Days:              days,
 		ComputedAt:        now,
 		PRChecks:          deliveryPipelinePRChecks{Run: run, SlowestJobs: slowest, FailingJobs: failing},
-		StagingE2E:        optional(settings.StagingE2EJobName),
-		StagingApply:      optional(settings.StagingApplyJobName),
-		ProductionApply:   deployJobs[settings.ProductionJobName],
+		StagingE2E:        stagingE2E,
+		StagingApply:      stagingApply,
+		ProductionApply:   timings[0],
 		MergeToProduction: mergeToProduction,
 		OpenedToMerge:     openedToMerge,
 		Targets:           measures.DefaultTargets,

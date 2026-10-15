@@ -30,7 +30,7 @@ func TestGetDeliveryTimelineRejectsMalformedWindow(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	if _, err := delivery.PutSettings(t.Context(), database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"widgets-release / widgets-release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -56,7 +56,7 @@ func TestGetDeliveryTimelineComputesDeployedStatusAndFacets(t *testing.T) {
 
 	if _, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"widgets-release / widgets-release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -196,7 +196,7 @@ func TestGetDeliveryTimelineAnswersThePullRequestsStillWaitingAtFrom(t *testing.
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "release / release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"release / release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat", "hubot"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -288,7 +288,7 @@ func TestGetDeliveryTimelineCreditsAMergeQueueMergeToTheDeployCreatedAfterIt(t *
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "release / release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"release / release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -394,7 +394,7 @@ func TestGetDeliveryTimelineJoinsIssueFactsAndCountsFacets(t *testing.T) {
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat", "hubot"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -512,7 +512,7 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 	}
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -570,21 +570,19 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 }
 
 // TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob: both reads that judge deploy runs, the
-// timeline and the measures, warn about a successfully concluded run on main that holds no job by
-// the configured production job name, and only once for it however often they read it. A dev-only
+// timeline and the measures, warn about a successfully concluded run on main that holds none of
+// the configured production job names, and only once for it however often they read it. A dev-only
 // run is no deploy and draws no warning, whether it ran off main (neither read judges it) or on
 // main beside a deploy: dev-only-run-jobs.json is GitHub's job list for a main run whose dispatch
-// applied dev alone, where the configured production job (`production-apply / production-apply`, a
-// reusable workflow's job) is skipped and so listed under its calling job's name alone
-// (`production-apply`), and the deploy's job of the configured name shows that name is real. The
-// run on main with neither spelling of the job is the warning's case, a renamed or misconfigured
-// job, and shows the capture sees the WARN when one is written.
+// applied dev alone, where a configured production job is skipped and so listed under its calling
+// job's name alone. The run on main with neither configured name is the warning's case, a renamed
+// or misconfigured job, and shows the capture sees the WARN when one is written.
 func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "production-apply / production-apply", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"production / production-apply", "production-apply / production-apply"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -616,7 +614,7 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, delivery.RunJobs("acme/widgets", run.id, run.jobs), true); err != nil {
+		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, delivery.RunJobs("acme/widgets", run.id, run.jobs, delivery.Production{}), true); err != nil {
 			t.Fatalf("seed run %d's jobs: %v", run.id, err)
 		}
 	}
@@ -634,8 +632,11 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 
 	warned := map[string]int{}
 	for _, line := range strings.Split(logs.String(), "\n") {
-		if !strings.Contains(line, "no job matching the configured production_job_name") {
+		if !strings.Contains(line, "no job matching the configured production_job_names") {
 			continue
+		}
+		if !strings.Contains(line, "production / production-apply") || !strings.Contains(line, "production-apply / production-apply") {
+			t.Fatalf("production-job warning lacks both configured names: %s", line)
 		}
 		for _, field := range strings.Fields(line) {
 			if id, ok := strings.CutPrefix(field, "run_id="); ok {
@@ -658,7 +659,7 @@ func TestGetDeliveryTimelineSurfacesReconcileErrorOnFreshness(t *testing.T) {
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"widgets-release / widgets-release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)

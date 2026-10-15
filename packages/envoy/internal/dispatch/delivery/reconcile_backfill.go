@@ -44,7 +44,7 @@ const createdAtBackfillStep = "backfill/created_at/" + string(DeliveryRunKindDep
 // Every failure is logged and the pass resumes next time, never returned: runOnce's health state
 // (last_reconcile_at, last_error) describes the regular steps, which a backfill rate limit must
 // not make look failed.
-func (r *Reconcile) backfillRuns(ctx context.Context, step, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, now time.Time) {
+func (r *Reconcile) backfillRuns(ctx context.Context, step, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, production Production, now time.Time) {
 	scope := runsProgressScope(repoFull, workflowPath)
 	warn := func(message string, err error, args ...any) {
 		slog.Warn("dispatch delivery: backfill runs: "+message, append([]any{"step", step, "error", err}, args...)...)
@@ -74,7 +74,7 @@ func (r *Reconcile) backfillRuns(ctx context.Context, step, owner, repo, repoFul
 		if progress.beganAt.Before(until) {
 			until = progress.beganAt
 		}
-		if err := r.backfillWindow(ctx, owner, repo, repoFull, workflowPath, kind, since, until); err != nil {
+		if err := r.backfillWindow(ctx, owner, repo, repoFull, workflowPath, kind, production, since, until); err != nil {
 			warn("window", err, "window_start", formatWindowBound(since), "window_end", formatWindowBound(until))
 			return
 		}
@@ -91,7 +91,7 @@ func (r *Reconcile) backfillRuns(ctx context.Context, step, owner, repo, repoFul
 // progress unrecorded, so the next pass lists it again in full. GitHub's created qualifier is
 // inclusive on both ends, so the window is asked for as since..until-1s, and the next window
 // starts at until.
-func (r *Reconcile) backfillWindow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, since, until time.Time) error {
+func (r *Reconcile) backfillWindow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, production Production, since, until time.Time) error {
 	last := until.Add(-time.Second)
 	if last.Before(since) {
 		return nil
@@ -109,7 +109,7 @@ func (r *Reconcile) backfillWindow(ctx context.Context, owner, repo, repoFull, w
 		return fmt.Errorf("list %s runs whose jobs the backfill skips: %w", kind, err)
 	}
 	for _, run := range runs {
-		if err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run, skipJobs); err != nil {
+		if err := r.reconcileRun(ctx, owner, repo, repoFull, kind, production, run, skipJobs); err != nil {
 			return fmt.Errorf("run %d: %w", run.RunID, err)
 		}
 	}

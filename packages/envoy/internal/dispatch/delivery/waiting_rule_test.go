@@ -22,6 +22,7 @@ type waitingRun struct {
 	head, started, done time.Time
 	created             *time.Time
 	result              DeliveryJobConclusion
+	stoodDown           bool
 }
 
 // waitingPR is one merged pull request a waiting-rule history holds.
@@ -31,7 +32,10 @@ type waitingPR struct {
 	merged time.Time
 }
 
-const waitingRepo, waitingJob = "acme/widgets", "widgets-release / widgets-release"
+const (
+	waitingRepo, waitingJob = "acme/widgets", "widgets-release / widgets-release"
+	waitingStep             = "Run ./.github/actions/apply"
+)
 
 // TestTheWaitingSQLAgreesWithTheShippingRule: ListPullRequestsWaitingAt states in SQL when a
 // deploy ships a pull request, and FirstShippingApply states it in Go; nothing else keeps the two
@@ -59,6 +63,8 @@ func TestTheWaitingSQLAgreesWithTheShippingRule(t *testing.T) {
 		{id: 305, branch: "main", head: day(8, 12), created: new(day(8, 12)), started: day(8, 12), done: day(8, 13), result: DeliveryJobConclusionCancelled},
 		// A re-run: created on day 9 at midnight, its re-run started at 02:00, done after at.
 		{id: 306, branch: "main", head: day(9, 0).Add(-10 * time.Minute), created: new(day(9, 0)), started: day(9, 2), done: day(12, 0), result: DeliveryJobConclusionSuccess},
+		// A superseded run: its production job succeeded having applied nothing, so it ships nothing.
+		{id: 307, branch: "main", head: day(9, 3), created: new(day(9, 3)), started: day(9, 3), done: day(9, 4), result: DeliveryJobConclusionSuccess, stoodDown: true},
 	}
 	prs := []waitingPR{
 		{waitingRepo, 401, time.Date(2024, 2, 28, 0, 0, 0, 0, time.UTC)}, // shipped by 300
@@ -121,6 +127,8 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleOverMergeQueueHistories(t *testin
 				run.started = created.Add(minutes(14, 54)) // a re-run
 			case 4:
 				run.created, run.started = nil, created // stored before created_at
+			case 5:
+				run.stoodDown = true
 			}
 			// Distinct per run: the two rules order applies by completion alone, and break a tie
 			// each its own way.
@@ -169,9 +177,14 @@ func seedWaitingHistory(t *testing.T, ctx context.Context, pool *store.Pool, run
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		if err := UpsertRunJobs(ctx, pool, waitingRepo, run.id, []DeliveryRunJob{
-			{Repo: waitingRepo, RunID: run.id, Name: waitingJob, StartedAt: &started, CompletedAt: &done, Conclusion: new(run.result)},
-		}, true); err != nil {
+		conclusion := new(DeliveryJobConclusionSuccess)
+		if run.stoodDown {
+			conclusion = new(DeliveryJobConclusionSkipped)
+		}
+		if err := UpsertRunJobs(ctx, pool, waitingRepo, run.id, []DeliveryRunJob{{
+			Repo: waitingRepo, RunID: run.id, Name: waitingJob, StartedAt: &started, CompletedAt: &done,
+			Conclusion: new(run.result), ApplyStep: new(waitingStep), ApplyStepConclusion: conclusion,
+		}}, true); err != nil {
 			t.Fatalf("seed run %d's job: %v", run.id, err)
 		}
 	}
@@ -192,7 +205,8 @@ func seedWaitingHistory(t *testing.T, ctx context.Context, pool *store.Pool, run
 // the run that ships it after at.
 func waitingSets(t *testing.T, ctx context.Context, pool *store.Pool, at time.Time) (sqlSet, goSet map[int]string) {
 	t.Helper()
-	waiting, err := ListPullRequestsWaitingAt(ctx, pool, waitingRepo, waitingJob, at)
+	waitingProduction := Production{JobNames: []string{waitingJob}, ApplyStep: new(waitingStep)}
+	waiting, err := ListPullRequestsWaitingAt(ctx, pool, waitingRepo, waitingProduction, at)
 	if err != nil {
 		t.Fatalf("ListPullRequestsWaitingAt: %v", err)
 	}
@@ -218,7 +232,7 @@ func waitingSets(t *testing.T, ctx context.Context, pool *store.Pool, at time.Ti
 	if err != nil {
 		t.Fatalf("ListRunJobsForRuns: %v", err)
 	}
-	applies, _ := ProductionApplies(deployRuns, jobs, waitingJob)
+	applies := ProductionApplies(deployRuns, jobs, waitingProduction).Applies
 	goSet = map[int]string{}
 	for _, pr := range stored {
 		if ComputeDeployedStatus(pr, waitingRepo, nil) == DeployedStatusNotTracked {

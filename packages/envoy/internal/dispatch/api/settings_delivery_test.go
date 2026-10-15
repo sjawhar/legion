@@ -2,7 +2,9 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -40,7 +42,7 @@ func TestPutDeliverySettingsWritesSettings(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
 		"deploy_repo":             "acme/widgets",
 		"deploy_workflow_path":    ".github/workflows/deploy.yml",
-		"production_job_name":     "widgets-release / widgets-release",
+		"production_job_names":    []string{"widgets-release / widgets-release"},
 		"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
 		"population_authors":      []string{"octocat"},
 	}, "alice")
@@ -64,6 +66,77 @@ func TestPutDeliverySettingsWritesSettings(t *testing.T) {
 	}
 }
 
+// TestPutDeliverySettingsTrimsTheProductionJobNamesAndApplyStep checks that each production-job
+// name and the optional apply step are trimmed, and that the GET preserves the names' order.
+func TestPutDeliverySettingsTrimsTheProductionJobNamesAndApplyStep(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	handler, _ := newArchitectureSourceServer(t, fake)
+	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
+		"deploy_repo":                "acme/widgets",
+		"deploy_workflow_path":       ".github/workflows/deploy.yml",
+		"production_job_names":       []string{" release / release ", "widgets-release / widgets-release"},
+		"production_apply_step_name": " Run ./.github/actions/apply ",
+		"pr_checks_workflow_path":    ".github/workflows/pr-checks.yml",
+		"population_authors":         []string{"octocat"},
+	}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/settings/delivery", nil, "alice")
+	var got delivery.DeliverySettings
+	if err := json.Unmarshal(read.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode GET: %v (%s)", err, read.Body.String())
+	}
+	if !slices.Equal(got.ProductionJobNames, []string{"release / release", "widgets-release / widgets-release"}) {
+		t.Errorf("production_job_names = %v, want both trimmed, in order", got.ProductionJobNames)
+	}
+	if got.ProductionApplyStepName == nil || *got.ProductionApplyStepName != "Run ./.github/actions/apply" {
+		t.Errorf("production_apply_step_name = %v, want it trimmed", got.ProductionApplyStepName)
+	}
+}
+
+// TestPutDeliverySettingsRefusesABadProductionJobList proves malformed production name lists do
+// not write settings.
+func TestPutDeliverySettingsRefusesABadProductionJobList(t *testing.T) {
+	for name, tc := range map[string]struct {
+		names any
+		want  string
+	}{
+		"absent":    {nil, "production_job_names must name at least one job"},
+		"empty":     {[]string{}, "production_job_names must name at least one job"},
+		"blank":     {[]string{"release / release", " \t"}, "production_job_names[1] is blank"},
+		"duplicate": {[]string{"release / release", " release / release"}, `production_job_names names "release / release" twice`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+			handler, database := newArchitectureSourceServer(t, fake)
+			body := map[string]any{
+				"deploy_repo":             "acme/widgets",
+				"deploy_workflow_path":    ".github/workflows/deploy.yml",
+				"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
+				"population_authors":      []string{"octocat"},
+			}
+			if tc.names != nil {
+				body["production_job_names"] = tc.names
+			}
+			response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", body, "alice")
+			var refusal struct {
+				Code  string `json:"code"`
+				Error string `json:"error"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &refusal); err != nil {
+				t.Fatalf("decode refusal: %v (%s)", err, response.Body.String())
+			}
+			if response.Code != http.StatusBadRequest || refusal.Code != "DELIVERY_SETTINGS_INPUT" || refusal.Error != tc.want {
+				t.Fatalf("status = %d, refusal = %+v; want 400 DELIVERY_SETTINGS_INPUT saying %q", response.Code, refusal, tc.want)
+			}
+			if _, err := delivery.GetSettings(t.Context(), database.Pool); !errors.Is(err, delivery.ErrNoSettings) {
+				t.Fatalf("GetSettings after a refused PUT = %v, want ErrNoSettings", err)
+			}
+		})
+	}
+}
+
 func TestPutDeliverySettingsRefusesWithoutGitHubAccess(t *testing.T) {
 	fake := &fakeGitHubApp{installations: map[string]string{}}
 	handler, _ := newArchitectureSourceServer(t, fake)
@@ -71,7 +144,7 @@ func TestPutDeliverySettingsRefusesWithoutGitHubAccess(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
 		"deploy_repo":             "acme/widgets",
 		"deploy_workflow_path":    ".github/workflows/deploy.yml",
-		"production_job_name":     "widgets-release / widgets-release",
+		"production_job_names":    []string{"widgets-release / widgets-release"},
 		"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
 		"population_authors":      []string{"octocat"},
 	}, "alice")
@@ -89,7 +162,7 @@ func TestPutDeliverySettingsRoundTripsThePipelineJobNames(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
 		"deploy_repo":               "acme/widgets",
 		"deploy_workflow_path":      ".github/workflows/deploy.yml",
-		"production_job_name":       "widgets-release / widgets-release",
+		"production_job_names":      []string{"widgets-release / widgets-release"},
 		"pr_checks_workflow_path":   ".github/workflows/pr-checks.yml",
 		"population_authors":        []string{"octocat"},
 		"staging_e2e_job_name":      " staging-e2e / run ",
@@ -126,7 +199,7 @@ func TestPutDeliverySettingsWithoutThePipelineJobNamesStoresNull(t *testing.T) {
 	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
 		"deploy_repo":             "acme/widgets",
 		"deploy_workflow_path":    ".github/workflows/deploy.yml",
-		"production_job_name":     "widgets-release / widgets-release",
+		"production_job_names":    []string{"widgets-release / widgets-release"},
 		"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
 		"population_authors":      []string{"octocat"},
 		"staging_apply_job_name":  "  ",
@@ -164,7 +237,7 @@ func TestAgentPutsDeliverySettingsWithItsActor(t *testing.T) {
 	response := agentRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
 		"deploy_repo":             "acme/widgets",
 		"deploy_workflow_path":    ".github/workflows/deploy.yml",
-		"production_job_name":     "widgets-release / widgets-release",
+		"production_job_names":    []string{"widgets-release / widgets-release"},
 		"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
 		"population_authors":      []string{"octocat"},
 		"actor":                   map[string]string{"kind": "session", "id": "agent-delivery-put"},
