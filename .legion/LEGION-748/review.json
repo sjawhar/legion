@@ -2,44 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T22:03:49Z",
+  "completed": "2026-10-15T22:59:03Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "round": 4,
-  "reviewedHead": "2919b343e5329bc376203d93462b7c6a406a3813",
-  "ciHead": "247c104ed24763579f037a47326ac67f85ccd5e4",
-  "ci": "Required set from main's ruleset: lint, typecheck, test, pr-title. Newest pull_request run head 247c104e; its check-runs: lint, typecheck, test completed/success; pr-title's newest run (21:37:06Z, run 38811227924) success, its predecessor cancelled by concurrency (Tests run 38809967155, PR Title run 38810027690 as the body's CI line says). compare 247c104e...2919b343 touches only .legion/.",
-  "threads": "Twenty-one threads. Replied on the six round-3 threads I had open; accepted five (PRRT_kwDORFy7ds6s9-ej, …em, …es, …e3, …e7). The checker thread PRRT_kwDORFy7ds6s9-ec still stands, narrowed, with regressions this push adds; I unresolved it.",
-  "proofLines": "E2E (implementer) rounds 1-5 and E2E (tester) round 5 present; census unchanged and exact.",
-  "thermonuclear": "Pair run at 247c104e (new fingerprint). Both found the comment class open: `;#`/`|#`/`&&#` before a trailing backslash hides the next line (same class as round 3, green since the join landed in b2600428), and per-line stripping before the join resets quote state, so a `#` opening a line inside a multi-line quoted string, an escaped space before `#`, and a `#` glued by a continuation each hide a command the previous head refused. The reviewer reproduced `;#` and the multi-line-quote shape on a copy of the real release.yaml (head green, bash runs the hidden line; the 391d2c2b checker refuses the quote shape). push-main's hoisted checks held in every scenario driven (12 by the pair; the 2g and c2g-held shapes, the clean stale-parent race and the same-package race by the reviewer's read of the harness). Harnesses: check-release-credentials.test.sh 165/165; release-push.test.sh 297/299 (the two github.com host-key cases need an ssh binary the pod lacks); the real workflows pass.",
-  "verdict": "changes_requested",
+  "round": 5,
+  "reviewedHead": "753d1f0eabece913bec978c3a6fd15a561671d28",
+  "ciHead": "06765ce13951473740f3a01e8be6a047a8e94270",
+  "ci": "Required set from main's ruleset: lint, typecheck, test, pr-title. Newest pull_request run head 06765ce1; its check-runs: lint, typecheck, test, pr-title all completed/success (Tests run 38816662485 with `check-release-credentials: 7 credentialed job(s) and 8 build job(s)` in the lint log and harness totals 298/298 and 184/184; PR Title run 38816700246, as the body's CI line says). compare 06765ce1...753d1f0e touches only .legion/.",
+  "threads": "Twenty-four threads, all resolved by the implementer, each carrying my answer as its last comment. This round I replied on the four I had open (PRRT_kwDORFy7ds6s9-ec, …--w2, …--w5, …--w7) and accepted all four after replaying the pinned shapes myself.",
+  "proofLines": "E2E (implementer) rounds 1-6 and E2E (tester) round 6 present with surfaces, commands, observations, heads and negative controls; the Contract change census is present and its searches, re-run in round 2, match its listed hits.",
+  "thermonuclear": "Pair run at 06765ce1 (new fingerprint), the fifth time at a reviewed head. Deep-review: 29/29 pinned mutations refuse on copies of the real workflows; 76/76 real `run:` bodies verdict-identical between the new Scanner and the previous lexer; the header's claims verified sentence by sentence against real bash; four crafted-shape lexing items, none reached by a real workflow. Code-quality: the Scanner's branch order holds, the threat-model paragraph is accurate, fixtures unique and behavioural; the `$(…)` word-tail false refusal and two fixture gaps noted. Harnesses at head: check-release-credentials.test.sh 184/184; release-push.test.sh 297/299 with a stub ssh-keygen (the two github.com host-key cases need an ssh binary the pod lacks; CI 298/298); the real workflows pass.",
+  "verdict": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": ".github/scripts/check-release-credentials.sh:215",
-      "description": "Comment handling is one quote-aware pass short. `strip_comment` counts only line start or whitespace before a `#` (:215), so `release-push.sh push-tag \"$TAG\" ;# keep the toolchain pinned \\` followed by `bun install --frozen-lockfile` in envoy_plugin_publish's Push tag step (DEPLOY_KEY in its env) leaves the checker green: the `\\` is taken as a real continuation (:262), and the joined `# …` segment is dropped by the `startswith('#')` guard (:272) — while bash starts a comment at a `#` that begins a word after `;`, `|` or `&&` and runs the next line (`printf 'echo a ;# c \\\\\\necho RAN\\n' | bash` prints RAN). Stripping per line before the join (:267-269) also resets quote state at every newline: `notes='Release notes:` / `# keep the toolchain pinned' ; bun install` is green at this head and refused at 391d2c2b (both checkers run on the same copy); `echo a\\ #; bun install` (escaped space, no comment to bash) and `echo a\\` / `#;bun install` (the `#` glued to `a`) are regressions the same way. Fix: one pass over the whole run with quote state carried across newlines; `#` a comment only at word start (run start, after unquoted whitespace or newline, after an unquoted `;`, `&`, `|`, `(`, `)`, `<`, `>` or backtick — not `{`, because of `${#x}`); escaped whitespace is not whitespace; a comment runs to the real newline; `\\`+newline joins outside single quotes when the backslash run is odd. The guard at :272 then goes. Fixtures for `;#`, the multi-line-quote `#`, the escaped-space `#`, the glued `#`."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.sh:262",
-      "description": "`(?<!\\\\)\\\\\\n` joins one or two backslashes correctly but refuses to join an odd run of three or more, which bash continues: `printf 'x' \\\\\\` then `bun install` is flagged `runs 'bun'` on a legal body — a false CI failure no real workflow reaches; join when the run before the newline is odd."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/release-push.sh:435",
-      "description": "`only_bump` says `.version set to v$version` where the value written is the bare version and the clause before it says `.version = 1.0.1`; drop the `v` or say 'the released version'."
-    }
-  ],
-  "hardening": [
-    "Accepted as the documented pass-through class: a BOM, duplicate keys, key order and the manifest blob's mode are not compared (sorted-JSON equality, now stated in the header and §4); the bump commit's own subject lacks [skip ci]; `docker -Dl debug run`; `npm publish <dir named x.tgz>`; a variable in command position, xargs/nohup, an unlisted program.",
-    "The conflict-abort clause for a second path is reachable (main renames the manifest's directory), so the header's sentence stays accurate; only the modify/delete half is covered by the harness."
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "acceptedPassThrough": [
+    "Per the architect's ruling (Envoy 86cd502c, 2026-10-15 22:08Z) and the checker's header threat model: a here-document body holding an apostrophe swallows the rest of the step; a file-descriptor digit before a redirection hides the command (`2>&1 bun install`); `$'…'` quoting's escaped quote; the word tail after `$(…)` read as a new command (a false refusal, not a miss); the header clause over-claiming `(…)`/`<(…)` inside double quotes; two fixture gaps; release-push.sh:503/505 saying `v$version`. All recorded on dispatch://LEGION-772 (comment 39716473-9ab9-482e-8b2b-209b8cf20597)."
   ],
   "notProvenRisk": [
     "`docker buildx imagetools create` without docker/setup-buildx-action is proven only on the first merge-triggered listener run.",
     "`agent-secrets --version` and `go version -m` in release_build first execute on the merge-triggered listener run.",
-    "The listener's `--expect` recompute makes a benign race a red release_publish needing a whole-run re-run."
+    "The listener's `--expect` recompute makes a benign race a red release_publish needing a whole-run re-run (LEGION-772).",
+    "push-main's manifest check is sorted-JSON equality (BOM, duplicate keys, key order, blob mode uncompared); the exact bump a branch dispatch lands carries its author's subject without [skip ci]."
   ],
-  "fastFollow": "dispatch://LEGION-772 as filed, plus: push-main could construct the bump commit on the fetched tip instead of validating and rebasing a consumed one; release-push.test.sh crossed 1000 lines and splits along its subcommand seams; a `fetch_main` helper and a `doctor_bump` harness helper for the three copies of the doctored-manifest setup; a rename-conflict harness case for the second-path abort clause."
+  "fastFollow": "dispatch://LEGION-772, extended this round with the seven items above."
 }
