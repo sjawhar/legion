@@ -59,6 +59,25 @@ func noStore(t *testing.T) seed.Stores {
 	}}
 }
 
+// brokenStdout fails every write, as a closed stdout does.
+type brokenStdout struct{}
+
+func (brokenStdout) Write([]byte) (int, error) {
+	return 0, errors.New("write /dev/stdout: bad file descriptor")
+}
+
+// TestVersionItCannotPrintExitsOne: a --version whose answer never reached stdout does not exit 0,
+// so a script that reads it is not told the version was printed.
+func TestVersionItCannotPrintExitsOne(t *testing.T) {
+	var stderr bytes.Buffer
+	if code := run(context.Background(), []string{"--version"}, brokenStdout{}, &stderr, noStore(t)); code != 1 {
+		t.Fatalf("exit %d, want 1", code)
+	}
+	if want := "envoy-infra: could not print the version: write /dev/stdout: bad file descriptor\n"; stderr.String() != want {
+		t.Errorf("stderr %q, want %q", stderr.String(), want)
+	}
+}
+
 // TestVersionStandsAlone: --version followed by another word is a usage error, which echoes
 // neither word, since a seed pasted there must not reach the terminal.
 func TestVersionStandsAlone(t *testing.T) {

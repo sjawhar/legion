@@ -21,6 +21,9 @@ a build provenance attestation for every archive.
 
 ### The plugin
 
+Pulumi CLI 3.257.0 or later; the plugin is tested with 3.268.0. `pulumi package add` takes
+`--server` from 3.256.0 on, and keeps it in `Pulumi.yaml` from 3.257.0 on.
+
 The plugin runs on the machine that runs `pulumi`, and logs in to the Docker hosts it deploys to, so
 verify an archive before installing it. Each release's archives carry build provenance from
 `.github/workflows/release-envoy-infra.yaml` on `main`; `--repo` alone would accept an attestation
@@ -65,10 +68,10 @@ program imports each component's package under `github.com/sjawhar/envoy/infra/s
 
 ### The command
 
-The command's archive is `envoy-infra-<os>-<arch>.tar.gz`. It holds one directory,
-`envoy-infra-<os>-<arch>/`, with the `envoy-infra` binary and its `THIRD_PARTY_NOTICES`; a mise
-`github:` pin strips that directory and installs the binary. The command writes seeds with your
-cloud credentials, so check the archive's provenance before you install it. For linux on amd64:
+The command's archive is `envoy-infra-<os>-<arch>.tar.gz`, holding the `envoy-infra` binary and
+its `THIRD_PARTY_NOTICES` in one directory, `envoy-infra-<os>-<arch>/`. The command writes seeds
+with your cloud credentials, so check the archive's provenance before you install it. For linux on
+amd64:
 
 ```sh
 gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
@@ -85,6 +88,29 @@ runner, so an archive attested by any other workflow, branch or runner in the re
 `--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
 explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
 `PATH`; the commands under [NATS seeds](#nats-seeds) call it `envoy-infra`.
+
+To install it with mise, give it a tool alias: `github:sjawhar/legion` is also where the `legion`
+command's releases come from, so a second pin of that repository needs a name of its own. Pin the
+tag, and name each platform's archive with its digest, since each release holds the plugin's
+archives beside the command's:
+
+```toml
+[tool_alias]
+envoy-infra = "github:sjawhar/legion"
+
+[tools.envoy-infra]
+version = "envoy-infra-v<version>"
+platforms.linux-x64   = { asset_pattern = "envoy-infra-linux-amd64.tar.gz", checksum = "sha256:<digest>" }
+platforms.linux-arm64 = { asset_pattern = "envoy-infra-linux-arm64.tar.gz", checksum = "sha256:<digest>" }
+platforms.macos-x64   = { asset_pattern = "envoy-infra-darwin-amd64.tar.gz", checksum = "sha256:<digest>" }
+platforms.macos-arm64 = { asset_pattern = "envoy-infra-darwin-arm64.tar.gz", checksum = "sha256:<digest>" }
+```
+
+Each `<digest>` is the SHA-256 of that platform's archive: `sha256sum` of the one you verified
+above, or GitHub's digest for it, which
+`gh api repos/sjawhar/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
+lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
+and on `PATH`.
 
 ## What `host:Listener` deploys
 
@@ -164,6 +190,8 @@ The listener refuses these before it registers anything, with an error naming wh
 - a `watchdog.host` containing `@` or `://`;
 - `watchdog` on a listener whose name contains `"`, `$`, a backtick, `\` or a line break, since the
   watchdog's script echoes the name in double quotes;
+- `adopt.watchdog` without `watchdog`, since nothing would take the old command over and the
+  update would delete it;
 - a missing provider (see [Providers](#providers)).
 
 `natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
@@ -717,16 +745,24 @@ envoy-infra seed {check|generate|verify} --store gcp-secret-manager --name proje
 
 With `aws-secrets-manager`, the command runs under your own AWS configuration, as the AWS SDK loads
 it: the environment, then the shared configuration and credentials files. `--region` overrides the
-region it names. It retrieves your credentials before any call; with none it can use, it stops with
+region it names. Before any call, it refuses a Secrets Manager endpoint you configure
+(`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is
+not `https`, unless it is this machine's loopback address, since a seed would cross the network in
+plain text; and it retrieves your credentials, and with none it can use, it stops with
 `refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks STS whose
-credentials they are and refuses, before any other call, unless they are that account's. Pass it
-whenever you name a secret, so that a seed is never written to, or read from, a secret of the same
-name in another account.
+credentials they are and refuses, before any other call, unless they are that account's. STS and
+Secrets Manager each resolve their own endpoint, so the secret is checked too: `DescribeSecret`,
+every mode's first call, answers the secret's ARN, and the command refuses a secret in another
+region than the one it sends to, and with `--expect-account` one in another account, before it
+reads or writes a seed. Pass `--expect-account` whenever you name a secret, so that a seed is never
+written to, or read from, a secret of the same name in another account.
 
 With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
-store refuses `--region` and `--expect-account`. It checks the name's form before anything else and
-refuses a name of any other form, such as a regional secret's, without printing it, since a seed
-pasted there must not reach the terminal. It runs under your
+store refuses `--region` and `--expect-account`, and has no flag of its own to expect a project:
+every call names the secret by that name, so no call reaches a secret of another project. It checks
+the name's form before anything else and refuses a name of any other form, such as a regional
+secret's, without printing it, since a seed pasted there must not reach the terminal. It runs under
+your
 [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials):
 the key file `GOOGLE_APPLICATION_CREDENTIALS` names, then the credentials
 `gcloud auth application-default login` saved, then the service account of the Google Cloud
@@ -734,7 +770,8 @@ machine it runs on. When `GOOGLE_OAUTH_ACCESS_TOKEN` is set, it runs under that 
 instead, such as one `gcloud auth print-access-token` prints. It calls Secret Manager's gRPC API at
 `secretmanager.googleapis.com`, or at the endpoint `SECRET_MANAGER_ENDPOINT` names as
 `https://<host>[:<port>]`, a test or private endpoint, whose TLS certificate this machine must
-trust.
+trust. It refuses any other form before any call, `http` on this machine's loopback included: the
+client speaks TLS to every endpoint, so a seed is never sent in plain text.
 
 ### Making a seed
 
@@ -775,12 +812,15 @@ trust.
    secret that is absent, is scheduled for deletion or holds any version, deprecated ones
    included, so it never replaces a seed a client may already read. It prints the public key just
    before the write, so the key is on your terminal whatever happens next, and the version id once
-   the write answers. After the write it lists the versions again and reads back the version
-   Secrets Manager serves by default (`AWSCURRENT`), which must be the one it wrote and derive the
-   public key it printed. Secrets Manager's reads are eventually consistent, so while the listing
-   shows no version yet, or no version is `AWSCURRENT`, it looks again after pauses of 0.25, 0.5,
-   1, 2 and 4 seconds; if the write is still not shown, it stops with an error after writing. More
-   than one version, or another version served by default, is another writer's race.
+   the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
+   somewhere you can read: `>/dev/null`, or a closed stdout, which a Go program sees as
+   `/dev/null`, discards the key with nothing to tell. After the write it lists the versions again
+   and reads back the version Secrets Manager serves by default (`AWSCURRENT`), which must be the
+   one it wrote and derive the public key it printed. Secrets Manager's reads are eventually
+   consistent, so while the listing shows no version yet, or no version is `AWSCURRENT`, it looks
+   again after pauses of 0.25, 0.5, 1, 2 and 4 seconds; if the write is still not shown, it stops
+   with an error after writing. More than one version, or another version served by default, is
+   another writer's race.
 4. Put the public key into the NATS server's authorization: as a user's `publicKey` on a
    `gcp:NatsHub` (see [The hub's users](#the-hubs-users)), or as a `core.Authorization` user's
    `NKey`, with `HasSeed` set (see [NATS authorization](#nats-authorization)). It is public, so it
@@ -876,9 +916,9 @@ pasted there must not reach the terminal.
 
 | Code | Meaning |
 | --- | --- |
-| 0 | Done: `check` printed its line, `generate` wrote the seed and read it back, or `verify` found the stored seed derives the key. |
-| 1 | `verify` found another key, no seed, or a newest Secret Manager version that is not enabled; or `generate` failed after it began its write. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
-| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the error's code, AWS's or Secret Manager's gRPC status code, as `refused: describe-secret <name> failed: AccessDeniedException` or `refused: get-secret <name> failed: PermissionDenied`. |
+| 0 | Done: `check` printed its line, `generate` wrote the seed, read it back and printed the public key and version id, or `verify` printed that the stored seed derives the key. A result that cannot be printed on stdout is never exit 0. |
+| 1 | `verify` found another key, no seed, or a newest Secret Manager version that is not enabled; or `generate` failed after it began its write, including a version id it could not print. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
+| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the error's code, AWS's or Secret Manager's gRPC status code, as `refused: describe-secret <name> failed: AccessDeniedException` or `refused: get-secret <name> failed: PermissionDenied`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. |
 
 ### The calls each mode makes
 
@@ -889,7 +929,7 @@ exactly these permissions on the secret. On AWS Secrets Manager:
 | --- | --- | --- |
 | `check` | `DescribeSecret` | `secretsmanager:DescribeSecret` |
 | `verify` | `DescribeSecret`, `GetSecretValue` | `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue` |
-| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, `ListSecretVersionIds`, `GetSecretValue`, the last two again after each pause while Secrets Manager has not caught up with the write | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
+| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, then `ListSecretVersionIds`, and `GetSecretValue` once a version is listed, again after each pause while Secrets Manager has not caught up with the write | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
 
 So a read-only check of a deployment's seed, `check` and `verify`, needs only `DescribeSecret` and
 `GetSecretValue`. `--expect-account` adds `sts:GetCallerIdentity` before them, which needs no
@@ -984,7 +1024,11 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 ```
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
-path and execs `nats-server --config <path>` with the server's own arguments.
+path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
+argument that sets `-c`, `-config`, `-user`, `-pass` or `-auth` (with one dash or two, and with or
+without `=`), naming its index: nats-server takes the last value of a flag, so a later `-c` would
+load another file in place of the rendered one, and the others would add a credential beside its
+nkey users.
 
 ### Permission sets
 
