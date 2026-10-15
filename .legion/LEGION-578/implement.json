@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-578",
-  "completed": "2026-10-15T22:31:21Z",
+  "completed": "2026-10-15T23:37:51Z",
   "generation": 3,
-  "head": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
+  "head": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
   "pullRequest": 1866,
   "workerImage": "ghcr.io/sjawhar/legion-worker@sha256:daf3708595c18345ad4ee40d6bbd92fa345cbeeca2c6bbf7a065bc8a486f7037 (tag sha-13cb9ce7110d, Worker Image run 38758193451)",
   "productionRelease": {
@@ -14,7 +14,8 @@
   },
   "decisions": [
     "D9 → option (a), ruled by the architect (dispatch://LEGION-578/artifact/plan-md, comment 4d2193d0-128e-4a9a-b143-76b5f811862e; Envoy b69cffd49c378afba55005b262302724): the merged diff carries e2e, test and docs code only, so no release is owed to this issue's production check; after the merge the Production line names the merge commit and the two surfaces, and one FYI goes to notifications.role.legion-deploy with expects_reply none.",
-    "The checkpoint name full-agent-tools stands (the architect, same message)."
+    "The checkpoint name full-agent-tools stands (the architect, same message).",
+    "Round 2's proof route, ruled by the architect (Envoy d0540c3d33d7a601f0f1e396158823df and ce88e66ee0396e28d64adeb477f0294e): a narrower re-proof of the changed lines, no new coordinator run — a departure from plan v6 §3.3/§3.7, recorded under deviations."
   ],
   "proof": [
     {
@@ -128,6 +129,30 @@
       "observed": "probe pass: every image row present (lsp: /usr/local/bin/gopls, typescript-language-server, pyright-langserver; codegraph: /opt/codegraph/bin/codegraph on PATH and @bopstack/pi-codegraph enabled in the profile lock; toolchain: go, curl, wget, python3, node, bun, uv, kubectl), the six live rows 'reported (each session reports it at start; `legion state` renders it …)', secrets/model-fallback/resource-limits/pool-capacity 'reported (the daemon reports it from the deployment's configuration …)', and the gate line `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=24`, exit 0, 4.8 s; the rootfs's `legion version` is 3f1ed031 with pi-legion 10.2.0 and pi-envoy 10.1.0, the release production runs. Daemon log: {time: 2026-10-15T03:42:00Z, msg: 'sandbox runtime: the worker image passed its probe', image: …@sha256:c69e8c5d…, sandbox: legion-probe-legion-c69e8c5d0ad9, model-fallback: on}; zero `capability <name> is open` lines in 48 h; seven `capabilities: session reported` lines since the drain, each six rows with open [] — among them this tree's architect (c5ef620e…/7), planner (/5) and implementer (/12). read_record: the architect's, planner's and implementer's claims each carry capabilities {ok: [subagents, web-search, mcp, repository-extensions, dispatch-envoy-tools, github], open: []} at their running incarnations. The controller clause (a gap reaching the controller's tick while the daemon keeps running) has no production surface a pod reaches and is the Stage 4b run's boot + controller",
       "headSha": "e5bfb6c8e0839cce75a2a16dffebd1b3f3bf7279 (the head when this half ran; the later commits ec9f48dc, 2e0e4171, ae40038b and 13cb9ce7 change only scripts/e2e/, which this half does not exercise)",
       "negativeControl": "gopls removed from the rootfs → `probe-image: capability lsp: missing (gopls is not on PATH)`, stderr `legion probe-image: capability lsp is missing: gopls is not on PATH`, exit 1, no OK line"
+    },
+    {
+      "criterion": "7 (round 2) — the controller tick assertion compares to the running daemon's open rows, not boot's: a cold pool at boot that a later `legion start` finds warm must not fail the run (review thread PRRT_kwDORFy7ds6tAG7V)",
+      "surface": "round 2, this pod and CI: the unit suites `bun test scripts/e2e/lib/controller-ticks.test.ts stage4b-tools.test.ts stage4b-hold.test.ts stage4b-boot-capabilities.test.ts` under jq 1.6, 1.7.1 and 1.8.2 (38 pass each); the real LEGION daemon's `GET $LEGION_DAEMON_URL/legion/v1/state` from the implementer's container; the implementer's own session file (/legion/sessions/…/2026-10-15T04-41-23-642Z_01a13ddd-6bba-7475-814f-6d0c65b3eea9.jsonl) read with the script's own helpers lifted from the working copy; evidence files under the state directory's proof/round2/",
+      "command": "bun test scripts/e2e/lib/controller-ticks.test.ts (tick_open_capabilities, controller_ticks($tick), ticks_name_open($open)); curl -sS \"$LEGION_DAEMON_URL/legion/v1/state\" | jq -c '[.capabilities[] | select(.status == \"open\") | .name]'; jq -L scripts/e2e/lib --argjson open <rows> 'include \"controller-ticks\"; ticks_name_open($open)' <<<'<ticks>' for the production rows and the proof's arms; bash -n scripts/e2e/stage4b-sandbox-tree.sh; the lifted bash tick_open_capabilities over a two-line fake session",
+      "observed": "tests: a warm pool (ticks and daemon [\"secrets\"]) → true; a cold pool healed at a later start — ticks [\"secrets\"] against the running daemon's [\"secrets\"] → true, against boot's [\"secrets\",\"pool-capacity\"] → false; a pool still cold, both rows in either order → true; one divergent tick → false; rows without secrets → false; no ticks → false; the TOON line `openCapabilities[2]: secrets,pool-capacity` parsed to both, a delivery without the line to []. Production (23:34:35Z): HTTP 200, 47,211 bytes, open rows [] (17 present, 3 withheld); ticks_name_open([]) over [{open:[\"secrets\"]}] → false and over [] → false (no secrets gap in production, so the proof's assertion rightly does not hold there); the proof's arm [{open:[\"secrets\"]},{open:[\"secrets\"]}] against [\"secrets\"] → true, [{open:[\"pool-capacity\",\"secrets\"]}] against [\"secrets\",\"pool-capacity\"] → true. The lifted bash tick_open_capabilities printed {\"open\":[\"secrets\"],\"delivery\":\"… openCapabilities[1]: secrets …\"} under all three jqs; bash -n clean; shellcheck not in the image (not run)",
+      "headSha": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+      "negativeControl": "ticks [{open:[\"secrets\"]}] against boot's [\"secrets\",\"pool-capacity\"] → false (the stale comparand the finding described); one divergent tick among agreeing ones → false; the production rows [] refused"
+    },
+    {
+      "criterion": "1, 4 and 5 (round 2) — full-agent-tools' assertions bind to the calls they judge: an edit result for `edited <nonce>` (the read a second assertion), the App login from the `gh api graphql` call's own result, each toolchain want from the `go version &&` chain's result (threads PRRT_kwDORFy7ds6tAG7h, PRRT_kwDORFy7ds6tAG7q)",
+      "surface": "round 2, this pod and CI: the unit suites `bun test scripts/e2e/lib/controller-ticks.test.ts stage4b-tools.test.ts stage4b-hold.test.ts stage4b-boot-capabilities.test.ts` under jq 1.6, 1.7.1 and 1.8.2 (38 pass each); the real LEGION daemon's `GET $LEGION_DAEMON_URL/legion/v1/state` from the implementer's container; the implementer's own session file (/legion/sessions/…/2026-10-15T04-41-23-642Z_01a13ddd-6bba-7475-814f-6d0c65b3eea9.jsonl) read with the script's own helpers lifted from the working copy; evidence files under the state directory's proof/round2/",
+      "command": "the script's session_jq, tool_result_said and tool_result_answered lifted from the working copy and run over the excerpts of the implementer's real session from the nonces full-agent-tools-implementer-57831 (the rehearsal) and full-agent-tools-implementer-tester-287839177 (the tester's drive), and over an excerpt from the marker demo-echo-5781 holding only a bash call `echo demo-echo-5781; echo 'legion-implementer[bot]'`",
+      "observed": "both real drives: tool_result_said edit 'edited <nonce>' PASS, tool_result_said read 'edited <nonce>' PASS, tool_result_answered bash 'gh api graphql' 'legion-implementer[bot]' PASS, tool_result_answered bash 'go version &&' for 'go version go', 'Python 3' and 'git version' PASS",
+      "headSha": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+      "negativeControl": "the echo-only excerpt: the old tool_result_said bash 'legion-implementer[bot]' → PASS (a composed result fooled it), the new tool_result_answered bash 'gh api graphql' 'legion-implementer[bot]' → FAIL"
+    },
+    {
+      "criterion": "7 (round 2) — a hold's re-arm task asks whichever role receives it for the `sleep 300` directly (thread PRRT_kwDORFy7ds6tAG7u), and a toolCall whose id is no string is no call (thread PRRT_kwDORFy7ds6tAG7z)",
+      "surface": "round 2, this pod and CI: the unit suites `bun test scripts/e2e/lib/controller-ticks.test.ts stage4b-tools.test.ts stage4b-hold.test.ts stage4b-boot-capabilities.test.ts` under jq 1.6, 1.7.1 and 1.8.2 (38 pass each); the real LEGION daemon's `GET $LEGION_DAEMON_URL/legion/v1/state` from the implementer's container; the implementer's own session file (/legion/sessions/…/2026-10-15T04-41-23-642Z_01a13ddd-6bba-7475-814f-6d0c65b3eea9.jsonl) read with the script's own helpers lifted from the working copy; evidence files under the state directory's proof/round2/",
+      "command": "bun test scripts/e2e/lib/stage4b-hold.test.ts (the task carries the instructions' reading sentence verbatim and is delivered through `legion claims deliver` on a miss); bun test scripts/e2e/lib/stage4b-tools.test.ts (a session with a null-id toolCall beside a real one)",
+      "observed": "stage4b-hold: 14 tests pass under jq 1.6, 1.7.1 and 1.8.2 with the new task text ('…before you reply WAITING, whatever your role, run `sleep 300` as one bash call (its timeout 600 seconds)…'); stage4b-tools: the null-id call is dropped, tool_results(\"read\") returns exactly the real call's result, the program exits 0 where from_entries on a null key exits 5 on all three jqs",
+      "headSha": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+      "negativeControl": "from_entries over a null key exits 5 on jq 1.6, 1.7.1 and 1.8.2 (the failure the guard prevents); stage4b-hold.test.ts fails when the reading sentence leaves the task (it did at ae40038b before 13cb9ce7 restored it)"
     }
   ],
   "filesChanged": [
@@ -136,7 +161,9 @@
     "scripts/e2e/lib/stage4b-tools.jq, scripts/e2e/lib/stage4b-tools.test.ts, scripts/e2e/lib/testdata/stage4b-tools-session.jsonl (carried over)",
     "scripts/e2e/lib/stage4b-boot-capabilities.test.ts (new: capabilities_probed lifted from the script over the daemon API fixture)",
     "packages/daemon/internal/admit/admit_test.go (the production-check pin kept over main's test)",
-    "docs/solutions/daemon/a-capability-row-reports-what-a-worker-can-do-not-what-the-image-contains-LEGION-578.md (the live-row bullet rewritten to LEGION-663's model; title and related issues)"
+    "docs/solutions/daemon/a-capability-row-reports-what-a-worker-can-do-not-what-the-image-contains-LEGION-578.md (the live-row bullet rewritten to LEGION-663's model; title and related issues)",
+    "scripts/e2e/lib/controller-ticks.jq and scripts/e2e/lib/controller-ticks.test.ts (new, round 2: the tick parsing and the running-daemon comparison, tested)",
+    "scripts/e2e/stage4b-sandbox-tree.sh, scripts/e2e/README.md, scripts/e2e/lib/stage4b-tools.jq, scripts/e2e/lib/stage4b-tools.test.ts (round 2: the five review threads)"
   ],
   "trickyParts": [
     "The forward merge (85ec0e97) took main whole for packages/daemon/internal/capabilities/, packages/contracts/ and docs/kubernetes.md, dropping 063fe7dd's content: against the merge base the pull request touches none of them (jj diff --from 99491671 --summary).",
@@ -153,7 +180,8 @@
     "Criterion 2's plan note gave Oh My Pi's defaults as dev.autoqa false and (by implication) retry.modelFallback false; this build answers true for both with no overlay (env -i), so the production reads are recorded as facts, not asserted against those defaults. The fixture's control in repository-tools (false/true from the repository's own .omp/config.yml) is where precedence is asserted.",
     "The tester, reviewer and merger are not live during implementing (their claims are retired until their phases), so the production half's sibling drives cover the architect and the planner; the remaining roles are the Stage 4b run's full-agent-tools and the tester's own sibling drive.",
     "main's ensure-project.test.ts (8 tests) fails in the pod for want of /usr/bin/jq (dispatch://LEGION-764) and passes in CI (Tests run 38758192010); the admit package's Docker-backed test is skipped by name in the pod and passes in CI.",
-    "The coordinator asked for a forward merge of main to pick up 5735a9b6 (the LEGION-762 NATS flake fix); declined, since the worker skill brings the base in only on a real conflict and the pull request reads MERGEABLE — the coordinator retries once on that flake instead."
+    "The coordinator asked for a forward merge of main to pick up 5735a9b6 (the LEGION-762 NATS flake fix); declined, since the worker skill brings the base in only on a real conflict and the pull request reads MERGEABLE — the coordinator retries once on that flake instead.",
+    "Plan v6 §3.3/§3.7 (the coordinator's run head is the merging head; a change repeats the request at the new head): departed by the architect's ruling for round 2. The run of record stays at 13cb9ce7; the round's diff changes how three checkpoints judge (the controller tick comparand, full-agent-tools' call-bound assertions, a hold's re-arm task text, a jq guard), not what any checkpoint drives, and each changed line carries its own proof in this handoff's round-2 entries. Had a fix changed what a checkpoint drives, the architect's rule was to stop and request a run."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
@@ -163,6 +191,36 @@
   "evidenceFiles": [
     "$LEGION_STATE_DIR/proof/implementer-excerpt.jsonl (the implementer's session from the nonce on)",
     "$LEGION_STATE_DIR/proof/sibling-architect.txt, sibling-planner.txt (the Envoy replies verbatim)",
-    "$LEGION_STATE_DIR/proof/probe-release.log, probe-release-nogopls.log, run-probe.sh (the release image's probe in its rootfs, pass and control)"
+    "$LEGION_STATE_DIR/proof/probe-release.log, probe-release-nogopls.log, run-probe.sh (the release image's probe in its rootfs, pass and control)",
+    "$LEGION_STATE_DIR/proof/round2/ (the two real-session excerpts, the echo-only excerpt, the production state reads)"
+  ],
+  "round": 2,
+  "runOfRecordHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5 (the coordinator lane's Stage 4a and Stage 4b PASS, PR comment 6203340869); the diff from it to d25908b1 is assertion-side changes in the proof script and its jq library",
+  "threads": [
+    {
+      "id": "PRRT_kwDORFy7ds6tAG7V",
+      "disposition": "fixed in d25908b1",
+      "resolvedAt": "d25908b1"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6tAG7h",
+      "disposition": "fixed in d25908b1",
+      "resolvedAt": "d25908b1"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6tAG7q",
+      "disposition": "fixed in d25908b1",
+      "resolvedAt": "d25908b1"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6tAG7u",
+      "disposition": "fixed in d25908b1",
+      "resolvedAt": "d25908b1"
+    },
+    {
+      "id": "PRRT_kwDORFy7ds6tAG7z",
+      "disposition": "fixed in d25908b1",
+      "resolvedAt": "d25908b1"
+    }
   ]
 }
