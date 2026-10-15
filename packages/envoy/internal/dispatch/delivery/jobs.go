@@ -80,12 +80,8 @@ func (realJobClock) Now() time.Time { return time.Now() }
 
 func (realJobClock) AfterFunc(d time.Duration, f func()) jobTimer { return time.AfterFunc(d, f) }
 
-// NewJobIntake builds a JobIntake. natsClient must already be connected and belong to the job
-// intake alone, as for NewIntake.
-func NewJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *JobIntake {
-	return newJobIntake(natsClient, pool, github, realJobClock{})
-}
-
+// newJobIntake builds a JobIntake on natsClient, a connected client StartIntakes opens for it alone,
+// scheduling its reads by clock.
 func newJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client, clock jobClock) *JobIntake {
 	return &JobIntake{
 		nats: natsClient, pool: pool, github: github, clock: clock,
@@ -93,19 +89,9 @@ func newJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Cl
 	}
 }
 
-// HasApp reports whether the GitHub App credentials a jobs read needs are configured.
-func (j *JobIntake) HasApp() bool {
-	return j != nil && j.github != nil
-}
-
-// Run binds the durable job consumer and handles job events until ctx is cancelled. Idle, logged
-// once, without GitHub App credentials, as Intake and Reconcile are. A bind that fails is tried
-// again every settingsPollInterval.
+// Run binds the durable job consumer and handles job events until ctx is cancelled. A bind that
+// fails is tried again every settingsPollInterval.
 func (j *JobIntake) Run(ctx context.Context) {
-	if !j.HasApp() {
-		slog.Info("dispatch delivery: no GitHub App key — the job intake is idle")
-		return
-	}
 	j.ctx = ctx
 	defer j.stopPending()
 	var sub *natsgo.Subscription

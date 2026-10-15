@@ -48,8 +48,8 @@ func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, e
 		return nil, fmt.Errorf("connect the job intake: %w", err)
 	}
 	var running sync.WaitGroup
-	running.Go(func() { NewIntake(intakeClient, pool, github).Run(ctx) })
-	running.Go(func() { NewJobIntake(jobClient, pool, github).Run(ctx) })
+	running.Go(func() { newIntake(intakeClient, pool, github).Run(ctx) })
+	running.Go(func() { newJobIntake(jobClient, pool, github, realJobClock{}).Run(ctx) })
 	return sync.OnceFunc(func() {
 		running.Wait()
 		intakeClient.Close()
