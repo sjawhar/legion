@@ -1,0 +1,67 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-578",
+  "completed": "2026-10-15T23:12:14Z",
+  "generation": 3,
+  "round": 1,
+  "reviewedHead": "2830bd512564b5bf91883ed14d88a81de52c7159",
+  "codeHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
+  "pullRequest": 1866,
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 5,
+  "ci": {
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
+    "checkRuns": "lint, typecheck, test success (Tests run 38758192010, attempt 2); pr-title success (38758191957, 38762224411, 38817783611); compare 13cb9ce7...2830bd51 touches only .legion/ (ahead_by 2)",
+    "bodyCiLine": "runs 38758192010 and 38758191957 both at 13cb9ce7, completed success — current"
+  },
+  "e2e": {
+    "implementer": "present: coordinator lane (Stage 4a 2175 s PASS, Stage 4b 13294 s PASS at 13cb9ce7 on sha256:daf37085…, PR comment 6203340869, 14 named CHECK lines read there) and this tree's generation-3 pods; negative controls image-probe-capability-negative, full-agent-negative, NoSuchSymbol, notebook, GH_CONFIG_DIR=/nonexistent, the boot test",
+    "tester": "present: the coordinator record re-read against the plan's checkpoint map with the digest resolved independently; the tester's own container; the implementer's session over Envoy; negative controls the def-chain abort under jq 1.8.2, GH_CONFIG_DIR=/nonexistent, gh api user 403, NoSuchSymbol, notebook, the other App absent, capabilities_probed exit 1"
+  },
+  "thermonuclear": {
+    "head": "2830bd512564b5bf91883ed14d88a81de52c7159",
+    "deepReview": "one Medium, five Low, one hardening; traced clean: agent_pid_sh quoting, call_arguments consumers, tool_results pairing, full_agent_task_id, agent_setting quoting, boot's row names and case arms, the controller TOON regex, the admit test's claim, the prerequisites guard, README/script rows",
+    "codeQuality": "no blocker; six fast-follows (bind the bash assertions to their call; latest tick only; one controller-session scan helper; repository-configuration's unasserted markers; the merger's copied assertions; one-pass role verdict) and three nits"
+  },
+  "threads": "none on the pull request (0 review threads, 0 reviews before this round); the three issue comments are the implementer's two rebase notes and the coordinator's run record",
+  "contractCensus": "not required: device_arguments had one caller (call_arguments, same file) and pod_env's two callers (:1050, :3918) and the stage4b-pods.test.ts fake keep its signature; the prerequisites guard is a precondition in the block that already holds the run's preconditions, not a boundary contract",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:5106",
+      "description": "The controller tick assertion compares every tick against boot's open_rows (:3097), read from the first daemon's image probe; restart-mid-tree (:4734-4736), address-moved-env-same-pod (:4787-4792) and address-moved-stream-new-pod (:4841-4847) each run a full `legion start` before the controller starts (:4914), and every start re-runs the probe (daemon.go:297-310, :862-863), whose own CapacityWaits decides pool-capacity (deployment.go:312-321); the tick carries the current daemon's Open() at enqueue (admit.go:256-258). A run that starts on a cold pool — the case :3085-3089 names as the reason the [\"secrets\",\"pool-capacity\"] arm exists — gets [\"secrets\"] ticks from the fourth daemon against boot's two-row set and fails ~3.7 h in; the run of record had pool-capacity present at boot, so neither arm's divergence was exercised. Fix: read the open rows from the running daemon at controller and compare the ticks to that (keep boot's set for the note)."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4359",
+      "description": "The edit assertion is `read 'edited $nonce' || edit 'edited $nonce'`: a role that rewrote the page with write and read it back passes, while the README (:1050) and the fail line claim the edit landed; the edit tool's result echoes the changed line (testdata line 19), so `edit` alone can be required with the read kept as a second assertion. The merger's copy at :4386 the same. The tester recorded the laxity."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4361",
+      "description": "The App-login and toolchain bash assertions use tool_result_said, bound to the tool and not to the call: a bash result the model composed (`echo <login>`) satisfies them. tool_result_answered \"$excerpt\" bash 'gh api graphql' \"$app\" (and the chain's text for the toolchain) is free and is what repository-tools already does for its reads and hovers (:3642, :3652-3655)."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:1589",
+      "description": "hold_end_charged's new task ends 'after the `sleep 300` the proof's instructions ask of an implementer on a new task', and deaths-with-work sends it to tree 4's planner (:5497), whose instructions carry no such clause: a planner that reads it as not addressed to it answers in seconds, the race the change fixed for implementers. Word it as a direct instruction to the receiving role."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/lib/stage4b-tools.jq:25",
+      "description": "A toolCall with id null makes from_entries exit 5, which reaches a checkpoint as an ordinary 'no result carries …' fail line with no diagnosis (the result side is guarded by `| strings` at :27, the call side is not); `select(.id | strings)` before the key. 0 such calls in the tester's 1,845 entries."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4345",
+      "description": "The two negatives (the other App in a bash result, notebook ran) are judged over the whole excerpt from the nonce on, so a role doing its own `gh` work in that window fails the run spuriously; and the implementer's `sleep 300` on every task line is not reflected in the fixed budgets at :3846, :4167 and :5642. Both recorded under Not proven / risk; no change asked this round."
+    }
+  ],
+  "security": "secret — agent_setting (stage4b-sandbox-tree.sh:2314) passes the agent's /proc/<pid>/environ as argv to env inside the agent's own container and uid, where no second uid and no shared PID namespace exists (no shareProcessNamespace in deploy/ or runtime/sandbox), and only `jq -c .value` leaves the pod — hardening, no exploit path; untrusted-input — the new assertions decide pass/fail from model-authored session transcripts (lib/stage4b-tools.jq:22-54), and the pairing by toolCallId plus the nonces hold that boundary except for the bash assertions above (Minor); agent-def — the proof's instruction text to roles (:3017-3022, full_agent_message) steers the proof's own agents, not this review's; no authz, supply-chain, sandbox or transport surface changes.",
+  "fastFollow": "one `controller_deliveries [NEEDLE]` helper for the four controller-session scans (controller_notice, controller_received, controller_tick_names, tick_open_capabilities) and one shared function for the four assertions the merger block copies from the role loop (:4386-4391), in the next Stage 4b edit",
+  "proofRouteForTheFix": "the architect's call: a change to the controller assertion is a code push past the head the coordinator ran (plan v6 §3.3 kept the run's head the merging head); plan §3.7 repeats the request at the new head, or the architect rules a narrower re-proof of the changed line"
+}
