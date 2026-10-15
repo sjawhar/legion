@@ -74,6 +74,9 @@ type fakeAWS struct {
 	// version, and the next staleGets reads find no AWSCURRENT version, as a read just after a
 	// write may.
 	staleLists, staleGets int
+	// staleViews makes the next staleViews DescribeSecret and ListSecretVersionIds answers show no
+	// version, as a run whose checks were answered before another run's first write landed sees.
+	staleViews int
 	// The ARN every Secrets Manager answer gives the secret: secretARN when set (a test that wants
 	// none sets it to " " and the field is left out), otherwise one in secretAccount and
 	// secretRegion, by default awsAccount and awsRegion, whatever account STS answers.
@@ -190,6 +193,11 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			out["ARN"] = arn
 		}
 		stages := map[string][]string{}
+		if f.staleViews > 0 {
+			f.staleViews--
+			f.answer(w, out)
+			return
+		}
 		for _, v := range f.versions {
 			if len(v.stages) > 0 {
 				stages[v.id] = v.stages
@@ -232,6 +240,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			}
 		}
 		versions := slices.Clone(f.versions)
+		if f.staleViews > 0 {
+			f.staleViews--
+			versions = nil
+		}
 		if f.written() && f.staleLists > 0 {
 			f.staleLists--
 			versions = slices.DeleteFunc(versions, func(v awsVersion) bool { return v.id == f.tokens[0] })
@@ -476,7 +488,10 @@ func TestAWSCheck(t *testing.T) {
 	}
 }
 
-func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T) {
+// generate writes the bare seed string as the first version, under one fixed ClientRequestToken: the
+// same for every secret, since a version id is per secret, so that a second run's first-version
+// write with another seed is refused rather than written beside the first.
+func TestAWSGenerateWritesTheBareSeedWithTheFirstVersionTokenAndReadsItBack(t *testing.T) {
 	f := newFakeAWS(t)
 	serve(t, f)
 	code, out, errs := runAWS(t, f, "generate")
@@ -495,7 +510,40 @@ func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T)
 	serve(t, again)
 	code, _, errs = runAWS(t, again, "generate")
 	require.Equal(t, 0, code, errs)
-	require.NotEqual(t, f.tokens[0], again.tokens[0], "each generate sends a fresh ClientRequestToken")
+	require.Equal(t, f.tokens[0], again.tokens[0], "every generate sends the one first-version token")
+	require.Equal(t, firstVersionToken, f.tokens[0])
+}
+
+// Two generate runs overlap on one secret. B's checks are answered as they would have been before
+// A's write landed, so B finds the secret empty; A has written and printed its key. B's write carries
+// the same first-version token with another seed, so Secrets Manager refuses it
+// (ResourceExistsException): B writes nothing and exits 2, and A's printed key still verifies.
+func TestAWSOverlappingGenerateRunsLeaveTheFirstSeedServed(t *testing.T) {
+	f := newFakeAWS(t)
+	serve(t, f)
+	code, outA, errs := runAWS(t, f, "generate")
+	require.Equal(t, 0, code, errs)
+	keyA, _, _ := strings.Cut(strings.TrimPrefix(outA, "public key: "), "\n")
+
+	f.mu.Lock()
+	f.calls, f.staleViews = nil, 2
+	f.mu.Unlock()
+	code, outB, errs := runAWS(t, f, "generate")
+	require.Equal(t, 2, code, errs)
+	require.Equal(t, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue"}, f.recorded())
+	keyB, rest, _ := strings.Cut(strings.TrimPrefix(outB, "public key: "), "\n")
+	require.NotEqual(t, keyA, keyB)
+	require.Empty(t, rest, "after B's key, no version id: no version holds it")
+	require.Equal(t, "refused: put-secret-value "+awsSecret+" failed: ResourceExistsException; another generate wrote "+
+		"this secret's first version, with another seed; nothing was written, and the public key above is not stored\n", errs)
+	require.Len(t, f.versions, 1, "B wrote no version")
+
+	f.mu.Lock()
+	f.calls = nil
+	f.mu.Unlock()
+	code, out, errs := runAWS(t, f, "verify", "--public-key", keyA)
+	require.Equal(t, 0, code, errs)
+	require.True(t, strings.HasSuffix(out, " derives "+keyA+": yes\n"), out)
 }
 
 func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
@@ -508,7 +556,7 @@ func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
 	}{
 		// DescribeSecret names the AWSCURRENT version: generate refuses on it before it lists.
 		{"an AWSCURRENT version", func(f *fakeAWS) *fakeAWS { return f.holding(seedValue) },
-			"already holds version v1, which AWSCURRENT names", 0},
+			"already serves version v1 by default (AWSCURRENT)", 0},
 		// The listing counts the versions DescribeSecret does not label, across every page.
 		{"a deprecated version DescribeSecret does not show", func(f *fakeAWS) *fakeAWS {
 			f.versions = []awsVersion{{id: "v1", value: seedValue}}

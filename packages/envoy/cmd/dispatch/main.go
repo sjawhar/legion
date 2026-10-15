@@ -161,7 +161,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName("dispatch"))
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -368,10 +368,22 @@ func main() {
 	// a connected client, exactly like the outbox above.
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
 	if natsClient != nil {
-		go delivery.NewIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
-		// LEGION-690: a deploy run's jobs as each finishes, from Envoy's job events, on a durable
-		// of its own so a run's burst of jobs never queues behind the intake's merges.
-		go delivery.NewJobIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
+		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
+		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
+		// message still in its handler can be acknowledged while Dispatch shuts down; stop waits for
+		// both Runs, which return once ctx is cancelled, and not for that handler.
+		connectIntake := func(name string) (*bus.Client, error) {
+			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
+		}
+		stopIntakes, err := delivery.StartIntakes(ctx, connectIntake, database.Pool, appCtx.GitHub())
+		if err != nil {
+			slog.Error("dispatch delivery: connect NATS", "error", err)
+			os.Exit(1)
+		}
+		defer func() {
+			cancel()
+			stopIntakes()
+		}()
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}

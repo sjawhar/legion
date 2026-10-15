@@ -110,13 +110,13 @@ func TestGCPGenerateRefusesBeforeWriting(t *testing.T) {
 		// on it before it lists, so neither eventually consistent read alone lets a write through.
 		// A destroyed version holds no value, but a client may have read the seed it held.
 		{"a destroyed version", func(f *fakeGCP) *fakeGCP { return f.with("", destroyed) },
-			"already holds version 1, which latest names", 0},
+			"already holds version 1, which latest names though it is DESTROYED", 0},
 		{"a disabled version", func(f *fakeGCP) *fakeGCP { return f.with(seedValue, disabled) },
-			"already holds version 1, which latest names", 0},
+			"already holds version 1, which latest names though it is DISABLED", 0},
 		{"a version latest names and the listing leaves out", func(f *fakeGCP) *fakeGCP {
 			f.unlisted = 1
 			return f.with(seedValue, enabled)
-		}, "already holds version 1, which latest names", 0},
+		}, "already serves version 1 by default (latest)", 0},
 		// The listing counts what latest does not name yet, destroyed versions included, across
 		// every page.
 		{"a destroyed version only the listing shows", func(f *fakeGCP) *fakeGCP {

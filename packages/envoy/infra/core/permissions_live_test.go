@@ -153,7 +153,7 @@ func startHostServer(t *testing.T, image string, grant core.Permissions) (string
 func startListener(t *testing.T, binary, uri, seed string) (*cmdtest.Process, int) {
 	t.Helper()
 	port := cmdtest.FreeTCPPort(t)
-	env, err := core.ListenerEnv(core.ListenerConfig{MachineID: liveMachineID, NATSURLs: []string{uri}, Port: port})
+	env, err := core.ListenerConfig{MachineID: liveMachineID, Port: port}.Env([]string{uri})
 	require.NoError(t, err)
 	cmd := exec.Command(binary)
 	cmd.Env = append(env, core.EnvNATSSeed+"="+seed)

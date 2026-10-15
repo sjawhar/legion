@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -35,7 +36,8 @@ type Store interface {
 	// Versions counts every version the secret holds, deprecated ones included.
 	Versions(ctx context.Context, name string) (int, error)
 	// Put writes value as the secret's first version and returns its version id. An error with a
-	// version id means that version was written; one without may follow a write that landed.
+	// version id means that version was written; one matching ErrRefused means nothing was, since
+	// another writer's first version is already there; any other may follow a write that landed.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
 	// clears it once read. When the store finds no version to serve, the error matches
@@ -164,13 +166,14 @@ func pythonDate(t time.Time, loc *time.Location) string {
 }
 
 // Generate makes an nkey user and writes its seed as the secret's first version: it refuses a
-// secret that is absent, scheduled for deletion or holds any version, so it never replaces a seed a
-// client may already read. A version the store names as its default, whatever its state, is
-// refused before the versions are listed; the listing then counts the rest, destroyed and disabled
-// ones included. After the write it lists the versions again, to check the secret holds that version
-// alone, and reads back the version served by default, which must be that version and derive the
-// public key it returns. Once Put has been called, every return carries the public key, and the
-// version id when Put answered one: a version may exist, and verify needs the key to check it.
+// secret that is absent, scheduled for deletion, served by default or holding any version, so it
+// never replaces a seed a client may already read. A version the store names as its default,
+// whatever its state, is refused before the versions are listed; the listing then counts the rest,
+// destroyed and disabled ones included. After the write it lists the versions again, to check the
+// secret holds that version alone, and reads back the version served by default, which must be that
+// version and derive the public key it returns. Once Put has been called, every return carries the
+// public key, and the version id when Put answered one: a version may exist, and verify needs the
+// key to check it. A Put the store refuses wrote nothing, and its error matches ErrRefused.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
 	return generate(ctx, s, name, func(string) error { return nil })
 }
@@ -186,9 +189,15 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 	if err := existing(d, name); err != nil {
 		return "", "", err
 	}
-	if d.Default != nil {
-		return "", "", refuse("%s already holds version %s, which %s names. generate writes only a secret's first "+
-			"version, so it never replaces a seed a client may already read; use check or verify", name, d.Default.ID, s.Label())
+	if v := d.Default; v != nil {
+		// The listing below is eventually consistent; the default the metadata names is a witness
+		// it cannot miss, so it is refused first, served or not.
+		what := fmt.Sprintf("serves version %s by default (%s)", v.ID, s.Label())
+		if v.State != "" {
+			what = fmt.Sprintf("holds version %s, which %s names though it is %s", v.ID, s.Label(), v.State)
+		}
+		return "", "", refuse("%s already %s. generate writes only a secret's first version, so it never replaces a "+
+			"seed a client may already read; use check or verify", name, what)
 	}
 	held, err := s.Versions(ctx, name)
 	if err != nil {
@@ -216,6 +225,9 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 		return "", "", refuse("%s: could not print the public key: %v; nothing was written", name, err)
 	}
 	version, err = s.Put(ctx, name, value)
+	if errors.Is(err, ErrRefused) {
+		return publicKey, "", refuse("%v; nothing was written, and the public key above is not stored", err)
+	}
 	if err != nil {
 		if version == "" {
 			return publicKey, "", afterWritef("%v; whether a version was written is unknown, run check", err)
@@ -384,7 +396,8 @@ func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer
 		announced = true
 		return nil
 	})
-	if !announced {
+	if !announced || errors.Is(err, ErrRefused) {
+		// A refusal after the key was printed is a write the store refused: no version holds the key.
 		return err
 	}
 	if version == "" {
@@ -418,7 +431,10 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	names := slices.Sorted(maps.Keys(stores))
 
 	fs := flag.NewFlagSet("envoy-infra seed", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	// Parse's own messages echo an undefined flag word whole, and a seed pasted with a leading dash
+	// would be that word, so Parse writes nowhere and Command prints every problem and the usage.
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	var store, name, region, account, publicKey string
 	fs.StringVar(&store, "store", "", "the secret store: "+strings.Join(names, ", "))
 	fs.StringVar(&name, "name", "", "the secret, named as its store names it (below)")
@@ -426,9 +442,11 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	fs.StringVar(&account, "expect-account", "", "refuse, before any other call, unless the credentials are this account's, "+
 		"for a store that has accounts (below)")
 	fs.StringVar(&publicKey, "public-key", "", "verify only: the U… public key the stored seed must derive")
-	fs.Usage = func() {
+	printUsage := func() {
 		fmt.Fprint(stderr, usageText)
+		fs.SetOutput(stderr)
 		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
 		fmt.Fprintln(stderr, "\nStores:")
 		for _, n := range names {
 			fmt.Fprintf(stderr, "  %s\n    \t%s\n", n, stores[n].Help)
@@ -436,7 +454,7 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	usage := func(problem string) int {
 		fmt.Fprintf(stderr, "envoy-infra seed: %s\n", problem)
-		fs.Usage()
+		printUsage()
 		return 2
 	}
 
@@ -445,7 +463,7 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	mode := args[0]
 	if mode == "-h" || mode == "-help" || mode == "--help" {
-		fs.Usage()
+		printUsage()
 		return 0
 	}
 	run, ok := modes[mode]
@@ -454,10 +472,15 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("the mode is check, generate or verify")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
+		switch {
+		case errors.Is(err, flag.ErrHelp):
+			printUsage()
 			return 0
+		case strings.HasPrefix(err.Error(), "flag needs an argument: -"):
+			// The flag package says this only of a flag it defines, so the name is one of ours.
+			return usage(err.Error())
 		}
-		return 2 // the flag package has printed the problem and the usage
+		return usage("a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)")
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
@@ -474,6 +497,13 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("--public-key is required by verify")
 	case mode != "verify" && given["public-key"]:
 		return usage("--public-key is accepted by verify only")
+	case given["expect-account"] && account == "":
+		// `--expect-account "$ACCOUNT"` with the variable unset would otherwise skip the check.
+		return usage("--expect-account is given empty; it is a 12-digit AWS account id, or leave the flag out")
+	}
+	if mode == "generate" && nullDevice(stdout) {
+		return exitCode(stderr, refuse("%s: stdout is the null device, where the public key would be lost (a closed stdout "+
+			"is one too: Go opens it on %s); send stdout somewhere you can read. Nothing was written", name, os.DevNull))
 	}
 	if check := stores[store].CheckName; check != nil {
 		if err := check(name); err != nil {
@@ -486,6 +516,23 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return exitCode(stderr, refuse("%s: %v", name, err))
 	}
 	return exitCode(stderr, run(ctx, s, name, publicKey, stdout))
+}
+
+// nullDevice reports whether w is the null device, comparing its device and inode numbers with
+// os.DevNull's (os.SameFile, on Unix). A closed stdout is the null device too: the Go runtime opens a
+// closed fd 0-2 on it at start (runtime/fds_unix.go checkfds). A writer that is no file, or a file
+// that cannot be stat'd, is not: a write that then fails is caught where generate prints.
+func nullDevice(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	got, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	null, err := os.Stat(os.DevNull)
+	return err == nil && os.SameFile(got, null)
 }
 
 // exitCode writes err on stderr and returns the command's exit code: 0 for none; 1 for ErrMismatch,

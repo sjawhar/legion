@@ -178,6 +178,12 @@ func TestValidateRefuses(t *testing.T) {
 		{"an invalid subscribe deny entry", func(a *core.Authorization) { listener(a).Subscribe.Deny = []string{"a..b"} }, `users[0] "example-listener": subscribe.deny[0]`},
 		{"a queue-scoped publish allow", func(a *core.Authorization) { listener(a).Publish.Allow = []string{"envoy.example.>", "a q"} }, `users[0] "example-listener": publish.allow[1]`},
 		{"a queue-scoped publish deny", func(a *core.Authorization) { listener(a).Publish.Deny = []string{"a q"} }, `users[0] "example-listener": publish.deny[0]`},
+		// nats-server before 2.15 enforces a queue-scoped subscribe deny more loosely than it reads:
+		// beside a plain deny it re-allows every other queue group, and alone it misses a wildcard
+		// subscription (v2.10.29 server/client.go:3044-3051 and :1199-1203).
+		{"a queue deny beside a plain deny", func(a *core.Authorization) { listener(a).Subscribe.Deny = []string{"secret.>", "secret.x q1"} },
+			`users[0] "example-listener": subscribe.deny[1] "secret.x q1" names a queue group; nats-server before 2.15 does not enforce a queue-scoped subscribe deny as written`},
+		{"a queue deny alone", func(a *core.Authorization) { listener(a).Subscribe.Deny = []string{"secret.x q1"} }, `users[0] "example-listener": subscribe.deny[0]`},
 		{"two keyed users with one name", func(a *core.Authorization) { a.Users[1].Name = "example-listener" }, `users[1] "example-listener": name repeats users[0]`},
 		{"a pending user with a keyed user's name", func(a *core.Authorization) { pending(a).Name = "example-daemon" }, `users[3] "example-daemon": name repeats users[1]`},
 		{"two users with one key", func(a *core.Authorization) { a.Users[1].NKey = listenerKey }, `users[1] "example-daemon": nkey repeats users[0]`},
@@ -196,7 +202,8 @@ func TestValidateRefuses(t *testing.T) {
 			_, err := a.Render(header)
 			require.ErrorContains(t, err, r.err, "Render renders only what Validate accepts")
 			_, err = a.StartScript(header, nil, "/tmp/nats-server.conf")
-			require.ErrorContains(t, err, r.err, "StartScript renders only what Validate accepts")
+			requireInputError(t, err, "authorization", r.err)
+			require.EqualError(t, err, "authorization: "+a.Validate().Error(), "StartScript renders only what Validate accepts")
 		})
 	}
 }
@@ -216,7 +223,10 @@ func TestValidateAccepts(t *testing.T) {
 		{"wildcards as whole tokens", func(a *core.Authorization) {
 			a.Users[0].Publish.Allow = []string{"*", ">", "a.*.b", "a.>"}
 		}},
-		{"a wildcard queue", func(a *core.Authorization) { a.Users[0].Subscribe.Deny = []string{"notifications.role.> >"} }},
+		{"a wildcard queue", func(a *core.Authorization) {
+			a.Users[0].Subscribe.Allow = append(a.Users[0].Subscribe.Allow, "notifications.role.> >")
+		}},
+		{"a plain subscribe deny", func(a *core.Authorization) { a.Users[0].Subscribe.Deny = []string{"notifications.role.>"} }},
 		{"no pending user", func(a *core.Authorization) { a.Users = a.Users[:3] }},
 	}
 	for _, r := range rows {
@@ -228,12 +238,14 @@ func TestValidateAccepts(t *testing.T) {
 	}
 }
 
+// Render refuses a header line holding a line break; StartScript refuses it as configHeader.
 func TestRenderRefusesAHeaderLineWithALineBreak(t *testing.T) {
 	for _, line := range []string{"one\ntwo", "one\rtwo"} {
 		_, err := placeholder().Render([]string{"fine", line})
-		require.ErrorContains(t, err, "header[1]")
+		require.EqualError(t, err, "header[1] holds a line break; each header line is one comment line")
 		_, err = placeholder().StartScript([]string{"fine", line}, nil, "/tmp/nats-server.conf")
-		require.ErrorContains(t, err, "header[1]")
+		requireInputError(t, err, "configHeader", "header[1]")
+		require.EqualError(t, err, "configHeader: header[1] holds a line break; each header line is one comment line")
 	}
 }
 
@@ -253,15 +265,17 @@ func TestRenderWithoutAFallbackOrAHeader(t *testing.T) {
 
 func TestStartScriptRefusesAnEmptyPath(t *testing.T) {
 	_, err := placeholder().StartScript(header, nil, "")
-	require.ErrorContains(t, err, "path")
+	requireInputError(t, err, "configPath", "configPath")
+	require.EqualError(t, err, "configPath is required with authorization: the start script writes the configuration there")
 }
 
-// nats-server parses its arguments with Go's flag package, so each of its configuration and
-// credential flags takes one dash or two and a value after `=` or as the next argument: -c and
-// --config load another file in place of the rendered one, and -user, -pass and -auth add a
-// credential beside its nkey users (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351).
-// StartScript refuses each, naming its index and the flag and never the value, which may be a
-// password.
+// nats-server parses its arguments with Go's flag package, so each of its configuration, credential
+// and route flags takes one dash or two and a value after `=` or as the next argument: -c and
+// --config load another file in place of the rendered one; -user, -pass and -auth add a
+// credential beside its nkey users (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351);
+// and -cluster, -cluster_listen and -routes open or solicit a route, which the rendered block,
+// having no cluster authorization, leaves unauthenticated (:5368-5370). StartScript refuses each,
+// naming its index and the flag and never the value, which may be a password.
 func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 	rows := []struct{ arg, flag string }{
 		{"-c", "c"},
@@ -276,12 +290,18 @@ func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 		{"--user=example-user", "user"},
 		{"-pass", "pass"},
 		{"--pass=example-password", "pass"},
+		{"-cluster", "cluster"},
+		{"--cluster=nats://0.0.0.0:6222", "cluster"},
+		{"-cluster_listen", "cluster_listen"},
+		{"--cluster_listen=nats://0.0.0.0:6222", "cluster_listen"},
+		{"-routes", "routes"},
+		{"--routes=nats://example-host-b.internal.example:6222", "routes"},
 	}
 	for _, row := range rows {
 		t.Run(row.arg, func(t *testing.T) {
 			script, err := placeholder().StartScript(header, []string{"-js", row.arg, "value"}, "/tmp/nats-server.conf")
 			require.Empty(t, script)
-			require.ErrorContains(t, err, "serverArgs[1] sets nats-server's -"+row.flag+",")
+			requireInputError(t, err, "serverArgs", "serverArgs[1] sets nats-server's -"+row.flag+",")
 			if _, value, ok := strings.Cut(row.arg, "="); ok {
 				require.NotContains(t, err.Error(), value)
 			}
@@ -289,9 +309,10 @@ func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 	}
 }
 
-// A flag whose name only begins like one of those is another flag, and a value is not a flag.
+// A flag whose name only begins like one of those is another flag, and a value is not a flag. A
+// cluster name opens no route on its own.
 func TestStartScriptAcceptsOtherArguments(t *testing.T) {
-	args := []string{"-js", "--cluster", "nats://0.0.0.0:6222", "-cluster_name", "example", "--users_file", "-m", "8222", "c", "config"}
+	args := []string{"-js", "-cluster_name", "example", "--cluster_advertise", "example", "--users_file", "-m", "8222", "c", "config", "cluster"}
 	_, err := placeholder().StartScript(header, args, "/tmp/nats-server.conf")
 	require.NoError(t, err)
 }

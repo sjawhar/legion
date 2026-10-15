@@ -33,13 +33,13 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), and the error naming and version paging both share (`errors.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the key fetcher's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
 | `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
-| `internal/pulumitest/` | The live tests' harness. |
+| `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
 
 ## Rules for a component
 
@@ -61,17 +61,20 @@ versions. Never add the module to the root `go.work`.
   The hub's resolver also renders the authorization, and its constructor renders the cloud-config
   before it requires the provider (`gcp/natshub.go:122-235`); its refusal table drives the
   constructor for every row (`gcp/natshub_test.go`).
-- **Refusals.** Every refusal names the input. `core.ListenerConfig.CheckPlain` holds the checks of
-  the listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`);
-  `core.ListenerEnv` runs it again and then checks each of `natsUrls`, the one field that may be
-  another resource's output, inside the `ApplyT` that computes the container's environment. A bad
-  URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
-  container's `envs` resolve, after the component and its image have registered, not the
-  constructor. The watchdog's create script runs as root on the host (`host.watchdogCreate`), so
-  no value of the environment, which it writes into a heredoc, may hold a control character, and
-  with a watchdog the listener's name, which it echoes in double quotes, may hold no `"`, `$`,
-  backtick, `\` or line break. The hub reads none of its Inputs by value: its resolver checks only
-  that `tailnetAuthKey` is set and that `subnetwork` comes with `network`.
+- **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
+  listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`), run once
+  before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one value that may be
+  another resource's output, and checks only those, inside the `ApplyT` that computes the
+  container's environment. A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the
+  preview or update when the container's `envs` resolve, after the component and its image have
+  registered, not the constructor. The watchdog's create script runs as root on the host
+  (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
+  a control character, and with a watchdog the listener's name, which it echoes in double quotes,
+  may hold no `"`, `$`, backtick, `\` or line break. Each table tests its own refusals: core's are
+  in `core`, and a component's or a command's table holds its own plus one row for each input whose
+  core refusal it passes on, showing where that refusal goes. The hub reads none of its Inputs by
+  value: its resolver checks only that `tailnetAuthKey` is set and that `subnetwork` comes with
+  `network`.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
@@ -105,13 +108,16 @@ versions. Never add the module to the root `go.work`.
 - **Release jobs.** The workflow's `build` job (`contents: read`, no secret) runs everything that
   runs the module's code or its dependencies: the version step's `go list`, vet, the unit tests,
   the builds of both commands and their smoke tests. It hands `publish` the archives as an artifact
-  and the version as job outputs. `publish` holds the write scopes, the OIDC token and the deploy
-  key, and runs only the pinned actions, `release-push.sh` and its own check of what `build` handed
-  over: the version X.Y.Z, the tag `envoy-infra-v<version>`, exactly the archives its own checkout
-  of the target list names, the plugin's and the command's for each target, plus `SHA256SUMS`,
-  each archive's bytes matching `SHA256SUMS`. So `build` chooses the archives' bytes but not their
-  names. An archive the release adds goes into that check's list. A step that runs Go, the Pulumi
-  CLI or either command goes in `build`, never in `publish`.
+  and the version as a job output, nothing else. `publish` holds the write scopes, the OIDC token
+  and the deploy key, and runs only the pinned actions, `jq`, `sha256sum` and `release-push.sh`. It
+  names the archives itself, from that version and its own checkout of the target list, one
+  `archives+=` line per kind of archive, the plugin's and the command's; `release-push.sh handed`
+  refuses a version that is not X.Y.Z and an artifact that is not exactly those archives, each a
+  regular file, and prints the tag `envoy-infra-v<version>`; and `publish` writes `SHA256SUMS` over
+  them. So `build` chooses the archives' bytes, and not their names, the tag or the sums. An archive
+  the release adds gets its `archives+=` line in that step. The attestation runs after the tag
+  step, so a run whose tag is refused leaves no attestation. A step that runs Go, the Pulumi CLI or
+  either command goes in `build`, never in `publish`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. The hub's cloud-config is its instance template's `user-data`, and a template cannot
@@ -196,6 +202,11 @@ go test -tags natslive ./core/ ./seed/
 The release job runs vet and the unit tests again before it builds. The required `lint` job of
 `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release target. Run
 those steps from those jobs after changing what they cover.
+
+A component's tests run on `pulumitest.Mocks`, which records every registration and answers with
+its known inputs as state, plus what the package's `Computed` adds for its provider's outputs, and
+construct through the plugin with `pulumitest.Construct`. A package keeps only its `Computed` and
+its example inputs.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit

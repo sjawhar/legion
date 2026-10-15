@@ -429,12 +429,14 @@ region it names. Before any call, it refuses a Secrets Manager endpoint you conf
 not `https`, unless it is this machine's loopback address, since a seed would cross the network in
 plain text; and it retrieves your credentials, and with none it can use, it stops with
 `refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks STS whose
-credentials they are and refuses, before any other call, unless they are that account's. STS and
-Secrets Manager each resolve their own endpoint, so the secret is checked too: `DescribeSecret`,
-every mode's first call, answers the secret's ARN, and the command refuses a secret in another
-region than the one it sends to, and with `--expect-account` one in another account, before it
-reads or writes a seed. Pass `--expect-account` whenever you name a secret, so that a seed is never
-written to, or read from, a secret of the same name in another account.
+credentials they are and refuses, before any other call, unless they are that account's; an empty
+`--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage
+error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so the
+secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and the
+command refuses a secret in another region than the one it sends to, and with `--expect-account`
+one in another account, before it reads or writes a seed. Pass `--expect-account` whenever you name
+a secret, so that a seed is never written to, or read from, a secret of the same name in another
+account.
 
 With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
 store refuses `--region` and `--expect-account`, and has no flag of its own to expect a project:
@@ -488,13 +490,17 @@ client speaks TLS to every endpoint, so a seed is never sent in plain text.
    ```
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
-   secret that is absent, is scheduled for deletion or holds any version: one `DescribeSecret` names
-   as `AWSCURRENT`, before it lists any, and otherwise any the listing shows, deprecated ones
-   included, so it never replaces a seed a client may already read. It prints the public key just
-   before the write, so the key is on your terminal whatever happens next, and the version id once
-   the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
-   somewhere you can read: `>/dev/null`, or a closed stdout, which a Go program sees as
-   `/dev/null`, discards the key with nothing to tell. After the write it lists the versions again
+   secret that is absent, is scheduled for deletion or holds any version: the version
+   `DescribeSecret` names as `AWSCURRENT`, before it lists any, so even when the versions listing,
+   which Secrets Manager answers eventually consistently, does not show it yet, and otherwise any
+   the listing shows, deprecated ones included, so it never replaces a seed a client may already
+   read. Every write uses one fixed `ClientRequestToken`, so a second run's first-version write with
+   another seed, racing this one, is refused (`ResourceExistsException`, exit 2) rather than written
+   beside it, and the key that run printed is not stored. It prints the public key just before the
+   write, so the key is on your terminal whatever happens next, and the version id once the write
+   answers. If it cannot print the key, it writes nothing and exits 2. With stdout on the null
+   device it refuses before any call, exit 2, since the key would be lost: `>/dev/null`, and a
+   closed stdout, which a Go program sees as `/dev/null`. After the write it lists the versions again
    and reads back the version Secrets Manager serves by default (`AWSCURRENT`), which must be the
    one it wrote and derive the public key it printed. Secrets Manager's reads are eventually
    consistent, so while the listing shows no version yet, or no version is `AWSCURRENT`, it looks
@@ -550,18 +556,19 @@ included. Secret Manager's listings and `latest` are eventually consistent with 
 only an access by version number is not
 ([resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)). So
 it refuses, naming the version, when `latest` names one, as
-`refused: <name> already holds version <n>, which latest names …`; otherwise when the listing shows
-any; and, when it shows none, when an access of `versions/1`, the number every secret's first
-version gets, finds a version in any state. Then the version it adds must be version 1: any other
-number is another writer's version that landed after those reads, and `generate` stops with an
-error after writing, naming it. It reads version 1 back by number, which must be the value it
-wrote, then `versions/latest`, the version Secret Manager serves by default, which must be the one
-it added; while the listing shows no version yet, or `latest` names none, it waits as it does on
-Secrets Manager. A `latest` that names a version it will not serve, such as a disabled one, is no
-wait but an error after writing. Once a secret holds a second version, `latest` names it and cannot
-be pointed back at version 1: disabling or destroying version 2 leaves `latest` naming a version it
-will not serve. A version 2 is undone only by adding version 1's seed again, as version 3, or by
-moving every client to version 2's key.
+`refused: <name> already serves version <n> by default (latest) …`, or, for a version that is not
+enabled, `refused: <name> already holds version <n>, which latest names though it is <STATE> …`;
+otherwise when the listing shows any; and, when it shows none, when an access of `versions/1`, the
+number every secret's first version gets, finds a version in any state. Then the version it adds
+must be version 1: any other number is another writer's version that landed after those reads, and
+`generate` stops with an error after writing, naming it. It reads version 1 back by number, which
+must be the value it wrote, then `versions/latest`, the version Secret Manager serves by default,
+which must be the one it added; while the listing shows no version yet, or `latest` names none, it
+waits as it does on Secrets Manager. A `latest` that names a version it will not serve, such as a
+disabled one, is no wait but an error after writing. Once a secret holds a second version,
+`latest` names it and cannot be pointed back at version 1: disabling or destroying version 2
+leaves `latest` naming a version it will not serve. A version 2 is undone only by adding version
+1's seed again, as version 3, or by moving every client to version 2's key.
 
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.
@@ -663,7 +670,7 @@ its server's from its `users` (see [The hub's users](docs/nats-hub.md#the-hubs-u
 | --- | --- |
 | `Users[].Name` | The user's name: lowercase letters, digits and hyphens, 1 to 48 characters, starting and ending with a letter or digit. |
 | `Users[].NKey` | The user's public key, `U` and 55 more characters, as `envoy-infra seed generate` prints it. Empty for a pending user. |
-| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
+| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe allow entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
 | `Users[].HasSeed` | The consumer stores a seed for this user. |
 | `NoAuthUser` | Optional: the name of a keyed user without a seed, whom a client presenting no credential becomes. |
 
@@ -687,6 +694,10 @@ An authorization is refused, with an error naming the field and, for a user's fi
   tokens, none empty, with `*` and `>` only as whole tokens and `>` only last, and no whitespace
   or control character anywhere;
 - a `<subject> <queue>` entry under `Publish`, since a queue group scopes only subscriptions;
+- a `<subject> <queue>` entry in `Subscribe.Deny`, which nats-server before 2.15 enforces more
+  loosely than it reads: beside a plain deny of the same subject it re-allows every other queue
+  group, and alone it misses a wildcard subscription that covers its subject. Deny the plain
+  subject, or narrow `Subscribe.Allow`;
 - a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line
@@ -715,10 +726,14 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
 path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
-argument that sets `-c`, `-config`, `-user`, `-pass` or `-auth` (with one dash or two, and with or
-without `=`), naming its index: nats-server takes the last value of a flag, so a later `-c` would
-load another file in place of the rendered one, and the others would add a credential beside its
-nkey users.
+argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or
+`-routes` (with one dash or two, and with or without `=`), naming its index: nats-server takes the
+last value of a flag, so a later `-c` would load another file in place of the rendered one;
+`-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
+has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
+and a server routed to it would see every message its users publish. Each of its refusals is a
+`core.InputError` naming the input it refuses: `authorization`, `configPath`, `serverArgs` or
+`configHeader`.
 
 ### Permission sets
 

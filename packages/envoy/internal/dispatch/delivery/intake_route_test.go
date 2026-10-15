@@ -53,7 +53,7 @@ func TestIntakeDedupesAMergedPullRequestEnvelope(t *testing.T) {
 	}
 	t.Cleanup(natsClient.Close)
 
-	intake := NewIntake(natsClient, pool, client)
+	intake := newIntake(natsClient, pool, client)
 	startIntake(t, intake)
 
 	envelopeFields := map[string]string{
@@ -122,7 +122,7 @@ func TestIntakeAcksAKindItDoesNotRecordWithoutLoggingOrWriting(t *testing.T) {
 	logs := captureLogs(t)
 	fake := newFakeGitHub(t)
 	natsClient := intakeTestClient(t)
-	startIntake(t, NewIntake(natsClient, pool, fake.newTestClient()))
+	startIntake(t, newIntake(natsClient, pool, fake.newTestClient()))
 	awaitBoundDurable(t, natsClient)
 
 	checks, err := json.Marshal(cistore.Summary{
@@ -177,7 +177,7 @@ func TestIntakeAcksAnEnvelopeWithNoPayloadSilently(t *testing.T) {
 	logs := captureLogs(t)
 	fake := newFakeGitHub(t)
 	natsClient := intakeTestClient(t)
-	startIntake(t, NewIntake(natsClient, pool, fake.newTestClient()))
+	startIntake(t, newIntake(natsClient, pool, fake.newTestClient()))
 	awaitBoundDurable(t, natsClient)
 
 	publishGitHubEnvelope(t, natsClient, contracts.GithubSubject("unknown", "unknown", "comment"), "")
@@ -213,7 +213,7 @@ func TestIntakeLogsAMalformedEnvelopeOfAKindItRecords(t *testing.T) {
 			logs := captureLogs(t)
 			fake := newFakeGitHub(t)
 			natsClient := intakeTestClient(t)
-			startIntake(t, NewIntake(natsClient, pool, fake.newTestClient()))
+			startIntake(t, newIntake(natsClient, pool, fake.newTestClient()))
 			awaitBoundDurable(t, natsClient)
 
 			publishGitHubEnvelope(t, natsClient, envelope.topic, envelope.payload)
@@ -257,7 +257,7 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 	})
 
 	natsClient := intakeTestClient(t)
-	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	intake := newIntake(natsClient, pool, fake.newTestClient())
 	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
@@ -326,7 +326,7 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	})
 
 	natsClient := intakeTestClient(t)
-	intake := NewIntake(natsClient, pool, fake.newTestClient())
+	intake := newIntake(natsClient, pool, fake.newTestClient())
 	startIntake(t, intake)
 	awaitBoundDurable(t, natsClient)
 
