@@ -124,7 +124,10 @@ and every error and line it returns, for a canary seed. A new store implements `
 `Current` answering an error that matches `seed.ErrNotServed` when it serves no version, which
 `generate` waits out after its write. Its `Put` must refuse a second first version with an error
 matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each find the
-secret empty, and only the store sees both writes. Its tests run `testStoreContract`
+secret empty, and only the store sees both writes. Its opener refuses a seed (`holdsSeed`) in any
+string its configuration carries into a client, before any request, as the AWS store's
+`checkedAWSConfig` and `endpointSeed` do: a seed in a profile name or an endpoint's path is sent
+or quoted as surely as one in a flag. Its tests run `testStoreContract`
 (`seed/store_contract_test.go`), and it joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
