@@ -2,7 +2,9 @@ package bus_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -28,10 +30,12 @@ const unresolvable = "nats.example.test:4222"
 // fakeSOCKS5 is a SOCKS5 server (RFC 1928: no authentication, CONNECT only) that serves every
 // request from one NATS server, whatever address the request names, so a name that resolves
 // nowhere is served. It records each request's address type and address, counts every connection
-// it accepts, and dropAll closes every connection it relays, so nats.go reconnects in place.
+// it accepts, and dropAll closes every connection it relays, so nats.go reconnects in place. With
+// reply set (startRefusingSOCKS5) it answers every request with that reply code and relays nothing.
 type fakeSOCKS5 struct {
 	addr     string
 	target   string
+	reply    byte
 	listener net.Listener
 	accepted atomic.Int64
 
@@ -51,11 +55,23 @@ type socksRequest struct {
 // the test ends.
 func startFakeSOCKS5(t *testing.T, target string) *fakeSOCKS5 {
 	t.Helper()
+	return startSOCKS5(t, &fakeSOCKS5{target: target})
+}
+
+// startRefusingSOCKS5 serves on a loopback port, answering every request with reply (RFC 1928's
+// reply field: 0x04 host unreachable, 0x05 connection refused), until the test ends.
+func startRefusingSOCKS5(t *testing.T, reply byte) *fakeSOCKS5 {
+	t.Helper()
+	return startSOCKS5(t, &fakeSOCKS5{reply: reply})
+}
+
+func startSOCKS5(t *testing.T, fake *fakeSOCKS5) *fakeSOCKS5 {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen for the SOCKS5 fake: %v", err)
 	}
-	fake := &fakeSOCKS5{addr: listener.Addr().String(), target: target, listener: listener}
+	fake.addr, fake.listener = listener.Addr().String(), listener
 	go fake.serve()
 	t.Cleanup(func() {
 		_ = listener.Close()
@@ -90,6 +106,11 @@ func (f *fakeSOCKS5) handle(client net.Conn) {
 	f.mu.Lock()
 	f.requests = append(f.requests, request)
 	f.mu.Unlock()
+	if f.reply != 0 {
+		_, _ = client.Write([]byte{0x05, f.reply, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		_ = client.Close()
+		return
+	}
 	server, err := net.Dial("tcp", f.target)
 	if err != nil {
 		_ = client.Close()
@@ -401,20 +422,21 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 // A connect through the proxy that fails names the setting and the proxy's address, whatever the
 // failure: a proxy nothing listens on, which nats.go answers with its bare ErrNoServers ("nats: no
 // servers available for connection") so the dial's own error is named too; a proxy that closes the
-// connection without answering; and a proxy host that resolves nowhere. nats.go hands back the
-// last two as the dial's error, which names the proxy's address and not the setting. Each connect
-// makes the bus's ten attempts a second apart, so each subtest takes about ten seconds; they run in
-// parallel.
+// connection without answering; and a proxy that answers the request "host unreachable". nats.go
+// hands back the last two as the dial's error, which names the proxy's address and not the
+// setting. Each connect makes the bus's ten attempts a second apart, so each subtest takes about
+// ten seconds; they run in parallel. Every proxy is a loopback address: nothing is looked up.
 func TestAFailedConnectThroughAProxyNamesIt(t *testing.T) {
 	urls := []string{"nats://" + unresolvable}
 	silent := startFakeSOCKS5(t, "127.0.0.1:1")
+	unreachable := startRefusingSOCKS5(t, 0x04)
 	for _, proxy := range []struct {
 		name, address string
 		also          []string
 	}{
 		{"nothing listens", "127.0.0.1:1", []string{"connection refused"}},
 		{"closes without answering", silent.addr, nil},
-		{"resolves nowhere", "proxy.example.test:1080", nil},
+		{"answers host unreachable", unreachable.addr, []string{"host unreachable"}},
 	} {
 		for name, connect := range map[string]func(string) error{
 			"Connect": func(address string) error {
@@ -448,13 +470,49 @@ func TestAFailedConnectThroughAProxyNamesIt(t *testing.T) {
 	}
 }
 
+// A publish on a closed connection through a dead proxy fails when its own 5 s deadline ends,
+// before the replacement dial has made its ten attempts, and still names the setting and the
+// proxy's address: an operator reads a publish's error first.
+func TestAPublishWhoseDeadlineEndsFirstNamesTheProxy(t *testing.T) {
+	uri := testnats.URL(t)
+	fake := startFakeSOCKS5(t, hostOf(t, uri))
+	client, err := bus.Connect([]string{withHost(t, uri, unresolvable)}, bus.WithEnvironment(proxied(fake.addr)))
+	if err != nil {
+		t.Fatalf("connect through the proxy: %v", err)
+	}
+	t.Cleanup(client.Close)
+	// The proxy goes away, then the connection: the publish dials a replacement, and every attempt
+	// is refused.
+	_ = fake.listener.Close()
+	fake.dropAll()
+	client.Conn.Close()
+	started := time.Now()
+	err = client.PublishCore(roleEnvelope("notifications.role.socks5"))
+	elapsed := time.Since(started)
+	if err == nil {
+		t.Fatal("a publish through a dead proxy succeeded")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("publish error %q after %s is not its deadline's: the replacement dial ran out of attempts first", err, elapsed)
+	}
+	for _, want := range []string{bus.SOCKS5ProxyEnvVar, fake.addr} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("publish error %q does not name %q", err, want)
+		}
+	}
+	if elapsed > 7*time.Second {
+		t.Errorf("the publish failed after %s, past its 5 s deadline", elapsed)
+	}
+}
+
 // A proxy address that is not host:port is refused at once, before anything dials, naming the
 // setting: a URL, an address with no port, one with no host, ports that are not a port number or
-// out of range, whitespace around the value or inside it, a host that is neither an IP address nor
-// a DNS name (userinfo, a path, a control byte, an empty label, a label or a name too long), and a
-// value set but empty. Any dial would take the bus's ten attempts a second apart, and a failed dial
-// through a proxy names the setting too, so "at once" is under a second. The server URL is the fake
-// itself, so a connect that ignored the setting and dialled directly would reach it.
+// out of range, whitespace around the value or inside it, an IPv6 address with a zone (every proxy
+// a deployment names is loopback, and a zone is free text), a host that is neither an IP address
+// nor a DNS name (userinfo, a path, a control byte, an empty label, a label or a name too long),
+// and a value set but empty. Any dial would take the bus's ten attempts a second apart, and a
+// failed dial through a proxy names the setting too, so "at once" is under a second. The server URL
+// is the fake itself, so a connect that ignored the setting and dialled directly would reach it.
 func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 	fake := startFakeSOCKS5(t, "127.0.0.1:1")
 	urls := []string{"nats://" + fake.addr}
@@ -478,9 +536,9 @@ func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 		"socks5://127.0.0.1:1055", "127.0.0.1", ":1055", "127.0.0.1:socks", "127.0.0.1:+1",
 		"127.0.0.1:0", "127.0.0.1:65536", "",
 		" 127.0.0.1:1055", "\t127.0.0.1:1055", "127.0.0.1:1055 ", "127.0.0.1:1055\n", "127.0.0.1 :1055",
+		"[fe80::1%eth0]:1055", "[::1%u:hunter2@x]:1055", "[fe80::1%a b]:1055",
 		"a\nb:1055", "a\x00b:1055", "user@127.0.0.1:1055", "proxy/path:1055", "proxy..example:1055",
-		"proxy_sidecar:1055", strings.Repeat("a", 64) + ".example:1055",
-		strings.Repeat("abcdefg.", 32) + "example:1055",
+		strings.Repeat("a", 64) + ".example:1055", strings.Repeat("abcdefg.", 32) + "example:1055",
 	}
 	for _, value := range malformed {
 		for name, connect := range connects {
@@ -504,13 +562,15 @@ func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 	}
 }
 
-// A host:port whose host is an IP address, with or without a zone, or a DNS name passes the check,
-// as does a port written with leading zeros or the highest port.
+// A host:port whose host is an IP address without a zone, or a DNS name as Go's resolver reads one
+// (underscores allowed, as in a Compose service name), passes the check, as does a port written
+// with leading zeros or the highest port.
 func TestAWellFormedProxyIsAccepted(t *testing.T) {
 	for _, value := range []string{
-		"127.0.0.1:1055", "[::1]:1055", "[fe80::1%eth0]:1055", "localhost:1055", "localhost.:1055",
+		"127.0.0.1:1055", "[::1]:1055", "localhost:1055", "localhost.:1055",
 		"127.0.0.1:01055", "127.0.0.1:65535", "proxy.example.test:1080", "tailscale-sidecar:1055",
-		strings.Repeat("a", 63) + ".example:1055", strings.Repeat("abcdefg.", 30) + "example.test:1055",
+		"proxy_sidecar:1055", strings.Repeat("a", 63) + ".example:1055",
+		strings.Repeat("abcdefg.", 30) + "example.test:1055",
 	} {
 		if err := bus.CheckSOCKS5Proxy(value); err != nil {
 			t.Errorf("CheckSOCKS5Proxy(%q) = %v, want it accepted", value, err)
@@ -519,11 +579,15 @@ func TestAWellFormedProxyIsAccepted(t *testing.T) {
 }
 
 // A proxy value can carry credentials (an operator who writes it as a URL, as ALL_PROXY settings
-// are written), and a refusal ends up in the process's log, so no refusal prints the value: not the
-// remote-reach refusal of a run that has not opted in, and not the address check's.
+// are written, or hides them in an IPv6 zone), and a refusal ends up in the process's log, so no
+// refusal prints the value: not the remote-reach refusal of a run that has not opted in, and not
+// the address check's.
 func TestARefusalNeverPrintsTheProxyValue(t *testing.T) {
 	const secret = "hunter2"
-	for _, value := range []string{"socks5://user:" + secret + "@proxy.example:1080", "user:" + secret + "@127.0.0.1:1055", secret + "@127.0.0.1:1055"} {
+	for _, value := range []string{
+		"socks5://user:" + secret + "@proxy.example:1080", "user:" + secret + "@127.0.0.1:1055",
+		secret + "@127.0.0.1:1055", "[::1%u:" + secret + "@x]:1055", "[fe80::1%a " + secret + "]:1055",
+	} {
 		if err := bus.CheckSOCKS5Proxy(value); err == nil || strings.Contains(err.Error(), secret) {
 			t.Errorf("CheckSOCKS5Proxy(%q) = %v, want a refusal that does not print the value", value, err)
 		}

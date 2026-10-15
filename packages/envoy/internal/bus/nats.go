@@ -210,7 +210,8 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 }
 
 // connectTimeout bounds each dial of a NATS server and its handshake: nats.go's own for a direct
-// dial (options), the bus's SOCKS5 dialer's for one through a proxy (socks5Proxy).
+// dial (options), the bus's SOCKS5 dialer's for one through a proxy (socks5Proxy). A connect with a
+// deadline cuts either to what remains of it.
 const connectTimeout = 5 * time.Second
 
 func connect(name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
@@ -221,7 +222,21 @@ func connect(name string, urls []string, credential nats.Option, dialer *socks5D
 // it names (nkeyCredential), and when dialer is not nil through the SOCKS5 proxy it names
 // (socks5Proxy): every connection then, the first and each one nats.go dials to reconnect, goes
 // through the proxy, handed the server's host name as the URL spells it.
-func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
+//
+// A connect through a proxy that fails names the setting and the proxy, whatever failed: its ten
+// attempts ran out, the credential was refused, or ctx ended first (a publish's own deadline). A
+// dial error comes back with the proxy's address but not the setting, and a refused dial as
+// nats.go's ErrNoServers alone, which names neither, so the proxy's own dial error stands in for
+// it. The address carries no credentials: CheckSOCKS5Proxy admits only an IP address with no zone
+// or a DNS name.
+func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, dialer *socks5Dialer, reconnectCB func(*nats.Conn), closedCB func()) (_ *nats.Conn, err error) {
+	if dialer != nil {
+		defer func() {
+			if err != nil {
+				err = fmt.Errorf("bus: NATS connect through the SOCKS5 proxy %s=%s failed: %w", SOCKS5ProxyEnvVar, dialer.Address(), err)
+			}
+		}()
+	}
 	var lastErr error
 	for range 10 {
 		if err := ctx.Err(); err != nil {
@@ -233,12 +248,7 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 				return nil, err
 			}
 		}
-		if dialer != nil {
-			next.CustomDialer = dialer
-			// nats.go otherwise resolves the host itself and hands the dialer an address, which the
-			// proxy cannot reach when only its resolver knows the name.
-			next.SkipHostLookup = true
-		}
+		attemptDialer := dialer
 		if deadline, ok := ctx.Deadline(); ok {
 			remaining := time.Until(deadline)
 			if remaining <= 0 {
@@ -249,6 +259,15 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 			if remaining < next.Timeout {
 				next.Timeout = remaining
 			}
+			if dialer != nil {
+				attemptDialer = dialer.bounded(remaining)
+			}
+		}
+		if attemptDialer != nil {
+			next.CustomDialer = attemptDialer
+			// nats.go otherwise resolves the host itself and hands the dialer an address, which the
+			// proxy cannot reach when only its resolver knows the name.
+			next.SkipHostLookup = true
 		}
 		type connectionResult struct {
 			conn *nats.Conn
@@ -282,15 +301,8 @@ func connectWithContext(ctx context.Context, name string, urls []string, credent
 		case <-timer.C:
 		}
 	}
-	if dialer != nil {
-		// A connect through a proxy that fails names the setting and the proxy, whatever failed: a
-		// dial error comes back with the proxy's address but not the setting, and a refused dial as
-		// nats.go's ErrNoServers alone, which names neither, so the proxy's own dial error stands in
-		// for it. The address carries no credentials: CheckSOCKS5Proxy admits none.
-		if errors.Is(lastErr, nats.ErrNoServers) {
-			lastErr = cmp.Or(dialer.LastError(), lastErr)
-		}
-		return nil, fmt.Errorf("bus: NATS connect through the SOCKS5 proxy %s=%s failed: %w", SOCKS5ProxyEnvVar, dialer.Address(), lastErr)
+	if dialer != nil && errors.Is(lastErr, nats.ErrNoServers) {
+		lastErr = cmp.Or(dialer.LastError(), lastErr)
 	}
 	return nil, lastErr
 }
