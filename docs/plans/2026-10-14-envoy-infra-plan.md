@@ -1651,6 +1651,19 @@ Hardening considered and not taken (the coordinator's ruling, recorded with #195
   a Go string the process cannot clear (`awsstore.go:259`), and `Current` reads one back
   (`:290`). The read-back byte slices are cleared and the key pair wiped (`seed.go:162, 189, 266`).
   This is memory hygiene only: nothing reaches an output, a log or an error.
+- Closing the GCP store's last overlap window with a claim. Secret Manager has no conditional add,
+  so `Put` reads `versions/1` by number just before `AddSecretVersion` and refuses when it exists;
+  two `generate` runs for one secret whose reads both precede both adds, a round trip apart, still
+  both write, as versions 1 and 2, and `latest` serves version 2. The run that wrote version 2
+  always ends in an error after writing (exit 1) saying what happened, that the other run's key
+  does not derive the served seed, and the `gcloud` and `envoy-infra seed` commands that recover
+  (`seed/gcpstore.go`, `gcpOvertaken`, pinned by
+  `TestGCPOverlappingGenerateRunsWhoseReadsBothPrecedeBothAdds`); the run that wrote version 1
+  reports it too if its read-back sees version 2, and succeeds if not. A claim, an etag-guarded
+  `UpdateSecret` before the add, would add `secretmanager.secrets.update` to `generate`'s grant,
+  and a run that died holding it would leave a claim someone has to clear before any later
+  `generate` can write. The AWS store has no such window: Secrets Manager refuses the second first
+  write through the shared `ClientRequestToken`.
 
 ## End-to-end verification plan
 

@@ -170,10 +170,21 @@ a `*seed.Unserved` when the version it names is one it will not serve. Every mod
 alone, so no store's kind is a branch in `seed.go`. Its `Put` must refuse a second first version
 with an error matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each
 find the secret empty, and only the store sees both writes. Its tests run `testStoreContract`
-(`seed/store_contract_test.go`). The store also gets a `seed.StoreType`, with its opener, its
-`CheckName` when its names have a form (`Command` applies it before it opens the store, since the
-refusal of an open prints `--name`, where a seed may have been pasted) and its line of help, and
-that type joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+(`seed/store_contract_test.go`). Secrets Manager refuses a second first version itself, through the
+one `ClientRequestToken` every first write sends. Secret Manager has no conditional add, so the GCP
+store reads `versions/1` by number just before its add and refuses when it exists, which leaves one
+window, a round trip wide: two runs whose reads both precede both adds both write, as versions 1
+and 2. The run that wrote version 2 always ends in an error after writing that says what happened,
+that the other run's key does not derive the served seed, and the commands that recover
+(`gcloud secrets versions …`, then `check` and `verify`); the run that wrote version 1 does too if
+its read-back sees version 2, and succeeds if not
+(`TestGCPOverlappingGenerateRunsWhoseReadsBothPrecedeBothAdds`). The store keeps that window rather
+than close it with a claim (an etag-guarded `UpdateSecret` before the add), which would add
+`secretmanager.secrets.update` to `generate`'s grant and leave a dead run's claim for someone to
+clear. The store also gets a `seed.StoreType`, with its opener, its `CheckName` when its names have
+a form (`Command` applies it before it opens the store, since the refusal of an open prints
+`--name`, where a seed may have been pasted) and its line of help, and that type joins the
+`seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's calls are the grant an operator gives it, listed per store under "The calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
