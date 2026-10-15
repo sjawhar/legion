@@ -131,6 +131,8 @@ The listener refuses these before it registers anything, with an error naming wh
 - a `watchdog.host` containing `@` or `://`;
 - `watchdog` on a listener whose name contains `"`, `$`, a backtick, `\` or a line break, since the
   watchdog's script echoes the name in double quotes;
+- `adopt.watchdog` without `watchdog`, since nothing would take the old command over and the
+  update would delete it;
 - a missing provider (see [Providers](#providers)).
 
 `natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
