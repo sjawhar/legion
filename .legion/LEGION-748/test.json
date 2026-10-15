@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T19:36:44Z",
+  "completed": "2026-10-15T20:46:35Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "headSha": "4ee312ac70a2592dada486384f70b38877102e06",
-  "ci": "Tests run 38793179060 (lint, typecheck, test success; `Test the release credential check | Results: 135 passed, 0 failed`, `Test release scripts | Results: 250 passed, 0 failed` with the host-key SKIP) at 4ee312ac70a2592dada486384f70b38877102e06; the branch head a755d2a3 is the round-3 implement handoff alone (skip-checks)",
+  "headSha": "b260042886232813edbe84fba6ce2a8205fcc937",
+  "ci": "Tests run 38802597920 (lint, typecheck, test success) and PR Title success at b260042886232813edbe84fba6ce2a8205fcc937; the branch head 1c50ba5e is the round-4 implement handoff alone (skip-checks)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3 (the review round): the implementer's push-main cases re-driven on my own bare-origin rig (/tmp/pt/rig3.sh, a pre-receive hook logging every ref that reaches origin): a branch two commits ahead of main → `::error::HEAD carries 2 commits main does not — …` with the summary line, hook log empty, main untouched; a bump also changing README.md → refused naming both paths; HEAD main already holds → `Nothing to push`, exit 0; no DEPLOY_KEY → fail_outstanding's `::error::` and summary, nothing made; the manifest race and another package's bump racing in → rebased and landed. Its three checker mutations (workflow-level env DEPLOY_KEY, workflow-level defaults.run.shell: python, `npm publish --access public --provenance` without a tarball) re-applied to copies of the real release.yaml → each exit 1 as it reports. Harness totals re-run here (135 and 251) and read from CI run 38793179060 (135 and 250 with the host-key SKIP). Rounds 1–2 stand as recorded below."
+    "how": "Round 4 (the review's reopened Critical and Important): the implementer's push-main shapes re-driven on my own bare-origin rig (/tmp/pt/rig4.sh; a two-commit seed, src/guard.js as a canary, a pre-receive hook logging every ref): shape A (a manifest-only branch commit at the release version carrying scripts.postinstall) → `HEAD's packages/pkg/package.json differs from main's in more than .version = 1.0.1`, hook log empty, planted text in no output; A′ (the exact bump) lands; shape B (a merge commit, first parent an older main commit) → `has 2 parents; the version-bump commit has one`, src/guard.js intact. Its two checker mutations (job-level continue-on-error; defaults.run.shell: 'cat {0}') re-applied to copies of the real release.yaml → each exit 1 as reported. Harness totals re-run here (162 and 281) and CI run 38802597920 green. Rounds 1–3 stand (the `version` arm is byte-identical to round 3's; the workflows are unchanged since round 3)."
   },
   "failures": [],
   "failed": 0,
@@ -17,9 +17,26 @@
     "command": ".github/scripts/check-release-credentials.test.sh",
     "observed": "Results: 75 passed, 15 failed (the five new cases; every pre-existing case passes). A throwaway prototype of the fix in /tmp (npm allow-list {view, publish}; bash/sh/source/. skipped like exec; shell: read as a command; a DEPLOY_KEY regex covering the index form; a build job with no permissions anywhere refused) makes all 90 checks pass and still accepts the three real workflows (7 credentialed, 8 build jobs), so the red cases ask for no change to the workflows.",
     "round2": "The five red cases of 8617f1d8 pass at 8b299ab3 (harness 101 passed, 0 failed); the implementer appended three cases (another secret and the whole secrets context in a build job; docker run with imagetools/login/buildx version allowed; Actions/Checkout without persist-credentials).",
-    "round3": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 135 passed, 0 failed, 49 cases)."
+    "round3": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 135 passed, 0 failed, 49 cases).",
+    "round4": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 162 passed, 0 failed, 57 cases)."
   },
   "proof": [
+    {
+      "criterion": "Done when, bullets 3 and 6 (round 4, the review's reopened Critical): `push-main` pushes exactly the one version-bump commit — one parent that is main's fetched tip, a tree differing from main's in the manifest alone, the manifest differing in `.version` alone — so a workflow_dispatch from a branch lands nothing but that exact bump, and every read in the arm fails through `fail_outstanding`.",
+      "surface": "A bare origin at /tmp/pt/w4/origin.git with a two-commit seed (main's tip has a parent), `src/guard.js` as a canary, a pre-receive hook appending `push: <ref> <sha>` for every ref that reaches it; clones detached at origin/main (and at older main commits); a throwaway ed25519 key as DEPLOY_KEY; url.insteadOf mapping the script's SSH URL to the bare origin; a private TMPDIR.",
+      "command": "bash /tmp/pt/rig4.sh (scenarios A, A2, A3, A4, B, F, G, G2, H, A′, C, J, C2, D, E, I)",
+      "observed": "A (manifest-only commit at 1.0.1 planting scripts.postinstall): rc 1, `::error::HEAD's packages/pkg/package.json differs from main's in more than .version = 1.0.1. push-main pushes the one version-bump commit…`, summary written, hook log empty, main's manifest unchanged, the planted text in no output. A2 (same shape on the older main commit): rebased, then refused at the tip the same way, nothing landed. A3 (a non-version key changed at the old version): refused the same way. A4 (keys reordered, version set): lands — `jq -S` normalises. B (merge commit, parents = older main commit + main's tip, tree = old tree + bump): rc 1, `HEAD 7657702 has 2 parents; the version-bump commit has one`, hook empty, src/guard.js present, README intact. F (feat + bump): `HEAD carries 2 commits main does not — …`, hook empty. G (bump + README.md) and G2 (bump + deleting src/guard.js): refused naming the paths, hook empty, guard present. H: `Nothing to push`, rc 0. A′ (the exact bump on the older main commit): rebased, `Resolving the … version-line conflict to v1.0.2`, landed. C (same manifest line raced in): repair, landed. J (another package's bump raced in): rebased, landed. C2 (main changed scripts.test meanwhile): the repair keeps main's `bun test ./x` and sets the version, landed. D (late re-run, main past the version): `superseded` notice, rc 0, nothing landed. E (hook rejects): exactly five hook pushes, then `lost the push race to main 5 times`, summary. I (no DEPLOY_KEY): `::error::DEPLOY_KEY holds the deploy key … it is unset or empty. The release itself succeeded…`, summary, nothing made. TMPDIR empty after every case; the private key's text in no output.",
+      "headSha": "b260042886232813edbe84fba6ce2a8205fcc937",
+      "negativeControl": "Shape A is the control: under round 3's rule (the review's reproduction) the manifest-only branch commit carrying scripts.postinstall landed on main; at this head it pushes nothing, while the exact bump on the same base (A′) lands — the refusal is the content, not the shape."
+    },
+    {
+      "criterion": "Done when, bullet 5 (round 4, the review's Important and minors): the checker refuses a job-level `continue-on-error:` on a build job and a tripwire whose effective shell is not bash or sh, reads `npm publish`'s tarball as the word right after it, skips docker's global options before the subcommand, and joins backslash-continued lines before tokenising.",
+      "surface": "The checker over mutated copies of the real workflows (/tmp/mut/probes4.sh, 13 probes; the round-1/2/3 sets re-run) and over the real three.",
+      "command": "bash /tmp/mut/probes4.sh; bash /tmp/mut/mutate.sh; bash /tmp/mut/probes2.sh; bash /tmp/mut/probes3.sh; bash /tmp/mut/probes3b.sh; .github/scripts/check-release-credentials.sh; .github/scripts/check-release-credentials.test.sh",
+      "observed": "Job-level `continue-on-error: true` on legion_build → `carries 'continue-on-error:', which reports a failed tripwire as success to the jobs that need it`; job-level `defaults: run: shell: cat {0}` → `its tripwire step must run under bash or sh (found 'cat'), which is what runs .github/scripts/release-push.sh no-credential`; workflow-level `defaults.run.shell: pwsh` → every build job's tripwire refused and every publish `run:` named; a pwsh job default with each `run:` step carrying `shell: bash -e {0}` allowed; `npm publish --tag x.tgz` and `--tag=x.tgz` → `'npm publish' without a tarball argument`; `npm publish \"tarball/$STEM.tgz\" --tag next` allowed; `docker --config /tmp/c run alpine`, `docker -H tcp://x:2375 container run alpine`, `docker --debug run alpine` → `docker run` / `docker container run`; `docker --config /tmp/c buildx imagetools create` allowed; `bun \\` continued onto `install` → `runs 'bun'`; a `scripts/foo.sh` on a continued argument line not a command. Earlier sets: 22/22, 14/14 (plus the two probes whose own quoting is broken, each proven caught on a correct run), 18/18. Real workflows: `7 credentialed job(s) and 8 build job(s)`. Harness: 162 passed, 57 cases.",
+      "headSha": "b260042886232813edbe84fba6ce2a8205fcc937",
+      "negativeControl": "The legitimate shapes stay green on copies of the real files: a job default of pwsh when every `run:` step names bash, `npm publish \"tarball/$STEM.tgz\" --tag next`, docker's global options before `buildx imagetools create`, a backslash-continued argument line; and the real legion_build version step (backslash-continued paths) is no longer named by one of its path arguments."
+    },
     {
       "criterion": "Done when, bullet 3 and 6 (round 3, the review's Critical): `push-main` pushes exactly the one version-bump commit over main's tip through the deploy key and refuses a HEAD carrying anything else, so a workflow_dispatch from a branch lands none of that branch's commits on main; `deploy_key_env`'s refusals go through `::error::`/fail_outstanding.",
       "surface": "A bare origin at /tmp/pt/w3/origin.git with a pre-receive hook appending `push: <ref> <sha>` for every ref that reaches it; clones detached at origin/main as actions/checkout leaves a push run (and one on branch main); a throwaway ed25519 key as DEPLOY_KEY; url.insteadOf mapping the script's SSH URL to the bare origin; a private TMPDIR.",
@@ -102,6 +119,7 @@
     }
   ],
   "notes": [
+    "Round 4: no residual gap found. A mode-only change to the manifest (executable bit) alongside the exact bump would pass the content rule (`git diff --name-only` lists the file; the JSON is equal) — harmless (a file mode on package.json) and not reproduced here since `jq > tmp && mv` rewrites the mode; noted for completeness.",
     "Round 3: no residual checker gap found among the probes; the header's documented pass-through class is now `xargs`/`nohup` and a variable in command position. The one false-positive class (a `shell:` first word other than bash/sh, e.g. `/bin/bash`, and `npm` with a leading flag) is conservative and absent from the real workflows.",
     "A bash killed by SIGTERM mid-push (a cancelled job) does not run its EXIT trap, so the deploy-key directory would outlive the command on the runner's disk until the ephemeral runner is destroyed; the spec covers exit paths, not signals, and GitHub-hosted runners are ephemeral — noted for completeness.",
     "`npm --version` and `npm` with a leading flag (`npm --registry … publish`) are refused in a credentialed job (conservative false positive); the real publish jobs spell `npm view` and `npm publish` plainly and pass.",
@@ -110,7 +128,7 @@
     "Environment: PyYAML (a uv venv), jq 1.7 and openssh-client 10.0 were installed under $HOME/.local for the local runs; the pod image has none of them (the implement handoff recorded the same for its container). The `jq` builtin of the harness shell is jaq; the scripts ran under bash with the real jq first on PATH.",
     "Tests not re-run: lint, typecheck and the unit suites are CI's (cited above); `go version -m` on a cross-built agent-secrets binary and `agent-secrets --version` were not re-measured here (planner's measurement in plan.json specDepartures; first executed on the merge-triggered listener run)."
   ],
-  "round": 3,
+  "round": 4,
   "resolvedFailures": [
     {
       "round": 1,
