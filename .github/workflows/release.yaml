@@ -630,16 +630,18 @@ jobs:
       # job names the tarball itself, from that version and the committed manifest's name (Bun names
       # a scoped tarball sjawhar-pi-legion-1.2.3.tgz); release-push.sh handed refuses a version that
       # is not X.Y.Z and an artifact that is not exactly that one regular file, and prints the tag.
+      # The steps below take the name's stem and spell the `.tgz` themselves, so each reads as the
+      # publish of a tarball (check-release-credentials.sh allows `npm publish` of nothing else).
       - name: Check the hand-over
         id: handed
         env:
           VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
         run: |
           name=$(jq -r .name packages/envoy-plugin/package.json)
-          file="${name#@}"
-          file="${file//\//-}-$VERSION.tgz"
-          tag=$(.github/scripts/release-push.sh handed opencode-legion-envoy-v "$VERSION" tarball "$file")
-          { echo "tag=$tag"; echo "file=$file"; } >> "$GITHUB_OUTPUT"
+          stem="${name#@}"
+          stem="${stem//\//-}-$VERSION"
+          tag=$(.github/scripts/release-push.sh handed opencode-legion-envoy-v "$VERSION" tarball "$stem.tgz")
+          { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
 
       # The committed manifest takes the version "Commit and tag" commits; the tarball carries it already.
       - name: Set release version
@@ -650,16 +652,17 @@ jobs:
             packages/envoy-plugin/package.json > tmp.json \
             && mv tmp.json packages/envoy-plugin/package.json
 
-      # The tarball is envoy_plugin_build's bytes, never a repack here.
+      # The tarball is envoy_plugin_build's bytes, never a repack here: npm publish is handed the
+      # .tgz, so no package script (prepack) runs in this job.
       - name: Publish to npm
         env:
           VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-          FILE: ${{ steps.handed.outputs.file }}
+          STEM: ${{ steps.handed.outputs.stem }}
         run: |
           if npm view "$(jq -r .name package.json)@$VERSION" version >/dev/null 2>&1; then
             echo "npm already has $VERSION; skipping publish"
           else
-            npm publish "$GITHUB_WORKSPACE/tarball/$FILE" --access public --provenance
+            npm publish "$GITHUB_WORKSPACE/tarball/$STEM.tgz" --access public --provenance
           fi
         working-directory: packages/envoy-plugin
 
@@ -686,8 +689,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.handed.outputs.tag }}
           VERSION: ${{ needs.envoy_plugin_build.outputs.version }}
-          FILE: ${{ steps.handed.outputs.file }}
-        run: .github/scripts/release-push.sh release "$TAG" "Envoy Plugin v$VERSION" "tarball/$FILE"
+          STEM: ${{ steps.handed.outputs.stem }}
+        run: .github/scripts/release-push.sh release "$TAG" "Envoy Plugin v$VERSION" "tarball/$STEM.tgz"
 
       - name: Push version bump
         env:
@@ -828,10 +831,10 @@ jobs:
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
         run: |
           name=$(jq -r .name packages/pi-envoy/package.json)
-          file="${name#@}"
-          file="${file//\//-}-$VERSION.tgz"
-          tag=$(.github/scripts/release-push.sh handed pi-envoy-v "$VERSION" tarball "$file")
-          { echo "tag=$tag"; echo "file=$file"; } >> "$GITHUB_OUTPUT"
+          stem="${name#@}"
+          stem="${stem//\//-}-$VERSION"
+          tag=$(.github/scripts/release-push.sh handed pi-envoy-v "$VERSION" tarball "$stem.tgz")
+          { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
 
       - name: Set release version
         env:
@@ -844,12 +847,12 @@ jobs:
       - name: Publish to npm
         env:
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
-          FILE: ${{ steps.handed.outputs.file }}
+          STEM: ${{ steps.handed.outputs.stem }}
         run: |
           if npm view "$(jq -r .name package.json)@$VERSION" version >/dev/null 2>&1; then
             echo "npm already has $VERSION; skipping publish"
           else
-            npm publish "$GITHUB_WORKSPACE/tarball/$FILE" --access public --provenance
+            npm publish "$GITHUB_WORKSPACE/tarball/$STEM.tgz" --access public --provenance
           fi
         working-directory: packages/pi-envoy
 
@@ -874,8 +877,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.handed.outputs.tag }}
           VERSION: ${{ needs.pi_envoy_build.outputs.version }}
-          FILE: ${{ steps.handed.outputs.file }}
-        run: .github/scripts/release-push.sh release "$TAG" "Pi Envoy v$VERSION" "tarball/$FILE"
+          STEM: ${{ steps.handed.outputs.stem }}
+        run: .github/scripts/release-push.sh release "$TAG" "Pi Envoy v$VERSION" "tarball/$STEM.tgz"
 
       - name: Push version bump
         env:
@@ -1021,10 +1024,10 @@ jobs:
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
         run: |
           name=$(jq -r .name packages/pi-legion/package.json)
-          file="${name#@}"
-          file="${file//\//-}-$VERSION.tgz"
-          tag=$(.github/scripts/release-push.sh handed pi-legion-v "$VERSION" tarball "$file")
-          { echo "tag=$tag"; echo "file=$file"; } >> "$GITHUB_OUTPUT"
+          stem="${name#@}"
+          stem="${stem//\//-}-$VERSION"
+          tag=$(.github/scripts/release-push.sh handed pi-legion-v "$VERSION" tarball "$stem.tgz")
+          { echo "tag=$tag"; echo "stem=$stem"; } >> "$GITHUB_OUTPUT"
 
       - name: Set release version
         env:
@@ -1037,12 +1040,12 @@ jobs:
       - name: Publish to npm
         env:
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
-          FILE: ${{ steps.handed.outputs.file }}
+          STEM: ${{ steps.handed.outputs.stem }}
         run: |
           if npm view "$(jq -r .name package.json)@$VERSION" version >/dev/null 2>&1; then
             echo "npm already has $VERSION; skipping publish"
           else
-            npm publish "$GITHUB_WORKSPACE/tarball/$FILE" --access public --provenance
+            npm publish "$GITHUB_WORKSPACE/tarball/$STEM.tgz" --access public --provenance
           fi
         working-directory: packages/pi-legion
 
@@ -1067,8 +1070,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.handed.outputs.tag }}
           VERSION: ${{ needs.pi_legion_build.outputs.version }}
-          FILE: ${{ steps.handed.outputs.file }}
-        run: .github/scripts/release-push.sh release "$TAG" "Pi Legion v$VERSION" "tarball/$FILE"
+          STEM: ${{ steps.handed.outputs.stem }}
+        run: .github/scripts/release-push.sh release "$TAG" "Pi Legion v$VERSION" "tarball/$STEM.tgz"
 
       - name: Push version bump
         env:

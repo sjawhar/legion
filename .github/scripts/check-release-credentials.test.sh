@@ -142,7 +142,7 @@ jobs:
       - name: Publish to npm
         env:
           FILE: ${{ steps.handed.outputs.file }}
-        run: npm publish "tarball/$FILE" --access public --provenance
+        run: npm publish "tarball/$STEM.tgz" --access public --provenance
       - name: Push tag
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
@@ -184,7 +184,7 @@ jobs:
       - name: Publish to npm
         env:
           FILE: ${{ steps.handed.outputs.file }}
-        run: npm publish "tarball/$FILE" --access public --provenance
+        run: npm publish "tarball/$STEM.tgz" --access public --provenance
       - name: Push tag
         env:
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
@@ -672,5 +672,88 @@ check "names the build job's checkout at its line" \
 check "the credentialed job's Actions/Checkout, with persist-credentials: false, is on the allow-list" \
   "$(is "$(contains "$out" "not on the checker's allow-list")" false)"
 check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: the deploy key in the workflow-level env"
+root=$(fixture workflow-env-key)
+mutate "$root/$RELEASE" $'permissions: {}\n' $'permissions: {}\nenv:\n  DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the workflow's env for the build job at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_build' runs dependency code (.*), but its text names secrets.DEPLOY_KEY; a build job holds no secret but GITHUB_TOKEN")"
+check "names the workflow's env for a credentialed job at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^  DEPLOY_KEY:'): job 'pi_envoy_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY; the deploy key may appear only as 'DEPLOY_KEY: \${{ secrets.DEPLOY_KEY }}' in the env of a step whose run calls release-push.sh push-tag or push-main")"
+check "names the workflow's env for the other credentialed job too" \
+  "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at the workflow's env.DEPLOY_KEY;")"
+check "the plain job, credentialed through the workflow's env, must set cache-mode: none" \
+  "$(contains "$out" "job 'changes' holds a credential, so it must set 'cache-mode: none'")"
+
+echo "case: a workflow-level defaults.run.shell that is an interpreter"
+root=$(fixture workflow-shell-python)
+mutate "$root/$RELEASE" $'permissions: {}\n' $'permissions: {}\ndefaults:\n  run:\n    shell: python\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+for step in 'Check the hand-over' 'Publish to npm' 'Push tag' 'Push version bump'; do
+  check "names the credentialed job's run step '$step' under the workflow's shell" \
+    "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step '$step' runs its body under shell 'python', not bash or sh; dependency code runs only in a job that holds none")"
+done
+check "does not name a step with no run" "$(is "$(contains "$out" "step 'actions/checkout@$SHA' runs its body")" false)"
+
+echo "case: a job-level defaults.run.shell that is an interpreter"
+root=$(fixture job-shell-pwsh)
+mutate "$root/$RELEASE" $'    cache-mode: none\n' $'    cache-mode: none\n    defaults:\n      run:\n        shell: pwsh\n' 1
+add_publish_step "$root" $'      - name: Under bash\n        shell: bash\n        run: echo ok\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+for step in 'Check the hand-over' 'Publish to npm' 'Push tag' 'Push version bump'; do
+  check "names pi_envoy_publish's run step '$step' under the job's shell" \
+    "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step '$step' runs its body under shell 'pwsh', not bash or sh")"
+done
+check "a step's own shell: bash wins over the job's" "$(is "$(contains "$out" "step 'Under bash'")" false)"
+check "does not name pi_legion_publish, whose shell is bash" "$(is "$(contains "$out" "job 'pi_legion_publish'")" false)"
+
+echo "case: the deploy key in lower case, secrets.deploy_key"
+root=$(fixture deploy-key-lower-case)
+mutate "$root/$RELEASE" $'      - run: echo hello\n' $'      - env:\n          KEY: ${{ secrets.deploy_key }}\n        run: echo hello\n'
+mutate "$root/$RELEASE" $'          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG:' $'          DEPLOY_KEY: ${{ Secrets.deploy_key }}\n          TAG:' 1
+mutate "$root/$RELEASE" $'          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG:' $'          deploy_key: ${{ secrets.DEPLOY_KEY }}\n          TAG:'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "the plain job is credentialed: names the site at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" 'secrets.deploy_key }}$'): job 'changes' names secrets.DEPLOY_KEY at step 1 env.KEY; the deploy key may appear only as")"
+check "the plain job is credentialed: wants cache-mode: none" \
+  "$(contains "$out" "job 'changes' holds a credential, so it must set 'cache-mode: none' to restore no cache (it is not set)")"
+check "the value form in another casing, under DEPLOY_KEY of a push step, is allowed" \
+  "$(is "$(contains "$out" "job 'pi_envoy_publish'")" false)"
+check "the env key deploy_key is not DEPLOY_KEY, which release-push.sh reads" \
+  "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.deploy_key;")"
+
+echo "case: npm publish without a tarball argument in a credentialed job"
+root=$(fixture npm-publish-directory)
+add_publish_step "$root" $'      - name: Publish the directory\n        run: npm publish --access public --provenance\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the directory publish and why" \
+  "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Publish the directory' runs 'npm publish' without a tarball argument (a directory publish runs the package's prepack); dependency code runs only in a job that holds none")"
+check "does not name the publish of the handed tarball" "$(is "$(contains "$out" "step 'Publish to npm'")" false)"
+
+echo "case: a tripwire step with continue-on-error"
+root=$(fixture tripwire-continue-on-error)
+mutate "$root/$RELEASE" $'        run: .github/scripts/release-push.sh no-credential\n' $'        continue-on-error: true\n        run: .github/scripts/release-push.sh no-credential\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the key at its line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^        continue-on-error: true$'): job 'pi_envoy_build' runs dependency code (.*), so its tripwire step must carry no 'continue-on-error:'")"
+
+echo "case: a script behind an interpreter's -o or +O option, commands behind eval, and docker's long forms, in a credentialed job"
+root=$(fixture option-flags-eval-docker-long-forms)
+add_publish_step "$root" $'      - name: Behind -o\n        run: bash -o pipefail scripts/x.sh\n      - name: Behind +O\n        run: bash +O extglob scripts/y.sh\n      - name: Eval quoted\n        run: eval "bun install"\n      - name: Eval bare\n        run: eval bun install\n      - name: Docker long forms\n        run: |\n          docker container run alpine sh\n          docker image build .\n          docker buildx bake\n          docker container exec x sh\n          docker image ls\n          docker container ls\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the script behind -o pipefail" "$(contains "$out" "step 'Behind -o' runs 'scripts/x.sh'")"
+check "names the script behind +O extglob" "$(contains "$out" "step 'Behind +O' runs 'scripts/y.sh'")"
+check "names bun behind a quoted eval" "$(contains "$out" "step 'Eval quoted' runs 'bun'")"
+check "names bun behind a bare eval" "$(contains "$out" "step 'Eval bare' runs 'bun'")"
+check "names docker's long forms as written, and not its listings" \
+  "$(contains "$out" "step 'Docker long forms' runs 'docker container run', 'docker image build', 'docker buildx bake', 'docker container exec'; dependency code")"
 
 summary "check-release-credentials.sh"
