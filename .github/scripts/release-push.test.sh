@@ -18,7 +18,9 @@
 # the release run whose bump commit already landed on main; clone b plays the
 # next run of the same package, whose checkout predates that bump — so b's push
 # is rejected and its rebase meets a's change on the same "version" line. In
-# the re-run cases, b plays a later attempt of a's run or of an older run. A
+# the re-run cases, b plays a later attempt of a's run or of an older run; in
+# the refusal cases, b's HEAD carries a branch commit beside the bump, or a bump
+# that changes a second file, which push-main refuses before any push. A
 # pre-receive hook that always rejects forces the exhaustion case. push-main
 # reaches origin as push-tag does: through the deploy key, with the GitHub URL
 # rewritten to the local origin by GIT_CONFIG_*, so the key directory is all
@@ -184,35 +186,37 @@ check "the rebased bump commit keeps its message" "$(is "$(origin_tip_subject "$
 check "clone is not left mid-rebase" "$(not_rebasing "$work/c1/b")"
 
 echo
-echo "Case 2: a conflict in another file fails naming it"
+echo "Case 2: a HEAD carrying a commit besides the bump is refused before any push"
+# A workflow_dispatch from a branch checks out that branch; its commits must
+# not reach main through the deploy key.
 setup "$work/c2"
-printf 'from a\n' > "$work/c2/a/README.md"
-git -C "$work/c2/a" commit -q -am "a: readme"
-git -C "$work/c2/a" push -q origin main
-printf 'from b\n' > "$work/c2/b/README.md"
-git -C "$work/c2/b" commit -q -am "b: readme"
+record_hook "$work/c2/origin.git"
+change "$work/c2/b" README.md "feat: on the branch"
 bump "$work/c2/b" 1.0.1
-push_main "$work/c2/b" 1.0.1
+push_main "$work/c2/b" 1.0.1 "$work/c2/summary.md"
 check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names README.md as the conflict" "$(contains "$out" '^::error::.*conflicts in: README\.md\.')"
+check "error counts the commits HEAD carries over main" "$(contains "$out" '^::error::HEAD carries 2 commits main does not')"
+check "error lists each commit, short sha and subject" "$(contains "$out" '^::error::HEAD carries 2 commits main does not .* [0-9a-f]* chore: release pkg v1\.0\.1 \[skip ci\]; [0-9a-f]* feat: on the branch .* and push-main pushes the one version-bump commit')"
+check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
+check "job summary says the same" "$(contains "$(cat "$work/c2/summary.md" 2>/dev/null)" 'HEAD carries 2 commits main does not.*feat: on the branch.*The release itself succeeded.*only this version-bump push to main is outstanding')"
+check "nothing was pushed" "$(is "$seen" "")"
 check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2")" 1.0.0)"
-check "rebase was aborted" "$(not_rebasing "$work/c2/b")"
+check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2")" seed)"
+check "clone is not left mid-rebase" "$(not_rebasing "$work/c2/b")"
 
 echo
-echo "Case 2b: the manifest conflicting alongside another file is not resolved"
+echo "Case 2b: a bump commit that changes a second file is refused before any push"
 setup "$work/c2b"
-printf 'from a\n' > "$work/c2b/a/README.md"
-git -C "$work/c2b/a" add README.md
-bump "$work/c2b/a" 1.0.1
-git -C "$work/c2b/a" push -q origin main
+record_hook "$work/c2b/origin.git"
 printf 'from b\n' > "$work/c2b/b/README.md"
 git -C "$work/c2b/b" add README.md
-bump "$work/c2b/b" 1.0.2
-push_main "$work/c2b/b" 1.0.2
+bump "$work/c2b/b" 1.0.1
+push_main "$work/c2b/b" 1.0.1
 check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error names both conflicted paths" "$(contains "$out" '^::error::.*conflicts in: README\.md packages/pkg/package\.json\.')"
-check "origin/main keeps the landed version" "$(is "$(origin_version "$work/c2b")" 1.0.1)"
-check "rebase was aborted" "$(not_rebasing "$work/c2b/b")"
+check "error names the paths the one commit changes" "$(contains "$out" '^::error::HEAD carries 1 commit main does not .* chore: release pkg v1\.0\.1 \[skip ci\] .* which changes README\.md packages/pkg/package\.json, and push-main pushes the one version-bump commit, which changes only packages/pkg/package\.json,')"
+check "nothing was pushed" "$(is "$seen" "")"
+check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2b")" 1.0.0)"
+check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2b")" seed)"
 
 echo
 echo "Case 3: five rejections fail, saying the release succeeded and only the push is outstanding"
@@ -320,11 +324,20 @@ check "five rejections: nothing is left in TMPDIR" "$(is "$left" 0)"
 check "five rejections: origin/main manifest is untouched" "$(is "$(origin_version "$work/c8c")" 1.0.0)"
 setup "$work/c8d"
 bump "$work/c8d/b" 1.0.1
-push_main "$work/c8d/b" 1.0.1 "" DEPLOY_KEY=
-check "no DEPLOY_KEY: exits non-zero, naming it" "$([ "$rc" != 0 ] && contains "$out" 'DEPLOY_KEY' || echo false)"
+push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" DEPLOY_KEY=
+check "no DEPLOY_KEY: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "no DEPLOY_KEY: the error names it and says the release itself succeeded" \
+  "$(is "$(contains "$out" '^::error::.*DEPLOY_KEY')|$(contains "$out" 'The release itself succeeded')" 'true|true')"
+check "no DEPLOY_KEY: the job summary says the same" \
+  "$(contains "$(cat "$work/c8d/summary.md" 2>/dev/null)" 'DEPLOY_KEY.*The release itself succeeded')"
 check "no DEPLOY_KEY: origin/main is untouched" "$(is "$(origin_version "$work/c8d")" 1.0.0)"
 check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
-# The release workflows check out a commit, not a branch, so the bump sits on a detached HEAD.
+push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" GITHUB_REPOSITORY=
+check "no GITHUB_REPOSITORY: exits non-zero, naming it, and says the release itself succeeded" \
+  "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::GITHUB_REPOSITORY.*The release itself succeeded')|$left" 'true|0' || echo false)"
+# HEAD:refs/heads/main serves a detached HEAD and a branch alike (a release job
+# may check out either); the one-commit check (case 2) is what keeps a branch's
+# commits off main.
 setup "$work/c8e"
 git -C "$work/c8e/b" checkout -q --detach
 bump "$work/c8e/b" 1.0.1
@@ -333,6 +346,15 @@ check "a detached HEAD: exits 0" "$(is "$rc" 0)"
 check "a detached HEAD: origin/main holds the bump" "$(is "$(origin_version "$work/c8e")" 1.0.1)"
 check "a detached HEAD: origin/main's tip is the bump commit" \
   "$(is "$(git -C "$work/c8e/origin.git" rev-parse main)" "$(git -C "$work/c8e/b" rev-parse HEAD)")"
+# The manifest already held the version, so `tag` committed nothing and HEAD is main's tip.
+setup "$work/c8f"
+record_hook "$work/c8f/origin.git"
+push_main "$work/c8f/b" 1.0.0
+check "HEAD already on main: exits 0" "$(is "$rc" 0)"
+check "HEAD already on main: says there is nothing to push" "$(contains "$out" '^Nothing to push: main already holds this checkout$')"
+check "HEAD already on main: nothing was pushed" "$(is "$seen" "")"
+check "HEAD already on main: origin/main is unchanged" \
+  "$(is "$(git -C "$work/c8f/origin.git" rev-parse main)" "$(git -C "$work/c8f/b" rev-parse HEAD)")"
 
 echo
 echo "Case 9: tagged finds the tag an earlier attempt pushed for this checkout, and only that"
@@ -736,8 +758,12 @@ check "a rejected push: nothing is left in TMPDIR" "$(is "$left" 0)"
 check "a rejected push: origin has no such tag" \
   "$(is "$(git -C "$pt/origin.git" tag -l pkg-v1.0.2)" "")"
 push_tag pkg-v1.0.1 DEPLOY_KEY=
-check "no DEPLOY_KEY: exits non-zero, naming it" "$([ "$rc" != 0 ] && contains "$out" 'DEPLOY_KEY' || echo false)"
+check "no DEPLOY_KEY: exits non-zero, with an ::error:: naming the command and the variable" \
+  "$([ "$rc" != 0 ] && contains "$out" '^::error::release-push.sh push-tag: DEPLOY_KEY' || echo false)"
 check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
+push_tag pkg-v1.0.1 GITHUB_REPOSITORY=
+check "no GITHUB_REPOSITORY: exits non-zero, with an ::error:: naming it, making nothing in TMPDIR" \
+  "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::release-push.sh push-tag: GITHUB_REPOSITORY')|$left" 'true|0' || echo false)"
 
 echo
 echo "Case: push-tag holds GitHub's host keys and refuses any other"

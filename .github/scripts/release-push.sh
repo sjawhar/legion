@@ -57,12 +57,20 @@
 #            upload fails, so only a job cancelled or lost mid-upload leaves
 #            one, possibly short of assets. A failed upload leaves the draft
 #            unpublished; either failure fails the step, naming the release.
-# push-main: push the bump commit to main, fetching main and rebasing onto it
-#            between attempts, five attempts in all. It fetches and pushes
-#            $GITHUB_REPOSITORY on GitHub with the deploy key in $DEPLOY_KEY,
-#            as push-tag does, and from a detached HEAD as well as a branch.
-#            This runs last, after the tag and GitHub release exist: a lost
-#            push only delays the metadata bump on main, which the
+# push-main: push the version-bump commit to main, fetching main and rebasing
+#            onto it between attempts, five attempts in all. It fetches and
+#            pushes $GITHUB_REPOSITORY on GitHub with the deploy key in
+#            $DEPLOY_KEY, as push-tag does, from a detached HEAD as well as a
+#            branch, and it pushes exactly the one bump commit: before every
+#            push it fetches main and checks that HEAD carries exactly one
+#            commit main does not, changing only <package-dir>/package.json
+#            (the test `tagged` applies to a bump commit). A HEAD that carries
+#            anything else is refused, origin untouched: a run dispatched from
+#            a branch other than main lands none of that branch's commits on
+#            main. A HEAD main already holds (the manifest already held the
+#            version, so `tag` committed nothing) has nothing to push and
+#            exits 0. This runs last, after the tag and GitHub release exist:
+#            a lost push only delays the metadata bump on main, which the
 #            tag-anchored version computation heals on the next release.
 #            Raced-in commits stay outside the tag and are picked up by the
 #            next version calculation.
@@ -149,16 +157,24 @@ github.com ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCj7ndNxQowgcQnjshcLrqPEiiphnt+V
 KNOWN_HOSTS
 }
 
-# deploy_key_env: make this process's git reach GitHub over SSH with the deploy
-# key in $DEPLOY_KEY (the header's push-tag paragraph): the key and GitHub's
-# host keys go into a directory only the runner's user can read, removed when
-# the script exits, GIT_SSH_COMMAND points ssh at them and nothing else, and $remote is the
-# repository's SSH URL on GitHub. $DEPLOY_KEY and $GITHUB_REPOSITORY are required before anything
-# is made.
+# fail_error <message>: fail the command with an ::error:: on stderr naming it.
+fail_error() {
+  echo "::error::release-push.sh $command: $1" >&2
+  exit 1
+}
+
+# deploy_key_env [<fail>]: make this process's git reach GitHub over SSH with
+# the deploy key in $DEPLOY_KEY (the header's push-tag paragraph): the key and
+# GitHub's host keys go into a directory only the runner's user can read,
+# removed when the script exits, GIT_SSH_COMMAND points ssh at them and nothing
+# else, and $remote is the repository's SSH URL on GitHub. Before anything is
+# made, an unset or empty $DEPLOY_KEY or $GITHUB_REPOSITORY goes to <fail>
+# (fail_error unless given; push-main gives fail_outstanding) as one message
+# naming it.
 deploy_key_env() {
-  : "${DEPLOY_KEY:?DEPLOY_KEY holds the deploy key to reach GitHub with}"
-  : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY names the repository on GitHub}"
-  local key known_hosts
+  local fail=${1:-fail_error} key known_hosts
+  [ -n "${DEPLOY_KEY:-}" ] || "$fail" "DEPLOY_KEY holds the deploy key to reach GitHub with; it is unset or empty."
+  [ -n "${GITHUB_REPOSITORY:-}" ] || "$fail" "GITHUB_REPOSITORY names the repository on GitHub; it is unset or empty."
   ssh_dir=$(mktemp -d)
   trap 'rm -rf "$ssh_dir"' EXIT
   (
@@ -285,7 +301,7 @@ case "$command" in
       skip=false
       log="Releasing $tag, already pushed for this checkout"
     else
-      prev_tag=$(git tag -l "$prefix*" --sort=-v:refname | head -1)
+      prev_tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$prefix*")
       if [ -n "$prev_tag" ]; then
         prev_version=${prev_tag#"$prefix"}
         range="$prev_tag..HEAD"
@@ -400,13 +416,36 @@ case "$command" in
     package_dir=${2:?package dir}
     version=${3:?released version}
     manifest="$package_dir/package.json"
-    deploy_key_env
+    deploy_key_env fail_outstanding
+    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, over main's tip and nothing else: a run from a branch other than main lands none of that branch's commits on main."
     for attempt in 1 2 3 4 5; do
-      # HEAD:refs/heads/main pushes from a detached HEAD as well as a branch.
+      git fetch "$remote" main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
+      upstream=$(git rev-parse FETCH_HEAD)
+      # What goes over main's tip is the one bump commit, changing only the
+      # manifest (the header's push-main paragraph), checked before every push
+      # so a rebased bump is checked again. HEAD on main itself is what `tag`
+      # leaves when the manifest already held the version.
+      extra=$(git rev-list --count "$upstream..HEAD")
+      if [ "$extra" = 0 ]; then
+        echo "Nothing to push: main already holds this checkout"
+        exit 0
+      fi
+      carried=$(git log --format='%h %s' "$upstream..HEAD")
+      if [ "$extra" != 1 ]; then
+        fail_outstanding "HEAD carries $extra commits main does not — ${carried//$'\n'/; } — and $only_bump"
+      fi
+      changed=$(git diff --name-only HEAD^ HEAD)
+      if [ "$changed" != "$manifest" ]; then
+        fail_outstanding "HEAD carries 1 commit main does not — $carried — which changes ${changed//$'\n'/ }, and $only_bump"
+      fi
+      # HEAD:refs/heads/main serves a detached HEAD and a branch alike; the
+      # check above is what keeps a branch's other commits off main.
       git push "$remote" HEAD:refs/heads/main && exit 0
       if [ "$attempt" = 5 ]; then
         fail_outstanding "The version-bump commit for $package_dir v$version lost the push race to main 5 times."
       fi
+      # main moved between the fetch and the push: its new tip is what to
+      # check and rebase onto.
       git fetch "$remote" main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD)
       # Main's manifest at or past this version needs nothing pushed (the
