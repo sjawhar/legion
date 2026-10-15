@@ -432,7 +432,7 @@ case "$command" in
     version=${3:?released version}
     manifest="$package_dir/package.json"
     deploy_key_env fail_outstanding
-    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, onto main's tip: its parent's $manifest with .version set to v$version and nothing else, as JSON; a run from a branch other than main lands nothing but that exact bump on main."
+    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, onto main's tip: its parent's $manifest with .version set to $version and nothing else, as JSON; a run from a branch other than main lands nothing but that exact bump on main."
     for attempt in 1 2 3 4 5; do
       git fetch "$remote" main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD) || fail_outstanding "Reading main's fetched tip failed."

@@ -45,20 +45,35 @@
 # past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), or is a path with a
 # `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`, `out/x`,
 # `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command position
-# is found by stripping each line's comment first (an unquoted `#` at the start of a line or after
-# whitespace runs to the end of its line, so a backslash inside it continues nothing), then joining
-# only a real continuation (a line ending in a backslash not itself escaped: `printf 'x' \\` ends
-# its command), then splitting each line of the `run:` on the shell's separators (`;`, `&&`, `||`,
-# `|`, `(`, `{`, `$(` and backticks; `${{ … }}` expressions are elided first), dropping
-# leading `VAR=value` assignments and the keywords that precede a command (if, then, for, do, time,
-# exec, env, …), and taking the first word left; an interpreter there (one of INTERPRETERS: bash,
-# sh, dash, zsh, source, `.`) is looked through, past its flags and the option name an `-o`, `+o`,
-# `-O` or `+O` takes, to the word after it (`bash -o pipefail scripts/x.sh` runs `scripts/x.sh`),
-# and the script string behind its `-c`, like the words behind `eval`, is split the same way
-# (`sh -c 'bun install'`, `eval "bun install"` and `eval bun install` run `bun`). A variable in
-# command position (`"$tool" build`), a command behind `xargs` or `nohup`, or a program not on the
-# list passes here; the job-level tripwire (`release-push.sh no-credential`) and review hold the
-# rest.
+# is found by one quote-aware scan of the `run:` (its `${{ … }}` expressions elided first), as bash
+# reads it: a `#` starts a comment only at word start — the start of the run, after unquoted
+# whitespace or a newline, or after an unquoted `;`, `&`, `|`, `(`, `)`, `<`, `>` or backtick, not
+# `{` (`${#x}`, `$#` and `a#b` are words) — and the comment runs to the real newline, so a
+# backslash inside it continues nothing; escaped whitespace and an escaped `#` are word characters
+# (`echo a\ #` has no comment); a backslash-newline joins lines outside single quotes, whatever the
+# number of backslashes before it (an escaped backslash is a character: `printf 'x' \\` ends its
+# command, `printf 'x' \\\` continues it, and `a\` + newline + `#` glues `a#`); a quote carries
+# across newlines, and `;`, `&`, `|` and `#` inside one are literal; `$(…)`, `<(…)`, `(…)` and
+# backticks open a command of their own, inside a double-quoted string too, and the string resumes
+# at the close; an unquoted `;`, `&`, `|`, `(`, `)` or newline ends a command, and a redirection's
+# target (`>/dev/null`, `>> "$GITHUB_OUTPUT"`, `2>&1`) is not one of its words. Each command sheds
+# its leading `VAR=value` assignments and the keywords that precede a command (if, then, for, do,
+# time, exec, env, `{`, `}`, …), and the first word left is the command; an interpreter there (one
+# of INTERPRETERS: bash, sh, dash, zsh, source, `.`) is looked through, past its flags and the
+# option name an `-o`, `+o`, `-O` or `+O` takes, to the word after it (`bash -o pipefail
+# scripts/x.sh` runs `scripts/x.sh`), and the script string behind its `-c`, like the words behind
+# `eval`, is scanned the same way (`sh -c 'bun install'`, `eval "bun install"` and `eval bun
+# install` run `bun`). A variable in command position (`"$tool" build`), a command behind `xargs`
+# or `nohup`, or a program not on the list passes here; the job-level tripwire (`release-push.sh
+# no-credential`) and review hold the rest.
+#
+# What this check is for, so it is held to the right bar: it pins the release workflows' shape
+# against drift — a later well-meant edit that puts dependency code, a cache or a credential in the
+# wrong job, or loosens a checkout — not against someone editing a workflow file to hide a command
+# from it, who could as well remove this check from pr-and-main.yaml. The build/publish split is
+# the boundary; this check is a tripwire on that boundary, and the pass-through class above (a
+# variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
+# debug run`) is accepted on that ground.
 #
 # Scope: exactly the three release workflows named in WORKFLOWS, every job that has `steps:`. A job
 # that calls a reusable workflow (`uses:` and no steps, release.yaml's worker_image) is out of
@@ -184,7 +199,6 @@ CREDENTIALED_USES = {
 
 # Just enough shell to find each simple command's first word.
 EXPRESSION = re.compile(r"\$\{\{.*?\}\}")
-SEPARATORS = re.compile(r"\|\||&&|;|\||\$\(|\(|(?<!\$)\{|`")
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 SKIP_WORDS = {
     "if", "then", "else", "elif", "fi", "do", "done", "while", "until", "for", "in",
@@ -197,82 +211,119 @@ SKIP_WORDS = {
 INTERPRETERS = {"bash", "sh", "dash", "zsh", "source", "."}
 
 
-def strip_comment(line: str) -> str:
-    """Cuts an unquoted `#` at the start of the line or after whitespace, and everything after it."""
-    quote = None
-    i = 0
-    while i < len(line):
-        char = line[i]
-        if quote:
-            if char == quote:
-                quote = None
-            elif char == "\\" and quote == '"':
-                i += 1
-        elif char in "'\"":
-            quote = char
-        elif char == "\\":
-            i += 1
-        elif char == "#" and (i == 0 or line[i - 1].isspace()):
-            return line[:i]
-        i += 1
-    return line
+class Scanner:
+    """One quote-aware pass over a `run:`, as bash reads it (the header's rules), collecting each
+    simple command's words. Between characters it holds the word being read, the words of the
+    command being read, whether the next character begins a word (where a `#` starts a comment),
+    and whether the next word is a redirection's target (dropped: `>/dev/null` names no command)."""
 
+    def __init__(self) -> None:
+        self.commands: list[list[str]] = []
+        self.words: list[str] = []
+        self.word = ""
+        self.started = False
+        self.at_word_start = True
+        self.redirect_target = False
 
-def words_of(segment: str) -> list[str]:
-    """Splits on unquoted whitespace and drops the quotes. A quote the separator split left open
-    runs to the end of the segment."""
-    words: list[str] = []
-    word = ""
-    started = False
-    quote = None
-    i = 0
-    while i < len(segment):
-        char = segment[i]
-        if quote:
-            if char == quote:
+    def add(self, char: str) -> None:
+        self.word += char
+        self.started = True
+        self.at_word_start = False
+
+    def end_word(self) -> None:
+        if self.started:
+            if not self.redirect_target:
+                self.words.append(self.word)
+            self.redirect_target = False
+        self.word = ""
+        self.started = False
+        self.at_word_start = True
+
+    def end_command(self) -> None:
+        self.end_word()
+        if self.words:
+            self.commands += command_of(self.words)
+        self.words = []
+        self.redirect_target = False
+
+    def scan(self, text: str) -> list[list[str]]:
+        quote = None
+        # The open `$(`, `<(`, `(` and backticks, innermost last, each with the quote it interrupted:
+        # inside, an unquoted command of its own starts; at the close, the string resumes.
+        open_subs: list[tuple[str, str | None]] = []
+        i = 0
+        while i < len(text):
+            char = text[i]
+            after = text[i + 1:i + 2]
+            if quote == "'":
+                if char == "'":
+                    quote = None
+                else:
+                    self.add(char)
+            elif char == "`":
+                self.end_command()
+                if open_subs and open_subs[-1][0] == "tick":
+                    quote = open_subs.pop()[1]
+                else:
+                    open_subs.append(("tick", quote))
+                    quote = None
+            elif char == "$" and after == "(":
+                self.add(char)  # the `$` and what precedes it stay with the outer word
+                self.end_command()
+                open_subs.append(("paren", quote))
                 quote = None
-            elif char == "\\" and quote == '"' and i + 1 < len(segment):
                 i += 1
-                word += segment[i]
+            elif quote == '"':
+                if char == '"':
+                    quote = None
+                elif char == "\\" and after in ("$", "`", '"', "\\"):
+                    self.add(after)
+                    i += 1
+                elif char == "\\" and after == "\n":
+                    i += 1
+                else:
+                    self.add(char)  # any other `\x` keeps both characters
+            elif char == "#" and self.at_word_start:
+                end = text.find("\n", i)  # the newline stays, to end the command below
+                i = len(text) if end < 0 else end
+                continue
+            elif char == "\\" and after == "\n":
+                i += 1
+            elif char == "\\" and after:
+                self.add(after)
+                i += 1
+            elif char in "'\"":
+                quote = char
+                self.started = True
+                self.at_word_start = False
+            elif char == "(" or (char in "<>" and after == "("):
+                if char != "(":
+                    i += 1
+                self.end_command()
+                open_subs.append(("paren", None))
+            elif char == ")":
+                self.end_command()
+                if open_subs and open_subs[-1][0] == "paren":
+                    quote = open_subs.pop()[1]
+            elif char in "<>":
+                self.end_word()
+                self.redirect_target = True
+                while text[i + 1:i + 2] in ("<", ">", "&", "|"):  # `>>`, `2>&1`, `<<<`, `>|`
+                    i += 1
+            elif char in ";&|\n":
+                self.end_command()
+            elif char in " \t":
+                self.end_word()
             else:
-                word += char
-        elif char in "'\"":
-            quote = char
-            started = True
-        elif char == "\\" and i + 1 < len(segment):
+                self.add(char)
             i += 1
-            word += segment[i]
-            started = True
-        elif char.isspace():
-            if started:
-                words.append(word)
-            word = ""
-            started = False
-        else:
-            word += char
-            started = True
-        i += 1
-    if started:
-        words.append(word)
-    return words
-
-
-# A backslash-newline continues the command when the backslash is not itself escaped; after the
-# comments are gone, one ending a comment is gone with it.
-CONTINUATION = re.compile(r"(?<!\\)\\\n")
+        self.end_command()
+        return self.commands
 
 
 def commands_of(run: str) -> list[list[str]]:
     """Each simple command of a `run:`, as its words with the command first."""
-    stripped = "\n".join(strip_comment(line) for line in EXPRESSION.sub("EXPR", run).splitlines())
-    commands = []
-    for line in CONTINUATION.sub(" ", stripped).splitlines():
-        for segment in SEPARATORS.split(line):
-            segment = segment.strip()
-            if not segment or segment.startswith("#"):
-                continue
-            commands += command_of(words_of(segment))
-    return commands
+    return Scanner().scan(EXPRESSION.sub("EXPR", run))
 
 
 def command_of(words: list[str]) -> list[list[str]]:

@@ -346,6 +346,13 @@ add_publish_step() {
   mutate "$1/$RELEASE" $'      - name: Publish to npm\n' "$2"$'      - name: Publish to npm\n' 1
 }
 
+# add_push_tag_step <root> <name> <run lines>: add_publish_step of a step that holds the deploy key,
+# whose `run:` is the given lines (each indented ten spaces, newline-ended) and then the push-tag
+# call that allows the key there, so the check's verdict rests on the lines alone.
+add_push_tag_step() {
+  add_publish_step "$1" "      - name: $2"$'\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n'"$3"$'          .github/scripts/release-push.sh push-tag "$TAG"\n'
+}
+
 echo "case: the trio in its intended shape"
 root=$(fixture green)
 run_check "$root"
@@ -852,5 +859,72 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the command under a comment's trailing backslash" "$(contains "$out" "step 'Install behind a comment' runs 'bun'")"
 check "names the command under an escaped backslash" "$(contains "$out" "step 'Install behind an escaped backslash' runs 'bun'")"
+
+echo "case: a comment after a separator, ending in a backslash, continues nothing"
+root=$(fixture separator-comment)
+add_publish_step "$root" $'      - name: Push tag behind a comment\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n          .github/scripts/release-push.sh push-tag "$TAG" ;# keep the toolchain pinned \\\n          bun install --frozen-lockfile\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the command under the comment's trailing backslash" "$(contains "$out" "step 'Push tag behind a comment' runs 'bun'")"
+
+echo "case: a quote carries across newlines, so a # opening its second line is no comment"
+root=$(fixture quoted-newline)
+add_push_tag_step "$root" 'Install after a quoted note' $'          notes=\'Release notes:\n          # keep the toolchain pinned\' ; bun install --frozen-lockfile\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the command after the closing quote" "$(contains "$out" "step 'Install after a quoted note' runs 'bun'")"
+
+echo "case: an escaped space before a #, or a continuation gluing a # to a word, makes no comment"
+root=$(fixture escaped-hash)
+add_push_tag_step "$root" 'Escaped space' $'          echo a\\ #; bun install --frozen-lockfile\n'
+add_push_tag_step "$root" 'Glued hash' $'          echo a\\\n          #;bun install --frozen-lockfile\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the command after an escaped space and a #" "$(contains "$out" "step 'Escaped space' runs 'bun'")"
+check "names the command after a glued #" "$(contains "$out" "step 'Glued hash' runs 'bun'")"
+
+echo "case: an odd run of backslashes before a newline continues the command"
+root=$(fixture odd-backslashes)
+add_push_tag_step "$root" 'Three backslashes' $'          printf \'x\' \\\\\\\n            bun\n'
+run_check "$root"
+check "exits 0: the bun on the next line is printf's argument" "$(is "$status" 0)"
+
+echo "case: a # inside a word, in \${#x} or in a string that resumes behind \$(…) is no comment"
+root=$(fixture hash-in-word)
+add_push_tag_step "$root" 'Resumed string' $'          echo "$(date) # not a comment"; bun install --frozen-lockfile\n'
+add_push_tag_step "$root" 'Length expansion' $'          echo ${#x}; bun install --frozen-lockfile\n'
+add_push_tag_step "$root" 'Hash mid-word' $'          echo a#b; bun install --frozen-lockfile\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the command after a string that resumes behind \$(…)" "$(contains "$out" "step 'Resumed string' runs 'bun'")"
+check "names the command after \${#x}" "$(contains "$out" "step 'Length expansion' runs 'bun'")"
+check "names the command after a#b" "$(contains "$out" "step 'Hash mid-word' runs 'bun'")"
+
+echo "case: a command name or a separator inside a string is text"
+root=$(fixture quoted-text)
+add_push_tag_step "$root" 'Quoted bun' $'          echo "bun install"\n'
+add_push_tag_step "$root" 'Quoted separator' $'          echo "a; bun install"\n'
+run_check "$root"
+check "exits 0: bun inside a string runs nothing" "$(is "$status" 0)"
+
+echo "case: a command substitution, by \$(…) or backticks, is a command of its own"
+root=$(fixture substitution)
+add_push_tag_step "$root" 'Dollar paren' $'          x=$(bun install)\n'
+add_push_tag_step "$root" 'Backticks' $'          y=`bun install`\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the command inside \$(…)" "$(contains "$out" "step 'Dollar paren' runs 'bun'")"
+check "names the command inside backticks" "$(contains "$out" "step 'Backticks' runs 'bun'")"
+
+echo "case: a redirection's target is not a command; the same path in command position is"
+root=$(fixture redirect-target)
+add_push_tag_step "$root" 'Write a file' $'          echo x > out/x.txt\n'
+run_check "$root"
+check "exits 0: out/x.txt behind > is a target" "$(is "$status" 0)"
+root=$(fixture redirect-command)
+add_push_tag_step "$root" 'Run the file' $'          out/x.txt\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the path in command position" "$(contains "$out" "step 'Run the file' runs 'out/x.txt'")"
 
 summary "check-release-credentials.sh"
