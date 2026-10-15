@@ -87,7 +87,7 @@ Declare `secrets:` explicitly or omit it.
 The remedy text for a failed image build must say `gh run rerun <run-id> --failed`, which re-runs
 the failed jobs and keeps the succeeded jobs' recorded outputs. A whole-run rerun of a
 `release.yaml` invocation re-executes every job at the same commit, and so does a
-`workflow_dispatch` of `release.yaml` while main's tip still carries a `legion-v` tag: `legion`
-finds that tag at HEAD and releases it again, so the image job still gets `legion_version`, but
-the image is rebuilt and the version tag moves to the rebuild's digest, which then replaces the
-first digest in the release body's "Worker image" section.
+`workflow_dispatch` of `release.yaml` while main's tip still carries a `legion-v` tag: `legion_build`
+finds that tag at HEAD and `legion_publish` releases it again, so the image job still gets
+`legion_version`, but the image is rebuilt and the version tag moves to the rebuild's digest, which
+then replaces the first digest in the release body's "Worker image" section.

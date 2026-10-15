@@ -133,11 +133,11 @@ jobs:
         with:
           base: ${{ steps.base.outputs.sha }}
           filters: |
-            # The Go `legion` the legion job releases and worker.Dockerfile's go stage compiles: its
-            # module, which embeds the role prompts, the modules go.work binds it to (packages/envoy
-            # is also copied whole into the image for the agent-secrets binary it builds), the
-            # notices scripts that change its archives or worker image, and the list of the
-            # targets it builds.
+            # The Go `legion` the legion_build and legion_publish jobs release and worker.Dockerfile's go
+            # stage compiles: its module, which embeds the role prompts, the modules go.work binds it to
+            # (packages/envoy is also copied whole into the image for the agent-secrets binary it
+            # builds), the notices scripts that change its archives or worker image, and the list of
+            # the targets it builds.
             legion:
               - 'packages/daemon/**'
               - 'go.work'

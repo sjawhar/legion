@@ -460,7 +460,8 @@ jobs:
               fi
             fi
 
-            # Prefer the newest already-published descendant, even if its release job was cancelled.
+            # Prefer the newest already-published descendant, even if its release_publish job was
+            # cancelled.
             promote_sha="$GITHUB_SHA"
             promote_digest="$OWN_DIGEST"
             if ! candidate_shas=$(git rev-list --first-parent "$GITHUB_SHA..origin/main"); then
