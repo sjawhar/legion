@@ -109,7 +109,7 @@ func (s *subcommand) parse(args []string, required ...string) (map[string]bool, 
 		}
 	})
 	if len(seeded) > 0 {
-		fmt.Fprintf(s.stderr, "refused: %s: an nkey user seed, which is never an argument (not echoed)\n", strings.Join(seeded, ", "))
+		fmt.Fprintf(s.stderr, "refused: %s: an nkey seed, which is never an argument (not echoed)\n", strings.Join(seeded, ", "))
 		return nil, 2, true
 	}
 	if s.fs.NArg() > 0 {
@@ -415,13 +415,13 @@ func fileSeed(text []byte) error {
 				prefix = path + ": "
 			}
 			if key {
-				return errors.New(prefix + "a key holding an nkey user seed (not echoed)")
+				return errors.New(prefix + "a key holding an nkey seed (not echoed)")
 			}
-			return errors.New(prefix + "an nkey user seed, which the file never holds (not echoed)")
+			return errors.New(prefix + "an nkey seed, which the file never holds (not echoed)")
 		}
 	}
 	if bus.HoldsSeed(string(text)) {
-		return errors.New("an nkey user seed, which the file never holds (not echoed)")
+		return errors.New("an nkey seed, which the file never holds (not echoed)")
 	}
 	return nil
 }

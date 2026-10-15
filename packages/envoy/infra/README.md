@@ -854,12 +854,13 @@ component refuses is refused, naming the flag, as `refused: --<flag>: <reason>` 
 error prints the usage and exits 2. It reads only its flags and the file `--authorization-file`
 names, and calls no API.
 
-An nkey user seed is never echoed. A flag value that holds one, whole or inside it, percent-encoded
-or not, is refused before anything reads it, naming the flags and never the value (`refused:
---<flag>: an nkey user seed, which is never an argument`). So is a seed anywhere in the
-`--authorization-file`, naming its field (`users[0].name`, `users[0].publish.allow[0]`), or the
-object whose key holds it. A flag the command does not take, and a value a numeric or boolean flag
-cannot parse, are reported without quoting what was given, as `envoy-infra seed` reports them.
+An nkey seed of any type is never echoed. A flag value that holds one (`bus.HoldsSeed`: whole or
+inside it, in either case, split over `.`, `-`, `_` or whitespace, percent-encoded or not) is
+refused before anything reads it, naming the flags and never the value (`refused: --<flag>: an nkey
+seed, which is never an argument`). So is a seed anywhere in the `--authorization-file`, naming
+its field (`users[0].name`, `users[0].publish.allow[0]`), or the object whose key holds it. A flag
+the command does not take, and a value a numeric or boolean flag cannot parse, are reported
+without quoting what was given, as `envoy-infra seed` reports them.
 
 ### nats-start-script
 

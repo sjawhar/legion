@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
@@ -714,24 +715,34 @@ func percentEncoded(text string) string {
 	return b.String()
 }
 
-// requireNoSeed requires text to hold no twelve letters of testSeed in a row, nor any of it
-// percent-encoded.
+// requireNoSeed requires text to hold no twelve letters of testSeed in a row, in either case and
+// with '.', '-', '_' and whitespace removed, as a reader joins a seed split over them, nor any of
+// it percent-encoded.
 func requireNoSeed(t *testing.T, stream, text string) {
 	t.Helper()
+	joined := strings.Map(func(r rune) rune {
+		if strings.ContainsRune(".-_ \t\r\n", r) {
+			return -1
+		}
+		return unicode.ToUpper(r)
+	}, text)
 	for i := range len(testSeed) - 11 {
-		require.NotContains(t, text, testSeed[i:i+12], "%s holds part of the seed", stream)
+		require.NotContains(t, joined, testSeed[i:i+12], "%s holds part of the seed", stream)
 	}
-	require.NotContains(t, text, percentEncoded(testSeed[:12]), "%s holds part of the seed, percent-encoded", stream)
+	require.NotContains(t, strings.ToUpper(text), percentEncoded(testSeed[:12]), "%s holds part of the seed, percent-encoded", stream)
 }
 
 // A seed reaches render's output three ways: a flag's value, which the rendering prints; the flag
 // package's own messages, which quote an undefined flag word and a value it cannot parse; and the
 // refusals of core and rendering, which quote a value, a user's name and a subject from the
-// authorization file. Each is refused, naming the flag or the file's field and never the value.
+// authorization file. Each is refused, naming the flag or the file's field and never the value,
+// whatever the seed's spelling: either case, or split over '.', '-' or whitespace.
 func TestRenderNeverEchoesASeed(t *testing.T) {
 	require.Equal(t, testSeed[:5]+"A"+testSeed[6:], nearSeed)
-	const seedFlag = ": an nkey user seed, which is never an argument (not echoed)"
-	const seedInFile = ": an nkey user seed, which the file never holds (not echoed)"
+	lower := strings.ToLower(testSeed)
+	split := func(v, sep string) string { return v[:len(v)/2] + sep + v[len(v)/2:] }
+	const seedFlag = ": an nkey seed, which is never an argument (not echoed)"
+	const seedInFile = ": an nkey seed, which the file never holds (not echoed)"
 	const malformed = "a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)"
 	const malformedValue = ": a malformed value (not echoed: a seed may have been pasted there)"
 	nats := func(file string, rest ...string) []string {
@@ -764,12 +775,19 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 		{name: "--reviewer-app-id", args: listenerFlags([]string{"reviewer-app-id"}, "--reviewer-app-id", testSeed), want: "refused: --reviewer-app-id" + seedFlag},
 		{name: "--mention-trigger", args: listenerFlags([]string{"mention-trigger"}, "--mention-trigger", "@"+testSeed), want: "refused: --mention-trigger" + seedFlag},
 		{name: "--listen-host", args: listenerFlags([]string{"listen-host"}, "--listen-host", testSeed), want: "refused: --listen-host" + seedFlag},
+		{name: "--machine-id, lowercase", args: listenerFlags([]string{"machine-id"}, "--machine-id", lower), want: "refused: --machine-id" + seedFlag},
+		{
+			name: "--nats-url's host, split across DNS labels",
+			args: listenerFlags([]string{"nats-url"}, "--nats-url", "nats://"+split(testSeed, ".")+".example:4222"),
+			want: "refused: --nats-url" + seedFlag,
+		},
 		{
 			name: "--machine-id and --mention-trigger, both named",
 			args: listenerFlags([]string{"machine-id", "mention-trigger"}, "--machine-id", testSeed, "--mention-trigger", testSeed),
 			want: "refused: --machine-id, --mention-trigger" + seedFlag,
 		},
 		{name: "--config-header", args: nats(valid, "--config-header", "Rendered for "+testSeed), want: "refused: --config-header" + seedFlag},
+		{name: "--config-header, split by a space", args: nats(valid, "--config-header", "Rendered for "+split(testSeed, " ")), want: "refused: --config-header" + seedFlag},
 		{name: "--server-arg", args: nats(valid, "--server-arg", "--server_name="+testSeed), want: "refused: --server-arg" + seedFlag},
 		{name: "--config-path", args: nats(valid, "--config-path", "/tmp/"+testSeed+".conf"), want: "refused: --config-path" + seedFlag},
 		{name: "--authorization-file's path", args: nats(seededPath), want: "refused: --authorization-file" + seedFlag},
@@ -783,10 +801,20 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 			args: filters("--metric-namespace", "example/"+testSeed, "--logical-name-prefix", "example-bus", "--json"),
 			want: "refused: --metric-namespace" + seedFlag,
 		},
+		{
+			name: "--logical-name-prefix, lowercase and split by a dash",
+			args: filters("--metric-namespace", "example/NATS", "--logical-name-prefix", split(lower, "-"), "--json"),
+			want: "refused: --logical-name-prefix" + seedFlag,
+		},
 		// The flag package's own messages, which quote what they cannot take.
 		{
 			name: "an undefined flag word", usage: true,
 			args: listenerFlags(nil, "--"+testSeed),
+			want: "envoy-infra render webhook-listener-env: " + malformed,
+		},
+		{
+			name: "an undefined flag word, lowercase", usage: true,
+			args: listenerFlags(nil, "--"+lower),
 			want: "envoy-infra render webhook-listener-env: " + malformed,
 		},
 		{
@@ -797,6 +825,11 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 		{
 			name: "--nats-replicas, which is no number", usage: true,
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", testSeed),
+			want: "envoy-infra render webhook-listener-env: --nats-replicas" + malformedValue,
+		},
+		{
+			name: "--nats-replicas, which is no number, lowercase", usage: true,
+			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", lower),
 			want: "envoy-infra render webhook-listener-env: --nats-replicas" + malformedValue,
 		},
 		{
@@ -817,6 +850,11 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 			want: "refused: --authorization-file: users[0].name" + seedInFile,
 		},
 		{
+			name: "a user's name in --authorization-file, lowercase",
+			args: nats(inFile(`"name": "example-listener"`, `"name": "`+lower+`"`)),
+			want: "refused: --authorization-file: users[0].name" + seedInFile,
+		},
+		{
 			name: "a user's nkey in --authorization-file",
 			args: nats(inFile("UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", testSeed)),
 			want: "refused: --authorization-file: users[0].nkey" + seedInFile,
@@ -824,6 +862,11 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 		{
 			name: "a publish subject in --authorization-file",
 			args: nats(inFile(`"envoy.example.>"`, `"envoy.`+testSeed+`.>"`)),
+			want: "refused: --authorization-file: users[0].publish.allow[0]" + seedInFile,
+		},
+		{
+			name: "a publish subject in --authorization-file, split across subject tokens",
+			args: nats(inFile(`"envoy.example.>"`, `"envoy.`+split(testSeed, ".")+`.>"`)),
 			want: "refused: --authorization-file: users[0].publish.allow[0]" + seedInFile,
 		},
 		{
@@ -850,7 +893,7 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
     },
     {
       "name": "example-daemon"`)),
-			want: "refused: --authorization-file: users[0]: a key holding an nkey user seed (not echoed)",
+			want: "refused: --authorization-file: users[0]: a key holding an nkey seed (not echoed)",
 		},
 		{
 			name: "--authorization-file that is not JSON",
@@ -873,20 +916,22 @@ func TestRenderNeverEchoesASeed(t *testing.T) {
 	nearFile := writeFile(t, strings.Replace(authorizationJSON, `"envoy.example.>"`, `"envoy.`+nearSeed+`.>"`, 1))
 	nearPath := filepath.Join(t.TempDir(), nearSeed+".json")
 	require.NoError(t, os.WriteFile(nearPath, []byte(authorizationJSON), 0o600))
+	nearSplit := split(strings.ToLower(nearSeed), ".")
 	for _, control := range []struct {
-		name string
-		args []string
+		name, shows string
+		args        []string
 	}{
-		{"webhook-listener-env", listenerFlags([]string{"machine-id", "mention-trigger"}, "--machine-id", nearSeed, "--mention-trigger", "@"+nearSeed)},
-		{"nats-start-script", nats(nearFile, "--config-header", "Rendered for "+nearSeed, "--server-arg", "--server_name="+nearSeed)},
-		{"nats-start-script, by a path", nats(nearPath, "--config-path", "/tmp/"+nearSeed+".conf")},
-		{"metric-filters", filters("--metric-namespace", "example/NATS", "--logical-name-prefix", nearSeed, "--json")},
+		{"webhook-listener-env", nearSeed, listenerFlags([]string{"machine-id", "mention-trigger"}, "--machine-id", nearSeed, "--mention-trigger", "@"+nearSeed)},
+		{"webhook-listener-env, lowercase and split", nearSplit, listenerFlags([]string{"machine-id"}, "--machine-id", nearSplit)},
+		{"nats-start-script", nearSeed, nats(nearFile, "--config-header", "Rendered for "+nearSeed, "--server-arg", "--server_name="+nearSeed)},
+		{"nats-start-script, by a path", nearSeed, nats(nearPath, "--config-path", "/tmp/"+nearSeed+".conf")},
+		{"metric-filters", nearSeed, filters("--metric-namespace", "example/NATS", "--logical-name-prefix", nearSeed, "--json")},
 	} {
 		t.Run("control: "+control.name, func(t *testing.T) {
 			stdout, stderr, code := run(control.args...)
 			require.Equal(t, 0, code, stderr)
 			require.Empty(t, stderr)
-			require.Contains(t, stdout, nearSeed)
+			require.Contains(t, stdout, control.shows)
 		})
 	}
 }
