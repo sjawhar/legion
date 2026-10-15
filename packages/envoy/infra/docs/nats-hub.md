@@ -18,7 +18,7 @@ A hub whose `hostname` is `<h>` registers these resources, each a child of the h
 | `<h>-network` | `gcp:compute/network:Network` | Only without `network`: an auto-mode network, with a subnetwork in every region. |
 | `<h>-health-checks` | `gcp:compute/firewall:Firewall` | The hub's one firewall rule: tcp/8222 from Google's health-check ranges, `130.211.0.0/22` and `35.191.0.0/16`, to the VM's network tag `<h>-hub`. |
 | `<h>-healthz` | `gcp:compute/healthCheck:HealthCheck` | An HTTP check of NATS's `/healthz` on port 8222, every 10 seconds, unhealthy after 6 failures. |
-| `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet, the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
+| `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet (see [The VM's external address](#the-vms-external-address)), the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
 | `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from 300 seconds after the VM is created, and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, since its first VM fetches the key when it boots, and `pulumi up` waits until it is `STABLE`. |
 
 Every resource is in the gcp provider's project. The template's name is `<h>-` and a suffix the
@@ -42,7 +42,7 @@ and `instanceGroup`, the group's name.
 | `diskSizeGb` | `20` | The size, in GB, of the data disk the group creates for the hub's first VM. |
 | `natsImage` | required | The NATS server image, pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Its entrypoint takes nats-server's arguments, as the official `nats` image's does. |
 | `tailscaleImage` | required | Tailscale's image, pinned the same way. The unit configures it through containerboot's `TS_*` variables, as Tailscale's own image reads them. |
-| `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address, for its way out, and COS's host firewall accepts SSH, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, the VM's sshd is reachable from the internet: name a network without such a rule, or one whose way out is Cloud NAT. May come from another resource or stack. |
+| `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address and takes the network's rules for all its instances, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, its sshd is reachable from the internet: see [The VM's external address](#the-vms-external-address). May come from another resource or stack. |
 | `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
 
 Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
@@ -164,6 +164,25 @@ the tailnet's policy decides which peers reach 4222. 8222's `/varz`, `/connz` an
 reachable over the tailnet only through Tailscale's own accept rule for `tailscale0`, as are its
 other ports (see
 [What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
+
+## The VM's external address
+
+The template gives the VM an ephemeral external address, and the hub has no input that drops it.
+The address is the VM's way out: to the registries `natsImage` and `tailscaleImage` are pulled
+from, and to Tailscale's coordination and relay servers. A VM without one reaches the internet only
+through [Cloud NAT](https://cloud.google.com/nat/docs/overview) on its subnetwork's region, which
+a consumer's network need not have.
+
+The address is also a way in. Besides the hub's own rule, the VM takes every ingress rule of
+`network` that applies to all of the network's instances. The default network has four
+([pre-populated rules](https://cloud.google.com/firewall/docs/firewalls)): `default-allow-ssh`
+(tcp:22 from `0.0.0.0/0`), `default-allow-rdp`, `default-allow-icmp` and `default-allow-internal`
+(every port from `10.128.0.0/9`). COS's host firewall then accepts SSH and nothing else that the
+hub has not opened, so on such a network the VM's sshd is reachable from the internet. To avoid
+that, leave `network` unset, so the hub creates a network holding only its own rule, or name a
+network with no ingress rule from outside it that applies to every instance. The hub offers no
+way to run with Cloud NAT and no external address: a consumer whose VMs must have no external
+address can't use this version of `gcp:NatsHub`.
 
 ## The hub's data disk
 
