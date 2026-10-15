@@ -101,18 +101,22 @@ func TestAWSGenerateWritesTheBareSeedWithTheFirstVersionTokenAndReadsItBack(t *t
 	require.Equal(t, firstVersionToken, f.tokens[0])
 }
 
+// awsStoreOn serves f and opens the AWS store against it, in the test's region, with no account.
+// f answers version listings, which through the command only generate makes.
+func awsStoreOn(t *testing.T, f *fakeAWS) Store {
+	t.Helper()
+	f.generating = true
+	serve(t, f)
+	s, err := OpenAWS(context.Background(), awsRegion, "")
+	require.NoError(t, err)
+	return s
+}
+
 // The AWS store keeps every Store's contract against the fake, which applies Secrets Manager's
 // ClientRequestToken rules: it refuses a second first version since every Put sends
 // firstVersionToken.
 func TestAWSStoreKeepsTheStoreContract(t *testing.T) {
-	testStoreContract(t, func(t *testing.T) (Store, string) {
-		f := newFakeAWS(t)
-		f.generating = true // the contract counts versions, as only generate does
-		serve(t, f)
-		s, err := OpenAWS(context.Background(), awsRegion, "")
-		require.NoError(t, err)
-		return s, awsSecret
-	})
+	testStoreContract(t, func(t *testing.T) (Store, string) { return awsStoreOn(t, newFakeAWS(t)), awsSecret })
 }
 
 // Two generate runs overlap on one secret. B's checks are answered as they would have been before
@@ -147,86 +151,80 @@ func TestAWSOverlappingGenerateRunsLeaveTheFirstSeedServed(t *testing.T) {
 	require.True(t, strings.HasSuffix(out, " derives "+keyA+": yes\n"), out)
 }
 
-func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
+// The AWS store's own answers, each from the one call it makes; generate's messages over them are
+// seed_test.go's. DescribeSecret's ResourceNotFoundException is a secret that does not exist and its
+// DeletedDate one scheduled for deletion; ListSecretVersionIds is counted with deprecated versions
+// and across every page, and a page token handed out twice is refused; a written version must be
+// AWSCURRENT; GetSecretValue's ResourceNotFoundException matches ErrNotServed; and a failure names
+// the call, the secret and the AWS error code.
+func TestAWSStoreAnswersFromTheCallItMakes(t *testing.T) {
+	zone := time.Local
+	time.Local = time.UTC
+	t.Cleanup(func() { time.Local = zone })
 	seedValue, _ := testnats.User(t)
+	ctx := context.Background()
+	describe := func(s Store) (any, error) { return s.Describe(ctx, awsSecret) }
+	versions := func(s Store) (any, error) { return s.Versions(ctx, awsSecret) }
+	put := func(s Store) (any, error) { return s.Put(ctx, awsSecret, []byte(seedValue)) }
+	current := func(s Store) (any, error) {
+		version, value, err := s.Current(ctx, awsSecret)
+		require.Empty(t, value, "a failed read answers no value")
+		return version, err
+	}
+	failing := func(call, code string) func(*fakeAWS) *fakeAWS {
+		return func(f *fakeAWS) *fakeAWS {
+			f.failures = map[string]awsFailure{call: {code, "the request failed"}}
+			return f.holding(seedValue)
+		}
+	}
 	rows := []struct {
 		name  string
 		fake  func(*fakeAWS) *fakeAWS
-		want  string
-		lists int
+		call  func(Store) (any, error)
+		want  any
+		err   string
+		is    error // an error the store's must match, when not nil
+		calls []string
 	}{
+		{"a secret that does not exist", func(f *fakeAWS) *fakeAWS { f.exists = false; return f }, describe,
+			Description{}, "", nil, []string{"DescribeSecret"}},
+		{"a secret scheduled for deletion", func(f *fakeAWS) *fakeAWS { f.deletedAt = 1759190400; return f.holding(seedValue) }, describe,
+			Description{Exists: true, ScheduledForDeletion: true, DeletionDate: "2025-09-30 00:00:00+00:00"}, "", nil, []string{"DescribeSecret"}},
+		{"describe-secret denied", failing("DescribeSecret", "AccessDeniedException"), describe,
+			Description{}, "describe-secret " + awsSecret + " failed: AccessDeniedException", nil, []string{"DescribeSecret"}},
 		{"a deprecated version DescribeSecret does not show", func(f *fakeAWS) *fakeAWS {
 			f.versions = []awsVersion{{id: "v1", value: seedValue}}
 			return f
-		}, "already holds 1 version(s)", 1},
-		{"versions on every page", func(f *fakeAWS) *fakeAWS { f.pageSize = 2; return f.holding(seedValue, seedValue, seedValue) },
-			"already holds 3 version(s)", 2},
-		{"a listing that repeats its page token", func(f *fakeAWS) *fakeAWS { f.repeatToken = true; return f },
-			"list-secret-version-ids " + awsSecret + " failed: the listing handed out page token page-2 twice", 2},
-		{"absent", func(f *fakeAWS) *fakeAWS { f.exists = false; return f }, awsSecret + " does not exist", 0},
-		{"scheduled for deletion", func(f *fakeAWS) *fakeAWS { f.deletedAt = 1759190400; return f }, "is scheduled for deletion", 0},
-		{"describe-secret denied", func(f *fakeAWS) *fakeAWS {
-			f.failures = map[string]awsFailure{"DescribeSecret": {"AccessDeniedException", "not allowed"}}
-			return f
-		}, "describe-secret " + awsSecret + " failed: AccessDeniedException", 0},
-		{"list-secret-version-ids denied", func(f *fakeAWS) *fakeAWS {
-			f.failures = map[string]awsFailure{"ListSecretVersionIds": {"AccessDeniedException", "not allowed"}}
-			return f
-		}, "list-secret-version-ids " + awsSecret + " failed: AccessDeniedException", 1},
+		}, versions, 1, "", nil, []string{"ListSecretVersionIds"}},
+		{"versions on every page", func(f *fakeAWS) *fakeAWS { f.pageSize = 2; return f.holding(seedValue, seedValue, seedValue) }, versions,
+			3, "", nil, []string{"ListSecretVersionIds", "ListSecretVersionIds"}},
+		{"a listing that repeats its page token", func(f *fakeAWS) *fakeAWS { f.repeatToken = true; return f }, versions,
+			0, "list-secret-version-ids " + awsSecret + " failed: the listing handed out page token page-2 twice", nil,
+			[]string{"ListSecretVersionIds", "ListSecretVersionIds"}},
+		{"list-secret-version-ids denied", failing("ListSecretVersionIds", "AccessDeniedException"), versions,
+			0, "list-secret-version-ids " + awsSecret + " failed: AccessDeniedException", nil, []string{"ListSecretVersionIds"}},
+		{"a written version that is not AWSCURRENT", func(f *fakeAWS) *fakeAWS { f.putStages = []string{"AWSPENDING"}; return f }, put,
+			firstVersionToken, "version " + firstVersionToken + " was written but is not AWSCURRENT; run check", nil, []string{"PutSecretValue"}},
+		{"no version AWSCURRENT", func(f *fakeAWS) *fakeAWS { return f }, current,
+			"", "get-secret-value " + awsSecret + " failed: ResourceNotFoundException", ErrNotServed, []string{"GetSecretValue"}},
+		{"get-secret-value failing", failing("GetSecretValue", "DecryptionFailure"), current,
+			"", "get-secret-value " + awsSecret + " failed: DecryptionFailure", nil, []string{"GetSecretValue"}},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			f := row.fake(newFakeAWS(t))
-			serve(t, f)
-			code, out, errs := runAWS(t, f, "generate")
-			require.Equal(t, 2, code, errs)
-			require.Empty(t, out)
-			require.Contains(t, errs, "refused: ")
-			require.Contains(t, errs, row.want)
-			require.NotContains(t, f.recorded(), "PutSecretValue")
-			lists := 0
-			for _, call := range f.recorded() {
-				if call == "ListSecretVersionIds" {
-					lists++
-				}
+			got, err := row.call(awsStoreOn(t, f))
+			require.Equal(t, row.want, got)
+			if row.err == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, row.err)
+				require.NotErrorIs(t, err, ErrRefused, "the store refuses only another writer's first version")
 			}
-			require.Equal(t, row.lists, lists)
-		})
-	}
-}
-
-func TestAWSGenerateAfterItsWrite(t *testing.T) {
-	theirs, _ := testnats.User(t)
-	rows := []struct {
-		name string
-		fake func(*fakeAWS) *fakeAWS
-		want string
-	}{
-		{"the written version is not AWSCURRENT", func(f *fakeAWS) *fakeAWS { f.putStages = []string{"AWSPENDING"}; return f },
-			"was written but is not AWSCURRENT; run check"},
-		{"another writer raced it", func(f *fakeAWS) *fakeAWS { f.racing = &awsVersion{id: "their-version", value: theirs}; return f },
-			awsSecret + " now holds 2 version(s)"},
-		{"listing afterwards fails", func(f *fakeAWS) *fakeAWS {
-			f.failAfterPut = map[string]awsFailure{"ListSecretVersionIds": {"AccessDeniedException", "not allowed"}}
-			return f
-		}, "but listing versions afterwards failed: list-secret-version-ids " + awsSecret + " failed: AccessDeniedException"},
-		{"reading back fails", func(f *fakeAWS) *fakeAWS {
-			f.failAfterPut = map[string]awsFailure{"GetSecretValue": {"DecryptionFailure", "cannot decrypt"}}
-			return f
-		}, "but reading it back failed: get-secret-value " + awsSecret + " failed: DecryptionFailure"},
-	}
-	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			f := row.fake(newFakeAWS(t))
-			serve(t, f)
-			code, out, errs := runAWS(t, f, "generate")
-			require.Equal(t, 1, code, errs)
-			require.Contains(t, errs, "error after writing: ")
-			require.Contains(t, errs, row.want)
-			require.Len(t, f.tokens, 1)
-			mine := f.versions[len(f.versions)-1]
-			require.Equal(t, f.tokens[0], mine.id)
-			require.Equal(t, "public key: "+publicKeyOfSeed(t, mine.value)+"\nversion id: "+mine.id+"\n", out)
+			if row.is != nil {
+				require.ErrorIs(t, err, row.is)
+			}
+			require.Equal(t, row.calls, f.recorded())
 		})
 	}
 }
