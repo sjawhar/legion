@@ -175,9 +175,10 @@ jobs:
       - name: Unit test envoy-infra
         if: steps.version.outputs.skip != 'true'
         run: go -C packages/envoy/infra test ./...
-      # CGO_ENABLED=0: a static binary, so a linux archive runs on any distribution. One archive per
-      # target .github/envoy-infra-targets.json lists (the pull request's notices check reads the
-      # same list), under the name Pulumi requests from the schema's download URL,
+      # CGO_ENABLED=0: a static binary, so a linux archive runs on any distribution. -trimpath keeps
+      # the runner's directories out of the binary, so it does not depend on where it was built. One
+      # archive per target .github/envoy-infra-targets.json lists (the pull request's notices check
+      # reads the same list), under the name Pulumi requests from the schema's download URL,
       # pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz, with the binary and
       # THIRD_PARTY_NOTICES at its root, where Pulumi looks for the binary. THIRD_PARTY_NOTICES is
       # the license of every Go module that target's binary compiles in
@@ -196,7 +197,7 @@ jobs:
             arch=${target#*/}
             dir="out/$os-$arch"
             mkdir -p "$dir"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -buildvcs=false \
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go -C packages/envoy/infra build -trimpath -buildvcs=false \
               -ldflags "-X main.version=$VERSION" \
               -o "$GITHUB_WORKSPACE/$dir/pulumi-resource-envoy-infra" ./cmd/pulumi-resource-envoy-infra
             (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
