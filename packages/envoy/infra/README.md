@@ -731,8 +731,8 @@ nats = envoy_infra.aws.NatsService(
             envoy_infra.aws.UserArgs(
                 name="example-listener",
                 nkey="UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO",
-                publish=envoy_infra.aws.RulesArgs(allow=[">"]),
-                subscribe=envoy_infra.aws.RulesArgs(allow=[">"]),
+                publish=envoy_infra.nats.RulesArgs(allow=[">"]),
+                subscribe=envoy_infra.nats.RulesArgs(allow=[">"]),
                 has_seed=True,
             ),
         ],
@@ -1078,9 +1078,11 @@ describes.
 `core.Authorization` is a NATS server's nkey authorization: the users it knows by public key, what
 each may publish and subscribe to, and the user a client presenting no credential becomes. A NATS
 server's configuration is rendered from it, so it holds public keys only. `aws:NatsService` takes
-it as its `authorization` input, an `aws:Authorization`, whose properties are these fields in
-camelCase (`users[].name`, `nkey`, `publish`, `subscribe`, `allow`, `deny`, `hasSeed`,
-`noAuthUser`); `envoy-infra render nats-start-script` reads the same from its file.
+it as its `authorization` input, an `aws:Authorization` of `aws:User`s, whose properties are these
+fields in camelCase (`users[].name`, `nkey`, `publish`, `subscribe`, `allow`, `deny`, `hasSeed`,
+`noAuthUser`); `envoy-infra render nats-start-script` reads the same from its file. A user's
+`publish` and `subscribe` are each a `nats:Rules`, the one rules type every NATS component takes,
+whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs.
 
 | Field | What it is |
 | --- | --- |

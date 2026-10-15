@@ -43,7 +43,11 @@ type schema struct {
 		} `json:"inputProperties"`
 		RequiredInputs []string `json:"requiredInputs"`
 	} `json:"resources"`
-	Types map[string]json.RawMessage `json:"types"`
+	Types map[string]struct {
+		Properties map[string]struct {
+			Ref string `json:"$ref"`
+		} `json:"properties"`
+	} `json:"types"`
 }
 
 // servedSchema is schemaJSON decoded.
@@ -60,11 +64,12 @@ func TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath(t *testing.T) {
 	require.Equal(t, "github.com/sjawhar/envoy/infra/sdk/go/envoyinfra", s.Language.Go.ImportBasePath)
 }
 
-// The schema's types are exactly the components' own.
+// The schema's types are exactly the components' own, the rules every NATS component shares under
+// nats, which names no cloud.
 func TestSchemaTypes(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
-		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:aws:Rules",
+		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:nats:Rules",
 	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
@@ -81,7 +86,8 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
-	nats, ok := servedSchema(t).Resources["envoy-infra:aws:NatsService"]
+	s := servedSchema(t)
+	nats, ok := s.Resources["envoy-infra:aws:NatsService"]
 	require.True(t, ok, "the schema lists envoy-infra:aws:NatsService")
 	require.True(t, nats.IsComponent)
 	// A consumer owns its secrets; the component takes references to them.
@@ -90,6 +96,10 @@ func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
 	}
 	// Generated SDKs append Args to an object type's name for its input type.
 	require.Equal(t, "#/types/envoy-infra:aws:Authorization", nats.InputProperties["authorization"].Ref)
+	// A user's rules are the shared nats:Rules.
+	for _, direction := range []string{"publish", "subscribe"} {
+		require.Equal(t, "#/types/envoy-infra:nats:Rules", s.Types["envoy-infra:aws:User"].Properties[direction].Ref, "aws:User's %s", direction)
+	}
 	// Every input is required but the authorization and what belongs to it, and the optional
 	// settings.
 	require.ElementsMatch(t, []string{

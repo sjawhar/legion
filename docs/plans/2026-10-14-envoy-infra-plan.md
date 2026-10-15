@@ -1040,8 +1040,9 @@ value is required and has no default, and the brief gives the deployment's value
 components render, with no Pulumi, which Task 3.3's `render` shares) `rendering.go`, `nats.go`
 (the container definitions and the start script), `containers.go` (the container-JSON parts both
 components write) and `metricfilters.go` (both components' filters and the listener's alarms'
-text), and `testdata/nats-*.golden`. Modify `provider.go` (register), `go.mod` and `go.sum`
-(pulumi-aws Go SDK v7, the latest release when the task starts).
+text), and `testdata/nats-*.golden`; and `packages/envoy/infra/nats/rules.go`, the schema types
+every NATS component shares whatever its cloud (below). Modify `provider.go` (register), `go.mod`
+and `go.sum` (pulumi-aws Go SDK v7, the latest release when the task starts).
 
 **Interfaces:**
 
@@ -1104,8 +1105,12 @@ type NatsService struct {
 }
 ```
 
-`AuthorizationArgs` mirrors `core.Authorization` field for field (`users`: `name`, `nkey`,
-`publish`, `subscribe`, `hasSeed`; `noAuthUser`).
+`AuthorizationArgs` (`aws:Authorization`) and `UserArgs` (`aws:User`) mirror `core.Authorization`
+and `core.User` field for field (`users`: `name`, `nkey`, `publish`, `subscribe`, `hasSeed`;
+`noAuthUser`). A user's `publish` and `subscribe` are `nats.RulesArgs`, the schema type
+`nats:Rules`, in the package `nats`, which imports no cloud package: slice 4's `gcp:NatsHub` takes
+the same type for its users' explicit permissions, so a consumer of either spells rules alike and a
+GCP-only consumer's SDK shows no `aws` type. The Python and Go SDKs name it `nats.RulesArgs`.
 
 - [x] **Resources, as children.**
   - Two EFS file systems, each with its security group, rules, one mount target per subnet and an
