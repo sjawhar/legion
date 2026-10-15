@@ -31,6 +31,15 @@ function listEntries(text: string): string[] {
   return text.split(LIST_SEPARATOR).filter(Boolean);
 }
 
+/** A job-name list's entries: one per line, each trimmed. A job name holds spaces and slashes
+ *  (`production / production-apply`), so only a line break separates two. */
+function lineEntries(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
 /** A required field's text as the draft keeps it: text holding nothing but whitespace is empty,
  *  so the browser's `required` check refuses it before the server's 400 would. */
 function textOrEmpty(text: string): string {
@@ -49,11 +58,12 @@ function textOrNull(text: string): string | null {
   return trimmed === "" ? null : trimmed;
 }
 
-/** The fields as typed: the two lists are the textareas' text, split only when saved. */
+/** The fields as typed: the lists are the textareas' text, split only when saved. */
 interface Draft {
   deploy_repo: string;
   deploy_workflow_path: string;
-  production_job_name: string;
+  production_job_names: string;
+  production_apply_step_name: string;
   staging_e2e_job_name: string;
   staging_apply_job_name: string;
   pr_checks_rollup_job_name: string;
@@ -90,17 +100,18 @@ interface DeliverySettingsFormProps {
 
 /**
  * The delivery timeline's configuration record as a form: the deploy repository, its deploy and
- * pull-request-check workflow paths, the deploy workflow's production job, the three optional job
- * names the Pipeline page follows (the staging end-to-end gate, the staging deploy and the
- * PR-checks roll-up), and the population's authors and excluded repositories. The two lists take
- * one entry per line (a comma or a space also separates entries). The fields start from the stored
- * record (`initial`, or the record the form reads), and empty, with placeholders saying what each
- * holds, when there is none. A required field holding only whitespace (a list, only separators)
- * is empty, so the browser refuses it before any request; an optional job name left empty saves
- * `null`. Save replaces the whole record; the server first checks that the GitHub App can read the
- * deploy repository, and a refusal shows under the form as the server wrote it. A save refreshes
- * the record and every delivery read, so the Delivery page, which renders this form in place of a
- * timeline it cannot read yet, shows the timeline once the save succeeds.
+ * pull-request-check workflow paths, the deploy workflow's production jobs (one per line) and
+ * optional apply step, the three optional job names the Pipeline page follows (the staging
+ * end-to-end gate, the staging deploy and the PR-checks roll-up), and the population's authors and
+ * excluded repositories. The two population lists take one entry per line (a comma or a space also
+ * separates entries); production job names split on newlines alone because they can contain spaces.
+ * The fields start from the stored record (`initial`, or the record the form reads), and empty, with
+ * placeholders saying what each holds, when there is none. A required field holding only whitespace
+ * (a list, only separators) is empty, so the browser refuses it before any request; an optional job
+ * name left empty saves `null`. Save replaces the whole record; the server first checks that the
+ * GitHub App can read the deploy repository, and a refusal shows under the form as the server wrote
+ * it. A save refreshes the record and every delivery read, so the Delivery page, which renders this
+ * form in place of a timeline it cannot read yet, shows the timeline once the save succeeds.
  */
 export function DeliverySettingsForm({ initial }: DeliverySettingsFormProps): ReactNode {
   const settings = useQuery({ ...deliverySettingsQuery(), enabled: initial === undefined });
@@ -137,7 +148,8 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
     excluded_repos: record?.excluded_repos.join("\n") ?? "",
     population_authors: record?.population_authors.join("\n") ?? "",
     pr_checks_workflow_path: record?.pr_checks_workflow_path ?? "",
-    production_job_name: record?.production_job_name ?? "",
+    production_job_names: record?.production_job_names.join("\n") ?? "",
+    production_apply_step_name: record?.production_apply_step_name ?? "",
     pr_checks_rollup_job_name: record?.pr_checks_rollup_job_name ?? "",
     staging_apply_job_name: record?.staging_apply_job_name ?? "",
     staging_e2e_job_name: record?.staging_e2e_job_name ?? "",
@@ -164,7 +176,8 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
         excluded_repos: listEntries(draft.excluded_repos),
         population_authors: listEntries(draft.population_authors),
         pr_checks_workflow_path: draft.pr_checks_workflow_path.trim(),
-        production_job_name: draft.production_job_name.trim(),
+        production_job_names: lineEntries(draft.production_job_names),
+        production_apply_step_name: textOrNull(draft.production_apply_step_name),
         pr_checks_rollup_job_name: textOrNull(draft.pr_checks_rollup_job_name),
         staging_apply_job_name: textOrNull(draft.staging_apply_job_name),
         staging_e2e_job_name: textOrNull(draft.staging_e2e_job_name),
@@ -202,23 +215,44 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
             />
           </label>
           <div className="grid gap-1">
-            <label className={settingsFieldLabel} htmlFor={`${id}-production-job`}>
-              Production job
-              <input
-                aria-describedby={`${id}-production-job-hint`}
+            <label className={settingsFieldLabel} htmlFor={`${id}-production-jobs`}>
+              Production jobs
+              <textarea
+                aria-describedby={`${id}-production-jobs-hint`}
                 className={settingsMonoInput}
-                id={`${id}-production-job`}
+                id={`${id}-production-jobs`}
                 onChange={(event) =>
-                  setDraft({ ...draft, production_job_name: textOrEmpty(event.target.value) })
+                  setDraft({ ...draft, production_job_names: textOrEmpty(event.target.value) })
                 }
-                placeholder="The job's name as a deploy run lists it"
+                placeholder="One job name per line, as a deploy run lists it"
                 required
-                value={draft.production_job_name}
+                rows={2}
+                value={draft.production_job_names}
               />
             </label>
-            <p className={`text-xs ${textMutedOnCanvas}`} id={`${id}-production-job-hint`}>
-              The job whose success counts as a production deploy, named as a run lists it: a
-              reusable workflow's job reads &lt;caller&gt; / &lt;job&gt;.
+            <p className={`text-xs ${textMutedOnCanvas}`} id={`${id}-production-jobs-hint`}>
+              The jobs whose success counts as a production deploy, one per line, named as a run
+              lists each: a reusable workflow&apos;s job reads &lt;caller&gt; / &lt;job&gt;. After a
+              rename, keep the old name beside the new so history still counts.
+            </p>
+          </div>
+          <div className="grid gap-1">
+            <label className={settingsFieldLabel} htmlFor={`${id}-production-apply-step`}>
+              Production apply step
+              <input
+                aria-describedby={`${id}-production-apply-step-hint`}
+                className={settingsMonoInput}
+                id={`${id}-production-apply-step`}
+                onChange={(event) =>
+                  setDraft({ ...draft, production_apply_step_name: event.target.value })
+                }
+                placeholder="The step whose success means the job applied (optional)"
+                value={draft.production_apply_step_name}
+              />
+            </label>
+            <p className={`text-xs ${textMutedOnCanvas}`} id={`${id}-production-apply-step-hint`}>
+              Named as GitHub lists the job&apos;s step. Set, a production job that succeeds without
+              this step succeeding is not a deploy.
             </p>
           </div>
           {PIPELINE_JOB_FIELDS.map(({ key, label, placeholder }) => (

@@ -177,7 +177,7 @@ func deliveryTimelineCompute(settings delivery.DeliverySettings, pop deliveryPop
 		runViews = append(runViews, delivery.DeliveryRunView{
 			ID: run.RunID, URL: run.URL, HeadSHA: run.HeadSHA, HeadAt: run.HeadCommitAt,
 			StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
-			Production:     deliveryProductionView(jobs, settings.ProductionJobName),
+			Production:     deliveryProductionView(jobs, settings.Production()),
 			FailedJobs:     deliveryJobViews(delivery.FailedJobs(jobs)),
 			RootFailingJob: deliveryJobView(delivery.RootFailingJob(jobs)),
 			PRs:            shipped,
@@ -373,7 +373,7 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 		// The deploy repository's pull requests still waiting at `from`, so the waiting line
 		// starts the window at their count rather than at zero.
 		independent = append(independent, func(ctx context.Context) (err error) {
-			pop.waiting, err = delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.ProductionJobName, from)
+			pop.waiting, err = delivery.ListPullRequestsWaitingAt(ctx, pool, settings.DeployRepo, settings.Production(), from)
 			return err
 		})
 	}
@@ -396,8 +396,8 @@ func (s *server) readDeliveryRows(ctx context.Context, settings delivery.Deliver
 		return deliveryPopulation{}, err
 	}
 	// Warned here, once per run, rather than in the compute, which runs again on every expiry.
-	s.productionApplies(pop.applyRuns, pop.jobsByRun, settings.ProductionJobName)
-	s.productionApplies(pop.windowRuns, pop.windowJobs, settings.ProductionJobName)
+	s.productionApplies(pop.applyRuns, pop.jobsByRun, settings.Production())
+	s.productionApplies(pop.windowRuns, pop.windowJobs, settings.Production())
 
 	sessionIDs := []string{}
 	issueKeys := []string{}
@@ -443,7 +443,7 @@ func deliveryIssueProjects(issues map[string]deliveryIssue) []string {
 // of the issues the population's pull requests name, so a narrowed population derives what a fresh
 // read of its window would.
 func (p deliveryPopulation) derive(settings delivery.DeliverySettings) deliveryDerived {
-	applies, _ := delivery.ProductionApplies(p.applyRuns, p.jobsByRun, settings.ProductionJobName)
+	applies := delivery.ProductionApplies(p.applyRuns, p.jobsByRun, settings.Production()).Applies
 	parentAgents := delivery.NewParentAgents(p.groups, p.titles)
 	sessionTitles := map[string]string{}
 	sessionPRCounts := map[string]int{}
@@ -583,7 +583,7 @@ func (p deliveryPopulation) narrowedTo(settings delivery.DeliverySettings, from 
 			narrowed.waiting = append(narrowed.waiting, waiting)
 		}
 	}
-	applies, _ := delivery.ProductionApplies(p.applyRuns, p.jobsByRun, settings.ProductionJobName)
+	applies := delivery.ProductionApplies(p.applyRuns, p.jobsByRun, settings.Production()).Applies
 	for _, pr := range left {
 		if pr.Repo != settings.DeployRepo {
 			continue
@@ -722,32 +722,42 @@ func deliveryJobView(job *delivery.DeliveryRunJob) *delivery.DeliveryRunJobView 
 	return &delivery.DeliveryRunJobView{Name: job.Name, CompletedAt: job.CompletedAt}
 }
 
-// deliveryProductionView is the run's production job (the configured production_job_name), or nil
+// deliveryProductionView is the run's production job (Production.Job), its conclusion as a deploy
+// reads it (Production.Conclusion: skipped for a job that succeeded having applied nothing), or nil
 // when the run has none.
-func deliveryProductionView(jobs []delivery.DeliveryRunJob, productionJobName string) *delivery.DeliveryRunProductionView {
-	for _, job := range jobs {
-		if job.Name == productionJobName {
-			return &delivery.DeliveryRunProductionView{Conclusion: job.Conclusion, CompletedAt: job.CompletedAt}
-		}
+func deliveryProductionView(jobs []delivery.DeliveryRunJob, production delivery.Production) *delivery.DeliveryRunProductionView {
+	job := production.Job(jobs)
+	if job == nil {
+		return nil
 	}
-	return nil
+	return &delivery.DeliveryRunProductionView{Conclusion: production.Conclusion(*job), CompletedAt: job.CompletedAt}
 }
 
-// productionApplies is delivery.ProductionApplies for a read, which warns about each run it sets
-// apart, a successfully concluded run with no production job, once per run and configured job
-// name for the life of the process: the timeline and the measures judge the same runs on every
-// read, so the line would otherwise repeat for one run on every page load. A changed
-// production_job_name is a new key, so a misconfiguration is named again under its new value.
-func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, productionJobName string) []delivery.Apply {
-	applies, unmatched := delivery.ProductionApplies(runs, jobsByRun, productionJobName)
-	for _, missing := range unmatched {
-		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedProductionRun{missing.Run.Repo, missing.Run.RunID, productionJobName}, struct{}{}); warned {
+// productionApplies is delivery.ProductionApplies for a read. It warns once per run and
+// configuration for the life of the process about each successful run with no listed production
+// job, naming every listed name, and about each run whose production job lists no step named the
+// configured apply step: the timeline and the measures judge the same runs on every read, so a
+// line would otherwise repeat on every page load. A changed list or step is a new key, so a
+// misconfiguration is named again under its new value.
+func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, production delivery.Production) []delivery.Apply {
+	judged := delivery.ProductionApplies(runs, jobsByRun, production)
+	names := strings.Join(production.JobNames, "\x00")
+	for _, missing := range judged.Unmatched {
+		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedProductionRun{repo: missing.Run.Repo, runID: missing.Run.RunID, jobNames: names}, struct{}{}); warned {
 			continue
 		}
-		slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_name -- it will never count as a deploy",
-			"repo", missing.Run.Repo, "run_id", missing.Run.RunID, "configured_job_name", productionJobName, "job_names_seen", missing.JobNames)
+		slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_names -- it will never count as a deploy",
+			"repo", missing.Run.Repo, "run_id", missing.Run.RunID, "configured_job_names", production.JobNames, "job_names_seen", missing.JobNames)
 	}
-	return applies
+	for _, run := range judged.StepMissing {
+		key := warnedProductionRun{repo: run.Repo, runID: run.RunID, jobNames: names, applyStep: *production.ApplyStep}
+		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(key, struct{}{}); warned {
+			continue
+		}
+		slog.Warn("dispatch delivery: a run's production job succeeded but lists no step named the configured production_apply_step_name -- it will never count as a deploy",
+			"repo", run.Repo, "run_id", run.RunID, "configured_job_names", production.JobNames, "configured_apply_step", *production.ApplyStep)
+	}
+	return judged.Applies
 }
 
 // deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,

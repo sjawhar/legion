@@ -17,7 +17,8 @@ const record: DeliverySettings = {
   population_authors: ["octocat", "octocat-agent[bot]"],
   pr_checks_rollup_job_name: null,
   pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
-  production_job_name: "widgets-release",
+  production_job_names: ["widgets-release / widgets-release", "release / release"],
+  production_apply_step_name: null,
   staging_apply_job_name: null,
   staging_e2e_job_name: null,
   updated_at: "2026-10-07T12:00:00Z",
@@ -46,7 +47,9 @@ test("the form starts from the stored record, one list entry per line", async ()
 
     expect(await screen.findByDisplayValue("acme/widgets")).toBeDefined();
     expect(field("Deploy workflow").value).toBe(".github/workflows/deploy.yml");
-    expect(field("Production job").value).toBe("widgets-release");
+    expect(field("Production jobs").value).toBe(
+      "widgets-release / widgets-release\nrelease / release"
+    );
     expect(field("PR checks workflow").value).toBe(".github/workflows/pr-checks.yml");
     expect(field("Population authors").value).toBe("octocat\noctocat-agent[bot]");
     expect(field("Excluded repositories").value).toBe("acme/dojo\nacme/widgets-smoke");
@@ -66,7 +69,7 @@ test("with no record the fields are empty and their placeholders say what each h
     const placeholders = [
       ["Deploy repository", "owner/repo"],
       ["Deploy workflow", ".github/workflows/<deploy>.yml"],
-      ["Production job", "The job's name as a deploy run lists it"],
+      ["Production jobs", "One job name per line, as a deploy run lists it"],
       ["PR checks workflow", ".github/workflows/<checks>.yml"],
       ["Population authors", "One GitHub login per line"],
       ["Excluded repositories", "One owner/repo per line"],
@@ -96,7 +99,9 @@ test("Save sends the fields trimmed and each list split into its entries", async
     fireEvent.change(field("Deploy workflow"), {
       target: { value: ".github/workflows/deploy.yml " },
     });
-    fireEvent.change(field("Production job"), { target: { value: " widgets-release" } });
+    fireEvent.change(field("Production jobs"), {
+      target: { value: " widgets-release / widgets-release \n\nrelease / release\n" },
+    });
     fireEvent.change(field("PR checks workflow"), {
       target: { value: ".github/workflows/pr-checks.yml" },
     });
@@ -116,7 +121,8 @@ test("Save sends the fields trimmed and each list split into its entries", async
       population_authors: ["octocat", "octocat-agent[bot]", "hubot"],
       pr_checks_rollup_job_name: null,
       pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
-      production_job_name: "widgets-release",
+      production_job_names: ["widgets-release / widgets-release", "release / release"],
+      production_apply_step_name: null,
       staging_apply_job_name: null,
       staging_e2e_job_name: null,
     });
@@ -179,19 +185,53 @@ test("the three optional pipeline job names round-trip, and an emptied one saves
   }
 });
 
+test("the production apply step round-trips trimmed and an empty value saves null", async () => {
+  const stored: DeliverySettings = {
+    ...record,
+    production_apply_step_name: "Run ./.github/actions/apply",
+  };
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(stored);
+  const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(stored);
+
+  try {
+    renderForm();
+    await screen.findByDisplayValue("acme/widgets");
+    expect(field("Production apply step").value).toBe("Run ./.github/actions/apply");
+    fireEvent.change(field("Production apply step"), {
+      target: { value: " Run ./.github/actions/apply " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
+    expect(putDeliverySettings.mock.calls[0]?.[0]).toMatchObject({
+      production_apply_step_name: "Run ./.github/actions/apply",
+    });
+
+    fireEvent.change(field("Production apply step"), { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(2));
+    expect(putDeliverySettings.mock.calls[1]?.[0]).toMatchObject({
+      production_apply_step_name: null,
+    });
+  } finally {
+    cleanup();
+    getDeliverySettings.mockRestore();
+    putDeliverySettings.mockRestore();
+  }
+});
+
 test("a required field holding only whitespace is empty, so Save is refused before any request", async () => {
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(record);
   const filled: [string, string][] = [
     ["Deploy repository", "acme/widgets"],
     ["Deploy workflow", ".github/workflows/deploy.yml"],
-    ["Production job", "widgets-release"],
+    ["Production jobs", "widgets-release"],
     ["PR checks workflow", ".github/workflows/pr-checks.yml"],
     ["Population authors", "octocat"],
   ];
   const blank: [string, string][] = [
     ["Deploy workflow", "   "],
-    ["Production job", "\t "],
+    ["Production jobs", " \n\t \n"],
     ["PR checks workflow", " "],
     ["Population authors", " \n,\n  , "],
   ];

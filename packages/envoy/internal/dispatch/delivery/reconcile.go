@@ -90,6 +90,7 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 		slog.Error("dispatch delivery: read settings for reconcile", "error", err)
 		return
 	}
+	production := settings.Production()
 	owner, repo, err := splitRepo(settings.DeployRepo)
 	if err != nil {
 		slog.Error("dispatch delivery: deploy_repo setting", "error", err)
@@ -120,19 +121,19 @@ func (r *Reconcile) runOnce(ctx context.Context) {
 
 	record("reconcile merged pull requests", r.reconcileMergedPullRequests(ctx, settings, searchScope, now))
 	record("reconcile partial pull requests", r.reconcilePartialPullRequests(ctx))
-	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now))
+	record("reconcile deploy workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now))
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now))
+		record("reconcile PR-checks workflow runs", r.reconcileWorkflow(ctx, owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, production, now))
 	}
 	// The runs backfills log and resume their own failures and never reach record(): a rate limit
 	// one meets must not hold last_reconcile_at or set last_error while every regular step
 	// succeeded. Each walks at most backfillWindowsPerPass hours a pass. The created_at backfill
 	// reads deploy runs alone, since containment is the one reader of a run's creation.
-	r.backfillRuns(ctx, backfillStep(DeliveryRunKindDeploy), owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now)
+	r.backfillRuns(ctx, backfillStep(DeliveryRunKindDeploy), owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now)
 	if settings.PRChecksWorkflowPath != settings.DeployWorkflowPath {
-		r.backfillRuns(ctx, backfillStep(DeliveryRunKindPRChecks), owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, now)
+		r.backfillRuns(ctx, backfillStep(DeliveryRunKindPRChecks), owner, repo, settings.DeployRepo, settings.PRChecksWorkflowPath, DeliveryRunKindPRChecks, production, now)
 	}
-	r.backfillRuns(ctx, createdAtBackfillStep, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, now)
+	r.backfillRuns(ctx, createdAtBackfillStep, owner, repo, settings.DeployRepo, settings.DeployWorkflowPath, DeliveryRunKindDeploy, production, now)
 	// The attribution backfill runs last, within its own call budget: it is the one step whose
 	// work can wait a pass, so the timeline's own facts take the rate limit first.
 	record("read attribution inputs of stored pull requests", r.reconcileAttributionInputs(ctx))
@@ -629,7 +630,7 @@ func completedRunIDs(runs []FetchedRun) []int64 {
 // RunJobsUnfetchable point query once per completed run on every pass -- the overwhelming
 // majority of runs were never marked, and this package already bulk-fetches this way one
 // function away (ListPartialPullRequests feeding reconcilePartialPullRequests).
-func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, until time.Time) error {
+func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, production Production, until time.Time) error {
 	step, scope := runsStep(kind), runsProgressScope(repoFull, workflowPath)
 	since, err := r.stepSince(ctx, step, scope, until)
 	if err != nil {
@@ -649,7 +650,7 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 		windowFailed := false
 		for _, run := range runs {
 			attempted++
-			err := r.reconcileRun(ctx, owner, repo, repoFull, kind, run, jobsUnfetchable)
+			err := r.reconcileRun(ctx, owner, repo, repoFull, kind, production, run, jobsUnfetchable)
 			if err == nil {
 				continue
 			}
@@ -698,7 +699,7 @@ func (r *Reconcile) reconcileWorkflow(ctx context.Context, owner, repo, repoFull
 // (jobsUnfetchable, reconcileWorkflow's own bulk ListUnfetchableRunIDs read, from an earlier
 // pass's permanent 404) is skipped rather than re-fetched: the same treatment
 // completePartialPullRequest gives an already-unfetchable pull request.
-func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, run FetchedRun, jobsUnfetchable map[int64]bool) error {
+func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull string, kind DeliveryRunKind, production Production, run FetchedRun, jobsUnfetchable map[int64]bool) error {
 	if err := UpsertRun(ctx, r.pool, StoredRun(repoFull, kind, run)); err != nil {
 		return fmt.Errorf("upsert run: %w", err)
 	}
@@ -718,7 +719,7 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 		}
 		return fmt.Errorf("list jobs: %w", err)
 	}
-	jobs := RunJobs(repoFull, run.RunID, fetchedJobs)
+	jobs := RunJobs(repoFull, run.RunID, fetchedJobs, production)
 	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, jobs, JobsComplete(jobs))
 }
 

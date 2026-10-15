@@ -503,7 +503,7 @@ test("API client reaches every remaining documented endpoint", async () => {
     excluded_repos: [],
     population_authors: ["octocat"],
     pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
-    production_job_name: "widgets-release",
+    production_job_names: ["widgets-release"],
   });
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([

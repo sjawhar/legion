@@ -71,8 +71,11 @@ data** when the window holds nothing to measure. Below them, one line carries th
 **Definitions & alternatives** opens the other definitions of each figure and a per-day table,
 newest day first; a day the window only partly covers is marked partial.
 
-- **Deploy**: a run of the deploy workflow on `main` whose production job succeeded. A run counts
-  on the day it started. Runs on other branches count in no figure.
+- **Deploy**: a run of the deploy workflow on `main` whose production job succeeded: a job named
+  in **Production jobs** in **Settings → Delivery timeline** (a renamed job lists its old and new
+  names) and, when **Production apply step** names a step, one whose step of that name succeeded
+  too, so a run that stood down without applying is no deploy. A run counts on the day it started.
+  Runs on other branches count in no figure.
 - **Deploys a day**: deploys in the window divided by the window's length in days.
 - **Lead time**: from a pull request's merge to the first successful production deploy that
   contains it: the earliest to finish of the deploys whose run GitHub created after the merge. A
@@ -199,9 +202,10 @@ clock; a step's median and 90th percentile are rounded to a tenth of a minute.
   `pull_request` event; merge-queue runs are not counted), from the run's start to its
   completion.
 - **Staging end-to-end gate**, **Deploy to staging** and **Deploy to production**: the deploy
-  workflow's jobs named in **Settings → Delivery timeline**, in its push runs on `main`. A run
-  started by hand, or on another branch, is not counted. The first two are optional settings; a
-  pipeline that names neither has no such card.
+  workflow's jobs named in **Settings → Delivery timeline**, in its push runs on `main`. The
+  production card follows every listed production job name. A run started by hand, or on another
+  branch, is not counted. The first two are optional settings; a pipeline that names neither has no
+  such card.
 - **Merge to production**: the delivery lead time, by the day each pull request merged. A pull
   request still waiting has none yet. It is judged on the seven days' longest change: the target
   is under 45 minutes for every change.

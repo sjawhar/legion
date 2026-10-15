@@ -87,6 +87,11 @@
 
 ### Changed
 
+- **Breaking:** `DeliverySettings` and `DeliverySettingsInput` replace
+  `production_job_name` with `production_job_names` and `production_apply_step_name`. A run's
+  production result can be `skipped` when its configured apply step did not succeed, and
+  `DeliveryDeployJobTiming.job` joins every followed job name with `or`.
+
 - `live` is removed from the capability row's `status` enum on `GET /legion/v1/state`: a live row
   is `present`, `open` or `unchecked` from the sessions' reports, and a row no session has reported
   reads `unchecked` beside an image row no probe has checked — daemon API contract 21 (LEGION-663).

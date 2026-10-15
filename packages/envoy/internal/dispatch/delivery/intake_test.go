@@ -66,7 +66,7 @@ func seedDeliverySettings(t *testing.T, ctx context.Context, pool *store.Pool) D
 	settings, err := PutSettings(ctx, pool, DeliverySettings{
 		DeployRepo:           "acme/widgets",
 		DeployWorkflowPath:   ".github/workflows/deploy.yml",
-		ProductionJobName:    "widgets-release / widgets-release",
+		ProductionJobNames:   []string{"widgets-release / widgets-release"},
 		PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors:    []string{"octocat"},
 		ExcludedRepos:        []string{"acme/playground"},
