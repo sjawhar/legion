@@ -1,7 +1,6 @@
 package rendering
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -89,12 +88,13 @@ func NatsContainerDefinitions(c NatsContainers) string {
 
 // NatsLaunch returns the NATS container's launch fields. Without authorization the image's own
 // entrypoint runs nats-server with serverArgs. With it, the task has no file of its own to mount,
-// so a shell runs NatsStartScript.
+// so `/bin/sh -c` runs core's StartScript, which `envoy-infra render nats-start-script` prints;
+// its refusals, each a core.InputError naming its input, pass through as they are.
 func NatsLaunch(authorization *core.Authorization, header, serverArgs []string, configPath string) ([]core.Field, error) {
 	if authorization == nil {
 		return []core.Field{{Key: "command", Value: append([]string{"nats-server"}, serverArgs...)}}, nil
 	}
-	script, err := NatsStartScript(*authorization, header, serverArgs, configPath)
+	script, err := authorization.StartScript(header, serverArgs, configPath)
 	if err != nil {
 		return nil, err
 	}
@@ -102,28 +102,4 @@ func NatsLaunch(authorization *core.Authorization, header, serverArgs []string, 
 		{Key: "entryPoint", Value: []string{"/bin/sh", "-c"}},
 		{Key: "command", Value: []string{script}},
 	}, nil
-}
-
-// NatsStartScript returns the script a NatsService's NATS container runs under `/bin/sh -c` when
-// the service has an authorization: it writes the rendered configuration (public keys only) to
-// configPath and execs nats-server on it, serverArgs still setting JetStream and the ports. The
-// component launches the container with it and `envoy-infra render nats-start-script` prints it.
-// Each refusal is a core.InputError naming the component's input: StartScript's own names
-// serverArgs, and any other it returns is a header line's.
-func NatsStartScript(authorization core.Authorization, configHeader, serverArgs []string, configPath string) (string, error) {
-	if err := authorization.Validate(); err != nil {
-		return "", core.InputErrorf("authorization", "authorization: %w", err)
-	}
-	if configPath == "" {
-		return "", core.InputErrorf("configPath", "configPath is required with authorization: the start script writes the configuration there")
-	}
-	script, err := authorization.StartScript(configHeader, serverArgs, configPath)
-	var refused *core.InputError
-	if errors.As(err, &refused) {
-		return "", err
-	}
-	if err != nil {
-		return "", core.InputErrorf("configHeader", "configHeader: %w", err)
-	}
-	return script, nil
 }

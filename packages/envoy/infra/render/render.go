@@ -178,7 +178,7 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 		return s.refused("authorization-file", err)
 	}
 
-	script, err := rendering.NatsStartScript(authorization, header, serverArgs, configPath)
+	script, err := authorization.StartScript(header, serverArgs, configPath)
 	if err != nil {
 		return s.refusedInput(err)
 	}
