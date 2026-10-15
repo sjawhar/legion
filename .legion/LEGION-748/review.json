@@ -2,71 +2,61 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T18:49:44Z",
+  "completed": "2026-10-15T20:00:34Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "round": 1,
-  "reviewedHead": "a6250e776f949962b868f3ba83ec363ccfa7db3e",
-  "ciHead": "8b299ab3abb53758cef42eed8120bcbacbd2e40f",
-  "ci": "Required set from main's ruleset: lint, typecheck, test, pr-title (branch protection: none). Newest pull_request run head 8b299ab3; its check-runs: lint, typecheck, test, pr-title all completed/success (Tests run 38781143108, PR Title run 38781143167, as the body's CI line says). compare 8b299ab3...a6250e77 touches only .legion/LEGION-748/{implement,test}.json.",
-  "threads": "None exist on the pull request (gh api graphql reviewThreads: empty); no prior review; one bot comment (the implementer's rebase record). Nothing to answer or name to the implementer.",
-  "proofLines": "E2E (implementer) and E2E (tester) both present, each naming a production-like surface (legion-smoke runs 38758454703/38758671814; the real history differential; the bare-origin SSH rig), a command or run id, an observation, the head (4af79526 round 1, 8b299ab3 round 2) and a negative control.",
-  "thermonuclear": "Pair run at a6250e77: thermonuclear-deep-review (checker 101/101, release-push.test.sh 235/237 with the two github.com host-key cases failing only for the pod's missing ssh; real workflows pass the checker; bun pm pack name verified) and thermonuclear-code-quality (same harness results; duplication measured). Both converge on the checker's workflow-level env/defaults blindness; the deep review found the push-main refspec regression, which the reviewer reproduced in a scratch repository.",
+  "round": 2,
+  "reviewedHead": "6cf18c50abfa0ce011d3b8f6e8e38c7dfd0ea026",
+  "ciHead": "4ee312ac70a2592dada486384f70b38877102e06",
+  "ci": "Required set from main's ruleset: lint, typecheck, test, pr-title (branch protection: none). Newest pull_request run head 4ee312ac; its check-runs: lint, typecheck, test, pr-title all completed/success (Tests run 38793179060, PR Title run 38793292477 as the body's CI line says; the Legion Envoy and Contracts run at that head was in_progress, not required). compare 4ee312ac...6cf18c50 touches only .legion/.",
+  "threads": "Eight threads from round 1, each with the implementer's `Fixed in …` reply and resolved. Replied on all eight in my own words at this round; accepted seven (PRRT_kwDORFy7ds6s66UA, …UJ, …UR, …Ub, …Uj, …Uw, …U8); the Critical push-main thread PRRT_kwDORFy7ds6s66T3 still stands, narrowed, and I unresolved it (the mutation succeeded for the review App).",
+  "proofLines": "E2E (implementer) rounds 1-3 and E2E (tester) round 3 present with surfaces, commands, observations, heads and negative controls. The Contract change census is present; its two searches re-run at the head give exactly the workflow hits it lists (the only extra hits are fixture text in check-release-credentials.test.sh).",
+  "thermonuclear": "Pair run at 4ee312ac (new fingerprint): deep-review drove the real release-push.sh against a bare origin and found two branch-dispatch shapes that still land on main (manifest-only commit at the release version with arbitrary content; a merge commit with an older first parent that resets main's tree), both reproduced by the reviewer; code-quality found the tripwire pinned by text not execution (job-level continue-on-error; non-shell defaults.run.shell on the build job). Harnesses: check-release-credentials.test.sh 135/135; release-push.test.sh 249/251 (the two github.com host-key cases need an ssh binary the pod lacks); the real workflows pass the checker.",
   "verdict": "changes_requested",
   "critical": 1,
-  "important": 3,
+  "important": 1,
   "minor": 5,
   "keyFindings": [
     {
       "severity": "critical",
-      "file": ".github/scripts/release-push.sh:406",
-      "description": "push-main now pushes `HEAD:refs/heads/main` (base: `git push origin main`) and, after a rejection, rebases the whole checkout onto main (:429) and pushes again. The three npm publish jobs run on a workflow_dispatch from any branch (release.yaml:526/702/889, no ref gate; the spec keeps that) and check out the event's ref (release.yaml:614-617, no `ref:`), so a branch dispatch lands that branch's commits on main through the deploy key with a `[skip ci]` head commit (release.yaml:672), bypassing main's ruleset and starting no workflow. Reproduced: from a branch two commits ahead, the base refspec pushes nothing; the new one fast-forwards main to the branch. The 'callers check out detached' premise (release-push.sh:63,405; release-push.test.sh:327) describes no caller of push-main. Fix: refuse unless HEAD is exactly one commit over main's tip (re-checked after each rebase), with a harness case pinning it."
+      "file": ".github/scripts/release-push.sh:437",
+      "description": "The one-commit rule counts commits against the fetched tip (:428) but diffs paths against HEAD^ (:437) and never checks the manifest's content, so a workflow_dispatch from a branch still writes main through the deploy key: (A) a branch whose one commit over main's tip edits only the manifest and already carries the release version (so `tag` commits nothing) lands with any other content in that file — reproduced: a `scripts.postinstall` under the author's own subject; (B) a merge commit whose first parent is an older main commit and second parent main's tip, tree = old tree + bump, passes both tests and fast-forwards main back to the old tree — reproduced: a file deleted and another reverted on origin/main, rc 0. The header (:64-70) and the body's 'a branch's commits never land on main' are false. Fix: before every push require HEAD^ == the fetched tip (else the rebase path), `git diff --name-only $upstream HEAD` == the manifest, and the manifest differing from main's copy in `.version` alone, set to `$version`; two harness cases (the merge shape, the manifest-with-extra-content shape) refused with origin untouched."
     },
     {
       "severity": "important",
-      "file": ".github/scripts/check-release-credentials.sh:374",
-      "description": "The checker scans each job's own text (`texts_of(job)`) and only the step's own `shell:` (:283), so a workflow-level `env: DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}` or `defaults: run: shell: python` leaves it green while every build job then holds the key or runs an unread interpreter; `write_scopes` (:301) already inherits the workflow's permissions, so this is the one inheritance the file misses. Reproduced on copies of the real release.yaml by both thermonuclear agents."
-    },
-    {
-      "severity": "important",
-      "file": ".github/scripts/check-release-credentials.sh:95",
-      "description": "DEPLOY_KEY_REF and DEPLOY_KEY_VALUE are case-sensitive while OTHER_SECRET (:109) is IGNORECASE with the comment that secret names are case-insensitive; `secrets.deploy_key` makes a job with the key and no write scope a plain job and escapes rule 1d. One `re.IGNORECASE`."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No `## Contract change census` although the PR changes release-push.sh's contract at a process boundary (`tag` pushes nothing; `push-main` requires DEPLOY_KEY and GITHUB_REPOSITORY; new `version`/`no-credential` refusals; the checker's refusal in the required lint job). Callers found: the three workflows only (release.yaml:671/682/696, 861/870/884, 1054/1063/1077; listener :279/:535/:607; infra :120/:285), all migrated. The census lists them with dispositions and names the rollout as an immediate refusal closing the deploy-key exposure."
+      "file": ".github/scripts/check-release-credentials.sh:540",
+      "description": "Rule 2 refuses `if:`/`continue-on-error:` on the tripwire step only. A job-level `continue-on-error: true` on a build job (GitHub reports the failed job as `success` to `needs`, so its publish job runs) and a job-level `defaults: run: shell: 'cat {0}'` (the tripwire's body is printed, never run) each leave the checker green on a copy of the real release.yaml, while the header sentence rewritten this round says no error tolerance can let the tripwire's failure pass. Refuse `continue-on-error` on the build job and require `shell_of(last, job, workflow)` in SHELLS; two fixtures."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.sh:259",
-      "description": "`npm publish` is allowed whatever its arguments, so a publish with no tarball path (a directory publish, which runs prepack) passes in a credentialed job; allow `publish` only with a `.tgz` argument."
+      "file": ".github/scripts/check-release-credentials.sh:295",
+      "description": "The `.tgz` word is matched anywhere after `publish`, so `npm publish --tag x.tgz` (a directory publish, which runs prepack) passes; require the word right after `publish` to be the tarball."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-release-credentials.sh:476",
-      "description": "The tripwire step may carry `continue-on-error: true` unrefused, and the header (:20-21) says 'with no if:, so the tripwire always runs', which is false: a failed earlier step skips it. Refuse continue-on-error as `if:` is refused; correct the sentence."
+      "file": ".github/scripts/check-release-credentials.sh:298",
+      "description": "`docker --config <dir> run …` / `docker -H <host> run …` pass: only words[1] and words[1:3] are read. Skip docker's leading global flags, or add the shape to the header's documented pass-through list."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/release-push.sh:159",
-      "description": "deploy_key_env's `:?` guards exit without the file's `::error::` sink or fail_outstanding's summary, so push-main with no DEPLOY_KEY gives no annotation and no 'the release itself succeeded' sentence; the test at release-push.test.sh:324 only checks the text names DEPLOY_KEY."
+      "file": ".github/scripts/release-push.sh:428",
+      "description": "The four new bare command substitutions in push-main (:423, :428, :433, :437) exit under set -e with git's bare message and no `::error::`/summary (a parentless HEAD: `fatal: ambiguous argument 'HEAD^'`, rc 128) — the sink class the PR's own solution doc §3 names; route them through fail_outstanding."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/release-push.sh:288",
-      "description": "`git tag -l | head -1` now runs under `set -o pipefail`; once the listing exceeds the pipe buffer, head's early exit gives git SIGPIPE and the shared version step dies with nothing on stdout. Not reachable at today's tag counts; `git for-each-ref --count=1 --sort=-v:refname` removes the pipe."
+      "file": "docs/solutions/github/release-bump-push-resolves-one-conflict-shape-and-routes-every-failure-through-one-sink.md:152",
+      "description": "§4, edited by this PR, still says 'Nothing at the point of use asserts that' and that a second file in the bump commit would be dropped silently; push-main now refuses a bump touching a second file before any push (case 2b). Rewrite that passage."
     },
     {
       "severity": "minor",
-      "file": ".github/workflows/release.yaml:136",
-      "description": "Stale wording for the old job names: release.yaml:136 'the legion job', release-envoy-listener.yaml:463 'its release job', docs/solutions/github/pull-request-trigger-paths-follow-the-pr-head.md:90-91 '`legion` finds that tag at HEAD'."
+      "file": ".github/scripts/check-release-credentials.test.sh:144",
+      "description": "The green fixture's publish steps bind `FILE: ${{ steps.handed.outputs.file }}` while their run lines read `$STEM.tgz` (:134-145, :176-187): the fixture no longer models release.yaml; mirror the `stem` output."
     }
   ],
   "notProvenRisk": [
     "`docker buildx imagetools create` without docker/setup-buildx-action is proven only on the first merge-triggered listener run.",
     "`agent-secrets --version` and `go version -m` in release_build first execute on the merge-triggered listener run.",
-    "The listener's `--expect` recompute makes a benign race (another run already released the version) a red release_publish needing a whole-run re-run.",
-    "Checker pass-through class documented in its header: `bash -euo pipefail scripts/x.sh`, `eval`, `docker container run`, `docker buildx bake`."
+    "The listener's `--expect` recompute makes a benign race a red release_publish needing a whole-run re-run.",
+    "Checker pass-through class documented in its header: a variable in command position, `xargs`/`nohup`, an unlisted program."
   ],
-  "fastFollow": "Collapse the three token-identical npm publish jobs (envoy_plugin_publish, pi_envoy_publish, pi_legion_publish: 6 of 79 lines differ) into one reusable workflow added to the checker's WORKFLOWS, and the listener's seven-times repeated `if: needs.release_build.result == 'success' && … skip != 'true'` into one job-level env; the third copy of LineLoader/Mapping could import from a shared .github/scripts module."
+  "fastFollow": "dispatch://LEGION-772 (the reusable npm publish workflow, the listener's one job-level flag, the shared LineLoader) plus, from this round: push-main's conflict-abort clause for a second path is unreachable under the new pre-push rule (release-push.sh:471-480, header :86-89) and the loop fetches main twice per attempt (:422, :449); the chain comments at release.yaml:785-789/:982-986 and rule 4's wording say a different-package race would fail the later push, where case 4 shows the rebase handles it; rule 4 pins one link of a three-job chain; worker-image.yaml:7's input description still says 'the `legion` job' (that file is out of this issue's scope and on the image's trigger paths)."
 }
