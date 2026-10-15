@@ -13,6 +13,7 @@ import (
 	"github.com/pulumi/pulumi-go-provider/infer"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
+	"github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
 )
@@ -71,10 +72,11 @@ type NatsHubArgs struct {
 }
 
 // NATSUserArgs are one nkey user of the hub: a host's, as a rule, which its listener and its
-// sessions share. Exactly one of machineId and permissions is set.
+// sessions share. Exactly one of machineId and permissions is set. nkey is named as aws:User names
+// it, so a consumer running both clouds spells a user alike.
 type NATSUserArgs struct {
 	Name        string           `pulumi:"name"`
-	PublicKey   string           `pulumi:"publicKey"`            // the user's public key; never its seed
+	NKey        string           `pulumi:"nkey"`                 // the user's public key; never its seed
 	MachineID   *string          `pulumi:"machineId,optional"`   // permissions = core.HostPermissions(machineId)
 	Permissions *PermissionsArgs `pulumi:"permissions,optional"` // explicit
 }
@@ -83,24 +85,15 @@ type NATSUserArgs struct {
 // type's name for its input type, so the Go name would reach consumers as NATSUserArgsArgs.
 func (u *NATSUserArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "NatsUser") }
 
-// PermissionsArgs are a user's explicit publish and subscribe rules.
+// PermissionsArgs are a user's explicit publish and subscribe rules, each the plugin's one Rules
+// type, aws:Rules, which the AWS components' users take too.
 type PermissionsArgs struct {
-	Publish   RulesArgs `pulumi:"publish"`
-	Subscribe RulesArgs `pulumi:"subscribe"`
+	Publish   aws.RulesArgs `pulumi:"publish"`
+	Subscribe aws.RulesArgs `pulumi:"subscribe"`
 }
 
 // Annotate names the type gcp:Permissions in the schema, for the reason NATSUserArgs's gives.
 func (p *PermissionsArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Permissions") }
-
-// RulesArgs are one direction's rules, as core.Rules takes them. allow is required, since core
-// refuses an empty one.
-type RulesArgs struct {
-	Allow []string `pulumi:"allow"`
-	Deny  []string `pulumi:"deny,optional"`
-}
-
-// Annotate names the type gcp:Rules in the schema, for the reason NATSUserArgs's gives.
-func (r *RulesArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Rules") }
 
 // NatsHub is NATS with JetStream on one Container-Optimized OS VM, joined to a tailnet. The VM is
 // the one instance of a managed group, which recreates it when NATS's /healthz fails and keeps its
@@ -194,8 +187,8 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 	auth := core.Authorization{Users: make([]core.User, 0, len(users))}
 	for i, u := range users {
 		where := fmt.Sprintf("users[%d] %q", i, u.Name)
-		if u.PublicKey == "" {
-			return core.Authorization{}, fmt.Errorf("%s: publicKey is required", where)
+		if u.NKey == "" {
+			return core.Authorization{}, fmt.Errorf("%s: nkey is required", where)
 		}
 		var perms core.Permissions
 		switch {
@@ -215,7 +208,7 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, or permissions", where)
 		}
 		auth.Users = append(auth.Users, core.User{
-			Name: u.Name, NKey: u.PublicKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
+			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
 		})
 	}
 	return auth, nil

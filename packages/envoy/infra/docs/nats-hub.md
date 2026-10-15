@@ -65,16 +65,18 @@ The hub refuses these before it registers anything, with an error naming the inp
 
 ## The hub's users
 
-`users` is the NATS server's whole authorization. Each user is `name`, `publicKey` and exactly one
-of:
+`users` is the NATS server's whole authorization. Each user is `name`, `nkey` and exactly one of:
 
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
   listener's own `machineId`: the set names that machine's durable consumer and queue group.
-- `permissions`: `{publish, subscribe}`, each an `allow` list and an optional `deny` list of
-  subject patterns, for any other client.
+- `permissions`: `{publish, subscribe}`, each an `aws:Rules`, an `allow` list and an optional
+  `deny` list of subject patterns, for any other client.
 
-`publicKey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
+`nkey` and `aws:Rules` are what `aws:NatsService`'s users take, so a user is written alike for
+both components.
+
+`nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): the host's listener reads it from
 there into its `seed`, and its `natsUrls` is the hub's `natsUrl`. In the authorization `core`
 renders (see [NATS authorization](../README.md#nats-authorization)), each user is a keyed user
@@ -84,9 +86,9 @@ refuses every client without the seed of one of `users`. The rendered file, head
 VM's metadata holds it in the clear.
 
 A user is refused, named as `users[<index>] "<name>"`, when it names both `machineId` and
-`permissions` or neither, when its `machineId` or `publicKey` is empty, and for each of the
+`permissions` or neither, when its `machineId` or `nkey` is empty, and for each of the
 authorization's own refusals under [NATS authorization](../README.md#nats-authorization), such as
-a name of another form or one two users share, a `publicKey` that is not a user public key (a
+a name of another form or one two users share, an `nkey` that is not a user public key (a
 seed included), or an empty `allow`.
 
 ## What the hub's VM runs
@@ -314,10 +316,10 @@ resources:
       tailscaleImage: example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
       users:
         - name: example-host-a
-          publicKey: UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO
+          nkey: UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO
           machineId: example-host-a
         - name: example-operator
-          publicKey: UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG
+          nkey: UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG
           permissions:
             publish:
               allow: [">"]

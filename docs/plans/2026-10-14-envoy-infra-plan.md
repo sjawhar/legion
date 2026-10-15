@@ -1463,19 +1463,14 @@ type NatsHubArgs struct {
 
 type NATSUserArgs struct {
 	Name        string           `pulumi:"name"`
-	PublicKey   string           `pulumi:"publicKey"`
+	NKey        string           `pulumi:"nkey"`                 // named as aws:User names it
 	MachineID   *string          `pulumi:"machineId,optional"`   // permissions = core.HostPermissions(machineId)
 	Permissions *PermissionsArgs `pulumi:"permissions,optional"` // explicit; exactly one of the two
 }
 
 type PermissionsArgs struct {
-	Publish   RulesArgs `pulumi:"publish"`
-	Subscribe RulesArgs `pulumi:"subscribe"`
-}
-
-type RulesArgs struct {
-	Allow []string `pulumi:"allow"`
-	Deny  []string `pulumi:"deny,optional"`
+	Publish   aws.RulesArgs `pulumi:"publish"` // the plugin's one Rules type, aws:Rules
+	Subscribe aws.RulesArgs `pulumi:"subscribe"`
 }
 
 type NatsHub struct {
@@ -1490,12 +1485,14 @@ and there is no `noAuthUser`. It is validated and rendered before any registrati
 `["Rendered by envoy-infra. Public keys only."]`. The server's other options are command-line
 arguments: `-js --store_dir /data -m 8222 --server_name <hostname>`. A user names `machineId` (the
 usual case, so no consumer spells Envoy's subjects) or `permissions`. Both or neither is refused,
-naming the user, as are an empty `publicKey` or `machineId`. `gcp:Rules`'s `allow` is required,
-since core refuses an empty one. The schema names the input types `gcp:NatsUser`,
-`gcp:Permissions` and `gcp:Rules`. The constructor also refuses, naming the input: a hostname
-outside its rule, no tags or a tag outside `^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or
-`machineType`, a `diskSizeGb` below 1, no `tailnetAuthKey`, and `subnetwork` without `network`.
-Only `tailnetAuthKey`, `network` and `subnetwork` take another resource's output.
+naming the user, as are an empty `nkey` or `machineId`. Each direction's rules are `aws:Rules`,
+the type `aws:NatsService`'s users take, whose `allow` is required since core refuses an empty one,
+and the key field is `nkey`, as `aws:User` names it: one shape for a NATS user in both clouds. The
+schema names the hub's own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also
+refuses, naming the input: a hostname outside its rule, no tags or a tag outside
+`^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or `machineType`, a `diskSizeGb` below 1, no
+`tailnetAuthKey`, and `subnetwork` without `network`. Only `tailnetAuthKey`, `network` and
+`subnetwork` take another resource's output.
 
 Resources (pulumi-gcp v10.1.0), all children, each named after the hostname rather than the
 component, after `providers.Require(..., "gcp")`:

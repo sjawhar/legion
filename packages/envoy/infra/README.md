@@ -1032,7 +1032,7 @@ client speaks TLS to every endpoint, so a seed is never sent in plain text.
    again after pauses of 0.25, 0.5, 1, 2 and 4 seconds; if the write is still not shown, it stops
    with an error after writing. More than one version, or another version served by default, is
    another writer's race.
-4. Put the public key into the NATS server's authorization: as a user's `publicKey` on a
+4. Put the public key into the NATS server's authorization: as a user's `nkey` on a
    `gcp:NatsHub` (see [The hub's users](docs/nats-hub.md#the-hubs-users)), or as a
    `core.Authorization` user's `NKey`, with `HasSeed` set (see
    [NATS authorization](#nats-authorization)). It is public, so it may sit in the stack's

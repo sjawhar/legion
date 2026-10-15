@@ -65,7 +65,7 @@ func TestSchemaTypes(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
 		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:aws:Rules",
-		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:Rules",
+		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions",
 	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
@@ -122,10 +122,16 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	// NATSUserArgs, PermissionsArgs and RulesArgs would reach consumers doubled.
 	user := schema.Types["envoy-infra:gcp:NatsUser"]
 	require.Equal(t, "#/types/envoy-infra:gcp:Permissions", user.Properties["permissions"].Ref)
-	require.Equal(t, "#/types/envoy-infra:gcp:Rules",
-		schema.Types["envoy-infra:gcp:Permissions"].Properties["publish"].Ref)
+	// One Rules type and one key field name for every NATS user input, the AWS components' and the
+	// hub's, so a consumer running both writes them alike.
+	require.Contains(t, user.Properties, "nkey")
+	require.NotContains(t, user.Properties, "publicKey")
+	for _, direction := range []string{"publish", "subscribe"} {
+		require.Equal(t, "#/types/envoy-infra:aws:Rules",
+			schema.Types["envoy-infra:gcp:Permissions"].Properties[direction].Ref)
+	}
 	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
-	require.ElementsMatch(t, []string{"allow"}, schema.Types["envoy-infra:gcp:Rules"].Required)
+	require.ElementsMatch(t, []string{"allow"}, schema.Types["envoy-infra:aws:Rules"].Required)
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {

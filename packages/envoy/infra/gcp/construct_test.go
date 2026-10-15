@@ -39,12 +39,12 @@ func plainInputs() map[string]property.Value {
 		"users": property.New(property.NewArray([]property.Value{
 			property.New(property.NewMap(map[string]property.Value{
 				"name":      property.New("example-host-a"),
-				"publicKey": property.New(keyA),
+				"nkey":      property.New(keyA),
 				"machineId": property.New("example-host-a"),
 			})),
 			property.New(property.NewMap(map[string]property.Value{
-				"name":      property.New("example-operator"),
-				"publicKey": property.New(keyB),
+				"name": property.New("example-operator"),
+				"nkey": property.New(keyB),
 				"permissions": property.New(property.NewMap(map[string]property.Value{
 					"publish": property.New(property.NewMap(map[string]property.Value{
 						"allow": property.New(property.NewArray([]property.Value{property.New(">")})),

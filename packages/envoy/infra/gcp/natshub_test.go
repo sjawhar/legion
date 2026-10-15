@@ -14,6 +14,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 	"github.com/stretchr/testify/require"
 
+	envoyaws "github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 )
@@ -110,10 +111,10 @@ func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProv
 func exampleArgs() *gcp.NatsHubArgs {
 	return &gcp.NatsHubArgs{
 		Users: []gcp.NATSUserArgs{
-			{Name: "example-host-a", PublicKey: keyA, MachineID: pulumi.StringRef("example-host-a")},
-			{Name: "example-operator", PublicKey: keyB, Permissions: &gcp.PermissionsArgs{
-				Publish:   gcp.RulesArgs{Allow: []string{">"}},
-				Subscribe: gcp.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
+			{Name: "example-host-a", NKey: keyA, MachineID: pulumi.StringRef("example-host-a")},
+			{Name: "example-operator", NKey: keyB, Permissions: &gcp.PermissionsArgs{
+				Publish:   envoyaws.RulesArgs{Allow: []string{">"}},
+				Subscribe: envoyaws.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 			}},
 		},
 		TailnetAuthKey: pulumi.String(authKey),
@@ -489,7 +490,7 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			name: "a user naming both a machine id and permissions",
 			edit: func(a *gcp.NatsHubArgs) {
 				a.Users[0].Permissions = &gcp.PermissionsArgs{
-					Publish: gcp.RulesArgs{Allow: []string{">"}}, Subscribe: gcp.RulesArgs{Allow: []string{">"}},
+					Publish: envoyaws.RulesArgs{Allow: []string{">"}}, Subscribe: envoyaws.RulesArgs{Allow: []string{">"}},
 				}
 			},
 			err: []string{`users[0] "example-host-a"`, "machineId", "permissions"},
@@ -506,12 +507,12 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 		},
 		{
 			name: "a user without a public key",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[0].PublicKey = "" },
-			err:  []string{`users[0] "example-host-a"`, "publicKey"},
+			edit: func(a *gcp.NatsHubArgs) { a.Users[0].NKey = "" },
+			err:  []string{`users[0] "example-host-a"`, "nkey"},
 		},
 		{
 			name: "a user whose public key is a seed",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[0].PublicKey = string(seed) },
+			edit: func(a *gcp.NatsHubArgs) { a.Users[0].NKey = string(seed) },
 			err:  []string{`users[0] "example-host-a"`, "never a seed"},
 		},
 		{
