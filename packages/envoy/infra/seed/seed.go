@@ -126,12 +126,13 @@ func existing(d Description, name string) error {
 // public key it returns. Once Put has been called, every return carries the public key, and the
 // version id when Put answered one: a version may exist, and verify needs the key to check it.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
-	return generate(ctx, s, name, func(string) {})
+	return generate(ctx, s, name, func(string) error { return nil })
 }
 
 // generate is Generate, calling announce with the public key just before Put is called, so the
-// command can print the key before anything is written.
-func generate(ctx context.Context, s Store, name string, announce func(publicKey string)) (publicKey, version string, err error) {
+// command can print the key before anything is written. When announce fails, generate refuses
+// and writes nothing: a seed whose public key nobody saw could be checked by no one.
+func generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", "", refuse("%v", err)
@@ -161,7 +162,9 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 		return "", "", refuse("read the public key of the nkey user made for %s: %v", name, err)
 	}
 
-	announce(publicKey)
+	if err := announce(publicKey); err != nil {
+		return "", "", refuse("%s: could not print the public key: %v; nothing was written", name, err)
+	}
 	version, err = s.Put(ctx, name, value)
 	if err != nil {
 		if version == "" {
@@ -266,37 +269,63 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 // that account's, with no call before that check but the one reading them.
 type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
 
-// mode is one of the command's modes: it returns the line the command prints on stdout last, "" for
-// none, and its error. Only generate writes to stdout itself, to print the public key before its
-// write.
-type mode func(ctx context.Context, s Store, name, publicKey string, stdout io.Writer) (string, error)
+// mode is one of the command's modes. It prints its result on stdout and returns its error; a
+// result it cannot print is an error too, so the command never exits 0 having said nothing.
+type mode func(ctx context.Context, s Store, name, publicKey string, stdout io.Writer) error
 
 var modes = map[string]mode{
-	"check": func(ctx context.Context, s Store, name, _ string, _ io.Writer) (string, error) {
-		return Check(ctx, s, name)
+	"check": func(ctx context.Context, s Store, name, _ string, stdout io.Writer) error {
+		line, err := Check(ctx, s, name)
+		if err != nil {
+			return err
+		}
+		return printResult(stdout, name, line, nil)
 	},
 	"generate": generateMode,
-	"verify": func(ctx context.Context, s Store, name, publicKey string, _ io.Writer) (string, error) {
-		return Verify(ctx, s, name, publicKey)
+	"verify": func(ctx context.Context, s Store, name, publicKey string, stdout io.Writer) error {
+		line, err := Verify(ctx, s, name, publicKey)
+		if line == "" {
+			return err
+		}
+		return printResult(stdout, name, line, err)
 	},
 }
 
+// printResult prints the result line of a mode that writes nothing, then returns err. A line it
+// cannot print leaves the caller with no result, so that is a refusal: running again is safe.
+func printResult(stdout io.Writer, name, line string, err error) error {
+	if _, printErr := fmt.Fprintln(stdout, line); printErr != nil {
+		return refuse("%s: could not print the result: %v", name, printErr)
+	}
+	return err
+}
+
 // generateMode prints the public key on stdout before the write, so it is on the terminal whatever
-// the write and the checks after it do, the process ending among them, and returns the version id
-// line once the write was tried: "unknown" when Put answered no version.
-func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer) (string, error) {
+// the write and the checks after it do, the process ending among them, and the version id once the
+// write was tried: "unknown" when Put answered no version. A key it cannot print stops it before
+// the write; a version id it cannot print is a failure after the write.
+func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer) error {
 	announced := false
-	_, version, err := generate(ctx, s, name, func(publicKey string) {
-		fmt.Fprintf(stdout, "public key: %s\n", publicKey)
+	_, version, err := generate(ctx, s, name, func(publicKey string) error {
+		if _, printErr := fmt.Fprintf(stdout, "public key: %s\n", publicKey); printErr != nil {
+			return printErr
+		}
 		announced = true
+		return nil
 	})
 	if !announced {
-		return "", err
+		return err
 	}
 	if version == "" {
 		version = "unknown"
 	}
-	return "version id: " + version, err
+	if _, printErr := fmt.Fprintf(stdout, "version id: %s\n", version); printErr != nil {
+		if err != nil {
+			return afterWritef("%v; and printing the version id failed: %v", err, printErr)
+		}
+		return afterWritef("version %s was written, but printing its version id failed: %v", version, printErr)
+	}
+	return err
 }
 
 const usageText = `usage: envoy-infra seed {check|generate|verify} --store <store> --name <secret id> [--region <r>] [--expect-account <id>] [--public-key U…]
@@ -374,11 +403,7 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	if err != nil {
 		return exitCode(stderr, refuse("%s: %v", name, err))
 	}
-	line, err := run(ctx, s, name, publicKey, stdout)
-	if line != "" {
-		fmt.Fprintln(stdout, line)
-	}
-	return exitCode(stderr, err)
+	return exitCode(stderr, run(ctx, s, name, publicKey, stdout))
 }
 
 // exitCode writes err on stderr and returns the command's exit code: 0 for none; 1 for ErrMismatch,
