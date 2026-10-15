@@ -649,9 +649,10 @@ written here.
   `pyfmt.go`, `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
 - Modify: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`; create
   `core/input_error.go`. `ListenerConfig` loses `NATSURLs`: `Check()` refuses the config once,
-  before a component registers anything, and `Env(natsURLs)` adds the URLs when they are known and
-  checks only those, replacing slice 1's `CheckPlain` and `ListenerEnv` with the same refusal
-  texts. Each refusal is a `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
+  before a component registers anything, and `Env(natsURLs)` runs `Check` again, so no caller
+  renders a config it refuses, and adds the URLs when they are known, checking them. They replace
+  slice 1's `CheckPlain` and `ListenerEnv` with the same refusal texts. Each refusal is a
+  `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
   `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
   its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
   3 and 4 build on this API.
