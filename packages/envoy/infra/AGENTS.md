@@ -34,9 +34,10 @@ versions. Never add the module to the root `go.work`.
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
 | `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
-| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`), the AWS Secrets Manager store (`awsstore.go`) and the GCP Secret Manager store (`gcpstore.go`). |
+| `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), and the error naming and version paging both share (`errors.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
-| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the key fetcher's script (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
+| `gcp/` | `gcp:NatsHub` (`natshub.go`) and its VM's cloud-config, with the key fetcher's and the joined marker's scripts (`cloudconfig.go`, golden-tested in `testdata/cloud-config.golden`). |
+| `docs/` | Each component's operator document beside the module's README: `nats-hub.md` for `gcp:NatsHub`. It lives outside the component's package so that an edit to it cuts no release, which a file in a package the plugin compiles does (see Release contract). |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
 
@@ -236,4 +237,4 @@ then checks that `pulumi package get-schema` reports the version the plugin was 
 
 `gcp:NatsHub` has no live test here, since it needs Google Cloud and a tailnet: what only a real
 deployment proves is listed under "What a first Google Cloud deployment proves" in
-`packages/envoy/infra/README.md`.
+`packages/envoy/infra/docs/nats-hub.md`.
