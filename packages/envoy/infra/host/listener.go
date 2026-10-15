@@ -107,6 +107,12 @@ func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 		return listenerPlan{}, fmt.Errorf("%s %s: %w", listenerType, name, err)
 	}
 	if args.Watchdog == nil {
+		// NewListener reads adopt.watchdog only with a watchdog to adopt it into, so without one
+		// the old root-level command would be deleted, its delete text run as root on the host.
+		if plan.adopt.Watchdog != nil {
+			return listenerPlan{}, fmt.Errorf("%s %s: adopt.watchdog names %q, but watchdog is not set, so nothing takes it over",
+				listenerType, name, *plan.adopt.Watchdog)
+		}
 		return plan, nil
 	}
 	// The watchdog's files and units are fixed per host and name the container envoy-listener.

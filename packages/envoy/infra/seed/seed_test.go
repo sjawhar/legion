@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -722,6 +723,90 @@ func TestGeneratePrintsThePublicKeyBeforeItsWrite(t *testing.T) {
 	public := publicKeyOfSeed(t, store.puts[0])
 	require.Equal(t, "public key: "+public+"\n", printed)
 	require.Equal(t, "public key: "+public+"\nversion id: v1\n", out.String())
+}
+
+// failingWriter accepts its first ok writes and fails every later one with err, as a closed
+// stdout (EBADF), a full disk (ENOSPC) or a pipe whose reader left (EPIPE, SIGPIPE ignored) does.
+type failingWriter struct {
+	ok      int
+	err     error
+	written bytes.Buffer
+}
+
+func (w *failingWriter) Write(p []byte) (int, error) {
+	if w.ok == 0 {
+		return 0, w.err
+	}
+	w.ok--
+	return w.written.Write(p)
+}
+
+var errStdout = errors.New("write /dev/stdout: bad file descriptor")
+
+func commandWith(store *fakeStore, stdout io.Writer, args ...string) (code int, stderr string) {
+	var errs bytes.Buffer
+	code = seed.Command(context.Background(), args, stdout, &errs,
+		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
+	return code, errs.String()
+}
+
+// generate never writes a seed whose public key it could not print: a print that fails is a
+// refusal before Put, so nothing is written and running again is safe.
+func TestGenerateWritesNothingWhenItCannotPrintThePublicKey(t *testing.T) {
+	store := newStore(t)
+	code, errs := commandWith(store, &failingWriter{err: errStdout}, mode("generate")...)
+	require.Equal(t, 2, code)
+	require.Equal(t, "refused: "+secretName+": could not print the public key: "+errStdout.Error()+"; nothing was written\n", errs)
+	require.Empty(t, store.puts)
+	require.Equal(t, []string{"describe", "versions"}, store.calls, "Put is never called")
+}
+
+// Once the key is printed and the seed written, a version id that cannot be printed is a failure
+// after the write, exit 1, and adds to any failure the write already had.
+func TestGenerateReportsAVersionIDItCannotPrintAsAFailureAfterItsWrite(t *testing.T) {
+	t.Run("after a write that succeeded", func(t *testing.T) {
+		store := newStore(t)
+		stdout := &failingWriter{ok: 1, err: errStdout}
+		code, errs := commandWith(store, stdout, mode("generate")...)
+		require.Equal(t, 1, code)
+		require.Equal(t, "error after writing: version v1 was written, but printing its version id failed: "+errStdout.Error()+"\n", errs)
+		require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\n", stdout.written.String())
+		require.Len(t, store.puts, 1)
+	})
+	t.Run("after a write that failed", func(t *testing.T) {
+		store := newStore(t)
+		store.currentErr = errors.New("get-secret-value " + secretName + " failed: DecryptionFailure")
+		stdout := &failingWriter{ok: 1, err: errStdout}
+		code, errs := commandWith(store, stdout, mode("generate")...)
+		require.Equal(t, 1, code)
+		require.Equal(t, "error after writing: version v1 was written, but reading it back failed: get-secret-value "+secretName+
+			" failed: DecryptionFailure; and printing the version id failed: "+errStdout.Error()+"\n", errs)
+		require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\n", stdout.written.String())
+	})
+}
+
+// check and verify write nothing, so a result line they cannot print is exit 2: the caller has no
+// result, and running again is safe. A verify mismatch is no exception, since its line is the
+// result.
+func TestCheckAndVerifyExitTwoWhenTheirLineCannotBePrinted(t *testing.T) {
+	_, otherPublic := testnats.User(t)
+	rows := []struct {
+		name string
+		args []string
+	}{
+		{"check", mode("check")},
+		{"verify: yes", mode("verify", "--public-key", readmePublicKey)},
+		{"verify: no", mode("verify", "--public-key", otherPublic)},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			store := newStore(t).holding(readmeSeed)
+			code, errs := commandWith(store, &failingWriter{err: errStdout}, row.args...)
+			require.Equal(t, 2, code)
+			require.Equal(t, "refused: "+secretName+": could not print the result: "+errStdout.Error()+"\n", errs)
+			require.NotContains(t, store.calls, "put")
+		})
+	}
 }
 
 // The canary seed, and every value a store holds or is handed, appears in no byte the command

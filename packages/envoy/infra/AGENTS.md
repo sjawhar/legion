@@ -90,15 +90,27 @@ versions. Never add the module to the root `go.work`.
 - **Release contract.** `provider.go`'s `downloadURL` names the release
   `.github/workflows/release-envoy-infra.yaml` publishes: tag `envoy-infra-v<version>`, asset
   `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` with the binary at the archive root.
-  The same release carries the command as `envoy-infra-<os>-<arch>.tar.gz`, holding
-  `envoy-infra-<os>-<arch>/envoy-infra` and its `THIRD_PARTY_NOTICES`, the one directory a mise
-  `github:` pin strips. Changing either side breaks every consumer's install. A commit releases
-  both only when it touches a path that workflow's push paths name and a path
-  `.github/envoy-infra-release-paths` lists (the pathspecs its version step cuts a version from),
-  so a `packages/envoy` package either command starts compiling in, directly or through another
-  import, goes into both. `.github/scripts/check-envoy-infra-release-paths.sh` derives that set
-  from `go list -deps` of every command under `cmd/` for every target and fails naming each path
-  and list that misses it.
+  The same release carries the command as `envoy-infra-<os>-<arch>.tar.gz`, holding `envoy-infra`
+  and its `THIRD_PARTY_NOTICES` in one directory, `envoy-infra-<os>-<arch>/`, which mise's
+  `github:` backend strips on install. A mise pin names that archive per platform with a tool alias
+  (`README.md`, "The command"), since the same tag carries the plugin's archives and
+  `github:sjawhar/legion` the `legion` command's. Changing either side breaks every consumer's
+  install. A version is cut only from what the plugin and the command build from: the workflow's
+  version step lists, with `go list -deps ./cmd/...` for each target, the directories of the
+  workspace's modules either compiles in, and adds those modules' `go.mod` and `go.sum`, the
+  `go.work` files, the notices script and the target list. A commit to the module's README,
+  AGENTS.md or live-test harness cuts none. The workflow's push paths take all of
+  `packages/envoy/**`, so a package either starts compiling in needs no list edited.
+- **Release jobs.** The workflow's `build` job (`contents: read`, no secret) runs everything that
+  runs the module's code or its dependencies: the version step's `go list`, vet, the unit tests,
+  the builds of both commands and their smoke tests. It hands `publish` the archives as an artifact
+  and the version as job outputs. `publish` holds the write scopes, the OIDC token and the deploy
+  key, and runs only the pinned actions, `release-push.sh` and its own check of what `build` handed
+  over: the version X.Y.Z, the tag `envoy-infra-v<version>`, exactly the archives its own checkout
+  of the target list names, the plugin's and the command's for each target, plus `SHA256SUMS`,
+  each archive's bytes matching `SHA256SUMS`. So `build` chooses the archives' bytes but not their
+  names. An archive the release adds goes into that check's list. A step that runs Go, the Pulumi
+  CLI or either command goes in `build`, never in `publish`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. The hub's cloud-config is its instance template's `user-data`, and a template cannot
@@ -137,10 +149,10 @@ endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`, and
 
 ## Tests
 
-The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
-(`host/listener_test.go`, `gcp/natshub_test.go`, `internal/providers/`), the listener's refusals
-against `host.resolveListener` directly, the plugin in process through pulumi-go-provider's
-`integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`,
+The unit tests need neither the Pulumi CLI nor Docker. They run components under
+`pulumi.WithMocks` (`host/listener_test.go`, `gcp/natshub_test.go`, `internal/providers/`), the
+listener's refusals against `host.resolveListener` directly, the plugin in process through
+pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`,
 `gcp/construct_test.go`), the hub's cloud-config against its golden (`gcp/cloudconfig_test.go`), the
 key fetcher's script under `/bin/sh` against `httptest` fakes of the metadata server and Secret
 Manager, with a `sleep` stub first on its `PATH` that records each wait (`gcp/fetch_key_test.go`,
@@ -151,15 +163,17 @@ on any request it does not expect (`seed/awsstore_test.go`), the Secret Manager 
 gRPC fake of the service over TLS, which fails a test on any call outside the mode's or any request
 it does not expect (`seed/gcpstore_test.go`; the package's `TestMain` makes the fake's certificate a
 root the whole test process trusts, through `SSL_CERT_FILE`), and the command built as the release
-job stamps it, for its `--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests
-start nats-server containers on this machine's Docker through `testnats`, as do the `natslive`
-tests, each on `testnats.Image` and `testnats.HubImage`: `seed/seed_live_test.go` (a generated seed
-connects, and a client without it is refused) and `core/permissions_live_test.go` (the listener,
-built from `packages/envoy/cmd/listener` under the root `go.work`, reaches `"status":"healthy"` as
-one user holding `HostPermissions`, a session as the same user receives, and the server refuses
-nothing the set allows; without the durable's consumer create, the listener never reaches
-`"status":"healthy"`). The `envoy-infra-go` job in `.github/workflows/envoy-and-contracts.yaml`
-runs, from `packages/envoy/infra`:
+job stamps it, for its `--version` (`cmd/envoy-infra/main_test.go`). The tests that start
+nats-server containers on this machine's Docker through `testnats` carry the `natslive` build tag,
+so a plain `go test ./...`, as the release job runs it, starts none. Each runs on `testnats.Image`
+and `testnats.HubImage`: `core/nats_auth_live_test.go` (the rendered authorization on a real
+server: its users connect, a client with no credential is refused, the grants hold),
+`seed/seed_live_test.go` (a generated seed connects, and a client without it is refused) and
+`core/permissions_live_test.go` (the listener, built from `packages/envoy/cmd/listener` under the
+root `go.work`, reaches `"status":"healthy"` as one user holding `HostPermissions`, a session as the
+same user receives, and the server refuses nothing the set allows; without the durable's consumer
+create, the listener never reaches `"status":"healthy"`). The `envoy-infra-go` job in
+`.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
 test -z "$(gofmt -l .)"
@@ -168,10 +182,9 @@ go test ./...
 go test -tags natslive ./core/ ./seed/
 ```
 
-The required `lint` job of `.github/workflows/pr-and-main.yaml` runs the release path check and
-compiles the module's commands for every release target; its `test` job runs the check's own
-tests, `.github/scripts/check-envoy-infra-release-paths.test.sh`. Run those steps from those jobs
-after changing what they cover.
+The release job runs vet and the unit tests again before it builds. The required `lint` job of
+`.github/workflows/pr-and-main.yaml` compiles the module's commands for every release target. Run
+those steps from those jobs after changing what they cover.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit

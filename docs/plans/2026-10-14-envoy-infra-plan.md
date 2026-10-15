@@ -112,9 +112,10 @@ Rejected, with the reason:
   Slices 3 (AWS) and 4 (GCP) both build on them and run in parallel.
 - **R7. An authorization with no users and no `no_auth_user` is refused.** nats-server treats an
   empty user list as no authentication at all (v2.15.1 `server/auth.go:328-337`).
-- **R8. Release paths include the Envoy packages the plugin compiles in.** The plugin renders
-  grants from Envoy's exported subject names, so a change there must cut a plugin release; a CI
-  check holds the list to `go list -deps`.
+- **R8. A plugin version comes only from what the plugin compiles.** The plugin renders grants
+  from Envoy's exported subject names, so a change there must cut a plugin release, and a change
+  to an Envoy package it does not compile must not. The release's version step computes the bump
+  paths with `go list -deps` per target, so no hand-kept list can drift from the build.
 - **R9. `host:Listener` offers no listen host and no webhooks in this version.** No consumer here
   sets webhooks (the Docker-host deployment's machines all have `listener: {}`; the GCP hub has
   none in the first version, Sami 2026-10-13), and a non-loopback listener needs an API token
@@ -280,10 +281,10 @@ its header comment updated, and report that this cuts patch releases of `legion`
 - [ ] **Step 6: CI job.** Add `envoy-infra-go` to `envoy-and-contracts.yaml`, gated on the
 existing `envoy` filter, modelled on `envoy-go` (`:744-811`): SHA-pinned checkout and setup-go
 (`go-version-file: packages/envoy/infra/go.mod`, `cache-dependency-path: packages/envoy/infra/go.sum`),
-`TESTCONTAINERS_RYUK_DISABLED: "true"`, the NATS image pre-pull reading
-`packages/envoy/internal/testnats/nats.go`'s `const Image` (Task 2.1 adds `const HubImage` to it),
-then in `packages/envoy/infra`: `test -z "$(gofmt -l .)"`, `go vet -tags pulumilive,natslive ./...`,
-`go test ./...`. The workflow
+then in `packages/envoy/infra`: `test -z "$(gofmt -l .)"`, `go vet -tags pulumilive ./...`,
+`go test ./...`. Slice 1 starts no container in this job, so `TESTCONTAINERS_RYUK_DISABLED: "true"`,
+the NATS image pre-pull reading `packages/envoy/internal/testnats/nats.go`'s `const Image` and the
+`natslive` vet tag arrive with slice 2, whose tests start NATS. The workflow
 has no aggregate job (verified), so nothing else lists it.
 
 - [ ] **Step 7: correct the spec** (R1, R2). Replace "nested under `packages/envoy` and added to
@@ -301,7 +302,8 @@ listen host, seed and webhooks" with "the remote-NATS opt-in, port, host bridge 
 
 **Files:**
 - Create: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`
-- Modify: `packages/envoy/internal/bus/reach.go` (export `LocalNATSURL`)
+- Modify: `packages/envoy/internal/bus/reach.go` (export `LocalNATSURL`) and `nkey.go` (export
+  `NkeySeedEnvVar`, the seed variable's name, which `core.EnvNATSSeed` reuses)
 
 **Interfaces:**
 - Produces:
@@ -310,14 +312,14 @@ listen host, seed and webhooks" with "the remote-NATS opt-in, port, host bridge 
 type ListenerConfig struct {
 	MachineID  string
 	NATSURLs   []string
-	Port       int    // 0 means 9020
+	Port       int    // required: 1-65535; the component passes core.DefaultListenerPort (9020) when its input is unset
 	HostBridge string // "" leaves ENVOY_HOST_BRIDGE unset
 }
 
 // ListenerEnv returns the listener's non-secret environment, KEY=value, in a fixed order.
 func ListenerEnv(c ListenerConfig) ([]string, error)
 
-const EnvNATSSeed = "NATS_NKEY_SEED" // its value is a secret; the component appends it
+const EnvNATSSeed = bus.NkeySeedEnvVar // "NATS_NKEY_SEED"; its value is a secret; the component appends it
 ```
 
 The contract implemented is the listener's own: `packages/envoy/internal/config/config.go:23-63`
@@ -511,8 +513,9 @@ pins) passed in `options.providers`:
 v3.268.0 from `https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz`, verifying
 SHA-256 `903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b` before extracting;
 download `pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz` from pulumi-docker's v4.11.0 release,
-verify it against the SHA-256 in that release's checksums file (written into the workflow as a
-literal), and set `ENVOY_INFRA_DOCKER_PLUGIN` to that tarball: the live harness installs it into
+verify it against the SHA-256 GitHub records for that release asset (written into the workflow as
+a literal; the release's checksums file lists only SHA-1, which the workflow's comment cross-checks),
+and set `ENVOY_INFRA_DOCKER_PLUGIN` to that tarball: the live harness installs it into
 a temporary `PULUMI_HOME` of its own per test binary, and fails naming the variable when it is
 unset. Then in `packages/envoy/infra`: `go test -tags pulumilive -v -timeout 15m ./host/`, and
 `go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'`.
@@ -525,25 +528,40 @@ Run `.github/scripts/check-image-trigger-paths.sh` and `.github/scripts/check-ac
 **Files:**
 - Create: `.github/envoy-infra-targets.json` (multi-line, like `.github/go-release-targets.json`):
   `{"envoy-infra": ["linux/amd64", "linux/arm64", "darwin/amd64", "darwin/arm64"]}`
-- Create: `.github/scripts/check-envoy-infra-release-paths.sh` (R8)
-- Create: `.github/workflows/release-envoy-infra.yaml` (the plugin's own release, on the model of `release-envoy-listener.yaml`) and `.github/envoy-infra-release-paths` (its bump paths, one pathspec per line)
+- Create: `.github/workflows/release-envoy-infra.yaml` (the plugin's own release, on the model of `release-envoy-listener.yaml`)
 - Modify: `.github/workflows/release-envoy-listener.yaml` (R3)
 - Modify: `.github/workflows/pr-and-main.yaml` (notices for the new binary, cache key)
 
-- [ ] **Step 1: release paths (R8).** The paths are `packages/envoy/infra/`, every
-`packages/envoy/internal/<pkg>/` directory the plugin compiles in, `packages/envoy/go.mod`,
-`packages/envoy/go.sum`, `scripts/go-third-party-notices.sh`, `.github/envoy-infra-targets.json`.
-`check-envoy-infra-release-paths.sh` runs `go list -deps -f '{{.ImportPath}}' ./cmd/...` in
-`packages/envoy/infra`, keeps `github.com/sjawhar/envoy/internal/*`, and fails naming any directory
-missing from `release-envoy-infra.yaml`'s push paths or the paths file; the required `lint` job runs
-it, with the per-target compile, so auto-merge waits on both.
+- [ ] **Step 1: release paths (R8).** The version step runs after setup-go and computes them:
+`go list -deps -f '{{with .Module}}{{if .Main}}{{$.Dir}}{{end}}{{end}}' ./cmd/...` in
+`packages/envoy/infra` for each target, keeping only directories under `"$PWD"/packages/envoy/`
+(a `go.work` that binds a module elsewhere fails the step), plus each main module's `go.mod` and
+`go.sum`, `GOWORK` and its `.sum`, and, as patch paths, `scripts/go-third-party-notices.sh` and
+`.github/envoy-infra-targets.json`, which decide what the archives hold. A `go list` failure or an
+empty target list fails the step with no output. The workflow's push paths are
+`packages/envoy/**` plus every input outside it the build reads (the notices script, the targets
+file, `.github/actions/install-pulumi/**`, the workflow), so a push that changes no compiled
+package runs the workflow and skips. The required `lint` job compiles every command for every
+target, so a platform-only break fails the pull request.
 
-- [ ] **Step 2: the workflow.** `release-envoy-infra.yaml`, on the model of
-`release-envoy-listener.yaml`: `on.push` to `main` on the paths of Step 1, plus `workflow_dispatch`;
-`permissions: {}` at the top; one job with `if: github.ref == 'refs/heads/main'` and
-`concurrency: {group: release-envoy-infra, cancel-in-progress: false}`, waiting on no other
-release; permissions `contents: write`, `id-token: write`, `attestations: write`; checkout with full
-history and `persist-credentials: false`, the deploy key given to the tag step only; version:
+- [ ] **Step 2: the workflow.** `release-envoy-infra.yaml`: `on.push` to `main` on the push paths
+of Step 1, plus `workflow_dispatch`; `permissions: {}` at the top; workflow-level
+`concurrency: {group: release-envoy-infra-${{ github.ref }}, cancel-in-progress: false}`, so one
+run's publish always tags before the next run's build versions; waiting on no other release. Two
+jobs, both `if: github.ref == 'refs/heads/main'`:
+- `build` (`contents: read`, checkout with full history and `persist-credentials: false`): the
+  version step, `go vet -tags pulumilive ./...` and `go test ./...` in the module, the per-target
+  build with `-trimpath`, the notices, `SHA256SUMS`, the smoke test, then `upload-artifact` of
+  `assets/` and the version as job outputs. It runs the module's code and every module it links,
+  so it holds no write scope and no secret.
+- `publish` (`needs: build`; `contents: write`, `id-token: write`, `attestations: write`): runs no
+  Go, Pulumi or plugin code. It refuses a tag other than `envoy-infra-v$VERSION` or a `VERSION`
+  that isn't plain X.Y.Z; downloads the artifact and requires exactly the expected file names
+  (one archive per target in its own checkout of the targets file, plus `SHA256SUMS`); runs
+  `sha256sum -c SHA256SUMS`; attests; pushes the tag with the deploy key through
+  `release-push.sh push-tag`; and releases. Build chooses the bytes, never the names.
+
+The version step:
 
 ```bash
 PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
@@ -558,15 +576,15 @@ seeds its first tag: the breaking commits in the paths' earlier history predate 
 nothing about its API. From the second release on, the formula above runs over `PREV_TAG..HEAD`.
 
 On `empty` or `none` it skips with the same `::notice` and step-summary line the `legion` job
-writes (`:286-297`). Build per target with `CGO_ENABLED=0` and `-ldflags "-X main.version=$VERSION"`,
-write `THIRD_PARTY_NOTICES` with `scripts/go-third-party-notices.sh`, pack
-`pulumi-resource-envoy-infra-v$VERSION-$os-$arch.tar.gz` with the binary and notices at the archive
-root. Smoke the linux/amd64 binary with the pinned Pulumi CLI:
+writes (`:286-297`). Build per target with `CGO_ENABLED=0`, `-trimpath` and
+`-ldflags "-X main.version=$VERSION"`, write `THIRD_PARTY_NOTICES` with
+`scripts/go-third-party-notices.sh`, pack `pulumi-resource-envoy-infra-v$VERSION-$os-$arch.tar.gz`
+with the binary and notices at the archive root. Smoke the linux/amd64 binary with the pinned
+Pulumi CLI:
 `pulumi package get-schema <binary> | jq -e --arg v "$VERSION" '.version == $v and .pluginDownloadURL == "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"'`.
-Attest provenance with `actions/attest-build-provenance`, `subject-path: assets/pulumi-resource-envoy-infra-v*.tar.gz`
-(consumers run `gh attestation verify` on exactly these tarballs), push the tag, `gh release create "envoy-infra-v$VERSION" assets/* --verify-tag --generate-notes --title "envoy-infra v$VERSION"`.
-The version, tag and release steps are `release-push.sh tagged` and `release-push.sh release`, as
-the other release workflows use them.
+In `publish`, attest provenance with `actions/attest-build-provenance` on exactly the archives
+(consumers run `gh attestation verify` on them), then push the tag and release through
+`release-push.sh tagged`, `push-tag` and `release`, as the other release workflows do.
 
 - [ ] **Step 3: R3.** In `release-envoy-listener.yaml` add `- "!packages/envoy/infra/**"` after
 `- "packages/envoy/**"` and `':(exclude)packages/envoy/infra'` after `--` in the bump. Run
@@ -1373,7 +1391,7 @@ Items to verify, each with the row that settles it and where its result goes:
 | E6. Rendered authorization admits and refuses as designed, on 2.10 and on the hub image, and matches the reference renderer's goldens byte for byte | 2 | infrastructure | real nats-server containers | CI runner | Task 2.1 |
 | E7. The listener reaches "healthy" under `HostPermissions`, and a session under the same user receives | 4 | infrastructure | real nats-server and this branch's listener binary | CI runner | Task 4.1 live test |
 | E8. Seed generate and verify against Secret Manager; a generated seed connects | 2, 4 | infrastructure | in-repo fake stores and real nats-server (Tasks 2.2, 4.2); Secret Manager in the first GCP deployment | that deployment's operator | Tasks 2.2, 4.2, 4.4 |
-| E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by Jason or Rajashree, and Sami's tailnet, policy and OAuth-client steps | Task 4.4 |
+| E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by the organization's billing administrator, and the operator's tailnet, policy and OAuth-client steps | Task 4.4 |
 | E10. The CLI checks and verifies the existing AWS deployment's live seed read-only, printing the reference script's lines | 2 | infrastructure | that deployment's staging Secrets Manager, from the devbox, with the branch-built CLI | the devbox's `staging` profile (`--expect-account` refuses any other) | Task 2.3 |
 | E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, from the devbox, with this branch's plugin by path | the devbox's `staging` profile for staging, its instance identity for production and dispatch | Task 3.3; the deployment's own plan |
 
@@ -1404,6 +1422,10 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
 
 - `bus.localNATSURL` → `bus.LocalNATSURL`: `git grep -n localNATSURL -- packages/` → `reach.go:38,46,50`
   only. Rename, behaviour unchanged.
+- The seed variable's name is exported as `bus.NkeySeedEnvVar` (`"NATS_NKEY_SEED"`), which
+  `core.EnvNATSSeed` reuses: `git grep -n NkeySeedEnvVar` → `bus/nkey.go` (the constant and its three
+  uses, which spelled the literal before) and `infra/core/listener_env.go`. Value unchanged. Rollout:
+  immediate.
 - The listener's durable and queue names move into `bus.ListenerDurable`/`ListenerQueue`:
   `git grep -n -e '"listener-"' -e '"envoy-listener-"' -- packages/envoy` → `cmd/listener/main.go:531,634`
   (now call the functions) and the tests `main_test.go:2260,2277`, `reconnect_shutdown_test.go:158`,

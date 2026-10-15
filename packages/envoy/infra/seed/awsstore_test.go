@@ -74,10 +74,14 @@ type fakeAWS struct {
 	// version, and the next staleGets reads find no AWSCURRENT version, as a read just after a
 	// write may.
 	staleLists, staleGets int
+	// The ARN every Secrets Manager answer gives the secret: secretARN when set (a test that wants
+	// none sets it to " " and the field is left out), otherwise one in secretAccount and
+	// secretRegion, by default awsAccount and awsRegion, whatever account STS answers.
+	secretARN, secretAccount, secretRegion string
 }
 
 func newFakeAWS(t *testing.T) *fakeAWS {
-	f := &fakeAWS{t: t, account: awsAccount, exists: true}
+	f := &fakeAWS{t: t, account: awsAccount, exists: true, secretAccount: awsAccount, secretRegion: awsRegion}
 	t.Cleanup(func() {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -166,7 +170,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 		f.jsonError(w, failure, body)
 		return
 	}
-	arn := "arn:aws:secretsmanager:" + awsRegion + ":" + awsAccount + ":secret:" + awsSecret + "-AbCdEf"
+	arn := "arn:aws:secretsmanager:" + f.secretRegion + ":" + f.secretAccount + ":secret:" + awsSecret + "-AbCdEf"
+	if f.secretARN != "" {
+		arn = strings.TrimSpace(f.secretARN)
+	}
 	switch call {
 	case "DescribeSecret":
 		var in struct{ SecretId string }
@@ -178,7 +185,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			f.jsonError(w, awsFailure{"ResourceNotFoundException", "Secrets Manager can't find the specified secret."}, body)
 			return
 		}
-		out := map[string]any{"ARN": arn, "Name": awsSecret}
+		out := map[string]any{"Name": awsSecret}
+		if arn != "" {
+			out["ARN"] = arn
+		}
 		stages := map[string][]string{}
 		for _, v := range f.versions {
 			if len(v.stages) > 0 {
@@ -772,6 +782,102 @@ func TestAWSMissingCredentialsAreRefusedBeforeAnyCall(t *testing.T) {
 		require.Equal(t, "refused: "+awsSecret+": no usable AWS credentials (ExpiredToken); log in or set AWS_PROFILE\n", errs)
 		require.Equal(t, []string{"AssumeRole"}, f.recorded(), "the credentials' own call, then nothing")
 	})
+}
+
+// STS and Secrets Manager each resolve their own endpoint, so the account STS answers is not
+// necessarily the account of the secret a write lands in. DescribeSecret, every mode's first call,
+// answers the secret's ARN: with --expect-account, a secret of another account is refused before
+// any other call, and a secret in another region than the client's always is.
+func TestAWSTheSecretItselfMustBeInTheExpectedAccountAndRegion(t *testing.T) {
+	seedValue, public := testnats.User(t)
+	const otherAccount = "111111111111"
+	accountMiss := "refused: describe-secret " + awsSecret + " answered a secret of account " + otherAccount +
+		", but --expect-account is " + awsAccount + ": the Secrets Manager endpoint answers for another account\n"
+	modes := [][]string{{"check"}, {"generate"}, {"verify", "--public-key", public}}
+	for _, args := range modes {
+		t.Run("another account: "+args[0], func(t *testing.T) {
+			f := newFakeAWS(t)
+			if args[0] != "generate" {
+				f.holding(seedValue)
+			}
+			f.secretAccount = otherAccount
+			serve(t, f)
+			code, out, errs := runAWS(t, f, append(args, "--expect-account", awsAccount)...)
+			require.Equal(t, 2, code)
+			require.Empty(t, out)
+			require.Equal(t, accountMiss, errs)
+			require.Equal(t, []string{"GetCallerIdentity", "DescribeSecret"}, f.recorded())
+		})
+	}
+	t.Run("another account, scheduled for deletion", func(t *testing.T) {
+		f := newFakeAWS(t)
+		f.secretAccount, f.deletedAt = otherAccount, 1759190400
+		serve(t, f)
+		code, _, errs := runAWS(t, f, "check", "--expect-account", awsAccount)
+		require.Equal(t, 2, code)
+		require.Equal(t, accountMiss, errs)
+	})
+	t.Run("another account without --expect-account: nothing to compare it with", func(t *testing.T) {
+		f := newFakeAWS(t).holding(seedValue)
+		f.secretAccount = otherAccount
+		serve(t, f)
+		code, out, errs := runAWS(t, f, "check")
+		require.Equal(t, 0, code, errs)
+		require.Equal(t, awsSecret+": present; AWSCURRENT: yes (version v1)\n", out)
+	})
+	rows := []struct{ name, arn, want string }{
+		{"another region", "", "refused: describe-secret " + awsSecret + " answered a secret in region eu-west-1, but the client is in region " + awsRegion + "\n"},
+		{"no ARN", " ", "refused: describe-secret " + awsSecret + " answered no Secrets Manager ARN, so the secret's account and region cannot be checked\n"},
+		{"another service's ARN", "arn:aws:s3:::example-bucket", "refused: describe-secret " + awsSecret + " answered no Secrets Manager ARN, so the secret's account and region cannot be checked\n"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newFakeAWS(t).holding(seedValue)
+			f.secretARN = row.arn
+			if row.name == "another region" {
+				f.secretRegion = "eu-west-1"
+			}
+			serve(t, f)
+			code, out, errs := runAWS(t, f, "verify", "--public-key", public)
+			require.Equal(t, 2, code)
+			require.Empty(t, out)
+			require.Equal(t, row.want, errs)
+			require.Equal(t, []string{"DescribeSecret"}, f.recorded(), "the seed is not read")
+		})
+	}
+}
+
+// A seed travels in a PutSecretValue request and a GetSecretValue answer, so a configured Secrets
+// Manager endpoint that is not https is refused before any call, unless it is this machine's own
+// loopback address, which the test endpoint is: plain text there never crosses a network.
+func TestAWSAPlainHTTPEndpointBeyondThisMachineIsRefusedBeforeAnyCall(t *testing.T) {
+	for _, variable := range []string{"AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_SECRETS_MANAGER"} {
+		t.Run(variable, func(t *testing.T) {
+			f := newFakeAWS(t)
+			serve(t, f)
+			t.Setenv(variable, "http://secrets.example.invalid")
+			code, out, errs := runAWS(t, f, "generate")
+			require.Equal(t, 2, code)
+			require.Empty(t, out)
+			require.Equal(t, "refused: "+awsSecret+": the Secrets Manager endpoint http://secrets.example.invalid is not https, "+
+				"and is not this machine's loopback address: a seed is sent in plain text only to this machine\n", errs)
+			require.Empty(t, f.recorded())
+		})
+	}
+}
+
+func TestAWSEndpointCheck(t *testing.T) {
+	for _, endpoint := range []string{"https://secrets.example.invalid", "https://10.0.0.1:8443", "http://127.0.0.1:4566",
+		"http://127.1.2.3", "http://[::1]:4566", "http://localhost:4566"} {
+		require.NoError(t, endpointCheck(aws.String(endpoint)), endpoint)
+	}
+	require.NoError(t, endpointCheck(nil), "the SDK's own endpoint for the region")
+	for _, endpoint := range []string{"http://10.0.0.1:4566", "http://secrets.example.invalid", "ftp://127.0.0.1", "127.0.0.1:4566"} {
+		require.ErrorIs(t, endpointCheck(aws.String(endpoint)), ErrRefused, endpoint)
+	}
+	err := endpointCheck(aws.String("http://user:example-password@secrets.example.invalid"))
+	require.ErrorIs(t, err, ErrRefused)
+	require.NotContains(t, err.Error(), "example-password")
 }
 
 func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
