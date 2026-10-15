@@ -53,11 +53,13 @@ type runKey struct {
 	runID int64
 }
 
-// pendingRun is one run's burst: when its first event arrived, and the timer that reads the run's
-// jobs once the burst goes quiet or has waited jobMaxWait.
+// pendingRun is one run's burst: when its first event arrived, the production rule the newest
+// event read, and the timer that reads the run's jobs once the burst goes quiet or has waited
+// jobMaxWait.
 type pendingRun struct {
-	first time.Time
-	timer jobTimer
+	first      time.Time
+	production Production
+	timer      jobTimer
 }
 
 const (
@@ -189,12 +191,13 @@ func (j *JobIntake) receive(ctx context.Context, payload string) {
 	if !tracked {
 		return
 	}
-	j.schedule(runKey{repo: job.Repo, runID: runID})
+	j.schedule(runKey{repo: job.Repo, runID: runID}, settings.Production())
 }
 
 // schedule starts a run's burst or moves its read to jobQuiet after this event, but never past
-// jobMaxWait after the burst's first event.
-func (j *JobIntake) schedule(key runKey) {
+// jobMaxWait after the burst's first event. A later event replaces production so a settings update
+// observed before that event governs the deferred read.
+func (j *JobIntake) schedule(key runKey, production Production) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	now := j.clock.Now()
@@ -205,6 +208,7 @@ func (j *JobIntake) schedule(key runKey) {
 	} else {
 		run.timer.Stop()
 	}
+	run.production = production
 	due := now.Add(jobQuiet)
 	if limit := run.first.Add(jobMaxWait); limit.Before(due) {
 		due = limit
@@ -231,13 +235,13 @@ func (j *JobIntake) fire(key runKey, run *pendingRun) {
 	defer func() { <-j.reads }()
 	ctx, cancel := context.WithTimeout(j.ctx, intakeMessageTimeout)
 	defer cancel()
-	j.read(ctx, key)
+	j.read(ctx, key, run.production)
 }
 
 // read lists the run's jobs from GitHub and stores that listing. It marks the run's jobs complete
 // only when the same listing shows every job finished, so a listing taken before the run ended
 // never marks the run complete because another consumer recorded its end meanwhile.
-func (j *JobIntake) read(ctx context.Context, key runKey) {
+func (j *JobIntake) read(ctx context.Context, key runKey, production Production) {
 	owner, repo, err := splitRepo(key.repo)
 	if err != nil {
 		slog.Error("dispatch delivery: job run repository", "repo", key.repo, "error", err)
@@ -248,7 +252,7 @@ func (j *JobIntake) read(ctx context.Context, key runKey) {
 		slog.Warn("dispatch delivery: read the jobs of a running deploy run; its end reads them again", "repo", key.repo, "run_id", key.runID, "error", err)
 		return
 	}
-	jobs := RunJobs(key.repo, key.runID, fetched)
+	jobs := RunJobs(key.repo, key.runID, fetched, production)
 	if err := UpsertRunJobs(ctx, j.pool, key.repo, key.runID, jobs, JobsComplete(jobs)); err != nil {
 		slog.Error("dispatch delivery: store the jobs of a running deploy run", "repo", key.repo, "run_id", key.runID, "error", err)
 	}

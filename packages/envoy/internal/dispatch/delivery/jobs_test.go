@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -213,6 +214,46 @@ func TestAJobOfATrackedDeployRunRecordsItsJobsWhileItRuns(t *testing.T) {
 	}
 }
 
+// TestAJobIntakeRecordsTheConfiguredProductionApplyStep exercises the early job-event path: it
+// keeps the configuration observed with the event through the delayed listing and stores that
+// listed job's configured step.
+func TestAJobIntakeRecordsTheConfiguredProductionApplyStep(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+	const step = "Run ./.github/actions/apply"
+	settings.ProductionApplyStepName = new(step)
+	if _, err := PutSettings(ctx, pool, settings, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("set production apply step: %v", err)
+	}
+	seedRunningDeployRun(t, ctx, pool)
+	fake := newJobsFake(t)
+	fake.mu.Lock()
+	fake.production = map[string]any{
+		"name": "widgets-release / widgets-release", "started_at": "2026-09-03T12:05:00Z",
+		"completed_at": "2026-09-03T12:09:00Z", "conclusion": "success",
+		"steps": []map[string]any{{"name": step, "conclusion": "success"}},
+	}
+	fake.mu.Unlock()
+	clock := newFakeJobClock()
+	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs.receive(ctx, jobPayload("acme/widgets", 500))
+	clock.Advance(jobQuiet)
+	stored, err := ListRunJobs(ctx, pool, "acme/widgets", 500)
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("ListRunJobs = %+v, %v; want the two fetched jobs", stored, err)
+	}
+	for _, job := range stored {
+		if job.Name != "widgets-release / widgets-release" {
+			continue
+		}
+		if job.ApplyStep == nil || *job.ApplyStep != step || job.ApplyStepConclusion == nil || *job.ApplyStepConclusion != DeliveryJobConclusionSuccess {
+			t.Fatalf("production job = %+v, want configured apply step success", job)
+		}
+		return
+	}
+	t.Fatal("the stored jobs have no production job")
+}
+
 // TestAJobOfAnUntrackedRunCostsNoGitHubCall: a job of a run Dispatch does not store schedules
 // nothing and asks GitHub for nothing, not even a token.
 func TestAJobOfAnUntrackedRunCostsNoGitHubCall(t *testing.T) {
@@ -313,7 +354,7 @@ func TestAStaleJobsReadStaysForTheBackfill(t *testing.T) {
 	fake.mu.Unlock()
 
 	jobs := newJobIntake(nil, pool, fake.newTestClient(), newFakeJobClock())
-	jobs.read(ctx, runKey{repo: "acme/widgets", runID: 500})
+	jobs.read(ctx, runKey{repo: "acme/widgets", runID: 500}, Production{})
 	if err := <-completed; err != nil {
 		t.Fatalf("store the run completion: %v", err)
 	}
@@ -517,7 +558,7 @@ func TestTheJobIntakeReadsAtMostABoundedNumberOfRunsAtOnce(t *testing.T) {
 	clock := &concurrentJobClock{}
 	jobs := newJobIntake(nil, pool, github, clock)
 	for id := int64(600); id < 600+runs; id++ {
-		jobs.schedule(runKey{repo: "acme/widgets", runID: id})
+		jobs.schedule(runKey{repo: "acme/widgets", runID: id}, Production{})
 	}
 	fired := clock.fireAll()
 	// Runs before the pool's and the fake's cleanups, so no read outlives the test into them.
@@ -542,4 +583,78 @@ func TestTheJobIntakeReadsAtMostABoundedNumberOfRunsAtOnce(t *testing.T) {
 	if got := most.Load(); got != reconcilePartialConcurrency {
 		t.Fatalf("%d runs' jobs read at once by the end, want at most %d", got, reconcilePartialConcurrency)
 	}
+}
+
+// TestAQueuedJobReadsDeadlineStartsOnceItHoldsItsSlot: a run whose burst ends while every read slot
+// is taken waits for one, and its read's deadline (intakeMessageTimeout) starts only once it holds
+// the slot. Here every listing takes jobsLatency, and the deadline is longer than one listing but
+// shorter than the waves of listings ahead of the last runs to get a slot. A deadline started
+// before the wait would expire on those runs' reads: each would log that it could not read or
+// store its run's jobs, and their jobs would not be stored. Each read finishes inside its own
+// deadline instead, and every run's jobs are stored.
+func TestAQueuedJobReadsDeadlineStartsOnceItHoldsItsSlot(t *testing.T) {
+	logs := captureLogs(t)
+	pool, ctx := deliveryTestPool(t)
+	const (
+		waves       = 16
+		runs        = waves * reconcilePartialConcurrency
+		jobsLatency = 300 * time.Millisecond
+		// Far longer than one listing, so a read that holds its slot finishes inside it even on a
+		// starved host, and shorter than the at least (waves-2)*jobsLatency the last two waves of
+		// runs wait for a slot, so with the deadline started before the wait their reads expire.
+		deadline = 4 * time.Second
+	)
+	timeout := intakeMessageTimeout
+	intakeMessageTimeout = deadline
+	t.Cleanup(func() { intakeMessageTimeout = timeout })
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	for id := int64(700); id < 700+runs; id++ {
+		if err := UpsertRun(ctx, pool, changeTestRun(id, DeliveryRunKindDeploy, started.Add(-time.Minute), started)); err != nil {
+			t.Fatalf("seed run %d: %v", id, err)
+		}
+	}
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}/jobs", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-time.After(jobsLatency):
+		case <-r.Context().Done():
+			return
+		}
+		mustEncode(t, w, map[string]any{"total_count": 1, "jobs": []map[string]any{
+			{"name": "build", "started_at": "2026-09-03T12:00:00Z", "completed_at": "2026-09-03T12:04:00Z", "conclusion": "success"},
+		}})
+	})
+
+	clock := &concurrentJobClock{}
+	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	for id := int64(700); id < 700+runs; id++ {
+		jobs.schedule(runKey{repo: "acme/widgets", runID: id}, Production{})
+	}
+	began := time.Now()
+	clock.fireAll().Wait()
+	took := time.Since(began)
+
+	failures := map[string]bool{
+		"dispatch delivery: read the jobs of a running deploy run; its end reads them again": true,
+		"dispatch delivery: store the jobs of a running deploy run":                          true,
+	}
+	var failed []map[string]any
+	for _, record := range logs() {
+		if message, _ := record["msg"].(string); failures[message] {
+			failed = append(failed, record)
+		}
+	}
+	var stored int
+	if err := pool.QueryRow(ctx, `select count(distinct run_id) from delivery_run_jobs where repo = 'acme/widgets'`).Scan(&stored); err != nil {
+		t.Fatalf("count the runs with stored jobs: %v", err)
+	}
+	if len(failed) > 0 || stored != runs {
+		first := map[string]any{}
+		if len(failed) > 0 {
+			first = failed[0]
+		}
+		t.Fatalf("%d of %d runs' reads failed and %d have their jobs stored, after %s with a %s deadline and %s listings; first failure: %v",
+			len(failed), runs, stored, took.Round(time.Millisecond), deadline, jobsLatency, first)
+	}
+	t.Logf("%d runs read in %s, %d at a time, each inside its %s deadline", runs, took.Round(time.Millisecond), reconcilePartialConcurrency, deadline)
 }

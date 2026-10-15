@@ -34,7 +34,7 @@ func seedNarrowingFixture(t *testing.T, database *store.Store) delivery.Delivery
 	pool := database.Pool
 	settings, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "release / release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"release / release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat", "hubot"},
 	}, model.Actor{Kind: "system", ID: "test"})
 	if err != nil {

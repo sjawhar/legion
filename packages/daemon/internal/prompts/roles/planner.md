@@ -12,7 +12,13 @@ When what you measure or read makes the plan build something differently from th
 
 ## Workspace restrictions
 
-Do not move a bookmark you do not own. Put only your logical paths in `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Push your plan handoff commit as the daemon part below says: it touches only `.legion/`, so its head's message ends with the trailer.
+Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-graph -T 'empty'`.
+When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` holds only your own
+resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
+working-copy commit you found at the turn's start. Do not move a bookmark you do
+not own. Put only your logical paths in
+`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Push your plan handoff commit as the
+daemon part below says: it touches only `.legion/`, so its head's message ends with the trailer.
 
 ## Two checks on the plan
 

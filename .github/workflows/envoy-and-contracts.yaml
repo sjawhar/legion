@@ -46,6 +46,8 @@ on:
       - ".github/actions/install-omp/**"
       # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
       - ".github/actions/install-pulumi/**"
+      # The image pull envoy-go, envoy-infra-go, envoy-go-race and envoy-smoke run first.
+      - ".github/actions/pull-test-images/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the six below before the target list are the ones the entries
       # above do not already cover. .github/scripts/check-image-trigger-paths.sh fails the build
@@ -93,6 +95,7 @@ on:
       - ".omp-pin"
       - ".github/actions/install-omp/**"
       - ".github/actions/install-pulumi/**"
+      - ".github/actions/pull-test-images/**"
       # Same entries the push list owes, for the same jobs.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
@@ -191,6 +194,8 @@ jobs:
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
+              # The image pull envoy-go, envoy-infra-go and envoy-go-race run before their tests.
+              - '.github/actions/pull-test-images/**'
             # Every file packages/envoy/docker/Dockerfile builds from, so the envoy-smoke job
             # runs whenever the image it smokes changes. `envoy` is deliberately not widened to
             # this: that would run the whole Go suite on every Dispatch pull request.
@@ -215,6 +220,8 @@ jobs:
               - '.github/workflows/envoy-and-contracts.yaml'
               # The Pulumi CLI the job's envoy-infra live tests run.
               - '.github/actions/install-pulumi/**'
+              # The image pull the job runs before its build and tests.
+              - '.github/actions/pull-test-images/**'
               # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
               # every module in it belong here too — `envoy` carried go.work and go.work.sum and
               # this filter must not be narrower. packages/daemon requires testcontainers-go,
@@ -798,25 +805,15 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
-      # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
-      # reports a registry connection reset as an internal error that testcontainers does not
-      # retry, so one reset failed every test sharing that container. Pull the image every test
-      # here starts (testnats.Image) instead, with the bounded retry the runner gives its own
-      # service images.
+      # Every image the tests here start: testnats.Image, testnats.HubImage (which testnats's own
+      # tests start) and tests3.Image, pulled first for the reason the action gives.
       - name: Pull test container images
-        run: |
-          nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
-          [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
-          s3_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/tests3/seaweedfs.go)
-          [ -n "$s3_image" ] || { echo "::error::no const Image in internal/tests3/seaweedfs.go"; exit 1; }
-          for image in "$nats_image" "$s3_image"; do
-            for attempt in 1 2 3; do
-              docker pull "$image" && break
-              [ "$attempt" -lt 3 ] || exit 1
-              sleep 10
-            done
-          done
-        working-directory: packages/envoy
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/envoy/internal/testnats/nats.go Image
+            packages/envoy/internal/testnats/nats.go HubImage
+            packages/envoy/internal/tests3/seaweedfs.go Image
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
         working-directory: packages/envoy
@@ -857,12 +854,17 @@ jobs:
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
   # the Envoy binaries and the daemon build with, and every go command below runs in that
-  # workspace. Vet compiles the files behind the live-test tag (pulumilive) too. The per-target
-  # compile runs in pr-and-main.yaml's required lint job.
+  # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
+  # tests start no container; the natslive files run in a step of their own against real
+  # nats-server, on testnats.Image and testnats.HubImage, pulled first for the reason
+  # .github/actions/pull-test-images gives. The per-target compile runs in pr-and-main.yaml's
+  # required lint job.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
     runs-on: ubuntu-24.04
+    env:
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -871,6 +873,12 @@ jobs:
         with:
           go-version-file: packages/envoy/infra/go.mod
           cache-dependency-path: packages/envoy/infra/go.sum
+      - name: Pull the NATS test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: |
+            packages/envoy/internal/testnats/nats.go Image
+            packages/envoy/internal/testnats/nats.go HubImage
       - name: Check Go formatting
         run: |
           unformatted=$(gofmt -l .)
@@ -880,11 +888,14 @@ jobs:
             exit 1
           fi
         working-directory: packages/envoy/infra
-      - name: Vet envoy-infra, its live-test tag included
-        run: go vet -tags pulumilive ./...
+      - name: Vet envoy-infra, its live-test tags included
+        run: go vet -tags pulumilive,natslive ./...
         working-directory: packages/envoy/infra
       - name: Unit test envoy-infra
         run: go test ./...
+        working-directory: packages/envoy/infra
+      - name: Live tests of envoy-infra against nats-server (natslive)
+        run: go test -tags natslive ./core/ ./seed/
         working-directory: packages/envoy/infra
 
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
@@ -901,7 +912,7 @@ jobs:
   # this job needs Bun installed and its workspace linked the same way, though not that freshness
   # check itself - a stale fixture is envoy-go's failure to catch, not a race. delivery's tests
   # start a NATS container, so the job takes envoy-go's Ryuk setting and pulls that image first,
-  # for the reason envoy-go's own pull step gives.
+  # for the reason .github/actions/pull-test-images gives.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -931,15 +942,9 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
       - name: Pull the NATS test container image
-        run: |
-          nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
-          [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$nats_image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
-          done
-        working-directory: packages/envoy
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Race-test the document service, its API, pmdoc, delivery, and the store
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/...
         working-directory: packages/envoy
@@ -1004,29 +1009,27 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
-      # reports a registry connection reset as an internal error that testcontainers does not
-      # retry, so one reset failed every test sharing that container. Pull every image the build
-      # or the test starts from here instead (testnats.Image and the smoke image's base images),
-      # with the bounded retry the runner gives its own service images.
-      - name: Pull test container images
+      # Every image the build or the test starts (testnats.Image and the smoke image's base
+      # images) is pulled first, for the reason .github/actions/pull-test-images gives. The SPA
+      # stage's base carries an ARG (the Bun pin), so each ARG default is expanded into the FROM
+      # that uses it.
+      - name: Read the smoke image's base images
+        id: base-images
         run: |
-          nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
-          [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
-          # The SPA stage's base carries an ARG (the Bun pin), so expand each ARG default
-          # into the FROM that uses it before pulling.
-          dockerfile_images=$(awk '
-            $1 == "ARG" { eq = index($2, "="); if (eq > 0) args[substr($2, 1, eq - 1)] = substr($2, eq + 1) }
-            $1 == "FROM" { image = $2; for (name in args) gsub("[$][{]" name "[}]", args[name], image); print image }
-          ' docker/Dockerfile)
-          for image in "$nats_image" $dockerfile_images; do
-            for attempt in 1 2 3; do
-              docker pull "$image" && break
-              [ "$attempt" -lt 3 ] || exit 1
-              sleep 10
-            done
-          done
+          {
+            echo "images<<IMAGES"
+            awk '
+              $1 == "ARG" { eq = index($2, "="); if (eq > 0) args[substr($2, 1, eq - 1)] = substr($2, eq + 1) }
+              $1 == "FROM" { image = $2; for (name in args) gsub("[$][{]" name "[}]", args[name], image); print image }
+            ' docker/Dockerfile
+            echo "IMAGES"
+          } >> "$GITHUB_OUTPUT"
         working-directory: packages/envoy
+      - name: Pull test container images
+        uses: ./.github/actions/pull-test-images
+        with:
+          consts: packages/envoy/internal/testnats/nats.go Image
+          images: ${{ steps.base-images.outputs.images }}
       # The image build is a step of its own: what TestSmoke asserts is the container's
       # behaviour, so a slow build must fail nothing. Inside the test it spent 256.60–289.47 s
       # of `go test -timeout 5m` across ten Release Envoy Listener runs while the five
@@ -1119,8 +1122,9 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache-dependency-path: packages/envoy/go.sum
-      # The same bounded retry envoy-go gives its test images: a registry connection reset during
-      # the script's own implicit pull would fail the run for a reason outside it.
+      # The same bounded retry .github/actions/pull-test-images gives test images: a registry
+      # connection reset during the script's own implicit pull would fail the run for a reason
+      # outside it.
       - name: Pull the NATS image the script starts
         run: |
           nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)

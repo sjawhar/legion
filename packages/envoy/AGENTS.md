@@ -39,7 +39,7 @@ events to the right session.
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step; a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`) |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
-| Pulumi components      | `infra/`                                  | the `envoy-infra` Pulumi plugin, a Go module with a `go.work` of its own; see `packages/envoy/infra/AGENTS.md` |
+| Pulumi components      | `infra/`                                  | the `envoy-infra` Pulumi plugin and the `envoy-infra seed` command, a Go module with a `go.work` of its own; see `packages/envoy/infra/AGENTS.md` |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
 and `EnsureBlockIDs` repairs missing and duplicate IDs (an id holding a NUL, which a hand-built

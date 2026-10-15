@@ -156,6 +156,9 @@ jobs:
               ../../../scripts/go-third-party-notices.sh \
               "$notices/pulumi-resource-envoy-infra-${target%/*}-${target#*/}" \
               ./cmd/pulumi-resource-envoy-infra)
+            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              ../../../scripts/go-third-party-notices.sh \
+              "$notices/envoy-infra-${target%/*}-${target#*/}" ./cmd/envoy-infra)
           done
           wc -l "$notices"/*
 

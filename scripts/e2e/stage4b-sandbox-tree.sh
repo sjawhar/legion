@@ -2670,10 +2670,11 @@ for key in $stale; do
   note "moved stale todo issue $key to backlog"
 done
 [ -z "$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')" ] || fail "$project still holds todo issues"
-# The configured stream carries both halves of the workflow's intake. Dispatch publishes every
-# project's issue events under subjects that name the issue, so any project's shows the Dispatch
-# half (LEGSMOKE's own age out between runs; admission is where the run's are seen); the GitHub
-# half is the smoke repository's own.
+# The configured stream carries both halves of the workflow's intake. Each `last` call reads one
+# ordered-consumer message under its 20-second budget instead of draining every matching subject.
+# Dispatch publishes every project's issue events under subjects that name the issue, so any
+# project's shows the Dispatch half (LEGSMOKE's own age out between runs; admission is where the
+# run's are seen); the GitHub half is the smoke repository's own.
 for subject in "notifications.dispatch.issue.>" "notifications.github.sjawhar.legion-smoke.>"; do
   seen=$(nats_stream last "$nats_url" "$stream" "$subject" 20) ||
     blocked "production NATS $stream carries no message on $subject (bun scripts/e2e/lib/nats-stream.ts last \$LEGION_E2E_NATS_URL $stream '$subject'): the daemon's intake would miss that half of the workflow"
