@@ -70,11 +70,11 @@ The hub refuses these before it registers anything, with an error naming the inp
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
   listener's own `machineId`: the set names that machine's durable consumer and queue group.
-- `permissions`: `{publish, subscribe}`, each an `aws:Rules`, an `allow` list and an optional
+- `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
   `deny` list of subject patterns, for any other client.
 
-`nkey` and `aws:Rules` are what `aws:NatsService`'s users take, so a user is written alike for
-both components.
+`nats:Rules` is the one rules type every NATS component takes, whatever its cloud, and `nkey` is
+named as `aws:NatsService`'s users name it, so a user is written alike for both components.
 
 `nkey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
 store it wrote (see [NATS seeds](../README.md#nats-seeds)): the host's listener reads it from

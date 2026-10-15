@@ -1474,8 +1474,8 @@ type NATSUserArgs struct {
 }
 
 type PermissionsArgs struct {
-	Publish   aws.RulesArgs `pulumi:"publish"` // the plugin's one Rules type, aws:Rules
-	Subscribe aws.RulesArgs `pulumi:"subscribe"`
+	Publish   nats.RulesArgs `pulumi:"publish"` // nats:Rules, shared by every NATS component
+	Subscribe nats.RulesArgs `pulumi:"subscribe"`
 }
 
 type NatsHub struct {
@@ -1490,11 +1490,12 @@ and there is no `noAuthUser`. It is validated and rendered before any registrati
 `["Rendered by envoy-infra. Public keys only."]`. The server's other options are command-line
 arguments: `-js --store_dir /data -m 8222 --server_name <hostname>`. A user names `machineId` (the
 usual case, so no consumer spells Envoy's subjects) or `permissions`. Both or neither is refused,
-naming the user, as are an empty `nkey` or `machineId`. Each direction's rules are `aws:Rules`,
-the type `aws:NatsService`'s users take, whose `allow` is required since core refuses an empty one,
-and the key field is `nkey`, as `aws:User` names it: one shape for a NATS user in both clouds. The
-schema names the hub's own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also
-refuses, naming the input: a hostname outside its rule, no tags or a tag outside
+naming the user, as are an empty `nkey` or `machineId`. Each direction's rules are `nats:Rules`,
+the cloud-neutral type `aws:NatsService`'s users take too, whose `allow` is required since core
+refuses an empty one, and the key field is `nkey`, as `aws:User` names it: one shape for a NATS
+user in both clouds, and the `gcp` package imports no `aws` package. The schema names the hub's
+own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also refuses, naming the
+input: a hostname outside its rule, no tags or a tag outside
 `^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or `machineType`, a `diskSizeGb` below 1, no
 `tailnetAuthKey`, and `subnetwork` without `network`. Only `tailnetAuthKey`, `network` and
 `subnetwork` take another resource's output.
