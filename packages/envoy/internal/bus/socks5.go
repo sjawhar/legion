@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nats-io/nkeys"
 	"golang.org/x/net/proxy"
 )
 
@@ -20,15 +21,20 @@ import (
 // process's resolver does not (tailscaled's SOCKS5 server and MagicDNS) connects to them.
 const SOCKS5ProxyEnvVar = "ENVOY_NATS_SOCKS5_PROXY"
 
-// CheckSOCKS5Proxy refuses a proxy address that is not host:port: whitespace around it, a scheme,
-// an IPv6 address with a zone (every proxy a deployment names is loopback, and a zone is free text
-// that could carry anything), a host that is neither an IP address nor a DNS name (dnsName), or a
-// port that is not a number from 1 to 65535. Its error says what is wrong with the value and never
-// prints it, since an operator can write a proxy with credentials in it and a refusal reaches the
-// process's log; its caller names the setting.
+// CheckSOCKS5Proxy refuses a proxy address that is not host:port: one that holds an nkey seed
+// (holdsNkeySeed), whitespace around it, a scheme, an IPv6 address with a zone (every proxy a
+// deployment names is loopback, and a zone is free text that could carry anything), a host that is
+// neither an IP address nor a DNS name (dnsName), or a port that is not a number from 1 to 65535.
+// Its error says what is wrong with the value and never prints it, since an operator can write a
+// proxy with credentials in it and a refusal reaches the process's log; its caller names the
+// setting. An address it admits is printed: a connect through it that fails names it, so an
+// operator can debug the dial, which is why a seed, a valid DNS label, is refused here.
 func CheckSOCKS5Proxy(value string) error {
 	if value == "" {
 		return errors.New("is empty; want host:port")
+	}
+	if holdsNkeySeed(value) {
+		return errors.New("holds an nkey seed, which is never a proxy address")
 	}
 	if strings.TrimSpace(value) != value {
 		return errors.New("has whitespace around it; want host:port")
@@ -57,6 +63,20 @@ func CheckSOCKS5Proxy(value string) error {
 		return errors.New("has a port out of range 1-65535")
 	}
 	return nil
+}
+
+// holdsNkeySeed reports whether any run of base32 letters and digits in value, in either case,
+// decodes as an nkey seed of any type: the whole value, its host, or one label of it.
+func holdsNkeySeed(value string) bool {
+	runs := strings.FieldsFunc(value, func(r rune) bool {
+		return !('A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' || '2' <= r && r <= '7')
+	})
+	for _, run := range runs {
+		if _, _, err := nkeys.DecodeSeed([]byte(strings.ToUpper(run))); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // dnsName reports whether host is a syntactic DNS name as Go's resolver reads one: at most 253
