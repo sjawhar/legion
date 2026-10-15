@@ -234,6 +234,11 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 		addressType = 0x01
 	}
 	requireConnects(t, fake, []testsocks5.Request{{AddressType: addressType, Address: server}})
+	// The count the direct connect read as zero counts this one, so a direct connect that dialled
+	// the proxy too would have shown there.
+	if accepted := fake.Accepted(); accepted < 1 {
+		t.Fatalf("the proxy accepted %d connections after a connect through it, want at least 1", accepted)
+	}
 }
 
 // A connect through the proxy that fails names the setting and the proxy's address, whatever the
@@ -376,6 +381,13 @@ func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 	if accepted := fake.Accepted(); accepted != 0 {
 		t.Fatalf("the server URL accepted %d connections, want none", accepted)
 	}
+	// A dial to the server URL is counted, so the zero above means no connect dialled it.
+	conn, err := net.Dial("tcp", fake.Addr)
+	if err != nil {
+		t.Fatalf("dial the server URL: %v", err)
+	}
+	_ = conn.Close()
+	waitFor(t, 5*time.Second, "the server URL to count a dial", func() bool { return fake.Accepted() >= 1 })
 }
 
 // A host:port whose host is an IP address without a zone, or a DNS name as Go's resolver reads one

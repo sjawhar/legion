@@ -235,6 +235,11 @@ func TestASetProxyIsRemoteReach(t *testing.T) {
 	if got := len(fake.Requests()); got != len(connects) {
 		t.Fatalf("the proxy received %d requests, want one for each of the %d connects", got, len(connects))
 	}
+	// The count the refusals above read as zero counts these connects, so a refusal that dialled the
+	// proxy first would have shown there.
+	if accepted := fake.Accepted(); accepted < int64(len(connects)) {
+		t.Fatalf("the proxy accepted %d connections after %d connects through it, want at least %d", accepted, len(connects), len(connects))
+	}
 }
 
 // remoteLookingURL reaches the test's own NATS, as the same user, by an address of this machine
