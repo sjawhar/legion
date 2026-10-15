@@ -1,6 +1,7 @@
 package host_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"slices"
@@ -14,6 +15,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/host"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 )
@@ -258,14 +260,17 @@ func TestListenerRefusesMissingProvidersBeforeRegistering(t *testing.T) {
 // resolveListener refuses every input it can check from the inputs alone, with no engine. The
 // environment's own refusals are core.ListenerConfig.Check's, tested in core; this table holds the
 // host's own and one row showing that core's refusal reaches the consumer with the component's
-// name, and that an explicit port 0 is passed to it rather than read as the default.
+// name and as the InputError naming its input, and that an explicit port 0 is passed to it rather
+// than read as the default.
 func TestListenerRefusesInvalidInputs(t *testing.T) {
-	cases := []struct {
+	type refusal = struct {
 		name     string
 		listener string // the listener's name; example-host-a when empty
 		edit     func(*host.ListenerArgs)
 		err      []string
-	}{
+		input    string // the input of a core.InputError the refusal wraps, when it is core's
+	}
+	cases := []refusal{
 		{
 			name: "a watchdog for a container not named envoy-listener",
 			edit: func(a *host.ListenerArgs) {
@@ -300,21 +305,17 @@ func TestListenerRefusesInvalidInputs(t *testing.T) {
 			err: []string{`adopt.watchdog names "example-host-a-watchdog", but watchdog is not set`},
 		},
 		{
-			name: "port 0, refused by core with the component's name",
-			edit: func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(0) },
-			err:  []string{"envoy-infra:host:Listener example-host-a: port 0 is outside 1-65535"},
+			name:  "port 0, refused by core with the component's name",
+			edit:  func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(0) },
+			err:   []string{"envoy-infra:host:Listener example-host-a: port 0 is outside 1-65535"},
+			input: "port",
 		},
 	}
 	// The watchdog's create script echoes the listener's name inside double quotes, so a name
 	// holding what the shell expands there, or a line break, is refused with a watchdog.
 	for _, unsafe := range []string{`"`, "$", "`", `\`, "\n"} {
 		listener := "example-host-a" + unsafe + "id"
-		cases = append(cases, struct {
-			name     string
-			listener string
-			edit     func(*host.ListenerArgs)
-			err      []string
-		}{
+		cases = append(cases, refusal{
 			name:     fmt.Sprintf("a watchdog on a listener named %q", listener),
 			listener: listener,
 			edit:     func(a *host.ListenerArgs) { a.Watchdog = &host.WatchdogArgs{Host: "example-host-a"} },
@@ -334,6 +335,13 @@ func TestListenerRefusesInvalidInputs(t *testing.T) {
 			for _, want := range c.err {
 				require.ErrorContains(t, err, want)
 			}
+			var refused *core.InputError
+			if c.input != "" {
+				require.True(t, errors.As(err, &refused), "%v wraps a core.InputError", err)
+				require.Equal(t, c.input, refused.Input)
+			} else {
+				require.False(t, errors.As(err, &refused), "%v is the host's own refusal", err)
+			}
 		})
 	}
 }
@@ -351,7 +359,9 @@ func TestListenerRefusesBeforeRegistering(t *testing.T) {
 		"nothing registered beyond the test's providers")
 }
 
-func TestListenerNatsUrlRefusedByListenerEnvFailsTheRun(t *testing.T) {
+// core.ListenerConfig.Env refuses a URL holding a comma, and natsUrls resolves only when the
+// container's envs do, so the refusal fails the run rather than the constructor.
+func TestListenerNatsUrlCoreRefusesFailsTheRun(t *testing.T) {
 	args := exampleArgs()
 	args.NatsUrls = pulumi.StringArray{pulumi.String("nats://a:1,nats://b:2")}
 	_, err := run(t, args, nil, "docker")

@@ -437,8 +437,8 @@ func TestGCPRefusesANameThatIsNoGlobalSecret(t *testing.T) {
 	}
 }
 
-// A --name the store would refuse is refused before the store opens, so no refusal of the open
-// quotes it: a seed pasted there must not reach the terminal, whatever else is wrong.
+// A seed pasted as --name is refused by the command's flag rule, before the store's name rule and
+// before the store opens, so no refusal of the open quotes it, whatever else is wrong.
 func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 	pasted, _ := testnats.User(t)
 	for _, row := range []struct {
@@ -465,7 +465,7 @@ func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 			require.Equal(t, 2, code, errs)
 			require.Empty(t, out)
 			require.NotContains(t, errs, pasted)
-			require.Equal(t, "refused: --name for --store gcp-secret-manager is a secret's name, projects/<project>/secrets/<secret>\n", errs)
+			require.True(t, strings.HasPrefix(errs, "envoy-infra seed: --name: an nkey user seed, which is never an argument (not echoed)\n"), errs)
 			require.Empty(t, f.recorded())
 		})
 	}

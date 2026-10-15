@@ -160,9 +160,9 @@ Rejected, with the reason:
 | Slice | PR | Outcome someone can try | Depends on |
 | --- | --- | --- | --- |
 | 1 | sjawhar/legion#1946 | `pulumi package add envoy-infra@<v> --server '<url>'` installs a released plugin, and `envoy-infra:host:Listener` runs a healthy listener on a Docker host | none |
-| 2 | a new PR stacked on #1946 (gh-stack), branch `envoy-infra-core` | `envoy-infra seed check` and `verify --store aws-secrets-manager` read an existing deployment's live seed and print the reference script's lines | Task 1.1 on `envoy-infra` |
-| 3 | a new PR stacked on slice 2's (gh-stack, linear: `envoy-infra` ← `envoy-infra-core` ← `envoy-infra-aws`) | the existing AWS deployment's staging, production and dispatch previews show no diff with its NATS service and webhook listener built by `envoy-infra:aws:NatsService` and `aws:WebhookListener` | Tasks 2.1 and 2.2 |
-| 4 | a plain PR based on `envoy-infra-core`, outside the gh-stack (gh-stack is strictly linear), which merges `main` once slice 2 merges and is then retargeted; branch `envoy-infra-gcp` | `envoy-infra seed generate --store gcp-secret-manager` writes a seed; `envoy-infra:gcp:NatsHub` serves NATS on GCE over a tailnet | Tasks 2.1 and 2.2 |
+| 2 | #1951, branch `envoy-infra-core`, based on `main` since #1946 squash-merged as `131ccd0a` | `envoy-infra seed check` and `verify --store aws-secrets-manager` read an existing deployment's live seed and print the reference script's lines | Task 1.1 on `envoy-infra` |
+| 3 | #1954, branch `envoy-infra-aws`, based on `envoy-infra-core` | the existing AWS deployment's staging, production and dispatch previews show no diff with its NATS service and webhook listener built by `envoy-infra:aws:NatsService` and `aws:WebhookListener` | Tasks 2.1 and 2.2 |
+| 4 | #1955, branch `envoy-infra-gcp`, based on `envoy-infra-aws` | `envoy-infra seed generate --store gcp-secret-manager` writes a seed; `envoy-infra:gcp:NatsHub` serves NATS on GCE over a tailnet | Tasks 2.1 and 2.2 |
 
 A stacked branch takes its lower layer's later commits by merging it (`git merge origin/<lower>`,
 then a fast-forward push), never by a rebase and a force push: each PR squash-merges, so the merge
@@ -449,7 +449,8 @@ Refusals, each an error naming the input: `watchdog` with a `containerName` othe
 what `core.ListenerConfig.CheckPlain` refuses of the fields known at construct (a blank
 `machineId`, a port outside 1-65535, a `hostBridge` with surrounding whitespace); all before any
 registration. A `natsUrls` element `core.ListenerEnv` refuses fails the update, from the `ApplyT`
-that computes the envs. `aws:WebhookListener` calls the same `CheckPlain` before it registers.
+that computes the envs. Slice 2 replaces `CheckPlain` and `ListenerEnv` with `ListenerConfig.Check`
+and `Env` (Task 2.1), and `aws:WebhookListener` calls the same `Check` before it registers.
 
 - [ ] **Step 1: failing unit tests** (`listener_test.go`) with `pulumi.WithMocks`, run through
 `NewListener` directly:
@@ -637,10 +638,10 @@ but not including the tag push: four tarballs, each `tar tzf` listing exactly
 
 ## Slice 2: NATS authorization and the seed command, from the existing AWS deployment
 
-Branch `envoy-infra-core` in its own clone (`~/.worktrees/legion/envoy-infra-core`): a plain PR
-(#1951) whose base is `envoy-infra`, not linked with gh-stack, and kept current by merging
-`envoy-infra` into it, never by rebasing. Task 2.1 starts once Task 1.1 is on `envoy-infra`; 2.2
-needs 2.1; 2.3 needs 2.2 and Task 1.4.
+Branch `envoy-infra-core` in its own clone (`~/.worktrees/legion/envoy-infra-core`): #1951, whose
+base was `envoy-infra` until #1946 squash-merged as `131ccd0a` and is now `main`. It is kept
+current by merging its base into it, never by rebasing. Task 2.1 starts once Task 1.1 is on
+`envoy-infra`; 2.2 needs 2.1; 2.3 needs 2.2 and Task 1.4.
 
 The reference implementation is the existing AWS deployment's Envoy code. Its implementer gets the
 inventory of that code with the brief, from outside this repository. Nothing private about it is
@@ -655,9 +656,10 @@ written here.
   `pyfmt.go`, `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
 - Modify: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`; create
   `core/input_error.go`. `ListenerConfig` loses `NATSURLs`: `Check()` refuses the config once,
-  before a component registers anything, and `Env(natsURLs)` adds the URLs when they are known and
-  checks only those, replacing slice 1's `CheckPlain` and `ListenerEnv` with the same refusal
-  texts. Each refusal is a `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
+  before a component registers anything, and `Env(natsURLs)` runs `Check` again, so no caller
+  renders a config it refuses, and adds the URLs when they are known, checking them. They replace
+  slice 1's `CheckPlain` and `ListenerEnv` with the same refusal texts. Each refusal is a
+  `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
   `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
   its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
   3 and 4 build on this API.
@@ -666,8 +668,8 @@ written here.
   (`One`, `Types`, `Registrations`) and answers with the inputs as state, less any unknown (the
   SDK fails to unmarshal a secret-wrapped unknown in a mock's state), plus what its `Computed`
   adds; `Construct` serves the plugin in process and constructs a component; `Plain` unwraps a
-  secret. host's tests run on it and keep only their `Computed` (an image's `imageId`); the gcp
-  and aws layers move onto it.
+  secret. host's tests run on it and keep only their `Computed` (an image's `imageId`), and so do
+  `internal/providers`' (`require_test.go`); the gcp and aws layers move onto it.
 - Modify: `packages/envoy/internal/testnats/nats.go`:
   - add `const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"`
     on one line beside `Image` (`nats.go:41-46`), and `var Images`, the two with each one's short
@@ -684,8 +686,12 @@ written here.
   - add `ConnectSeed(t, uri, seed string, opts ...nats.Option)` (`:406-424`): it connects as the
     user of a seed, or with no credential, and returns the server's answer. `core`'s and `seed`'s
     live tests and testnats' own tests use it.
-- Modify: `.github/workflows/envoy-and-contracts.yaml`: `envoy-go`'s pull step pulls `HubImage`
-  beside `Image` (`envoy-and-contracts.yaml:806-819`), as `envoy-infra-go`'s does (`:880-891`).
+- Create: `.github/actions/pull-test-images/action.yml`, a composite action that pulls each image a
+  job's tests start, read from the Go constant that declares it (`<file> <const>` per line) or
+  given, with the bounded retry. `envoy-and-contracts.yaml`'s `envoy-go` (testnats' `Image` and
+  `HubImage`, and tests3's `Image`), `envoy-infra-go` (`Image`, `HubImage`), `envoy-go-race`
+  (`Image`) and `envoy-smoke` (`Image` and the smoke image's base images) use it in place of four
+  copies of that step, and the `envoy` and `envoy_image` filters and the trigger paths name it.
 
 **Interfaces:**
 
@@ -844,10 +850,11 @@ These semantics are ported from the reference implementation, and the unit tests
 ### Task 2.2: `envoy-infra seed` with the AWS Secrets Manager store
 
 **Files:** Create `packages/envoy/infra/cmd/envoy-infra/main.go`, `main_test.go`, `seed/seed.go`,
-`seed_test.go`, `seed/awsstore.go`, `awsstore_test.go`, `seed/export_test.go` (the tests' setter
+`seed_test.go`, `seed/awsstore.go`, `awsstore_test.go`, `awsfake_test.go` (the fake Secrets
+Manager and STS endpoint the store's tests run against), `seed/export_test.go` (the tests' setter
 for `generate`'s read-back pauses), `seed/seed_live_test.go` (build tag `natslive`). Modify
 `.github/workflows/envoy-and-contracts.yaml`: `envoy-infra-go` runs `go test -tags natslive ./core/ ./seed/`
-(`envoy-and-contracts.yaml:909-911`).
+(`envoy-and-contracts.yaml:897-899`).
 
 **Interfaces:**
 
@@ -860,7 +867,8 @@ type Store interface {
 	// Versions counts every version the secret holds, deprecated ones included; generate alone
 	// calls it.
 	Versions(ctx context.Context, name string) (int, error)
-	// Put writes value as the secret's first version and returns its version id.
+	// Put writes value as the secret's first version and returns its version id. It refuses a
+	// second first version with an error matching ErrRefused (testStoreContract).
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. When it serves none, as it may for a
 	// moment after a write, the error matches ErrNotServed.
@@ -876,7 +884,8 @@ type Description struct {
 }
 
 func Check(ctx context.Context, s Store, name string) (string, error) // the report line
-func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error)
+// Generate calls announce with the public key just before Put; the command prints it there.
+func Generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error)
 // Verify returns the report line, with ErrMismatch for "no" or a value that is no user seed; a
 // refusal returns "".
 func Verify(ctx context.Context, s Store, name, publicKey string) (line string, err error)
@@ -895,62 +904,71 @@ const AWSSecretsManager = "aws-secrets-manager"
 func OpenAWS(ctx context.Context, region, account string) (Store, error)
 ```
 
-(`seed.go:28-48, 55-63, 95, 128, 238, 271, 346`; `awsstore.go:26, 39`.)
+(`seed.go:29-52, 59-67, 99, 136, 248, 281, 357`; `awsstore.go:29, 58`.)
 
 The CLI is `envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <secret id>
 [--region <r>] [--expect-account <id>] [--public-key U…]`, and `envoy-infra --version`, which
 prints the version the release stamps in (`main.go:17, 35-41`). `--help`, at either level, prints
 the usage and exits 0. An unknown command or mode, and a flag the command does not take or a
 malformed one, is a usage error, exit 2, and is not echoed, since a seed may have been pasted there
-(`main.go:42-52`, `seed.go:362-408`); other usage errors exit 2 too, a defined flag missing its value
-named (`:398-424`). An interrupt or SIGTERM cancels the command's context instead of killing
-it, so a write in flight ends as an unanswered write does, below (`main.go:19-28`). Its behaviour
-is the reference implementation's, with these additions:
-- **Before any Secrets Manager call or the account check** (`awsstore.go:39-62`), it refuses,
+(`main.go:42-52`, `seed.go:360-406`); other usage errors exit 2 too, a defined flag missing its
+value named (`:396-406, 422-437`). So is a flag whose value is an nkey user seed, which
+`core.UserSeedPublicKey` accepts: `--name` and `--region` reach every line, the refusals and the
+store's requests, so any flag holding a seed is refused naming the flag and not the value, before
+the store opens (`seed.go:407-421`). An interrupt or SIGTERM cancels the command's context instead
+of killing it, so a write in flight ends as an unanswered write does, below (`main.go:19-28`). Its
+behaviour is the reference implementation's, with these additions:
+- **Before any Secrets Manager call or the account check** (`awsstore.go:42-99`), it refuses,
   exit 2:
-  - an `--expect-account` that is not 12 digits (`:40-42`), or given empty, which `Command`
-    refuses as a usage error before the store opens (`seed.go:401-403`);
-  - no region from `--region` or the AWS configuration (`:47-49`);
+  - an `--expect-account` that is not 12 digits (`:59-61`), or given empty, which `Command`
+    refuses as a usage error before the store opens (`seed.go:434-436`);
+  - a region or a profile name that is an nkey user seed, from `--region`, `AWS_REGION`,
+    `AWS_DEFAULT_REGION`, `AWS_PROFILE`, `AWS_DEFAULT_PROFILE` (the variables the SDK's loader
+    reads), the shared config profile's `region`, or a profile the shared config names that the
+    loader cannot find, such as a `source_profile`. The refusal names the source and never the
+    value, since the loader quotes a profile it cannot find and a region reaches every request's
+    signature (`:46, 62-86`);
+  - no region from `--region` or the AWS configuration (`:80-82`);
   - a Secrets Manager endpoint the configuration overrides that is not `https`, unless its host is
     `localhost` or a loopback address, since the seed would cross a network in plain text
-    (`:50-53, 94-108`);
+    (`:87-90, 149-168`);
   - credentials it cannot retrieve, naming the failure only when it has a name, such as an AWS
-    error code: `no usable AWS credentials[ (<code>)]; log in or set AWS_PROFILE` (`:54-62`).
+    error code: `no usable AWS credentials[ (<code>)]; log in or set AWS_PROFILE` (`:91-99`).
 - **The account check.** With `--expect-account`, it then refuses with exit 2 unless
-  `sts:GetCallerIdentity` returns that account (`:63-71`). STS and Secrets Manager resolve their
+  `sts:GetCallerIdentity` returns that account (`:100-108`). STS and Secrets Manager resolve their
   endpoints separately, so `Describe`, every mode's first call, also parses the secret's ARN and
   refuses one in another region than the client's, one in another account than `--expect-account`,
-  and an answer with no Secrets Manager ARN (`awsstore.go:121-161`).
-- **`generate`** (`seed.go:135-233, 308-330`). It refuses unless the secret exists, is not
+  and an answer with no Secrets Manager ARN (`awsstore.go:178-221`).
+- **`generate`** (`seed.go:136-243, 318-341`). It refuses unless the secret exists, is not
   scheduled for deletion, holds no version, deprecated ones included, and is served by default in
   no version, which `DescribeSecret` answers even while the listing has not caught up. It prints
-  `public key: U…` before it writes, and writes nothing if that print fails (`:165-167`). It writes
+  `public key: U…` before it writes, and writes nothing if that print fails (`:172-174`). It writes
   the bare `SU…` seed string with `PutSecretValue` under one fixed `ClientRequestToken`, which the
   SDK resends on a retry; a first version another run wrote with another seed is
   `ResourceExistsException`, a refusal, exit 2, after which no `version id` line is printed. It
-  requires `AWSCURRENT` among the stages returned (`awsstore.go:196-212`).
+  requires `AWSCURRENT` among the stages returned (`awsstore.go:253-277`).
   It then re-lists the versions and reads the value back, which must be the version it wrote and
   derive the printed key. Secrets Manager's reads are eventually consistent, so while the listing
   shows no version or the store serves none, it looks again after pauses of 0.25, 0.5, 1, 2 and
-  4 s (`seed.go:68, 199-233`); more than one version, or another version served, is another
+  4 s (`seed.go:72, 204-243`); more than one version, or another version served, is another
   writer's race at once. It prints `version id: <id>`, or `version id: unknown` when the write
   never answered. Every failure after the write is `error after writing: <what failed>`, exit 1,
-  including a version id it cannot print (`seed.go:168-191, 323-327, 413-425`).
+  including a version id it cannot print (`seed.go:175-201, 334-339, 467-482`).
 - **`check`.** It prints exactly one of the reference script's three lines: `<name>: absent`,
   `<name>: present, scheduled for deletion (<date>)`, or
-  `<name>: present; AWSCURRENT: yes (version <id>)|no` (`seed.go:95-109`).
-- **`verify`** (`seed.go:238-265`). It refuses, exit 2, a `--public-key` that is not a user public
+  `<name>: present; AWSCURRENT: yes (version <id>)|no` (`seed.go:97-113`).
+- **`verify`** (`seed.go:245-275`). It refuses, exit 2, a `--public-key` that is not a user public
   key, without echoing it, and a secret with no `AWSCURRENT` version. Otherwise it compares the key
   derived from the `AWSCURRENT` value with `--public-key` and prints one of the reference's three
   lines: `<name> AWSCURRENT (version <id>) derives <key>: yes`, exit 0; `…: no`, exit 1; or
   `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>`, exit 1, the reason
   `core.UserSeedPublicKey`'s, never quoting the value.
 - **A result that cannot be printed** is never exit 0: `check`'s or `verify`'s line is a refusal,
-  exit 2 (`seed.go:297-302`), and `--version`'s exit 1 (`main.go:36-39`). `generate` with stdout on
+  exit 2 (`seed.go:305-312`), and `--version`'s exit 1 (`main.go:36-39`). `generate` with stdout on
   the null device, which a closed stdout is too, since the Go runtime opens a closed fd 0-2 on it,
-  refuses before the store opens, exit 2 (`seed.go:418-421, 430-445`).
+  refuses before the store opens, exit 2 (`seed.go:438-441, 450-465`).
 - **Secrecy.** The seed never reaches argv, stdout, stderr, a log or an error message, and the AWS
-  SDK's logging is off (`awsstore.go:78-87`).
+  SDK's logging is off (`awsstore.go:112-124`).
 
 The store uses aws-sdk-go-v2, pinned at the versions the tech stack line records.
 
@@ -1248,16 +1266,17 @@ type WebhookListener struct {
   (`rendering.ListenerEnv.Check`) in `aws/rendering`.
 - [x] **Container definitions, policies and environment.** Build them inside
   `pulumi.All(…).ApplyT` over the Input fields, as the reference builds them inside
-  `Output.all(...).apply`. Each environment value comes from `core.ListenerConfig` where the
-  variables match (its `Check` before any registration, its `Env` in the apply, once the NATS URLs
-  are known; slice 3 adds its `ListenHost`, which `Env` writes after `PORT` and `host:Listener`
-  leaves unset), and from the fields above for the rest. `ENVOY_WEBHOOKS` is written only when
-  `webhooks` is non-empty, `ENVOY_GITHUB_MENTION_TRIGGER` and `ENVOY_REVIEWER_APP_ID` only when
-  `github` is listed, and each webhook's secret entry only when its webhook is listed. That is the
-  reference's rule once the deployment makes its listener slot-capable; for a deployment that lists
-  both, the container is today's. The goldens show the result is byte for byte, each rendered by
-  the reference implementation: both webhooks, with and without the seed, and (Task 3.4) none. The
-  component takes `[]` or exactly `["github", "slack"]` and refuses any other list, naming it.
+  `Output.all(...).apply`. Each environment value comes from `core.ListenerConfig` (Task 2.1) where
+  the variables match (its `Check` before any registration, its `Env`, which runs `Check` first, in
+  the apply, once the NATS URLs are known; slice 3 adds its `ListenHost`, which `Env` writes after
+  `PORT` and `host:Listener` leaves unset), and from the fields above for the rest. `ENVOY_WEBHOOKS`
+  is written only when `webhooks` is non-empty, `ENVOY_GITHUB_MENTION_TRIGGER` and
+  `ENVOY_REVIEWER_APP_ID` only when `github` is listed, and each webhook's secret entry only when
+  its webhook is listed. That is the reference's rule once the deployment makes its listener
+  slot-capable; for a deployment that lists both, the container is today's. The goldens show the
+  result is byte for byte, each rendered by the reference implementation: both webhooks, with and
+  without the seed, and (Task 3.4) none. The component takes `[]` or exactly `["github", "slack"]`
+  and refuses any other list, naming it.
 - [x] **Tests,** as in Task 3.1, including its construct test.
 - [x] **Commit** `feat(envoy-infra): aws:WebhookListener`.
 - [x] **Adoption rehearsal, as run** (at `2b7e8c30`): as Task 3.1's, the listener's 19 resources at
@@ -1342,10 +1361,9 @@ Once that PR has a commit, the coordinator supplies it in the brief:
 
 ## Slice 4: `gcp:NatsHub`
 
-Branch `envoy-infra-gcp` in its own clone (`~/.worktrees/legion/envoy-infra-gcp`), a plain PR based
-on `envoy-infra-core` outside the gh-stack, which merges `main` once slice 2 merges. Task
-4.1 starts once Task 2.1 is on `envoy-infra-core`; 4.2 needs Task 2.2; 4.3 needs 4.1; 4.4 needs 4.2
-and 4.3.
+Branch `envoy-infra-gcp` in its own clone (`~/.worktrees/legion/envoy-infra-gcp`): #1955, based on
+`envoy-infra-aws` and kept current by merging it. Task 4.1 starts once Task 2.1 is on
+`envoy-infra-core`; 4.2 needs Task 2.2; 4.3 needs 4.1; 4.4 needs 4.2 and 4.3.
 
 ### Task 4.1: the listener's and a session's permission sets (`core`)
 
@@ -1608,7 +1626,7 @@ Items to verify, each with the row that settles it and where its result goes:
 - `envoy-infra seed generate` against the real Secrets Manager. E10 ran `check` and `verify`
   read-only against the existing deployment's live seed, so the write path (`PutSecretValue`, its
   `AWSCURRENT` stage, the re-list and the read-back waits in `packages/envoy/infra/seed/seed.go`,
-  `generate` and `readBack`) is shown only against the in-repo fake endpoint (the first seed a
+  `Generate` and `readBack`) is shown only against the in-repo fake endpoint (the first seed a
   consumer generates with a released CLI; that consumer's PR).
 - `gh attestation verify` with the README's flags on an envoy-infra archive, the plugin's and the
   command's (`packages/envoy/infra/README.md:32-34, 73-75`): no release has an attestation to
@@ -1618,12 +1636,12 @@ Items to verify, each with the row that settles it and where its result goes:
 Hardening considered and not taken (the coordinator's ruling, recorded with #1951's final audit):
 
 - Requiring `--expect-account` for `generate`. It stays optional, as for `check` and `verify`
-  (`packages/envoy/infra/seed/awsstore.go:63-71`): requiring it would change the CLI contract its
+  (`packages/envoy/infra/seed/awsstore.go:100-108`): requiring it would change the CLI contract its
   callers use, and no exploit path needs it absent. The README tells an operator to pass it
   whenever a secret is named.
 - Keeping the seed out of immutable Go strings. `Put` hands the SDK the seed as a `SecretString`,
-  a Go string the process cannot clear (`awsstore.go:199`), and `Current` reads one back
-  (`:225`). The read-back byte slices are cleared and the key pair wiped (`seed.go:155, 179, 256`).
+  a Go string the process cannot clear (`awsstore.go:259`), and `Current` reads one back
+  (`:290`). The read-back byte slices are cleared and the key pair wiped (`seed.go:162, 189, 266`).
   This is memory hygiene only: nothing reaches an output, a log or an error.
 
 ## End-to-end verification plan
@@ -1647,7 +1665,7 @@ Envoy changes (`bus.LocalNATSURL`, `bus.ListenerDurable`/`ListenerQueue`; in tes
 `HubImage`, `Images`, `StartImageConfig`, `ConnectSeed`, and `startNkeyConfig` now running on
 `StartImageConfig`) are covered by `envoy-go` and `envoy-smoke`, which run on these PRs; `envoy-go`
 runs `go test` on every `packages/envoy` package but `integration`, testnats' own tests among them
-(`envoy-and-contracts.yaml:822-824`).
+(`envoy-and-contracts.yaml:817-819`).
 
 ## Skill catalog
 

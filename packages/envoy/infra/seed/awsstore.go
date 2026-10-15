@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"slices"
 	"time"
@@ -17,6 +18,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/logging"
+
+	"github.com/sjawhar/envoy/infra/core"
 )
 
 // AWSSecretsManager is the --store value of AWS Secrets Manager.
@@ -42,22 +45,48 @@ const firstVersionToken = "037f74cb-0e19-4a2d-b95f-6fba44b44b4d"
 
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
+// awsConfigEnv are the environment variables the SDK's configuration loader takes a region or a
+// profile name from (aws-sdk-go-v2/config v1.33.9 env_config.go:105-112, :352-353).
+var awsConfigEnv = []string{"AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "AWS_DEFAULT_PROFILE"}
+
 // OpenAWS opens Secrets Manager under the caller's own AWS configuration (the environment, then the
 // shared files), in region when it is not "". Before any call it refuses a configured Secrets
 // Manager endpoint a seed would cross a network to in plain text (endpointCheck), and credentials
 // it cannot retrieve, naming the fix. With account, it then refuses unless sts:GetCallerIdentity
 // answers that account; Describe holds the secret itself to that account too, so a seed never
 // lands in, or is read from, another account's secret of the same name.
+//
+// A region or a profile name that is an nkey user seed is refused first, naming where it came
+// from and never the value (awsConfigSeed): the loader quotes a profile it cannot find, and a
+// region reaches every request's signature and the ARN check's refusal.
 func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	if account != "" && !awsAccountID.MatchString(account) {
 		return nil, refuse("--expect-account is a 12-digit AWS account id")
 	}
+	if isSeed(region) {
+		return nil, awsConfigSeed("--region")
+	}
+	for _, name := range awsConfigEnv {
+		if isSeed(os.Getenv(name)) {
+			return nil, awsConfigSeed(name)
+		}
+	}
 	cfg, err := loadAWSConfig(ctx, region)
+	// The environment's profile is checked above, so a missing profile that is a seed is one the
+	// shared config names, as a source_profile.
+	var missing config.SharedConfigProfileNotExistError
+	if errors.As(err, &missing) && isSeed(missing.Profile) {
+		return nil, awsConfigSeed("a profile the shared config names")
+	}
 	if err != nil {
 		return nil, refuse("load the AWS configuration: %v", err)
 	}
 	if cfg.Region == "" {
 		return nil, refuse("no AWS region: pass --region, or name one in AWS_REGION or the profile")
+	}
+	// --region and the environment are checked above, so a seed here is the shared config's.
+	if isSeed(cfg.Region) {
+		return nil, awsConfigSeed(fmt.Sprintf("the region of the shared config's profile %q", sharedConfigProfile(cfg)))
 	}
 	client := secretsmanager.NewFromConfig(cfg)
 	if err := endpointCheck(client.Options().BaseEndpoint); err != nil {
@@ -96,6 +125,29 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 		options = append(options, config.WithRegion(region))
 	}
 	return config.LoadDefaultConfig(ctx, options...)
+}
+
+// isSeed reports whether value is an nkey user seed, as core.UserSeedPublicKey reads one.
+func isSeed(value string) bool {
+	_, err := core.UserSeedPublicKey([]byte(value))
+	return err == nil
+}
+
+// awsConfigSeed refuses a value of the AWS configuration that is an nkey user seed, naming source,
+// where it came from.
+func awsConfigSeed(source string) error {
+	return refuse("%s: an nkey user seed, which is never AWS configuration (not echoed)", source)
+}
+
+// sharedConfigProfile names the shared config profile cfg was loaded from: the environment's,
+// which is checked to be no seed, or "default".
+func sharedConfigProfile(cfg aws.Config) string {
+	for _, source := range cfg.ConfigSources {
+		if shared, ok := source.(config.SharedConfig); ok && shared.Profile != "" {
+			return shared.Profile
+		}
+	}
+	return "default"
 }
 
 // endpointCheck refuses a configured Secrets Manager endpoint (AWS_ENDPOINT_URL,

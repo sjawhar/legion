@@ -59,15 +59,20 @@ func (c ListenerConfig) Check() error {
 	return nil
 }
 
-// Env returns the listener's non-secret environment, KEY=value, in a fixed order, for a config
-// that Check has passed and the NATS servers natsURLs.
+// Env returns the listener's non-secret environment, KEY=value, in a fixed order, for the config
+// and the NATS servers natsURLs. It runs Check first, so no caller renders a config Check refuses;
+// a component still runs Check before it registers anything, since Env runs only once the URLs
+// are known.
 //
-// It checks only natsURLs: the listener refuses NATS_URLS blank (internal/config/config.go) and
+// It then checks natsURLs: the listener refuses NATS_URLS blank (internal/config/config.go) and
 // splits it on commas, so a URL holding a comma or nothing is refused here, by its index, and so is
 // one holding a control character, for Check's reason. Each refusal is an InputError naming
 // natsUrls. ENVOY_ALLOW_REMOTE_NATS=1 is set exactly when a URL names a server bus.LocalNATSURL
 // does not vouch for, since the listener refuses such a server without it.
 func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
+	if err := c.Check(); err != nil {
+		return nil, err
+	}
 	if len(natsURLs) == 0 {
 		return nil, InputErrorf("natsUrls", "natsUrls needs at least one URL")
 	}
