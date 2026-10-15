@@ -312,6 +312,14 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 		{"generate: one version", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) }, "already holds 1 version(s)"},
 		// A version without the default label is still a seed someone may have read.
 		{"generate: two versions", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed, readmeSeed) }, "already holds 2 version(s)"},
+		// A store whose default is the newest version names it from metadata alone, whatever its
+		// state: generate refuses on that before it lists.
+		{"generate: a latest version", mode("generate"), func(f *fakeStore) *fakeStore { return f.latest().holding(readmeSeed) },
+			"already holds version v1, which latest names"},
+		{"generate: a disabled latest version", mode("generate"), func(f *fakeStore) *fakeStore {
+			f.unreadable = "DISABLED"
+			return f.latest().holding(readmeSeed, readmeSeed)
+		}, "already holds version v2, which latest names"},
 		{"generate: describe fails", mode("generate"), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f }, "AccessDeniedException"},
 		{"generate: listing versions fails", mode("generate"), func(f *fakeStore) *fakeStore {
 			f.versionsErr = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")

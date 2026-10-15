@@ -149,10 +149,13 @@ func existing(d Description, name string) error {
 
 // Generate makes an nkey user and writes its seed as the secret's first version: it refuses a
 // secret that is absent, scheduled for deletion or holds any version, so it never replaces a seed a
-// client may already read. It then lists the versions again, to check the secret holds that version
-// alone, and reads back the version served by default, which must be that version and derive the
-// public key it returns. Once Put has been called, every return carries the public key, and the
-// version id when Put answered one: a version may exist, and verify needs the key to check it.
+// client may already read. A store whose default is the newest version whatever its state names it
+// in its description, so a version it names is refused before the versions are listed; the listing
+// then counts the rest, destroyed and disabled ones included. After the write it lists the versions
+// again, to check the secret holds that version alone, and reads back the version served by
+// default, which must be that version and derive the public key it returns. Once Put has been
+// called, every return carries the public key, and the version id when Put answered one: a version
+// may exist, and verify needs the key to check it.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
 	return generate(ctx, s, name, func(string) {})
 }
@@ -166,6 +169,10 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 	}
 	if err := existing(d, name); err != nil {
 		return "", "", err
+	}
+	if d.DefaultIsNewest && d.NewestVersion != "" {
+		return "", "", refuse("%s already holds version %s, which %s names. generate writes only a secret's first "+
+			"version, so it never replaces a seed a client may already read; use check or verify", name, d.NewestVersion, s.Label())
 	}
 	held, err := s.Versions(ctx, name)
 	if err != nil {
