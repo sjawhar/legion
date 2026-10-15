@@ -35,6 +35,8 @@ type Store interface {
 	// Put writes value as the secret's first version and returns its version id. An error with a
 	// version id means that version was written; one matching ErrRefused means nothing was, since
 	// another writer's first version is already there; any other may follow a write that landed.
+	// A store's Put must refuse a second first version with an error matching ErrRefused, or two
+	// overlapping generate runs both write and the second's seed is served (testStoreContract).
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
 	// clears it once read. When the store serves no version, the error matches ErrNotServed.
@@ -123,19 +125,15 @@ func existing(d Description, name string) error {
 
 // Generate makes an nkey user and writes its seed as the secret's first version: it refuses a
 // secret that is absent, scheduled for deletion, served by default or holding any version, so it
-// never replaces a seed a client may already read. It then lists the versions again, to check the
-// secret holds that version alone, and reads back the version served by default, which must be that
-// version and derive the public key it returns. Once Put has been called, every return carries the
-// public key, and the version id when Put answered one: a version may exist, and verify needs the
-// key to check it. A Put the store refuses wrote nothing, and its error matches ErrRefused.
-func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
-	return generate(ctx, s, name, func(string) error { return nil })
-}
-
-// generate is Generate, calling announce with the public key just before Put is called, so the
-// command can print the key before anything is written. When announce fails, generate refuses
-// and writes nothing: a seed whose public key nobody saw could be checked by no one.
-func generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error) {
+// never replaces a seed a client may already read. It calls announce with the public key just
+// before Put is called, so the command prints the key before anything is written; when announce
+// fails, Generate refuses and writes nothing, since a seed whose public key nobody saw could be
+// checked by no one. It then lists the versions again, to check the secret holds that version
+// alone, and reads back the version served by default, which must be that version and derive the
+// public key it returns. Once Put has been called, every return carries the public key, and the
+// version id when Put answered one: a version may exist, and verify needs the key to check it. A
+// Put the store refuses wrote nothing, and its error matches ErrRefused.
+func Generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error) {
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", "", refuse("%v", err)
@@ -319,7 +317,7 @@ func printResult(stdout io.Writer, name, line string, err error) error {
 // the write; a version id it cannot print is a failure after the write.
 func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer) error {
 	announced := false
-	_, version, err := generate(ctx, s, name, func(publicKey string) error {
+	_, version, err := Generate(ctx, s, name, func(publicKey string) error {
 		if _, printErr := fmt.Fprintf(stdout, "public key: %s\n", publicKey); printErr != nil {
 			return printErr
 		}
@@ -406,9 +404,21 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		}
 		return usage("a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)")
 	}
+	// A flag's value reaches the result lines, the refusals and the store's requests (--name is
+	// every line's subject and the secret id it sends, --region the endpoint the SDK resolves), so a
+	// value that is an nkey user seed is refused naming the flag, before the store opens. Visit
+	// visits the flags in name order.
 	given := map[string]bool{}
-	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
+	var seeded []string
+	fs.Visit(func(f *flag.Flag) {
+		given[f.Name] = true
+		if _, err := core.UserSeedPublicKey([]byte(f.Value.String())); err == nil {
+			seeded = append(seeded, "--"+f.Name)
+		}
+	})
 	switch {
+	case len(seeded) > 0:
+		return usage(strings.Join(seeded, ", ") + ": an nkey user seed, which is never an argument (not echoed)")
 	case fs.NArg() > 0:
 		return usage("unexpected arguments after the flags")
 	case store == "":

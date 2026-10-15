@@ -51,16 +51,21 @@ func TestListenerConfigCheck(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			err := c.in.Check()
+			env, envErr := c.in.Env([]string{"nats://127.0.0.1:4222"})
 			if c.err != "" {
 				requireInputError(t, err, c.input, c.err)
+				// Env runs Check itself, so a caller that skips Check still gets its refusal.
+				require.Nil(t, env)
+				requireInputError(t, envErr, c.input, c.err)
 				return
 			}
 			require.NoError(t, err)
+			require.NoError(t, envErr)
 		})
 	}
 }
 
-// Env renders the environment of a config Check has passed, and refuses only natsUrls.
+// Env runs Check, then renders the environment, and refuses the URLs itself.
 func TestListenerConfigEnv(t *testing.T) {
 	cases := []struct {
 		name string

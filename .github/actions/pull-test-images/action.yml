@@ -1,0 +1,46 @@
+name: Pull the images tests start
+description: >-
+  Pulls each image a job's tests start before they run, with a bounded retry: testcontainers
+  pulls a missing image when a test first asks for it, and the Docker daemon reports a registry
+  connection reset as an internal error that testcontainers does not retry, so one reset failed
+  every test sharing that container. The images are read from the Go string constants that
+  declare them (testnats.Image and testnats.HubImage, tests3.Image), so the tests and the pull
+  never name two images.
+inputs:
+  consts:
+    description: >-
+      One per line: a Go file, relative to the repository root, and the name of the string
+      constant in it whose value is an image, as `packages/envoy/internal/testnats/nats.go Image`.
+    required: true
+  images:
+    description: More images to pull, one per line, as a job's build reads from a Dockerfile.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Pull the images tests start
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      env:
+        CONSTS: ${{ inputs.consts }}
+        IMAGES: ${{ inputs.images }}
+      run: |
+        images=()
+        while read -r file name; do
+          [ -n "$file" ] || continue
+          image=$(sed -n "s/^const $name = \"\(.*\)\"\$/\1/p" "$file")
+          [ -n "$image" ] || { echo "::error::no const $name in $file"; exit 1; }
+          images+=("$image")
+        done <<<"$CONSTS"
+        while read -r image; do
+          [ -z "$image" ] || images+=("$image")
+        done <<<"$IMAGES"
+        [ "${#images[@]}" -gt 0 ] || { echo "::error::no image to pull"; exit 1; }
+        for image in "${images[@]}"; do
+          for attempt in 1 2 3; do
+            docker pull "$image" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 10
+          done
+        done

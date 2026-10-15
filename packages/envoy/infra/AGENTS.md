@@ -33,7 +33,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -62,21 +62,24 @@ versions. Never add the module to the root `go.work`.
   AWS components resolve in `NatsServiceArgs.validate` and `WebhookListenerArgs.validate`.
 - **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
   listener's environment that the resolver can make (`machineId`, `port`, `listenHost`,
-  `hostBridge`), run once before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one
-  value that may be another resource's output, and checks only those, inside the `ApplyT` that
-  computes the container's environment. A bad URL, like a blank `seed` in its own `ApplyT`,
-  therefore fails the preview or update when the container's `envs` resolve, after the component
-  and its image have registered, not the constructor. The watchdog's create script runs as root on
-  the host (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc,
-  may hold a control character, and with a watchdog the listener's name, which it echoes in double
-  quotes, may hold no `"`, `$`, backtick, `\` or line break. An input that belongs to another (a
-  webhook's secret, `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and
-  `configPath` to `authorization`) is required while its owner is present and refused while it is
-  not, where the component would drop it: one rule, `rendering.CheckOwnedInputs`, which both AWS
-  components' `validate` and `rendering.ListenerEnv.Check` call. Each table tests its own
-  refusals: core's are in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a
-  component's or a command's table holds its own plus one row for each input whose shared refusal
-  it passes on, showing where that refusal goes.
+  `hostBridge`), run once before anything registers; `ListenerConfig.Env` runs `Check` again, so no
+  caller renders a config `Check` refuses, then adds `natsUrls`, the one value that may be another
+  resource's output, and checks it, inside the `ApplyT` that computes the container's environment.
+  A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
+  container's `envs` resolve, after the component and its image have registered, not the
+  constructor. The watchdog's create script runs as root on the host (`host.watchdogCreate`), so no
+  value of the environment, which it writes into a heredoc, may hold a control character, and with a
+  watchdog the listener's name, which it echoes in double quotes, may hold no `"`, `$`, backtick, `\`
+  or line break. An input that belongs to another (a webhook's secret, `reviewerAppId` and
+  `mentionTrigger` to their webhook; `configHeader` and `configPath` to `authorization`) is required
+  while its owner is present and refused while it is not, where the component would drop it: one
+  rule, `rendering.CheckOwnedInputs`, which both AWS components' `validate` and
+  `rendering.ListenerEnv.Check` call. Each table tests its own refusals: core's are in `core` and
+  `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a command's table holds
+  its own plus one row for each shared call whose refusals it passes on, showing where they go and
+  that each is the `core.InputError` naming its input. host passes on `Check`'s refusals of
+  `machineId`, `port` and `hostBridge` through one call, so it has one row. A store's tests assert
+  the store's own answers, and `seed_test.go` the modes' messages over them.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
@@ -136,12 +139,15 @@ the error's text, which can quote the request; the AWS SDK runs with its logger 
 (`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
 and every error and line it returns, for a canary seed. A new store implements `seed.Store`, its
 `Current` answering an error that matches `seed.ErrNotServed` when it serves no version, which
-`generate` waits out after its write, and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+`generate` waits out after its write. Its `Put` must refuse a second first version with an error
+matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each find the
+secret empty, and only the store sees both writes. Its tests run `testStoreContract`
+(`seed/store_contract_test.go`), and it joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
-same commit. `seed/seed_test.go` pins each mode's `Store` calls, and `seed/awsstore_test.go`'s
-fake endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`.
+same commit. `seed/seed_test.go` pins each mode's `Store` calls, and the fake endpoint in
+`seed/awsfake_test.go` fails a `check` or `verify` that sends `ListSecretVersionIds`.
 
 ## Tests
 
@@ -151,13 +157,14 @@ directly, the plugin in process through pulumi-go-provider's `integration.NewSer
 (`provider/provider_test.go`, `host/construct_test.go`), the seed command against a fake `Store`
 (`seed/seed_test.go`) and the AWS SDK against an `httptest` endpoint speaking Secrets Manager's
 JSON 1.1 and STS's query protocol, which fails a test on any request it does not expect
-(`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
-`--version` (`cmd/envoy-infra/main_test.go`). The tests that start nats-server containers on this
-machine's Docker through `testnats` carry the `natslive` build tag, so a plain `go test ./...`, as
-the release job runs it, starts none: `core/nats_auth_live_test.go` (the rendered authorization on a
-real server: its users connect, a client with no credential is refused, the grants hold) and
-`seed/seed_live_test.go` (a generated seed connects, and a client without it is refused), each on
-`testnats.Image` and `testnats.HubImage`. The `envoy-infra-go` job in
+(`seed/awsfake_test.go`, the store's tests in `seed/awsstore_test.go`), and the command built as
+the release job stamps it, for its `--version` (`cmd/envoy-infra/main_test.go`). The tests that
+start nats-server containers on this machine's Docker through `testnats` carry the `natslive`
+build tag, so a plain `go test ./...`, as the release job runs it, starts none:
+`core/nats_auth_live_test.go` (the rendered authorization on a real server: its users connect, a
+client with no credential is refused, the grants hold) and `seed/seed_live_test.go` (a generated
+seed connects, and a client without it is refused), each on `testnats.Image` and
+`testnats.HubImage`. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh

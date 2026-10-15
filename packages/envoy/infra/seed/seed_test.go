@@ -28,6 +28,9 @@ const (
 	readmePublicKey = "UD466L6EBCM3YY5HEGHJANNTN4LSKTSUXTH7RILHCKEQMQHTBNLHJJXT"
 )
 
+// quiet is an announce that prints nothing, for a test that calls Generate directly.
+func quiet(string) error { return nil }
+
 type version struct {
 	id    string
 	value []byte
@@ -305,9 +308,6 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 		}, "DecryptionFailure"},
 		{"verify: a malformed public key", mode("verify", "--public-key", "U-not-a-key"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) },
 			"--public-key is not an nkey user public key"},
-		// A seed pasted where the public key belongs is refused without being echoed.
-		{"verify: a seed as the public key", mode("verify", "--public-key", readmeSeed), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) },
-			"--public-key is not an nkey user public key"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -477,7 +477,7 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 			requireNoValue(t, store, out, errs)
 
 			direct := row.store(newStore(t))
-			got, version, err := seed.Generate(context.Background(), direct, secretName)
+			got, version, err := seed.Generate(context.Background(), direct, secretName, quiet)
 			require.Error(t, err)
 			require.Equal(t, publicKeyOfSeed(t, direct.puts[0]), got, "Generate returns the key on every path after Put")
 			require.Equal(t, strings.TrimSuffix(row.version, "unknown"), version)
@@ -733,7 +733,7 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 					texts = append(texts, text, fmt.Sprint(err))
 				}
 				answered(seed.Check(ctx, direct, secretName))
-				public, ver, err := seed.Generate(ctx, direct, secretName)
+				public, ver, err := seed.Generate(ctx, direct, secretName, quiet)
 				answered(public+ver, err)
 				answered(seed.Verify(ctx, direct, secretName, readmePublicKey))
 				answered(seed.Verify(ctx, direct, secretName, readmeSeed))
@@ -747,6 +747,9 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 // seed could have been pasted into.
 func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 	const notEchoed = "envoy-infra seed: a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)\n"
+	seedIn := func(flags string) string {
+		return "envoy-infra seed: " + flags + ": an nkey user seed, which is never an argument (not echoed)\n"
+	}
 	rows := []struct {
 		name string
 		args []string
@@ -773,6 +776,16 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 		{"a seed after three dashes", mode("check", "---"+readmeSeed), notEchoed},
 		{"a flag missing its value", mode("verify", "--public-key"), "flag needs an argument: -public-key"},
 		{"an argument after the flags", mode("generate", readmeSeed), "unexpected arguments after the flags"},
+		// A seed pasted as any flag's value is refused naming the flag, never the value, before the
+		// store opens: --name and --region would otherwise reach every line, every refusal and the
+		// store's requests, and no store's refusal of the others is relied on.
+		{"a seed as --name", []string{"check", "--store", "fake-store", "--name", readmeSeed}, seedIn("--name")},
+		{"a seed as --name=", []string{"check", "--store", "fake-store", "--name=" + readmeSeed}, seedIn("--name")},
+		{"a seed as --region", mode("check", "--region", readmeSeed), seedIn("--region")},
+		{"a seed as --expect-account", mode("generate", "--expect-account", readmeSeed), seedIn("--expect-account")},
+		{"a seed as --public-key", mode("verify", "--public-key", readmeSeed), seedIn("--public-key")},
+		{"a seed as --store", []string{"check", "--store", readmeSeed, "--name", secretName}, seedIn("--store")},
+		{"a seed in two flags", []string{"check", "--store", "fake-store", "--name", readmeSeed, "--region", readmeSeed}, seedIn("--name, --region")},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {

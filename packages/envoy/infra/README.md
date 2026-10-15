@@ -942,17 +942,18 @@ envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <sec
 
 The command runs under your own AWS configuration, as the AWS SDK loads it: the environment, then
 the shared configuration and credentials files. `--region` overrides the region it names. Before
-any call, it refuses a Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL`,
-`AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is not `https`, unless
-it is this machine's loopback address, since a seed would cross the network in plain text; and it
-retrieves your credentials, and with none it can use, it stops with `refused: <name>: no usable
-AWS credentials …`. With `--expect-account`, it then asks STS whose credentials they are and
-refuses, before any other call, unless they are that account's; an empty `--expect-account`, as
-`--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage error, never a skipped
-check. STS and Secrets Manager each resolve their own endpoint, so the secret is checked too:
-`DescribeSecret`, every mode's first call, answers the secret's ARN, and the command refuses a
-secret in another region than the one it sends to, and with `--expect-account` one in another
-account, before it reads or writes a seed.
+any call, it refuses a region or a profile name in that configuration that is an nkey user seed,
+without echoing it (see "What `check` and `verify` print"); a Secrets Manager endpoint you
+configure (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services`
+section) that is not `https`, unless it is this machine's loopback address, since a seed would
+cross the network in plain text; and it retrieves your credentials, and with none it can use, it
+stops with `refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks
+STS whose credentials they are and refuses, before any other call, unless they are that account's;
+an empty `--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a
+usage error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so
+the secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and
+the command refuses a secret in another region than the one it sends to, and with
+`--expect-account` one in another account, before it reads or writes a seed.
 Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
 from, a secret of the same name in another account.
 
@@ -1044,15 +1045,24 @@ The client reads the seed from the store when it is deployed, such as into `host
 | `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
-pasted there must not reach the terminal.
+pasted there must not reach the terminal. Before any store opens, the command refuses a flag whose
+value is an nkey user seed (`--name`, `--region`, or any other), naming the flag and not the value:
+`--name` is every line's subject and the secret id the store is sent, and `--region` names the
+endpoint the SDK resolves. An unknown mode, an argument after the flags and a flag the command does
+not take are not echoed either. The AWS store does the same, before any call, for a region or a
+profile name that is a seed in the AWS configuration: `AWS_REGION`, `AWS_DEFAULT_REGION`,
+`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, the shared config profile's `region`, or a profile the shared
+config names that does not exist, such as a `source_profile`. The refusal names where the value came
+from, as `refused: <name>: AWS_PROFILE: an nkey user seed, which is never AWS configuration (not
+echoed)`.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Done: `check` printed its line, `generate` wrote the seed, read it back and printed the public key and version id, or `verify` printed that the stored seed derives the key. A result that cannot be printed on stdout is never exit 0. |
-| 1 | `verify` found another key or no seed; or `generate` failed after it began its write, including a version id it could not print. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
-| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the AWS error code, as `refused: describe-secret <name> failed: AccessDeniedException`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. |
+| 1 | `verify` found another key or no seed; or `generate` failed after it began its write, including a version id it could not print, but not a write Secrets Manager refused, which is exit 2. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
+| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the AWS error code, as `refused: describe-secret <name> failed: AccessDeniedException`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. So is the first write Secrets Manager refuses because another `generate` already wrote this secret's first version (`ResourceExistsException`): it comes after the public key is printed, but no version holds that key, and no `version id` line follows: `refused: put-secret-value <name> failed: ResourceExistsException; another generate wrote this secret's first version, with another seed; nothing was written, and the public key above is not stored`. Run `check`, then `verify` with the other run's key. |
 
 ### The AWS calls each mode makes
 
