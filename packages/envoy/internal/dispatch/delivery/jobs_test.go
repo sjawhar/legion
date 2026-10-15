@@ -555,12 +555,13 @@ func TestAQueuedJobReadsDeadlineStartsOnceItHoldsItsSlot(t *testing.T) {
 	logs := captureLogs(t)
 	pool, ctx := deliveryTestPool(t)
 	const (
-		waves       = 8
+		waves       = 16
 		runs        = waves * reconcilePartialConcurrency
 		jobsLatency = 300 * time.Millisecond
-		// Longer than one listing, so a read that holds its slot finishes inside it, and shorter
-		// than waves*jobsLatency, so the last runs to get a slot wait past it.
-		deadline = 2 * time.Second
+		// Far longer than one listing, so a read that holds its slot finishes inside it even on a
+		// starved host, and shorter than the at least (waves-2)*jobsLatency the last two waves of
+		// runs wait for a slot, so with the deadline started before the wait their reads expire.
+		deadline = 4 * time.Second
 	)
 	timeout := intakeMessageTimeout
 	intakeMessageTimeout = deadline
