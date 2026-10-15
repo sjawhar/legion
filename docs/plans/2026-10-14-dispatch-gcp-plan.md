@@ -285,8 +285,8 @@ merges `origin/main`, then each layer merges the layer below it (`envoy-infra-co
 and the fix's commits appear in no PR of the stack.
 
 Releases: slice 5 cuts a `legion-envoy` image release (the listener and Dispatch binaries change)
-and, by the release-path rule, an `envoy-infra` plugin release (`internal/bus` is compiled into
-the plugin, `packages/envoy/infra/AGENTS.md`, "Release contract"), with no component change.
+and an `envoy-infra` plugin release from `release-envoy-infra.yaml` (`internal/bus` is compiled
+into the plugin, `packages/envoy/infra/AGENTS.md`, "Release contract"), with no component change.
 Slice 6 cuts both too (Dispatch's code moves onto `bus`'s names; `core` and `gcp:NatsHub` change).
 Slice 7 cuts a plugin release, and an image release as well: Task 7.6 edits
 `packages/envoy/cmd/dispatch/README.md`, a path inside `release-envoy-listener.yaml`'s push paths
@@ -479,8 +479,10 @@ calls too (Task 7.2), so the rule is spelled once.
 - [ ] **Step 4: pass**: `go test ./internal/bus/` and `go test -race ./internal/bus/` (the
   `envoy-go-race` job's command for the package), `go vet ./...` in `packages/envoy`; from
   `packages/envoy/infra`, `go build ./...` (the plugin compiles `bus`; `golang.org/x/net` stays an
-  indirect requirement there at v0.59.0, so its `go.mod` does not change) and
-  `../../../.github/scripts/check-envoy-infra-release-paths.sh` (no new Envoy path).
+  indirect requirement there at v0.59.0, so its `go.mod` does not change). No list of release
+  paths needs an edit: `release-envoy-infra.yaml`'s version step cuts a version from what
+  `go list -deps ./cmd/...` says the plugin and the command compile, `bus` among them
+  (`packages/envoy/infra/AGENTS.md`, "Release contract").
 - [ ] **Step 5: commit** `feat(envoy): bus dials NATS through a SOCKS5 proxy when ENVOY_NATS_SOCKS5_PROXY is set`.
 
 ### Task 5.2: the setting in Dispatch's table
@@ -518,7 +520,7 @@ edit.
   (`packages/envoy/infra/AGENTS.md`, "Tests").
 - [ ] Open the PR stacked on slice 4's with `gh stack`; its body names the setting, R16-R18 and the
   ~10 s negative control; `check-pr-text.sh` passes. After merge, `release-envoy-listener.yaml`'s
-  run id and the `legion-envoy-v*` tag, and `release.yaml`'s `envoy-infra-v*` tag, go on the PR as
+  run id and the `legion-envoy-v*` tag, and `release-envoy-infra.yaml`'s `envoy-infra-v*` tag, go on the PR as
   the slice's production check.
 
 ---
@@ -752,9 +754,9 @@ Task 7.1 first; 7.2 needs 7.1; 7.3 and 7.4 need 7.2 and run in parallel; 7.5 nee
 
 ### Task 7.1: the Kubernetes and random SDKs
 
-**Files:** modify `packages/envoy/infra/go.mod`, `go.sum`; `.github/scripts/check-envoy-infra-release-paths.sh`
-is unaffected (no new Envoy package); `scripts/go-third-party-notices.sh` picks the new modules up
-at release.
+**Files:** modify `packages/envoy/infra/go.mod`, `go.sum`; no list of release paths needs an edit,
+since `release-envoy-infra.yaml`'s version step reads what the plugin compiles (`go list -deps`);
+`scripts/go-third-party-notices.sh` picks the new modules up at release.
 
 - [ ] `cd packages/envoy/infra && go get github.com/pulumi/pulumi-kubernetes/sdk/v4@v4.34.2 github.com/pulumi/pulumi-random/sdk/v4@v4.21.2 && go mod tidy`.
   Both require `github.com/pulumi/pulumi/sdk/v3 v3.259.0` (their `go.mod` files, read from the
@@ -1082,7 +1084,7 @@ deployment at the component).
   carries `tag:dispatch`. That plan's tester
   records the result there; this PR gets a summary of outcomes and durations with placeholders only:
   no project, tailnet, host name, address or account.
-- [ ] The slice's PR, stacked on slice 6's; after merge, `release.yaml`'s `envoy-infra-v*` tag goes
+- [ ] The slice's PR, stacked on slice 6's; after merge, `release-envoy-infra.yaml`'s `envoy-infra-v*` tag goes
   on the PR, and the deployment's plan pins it.
 
 ---
