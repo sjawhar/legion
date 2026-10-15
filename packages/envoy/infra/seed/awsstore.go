@@ -18,8 +18,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/aws/smithy-go/logging"
-
-	"github.com/sjawhar/envoy/infra/core"
 )
 
 // AWSSecretsManager is the --store value of AWS Secrets Manager.
@@ -125,12 +123,6 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 		options = append(options, config.WithRegion(region))
 	}
 	return config.LoadDefaultConfig(ctx, options...)
-}
-
-// isSeed reports whether value is an nkey user seed, as core.UserSeedPublicKey reads one.
-func isSeed(value string) bool {
-	_, err := core.UserSeedPublicKey([]byte(value))
-	return err == nil
 }
 
 // awsConfigSeed refuses a value of the AWS configuration that is an nkey user seed, naming source,

@@ -1445,8 +1445,11 @@ deployment; the live test below re-proves it against this branch's listener.)
     interface, since its iterator follows a repeated token forever), counting every state; when
     the listing shows none it counts 1 if `AccessSecretVersion` on `versions/1`, the one read
     Secret Manager keeps strongly consistent with the add, finds that version in any state.
-  - `Put` uses `AddSecretVersion`; the version must be 1 and `ENABLED`, and read back by number as
-    the value written.
+  - `Put` reads `versions/1` by number just before `AddSecretVersion`, which takes no request id
+    or precondition, and refuses with `ErrRefused`, writing nothing, when it exists in any state:
+    a second first version, so the store keeps `testStoreContract`. The added version must be 1
+    and `ENABLED`, and read back by number as the value written; a version 2 is two runs whose
+    reads both preceded both adds, an error after the write.
   - `Current` reads `versions/latest` with `AccessSecretVersion`: `NOT_FOUND` matches
     `ErrNotServed`, which `generate`'s read-back waits out; `FAILED_PRECONDITION` is an `*Unserved`,
     named by one `GetSecretVersion`.
@@ -1454,7 +1457,12 @@ deployment; the live test below re-proves it against this branch's listener.)
   `--name` takes `projects/<p>/secrets/<s>`, checked before the store opens without echoing it.
   `--region` and `--expect-account` are refused. It authenticates with Application Default
   Credentials or `GOOGLE_OAUTH_ACCESS_TOKEN`, takes `SECRET_MANAGER_ENDPOINT` as `https` only, and
-  logs nothing whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says.
+  logs nothing whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says. Before any call it refuses, naming the
+  variable and not the value, a seed in `GOOGLE_OAUTH_ACCESS_TOKEN`,
+  `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `GOOGLE_CLOUD_UNIVERSE_DOMAIN`,
+  `GCE_METADATA_HOST` or `SECRET_MANAGER_ENDPOINT` (or as its host): the variables a probe of every
+  environment variable the store and its libraries read, each set to a seed, found quoted on
+  stderr, sent in a request header or dialed as a host.
 - [x] Its unit test runs against a gRPC fake over TLS (`gcpfake_test.go`, whose certificate the
   package's one `TestMain` in `main_test.go` trusts) that implements those RPCs, with lags for
   the listing and `latest`, and repeats Task 2.2's refusal, read-back and canary cases through this
