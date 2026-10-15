@@ -309,3 +309,40 @@ func assertSessionEnded(t *testing.T, rig *membershipRig) {
 		t.Fatal("an ended membership asked the issuer again")
 	}
 }
+
+// refresherFunc is a Refresher a test writes inline.
+type refresherFunc func(ctx context.Context, refreshToken string) (oidc.Session, error)
+
+func (f refresherFunc) Refresh(ctx context.Context, refreshToken string) (oidc.Session, error) {
+	return f(ctx, refreshToken)
+}
+
+// The old account's refresh is in flight when the address's new account signs in and is given its
+// cookie, and then the refresh fails: the failure belongs to the old account, so it ends nothing of
+// the new one's. The new account's cookie still signs in, and its row keeps its refresh token.
+func TestDomainMembershipWhoseRefreshFailsAfterAnotherAccountSignedInLeavesThatAccount(t *testing.T) {
+	rig := newDomainMembershipRig(t)
+	rig.now = rig.now.Add(2 * time.Hour)
+	var newGeneration int64
+	rig.membership.SignIn = refresherFunc(func(ctx context.Context, _ string) (oidc.Session, error) {
+		if err := rig.people.SignIn(ctx, memberEmail, "google-subject-B", "refresh-B", rig.now); err != nil {
+			t.Errorf("the new account's sign-in: %v", err)
+		}
+		generation, err := rig.sessions.EnsureSession(ctx, memberEmail)
+		if err != nil {
+			t.Errorf("the new account's session: %v", err)
+		}
+		newGeneration = generation
+		return oidc.Session{}, errors.New(`oauth2: "invalid_grant"`)
+	})
+	if err := rig.membership.Confirm(context.Background(), memberEmail); !errors.Is(err, ErrNoIdentity) {
+		t.Fatalf("the old account's failed confirmation: err = %v, want ErrNoIdentity", err)
+	}
+	login := CookieIdentity{SigningKey: "signing-key", Sessions: rig.sessions, Membership: rig.membership}
+	if email, err := login.Login(cookieRequest(t, memberEmail, newGeneration)); err != nil || email != memberEmail {
+		t.Fatalf("the new account's cookie: login %q, %v; want %s still signed in", email, err, memberEmail)
+	}
+	if membership, _ := rig.people.get(memberEmail); membership.Subject != "google-subject-B" || membership.RefreshToken != "refresh-B" {
+		t.Fatalf("the row after the old account's failure: %#v, want google-subject-B with refresh-B", membership)
+	}
+}

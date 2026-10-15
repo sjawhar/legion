@@ -234,3 +234,42 @@ func (s *PgPeopleStore) retire(ctx context.Context, email, plain string) error {
 }
 
 var _ auth.PeopleStore = (*PgPeopleStore)(nil)
+
+// EndSubject ends email's domain-mode sign-in only while its row records subject, empty meaning
+// none (auth.PeopleStore.EndSubject). It locks the row, compares its subject, and only then
+// advances the session generation (revokeSessionsSQL) and forgets the refresh token and
+// confirmation, all in one transaction, so a sign-in by another account cannot land between the
+// check and the writes.
+func (s *PgPeopleStore) EndSubject(ctx context.Context, email, subject string) (bool, error) {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("end the sign-in of %q: %w", email, err)
+	}
+	defer tx.Rollback(ctx)
+	var stored *string
+	err = tx.QueryRow(ctx, `select sub from people where email = $1 for update`, email).Scan(&stored)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read the subject the end of %q expects: %w", email, err)
+	}
+	if recorded := ""; stored != nil {
+		recorded = *stored
+		if recorded != subject {
+			return false, nil
+		}
+	} else if subject != "" {
+		return false, nil
+	}
+	if _, err := tx.Exec(ctx, revokeSessionsSQL, email); err != nil {
+		return false, fmt.Errorf("end the sessions of %q: %w", email, err)
+	}
+	if _, err := tx.Exec(ctx, `update people set refresh_token = null, confirmed_at = null where email = $1`, email); err != nil {
+		return false, fmt.Errorf("end membership of %q: %w", email, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("end the sign-in of %q: %w", email, err)
+	}
+	return true, nil
+}

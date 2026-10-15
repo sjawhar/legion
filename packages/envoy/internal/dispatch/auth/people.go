@@ -39,6 +39,12 @@ type PeopleStore interface {
 	// signed in to the address cannot overwrite the new holder's token. A Cognito pool's
 	// confirmation passes an empty subject and writes whatever the row's subject.
 	Confirm(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error
+	// EndSubject ends email's domain-mode sign-in only while its row still records subject (an
+	// empty subject: records none). In one transaction it advances email's session generation and
+	// forgets the refresh token and confirmation, and ended reports that it did; a row another
+	// Google account has signed in to since is left as it is, so a failed refresh of the old
+	// account never ends the new account's sessions.
+	EndSubject(ctx context.Context, email, subject string) (ended bool, err error)
 	// End forgets email's refresh token and confirmation, keeping the person and their subject.
 	End(ctx context.Context, email string) error
 }

@@ -1338,3 +1338,20 @@ func TestCookieAuthenticatedUnsafeRequestsRequireSameOrigin(t *testing.T) {
 		}
 	})
 }
+
+func (s *memoryPeopleStore) EndSubject(ctx context.Context, email, subject string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership, found := s.people[email]
+	if !found || membership.Subject != subject {
+		return false, nil
+	}
+	if s.sessions == nil {
+		return false, errors.New("memoryPeopleStore: EndSubject has no sessions to end")
+	}
+	if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+		return false, err
+	}
+	s.people[email] = auth.PersonMembership{Subject: membership.Subject}
+	return true, nil
+}

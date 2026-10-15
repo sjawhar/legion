@@ -232,3 +232,17 @@ func TestWriteErrorMapsNoIdentityToUnauthorized(t *testing.T) {
 		t.Errorf("other error: status %d, want 500", w.Code)
 	}
 }
+
+func (s *testPeopleStore) EndSubject(ctx context.Context, email, subject string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	membership, found := s.people[email]
+	if !found || membership.Subject != subject {
+		return false, nil
+	}
+	if err := s.sessions.RevokeSessions(ctx, email); err != nil {
+		return false, err
+	}
+	s.people[email] = auth.PersonMembership{Subject: membership.Subject}
+	return true, nil
+}

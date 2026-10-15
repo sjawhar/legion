@@ -669,3 +669,51 @@ func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
 		t.Fatalf("after a confirmation with no subject: %#v, want refresh-4", got)
 	}
 }
+
+// EndSubject ends a sign-in only while the row records the account it names: under another
+// account's subject it writes nothing, and under the row's own it advances the generation and
+// forgets the token, keeping the subject. A row with no subject ends only for an empty one.
+func TestPgPeopleStoreEndSubjectEndsOnlyTheAccountItNames(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	if err := people.SignIn(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := sessions.EnsureSession(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended, err := people.EndSubject(ctx, email, "subject-1"); err != nil || ended {
+		t.Fatalf("EndSubject under another account: ended %t, %v; want false", ended, err)
+	}
+	if membership, _, _ := people.Membership(ctx, email); membership.RefreshToken != "refresh-2" {
+		t.Fatalf("after EndSubject under another account: %#v, want refresh-2 kept", membership)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation {
+		t.Fatalf("EndSubject under another account moved the generation to %d", got)
+	}
+	if ended, err := people.EndSubject(ctx, email, "subject-2"); err != nil || !ended {
+		t.Fatalf("EndSubject under the row's account: ended %t, %v; want true", ended, err)
+	}
+	if membership, _, _ := people.Membership(ctx, email); membership.RefreshToken != "" || membership.Subject != "subject-2" {
+		t.Fatalf("after EndSubject: %#v, want no refresh token and subject-2 kept", membership)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("EndSubject left the generation at %d, want %d", got, generation+1)
+	}
+	if err := people.Record(ctx, "recorded@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if ended, err := people.EndSubject(ctx, "recorded@example.com", "subject-1"); err != nil || ended {
+		t.Fatalf("EndSubject of a row with no subject under an account: ended %t, %v; want false", ended, err)
+	}
+	if ended, err := people.EndSubject(ctx, "recorded@example.com", ""); err != nil || !ended {
+		t.Fatalf("EndSubject of a row with no subject under none: ended %t, %v; want true", ended, err)
+	}
+	if ended, err := people.EndSubject(ctx, "nobody@example.com", ""); err != nil || ended {
+		t.Fatalf("EndSubject of no row: ended %t, %v; want false", ended, err)
+	}
+}
