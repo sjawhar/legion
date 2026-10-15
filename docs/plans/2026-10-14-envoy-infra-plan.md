@@ -839,7 +839,8 @@ These semantics are ported from the reference implementation, and the unit tests
 ### Task 2.2: `envoy-infra seed` with the AWS Secrets Manager store
 
 **Files:** Create `packages/envoy/infra/cmd/envoy-infra/main.go`, `main_test.go`, `seed/seed.go`,
-`seed_test.go`, `seed/awsstore.go`, `awsstore_test.go`, `seed/export_test.go` (the tests' setter
+`seed_test.go`, `seed/awsstore.go`, `awsstore_test.go`, `awsfake_test.go` (the fake Secrets
+Manager and STS endpoint the store's tests run against), `seed/export_test.go` (the tests' setter
 for `generate`'s read-back pauses), `seed/seed_live_test.go` (build tag `natslive`). Modify
 `.github/workflows/envoy-and-contracts.yaml`: `envoy-infra-go` runs `go test -tags natslive ./core/ ./seed/`
 (`envoy-and-contracts.yaml:909-911`).
