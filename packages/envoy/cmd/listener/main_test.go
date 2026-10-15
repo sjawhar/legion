@@ -3757,6 +3757,45 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	}
 }
 
+// TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection is the three-hour outage this
+// threshold exists for: isUnrecoverableSelfHealthFailure reads every failure as transient while
+// NATS is disconnected, by design, so the rebuild path never runs and terminalFailures never
+// advances. Before disconnectedFailureThreshold existed, nothing else in the monitor bounded that
+// state, and a connection that never recovered on its own - a broken tunnel nats.go kept retrying
+// without ever reaching the server - left the listener logging this WARN forever with nothing
+// asking its runtime for a fresh process.
+func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T) {
+	stuck := errors.New("nats: outbound buffer limit exceeded")
+	probe := func() error { return stuck }
+	// Mirrors isUnrecoverableSelfHealthFailure's own rule while disconnected: never terminal, so
+	// rebuild must never run for this failure.
+	isUnrecoverable := func(error) bool { return false }
+	var rebuilds atomic.Int32
+	rebuild := func() error { rebuilds.Add(1); return nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, rebuild,
+			func() { terminated <- struct{}{} }, time.Millisecond, 3)
+	}()
+	select {
+	case <-terminated:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the monitor never terminated a disconnected probe that never recovered")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("the monitor did not return after terminating")
+	}
+	if got := rebuilds.Load(); got != 0 {
+		t.Fatalf("rebuilds = %d, want 0: a disconnected client is never rebuilt", got)
+	}
+}
+
 // A self-health rebuild moves an interest registry whose connection closed to the client's live
 // one, as it does for the session and CI stores. The registry's buckets and watcher were bound to
 // the connection Open took, so a rewatch on that connection's handles could only fail again and the

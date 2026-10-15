@@ -146,6 +146,19 @@ func rebuildListenerDependencies(
 	return err
 }
 
+// disconnectedFailureThreshold bounds how many consecutive probe failures the self-health monitor
+// tolerates while isUnrecoverableSelfHealthFailure reads NATS as disconnected, its own transient
+// case for as long as the client is not connected. nats.go retries a dropped connection every
+// second (ReconnectWait) on its own, so a connection still down after this many intervals is not a
+// brief reconnect gap: the transport itself has not come back (a NATS restart or deploy taking
+// longer than expected, or a tunnel that keeps accepting local connections without forwarding them
+// anywhere), and no amount of further waiting inside this process changes that. Left unbounded, the
+// monitor logs this WARN forever and the listener never asks its runtime for a fresh process: an
+// envoy-listener whose transport stayed broken this way logged "outbound buffer limit exceeded"
+// 363 consecutive times over about three hours, recovering only once a human restarted its
+// container by hand. At the production interval (30s) this threshold is 10 minutes.
+const disconnectedFailureThreshold = 20
+
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
 // NATS reconnects. A terminal watcher, closed KV handle, or missing durable
 // consumer is rebuilt immediately, and a rebuild that reports success is
@@ -158,7 +171,10 @@ func rebuildListenerDependencies(
 // A probe that lands in a reconnect gap is that transient case: it fails at
 // once with "outbound buffer limit exceeded" while the bus is disconnected (its
 // reconnect buffer is off), or at its deadline when the reconnect lands during
-// the probe. Either is one WARN, then "self-health recovered" from the next.
+// the probe. Either is one WARN, then "self-health recovered" from the next -
+// unless the gap outlasts disconnectedFailureThreshold consecutive probes, in
+// which case the bounded shutdown path runs for this too, rather than trusting
+// nats.go's own reconnect loop to eventually succeed with no bound at all.
 func runSelfHealthMonitor(
 	ctx context.Context,
 	logger *logging.Logger,
@@ -185,6 +201,16 @@ func runSelfHealthMonitor(
 			logger.Warn("self-health probe failed", slog.Int("consecutive", failures), slog.Int("threshold", threshold), slog.String("error", err.Error()))
 			if isUnrecoverable == nil || !isUnrecoverable(err) {
 				terminalFailures = 0
+				if failures >= disconnectedFailureThreshold {
+					logger.Error("self-health disconnected failure threshold exceeded; terminating for restart",
+						slog.Int("consecutive", failures),
+						slog.String("error", err.Error()),
+					)
+					if terminate != nil {
+						terminate()
+					}
+					return
+				}
 				continue
 			}
 			terminalFailures++
