@@ -395,6 +395,33 @@ add_publish_step "$root" $'      - name: Comments\n        run: |\n          # b
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 
+echo "case: npm install, npm ci and npm exec in a credentialed job (npm view and npm publish stay allowed)"
+root=$(fixture npm-dependency-subcommands)
+add_publish_step "$root" $'      - name: Install the publish dependencies\n        run: npm ci\n      - name: Install one more\n        run: npm install --no-save left-pad\n      - name: Run a tool\n        run: npm exec -- some-tool\n      - name: Look up the version\n        run: npm view "@sjawhar/pi-envoy@1.0.0" version\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names npm ci" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Install the publish dependencies' runs 'npm ci'")"
+check "names npm install" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Install one more' runs 'npm install'")"
+check "names npm exec" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Run a tool' runs 'npm exec'")"
+check "does not name npm view" "$(is "$(contains "$out" "step 'Look up the version'")" false)"
+check "does not name npm publish" "$(is "$(contains "$out" "step 'Publish to npm'")" false)"
+
+echo "case: a scripts/ program run through an interpreter in a credentialed job"
+root=$(fixture scripts-via-interpreter)
+add_publish_step "$root" $'      - name: Notices\n        run: bash scripts/go-third-party-notices.sh out/NOTICES ./cmd/legion\n      - name: Notices under sh\n        run: sh scripts/foo.sh\n      - name: Source a helper\n        run: source scripts/lib/helpers.sh\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the script behind bash" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Notices' runs 'scripts/go-third-party-notices.sh'")"
+check "names the script behind sh" "$(contains "$out" "step 'Notices under sh' runs 'scripts/foo.sh'")"
+check "names the sourced script" "$(contains "$out" "step 'Source a helper' runs 'scripts/lib/helpers.sh'")"
+
+echo "case: a step whose shell is an interpreter in a credentialed job"
+root=$(fixture shell-python)
+add_publish_step "$root" $'      - name: Helper\n        shell: python\n        run: |\n          import subprocess\n          subprocess.run(["bun", "install"], check=True)\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the step and its shell" "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Helper' .*'python'")"
+
 echo "case: docker build and docker buildx build in a credentialed job"
 root=$(fixture docker-build)
 add_publish_step "$root" $'      - name: Build image\n        run: docker build .\n      - name: Build image with buildx\n        run: docker buildx build .\n'
@@ -486,6 +513,15 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the key" "$(contains "$out" "job 'pi_envoy_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.OTHER_KEY;")"
 
+echo "case: the deploy key named by index, secrets['DEPLOY_KEY']"
+root=$(fixture deploy-key-index-syntax)
+mutate "$root/$RELEASE" $'        run: bun install --frozen-lockfile\n' $'        env:\n          KEY: ${{ secrets[\'DEPLOY_KEY\'] }}\n        run: bun install --frozen-lockfile\n' 1
+add_publish_step "$root" $'      - name: Create GitHub release\n        env:\n          KEY: ${{ secrets["DEPLOY_KEY"] }}\n        run: .github/scripts/release-push.sh release "$TAG" "Pi Envoy v1" "tarball/$FILE"\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the build job's text" "$(contains "$out" "job 'pi_envoy_build' runs dependency code (.*), but its text names .*DEPLOY_KEY")"
+check "names the step of the credentialed job" "$(contains "$out" "job 'pi_envoy_publish' names .*DEPLOY_KEY at step 'Create GitHub release' env.KEY")"
+
 echo "case: a build job holding id-token: write"
 root=$(fixture build-id-token)
 mutate "$root/$RELEASE" $'    permissions:\n      contents: read\n' $'    permissions:\n      contents: read\n      id-token: write\n' 1
@@ -509,6 +545,15 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the inherited scope at the workflow's permissions line" \
   "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^permissions:$'): job 'pi_envoy_build' runs dependency code (.*), but holds 'contents: write' through the workflow's permissions, having none of its own")"
+
+echo "case: a build job with no permissions block in a workflow with none"
+root=$(fixture build-no-permissions-anywhere)
+mutate "$root/$RELEASE" $'permissions: {}\n' ''
+mutate "$root/$RELEASE" $'    permissions:\n      contents: read\n' '' 1
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job, whose token is whatever the repository grants a job that declares no permissions" \
+  "$(contains "$out" "job 'pi_envoy_build' runs dependency code (.*), but .*permissions")"
 
 tripwire=$'      - name: Check this job holds no credential (tripwire)\n        run: .github/scripts/release-push.sh no-credential\n'
 
