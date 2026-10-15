@@ -163,14 +163,18 @@ release jobs from a branch makes HEAD whatever the branch holds, and a one-commi
 commits against main's tip but diffed paths against `HEAD^` let two shapes land as "the bump" — a
 manifest-only commit already at the release version that also carried a `scripts.postinstall`, and
 a merge commit whose first parent was an older main commit, which reset main to the old tree.
-`push-main` now checks the contract at the point of use, before every push (the first, and again
-after each rebase): HEAD's one parent is main's fetched tip, HEAD's tree differs from main's in the
-manifest alone, and the manifest differs from main's copy in `.version` alone, set to the released
-version — `git show "$upstream:$manifest" | jq -S '.version = $v'` must equal `git show
-"HEAD:$manifest" | jq -S .`. Anything else is refused through the one sink of §3, so a second file
-in the bump commit, a manifest carrying more than the version, or a merge commit is refused rather
-than dropped or pushed, and the only commit a branch dispatch can land is the exact bump a run from
-main lands. The contract is still written down at the producing end, `tag`'s header, and that is
+`push-main` now checks the contract at the point of use, against the commit's own parent, on every
+attempt (the first, and again after each rebase) and before any push, rebase or superseded-version
+drop: HEAD has one parent, HEAD is the one commit main does not have, HEAD's tree differs from its
+parent's in the manifest alone, and the manifest is its parent's copy with `.version` set to the
+released version and nothing else, as JSON — `git show "$parent:$manifest" | jq -S '.version = $v'`
+must equal `git show "HEAD:$manifest" | jq -S .` (sorted-JSON equality: key order, a BOM, duplicate
+keys and the blob's mode are not compared). Anything else is refused through the one sink of §3
+before anything else happens, so a second file in the bump commit, a manifest carrying more than
+the version (as JSON), a merge commit or a parentless commit is refused rather than rebased,
+dropped or pushed; a clean bump whose parent is an older main commit is rebased onto main's tip and
+checked there again. The only commit a branch dispatch can land is the exact bump a run from main
+lands. The contract is still written down at the producing end, `tag`'s header, and that is
 still the rule: when two stages of one script share a contract about the shape of what one
 produces and the other consumes destructively, write the contract down at the producing end, since
 the consuming end's check tells a reader what is refused but not why that shape is the only one

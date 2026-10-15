@@ -740,13 +740,13 @@ check "the value form in another casing, under DEPLOY_KEY of a push step, is all
 check "the env key deploy_key is not DEPLOY_KEY, which release-push.sh reads" \
   "$(contains "$out" "job 'pi_legion_publish' names secrets.DEPLOY_KEY at step 'Push tag' env.deploy_key;")"
 
-echo "case: npm publish without a tarball argument in a credentialed job"
+echo "case: npm publish without a tarball right after it in a credentialed job"
 root=$(fixture npm-publish-directory)
 add_publish_step "$root" $'      - name: Publish the directory\n        run: npm publish --access public --provenance\n'
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the directory publish and why" \
-  "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Publish the directory' runs 'npm publish' without a tarball argument (a directory publish runs the package's prepack); dependency code runs only in a job that holds none")"
+  "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step 'Publish the directory' runs 'npm publish' without a tarball right after it (the tarball must be the word after \`publish\`; a directory publish runs the package's prepack); dependency code runs only in a job that holds none")"
 check "does not name the publish of the handed tarball" "$(is "$(contains "$out" "step 'Publish to npm'")" false)"
 
 echo "case: a tripwire step with continue-on-error"
@@ -775,7 +775,7 @@ mutate "$root/$RELEASE" $'  pi_envoy_build:\n    runs-on: ubuntu-24.04\n' $'  pi
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the job's key at its line" \
-  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    continue-on-error: true$'): job 'pi_envoy_build' runs dependency code (.*), but carries 'continue-on-error:', which reports a failed tripwire as success to the jobs that need it")"
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    continue-on-error: true$'): job 'pi_envoy_build' runs dependency code (.*), so it must carry no 'continue-on-error:' (a true or an expression there reports a failed tripwire as success to the jobs that need it)")"
 check "does not name the tripwire step, which carries none" "$(is "$(contains "$out" "tripwire step must carry no")" false)"
 check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
 
@@ -820,8 +820,8 @@ add_publish_step "$root" $'      - name: Publish under a tag\n        run: npm p
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 for step in 'Publish under a tag' 'Publish with an otp' 'Publish under a one-word tag'; do
-  check "names '$step' as a publish without a tarball" \
-    "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step '$step' runs 'npm publish' without a tarball argument (a directory publish runs the package's prepack)")"
+  check "names '$step' as a publish without a tarball right after it" \
+    "$(contains "$out" "job 'pi_envoy_publish' holds a credential, but step '$step' runs 'npm publish' without a tarball right after it (the tarball must be the word after \`publish\`; a directory publish runs the package's prepack)")"
 done
 check "does not name the publish of the handed tarball, right after publish" "$(is "$(contains "$out" "step 'Publish to npm'")" false)"
 
@@ -844,5 +844,13 @@ run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "does not read a continued argument line as a command" "$(is "$(contains "$out" "step 'Hand over a long list'")" false)"
 check "still names the command a continuation starts" "$(contains "$out" "step 'Install across lines' runs 'bun'")"
+
+echo "case: a backslash ending a comment, or an escaped backslash, continues nothing"
+root=$(fixture comment-backslash)
+add_publish_step "$root" $'      - name: Install behind a comment\n        env:\n          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}\n          TAG: ${{ steps.handed.outputs.tag }}\n        run: |\n          # keep the toolchain pinned \\\n          bun install --frozen-lockfile\n          .github/scripts/release-push.sh push-tag "$TAG"\n      - name: Install behind an escaped backslash\n        run: |\n          printf \'x\' \\\\\n          bun install\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the command under a comment's trailing backslash" "$(contains "$out" "step 'Install behind a comment' runs 'bun'")"
+check "names the command under an escaped backslash" "$(contains "$out" "step 'Install behind an escaped backslash' runs 'bun'")"
 
 summary "check-release-credentials.sh"

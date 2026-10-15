@@ -45,9 +45,11 @@
 # past docker's global options (`--config /tmp/c`, `-H tcp://x`, `-D`), or is a path with a
 # `scripts/` or `out/` component (`./scripts/x`, `../../scripts/x`, `out/x`,
 # `"$GITHUB_WORKSPACE/out/x"`), other than .github/scripts/release-push.sh itself. Command position
-# is found by joining backslash-continued lines, then splitting each line of the `run:` on the
-# shell's separators (`;`, `&&`, `||`, `|`, `(`, `{`, `$(` and backticks; `${{ … }}` expressions
-# are elided first), dropping comments,
+# is found by stripping each line's comment first (an unquoted `#` at the start of a line or after
+# whitespace runs to the end of its line, so a backslash inside it continues nothing), then joining
+# only a real continuation (a line ending in a backslash not itself escaped: `printf 'x' \\` ends
+# its command), then splitting each line of the `run:` on the shell's separators (`;`, `&&`, `||`,
+# `|`, `(`, `{`, `$(` and backticks; `${{ … }}` expressions are elided first), dropping
 # leading `VAR=value` assignments and the keywords that precede a command (if, then, for, do, time,
 # exec, env, …), and taking the first word left; an interpreter there (one of INTERPRETERS: bash,
 # sh, dash, zsh, source, `.`) is looked through, past its flags and the option name an `-o`, `+o`,
@@ -138,7 +140,7 @@ DEPENDENCY_COMMANDS = {
 # `.tgz` behind a flag is one (`npm publish --tag x.tgz` publishes the directory under the tag
 # x.tgz): NO_TARBALL says why.
 NPM_ALLOWED = {"view", "publish"}
-NO_TARBALL = "without a tarball argument (a directory publish runs the package's prepack)"
+NO_TARBALL = "without a tarball right after it (the tarball must be the word after `publish`; a directory publish runs the package's prepack)"
 # docker runs a container's code under these, and under the long forms of the same on
 # DOCKER_DEPENDENCY_LONG; `docker login`, `docker buildx imagetools`, `docker image ls` and
 # `docker container ls` move only credentials, manifests and listings. The subcommand is the first
@@ -195,12 +197,12 @@ SKIP_WORDS = {
 INTERPRETERS = {"bash", "sh", "dash", "zsh", "source", "."}
 
 
-def strip_comment(segment: str) -> str:
-    """Cuts an unquoted ` #` and everything after it."""
+def strip_comment(line: str) -> str:
+    """Cuts an unquoted `#` at the start of the line or after whitespace, and everything after it."""
     quote = None
     i = 0
-    while i < len(segment):
-        char = segment[i]
+    while i < len(line):
+        char = line[i]
         if quote:
             if char == quote:
                 quote = None
@@ -210,10 +212,10 @@ def strip_comment(segment: str) -> str:
             quote = char
         elif char == "\\":
             i += 1
-        elif char == "#" and i > 0 and segment[i - 1].isspace():
-            return segment[:i]
+        elif char == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
         i += 1
-    return segment
+    return line
 
 
 def words_of(segment: str) -> list[str]:
@@ -255,15 +257,21 @@ def words_of(segment: str) -> list[str]:
     return words
 
 
+# A backslash-newline continues the command when the backslash is not itself escaped; after the
+# comments are gone, one ending a comment is gone with it.
+CONTINUATION = re.compile(r"(?<!\\)\\\n")
+
+
 def commands_of(run: str) -> list[list[str]]:
     """Each simple command of a `run:`, as its words with the command first."""
+    stripped = "\n".join(strip_comment(line) for line in EXPRESSION.sub("EXPR", run).splitlines())
     commands = []
-    for line in EXPRESSION.sub("EXPR", run).replace("\\\n", " ").splitlines():
+    for line in CONTINUATION.sub(" ", stripped).splitlines():
         for segment in SEPARATORS.split(line):
             segment = segment.strip()
             if not segment or segment.startswith("#"):
                 continue
-            commands += command_of(words_of(strip_comment(segment)))
+            commands += command_of(words_of(segment))
     return commands
 
 
@@ -296,7 +304,7 @@ def command_of(words: list[str]) -> list[list[str]]:
 
 def dependency_command(words: list[str]) -> str | None:
     """How the message names the command when it is dependency code (`'bun'`, `'npm ci'`, `'docker
-    container run'`, `'npm publish' without a tarball argument (…)`), else None."""
+    container run'`, `'npm publish' without a tarball right after it (…)`), else None."""
     command = words[0]
     if command in DEPENDENCY_COMMANDS:
         return f"'{command}'"
@@ -553,9 +561,10 @@ def check_job(
                 )
         if "continue-on-error" in job:
             problem(
-                path, job.lines["continue-on-error"],
-                f"job '{name}' runs dependency code ({what}), but carries 'continue-on-error:', "
-                f"which reports a failed tripwire as success to the jobs that need it",
+                path, job.lines.get("continue-on-error", job_line),
+                f"job '{name}' runs dependency code ({what}), so it must carry no "
+                f"'continue-on-error:' (a true or an expression there reports a failed tripwire "
+                f"as success to the jobs that need it)",
             )
         last = steps[-1]
         run = last.get("run")

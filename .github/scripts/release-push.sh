@@ -63,25 +63,31 @@
 #            $DEPLOY_KEY, as push-tag does, from a detached HEAD as well as a
 #            branch, and it pushes exactly the one bump commit. Before every
 #            push, the first and each one after a rebase, it fetches main and
-#            checks HEAD against the fetched tip: HEAD has one parent, and it
-#            is main's tip; HEAD is the one commit main does not have; HEAD's
-#            tree differs from main's in <package-dir>/package.json alone; and
-#            that manifest differs from main's copy in .version alone, set to
-#            <version> (the test `tagged` applies to a bump commit, plus its
-#            content). A HEAD whose one parent is an older main commit is
-#            rebased onto the tip first, which replays the one bump over what
-#            landed since the checkout, and checked again there. Anything else
-#            — a second commit, a merge commit, a parentless commit, a second
-#            path, a manifest changed in more than its version — is refused,
-#            origin untouched: the only commit a run dispatched from a branch
-#            other than main can land is the exact version bump, which is what
-#            a run from main lands. A HEAD main already holds (the manifest
-#            already held the version, so `tag` committed nothing) has nothing
-#            to push and exits 0. This runs last, after the tag and GitHub
-#            release exist: a lost push only delays the metadata bump on main,
-#            which the tag-anchored version computation heals on the next
-#            release. Raced-in commits stay outside the tag and are picked up
-#            by the next version calculation.
+#            checks HEAD against the fetched tip and against HEAD's own parent:
+#            HEAD has one parent; HEAD is the one commit main does not have;
+#            HEAD's tree differs from its parent's — main's fetched tip, or an
+#            older main commit it is then rebased onto and checked against
+#            again — in <package-dir>/package.json alone; and that manifest is
+#            its parent's copy with .version set to <version> and nothing
+#            else, as JSON (sorted-JSON equality: key order, a BOM, duplicate
+#            keys and the blob's mode are not compared; the test `tagged`
+#            applies to a bump commit, plus its content). The content checks
+#            run before any push, rebase or superseded-version exit, so a
+#            doctored commit on an older main commit is refused, not rebased
+#            or dropped. A HEAD whose one parent is an older main commit, and
+#            passes them, is rebased onto the tip, which replays the one bump
+#            over what landed since the checkout, and checked again there.
+#            Anything else — a second commit, a merge commit, a parentless
+#            commit, a second path, a manifest changed in more than its
+#            version — is refused, origin untouched: the only commit a run
+#            dispatched from a branch other than main can land is the exact
+#            version bump, which is what a run from main lands. A HEAD main
+#            already holds (the manifest already held the version, so `tag`
+#            committed nothing) has nothing to push and exits 0. This runs
+#            last, after the tag and GitHub release exist: a lost push only
+#            delays the metadata bump on main, which the tag-anchored version
+#            computation heals on the next release. Raced-in commits stay
+#            outside the tag and are picked up by the next version calculation.
 #
 #            The race that needs help is two releases of the *same* package.
 #            A run checks out the merge commit that triggered it, and when the
@@ -106,12 +112,12 @@
 #            there is nothing to push: a re-run whose first attempt landed this
 #            bump, or a re-run of an older run after a later release of the
 #            package landed. It says so in a notice and exits 0, dropping the
-#            bump commit whole, which is right only because that commit changes
-#            nothing but the manifest's version. A push that fast-forwards main
-#            is not checked against main's version: it can lower main's
-#            manifest only when main held a version above the newest tag, which
-#            only a hand edit makes, and the tags decide every next version
-#            anyway.
+#            bump commit whole, which is right only because the content checks
+#            above, run before this exit, found that commit to change nothing
+#            but the manifest's version. A push that fast-forwards main is not
+#            checked against main's version: it can lower main's manifest only
+#            when main held a version above the newest tag, which only a hand
+#            edit makes, and the tags decide every next version anyway.
 # push-tag:  push the local tag <tag> to $GITHUB_REPOSITORY on GitHub over SSH
 #            with the deploy key in $DEPLOY_KEY, for a job whose checkout keeps
 #            no credential. The key and GitHub's host keys, pinned below, go
@@ -426,7 +432,7 @@ case "$command" in
     version=${3:?released version}
     manifest="$package_dir/package.json"
     deploy_key_env fail_outstanding
-    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, and only its .version, to the released version v$version, over main's tip and nothing else: HEAD's parent must be main's tip, and a run from a branch other than main lands nothing but that exact bump on main."
+    only_bump="push-main pushes the one version-bump commit, which changes only $manifest, onto main's tip: its parent's $manifest with .version set to v$version and nothing else, as JSON; a run from a branch other than main lands nothing but that exact bump on main."
     for attempt in 1 2 3 4 5; do
       git fetch "$remote" main || fail_outstanding "Fetching main from origin failed on attempt $attempt."
       upstream=$(git rev-parse FETCH_HEAD) || fail_outstanding "Reading main's fetched tip failed."
@@ -454,24 +460,27 @@ case "$command" in
       if [ "$extra" != 1 ]; then
         fail_outstanding "HEAD carries $extra commits main does not — ${carried//$'\n'/; } — and $only_bump"
       fi
+      # The bump's content, against its one parent — main's tip, or an older
+      # main commit it is rebased onto below and checked against again — before
+      # any push, rebase or superseded-version exit sees it. The paths and the
+      # manifest are compared against the parent, the manifest as JSON (jq -S),
+      # so the parent's copy with .version set to the released version must be
+      # HEAD's copy.
+      changed=$(git diff --name-only "$parent" HEAD) || fail_outstanding "Reading the bump commit's paths failed."
+      if [ "$changed" != "$manifest" ]; then
+        paths=${changed//$'\n'/ }
+        fail_outstanding "HEAD carries 1 commit main does not — $carried — which changes ${paths:-nothing}, and $only_bump"
+      fi
+      parent_copy=$(git show "$parent:$manifest" 2>/dev/null) || fail_outstanding "$manifest is missing at HEAD's parent $parent, so HEAD adds it rather than bumping it. $only_bump"
+      expected=$(jq -S --arg v "$version" '.version = $v' <<<"$parent_copy") || fail_outstanding "$manifest at HEAD's parent $parent is not JSON."
+      actual=$(git show "HEAD:$manifest" | jq -S .) || fail_outstanding "HEAD's $manifest is missing or not JSON."
+      if [ "$expected" != "$actual" ]; then
+        fail_outstanding "HEAD's $manifest differs from its parent's in more than .version = $version. $only_bump"
+      fi
       if [ "$parent" = "$upstream" ]; then
-        # The bump sits on main's tip: check its content, then push it. The
-        # paths and the manifest are compared against main itself, not HEAD^,
-        # and the manifest as JSON, so main's copy with .version set to the
-        # released version must be HEAD's copy.
-        changed=$(git diff --name-only "$upstream" HEAD) || fail_outstanding "Reading the bump commit's paths failed."
-        if [ "$changed" != "$manifest" ]; then
-          paths=${changed//$'\n'/ }
-          fail_outstanding "HEAD carries 1 commit main does not — $carried — which changes ${paths:-nothing}, and $only_bump"
-        fi
-        main_copy=$(git show "$upstream:$manifest" 2>/dev/null) || fail_outstanding "main's $manifest is missing at $upstream, so HEAD adds it rather than bumping it. $only_bump"
-        expected=$(jq -S --arg v "$version" '.version = $v' <<<"$main_copy") || fail_outstanding "main's $manifest is not JSON."
-        actual=$(git show "HEAD:$manifest" | jq -S .) || fail_outstanding "HEAD's $manifest is missing or not JSON."
-        if [ "$expected" != "$actual" ]; then
-          fail_outstanding "HEAD's $manifest differs from main's in more than .version = $version. $only_bump"
-        fi
-        # HEAD:refs/heads/main serves a detached HEAD and a branch alike; the
-        # checks above are what keep everything but the bump off main.
+        # The bump sits on main's tip, checked: push it. HEAD:refs/heads/main
+        # serves a detached HEAD and a branch alike; the checks above are what
+        # keep everything but the bump off main.
         git push "$remote" HEAD:refs/heads/main && exit 0
         if [ "$attempt" = 5 ]; then
           fail_outstanding "The version-bump commit for $package_dir v$version lost the push race to main 5 times."
