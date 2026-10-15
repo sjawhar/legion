@@ -1,6 +1,7 @@
 package bus_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -184,5 +185,109 @@ func TestASeedAgainstAServerWithoutUsersIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "nkeys not supported by the server") {
 		t.Fatalf("refusal = %v, want nats.go's nkeys-not-supported error", err)
+	}
+}
+
+// HoldsSeed finds an nkey seed of any type, in every spelling a reader or a decoder takes for the
+// same seed: whole or inside a longer value or base32 run, in either case, percent-encoded once or
+// more, padded, with its last character's unused bits changed (nkeys reads that spelling), and
+// with '.', '-', '_' or whitespace inside it (nkeys reads line breaks; DNS labels and groups split
+// on the others). A value that is no seed is not found, and neither is any clean value of the
+// same shapes.
+func TestHoldsSeed(t *testing.T) {
+	// nats-io's vector: nkeys v0.4.15 README.md line 45, and its public key, line 49.
+	const seed = "SUAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43IZY"
+	const publicKey = "UD466L6EBCM3YY5HEGHJANNTN4LSKTSUXTH7RILHCKEQMQHTBNLHJJXT"
+	if !strings.HasSuffix(seed, "Y") {
+		t.Fatal("the spelling row changes a final Y")
+	}
+	percentEncoded := func(text string) string {
+		var b strings.Builder
+		for i := range len(text) {
+			fmt.Fprintf(&b, "%%%02X", text[i])
+		}
+		return b.String()
+	}
+	group := func(sep string, n int) string {
+		var parts []string
+		for i := 0; i < len(seed); i += n {
+			parts = append(parts, seed[i:min(i+n, len(seed))])
+		}
+		return strings.Join(parts, sep)
+	}
+	const k = 29 // where a split row cuts the seed
+	rows := []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"the seed", seed, true},
+		{"in a file path", "/tmp/example/" + seed, true},
+		{"in a URL's path", "https://example.invalid/" + seed + "/x", true},
+		{"in a URL's query", "https://example.invalid/?k=" + seed, true},
+		{"in a URL's userinfo", "https://" + seed + "@example.invalid/", true},
+		{"percent-encoded", "https://example.invalid/" + percentEncoded(seed), true},
+		{"partly percent-encoded, beside a percent that encodes nothing", "%zz/" + seed[:10] + percentEncoded(seed[10:]), true},
+		{"percent-encoded twice", "https://example.invalid/" + strings.ReplaceAll(percentEncoded(seed), "%", "%25"), true},
+		{"inside a longer run of base32 letters", "AB" + seed + "CD", true},
+		{"in an error message", "failed to get shared config profile, " + seed, true},
+		{"lowercase", strings.ToLower(seed), true},
+		{"mixed case", seed[:20] + strings.ToLower(seed[20:]), true},
+		{"lowercase, percent-encoded", "https://example.invalid/" + percentEncoded(strings.ToLower(seed)), true},
+		{"padded with = to a multiple of eight", seed + "======", true},
+		{"another spelling of its last character, which nkeys reads", strings.TrimSuffix(seed, "Y") + "Z", true},
+		{"a line break inside, which nkeys reads", seed[:k] + "\n" + seed[k:], true},
+		{"CRLF inside, which nkeys reads", seed[:k] + "\r\n" + seed[k:], true},
+		{"wrapped every 16 characters", group("\n", 16), true},
+		{"a trailing line break", seed + "\n", true},
+		{"grouped by spaces", group(" ", 4), true},
+		{"a tab inside", seed[:k] + "\t" + seed[k:], true},
+		{"grouped by hyphens", group("-", 4), true},
+		{"a proxy host:port, inside a longer base32 label", "AB" + seed + "CD.example.test:1055", true},
+		{"a proxy host:port, lowercase", strings.ToLower(seed) + ".example.test:1055", true},
+		{"a proxy host:port, percent-encoded", percentEncoded(seed) + ".example.test:1055", true},
+		{"a proxy host:port, split across DNS labels", seed[:k] + "." + seed[k:] + ":1055", true},
+		{"a proxy host:port, split by a hyphen", seed[:k] + "-" + seed[k:] + ".example.test:1055", true},
+		{"a proxy host:port, split by an underscore", seed[:k] + "_" + seed[k:] + ".example.test:1055", true},
+		{"a proxy host:port, split across DNS labels, lowercase", strings.ToLower(seed[:k]+"."+seed[k:]) + ":1055", true},
+		// The README seed's bytes behind a seed's prefix of the account type, with a valid checksum.
+		{"an account seed", "SAAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD443AI", true},
+		{"truncated", seed[:57], false},
+		{"one character changed", seed[:5] + "A" + seed[6:], false},
+		// The same 32 bytes behind the prefix bytes (0, 0), with a valid checksum: no seed.
+		{"a seed's bytes behind another prefix byte", "AAAKYRHVIOREXV7EUZTBHUHL7NUMHPMAS7QMDU3GTIUWEI5LDNOXD43I5I", false},
+		{"a public key", publicKey, false},
+		{"a region", "us-east-1", false},
+		{"empty", "", false},
+		{"a long base32 run that is no seed", strings.Repeat("SUAKYRHV", 20), false},
+		{"a clean proxy host:port split across DNS labels", "abcdefgh.ijklmnop.example.test:1055", false},
+		{"a clean proxy host:port split by hyphens and underscores", "socks-proxy_east-1.example.test:1055", false},
+		{"a clean sentence", "failed to get shared config profile, example; set AWS_PROFILE", false},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := bus.HoldsSeed(row.text); got != row.want {
+				t.Fatalf("HoldsSeed = %v, want %v", got, row.want)
+			}
+		})
+	}
+	// A seed of every type nkeys knows, as #1961's check takes them (nkeys.DecodeSeed).
+	for name, create := range map[string]func() (nkeys.KeyPair, error){
+		"operator": nkeys.CreateOperator, "server": nkeys.CreateServer, "cluster": nkeys.CreateCluster,
+		"account": nkeys.CreateAccount, "user": nkeys.CreateUser, "curve": nkeys.CreateCurveKeys,
+	} {
+		t.Run("a generated "+name+" seed", func(t *testing.T) {
+			kp, err := create()
+			if err != nil {
+				t.Fatalf("create %s: %v", name, err)
+			}
+			generated, err := kp.Seed()
+			if err != nil {
+				t.Fatalf("%s seed: %v", name, err)
+			}
+			if !bus.HoldsSeed("value " + string(generated) + " end") {
+				t.Fatalf("a generated %s seed is not found", name)
+			}
+		})
 	}
 }

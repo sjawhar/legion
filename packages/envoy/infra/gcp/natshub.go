@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
 	"github.com/sjawhar/envoy/infra/nats"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // natsHubType is the component's token. pulumi-go-provider derives the same one from the NatsHub
@@ -183,16 +184,18 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	return s, nil
 }
 
-// seededInput names the first plain input of args that holds an nkey user seed (core.HoldsSeed:
-// whole, inside a longer value, or percent-encoded), by its path and never its value. Every one
-// reaches a refusal that quotes it, the user data, or a child's inputs, which a preview prints:
-// the hostname and the tags, quoted by the hub's own refusals and written into the user data; the
-// zone and the machine type, the group's and the template's inputs; the images, written into the
-// user data; and each user's name, which core's refusals quote, and its machine id and rules,
-// which the rendered authorization holds. A user's nkey is not checked here: core refuses any nkey
-// that is not a user public key, a seed included, without quoting it, and a public key holds no
-// seed. tailnetAuthKey is a secret, which reaches the secret version alone; network and subnetwork
-// are Inputs, checked when they resolve (refuseSeed).
+// seededInput names the first plain input of args that the hub itself carries and that holds an
+// nkey seed (bus.HoldsSeed: any type, either case, whole, inside a longer value, split by '.', '-',
+// '_' or whitespace, or percent-encoded), by its path and never its value: the hostname and the
+// tags, quoted by the hub's own refusals and written into the user data; the zone and the machine
+// type, the group's and the template's inputs; the images, written into the user data; and each
+// user's machine id, which the hub turns into that user's rules before core sees them, so core's
+// refusal would name a rule entry the user never wrote. A user's name and rule entries are core's:
+// core.Authorization refuses a seed in either before any refusal of its own quotes it, and the
+// hub's own user refusals name a user by its index alone (authorization). A user's nkey is core's
+// too: it refuses any nkey that is not a user public key, a seed included, without quoting it.
+// tailnetAuthKey is a secret, which reaches the secret version alone; network and subnetwork are
+// Inputs, checked when they resolve (refuseSeed).
 func seededInput(args *NatsHubArgs) (string, bool) {
 	type field struct{ path, value string }
 	fields := []field{{"hostname", args.Hostname}, {"zone", args.Zone}, {"natsImage", args.NatsImage},
@@ -204,28 +207,12 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		fields = append(fields, field{"machineType", *args.MachineType})
 	}
 	for i, u := range args.Users {
-		user := fmt.Sprintf("users[%d]", i)
-		fields = append(fields, field{user + ".name", u.Name})
 		if u.MachineID != nil {
-			fields = append(fields, field{user + ".machineId", *u.MachineID})
-		}
-		if u.Permissions == nil {
-			continue
-		}
-		for _, rules := range []struct {
-			path    string
-			entries []string
-		}{
-			{"publish.allow", u.Permissions.Publish.Allow}, {"publish.deny", u.Permissions.Publish.Deny},
-			{"subscribe.allow", u.Permissions.Subscribe.Allow}, {"subscribe.deny", u.Permissions.Subscribe.Deny},
-		} {
-			for j, entry := range rules.entries {
-				fields = append(fields, field{fmt.Sprintf("%s.permissions.%s[%d]", user, rules.path, j), entry})
-			}
+			fields = append(fields, field{fmt.Sprintf("users[%d].machineId", i), *u.MachineID})
 		}
 	}
 	for _, f := range fields {
-		if core.HoldsSeed(f.value) {
+		if bus.HoldsSeed(f.value) {
 			return f.path, true
 		}
 	}
@@ -241,7 +228,7 @@ func seedRefused(input string) error {
 // refused once it resolves: the output fails naming input, so no child is registered with it.
 func refuseSeed(value pulumi.StringPtrInput, hub, input string) pulumi.StringPtrOutput {
 	return value.ToStringPtrOutput().ApplyT(func(v *string) (*string, error) {
-		if v != nil && core.HoldsSeed(*v) {
+		if v != nil && bus.HoldsSeed(*v) {
 			return nil, fmt.Errorf("%s: %w", hub, seedRefused(input))
 		}
 		return v, nil
@@ -250,11 +237,12 @@ func refuseSeed(value pulumi.StringPtrInput, hub, input string) pulumi.StringPtr
 
 // authorization maps the users onto core's: each a keyed user with a seed, whose permissions are
 // its host's set when it names a machine id and its own when it names permissions. core validates
-// the rest when it renders.
+// the rest when it renders, a seed in a name or a rule entry first. Its own refusals name a user
+// by its index alone: they come before core has read the names, so quoting one could quote a seed.
 func authorization(users []NATSUserArgs) (core.Authorization, error) {
 	auth := core.Authorization{Users: make([]core.User, 0, len(users))}
 	for i, u := range users {
-		where := fmt.Sprintf("users[%d] %q", i, u.Name)
+		where := fmt.Sprintf("users[%d]", i)
 		if u.NKey == "" {
 			return core.Authorization{}, fmt.Errorf("%s: nkey is required", where)
 		}

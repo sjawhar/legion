@@ -34,7 +34,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `HoldsSeed`, which finds a user seed anywhere in a value, whole, inside it or percent-encoded, and is the one seed detector every layer calls (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` runs `Check` again and adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it, and `SeedRefusal`, the refusal naming where a value holding a seed came from (`nkey.go`); `InputError`, a refusal naming the input it refuses; and the permission sets `ListenerPermissions`, `SessionPermissions` and `HostPermissions` (`permissions.go`). The seed detector every layer calls is `bus.HoldsSeed` (`packages/envoy/internal/bus/nkey.go`), which Envoy's own processes share. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Label`, `Describe`, `Versions`, `Put`, `Current`) and the `StoreType` each `--store` value names, the AWS Secrets Manager store (`awsstore.go`), the GCP Secret Manager store (`gcpstore.go`), the error naming and version paging both share (`errors.go`), and the contract every store's tests run (`store_contract_test.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -73,26 +73,38 @@ versions. Never add the module to the root `go.work`.
   resource's output, and checks it, inside the `ApplyT` that computes the container's environment.
   A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
   container's `envs` resolve, after the component and its image have registered, not the
-  constructor. The watchdog's create script runs as root on the host (`host.watchdogCreate`), so no
-  value of the environment, which it writes into a heredoc, may hold a control character, and with a
-  watchdog the listener's name, which it echoes in double quotes, may hold no `"`, `$`, backtick, `\`
-  or line break. An input that belongs to another (a webhook's secret, `reviewerAppId` and
-  `mentionTrigger` to their webhook; `configHeader` and `configPath` to `authorization`) is required
-  while its owner is present and refused while it is not, where the component would drop it: one
-  rule, `rendering.CheckOwnedInputs`, which both AWS components' `validate` and
-  `rendering.ListenerEnv.Check` call. Each table tests its own refusals: core's are in `core` and
-  `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a command's table holds
-  its own plus one row for each shared call whose refusals it passes on, showing where they go and
-  that each is the `core.InputError` naming its input. host passes on `Check`'s refusals of
-  `machineId`, `port` and `hostBridge` through one call, so it has one row. A store's tests assert
-  the store's own answers, and `seed_test.go` the modes' messages over them.
+  constructor. The watchdog's create script runs as root on the host
+  (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
+  a control character, and with a watchdog the listener's name, which it echoes in double quotes,
+  may hold no `"`, `$`, backtick, `\` or line break. A value that holds an nkey seed of any type, in
+  any spelling (`bus.HoldsSeed`), is refused where it enters, before anything quotes or renders
+  it, with `core.SeedRefusal`, which names its path and never the value: core refuses one in the
+  authorization's names, rule entries and `noAuthUser`, in `Render`'s and `StartScript`'s inputs,
+  and in the listener's `machineId`, `listenHost`, `hostBridge` and NATS URLs; a component refuses
+  one in its name and its own string inputs: host's listed in `host.stringInputs`, the AWS
+  components' every plain string by reflection over their args (`aws.seededPlainInput`), and every
+  Input once it resolves, by wrapping it before any child takes it (`aws.refuseSeedInputs`), so no
+  child is registered with one. `aws/seeds_test.go` has a Construct row per input and a test that
+  every string input of the schema has one. Only an input that is a seed, such as
+  `host:Listener`'s `seed`, takes one. An input that belongs to another (a webhook's secret,
+  `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and `configPath` to
+  `authorization`) is required while its owner is present and refused while it is not, where the
+  component would drop it: one rule, `rendering.CheckOwnedInputs`, which both AWS components'
+  `validate` and `rendering.ListenerEnv.Check` call. Each table tests its own refusals: core's are
+  in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a
+  command's table holds its own plus one row for each core call whose refusals it passes on,
+  showing where they go and that each is the `core.InputError` naming its input. host passes on
+  `Check`'s refusals of `machineId`, `port` and `hostBridge` through one call, so it has one row.
+  A store's tests assert the store's own answers, and `seed_test.go` the modes' messages over them.
   The hub reads none of its Inputs by value at construct: its resolver checks only that
   `tailnetAuthKey` is set and that `subnetwork` comes with `network`, and `network` and
   `subnetwork` are checked for a seed once they resolve (`gcp.refuseSeed`). Its resolver refuses a
-  seed (`core.HoldsSeed`) in every plain string input first, naming the input's path and never its
-  value (`gcp.seededInput`), since every one reaches the user data, a child's inputs or a refusal
-  that quotes it; a string input added to the hub joins that list, with a row in
-  `TestNatsHubRefusesASeedInAnyPlainInput`.
+  seed (`bus.HoldsSeed`) in every string input the hub itself carries first (`gcp.seededInput`:
+  hostname, tags, zone, machine type, images, each user's machine id), naming the input's path
+  and never its value; a string input added to the hub joins that list, with a row in
+  `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and rule entries are core's to refuse,
+  and the hub's own user refusals, which run before core's, name a user by its index alone
+  (`TestNatsHubPassesOnCoresSeedRefusalOfUsers`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
@@ -175,7 +187,7 @@ a `*seed.Unserved` when the version it names is one it will not serve. Every mod
 alone, so no store's kind is a branch in `seed.go`. Its `Put` must refuse a second first version
 with an error matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each
 find the secret empty, and only the store sees both writes. Its opener refuses a seed
-(`core.HoldsSeed`) in any string its configuration carries into a client, before any request, as
+(`bus.HoldsSeed`) in any string its configuration carries into a client, before any request, as
 the AWS store's `checkedAWSConfig` and `endpointSeed` and the GCP store's `gcpConfigEnv` check do:
 a seed in a profile name or an endpoint's path is sent or quoted as surely as one in a flag. Its
 tests run `testStoreContract` (`seed/store_contract_test.go`). Secrets Manager refuses a second

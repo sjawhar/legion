@@ -629,11 +629,16 @@ const (
 	natsService  = resource.URN("urn:pulumi:s::p::envoy-infra:aws:NatsService$aws:ecs/service:Service::nats-service")
 )
 
-// listenerInputs are exampleListenerArgs as a consumer sends them to Construct, each Input field
-// made a value by input, the two ordering inputs carrying their own resources' dependencies.
+// listenerInputs are exampleListenerArgs as a consumer sends them to Construct (listenerInputsOf).
 func listenerInputs(t *testing.T, input func(string) property.Value) map[string]property.Value {
 	t.Helper()
-	args := exampleListenerArgs()
+	return listenerInputsOf(t, exampleListenerArgs(), input)
+}
+
+// listenerInputsOf are args as a consumer sends them to Construct, each Input field made a value by
+// input, the two ordering inputs carrying their own resources' dependencies.
+func listenerInputsOf(t *testing.T, args *envoyaws.WebhookListenerArgs, input func(string) property.Value) map[string]property.Value {
+	t.Helper()
 	in := inputs(t, args, input)
 	in["apiTokenSecretVersionId"] = property.New(literal(t, args.ApiTokenSecretVersionId)).WithDependencies([]resource.URN{tokenVersion})
 	in["natsServiceArn"] = property.New(literal(t, args.NatsServiceArn)).WithDependencies([]resource.URN{natsService})

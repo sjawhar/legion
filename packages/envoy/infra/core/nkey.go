@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/nats-io/nkeys"
@@ -75,52 +74,12 @@ func UserSeedPublicKey(value []byte) (string, error) {
 	return user.PublicKey()
 }
 
-// HoldsSeed reports whether text holds a user seed UserSeedPublicKey accepts, anywhere in it:
-// whole, inside a longer value (a file path, an error message, any part of a URL, a longer run of
-// base32 letters), or percent-encoded. Every run of seedTextLength base32 letters is tried, in the
-// text and, when it percent-encodes anything, in the text decoded. It answers only true or false:
-// it never returns, formats or logs the value, so a caller can refuse naming where the text came
-// from, and never the text.
-func HoldsSeed(text string) bool {
-	return base32Seed(text) || strings.Contains(text, "%") && base32Seed(percentDecoded(text))
-}
-
-// seedTextLength is a user seed's length as nkeys spells it: its seedLength bytes, unpadded base32.
-const seedTextLength = 58
-
-// base32Seed reports whether any seedTextLength run of base32 letters in text is a user seed.
-func base32Seed(text string) bool {
-	run := 0
-	for i := range len(text) {
-		if c := text[i]; 'A' <= c && c <= 'Z' || '2' <= c && c <= '7' {
-			run++
-			if run >= seedTextLength {
-				if _, err := UserSeedPublicKey([]byte(text[i+1-seedTextLength : i+1])); err == nil {
-					return true
-				}
-			}
-			continue
-		}
-		run = 0
-	}
-	return false
-}
-
-// percentDecoded decodes each %XX in text, keeping every other byte, a % that encodes nothing
-// included.
-func percentDecoded(text string) string {
-	var b strings.Builder
-	for i := 0; i < len(text); i++ {
-		if text[i] == '%' && i+2 < len(text) {
-			if v, err := strconv.ParseUint(text[i+1:i+3], 16, 8); err == nil {
-				b.WriteByte(byte(v))
-				i += 2
-				continue
-			}
-		}
-		b.WriteByte(text[i])
-	}
-	return b.String()
+// SeedRefusal is the refusal of a value that holds an nkey seed of any type (bus.HoldsSeed): it
+// names field, the value's path, as "users[0]: name" or "natsUrls[1]", and never the value. A layer
+// that takes a value no seed belongs in refuses one with it, before the value reaches a message, a
+// log or rendered output.
+func SeedRefusal(field string) error {
+	return errors.New(field + " holds an nkey seed (not echoed)")
 }
 
 const base32Alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"

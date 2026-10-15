@@ -87,14 +87,21 @@ type WebhookListener struct {
 // NewWebhookListener registers the listener. Each child is named from name as the reference names
 // its root-level resource from envoy-listener, the Cloud Map service by cloudMapServiceLogicalName.
 // It resolves its inputs (validate), then requires an aws provider, and only then registers
-// anything.
+// anything. Each Input it registers from fails once it resolves to a value holding a seed
+// (refuseSeedInputs).
 func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerArgs, opts ...pulumi.ResourceOption) (*WebhookListener, error) {
+	if err := refuseSeededName(webhookListenerType, name); err != nil {
+		return nil, err
+	}
 	if err := args.validate(); err != nil {
 		return nil, fmt.Errorf("%s %s: %w", webhookListenerType, name, err)
 	}
 	if err := providers.Require(ctx.Context(), webhookListenerType, "aws", opts...); err != nil {
 		return nil, err
 	}
+	checked := *args
+	refuseSeedInputs(&checked, webhookListenerType+" "+name)
+	args = &checked
 
 	comp := &WebhookListener{}
 	if err := ctx.RegisterComponentResource(webhookListenerType, name, comp, opts...); err != nil {
@@ -283,9 +290,13 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 }
 
 // validate refuses the inputs NewWebhookListener cannot build a working listener from, each error
-// naming its input: an omitted webhooks, then each webhook's secret ARN against webhooks, then the
-// environment's plain inputs (rendering.ListenerEnv.Check), then the service's.
+// naming its input: a plain input holding a seed (seededPlainInput), an omitted webhooks, then
+// each webhook's secret ARN against webhooks, then the environment's plain inputs
+// (rendering.ListenerEnv.Check), then the service's.
 func (args *WebhookListenerArgs) validate() error {
+	if err := seededPlainInput(*args); err != nil {
+		return err
+	}
 	// ListenerEnv.Check reads a nil list as [], which `render webhook-listener-env` relies on for no
 	// --webhook; webhooks is a required input, so the component refuses one never given.
 	if args.Webhooks == nil {
