@@ -746,6 +746,7 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 // A usage error exits 2 with the usage text, before the store is opened, and echoes no argument a
 // seed could have been pasted into.
 func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
+	const notEchoed = "envoy-infra seed: a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)\n"
 	rows := []struct {
 		name string
 		args []string
@@ -763,9 +764,14 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 		// not "not given": it is refused before the store opens.
 		{"an empty --expect-account for check", mode("check", "--expect-account", ""), "--expect-account is given empty"},
 		{"an empty --expect-account for generate", mode("generate", "--expect-account="), "--expect-account is given empty"},
-		// There is no seed flag: a seed never reaches argv on purpose.
-		{"a seed flag", mode("generate", "--seed", readmeSeed), "flag provided but not defined: -seed"},
-		{"a seed flag with =", mode("generate", "--seed="+readmeSeed), "flag provided but not defined: -seed"},
+		// There is no seed flag: a seed never reaches argv on purpose. A flag word the command does
+		// not take is not echoed, since a seed pasted with a leading dash would be that word; a
+		// defined flag missing its value is named, as only defined names can be.
+		{"a seed flag", mode("generate", "--seed", readmeSeed), notEchoed},
+		{"a seed flag with =", mode("generate", "--seed="+readmeSeed), notEchoed},
+		{"a seed as a flag", mode("check", "-"+readmeSeed), notEchoed},
+		{"a seed after three dashes", mode("check", "---"+readmeSeed), notEchoed},
+		{"a flag missing its value", mode("verify", "--public-key"), "flag needs an argument: -public-key"},
 		{"an argument after the flags", mode("generate", readmeSeed), "unexpected arguments after the flags"},
 	}
 	for _, row := range rows {
@@ -777,6 +783,7 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 			require.Contains(t, errs, row.want)
 			require.Contains(t, errs, "usage: envoy-infra seed {check|generate|verify}")
 			require.NotContains(t, errs, readmeSeed)
+			require.NotContains(t, errs, "seed=")
 			require.Zero(t, o.calls)
 			require.Empty(t, store.calls)
 		})

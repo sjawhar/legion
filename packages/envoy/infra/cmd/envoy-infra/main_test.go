@@ -59,7 +59,8 @@ func noStore(t *testing.T) seed.Stores {
 	}}
 }
 
-// brokenStdout fails every write, as a closed stdout does.
+// brokenStdout fails every write, as stdout on a full disk (/dev/full) does. A closed stdout does
+// not: the Go runtime opens it on the null device, where writes succeed.
 type brokenStdout struct{}
 
 func (brokenStdout) Write([]byte) (int, error) {

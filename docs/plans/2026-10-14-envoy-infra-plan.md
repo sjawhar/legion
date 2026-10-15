@@ -870,9 +870,10 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error)
 The CLI is `envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <secret id>
 [--region <r>] [--expect-account <id>] [--public-key U…]`, and `envoy-infra --version`, which
 prints the version the release stamps in (`main.go:17, 35-41`). `--help`, at either level, prints
-the usage and exits 0. An unknown command or mode is a usage error, exit 2, and is not echoed,
-since a seed may have been pasted there (`main.go:42-52`, `seed.go:375-379`); other usage errors
-exit 2 too (`:367-401`). An interrupt or SIGTERM cancels the command's context instead of killing
+the usage and exits 0. An unknown command or mode, and a flag the command does not take or a
+malformed one, is a usage error, exit 2, and is not echoed, since a seed may have been pasted there
+(`main.go:42-52`, `seed.go:362-408`); other usage errors exit 2 too, a defined flag missing its value
+named (`:398-424`). An interrupt or SIGTERM cancels the command's context instead of killing
 it, so a write in flight ends as an unanswered write does, below (`main.go:19-28`). Its behaviour
 is the reference implementation's, with these additions:
 - **Before any Secrets Manager call or the account check** (`awsstore.go:39-62`), it refuses,
@@ -1592,17 +1593,17 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   `/etc/nats/nats-server.conf` rather than the NATS module's `/etc/nats.conf`
   (`nats.go:225-250, 328-334`), and wait with `awaitAuth`, which keeps `answering`'s messages;
   their signatures and what they enforce are unchanged. `git grep -n -e
-  'testnats.StartNkeyAuthorized(' -e 'testnats.StartNkeyGranted('` →
-  `daemon/internal/daemon/natsseed_test.go:37,81`,
-  `daemon/internal/natsauth/natsauth_test.go:66,88`, `envoy/infra/host/live_test.go:262`,
-  `envoy/internal/bus/core_permission_test.go:28`, `envoy/internal/bus/nkey_test.go:70,105`,
-  `envoy/internal/dispatch/outbox/core_denied_test.go:32`,
-  all passing at `8a4c7882`: the daemon's run locally, the rest in that head's `envoy-go` (with its
-  Postgres, `envoy-and-contracts.yaml:759-772`) and `envoy-smoke` jobs (Envoy and Contracts run
-  38674653570). `packages/envoy/internal/testnats/` is inside `release-envoy-listener.yaml`'s push
-  paths and bump pathspec (`release-envoy-listener.yaml:14-16, 381-387`), so #1951's squash commit
-  starts a listener release run, and a `feat` or `fix` title would cut a `legion-envoy` version
-  with no change to the image or the binaries.
+  'testnats.StartNkeyAuthorized(' -e 'testnats.StartNkeyGranted(' -- packages/envoy` →
+  `envoy/infra/host/live_test.go:262`, `envoy/internal/bus/core_permission_test.go:28`,
+  `envoy/internal/bus/nkey_test.go:70,105`, `envoy/internal/dispatch/outbox/core_denied_test.go:32`,
+  all passing at `8a4c7882` in that head's `envoy-go` (with its Postgres,
+  `envoy-and-contracts.yaml:759-772`) and `envoy-smoke` jobs (Envoy and Contracts run
+  38674653570). `packages/daemon` has a `testnats` of its own
+  (`github.com/sjawhar/legion/daemon/internal/testnats`), which this change does not touch.
+  `packages/envoy/internal/testnats/` is inside `release-envoy-listener.yaml`'s push paths and bump
+  pathspec (`release-envoy-listener.yaml:14-16, 381-387`), so #1951's squash commit starts a
+  listener release run, and a `feat` or `fix` title would cut a `legion-envoy` version with no
+  change to the image or the binaries.
 
 ## Permission source census
 

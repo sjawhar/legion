@@ -360,20 +360,25 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	names := slices.Sorted(maps.Keys(stores))
 
 	fs := flag.NewFlagSet("envoy-infra seed", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	// Parse's own messages echo an undefined flag word whole, and a seed pasted with a leading dash
+	// would be that word, so Parse writes nowhere and Command prints every problem and the usage.
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
 	var store, name, region, account, publicKey string
 	fs.StringVar(&store, "store", "", "the secret store: "+strings.Join(names, ", "))
 	fs.StringVar(&name, "name", "", "the secret's id")
 	fs.StringVar(&region, "region", "", "the store's region (default: the one its configuration names)")
 	fs.StringVar(&account, "expect-account", "", "refuse, before any other call, unless the credentials are this account's")
 	fs.StringVar(&publicKey, "public-key", "", "verify only: the U… public key the stored seed must derive")
-	fs.Usage = func() {
+	printUsage := func() {
 		fmt.Fprint(stderr, usageText)
+		fs.SetOutput(stderr)
 		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
 	}
 	usage := func(problem string) int {
 		fmt.Fprintf(stderr, "envoy-infra seed: %s\n", problem)
-		fs.Usage()
+		printUsage()
 		return 2
 	}
 
@@ -382,7 +387,7 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	mode := args[0]
 	if mode == "-h" || mode == "-help" || mode == "--help" {
-		fs.Usage()
+		printUsage()
 		return 0
 	}
 	run, ok := modes[mode]
@@ -391,10 +396,15 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("the mode is check, generate or verify")
 	}
 	if err := fs.Parse(args[1:]); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
+		switch {
+		case errors.Is(err, flag.ErrHelp):
+			printUsage()
 			return 0
+		case strings.HasPrefix(err.Error(), "flag needs an argument: -"):
+			// The flag package says this only of a flag it defines, so the name is one of ours.
+			return usage(err.Error())
 		}
-		return 2 // the flag package has printed the problem and the usage
+		return usage("a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)")
 	}
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
