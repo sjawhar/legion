@@ -28,6 +28,9 @@ const (
 	readmePublicKey = "UD466L6EBCM3YY5HEGHJANNTN4LSKTSUXTH7RILHCKEQMQHTBNLHJJXT"
 )
 
+// quiet is an announce that prints nothing, for a test that calls Generate directly.
+func quiet(string) error { return nil }
+
 type version struct {
 	id    string
 	value []byte
@@ -474,7 +477,7 @@ func TestGenerateReportsEveryFailureAfterItsWrite(t *testing.T) {
 			requireNoValue(t, store, out, errs)
 
 			direct := row.store(newStore(t))
-			got, version, err := seed.Generate(context.Background(), direct, secretName)
+			got, version, err := seed.Generate(context.Background(), direct, secretName, quiet)
 			require.Error(t, err)
 			require.Equal(t, publicKeyOfSeed(t, direct.puts[0]), got, "Generate returns the key on every path after Put")
 			require.Equal(t, strings.TrimSuffix(row.version, "unknown"), version)
@@ -730,7 +733,7 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 					texts = append(texts, text, fmt.Sprint(err))
 				}
 				answered(seed.Check(ctx, direct, secretName))
-				public, ver, err := seed.Generate(ctx, direct, secretName)
+				public, ver, err := seed.Generate(ctx, direct, secretName, quiet)
 				answered(public+ver, err)
 				answered(seed.Verify(ctx, direct, secretName, readmePublicKey))
 				answered(seed.Verify(ctx, direct, secretName, readmeSeed))

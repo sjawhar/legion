@@ -872,7 +872,8 @@ type Description struct {
 }
 
 func Check(ctx context.Context, s Store, name string) (string, error) // the report line
-func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error)
+// Generate calls announce with the public key just before Put; the command prints it there.
+func Generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error)
 // Verify returns the report line, with ErrMismatch for "no" or a value that is no user seed; a
 // refusal returns "".
 func Verify(ctx context.Context, s Store, name, publicKey string) (line string, err error)

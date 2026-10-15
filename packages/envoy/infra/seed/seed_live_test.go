@@ -21,7 +21,7 @@ func TestAGeneratedSeedReachesNATS(t *testing.T) {
 	for _, image := range testnats.Images {
 		t.Run(image.Name, func(t *testing.T) {
 			store := newStore(t)
-			public, version, err := seed.Generate(context.Background(), store, secretName)
+			public, version, err := seed.Generate(context.Background(), store, secretName, quiet)
 			require.NoError(t, err)
 			require.Equal(t, "v1", version)
 			require.Len(t, store.puts, 1)
