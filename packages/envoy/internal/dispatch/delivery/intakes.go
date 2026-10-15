@@ -23,11 +23,12 @@ const (
 // both before it returns, and returns the error of a connect that fails with neither intake
 // started. Without the GitHub App neither intake reads anything, so neither connects.
 //
-// The returned stop waits for both intakes to stop, which they do once ctx is cancelled, then
-// closes both clients. A client outlives its intake's Run because the message in the intake's
-// handler does: deliver runs on the subscription's delivery goroutine under a deadline of its own,
-// and acknowledges the message when it ends. cmd/dispatch defers stop beside its publisher's Close,
-// so both clients last as long as the publisher.
+// The returned stop waits for both intakes' Runs, which return once ctx is cancelled, then closes
+// both clients. It does not wait for a message still in an intake's handler: deliver runs on the
+// subscription's delivery goroutine under a deadline of its own and acknowledges the message when
+// it ends, which can be after Run has returned. cmd/dispatch defers stop beside its publisher's
+// Close, so the clients stay open until the publisher closes, and such a message can be
+// acknowledged while Dispatch shuts down.
 //
 // The intakes cannot share a client: a bus.Client keeps one JetStream subscription, and the second
 // intake's bind would unsubscribe the first's (bus.Client.Subscribe). Nothing binds that durable

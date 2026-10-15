@@ -311,6 +311,8 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 // ENVOY_NOTIFICATIONS stream. Every caller that only publishes or only tails uses it -- natstail,
 // the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and
 // a stream ensure from one of them rewrites a resource several deployments share (LEGION-249).
+// envoy-dispatch's delivery intakes use it too: each binds its durable on the stream Dispatch's
+// publisher owns (ConnectOwningStream), and leaves the stream itself alone.
 //
 // Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
 // names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
