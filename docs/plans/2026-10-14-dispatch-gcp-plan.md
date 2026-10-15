@@ -415,19 +415,21 @@ Two rules the dialer carries (Findings 4 and 12 of the plan gate):
 
 `bus` exports the address check, `func CheckSOCKS5Proxy(value string) error`, which `socks5Proxy`
 calls and `core.ListenerConfig.CheckPlain` calls too (Task 7.2), so the rule is spelled once. It
-refuses an empty value, a value holding an nkey seed (any run of base32 letters and digits, in
-either case, that `nkeys.DecodeSeed` accepts: the whole value, its host or one label of it; a seed
-is a valid DNS label, and an admitted address is printed by a failed connect), whitespace around
-the value, a scheme, a value `net.SplitHostPort` cannot split, an empty host, an IPv6 address with
-a zone (every proxy a deployment names is loopback, and a zone is free text), a host that is
-neither an IP address nor a DNS name as Go's resolver reads one (labels of 1 to 63 letters,
-digits, hyphens and underscores, at most 253 bytes, so userinfo, a path, whitespace and control
-bytes are refused), a port that is not a number, and a port outside 1-65535. Its error says what
-is wrong and never prints the value, which can carry credentials and reaches the process's log.
-`TestAProxyHoldingAnNkeySeedIsRefused` covers `<seed>`, `<seed>:1055`, `<seed>.example.test:1055`,
-a lower-case seed inside a longer name and an account seed, each refused at once and printing none
-of the seed, and a 58-letter base32 label that is a seed with one character changed, which passes
-the check and dials.
+refuses an empty value, a value holding an nkey seed (`bus.HoldsSeed`, the detector `nkey.go`
+shares with the plugin's refusals: a seed of any type in either case, inside a longer run, or split
+by `.`, `-`, `_` or whitespace; a seed is a valid DNS label, and an admitted address is printed by
+a failed connect), whitespace around the value, a scheme, a value `net.SplitHostPort` cannot
+split, an empty host, an IPv6 address with a zone (every proxy a deployment names is loopback, and
+a zone is free text), a host that is neither an IP address nor a DNS name as Go's resolver reads
+one (labels of 1 to 63 letters, digits, hyphens and underscores, at most 253 bytes, so userinfo, a
+path, whitespace and control bytes are refused), a port that is not a number, and a port outside
+1-65535. Its error says what is wrong and never prints the value, which can carry credentials and
+reaches the process's log. `TestAProxyHoldingAnNkeySeedIsRefused` covers a seed as the whole
+value, the host, a label and a lower-case label, an account seed, a label with a base32 letter
+before or after the seed, and a seed split across labels by `.`, `-` and `_` (user and account,
+upper and lower case), each refused at once and printing none of the seed. Its controls are a
+58-letter base32 label that is a seed with one character changed, whole and split across labels,
+which pass the check and dial.
 
 - [ ] **Step 1: failing tests** in `socks5_test.go`. A `fakeSOCKS5` server in the test: it accepts
   on a loopback port, reads the greeting (`05 <n> <methods>`), answers `05 00`, reads a CONNECT

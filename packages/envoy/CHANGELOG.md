@@ -11,9 +11,10 @@
   proxy that resolves names this process cannot (a userspace Tailscale container's SOCKS5 server
   and MagicDNS) reaches them. A value that is not `host:port` (whitespace around it, a scheme, an
   IPv6 address with a zone, a host that is neither an IP address nor a DNS name, a port outside
-  1-65535, or empty) is refused before anything dials, and so is one that holds an nkey seed (as
-  the value, its host, or one label of it, in either case), which is a valid DNS label but never a
-  proxy address. A set proxy is remote reach, refused without `ENVOY_ALLOW_REMOTE_NATS=1`, since
+  1-65535, or empty) is refused before anything dials, and so is one that holds an nkey seed as
+  `bus.HoldsSeed` finds one (the value, its host, a label or part of one, or split across labels by
+  `.`, `-` or `_`, in either case), which is a valid DNS label but never a proxy address. A set
+  proxy is remote reach, refused without `ENVOY_ALLOW_REMOTE_NATS=1`, since
   the proxy chooses the server. No refusal prints the value. A connect through the proxy that
   fails, its attempts spent or its deadline reached, names the setting and the proxy's address,
   with the proxy's own dial error where nats.go alone would report only `nats: no servers

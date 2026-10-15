@@ -11,7 +11,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/nats-io/nkeys"
 	"golang.org/x/net/proxy"
 )
 
@@ -22,7 +21,7 @@ import (
 const SOCKS5ProxyEnvVar = "ENVOY_NATS_SOCKS5_PROXY"
 
 // CheckSOCKS5Proxy refuses a proxy address that is not host:port: one that holds an nkey seed
-// (holdsNkeySeed), whitespace around it, a scheme, an IPv6 address with a zone (every proxy a
+// (HoldsSeed), whitespace around it, a scheme, an IPv6 address with a zone (every proxy a
 // deployment names is loopback, and a zone is free text that could carry anything), a host that is
 // neither an IP address nor a DNS name (dnsName), or a port that is not a number from 1 to 65535.
 // Its error says what is wrong with the value and never prints it, since an operator can write a
@@ -33,7 +32,7 @@ func CheckSOCKS5Proxy(value string) error {
 	if value == "" {
 		return errors.New("is empty; want host:port")
 	}
-	if holdsNkeySeed(value) {
+	if HoldsSeed(value) {
 		return errors.New("holds an nkey seed, which is never a proxy address")
 	}
 	if strings.TrimSpace(value) != value {
@@ -63,20 +62,6 @@ func CheckSOCKS5Proxy(value string) error {
 		return errors.New("has a port out of range 1-65535")
 	}
 	return nil
-}
-
-// holdsNkeySeed reports whether any run of base32 letters and digits in value, in either case,
-// decodes as an nkey seed of any type: the whole value, its host, or one label of it.
-func holdsNkeySeed(value string) bool {
-	runs := strings.FieldsFunc(value, func(r rune) bool {
-		return !('A' <= r && r <= 'Z' || 'a' <= r && r <= 'z' || '2' <= r && r <= '7')
-	})
-	for _, run := range runs {
-		if _, _, err := nkeys.DecodeSeed([]byte(strings.ToUpper(run))); err == nil {
-			return true
-		}
-	}
-	return false
 }
 
 // dnsName reports whether host is a syntactic DNS name as Go's resolver reads one: at most 253

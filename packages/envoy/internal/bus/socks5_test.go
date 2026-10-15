@@ -454,10 +454,11 @@ func printsSome(message, secret string) bool {
 // setting and saying it holds a seed, and no refusal prints any of it. A seed is a valid DNS label,
 // so `<seed>:1055` and `<seed>.example.test:1055` are host:port, and a connect through either
 // would print the value in its dial error, which names the address an operator set. The seed counts
-// as the whole value, as a host, as one label of a longer name, in lower case, and of any type. The
-// check decodes rather than matching a shape: a 58-letter base32 label that is a user seed with one
-// character changed, which its checksum catches, is still a proxy address, and a connect through it
-// dials (about ten seconds, the bus's ten attempts).
+// as the whole value, as a host, as one label of a longer name, inside a longer label, split across
+// labels by '.', '-' or '_', in lower case, and of any type (bus.HoldsSeed). The check decodes
+// rather than matching a shape: a 58-letter base32 label that is a user seed with one character
+// changed, which its checksum catches, is still a proxy address, whole or split across labels, and
+// a connect through it dials (about ten seconds, the bus's ten attempts). The rows run in parallel.
 func TestAProxyHoldingAnNkeySeedIsRefused(t *testing.T) {
 	seedOf := func(create func() (nkeys.KeyPair, error)) string {
 		t.Helper()
@@ -472,16 +473,25 @@ func TestAProxyHoldingAnNkeySeedIsRefused(t *testing.T) {
 		return string(seed)
 	}
 	user, account := seedOf(nkeys.CreateUser), seedOf(nkeys.CreateAccount)
+	lower := strings.ToLower
 
-	t.Run("seed", func(t *testing.T) {
-		t.Parallel()
-		for _, row := range []struct{ value, seed string }{
-			{user, user},
-			{user + ":1055", user},
-			{user + ".example.test:1055", user},
-			{"sidecar." + strings.ToLower(user) + ".example.test:1055", user},
-			{account + ":1055", account},
-		} {
+	for _, row := range []struct{ name, value, seed string }{
+		{"the whole value", user, user},
+		{"the host", user + ":1055", user},
+		{"a label", user + ".example.test:1055", user},
+		{"a lower-case label", "sidecar." + lower(user) + ".example.test:1055", user},
+		{"an account seed", account + ":1055", account},
+		{"a label with a base32 letter after the seed", user + "A.example.test:1055", user},
+		{"a label with a base32 letter before an account seed", "x" + account + ".example.test:1055", account},
+		{"a lower-case label with a letter after the seed", lower(user) + "b.example.test:1055", user},
+		{"split across labels", user[:29] + "." + user[29:] + ":1055", user},
+		{"split by a hyphen", user[:20] + "-" + user[20:] + ".example.test:1055", user},
+		{"split by an underscore", user[:40] + "_" + user[40:] + ":1055", user},
+		{"an account seed split across labels", account[:30] + "." + account[30:] + ":1055", account},
+		{"lower case, split across labels", "sidecar." + lower(user[:25]) + "." + lower(user[25:]) + ".example.test:1055", user},
+	} {
+		t.Run("seed/"+row.name, func(t *testing.T) {
+			t.Parallel()
 			if err := bus.CheckSOCKS5Proxy(row.value); err == nil || !strings.Contains(err.Error(), "nkey seed") || printsSome(err.Error(), row.seed) {
 				t.Errorf("CheckSOCKS5Proxy(%q) = %v, want a refusal saying it holds an nkey seed, printing none of it", row.value, err)
 			}
@@ -511,26 +521,30 @@ func TestAProxyHoldingAnNkeySeedIsRefused(t *testing.T) {
 					}
 				}
 			}
-		}
-	})
+		})
+	}
 
-	t.Run("a label that is not a seed", func(t *testing.T) {
-		t.Parallel()
-		changed := byte('A')
-		if user[30] == 'A' {
-			changed = 'B'
-		}
-		label := user[:30] + string(changed) + user[31:]
-		if _, _, err := nkeys.DecodeSeed([]byte(label)); err == nil {
-			t.Fatalf("the control label %s decodes as a seed", label)
-		}
-		value := label + ".example.test:1055"
-		if err := bus.CheckSOCKS5Proxy(value); err != nil {
-			t.Fatalf("CheckSOCKS5Proxy(%q) = %v, want it accepted", value, err)
-		}
-		_, err := bus.Connect([]string{"nats://" + unresolvable}, bus.WithEnvironment(proxied(value)))
-		if err == nil || !strings.Contains(err.Error(), "NATS connect through the SOCKS5 proxy "+bus.SOCKS5ProxyEnvVar+"="+value+" failed") {
-			t.Fatalf("connect through %s: %v, want the failed dial through it, naming it", value, err)
-		}
-	})
+	changed := byte('A')
+	if user[30] == 'A' {
+		changed = 'B'
+	}
+	label := user[:30] + string(changed) + user[31:]
+	if _, _, err := nkeys.DecodeSeed([]byte(label)); err == nil {
+		t.Fatalf("the control label %s decodes as a seed", label)
+	}
+	for _, row := range []struct{ name, value string }{
+		{"a label that is not a seed", label + ".example.test:1055"},
+		{"a label that is not a seed, split across labels", label[:29] + "." + label[29:] + ".example.test:1055"},
+	} {
+		t.Run("control/"+row.name, func(t *testing.T) {
+			t.Parallel()
+			if err := bus.CheckSOCKS5Proxy(row.value); err != nil {
+				t.Fatalf("CheckSOCKS5Proxy(%q) = %v, want it accepted", row.value, err)
+			}
+			_, err := bus.Connect([]string{"nats://" + unresolvable}, bus.WithEnvironment(proxied(row.value)))
+			if err == nil || !strings.Contains(err.Error(), "NATS connect through the SOCKS5 proxy "+bus.SOCKS5ProxyEnvVar+"="+row.value+" failed") {
+				t.Fatalf("connect through %s: %v, want the failed dial through it, naming it", row.value, err)
+			}
+		})
+	}
 }
