@@ -110,17 +110,19 @@ fake endpoint fails a `check` or `verify` that sends `ListSecretVersionIds`.
 
 ## Tests
 
-The unit tests need no Pulumi CLI. They run components under `pulumi.WithMocks`
+The unit tests need neither the Pulumi CLI nor Docker. They run components under `pulumi.WithMocks`
 (`host/listener_test.go`, `internal/providers/`), the refusals against `host.resolveListener`
 directly, the plugin in process through pulumi-go-provider's `integration.NewServer`
 (`provider/provider_test.go`, `host/construct_test.go`), the seed command against a fake `Store`
 (`seed/seed_test.go`) and the AWS SDK against an `httptest` endpoint speaking Secrets Manager's
 JSON 1.1 and STS's query protocol, which fails a test on any request it does not expect
 (`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
-`--version` (`cmd/envoy-infra/main_test.go`). `core`'s real-server tests start nats-server
-containers on this machine's Docker through `testnats`, as do the `natslive` tests
-(`seed/seed_live_test.go`: a generated seed connects, and a client without it is refused, on
-`testnats.Image` and `testnats.HubImage`). The `envoy-infra-go` job in
+`--version` (`cmd/envoy-infra/main_test.go`). The tests that start nats-server containers on this
+machine's Docker through `testnats` carry the `natslive` build tag, so a plain `go test ./...`, as
+a release job runs it, starts none: `core/nats_auth_live_test.go` (the rendered authorization on a
+real server: its users connect, a client with no credential is refused, the grants hold) and
+`seed/seed_live_test.go` (a generated seed connects, and a client without it is refused), each on
+`testnats.Image` and `testnats.HubImage`. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
 
 ```sh
