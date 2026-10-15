@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# Tests for `release-push.sh push-main`: the version-bump push and its
-# same-package race resolution (LEGION-75), and its re-run cases; for
-# `release-push.sh tagged`, which finds the tag an earlier attempt pushed and
-# refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
-# release`, which makes a GitHub release carry the run's assets; for
-# `release-push.sh push-tag`, which pushes a tag with the deploy key; and for
-# `release-push.sh handed`, which checks the version and the files a build job
-# hands a publish job and prints the release tag.
+# Tests for `release-push.sh version`, the one version step every build job
+# calls: the tag an earlier attempt pushed, the bump release-bump.sh computes
+# since the newest tag, the npm fallback for a first release, --expect and the
+# refusals; for `release-push.sh push-main`: the version-bump push through the
+# deploy key, its same-package race resolution (LEGION-75) and its re-run
+# cases; for `release-push.sh tagged`, which finds the tag an earlier attempt
+# pushed and refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
+# tag`, which commits the bump and tags it, pushing nothing; for
+# `release-push.sh release`, which makes a GitHub release carry the run's
+# assets; for `release-push.sh push-tag`, which pushes a tag with the deploy
+# key; for `release-push.sh handed`, which checks the version and the files a
+# build job hands a publish job and prints the release tag; and for
+# `release-push.sh no-credential`, the build job's tripwire.
 #
 # Each push-main case builds a bare origin holding one seed commit
 # (packages/pkg at 1.0.0 plus a README) and two clones, a and b. Clone a plays
@@ -14,18 +19,27 @@
 # next run of the same package, whose checkout predates that bump — so b's push
 # is rejected and its rebase meets a's change on the same "version" line. In
 # the re-run cases, b plays a later attempt of a's run or of an older run. A
-# pre-receive hook that always rejects forces the exhaustion case. The `tagged`
-# cases build the commits and tags release runs leave in clone a and read them
-# from several checkouts. The `release` cases run against a stub `gh` first on
-# PATH, which answers `gh release view` for a release that does not exist, is a
-# draft or is published, can fail an upload, an edit or a create, and logs
-# every call it gets. The `push-tag` cases push to a local bare origin through
-# a URL rewrite, and two more reach github.com itself: one with the pinned host
-# keys, one with a copy of the script whose pinned key GitHub does not hold.
-# Those, and a comparison of the pinned keys with `gh api meta`, print a SKIP
-# line and count nothing when the network or a gh sign-in is missing. The
-# `handed` cases fill a directory with the archives a release ships, change one
-# thing as a compromised build job could, and run `handed` on it.
+# pre-receive hook that always rejects forces the exhaustion case. push-main
+# reaches origin as push-tag does: through the deploy key, with the GitHub URL
+# rewritten to the local origin by GIT_CONFIG_*, so the key directory is all
+# the script makes, and a recording hook sees what it held during the push.
+# The `tagged` cases build the commits and tags release runs leave in clone a
+# and read them from several checkouts. The `version` cases build the same on
+# another origin and run the version step from each checkout, with a stub `npm`
+# first on PATH for the first-release fallback. The `tag` cases rewrite the
+# manifest and run `tag` against an origin that must end up without the tag.
+# The `release` cases run against a stub `gh` first on PATH, which answers `gh
+# release view` for a release that does not exist, is a draft or is published,
+# can fail an upload, an edit or a create, and logs every call it gets. The
+# `push-tag` cases push to a local bare origin through a URL rewrite, and two
+# more reach github.com itself: one with the pinned host keys, one with a copy
+# of the script whose pinned key GitHub does not hold. Those, and a comparison
+# of the pinned keys with `gh api meta`, print a SKIP line and count nothing
+# when the network or a gh sign-in is missing. The `handed` cases fill a
+# directory with the archives a release ships, change one thing as a
+# compromised build job could, and run `handed` on it. The `no-credential`
+# cases run it under `env -i` with a throwaway HOME, plant one credential at a
+# time, and check it is named but never shown.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
@@ -34,6 +48,8 @@ set -euo pipefail
 # core.hooksPath, rerere, rebase.*) must not reach the seed repos or the script
 # under test. Needs git >= 2.32.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+# `version --expect` names the run to re-run from GITHUB_RUN_ID; the cases set it themselves.
+unset GITHUB_RUN_ID
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 release_push="$script_dir/release-push.sh"
@@ -66,25 +82,70 @@ setup() {
   identity "$dir/b"
 }
 
+# set_version <clone> <version>: rewrite the manifest's .version with jq, as
+# the workflow's "Set release version" step does.
+set_version() {
+  jq --arg v "$2" '.version = $v' "$1/packages/pkg/package.json" > "$1/tmp.json" \
+    && mv "$1/tmp.json" "$1/packages/pkg/package.json"
+}
+
 # bump <clone> <version>: what the workflow's "Set release version" step and
-# `release-push.sh tag` do together — rewrite .version with jq and commit it
-# (together with anything the case already staged).
+# `release-push.sh tag` do together — rewrite .version and commit it (together
+# with anything the case already staged).
 bump() {
   local clone=$1 v=$2
-  jq --arg v "$v" '.version = $v' "$clone/packages/pkg/package.json" > "$clone/tmp.json" \
-    && mv "$clone/tmp.json" "$clone/packages/pkg/package.json"
+  set_version "$clone" "$v"
   git -C "$clone" add packages/pkg/package.json
   git -C "$clone" commit -q -m "chore: release pkg v$v [skip ci]"
 }
 
-# push_main <clone> <version> [summary-file]: runs the script under test from
-# <clone>; leaves its exit code in rc and its combined output in out.
+# change <clone> <path> <subject>: a commit with <subject> that appends a line
+# to <path>, creating it as needed.
+change() {
+  local clone=$1 path=$2 subject=$3
+  mkdir -p "$(dirname "$clone/$path")"
+  printf '%s\n' "$subject" >> "$clone/$path"
+  git -C "$clone" add "$path"
+  git -C "$clone" commit -q -m "$subject"
+}
+
+# The deploy key push-main and push-tag push with. The script under test writes
+# it under TMPDIR; each case gives it a fresh one and checks it is left empty.
+ssh-keygen -q -t ed25519 -N '' -C release-push-test -f "$work/deploy"
+
+# record_hook <origin.git>: a pre-receive hook that records what TMPDIR held
+# while the push ran (mode and name of each file, sorted) in $PUSH_SEEN, and
+# rejects the push when PUSH_REJECT is set.
+record_hook() {
+  cat > "$1/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+find "$TMPDIR" -type f -printf '%m %f\n' | sort > "$PUSH_SEEN"
+[ -z "${PUSH_REJECT:-}" ]
+HOOK
+  chmod +x "$1/hooks/pre-receive"
+}
+
+# push_main <clone> <version> [summary-file] [VAR=value...]: runs the script
+# under test from <clone> with the deploy key, a fresh TMPDIR and the GitHub URL
+# rewritten to the case's origin, <clone>/../origin.git, so git pushes locally;
+# leaves its exit code in rc, its combined output in out, what a recording hook
+# saw in seen and what TMPDIR holds afterwards in left.
 push_main() {
-  local clone=$1 v=$2 summary=${3:-}
+  local clone=$1 v=$2 summary=${3:-} dir
+  dir=$(dirname "$clone")
+  shift 2
+  [ $# -eq 0 ] || shift
+  rm -rf "$dir/tmp" && mkdir "$dir/tmp"
+  : > "$dir/seen"
   set +e
-  out=$(cd "$clone" && GITHUB_STEP_SUMMARY="$summary" "$release_push" push-main packages/pkg "$v" 2>&1)
+  out=$(cd "$clone" && env TMPDIR="$dir/tmp" PUSH_SEEN="$dir/seen" GITHUB_STEP_SUMMARY="$summary" \
+    GITHUB_REPOSITORY=example/repo DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.$dir/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
+    "$@" "$release_push" push-main packages/pkg "$v" 2>&1)
   rc=$?
   set -e
+  seen=$(<"$dir/seen")
+  left=$(find "$dir/tmp" -mindepth 1 | wc -l)
 }
 
 # tagged <clone> <tag-prefix> [<package-dir>]: runs the script under test's
@@ -185,8 +246,8 @@ echo
 echo "Case 5: an unreachable origin fails through the same message"
 setup "$work/c5"
 bump "$work/c5/b" 1.0.1
-git -C "$work/c5/b" remote set-url origin "$work/c5/nowhere.git"
-push_main "$work/c5/b" 1.0.1 "$work/c5/summary.md"
+# The GitHub URL rewritten to a path that does not exist.
+push_main "$work/c5/b" 1.0.1 "$work/c5/summary.md" GIT_CONFIG_KEY_0="url.$work/c5/nowhere.git.insteadOf"
 check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
 check "error names the fetch" "$(contains "$out" '^::error::Fetching main from origin failed on attempt 1\.')"
 check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
@@ -235,6 +296,43 @@ check "job summary says the bump was not pushed" "$(contains "$(cat "$work/c8/su
 check "origin/main keeps the later version" "$(is "$(origin_version "$work/c8")" 1.0.2)"
 check "origin/main has only the later release's bump commit" "$(is "$(release_commits "$work/c8")" 1)"
 check "clone is not left mid-rebase" "$(not_rebasing "$work/c8/b")"
+
+echo
+echo "Case 8b: push-main pushes through the deploy key and leaves none behind"
+setup "$work/c8b"
+record_hook "$work/c8b/origin.git"
+bump "$work/c8b/b" 1.0.1
+push_main "$work/c8b/b" 1.0.1
+check "pushes: exits 0" "$(is "$rc" 0)"
+check "pushes: origin/main holds the bump" "$(is "$(origin_version "$work/c8b")" 1.0.1)"
+check "pushes: the key and the pinned host keys were owner-only while the push ran" \
+  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
+check "pushes: nothing is left in TMPDIR" "$(is "$left" 0)"
+setup "$work/c8c"
+record_hook "$work/c8c/origin.git"
+bump "$work/c8c/b" 1.0.1
+push_main "$work/c8c/b" 1.0.1 "" PUSH_REJECT=1
+check "five rejections: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "five rejections: says the push race was lost 5 times" "$(contains "$out" '^::error::.*lost the push race to main 5 times\.')"
+check "five rejections: the key and the pinned host keys were owner-only while the pushes ran" \
+  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
+check "five rejections: nothing is left in TMPDIR" "$(is "$left" 0)"
+check "five rejections: origin/main manifest is untouched" "$(is "$(origin_version "$work/c8c")" 1.0.0)"
+setup "$work/c8d"
+bump "$work/c8d/b" 1.0.1
+push_main "$work/c8d/b" 1.0.1 "" DEPLOY_KEY=
+check "no DEPLOY_KEY: exits non-zero, naming it" "$([ "$rc" != 0 ] && contains "$out" 'DEPLOY_KEY' || echo false)"
+check "no DEPLOY_KEY: origin/main is untouched" "$(is "$(origin_version "$work/c8d")" 1.0.0)"
+check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
+# The release workflows check out a commit, not a branch, so the bump sits on a detached HEAD.
+setup "$work/c8e"
+git -C "$work/c8e/b" checkout -q --detach
+bump "$work/c8e/b" 1.0.1
+push_main "$work/c8e/b" 1.0.1
+check "a detached HEAD: exits 0" "$(is "$rc" 0)"
+check "a detached HEAD: origin/main holds the bump" "$(is "$(origin_version "$work/c8e")" 1.0.1)"
+check "a detached HEAD: origin/main's tip is the bump commit" \
+  "$(is "$(git -C "$work/c8e/origin.git" rev-parse main)" "$(git -C "$work/c8e/b" rev-parse HEAD)")"
 
 echo
 echo "Case 9: tagged finds the tag an earlier attempt pushed for this checkout, and only that"
@@ -340,6 +438,166 @@ check "forged refs with a space and a newline: prints no tag" "$(is "$out" "")"
 check "forged refs with a space and a newline: git ignores both" "$(is "$(printf '%s\n' "$err" | { grep -c '^warning: ignoring ref with broken name refs/tags/pkg-v1\.0\.2' || true; })" 2)"
 
 echo
+echo "Case 10b: version releases the tag an earlier attempt pushed, else the bump since the newest tag"
+# The stub npm, first on PATH. It logs each call to $NPM_TEST_DIR/npm-calls as
+# one line, each argument in brackets, answers with $NPM_TEST_VERSION, and fails
+# as npm does for a package it does not have when $NPM_TEST_FAIL is set.
+mkdir -p "$work/bin"
+cat > "$work/bin/npm" <<'NPM'
+#!/usr/bin/env bash
+{ printf '[%s]' "$@"; printf '\n'; } >> "$NPM_TEST_DIR/npm-calls"
+[ -z "${NPM_TEST_FAIL:-}" ] || { echo "npm ERR! 404 Not Found" >&2; exit 1; }
+echo "$NPM_TEST_VERSION"
+NPM
+chmod +x "$work/bin/npm"
+# version_run <clone> <arg>...: runs `release-push.sh version <arg>...` from
+# <clone>, with the job summary at $work/version.summary and the stub npm's log
+# emptied first; leaves its exit code in rc, its stdout (the output lines) in
+# out, its stderr in err, the summary in summary_md and npm's calls in npm_calls.
+version_run() {
+  local clone=$1
+  shift
+  : > "$work/version.summary"
+  : > "$work/npm-calls"
+  set +e
+  out=$(cd "$clone" && GITHUB_STEP_SUMMARY="$work/version.summary" NPM_TEST_DIR="$work" \
+    PATH="$work/bin:$PATH" "$release_push" version "$@" 2>"$work/version.err")
+  rc=$?
+  set -e
+  err=$(<"$work/version.err")
+  summary_md=$(<"$work/version.summary")
+  npm_calls=$(<"$work/npm-calls")
+}
+# outputs <version> <tag> <skip>: the three lines `version` prints, as is compares them.
+outputs() { printf 'version=%s\ntag=%s\nskip=%s' "$@"; }
+setup "$work/v"
+clone="$work/v/a"
+seed=$(git -C "$clone" rev-parse HEAD)
+git -C "$clone" tag pkg-v1.0.0
+version_run "$clone" pkg-v -- packages/pkg/
+check "a tag on HEAD: exits 0" "$(is "$rc" 0)"
+check "a tag on HEAD: prints its version, the tag and skip=false, nothing else" "$(is "$out" "$(outputs 1.0.0 pkg-v1.0.0 false)")"
+check "a tag on HEAD: says it was already pushed" "$(contains "$err" '^Releasing pkg-v1\.0\.0, already pushed for this checkout$')"
+# What one release run leaves (case 9): its bump commit, a child of the checkout, tagged.
+bump "$work/v/b" 1.0.1
+git -C "$work/v/b" tag pkg-v1.0.1
+git -C "$work/v/b" checkout -q --detach "$seed"
+version_run "$work/v/b" pkg-v --package-dir packages/pkg -- packages/pkg/
+check "a tag on HEAD's bump commit, with the package dir: that tag's version" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+version_run "$work/v/b" pkg-v -- packages/pkg/
+check "the same without the package dir: the newest tag is on a descendant, so nothing is since it" "$(is "$rc $out" "0 $(outputs '' '' true)")"
+# Commits since the tag, each kind from the tagged commit.
+change "$clone" packages/pkg/index.js "feat: add an export"
+feat=$(git -C "$clone" rev-parse HEAD)
+version_run "$clone" pkg-v -- packages/pkg/
+check "a feat: commit since the tag: exits 0" "$(is "$rc" 0)"
+check "a feat: commit since the tag: bumps minor" "$(is "$out" "$(outputs 1.1.0 pkg-v1.1.0 false)")"
+check "a feat: commit since the tag: logs the bump" "$(contains "$err" '^Bumping pkg-v1\.0\.0 -> pkg-v1\.1\.0$')"
+git -C "$clone" checkout -q --detach pkg-v1.0.0
+change "$clone" packages/pkg/index.js "fix: a bug"
+fix=$(git -C "$clone" rev-parse HEAD)
+version_run "$clone" pkg-v -- packages/pkg/
+check "a fix: commit since the tag: bumps patch" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+git -C "$clone" checkout -q --detach pkg-v1.0.0
+change "$clone" packages/pkg/README.md "docs: explain it"
+docs=$(git -C "$clone" rev-parse HEAD)
+version_run "$clone" pkg-v -- packages/pkg/
+check "a docs: commit alone: exits 0, skipping, with an empty version and tag" "$(is "$rc $out" "0 $(outputs '' '' true)")"
+check "a docs: commit alone: the notice names the tag" "$(contains "$err" '^::notice title=No release published::No version-bumping commits since pkg-v1\.0\.0$')"
+check "a docs: commit alone: the job summary says the same" "$(is "$summary_md" '**No release published** — No version-bumping commits since pkg-v1.0.0')"
+git -C "$clone" checkout -q --detach pkg-v1.0.0
+change "$clone" README.md "feat: elsewhere in the repository"
+version_run "$clone" pkg-v -- packages/pkg/
+check "a commit outside the paths: exits 0, skipping" "$(is "$rc $out" "0 $(outputs '' '' true)")"
+check "a commit outside the paths: says so plainly" "$(contains "$err" "^No commits in the release's paths since pkg-v1\.0\.0$")"
+check "a commit outside the paths: no notice, no job summary" "$(is "$(contains "$err" '::notice')|$summary_md" 'false|')"
+git -C "$clone" checkout -q --detach pkg-v1.0.0
+change "$clone" docs/guide.md "docs: a guide the package ships"
+version_run "$clone" pkg-v --patch-path docs/ -- packages/pkg/ docs/
+check "a docs: commit on a --patch-path: bumps patch" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+# A first release: no tag of the prefix anywhere (origin never got one).
+git clone -q "$work/v/origin.git" "$work/v/c"
+identity "$work/v/c"
+change "$work/v/c" packages/pkg/index.js "fix: a bug"
+NPM_TEST_VERSION=2.3.4 version_run "$work/v/c" pkg-v --first-npm @example/pkg -- packages/pkg/
+check "no tag, --first-npm: exits 0" "$(is "$rc" 0)"
+check "no tag, --first-npm: bumps npm's version over the whole history" "$(is "$out" "$(outputs 2.3.5 pkg-v2.3.5 false)")"
+check "no tag, --first-npm: asked npm for the package's version" "$(is "$npm_calls" '[view][@example/pkg][version]')"
+check "no tag, --first-npm: logs the bump from npm's version" "$(contains "$err" '^Bumping v2\.3\.4 -> pkg-v2\.3\.5$')"
+NPM_TEST_FAIL=1 version_run "$work/v/c" pkg-v --first-npm @example/pkg -- packages/pkg/
+check "no tag, npm has no such package: starts from 0.0.0" "$(is "$rc $out" "0 $(outputs 0.0.1 pkg-v0.0.1 false)")"
+version_run "$work/v/c" pkg-v -- packages/pkg/
+check "no tag, no --first-npm: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
+check "no tag, no --first-npm: the error says a release line starts from a tag" \
+  "$(contains "$err" '^::error::release-push.sh version: no pkg-v\* tag; a release line starts from a tag (push pkg-v0\.0\.0 on the commit before its first release)$')"
+# --expect: what the build job handed against what the tags give now.
+git -C "$clone" checkout -q --detach "$fix"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect, the tags agree: exits 0 with the three lines" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
+git -C "$clone" checkout -q --detach "$feat"
+GITHUB_RUN_ID=424242 version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect, the tags give another version: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
+check "--expect, the tags give another version: the error names both, the race and the run to re-run" \
+  "$(contains "$err" '^::error::release-push.sh version: the build job handed v1\.0\.1; the tags now give 1\.1\.0: another run took the tag first\. Re-run the whole run (gh run rerun 424242), not only the failed jobs: the build job must compute the version again$')"
+check "--expect, the tags give another version: no bump is logged" "$(is "$(contains "$err" 'Bumping')" false)"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect without GITHUB_RUN_ID: the re-run command keeps its placeholder" "$(contains "$err" 'gh run rerun <run id>')"
+git -C "$clone" checkout -q --detach "$docs"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect where there is nothing to release: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
+check "--expect where there is nothing to release: says so" "$(contains "$err" 'handed v1\.0\.1; the tags now give nothing to release: another run took the tag first')"
+check "--expect where there is nothing to release: no notice, no job summary" "$(is "$(contains "$err" '::notice')|$summary_md" 'false|')"
+# Refusals, each printing nothing.
+git -C "$clone" checkout -q --detach "$feat"
+git -C "$clone" tag pkg-v1.0.0-rc.1 "$seed"
+version_run "$clone" pkg-v -- packages/pkg/
+check "a pre-release as the newest tag: exits non-zero printing nothing" "$([ "$rc" != 0 ] && [ -z "$out" ] && echo true || echo false)"
+check "a pre-release as the newest tag: release-bump.sh's refusal names it" \
+  "$(contains "$err" '^::error::release-bump.sh: previous version 1\.0\.0-rc\.1 (range pkg-v1\.0\.0-rc\.1\.\.HEAD) is not a plain X\.Y\.Z version; refusing it$')"
+git -C "$clone" tag -d pkg-v1.0.0-rc.1 >/dev/null
+version_run "$clone" 'pkg v' -- packages/pkg/
+check "a prefix with a space: exits 2 printing nothing" "$(is "$rc|$out" "2|")"
+check "a prefix with a space: the error names it" "$(contains "$err" '^::error::release-push.sh version: tag prefix pkg\\ v holds more than letters, digits')"
+# shellcheck disable=SC2016 # literal $(…), the prefix under test
+version_run "$clone" 'pkg-v$(id>pwned)' -- packages/pkg/
+check "a prefix with a command substitution: exits 2 printing nothing" "$(is "$rc|$out" "2|")"
+check "a prefix with a command substitution: the error names it" "$(contains "$err" '^::error::release-push.sh version: tag prefix pkg-v.*id.*pwned.* holds more than')"
+check "a prefix with a command substitution: nothing in it ran" "$([ ! -e "$clone/pwned" ] && echo true || echo false)"
+version_run "$clone" pkg-v --expect abc -- packages/pkg/
+check "--expect abc: exits 2 printing nothing" "$(is "$rc|$out" "2|")"
+check "--expect abc: the error names it" "$(contains "$err" '^::error::release-push.sh version: --expect abc is not X\.Y\.Z')"
+version_run "$clone" pkg-v --bogus -- packages/pkg/
+check "an unknown option: exits 2 printing nothing, with the usage" "$(is "$rc|$out|$(contains "$err" '^::error::release-push.sh version: unknown option --bogus; usage: release-push.sh version ')" "2||true")"
+
+echo
+echo "Case 10c: tag commits the bump and tags it locally, pushing nothing"
+# tag_run <clone> <version> <tag>: sets the manifest's version as the workflow
+# does before `tag`, then runs `release-push.sh tag` from <clone>; leaves its
+# exit code in rc and its combined output in out.
+tag_run() {
+  local clone=$1 v=$2 tag=$3
+  set_version "$clone" "$v"
+  set +e
+  out=$(cd "$clone" && "$release_push" tag packages/pkg "chore: release pkg v$v [skip ci]" "$tag" 2>&1)
+  rc=$?
+  set -e
+}
+setup "$work/t"
+clone="$work/t/a"
+tag_run "$clone" 1.0.1 pkg-v1.0.1
+check "tags: exits 0" "$(is "$rc" 0)"
+check "tags: the clone has the bump commit" "$(is "$(git -C "$clone" log -1 --format=%s)" "chore: release pkg v1.0.1 [skip ci]")"
+check "tags: the tag is on it" "$(is "$(git -C "$clone" rev-parse 'pkg-v1.0.1^{commit}')" "$(git -C "$clone" rev-parse HEAD)")"
+check "tags: origin has no tag" "$(is "$(git -C "$work/t/origin.git" tag -l)" "")"
+check "tags: origin/main is untouched" "$(is "$(origin_version "$work/t")" 1.0.0)"
+tag_run "$clone" 1.0.1 pkg-v1.0.1
+check "the same version again: exits 0, reusing the tag" "$(is "$rc|$(contains "$out" '^Tag pkg-v1\.0\.1 already exists for version 1\.0\.1; reusing it$')" '0|true')"
+check "the same version again: still nothing on origin" "$(is "$(git -C "$work/t/origin.git" tag -l)" "")"
+tag_run "$clone" 1.0.2 pkg-v1.0.1
+check "another version under the existing tag: exits 1 naming both versions" \
+  "$(is "$rc|$(contains "$out" '^::error::tag pkg-v1\.0\.1 already exists with version 1\.0\.1, not 1\.0\.2$')" '1|true')"
+
+echo
 echo "Case 11: release creates a missing release, publishes a draft, and reuses a published one"
 # The stub gh, first on PATH. It logs each call to $GH_TEST_DIR/calls as one
 # line, each argument in brackets, so an argument the script splits or joins
@@ -434,8 +692,8 @@ check "an unknown option: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 echo
 echo "Case: push-tag pushes a tag with the deploy key and leaves no key behind"
 # The push goes to git@github.com:<repo>.git; GIT_CONFIG_* rewrites that to a local bare origin,
-# so git pushes locally and the key directory is all the script under test makes. A
-# pre-receive hook records what the directory held while the push ran.
+# so git pushes locally and the key directory is all the script under test makes. The recording
+# hook sees what the directory held while the push ran.
 pt="$work/pt"
 mkdir -p "$pt/tmp"
 git init -q --bare "$pt/origin.git"
@@ -443,13 +701,7 @@ git init -q -b main "$pt/a"
 identity "$pt/a"
 git -C "$pt/a" commit -q --allow-empty -m seed
 git -C "$pt/a" tag pkg-v1.0.1
-ssh-keygen -q -t ed25519 -N '' -C release-push-test -f "$pt/deploy"
-cat > "$pt/origin.git/hooks/pre-receive" <<'HOOK'
-#!/usr/bin/env bash
-find "$TMPDIR" -type f -printf '%m %f\n' | sort > "$PUSH_TAG_SEEN"
-[ -z "${PUSH_TAG_REJECT:-}" ]
-HOOK
-chmod +x "$pt/origin.git/hooks/pre-receive"
+record_hook "$pt/origin.git"
 # push_tag <tag> [VAR=value...]: runs `release-push.sh push-tag <tag>` in clone a with the deploy
 # key, a fresh TMPDIR and the rewrite to the local origin; leaves its exit code in rc, its output
 # in out, what the hook saw in seen and what TMPDIR holds afterwards in left.
@@ -459,8 +711,8 @@ push_tag() {
   rm -rf "$pt/tmp" && mkdir "$pt/tmp"
   : > "$pt/seen"
   set +e
-  out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" PUSH_TAG_SEEN="$pt/seen" GITHUB_REPOSITORY=example/repo \
-    DEPLOY_KEY="$(<"$pt/deploy")" GIT_CONFIG_COUNT=1 \
+  out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" PUSH_SEEN="$pt/seen" GITHUB_REPOSITORY=example/repo \
+    DEPLOY_KEY="$(<"$work/deploy")" GIT_CONFIG_COUNT=1 \
     GIT_CONFIG_KEY_0="url.$pt/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
     "$@" "$release_push" push-tag "$tag" 2>&1)
   rc=$?
@@ -477,7 +729,7 @@ check "pushes: the key and the pinned host keys were owner-only while the push r
 check "pushes: nothing is left in TMPDIR" "$(is "$left" 0)"
 # A tag origin lacks, so the push reaches the hook (one origin already holds is up to date).
 git -C "$pt/a" tag pkg-v1.0.2
-push_tag pkg-v1.0.2 PUSH_TAG_REJECT=1
+push_tag pkg-v1.0.2 PUSH_REJECT=1
 check "a rejected push: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
 check "a rejected push: the key was written for it" "$(contains "$seen" '^600 key$')"
 check "a rejected push: nothing is left in TMPDIR" "$(is "$left" 0)"
@@ -500,7 +752,7 @@ if timeout 10 bash -c '</dev/tcp/github.com/22' 2>/dev/null; then
     rm -rf "$pt/tmp" && mkdir "$pt/tmp"
     set +e
     out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" GITHUB_REPOSITORY=sjawhar/release-push-test-nonexistent \
-      DEPLOY_KEY="$(<"$pt/deploy")" "$@" "$script" push-tag pkg-v1.0.1 2>&1)
+      DEPLOY_KEY="$(<"$work/deploy")" "$@" "$script" push-tag pkg-v1.0.1 2>&1)
     rc=$?
     set -e
     left=$(find "$pt/tmp" -mindepth 1 | wc -l)
@@ -650,5 +902,83 @@ rc=$?
 set -e
 refused "no file to check"
 
-summary "release-push.sh push-main, tagged, release, push-tag and handed"
+echo
+echo "Case: no-credential names a reachable credential and never shows it"
+# Each case runs the tripwire from a clean clone under an environment of only PATH, a throwaway
+# HOME and the hermetic git settings, plants one credential at a time and checks the output names
+# it without showing its value (each value carries a marker the output must lack).
+nc="$work/nc"
+setup "$nc"
+mkdir "$nc/home"
+# no_credential [VAR=value...]: runs `release-push.sh no-credential` in clone a; leaves its exit
+# code in rc and its combined output in out.
+no_credential() {
+  set +e
+  out=$(cd "$nc/a" && env -i PATH="$PATH" HOME="$nc/home" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+    "$@" bash "$release_push" no-credential 2>&1)
+  rc=$?
+  set -e
+}
+# lacks <marker>: true when the output never shows <marker>, for check.
+lacks() { is "$(contains "$out" "$1")" false; }
+clean='git config entries matching credential|insteadof|sshcommand|extraheader (names only):
+  none
+~/.ssh:
+  absent
+GIT_SSH_COMMAND: unset
+SSH_AUTH_SOCK: unset
+DEPLOY_KEY: unset
+ACTIONS_ID_TOKEN_REQUEST_URL: unset
+ACTIONS_ID_TOKEN_REQUEST_TOKEN: unset
+no credential reachable'
+no_credential
+check "a clean job: exits 0" "$(is "$rc" 0)"
+check "a clean job: prints none, absent, the five variables unset and no credential reachable" "$(is "$out" "$clean")"
+no_credential GIT_SSH_COMMAND=ssh-marker-7f3a
+check "GIT_SSH_COMMAND set: exits 1, naming it" \
+  "$(is "$rc|$(contains "$out" '^GIT_SSH_COMMAND: set$')|$(contains "$out" '^::error::GIT_SSH_COMMAND is set$')" '1|true|true')"
+check "GIT_SSH_COMMAND set: never shows the value" "$(lacks ssh-marker-7f3a)"
+check "GIT_SSH_COMMAND set: does not call the job clean" "$(lacks 'no credential reachable')"
+no_credential ACTIONS_ID_TOKEN_REQUEST_TOKEN=secret-value-2b7d
+check "the OIDC token set: exits 1, naming it" "$(is "$rc|$(contains "$out" '^ACTIONS_ID_TOKEN_REQUEST_TOKEN: set$')" '1|true')"
+check "the OIDC token set: never shows the value" "$(lacks secret-value-2b7d)"
+no_credential DEPLOY_KEY=keymarker-4e
+check "DEPLOY_KEY set: exits 1, naming it" "$(is "$rc|$(contains "$out" '^DEPLOY_KEY: set$')" '1|true')"
+check "DEPLOY_KEY set: never shows the value" "$(lacks keymarker-4e)"
+git -C "$nc/a" config core.sshCommand 'ssh -i /secret/marker-9c1e'
+no_credential
+check "core.sshCommand in the clone: exits 1, naming the entry" "$(is "$rc|$(contains "$out" '^  file:.*core\.sshcommand$')" '1|true')"
+check "core.sshCommand in the clone: never shows the value" "$(lacks marker-9c1e)"
+check "core.sshCommand in the clone: says git holds it" "$(contains "$out" '^::error::git holds credential or SSH configuration$')"
+git -C "$nc/a" config --unset core.sshCommand
+git -C "$nc/a" config url.git@github.com:.insteadOf https://github.com/
+no_credential
+check "url.*.insteadOf in the clone: exits 1, naming the entry" "$(is "$rc|$(contains "$out" '^  file:.*url\.git@github\.com:\.insteadof$')" '1|true')"
+git -C "$nc/a" config http.https://github.com/.extraheader 'AUTHORIZATION: basic dG9rZW4tbWFya2VyLTZkMQ=='
+no_credential
+check "http.*.extraheader beside it: exits 1, each entry on its own indented line" \
+  "$(is "$rc|$(printf '%s\n' "$out" | grep -c '^  file:')|$(contains "$out" '^  file:.*http\.https://github\.com/\.extraheader$')" '1|2|true')"
+check "http.*.extraheader beside it: never shows the header" "$(lacks dG9rZW4)"
+git -C "$nc/a" config --unset url.git@github.com:.insteadOf
+git -C "$nc/a" config --unset http.https://github.com/.extraheader
+git -C "$nc/a" config credential.helper store
+no_credential
+check "credential.helper in the clone: exits 1, naming the entry" "$(is "$rc|$(contains "$out" '^  file:.*credential\.helper$')" '1|true')"
+git -C "$nc/a" config --unset credential.helper
+mkdir "$nc/home/.ssh"
+printf 'not a key\n' > "$nc/home/.ssh/id_ed25519"
+no_credential
+check "id_ed25519 in ~/.ssh: exits 1, listing it and naming the directory" \
+  "$(is "$rc|$(contains "$out" ' id_ed25519$')|$(contains "$out" '^::error::~/\.ssh holds entries other than known_hosts$')" '1|true|true')"
+rm "$nc/home/.ssh/id_ed25519"
+: > "$nc/home/.ssh/known_hosts"
+no_credential
+check "known_hosts alone in ~/.ssh: exits 0, clean" "$(is "$rc|$(contains "$out" '^no credential reachable$')" '0|true')"
+rm -r "$nc/home/.ssh"
+printf 'not a config [\n' > "$nc/bad.gitconfig"
+no_credential GIT_CONFIG_GLOBAL="$nc/bad.gitconfig"
+check "an unreadable git configuration: exits 1, naming git config's exit code" \
+  "$(is "$rc|$(contains "$out" '^::error::git config --get-regexp exited 128, so the git configuration could not be read$')" '1|true')"
+
+summary "release-push.sh version, push-main, tagged, tag, release, push-tag, handed and no-credential"
 
