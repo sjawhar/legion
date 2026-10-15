@@ -55,18 +55,11 @@ func (s DeliverySettings) Production() Production {
 // as a production deploy is success. When no listed job qualifies, it falls back to the first
 // listed job so callers still read a failed, skipped, or incomplete production job.
 func (p Production) Job(jobs []DeliveryRunJob) *DeliveryRunJob {
-	return p.match(jobs, nil)
-}
-
-func (p Production) match(jobs []DeliveryRunJob, real map[string]bool) *DeliveryRunJob {
 	var first, selected *DeliveryRunJob
 	for i := range jobs {
 		job := &jobs[i]
 		if !slices.Contains(p.JobNames, job.Name) {
 			continue
-		}
-		if real != nil && job.Conclusion != nil && *job.Conclusion == DeliveryJobConclusionSuccess {
-			real[job.Name] = true
 		}
 		if first == nil {
 			first = job

@@ -63,7 +63,13 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 	real := map[string]bool{}
 	for _, run := range runs {
 		jobs := jobsByRun[run.RunID]
-		match := production.match(jobs, real)
+		for _, job := range jobs {
+			if job.Conclusion != nil && *job.Conclusion == DeliveryJobConclusionSuccess &&
+				slices.Contains(production.JobNames, job.Name) {
+				real[job.Name] = true
+			}
+		}
+		match := production.Job(jobs)
 		if match == nil {
 			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
 				m := missing{run: run}
@@ -78,6 +84,7 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 			}
 			continue
 		}
+		// The selected fallback can be unsuccessful but still proves this listed name is not a typo.
 		real[match.Name] = true
 		if production.ApplyStep != nil && match.Conclusion != nil && *match.Conclusion == DeliveryJobConclusionSuccess &&
 			match.ApplyStep != nil && *match.ApplyStep == *production.ApplyStep && match.ApplyStepConclusion == nil {
