@@ -35,6 +35,18 @@ const NotificationTopicPrefix = "notifications."
 // on ExceptionTopicPrefix followed by its original topic.
 const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
 
+// DispatchDeliveryDurable is the stream's durable consumer Dispatch's delivery intake binds, over
+// every GitHub notification (internal/dispatch/delivery).
+const DispatchDeliveryDurable = "delivery-events"
+
+// DispatchJobDurable is the stream's durable consumer Dispatch's job intake binds, over a deploy
+// run's job events (internal/dispatch/delivery).
+const DispatchJobDurable = "delivery-jobs"
+
+// WebhookRedeliveryBucket holds the cursor and records of Dispatch's sweep of the GitHub App
+// webhook's failed deliveries (internal/dispatch/redeliver).
+const WebhookRedeliveryBucket = "envoy_webhook_redelivery"
+
 // ListenerDurable is the durable consumer of the stream that the listener of machine machineID
 // binds. A space in the machine id is a hyphen in the name.
 func ListenerDurable(machineID string) string {
