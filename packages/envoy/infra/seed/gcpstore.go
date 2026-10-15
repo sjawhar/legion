@@ -74,7 +74,10 @@ func gcpClientOptions() ([]option.ClientOption, error) {
 }
 
 // gcpEndpoint turns raw, https://<host>[:<port>] as for Secret Manager's REST API, into the host:port
-// the gRPC client dials, port 443 by default.
+// the gRPC client dials, port 443 by default. It takes https alone, with no exception for this
+// machine's loopback as the AWS store's endpointCheck has: the client dials every endpoint with TLS
+// (google.golang.org/api transport/grpc DialPool), so a seed is never sent in plain text, and an
+// http endpoint could only fail its handshake.
 func gcpEndpoint(raw string) (string, error) {
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || (u.Path != "" && u.Path != "/") ||
