@@ -654,16 +654,22 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			args: listenerFlags(nil, "--webhook", "ghostwispr"),
 			want: `refused: --webhook: webhooks ["github" "slack" "ghostwispr"] is not supported`,
 		},
-		// The rest of the environment, as the component refuses it.
+		// The rest of the environment, as the component refuses it. core.ListenerConfig's refusals
+		// are tested in core; one row per input each refuses shows the flag that input maps to.
 		{
 			name: "a blank --machine-id",
 			args: listenerFlags([]string{"machine-id"}, "--machine-id", " "),
 			want: "refused: --machine-id: machineId is required",
 		},
 		{
-			name: "a padded --host-bridge",
-			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", " 127.0.0.1"),
-			want: `refused: --host-bridge: hostBridge has leading or trailing whitespace: " 127.0.0.1"`,
+			name: "a line break in --host-bridge",
+			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", "127.0\n.0.1"),
+			want: `refused: --host-bridge: hostBridge contains a control character: "127.0\n.0.1"`,
+		},
+		{
+			name: "a blank second --nats-url",
+			args: listenerFlags(nil, "--nats-url", " "),
+			want: "refused: --nats-url: natsUrls[1] is empty",
 		},
 		{
 			name: "a blank --listen-host",
@@ -674,38 +680,6 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			name: "--nats-replicas 0",
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "0"),
 			want: "refused: --nats-replicas: natsReplicas 0 is below 1",
-		},
-		{
-			name: "no --nats-url",
-			args: listenerFlags([]string{"nats-url"}),
-			want: "refused: --nats-url: natsUrls needs at least one URL",
-		},
-		{
-			name: "a --nats-url holding a comma",
-			args: listenerFlags([]string{"nats-url"}, "--nats-url", "nats://a.internal.example:4222,nats://b.internal.example:4222"),
-			want: "refused: --nats-url: natsUrls[0] contains a comma",
-		},
-		{
-			name: "a blank second --nats-url",
-			args: listenerFlags(nil, "--nats-url", " "),
-			want: "refused: --nats-url: natsUrls[1] is empty",
-		},
-		// A control character in a value core checks, refused as the component refuses it: the host
-		// watchdog writes these values into a heredoc.
-		{
-			name: "a line break in --machine-id",
-			args: listenerFlags([]string{"machine-id"}, "--machine-id", "example\nmachine"),
-			want: `refused: --machine-id: machineId contains a control character: "example\nmachine"`,
-		},
-		{
-			name: "a carriage return in --nats-url",
-			args: listenerFlags([]string{"nats-url"}, "--nats-url", "nats://example-bus.internal.example:4222\r"),
-			want: "refused: --nats-url: natsUrls[0] contains a control character",
-		},
-		{
-			name: "a line break in --host-bridge",
-			args: listenerFlags([]string{"host-bridge"}, "--host-bridge", "127.0\n.0.1"),
-			want: `refused: --host-bridge: hostBridge contains a control character: "127.0\n.0.1"`,
 		},
 		// A value no KEY=value line can carry, which the component would write into its JSON.
 		{

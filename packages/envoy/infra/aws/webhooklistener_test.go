@@ -466,8 +466,8 @@ func TestWebhookListenerAlarmsNameItsLogGroup(t *testing.T) {
 	require.Equal(t, 5, alarms)
 }
 
-// natsUrls may be known only in the apply, so core.ListenerEnv refuses a bad one there and the
-// refusal reaches the consumer as the run's error.
+// natsUrls may be known only in the apply, so core.ListenerConfig.Env refuses a bad one there and
+// the refusal reaches the consumer as the run's error.
 func TestWebhookListenerRefusesWhatTheListenerEnvironmentRefuses(t *testing.T) {
 	args := exampleListenerArgs()
 	args.NatsUrls = pulumi.StringArray{pulumi.String("nats://a.internal.example:4222,nats://b.internal.example:4222")}
@@ -632,26 +632,12 @@ func TestWebhookListenerRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			},
 			err: `mentionTrigger is given for webhook "github", which webhooks does not list`,
 		},
-		// The rest of the environment and the service.
+		// The rest of the environment and the service. core.ListenerConfig.Check's refusals are
+		// tested in core; one of them shows that validate runs it before anything registers.
 		{
 			name:   "a blank machineId",
 			mutate: func(a *envoyaws.WebhookListenerArgs) { a.MachineId = " " },
 			err:    "machineId is required",
-		},
-		{
-			name:   "a machineId with a control character",
-			mutate: func(a *envoyaws.WebhookListenerArgs) { a.MachineId = "example\nmachine" },
-			err:    `machineId contains a control character: "example\nmachine"`,
-		},
-		{
-			name:   "a padded hostBridge",
-			mutate: func(a *envoyaws.WebhookListenerArgs) { a.HostBridge = " 127.0.0.1" },
-			err:    `hostBridge has leading or trailing whitespace: " 127.0.0.1"`,
-		},
-		{
-			name:   "a hostBridge with a control character",
-			mutate: func(a *envoyaws.WebhookListenerArgs) { a.HostBridge = "127.0.0.1\nENVEOF" },
-			err:    `hostBridge contains a control character: "127.0.0.1\nENVEOF"`,
 		},
 		{
 			name:   "a blank listen host",

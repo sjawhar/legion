@@ -309,7 +309,10 @@ func TestListenerRefusesMissingProvidersBeforeRegistering(t *testing.T) {
 	})
 }
 
-// resolveListener refuses every input it can check from the inputs alone, with no engine.
+// resolveListener refuses every input it can check from the inputs alone, with no engine. The
+// environment's own refusals are core.ListenerConfig.Check's, tested in core; this table holds the
+// host's own and one row showing that core's refusal reaches the consumer with the component's
+// name, and that an explicit port 0 is passed to it rather than read as the default.
 func TestListenerRefusesInvalidInputs(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -351,34 +354,9 @@ func TestListenerRefusesInvalidInputs(t *testing.T) {
 			err: []string{`adopt.watchdog names "example-host-a-watchdog", but watchdog is not set`},
 		},
 		{
-			name: "port 0",
+			name: "port 0, refused by core with the component's name",
 			edit: func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(0) },
-			err:  []string{"port 0 is outside 1-65535"},
-		},
-		{
-			name: "a port above 65535",
-			edit: func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(65536) },
-			err:  []string{"port 65536 is outside 1-65535"},
-		},
-		{
-			name: "a blank machineId",
-			edit: func(a *host.ListenerArgs) { a.MachineID = " " },
-			err:  []string{"machineId is required"},
-		},
-		{
-			name: "a host bridge with surrounding whitespace",
-			edit: func(a *host.ListenerArgs) { a.HostBridge = pulumi.StringRef(" 127.0.0.1") },
-			err:  []string{"hostBridge has leading or trailing whitespace", `" 127.0.0.1"`},
-		},
-		{
-			name: "a machineId with a control character",
-			edit: func(a *host.ListenerArgs) { a.MachineID = "a\nENVEOF\nid" },
-			err:  []string{`machineId contains a control character: "a\nENVEOF\nid"`},
-		},
-		{
-			name: "a host bridge with a control character inside",
-			edit: func(a *host.ListenerArgs) { a.HostBridge = pulumi.StringRef("127.0.0.1\nENVEOF") },
-			err:  []string{`hostBridge contains a control character: "127.0.0.1\nENVEOF"`},
+			err:  []string{"envoy-infra:host:Listener example-host-a: port 0 is outside 1-65535"},
 		},
 	}
 	// The watchdog's create script echoes the listener's name inside double quotes, so a name

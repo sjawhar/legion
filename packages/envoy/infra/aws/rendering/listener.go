@@ -81,7 +81,7 @@ func (e ListenerEnv) Check() error {
 		}
 		return core.InputErrorf("webhooks", "webhooks %q is not supported: this version takes %s", e.Webhooks, strings.Join(supported, " or "))
 	}
-	if err := e.config().CheckPlain(); err != nil {
+	if err := e.config().Check(); err != nil {
 		return err
 	}
 	// The listener binds 127.0.0.1 when ENVOY_LISTEN_HOST is blank, where the target group cannot
@@ -96,13 +96,13 @@ func (e ListenerEnv) Check() error {
 }
 
 // Variables returns the container's non-secret environment, as NAME=value in the order the
-// container definitions list it: core.ListenerEnv's, with the listen host after the port where
-// the reference lists it, then the replicas and the webhooks: ENVOY_WEBHOOKS only when one is
-// listed, and the GitHub variables only with github. It refuses what core.ListenerEnv refuses, and
-// expects the GitHub inputs Check requires with github, but runs no other check of Check's: the
-// container definitions are written for any webhook list.
+// container definitions list it: core.ListenerConfig.Env's, with the listen host after the port
+// where the reference lists it, then the replicas and the webhooks: ENVOY_WEBHOOKS only when one is
+// listed, and the GitHub variables only with github. It refuses NatsUrls as Env does, and expects
+// the rest to have passed Check, which the component and the render command run first; it runs no
+// check of Check's itself, so the container definitions are written for any webhook list.
 func (e ListenerEnv) Variables() ([]string, error) {
-	env, err := core.ListenerEnv(e.config())
+	env, err := e.config().Env(e.NatsUrls)
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +128,7 @@ func (e ListenerEnv) Variables() ([]string, error) {
 
 // config is the environment as core.ListenerConfig takes it, on the listener's fixed port.
 func (e ListenerEnv) config() core.ListenerConfig {
-	return core.ListenerConfig{MachineID: e.MachineId, NATSURLs: e.NatsUrls, Port: ListenerPort, HostBridge: e.HostBridge}
+	return core.ListenerConfig{MachineID: e.MachineId, Port: ListenerPort, HostBridge: e.HostBridge}
 }
 
 // SecretReadPolicy is the execution-role policy that reads the secret at arn into a container, as

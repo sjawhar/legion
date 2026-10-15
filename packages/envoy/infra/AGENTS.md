@@ -33,7 +33,7 @@ versions. Never add the module to the root `go.work`.
 | `cmd/pulumi-resource-envoy-infra/` | The plugin's `main`. Its version is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `cmd/envoy-infra/` | The `envoy-infra` command's `main`: `envoy-infra seed`, with the stores it knows, `envoy-infra render`, and `--version`, which is `-ldflags "-X main.version=<X.Y.Z>"`, `0.0.0-dev` without. |
 | `provider/` | `provider.New`: the schema's metadata and the components the plugin serves. |
-| `core/` | Logic that touches no cloud: `ListenerEnv`, the listener's environment, and `ListenerConfig.CheckPlain`, the part of its checks a component runs before it registers; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
+| `core/` | Logic that touches no cloud: `ListenerConfig`, the listener's environment, whose `Check` a component runs once before it registers and whose `Env` adds the NATS URLs when they are known; `Authorization`, a NATS server's nkey authorization (`nats_auth.go`, golden-tested in `testdata/`); `IsUserPublicKey` and `UserSeedPublicKey`, which take a user public key or seed only as nkeys writes it (`nkey.go`); and `InputError`, a refusal naming the input it refuses. |
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
@@ -61,16 +61,18 @@ versions. Never add the module to the root `go.work`.
   AWS components refuse in the same order, in `WebhookListenerArgs.validate` and at the top of
   `NewNatsService`, before they require `aws`, and their refusal tables drive the constructor under
   mocks, each row asserting that only the provider registered.
-- **Refusals.** Every refusal names the input. `core.ListenerConfig.CheckPlain` holds the checks of
-  the listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`);
-  `core.ListenerEnv` runs it again and then checks each of `natsUrls`, the one field that may be
-  another resource's output, inside the `ApplyT` that computes the container's environment. A bad
-  URL, like a blank `seed` in its own `ApplyT`, therefore fails the preview or update when the
-  container's `envs` resolve, after the component and its image have registered, not the
-  constructor. The watchdog's create script runs as root on the host (`host.watchdogCreate`), so
-  no value of the environment, which it writes into a heredoc, may hold a control character, and
-  with a watchdog the listener's name, which it echoes in double quotes, may hold no `"`, `$`,
-  backtick, `\` or line break.
+- **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
+  listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`), run once
+  before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one value that may be
+  another resource's output, and checks only those, inside the `ApplyT` that computes the
+  container's environment. A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the
+  preview or update when the container's `envs` resolve, after the component and its image have
+  registered, not the constructor. The watchdog's create script runs as root on the host
+  (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
+  a control character, and with a watchdog the listener's name, which it echoes in double quotes,
+  may hold no `"`, `$`, backtick, `\` or line break. Each table tests its own refusals: core's are
+  in `core`, and a component's or a command's table holds its own plus one row for each input whose
+  core refusal it passes on, showing where that refusal goes.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
