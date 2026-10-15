@@ -51,7 +51,7 @@ naming the input. So the cloud-config is known at preview.
 
 The hub refuses these before it registers anything, with an error naming the input:
 
-- an nkey user seed, found as `envoy-infra seed` finds one (`core.HoldsSeed`: whole, inside a
+- an nkey user seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: whole, inside a
   longer value, or percent-encoded), in any plain input the user data, a child or a refusal would
   carry: `hostname`, a tag, `zone`, `machineType`, an image, or a user's `name`, `machineId` or
   rule entry. The error names the input by its path and never its value, as

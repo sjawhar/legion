@@ -131,8 +131,12 @@ type NatsService struct {
 // NewNatsService registers the NATS service. Each child is named from name as the reference names
 // its root-level resource from envoy-nats, the Cloud Map service by cloudMapServiceLogicalName and
 // the metric filters by metricFilterLogicalNamePrefix. It resolves its inputs (validate), then
-// requires an aws provider, and only then registers anything.
+// requires an aws provider, and only then registers anything. Each Input it registers from fails
+// once it resolves to a value holding a seed (refuseSeedInputs).
 func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opts ...pulumi.ResourceOption) (*NatsService, error) {
+	if err := refuseSeededName(natsServiceType, name); err != nil {
+		return nil, err
+	}
 	launch, err := args.validate()
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", natsServiceType, name, err)
@@ -140,6 +144,9 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	if err := providers.Require(ctx.Context(), natsServiceType, "aws", opts...); err != nil {
 		return nil, err
 	}
+	checked := *args
+	refuseSeedInputs(&checked, natsServiceType+" "+name)
+	args = &checked
 
 	comp := &NatsService{}
 	if err := ctx.RegisterComponentResource(natsServiceType, name, comp, opts...); err != nil {
@@ -278,10 +285,13 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 }
 
 // validate refuses the inputs NewNatsService cannot build a working service from, each error
-// naming its input: configHeader and configPath against authorization, then the authorization,
-// configHeader and serverArgs (through rendering.NatsLaunch), then the service's. It returns the
-// NATS container's launch.
+// naming its input: a plain input holding a seed (seededPlainInput), configHeader and configPath
+// against authorization, then the authorization, configHeader and serverArgs (through
+// rendering.NatsLaunch), then the service's. It returns the NATS container's launch.
 func (args *NatsServiceArgs) validate() ([]core.Field, error) {
+	if err := seededPlainInput(*args); err != nil {
+		return nil, err
+	}
 	owner := rendering.Owner{Name: "authorization", Present: args.Authorization != nil, Absent: "which is not given"}
 	if err := rendering.CheckOwnedInputs([]rendering.OwnedInput{
 		{Owner: owner, Field: "configHeader", Given: args.ConfigHeader != nil, Set: args.ConfigHeader != nil},

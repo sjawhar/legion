@@ -189,6 +189,12 @@ listener's NATS client then refuses to connect rather than connect without the s
 
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
+- an nkey seed of any type, in any spelling listed under "What `check` and `verify` print",
+  anywhere in its name or in any input but `seed`: `machineId`, `image`, `containerName`,
+  `hostBridge`, `watchdog.host`, `adopt.container`, `adopt.image` or `adopt.watchdog`. The error
+  names the input and never the value, as `envoy-infra:host:Listener example-host-a: image holds an
+  nkey seed (not echoed)`, since each would reach a resource's inputs, an alias or another refusal.
+  `seed` is the one input that is a seed;
 - a blank `machineId`;
 - a `machineId` or `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
@@ -205,7 +211,8 @@ The listener refuses these before it registers anything, with an error naming wh
 `natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
 it computes the container's environment. That happens at preview, unless they are not known until
 the update. It refuses an empty `natsUrls`, a URL in it that is blank, contains a comma (commas
-separate the URLs in `NATS_URLS`) or holds a control character, and a blank `seed`.
+separate the URLs in `NATS_URLS`), holds a control character or holds an nkey seed anywhere, as a
+password in its userinfo or a host split across DNS labels would, and a blank `seed`.
 
 The watchdog writes the environment, one variable per line, into a heredoc of a script it runs as
 root on the host, so a line break in a value could end the heredoc and run what follows as a
@@ -575,6 +582,12 @@ Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn`
 Each component refuses these before it registers anything, with an error naming the component and
 the input:
 
+- Either, first: a name, or any plain string input, that holds an nkey seed of any type and in any
+  spelling (`bus.HoldsSeed`), named by its path (`authorization.users[1].name`, `tailnetTags[1]`,
+  `baseTags[env]`, or `a key of baseTags`) and never quoted, as `<path> holds an nkey seed (not
+  echoed)`. Every one of them reaches a refusal, a registered name, tag or alias, a resource's
+  inputs or the container definitions. An authorization's `nkey` is such an input too, and core
+  also refuses any nkey that is not a user public key without quoting it.
 - `aws:NatsService`: a `configHeader` or `configPath` missing while `authorization` is given (an
   empty `configPath` counts as missing) or given while it is not, each checked before the
   authorization; then, as `StartScript` checks them (see
@@ -594,7 +607,9 @@ the input:
 `natsUrls` may come from another resource, so the listener checks it when the container's
 definitions are computed, at preview unless it is not known until the update: it refuses an empty
 list, and a URL that is blank, holds a comma or holds a control character. An optional secret ARN
-that is given but resolves to no value is refused the same way.
+that is given but resolves to no value is refused the same way. Every input that takes an output,
+the secret ARNs included, is refused once it resolves to a value holding a seed, naming its path,
+so no child is registered with it.
 
 ### Inputs that take an output
 
@@ -853,12 +868,13 @@ component refuses is refused, naming the flag, as `refused: --<flag>: <reason>` 
 error prints the usage and exits 2. It reads only its flags and the file `--authorization-file`
 names, and calls no API.
 
-An nkey user seed is never echoed. A flag value that holds one, whole or inside it, percent-encoded
-or not, is refused before anything reads it, naming the flags and never the value (`refused:
---<flag>: an nkey user seed, which is never an argument`). So is a seed anywhere in the
-`--authorization-file`, naming its field (`users[0].name`, `users[0].publish.allow[0]`), or the
-object whose key holds it. A flag the command does not take, and a value a numeric or boolean flag
-cannot parse, are reported without quoting what was given, as `envoy-infra seed` reports them.
+An nkey seed of any type is never echoed. A flag value that holds one (`bus.HoldsSeed`: whole or
+inside it, in either case, split over `.`, `-`, `_` or whitespace, percent-encoded or not) is
+refused before anything reads it, naming the flags and never the value (`refused: --<flag>: an nkey
+seed, which is never an argument`). So is a seed anywhere in the `--authorization-file`, naming
+its field (`users[0].name`, `users[0].publish.allow[0]`), or the object whose key holds it. A flag
+the command does not take, and a value a numeric or boolean flag cannot parse, are reported
+without quoting what was given, as `envoy-infra seed` reports them.
 
 ### nats-start-script
 
@@ -1172,10 +1188,10 @@ On Secret Manager it prints one of:
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal. Before any store opens, the command refuses a flag whose
-value holds an nkey user seed, whole or inside it (`--name`, `--region`, or any other), naming the
-flag and not the value: `--name` is every line's subject and the secret id the store is sent, and
-`--region` names the endpoint the SDK resolves. An unknown mode, an argument after the flags and a
-flag the command does not take are not echoed either.
+value holds an nkey seed, in any of the spellings below (`--name`, `--region`, or any other),
+naming the flag and not the value: `--name` is every line's subject and the secret id the store is
+sent, and `--region` names the endpoint the SDK resolves. An unknown mode, an argument after the
+flags and a flag the command does not take are not echoed either.
 
 The AWS store refuses a seed anywhere the AWS configuration carries one into a client, the
 configuration before any client is built and the endpoints before any request:
@@ -1194,10 +1210,15 @@ configuration before any client is built and the endpoints before any request:
   other;
 - the Secrets Manager and STS endpoints, as the SDK resolves them.
 
-A seed is found anywhere in a value: whole, inside a path or a URL's path, query, fragment or
-userinfo, or percent-encoded. The refusal names where the value came from, never the value, as
-`refused: <name>: AWS_ENDPOINT_URL: an nkey user seed, which is never AWS configuration (not
-echoed)` or `refused: <name>: the shared config's profile "example": source_profile: …`.
+A seed of any nkey type (operator, server, cluster, account, user or curve) is found in any
+spelling a reader or a decoder takes for it: whole or inside a longer value, such as a path or any
+part of a URL; in either case; with its last character's two unused bits changed, which nkeys
+itself reads; padded with `=`; split by `.`, `-`, `_` or whitespace, as across DNS labels or
+wrapped lines; or percent-encoded, once or more. A seed split over two values, or by any other
+character, is not found, since neither part decodes as a seed. The refusal names where the value
+came from, never the value, as `refused: <name>: AWS_ENDPOINT_URL: an nkey seed, which is never
+AWS configuration (not echoed)` or `refused: <name>: the shared config's profile "example":
+source_profile: …`.
 
 The Secret Manager store refuses a seed, before any call, in each variable whose value it, or a
 library it calls, sends in a request, dials as a host or quotes in an error:
@@ -1288,6 +1309,11 @@ rendered.
 An authorization is refused, with an error naming the field and, for a user's field, the user as
 `users[<index>] "<name>"`, when it has:
 
+- a name, an `Allow` or `Deny` entry (a queue group included) or a `NoAuthUser` that holds an nkey
+  seed, in any spelling listed under "What `check` and `verify` print". This is checked first, and
+  the error names the field by its path and never the value, as `users[0] "example-listener":
+  publish.allow[1] holds an nkey seed (not echoed)`, or `users[0]: name holds …` for a name: every
+  other refusal quotes a name or an entry, and the block writes them;
 - no users, or only pending ones: nats-server reads an authorization block with no users as no
   authentication at all;
 - a name that is not of the form above, or a name or a key two users share;
@@ -1308,11 +1334,11 @@ An authorization is refused, with an error naming the field and, for a user's fi
 - a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line
-break. Then comes the block: a comment naming each keyed user, in order, and the user as one JSON
-object, with keys sorted, non-ASCII characters as they are, and `deny` only when it names an
-entry. With a `NoAuthUser`, `no_auth_user` follows it, naming that user's key. For three keyed
-users, a pending `example-pending` and `NoAuthUser` `example-fallback`, `core`'s tests pin this
-text:
+break or an nkey seed. Then comes the block: a comment naming each keyed user, in order, and
+the user as one JSON object, with keys sorted, non-ASCII characters as they are, and `deny` only
+when it names an entry. With a `NoAuthUser`, `no_auth_user` follows it, naming that user's key.
+For three keyed users, a pending `example-pending` and `NoAuthUser` `example-fallback`, `core`'s
+tests pin this text:
 
 ```text
 # Rendered by envoy-infra from placeholder inputs.
@@ -1332,15 +1358,16 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 ```
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
-path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
-argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or
-`-routes` (with one dash or two, and with or without `=`), naming its index: nats-server takes the
-last value of a flag, so a later `-c` would load another file in place of the rendered one;
-`-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
-has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
-and a server routed to it would see every message its users publish. Each of its refusals is a
-`core.InputError` naming the input it refuses: `authorization`, `configPath`, `serverArgs` or
-`configHeader`.
+path and execs `nats-server --config <path>` with the server's own arguments. It refuses a path or
+an argument that holds an nkey seed, which the script would carry, naming it and never the
+value, and an argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`,
+`-cluster_listen` or `-routes` (with one dash or two, and with or without `=`), naming its index:
+nats-server takes the last value of a flag, so a later `-c` would load another file in place of
+the rendered one; `-user`, `-pass` and `-auth` would add a credential beside its nkey users; and
+the rendered block has no cluster authorization, so a route the last three open or solicit would
+be unauthenticated, and a server routed to it would see every message its users publish. Each of
+its refusals is a `core.InputError` naming the input it refuses: `authorization`, `configPath`,
+`serverArgs` or `configHeader`.
 
 ### Permission sets
 

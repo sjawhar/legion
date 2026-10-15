@@ -18,6 +18,7 @@ import (
 
 	"github.com/sjawhar/envoy/infra/aws/rendering"
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 const usageText = `usage: envoy-infra render {nats-start-script|webhook-listener-env|metric-filters} [flags]
@@ -82,7 +83,7 @@ func (s *subcommand) usage(problem string) int {
 // the exit code when the command must stop: 0 after --help, 2 on a usage error or a refusal.
 //
 // Every flag's value reaches the rendering this command prints, and the refusals of core and
-// rendering quote values, so a value that holds an nkey user seed (core.HoldsSeed), whole or
+// rendering quote values, so a value that holds an nkey seed (bus.HoldsSeed), whole or
 // inside it, is refused before anything reads it, naming the flags and never the value.
 func (s *subcommand) parse(args []string, required ...string) (map[string]bool, int, bool) {
 	if err := s.fs.Parse(args); err != nil {
@@ -103,12 +104,12 @@ func (s *subcommand) parse(args []string, required ...string) (map[string]bool, 
 	var seeded []string
 	s.fs.Visit(func(f *flag.Flag) {
 		given[f.Name] = true
-		if core.HoldsSeed(f.Value.String()) {
+		if bus.HoldsSeed(f.Value.String()) {
 			seeded = append(seeded, "--"+f.Name)
 		}
 	})
 	if len(seeded) > 0 {
-		fmt.Fprintf(s.stderr, "refused: %s: an nkey user seed, which is never an argument (not echoed)\n", strings.Join(seeded, ", "))
+		fmt.Fprintf(s.stderr, "refused: %s: an nkey seed, which is never an argument (not echoed)\n", strings.Join(seeded, ", "))
 		return nil, 2, true
 	}
 	if s.fs.NArg() > 0 {
@@ -402,7 +403,7 @@ func sameKeys(path string, given, want any) error {
 	return nil
 }
 
-// fileSeed refuses a JSON file text that holds an nkey user seed (core.HoldsSeed), naming the field
+// fileSeed refuses a JSON file text that holds an nkey seed (bus.HoldsSeed), naming the field
 // it is in: a key's path ends at its object, so the refusal never quotes the key. A seed the file
 // holds outside any string or key, or in a file that is no JSON value, is refused naming no field.
 func fileSeed(text []byte) error {
@@ -414,13 +415,13 @@ func fileSeed(text []byte) error {
 				prefix = path + ": "
 			}
 			if key {
-				return errors.New(prefix + "a key holding an nkey user seed (not echoed)")
+				return errors.New(prefix + "a key holding an nkey seed (not echoed)")
 			}
-			return errors.New(prefix + "an nkey user seed, which the file never holds (not echoed)")
+			return errors.New(prefix + "an nkey seed, which the file never holds (not echoed)")
 		}
 	}
-	if core.HoldsSeed(string(text)) {
-		return errors.New("an nkey user seed, which the file never holds (not echoed)")
+	if bus.HoldsSeed(string(text)) {
+		return errors.New("an nkey seed, which the file never holds (not echoed)")
 	}
 	return nil
 }
@@ -430,7 +431,7 @@ func fileSeed(text []byte) error {
 func seedAt(path string, value any) (string, bool, bool) {
 	switch v := value.(type) {
 	case string:
-		return path, false, core.HoldsSeed(v)
+		return path, false, bus.HoldsSeed(v)
 	case []any:
 		for i, element := range v {
 			if at, key, ok := seedAt(fmt.Sprintf("%s[%d]", path, i), element); ok {
@@ -439,7 +440,7 @@ func seedAt(path string, value any) (string, bool, bool) {
 		}
 	case map[string]any:
 		for _, name := range slices.Sorted(maps.Keys(v)) {
-			if core.HoldsSeed(name) {
+			if bus.HoldsSeed(name) {
 				return path, true, true
 			}
 			next := name

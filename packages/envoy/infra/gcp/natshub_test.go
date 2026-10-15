@@ -560,7 +560,7 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone and machine type, which reach the group and the
 // template; the images and each user's name, machine id and rules, which reach the user data or
-// core's refusals. The seed is found as core.HoldsSeed finds it: whole, inside a longer value, or
+// core's refusals. The seed is found as bus.HoldsSeed finds it: whole, inside a longer value, or
 // percent-encoded. A seed as a user's nkey is core's to refuse, unquoted (the resolver table's
 // "a user whose public key is a seed"), and tailnetAuthKey, a secret that reaches the secret
 // version alone, is not checked.

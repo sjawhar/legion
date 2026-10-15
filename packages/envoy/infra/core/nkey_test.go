@@ -1,7 +1,6 @@
 package core_test
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -45,47 +44,4 @@ func TestUserSeedPublicKey(t *testing.T) {
 			require.EqualError(t, err, row.why)
 		})
 	}
-}
-
-// HoldsSeed finds a seed UserSeedPublicKey accepts anywhere in a text: whole, inside a path, a URL
-// or a message, percent-encoded, or inside a longer run of base32 letters. A value that is no seed
-// as nkeys spells one is not found.
-func TestHoldsSeed(t *testing.T) {
-	rows := []struct {
-		name string
-		text string
-		want bool
-	}{
-		{"the seed", readmeSeed, true},
-		{"in a file path", "/tmp/example/" + readmeSeed, true},
-		{"in a URL's path", "https://example.invalid/" + readmeSeed + "/x", true},
-		{"in a URL's query", "https://example.invalid/?k=" + readmeSeed, true},
-		{"in a URL's userinfo", "https://" + readmeSeed + "@example.invalid/", true},
-		{"percent-encoded", "https://example.invalid/" + percentEncoded(readmeSeed), true},
-		{"partly percent-encoded, beside a percent that encodes nothing", "%zz/" + readmeSeed[:10] + percentEncoded(readmeSeed[10:]), true},
-		{"inside a longer run of base32 letters", "AB" + readmeSeed + "CD", true},
-		{"in an error message", "failed to get shared config profile, " + readmeSeed, true},
-		{"lowercase", strings.ToLower(readmeSeed), false},
-		{"truncated", readmeSeed[:57], false},
-		{"one character changed", readmeSeed[:5] + "A" + readmeSeed[6:], false},
-		{"another spelling", strings.TrimSuffix(readmeSeed, "Y") + "Z", false},
-		{"a public key", readmePublicKey, false},
-		{"a region", "us-east-1", false},
-		{"empty", "", false},
-	}
-	require.True(t, strings.HasSuffix(readmeSeed, "Y"), "the spelling row changes a final Y")
-	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			require.Equal(t, row.want, core.HoldsSeed(row.text))
-		})
-	}
-}
-
-// percentEncoded spells every byte of text as %XX.
-func percentEncoded(text string) string {
-	var b strings.Builder
-	for i := range len(text) {
-		fmt.Fprintf(&b, "%%%02X", text[i])
-	}
-	return b.String()
 }

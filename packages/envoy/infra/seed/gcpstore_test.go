@@ -535,7 +535,7 @@ func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 			require.Equal(t, 2, code, errs)
 			require.Empty(t, out)
 			require.NotContains(t, errs, pasted)
-			require.True(t, strings.HasPrefix(errs, "envoy-infra seed: --name: an nkey user seed, which is never an argument (not echoed)\n"), errs)
+			require.True(t, strings.HasPrefix(errs, "envoy-infra seed: --name: an nkey seed, which is never an argument (not echoed)\n"), errs)
 			require.Empty(t, f.recorded())
 		})
 	}
@@ -547,7 +547,7 @@ func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 // fake found GOOGLE_APPLICATION_CREDENTIALS quoted on stderr ("open <seed>: no such file or
 // directory"), GOOGLE_OAUTH_ACCESS_TOKEN and GOOGLE_CLOUD_QUOTA_PROJECT in request headers (the
 // bearer token, x-goog-user-project), and GOOGLE_CLOUD_UNIVERSE_DOMAIN, GCE_METADATA_HOST and an
-// https endpoint's host dialed. A seed is found as core.HoldsSeed finds one: the whole value, inside
+// https endpoint's host dialed. A seed is found as bus.HoldsSeed finds one: the whole value, inside
 // a longer one (a path, a token, a host, a project), or percent-encoded, as in an endpoint's path or
 // query, which the endpoint's form would refuse but only after the seed check names the variable.
 func TestGCPRefusesASeedInItsConfiguration(t *testing.T) {

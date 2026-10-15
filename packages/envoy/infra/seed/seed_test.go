@@ -833,7 +833,7 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 	const notEchoed = "envoy-infra seed: a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)\n"
 	seedIn := func(flags string) string {
-		return "envoy-infra seed: " + flags + ": an nkey user seed, which is never an argument (not echoed)\n"
+		return "envoy-infra seed: " + flags + ": an nkey seed, which is never an argument (not echoed)\n"
 	}
 	rows := []struct {
 		name string

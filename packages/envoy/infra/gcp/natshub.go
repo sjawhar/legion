@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
 	"github.com/sjawhar/envoy/infra/nats"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // natsHubType is the component's token. pulumi-go-provider derives the same one from the NatsHub
@@ -183,7 +184,7 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	return s, nil
 }
 
-// seededInput names the first plain input of args that holds an nkey user seed (core.HoldsSeed:
+// seededInput names the first plain input of args that holds an nkey seed (bus.HoldsSeed:
 // whole, inside a longer value, or percent-encoded), by its path and never its value. Every one
 // reaches a refusal that quotes it, the user data, or a child's inputs, which a preview prints:
 // the hostname and the tags, quoted by the hub's own refusals and written into the user data; the
@@ -225,7 +226,7 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		}
 	}
 	for _, f := range fields {
-		if core.HoldsSeed(f.value) {
+		if bus.HoldsSeed(f.value) {
 			return f.path, true
 		}
 	}
@@ -241,7 +242,7 @@ func seedRefused(input string) error {
 // refused once it resolves: the output fails naming input, so no child is registered with it.
 func refuseSeed(value pulumi.StringPtrInput, hub, input string) pulumi.StringPtrOutput {
 	return value.ToStringPtrOutput().ApplyT(func(v *string) (*string, error) {
-		if v != nil && core.HoldsSeed(*v) {
+		if v != nil && bus.HoldsSeed(*v) {
 			return nil, fmt.Errorf("%s: %w", hub, seedRefused(input))
 		}
 		return v, nil
