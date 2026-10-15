@@ -1134,10 +1134,13 @@ type NatsServiceArgs struct {
 	Memory           string `pulumi:"memory"`
 	PlatformVersion  string `pulumi:"platformVersion"`
 
-	BaseTags           map[string]string `pulumi:"baseTags"`   // the component adds `service` per child
-	MetricNamespace    string            `pulumi:"metricNamespace"`
-	WaitForSteadyState *bool             `pulumi:"waitForSteadyState,optional"` // unset leaves the input unset
-	Adopt              bool              `pulumi:"adopt,optional"`
+	BaseTags        map[string]string `pulumi:"baseTags"` // the component adds `service` per child
+	MetricNamespace string            `pulumi:"metricNamespace"`
+	// The four log metric filters are named <prefix>-route-disconnect-filter,
+	// <prefix>-slow-consumer-filter, <prefix>-jetstream-error-filter and <prefix>-auth-error-filter.
+	MetricFilterLogicalNamePrefix string `pulumi:"metricFilterLogicalNamePrefix"`
+	WaitForSteadyState            *bool  `pulumi:"waitForSteadyState,optional"` // unset leaves the input unset
+	Adopt                         bool   `pulumi:"adopt,optional"`
 }
 
 type NatsService struct {
