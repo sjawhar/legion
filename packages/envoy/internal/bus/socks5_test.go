@@ -3,17 +3,12 @@ package bus_test
 import (
 	"bytes"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,201 +16,23 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
 // unresolvable is the server every proxied case names: a host name that resolves nowhere, so only a
 // proxy that ignores the name reaches the server.
 const unresolvable = "nats.example.test:4222"
 
-// fakeSOCKS5 is a SOCKS5 server (RFC 1928: no authentication, CONNECT only) that serves every
-// request from one NATS server, whatever address the request names, so a name that resolves
-// nowhere is served. It records each request's address type and address, counts every connection
-// it accepts, and dropAll closes every connection it relays, so nats.go reconnects in place. With
-// reply set (startRefusingSOCKS5) it answers every request with that reply code and relays nothing.
-type fakeSOCKS5 struct {
-	addr     string
-	target   string
-	reply    byte
-	listener net.Listener
-	accepted atomic.Int64
-
-	mu       sync.Mutex
-	requests []socksRequest
-	relayed  []net.Conn
-}
-
-// socksRequest is one CONNECT a fakeSOCKS5 received: its address type (0x01 an IPv4 address, 0x03
-// a domain name, 0x04 an IPv6 address) and the address it named, as host:port.
-type socksRequest struct {
-	addressType byte
-	address     string
-}
-
-// startFakeSOCKS5 serves on a loopback port, relaying every request to target (host:port), until
-// the test ends.
-func startFakeSOCKS5(t *testing.T, target string) *fakeSOCKS5 {
+// waitForConnects waits for the proxy to have received n requests, every one of them want.
+func waitForConnects(t *testing.T, proxy *testsocks5.Server, n int, want testsocks5.Request) {
 	t.Helper()
-	return startSOCKS5(t, &fakeSOCKS5{target: target})
+	waitFor(t, 15*time.Second, fmt.Sprintf("%d requests at the proxy", n), func() bool { return len(proxy.Requests()) >= n })
+	requireConnects(t, proxy, slices.Repeat([]testsocks5.Request{want}, n))
 }
 
-// startRefusingSOCKS5 serves on a loopback port, answering every request with reply (RFC 1928's
-// reply field: 0x04 host unreachable, 0x05 connection refused), until the test ends.
-func startRefusingSOCKS5(t *testing.T, reply byte) *fakeSOCKS5 {
+func requireConnects(t *testing.T, proxy *testsocks5.Server, want []testsocks5.Request) {
 	t.Helper()
-	return startSOCKS5(t, &fakeSOCKS5{reply: reply})
-}
-
-func startSOCKS5(t *testing.T, fake *fakeSOCKS5) *fakeSOCKS5 {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for the SOCKS5 fake: %v", err)
-	}
-	fake.addr, fake.listener = listener.Addr().String(), listener
-	go fake.serve()
-	t.Cleanup(func() {
-		_ = listener.Close()
-		fake.dropAll()
-	})
-	return fake
-}
-
-func (f *fakeSOCKS5) serve() {
-	for {
-		client, err := f.listener.Accept()
-		if err != nil {
-			return
-		}
-		f.accepted.Add(1)
-		go f.handle(client)
-	}
-}
-
-// handle reads the request, dials the target whatever the request named, answers success with a
-// zero bound address, then copies bytes both ways until either side closes.
-func (f *fakeSOCKS5) handle(client net.Conn) {
-	// A client that does not speak SOCKS5 first (a NATS client dialling the fake directly waits for
-	// the server's INFO) is dropped rather than held.
-	_ = client.SetDeadline(time.Now().Add(time.Second))
-	request, err := readSOCKS5Connect(client)
-	if err != nil {
-		_ = client.Close()
-		return
-	}
-	_ = client.SetDeadline(time.Time{})
-	f.mu.Lock()
-	f.requests = append(f.requests, request)
-	f.mu.Unlock()
-	if f.reply != 0 {
-		_, _ = client.Write([]byte{0x05, f.reply, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		_ = client.Close()
-		return
-	}
-	server, err := net.Dial("tcp", f.target)
-	if err != nil {
-		_ = client.Close()
-		return
-	}
-	if _, err := client.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
-		_ = client.Close()
-		_ = server.Close()
-		return
-	}
-	f.mu.Lock()
-	f.relayed = append(f.relayed, client, server)
-	f.mu.Unlock()
-	go func() {
-		_, _ = io.Copy(server, client)
-		_ = server.Close()
-		_ = client.Close()
-	}()
-	_, _ = io.Copy(client, server)
-	_ = client.Close()
-	_ = server.Close()
-}
-
-// readSOCKS5Connect reads a client's greeting (05 <n> <methods>), answers that it needs no
-// authentication (05 00), and reads its CONNECT request (05 01 00 <type> <address> <port>).
-func readSOCKS5Connect(conn net.Conn) (socksRequest, error) {
-	greeting := make([]byte, 2)
-	if _, err := io.ReadFull(conn, greeting); err != nil {
-		return socksRequest{}, err
-	}
-	if greeting[0] != 0x05 {
-		return socksRequest{}, fmt.Errorf("greeting of SOCKS version %d", greeting[0])
-	}
-	if _, err := io.ReadFull(conn, make([]byte, greeting[1])); err != nil {
-		return socksRequest{}, err
-	}
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-		return socksRequest{}, err
-	}
-	header := make([]byte, 4)
-	if _, err := io.ReadFull(conn, header); err != nil {
-		return socksRequest{}, err
-	}
-	if header[0] != 0x05 || header[1] != 0x01 {
-		return socksRequest{}, fmt.Errorf("request %x is not a SOCKS5 CONNECT", header)
-	}
-	var host string
-	switch header[3] {
-	case 0x01, 0x04:
-		size := net.IPv4len
-		if header[3] == 0x04 {
-			size = net.IPv6len
-		}
-		ip := make([]byte, size)
-		if _, err := io.ReadFull(conn, ip); err != nil {
-			return socksRequest{}, err
-		}
-		host = net.IP(ip).String()
-	case 0x03:
-		length := make([]byte, 1)
-		if _, err := io.ReadFull(conn, length); err != nil {
-			return socksRequest{}, err
-		}
-		name := make([]byte, length[0])
-		if _, err := io.ReadFull(conn, name); err != nil {
-			return socksRequest{}, err
-		}
-		host = string(name)
-	default:
-		return socksRequest{}, fmt.Errorf("address type %#x", header[3])
-	}
-	port := make([]byte, 2)
-	if _, err := io.ReadFull(conn, port); err != nil {
-		return socksRequest{}, err
-	}
-	return socksRequest{addressType: header[3], address: net.JoinHostPort(host, strconv.Itoa(int(binary.BigEndian.Uint16(port))))}, nil
-}
-
-// connects returns every request the fake has received, oldest first.
-func (f *fakeSOCKS5) connects() []socksRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return slices.Clone(f.requests)
-}
-
-// dropAll closes every connection the fake relays.
-func (f *fakeSOCKS5) dropAll() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, conn := range f.relayed {
-		_ = conn.Close()
-	}
-	f.relayed = nil
-}
-
-// waitForConnects waits for the fake to have received n requests, every one of them want.
-func (f *fakeSOCKS5) waitForConnects(t *testing.T, n int, want socksRequest) {
-	t.Helper()
-	waitFor(t, 15*time.Second, fmt.Sprintf("%d requests at the proxy", n), func() bool { return len(f.connects()) >= n })
-	requireConnects(t, f, slices.Repeat([]socksRequest{want}, n))
-}
-
-func requireConnects(t *testing.T, fake *fakeSOCKS5, want []socksRequest) {
-	t.Helper()
-	if got := fake.connects(); !slices.Equal(got, want) {
+	if got := proxy.Requests(); !slices.Equal(got, want) {
 		t.Fatalf("the proxy received %+v, want %+v", got, want)
 	}
 }
@@ -264,17 +81,17 @@ type clientConnect func([]string, ...bus.ConnectOption) (*bus.Client, error)
 // for a Client the replacement its recovery dials once the connection is closed. The name resolves
 // nowhere, so a connection that went around the proxy would reach nothing.
 func TestSOCKS5ProxyCarriesEveryConnectionWithTheHostUnresolved(t *testing.T) {
-	want := socksRequest{addressType: 0x03, address: unresolvable}
+	want := testsocks5.Request{AddressType: 0x03, Address: unresolvable}
 	for name, connect := range map[string]clientConnect{"Connect": bus.Connect, "ConnectOwningStream": bus.ConnectOwningStream} {
 		t.Run(name, func(t *testing.T) {
 			uri := testnats.URL(t)
-			fake := startFakeSOCKS5(t, hostOf(t, uri))
-			client, err := connect([]string{withHost(t, uri, unresolvable)}, bus.WithEnvironment(proxied(fake.addr)))
+			fake := testsocks5.Start(t, hostOf(t, uri))
+			client, err := connect([]string{withHost(t, uri, unresolvable)}, bus.WithEnvironment(proxied(fake.Addr)))
 			if err != nil {
 				t.Fatalf("connect through the proxy: %v", err)
 			}
 			t.Cleanup(client.Close)
-			requireConnects(t, fake, []socksRequest{want})
+			requireConnects(t, fake, []testsocks5.Request{want})
 
 			const topic = "notifications.role.socks5"
 			received := make(chan []byte, 64)
@@ -304,14 +121,14 @@ func TestSOCKS5ProxyCarriesEveryConnectionWithTheHostUnresolved(t *testing.T) {
 			}
 			roundTrip("after-the-first-connect")
 
-			fake.dropAll()
-			fake.waitForConnects(t, 2, want)
+			fake.DropAll()
+			waitForConnects(t, fake, 2, want)
 			roundTrip("after-the-reconnect-in-place")
 
 			// A connection nats.go has closed is replaced by the client's recovery, which dials
 			// with the same proxy.
 			client.Conn.Close()
-			fake.waitForConnects(t, 3, want)
+			waitForConnects(t, fake, 3, want)
 			waitFor(t, 15*time.Second, "the replacement connection", client.Connected)
 			roundTrip("after-the-replacement")
 		})
@@ -319,13 +136,13 @@ func TestSOCKS5ProxyCarriesEveryConnectionWithTheHostUnresolved(t *testing.T) {
 
 	t.Run("Dial", func(t *testing.T) {
 		uri := testnats.URL(t)
-		fake := startFakeSOCKS5(t, hostOf(t, uri))
-		conn, err := bus.Dial("socks5-test", []string{withHost(t, uri, unresolvable)}, proxied(fake.addr))
+		fake := testsocks5.Start(t, hostOf(t, uri))
+		conn, err := bus.Dial("socks5-test", []string{withHost(t, uri, unresolvable)}, proxied(fake.Addr))
 		if err != nil {
 			t.Fatalf("dial through the proxy: %v", err)
 		}
 		t.Cleanup(conn.Close)
-		requireConnects(t, fake, []socksRequest{want})
+		requireConnects(t, fake, []testsocks5.Request{want})
 
 		const subject = "socks5.dial"
 		sub, err := conn.SubscribeSync(subject)
@@ -351,8 +168,8 @@ func TestSOCKS5ProxyCarriesEveryConnectionWithTheHostUnresolved(t *testing.T) {
 		}
 		roundTrip("after-the-first-connect")
 
-		fake.dropAll()
-		fake.waitForConnects(t, 2, want)
+		fake.DropAll()
+		waitForConnects(t, fake, 2, want)
 		roundTrip("after-the-reconnect-in-place")
 	})
 }
@@ -367,13 +184,13 @@ func TestSOCKS5ProxyIsHandedANameTheResolverKnows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the test server's port from %s: %v", server, err)
 	}
-	fake := startFakeSOCKS5(t, server)
-	client, err := bus.Connect([]string{withHost(t, uri, net.JoinHostPort("localhost", port))}, bus.WithEnvironment(proxied(fake.addr)))
+	fake := testsocks5.Start(t, server)
+	client, err := bus.Connect([]string{withHost(t, uri, net.JoinHostPort("localhost", port))}, bus.WithEnvironment(proxied(fake.Addr)))
 	if err != nil {
 		t.Fatalf("connect through the proxy: %v", err)
 	}
 	t.Cleanup(client.Close)
-	requireConnects(t, fake, []socksRequest{{addressType: 0x03, address: "localhost:" + port}})
+	requireConnects(t, fake, []testsocks5.Request{{AddressType: 0x03, Address: "localhost:" + port}})
 }
 
 // A connect handed an environment that does not set the proxy dials the server directly, whatever
@@ -386,8 +203,8 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the test server's port from %s: %v", server, err)
 	}
-	fake := startFakeSOCKS5(t, server)
-	t.Setenv(bus.SOCKS5ProxyEnvVar, fake.addr)
+	fake := testsocks5.Start(t, server)
+	t.Setenv(bus.SOCKS5ProxyEnvVar, fake.Addr)
 
 	direct, err := bus.Connect([]string{uri}, bus.WithEnvironment(lookupOf(nil)))
 	if err != nil {
@@ -397,7 +214,7 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 	if _, port, err := net.SplitHostPort(direct.Conn.ConnectedAddr()); err != nil || port != serverPort {
 		t.Fatalf("connected to %s (%v), want the NATS server's own port %s", direct.Conn.ConnectedAddr(), err, serverPort)
 	}
-	if accepted := fake.accepted.Load(); accepted != 0 {
+	if accepted := fake.Accepted(); accepted != 0 {
 		t.Fatalf("the proxy the process environment names accepted %d connections, want none", accepted)
 	}
 
@@ -408,15 +225,15 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 		t.Fatalf("connect on the process environment: %v", err)
 	}
 	t.Cleanup(throughProxy.Close)
-	if got := throughProxy.Conn.ConnectedAddr(); got != fake.addr {
-		t.Fatalf("connected to %s, want the proxy %s", got, fake.addr)
+	if got := throughProxy.Conn.ConnectedAddr(); got != fake.Addr {
+		t.Fatalf("connected to %s, want the proxy %s", got, fake.Addr)
 	}
 	host, _, _ := net.SplitHostPort(server)
 	addressType := byte(0x03)
 	if net.ParseIP(host) != nil {
 		addressType = 0x01
 	}
-	requireConnects(t, fake, []socksRequest{{addressType: addressType, address: server}})
+	requireConnects(t, fake, []testsocks5.Request{{AddressType: addressType, Address: server}})
 }
 
 // A connect through the proxy that fails names the setting and the proxy's address, whatever the
@@ -428,15 +245,15 @@ func TestNoProxyIsDialedWhenTheSettingIsUnset(t *testing.T) {
 // ten seconds; they run in parallel. Every proxy is a loopback address: nothing is looked up.
 func TestAFailedConnectThroughAProxyNamesIt(t *testing.T) {
 	urls := []string{"nats://" + unresolvable}
-	silent := startFakeSOCKS5(t, "127.0.0.1:1")
-	unreachable := startRefusingSOCKS5(t, 0x04)
+	silent := testsocks5.Start(t, "127.0.0.1:1")
+	unreachable := testsocks5.StartRefusing(t, 0x04)
 	for _, proxy := range []struct {
 		name, address string
 		also          []string
 	}{
 		{"nothing listens", "127.0.0.1:1", []string{"connection refused"}},
-		{"closes without answering", silent.addr, nil},
-		{"answers host unreachable", unreachable.addr, []string{"host unreachable"}},
+		{"closes without answering", silent.Addr, nil},
+		{"answers host unreachable", unreachable.Addr, []string{"host unreachable"}},
 	} {
 		for name, connect := range map[string]func(string) error{
 			"Connect": func(address string) error {
@@ -475,16 +292,15 @@ func TestAFailedConnectThroughAProxyNamesIt(t *testing.T) {
 // proxy's address: an operator reads a publish's error first.
 func TestAPublishWhoseDeadlineEndsFirstNamesTheProxy(t *testing.T) {
 	uri := testnats.URL(t)
-	fake := startFakeSOCKS5(t, hostOf(t, uri))
-	client, err := bus.Connect([]string{withHost(t, uri, unresolvable)}, bus.WithEnvironment(proxied(fake.addr)))
+	fake := testsocks5.Start(t, hostOf(t, uri))
+	client, err := bus.Connect([]string{withHost(t, uri, unresolvable)}, bus.WithEnvironment(proxied(fake.Addr)))
 	if err != nil {
 		t.Fatalf("connect through the proxy: %v", err)
 	}
 	t.Cleanup(client.Close)
 	// The proxy goes away, then the connection: the publish dials a replacement, and every attempt
 	// is refused.
-	_ = fake.listener.Close()
-	fake.dropAll()
+	fake.Close()
 	client.Conn.Close()
 	started := time.Now()
 	err = client.PublishCore(roleEnvelope("notifications.role.socks5"))
@@ -495,7 +311,7 @@ func TestAPublishWhoseDeadlineEndsFirstNamesTheProxy(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("publish error %q after %s is not its deadline's: the replacement dial ran out of attempts first", err, elapsed)
 	}
-	for _, want := range []string{bus.SOCKS5ProxyEnvVar, fake.addr} {
+	for _, want := range []string{bus.SOCKS5ProxyEnvVar, fake.Addr} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("publish error %q does not name %q", err, want)
 		}
@@ -514,8 +330,8 @@ func TestAPublishWhoseDeadlineEndsFirstNamesTheProxy(t *testing.T) {
 // failed dial through a proxy names the setting too, so "at once" is under a second. The server URL
 // is the fake itself, so a connect that ignored the setting and dialled directly would reach it.
 func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
-	fake := startFakeSOCKS5(t, "127.0.0.1:1")
-	urls := []string{"nats://" + fake.addr}
+	fake := testsocks5.Start(t, "127.0.0.1:1")
+	urls := []string{"nats://" + fake.Addr}
 	connects := map[string]func(func(string) (string, bool)) error{
 		"Connect": func(environment func(string) (string, bool)) error {
 			client, err := bus.Connect(urls, bus.WithEnvironment(environment))
@@ -557,7 +373,7 @@ func TestAMalformedProxyIsRefusedBeforeAnyDial(t *testing.T) {
 			t.Errorf("CheckSOCKS5Proxy(%q) = %v, want the port refused as out of range", value, err)
 		}
 	}
-	if accepted := fake.accepted.Load(); accepted != 0 {
+	if accepted := fake.Accepted(); accepted != 0 {
 		t.Fatalf("the server URL accepted %d connections, want none", accepted)
 	}
 }

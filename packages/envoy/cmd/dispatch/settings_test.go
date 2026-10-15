@@ -7,7 +7,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -15,10 +14,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -28,7 +25,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -43,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
 // storetestImport is the one package under internal/dispatch that reads the process environment
@@ -731,19 +728,19 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=socks5://127.0.0.1:1055: err = %v, want the address refused as a URL, naming the setting", err)
 			}
 			// The connect dials the proxy and hands it localNATS's address. This proxy refuses
-			// every request, so the connect makes the bus's ten attempts a second apart, about ten
-			// seconds, and fails.
-			proxy, requests := refusingSOCKS5(t)
-			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": proxy}, localNATS); err == nil {
-				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: a connect through a proxy that refuses it succeeded", proxy)
+			// every request (connection refused), so the connect makes the bus's ten attempts a
+			// second apart, about ten seconds, and fails.
+			proxy := testsocks5.StartRefusing(t, 0x05)
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": proxy.Addr}, localNATS); err == nil {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: a connect through a proxy that refuses it succeeded", proxy.Addr)
 			}
-			got := requests()
+			got := proxy.Requests()
 			if len(got) == 0 {
-				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received no request", proxy)
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received no request", proxy.Addr)
 			}
 			for _, request := range got {
-				if request != "type 1 127.0.0.1:1" {
-					t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received %q, want every request for 127.0.0.1:1 as an IPv4 address (type 1)", proxy, got)
+				if request != (testsocks5.Request{AddressType: 0x01, Address: "127.0.0.1:1"}) {
+					t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received %+v, want every request for 127.0.0.1:1 as an IPv4 address (type 1)", proxy.Addr, got)
 					break
 				}
 			}
@@ -1184,64 +1181,6 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 	}
 	for name := range cases {
 		t.Errorf("a case for %s, which the settings table does not list", name)
-	}
-}
-
-// refusingSOCKS5 is a SOCKS5 server on a loopback port that reads each client's greeting and
-// CONNECT request and answers it "connection refused" (reply 05), relaying nothing. It returns
-// its address and the requests it has received, each as "type <address type> <host:port>" (the
-// address only for type 1, an IPv4 address).
-func refusingSOCKS5(t *testing.T) (string, func() []string) {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for the SOCKS5 fake: %v", err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	var mu sync.Mutex
-	var requests []string
-	answer := func(conn net.Conn) {
-		defer conn.Close()
-		greeting := make([]byte, 2) // 05 <number of methods>
-		if _, err := io.ReadFull(conn, greeting); err != nil {
-			return
-		}
-		if _, err := io.ReadFull(conn, make([]byte, greeting[1])); err != nil {
-			return
-		}
-		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-			return
-		}
-		header := make([]byte, 4) // 05 01 00 <address type>
-		if _, err := io.ReadFull(conn, header); err != nil {
-			return
-		}
-		request := fmt.Sprintf("type %d", header[3])
-		if header[3] == 0x01 {
-			address := make([]byte, 6) // an IPv4 address, then the port
-			if _, err := io.ReadFull(conn, address); err != nil {
-				return
-			}
-			request += " " + net.JoinHostPort(net.IP(address[:4]).String(), strconv.Itoa(int(binary.BigEndian.Uint16(address[4:]))))
-		}
-		mu.Lock()
-		requests = append(requests, request)
-		mu.Unlock()
-		_, _ = conn.Write([]byte{0x05, 0x05, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-	}
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			go answer(conn)
-		}
-	}()
-	return listener.Addr().String(), func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(requests)
 	}
 }
 

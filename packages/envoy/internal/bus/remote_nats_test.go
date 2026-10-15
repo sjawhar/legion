@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
 // A deployment of the stream still creates it and reconciles what it finds on the NATS it names.
@@ -189,7 +190,7 @@ func TestASetProxyIsRemoteReach(t *testing.T) {
 	if !bus.LocalNATSURL(uri) {
 		t.Fatalf("the test server's URL %s is not a loopback URL", uri)
 	}
-	fake := startFakeSOCKS5(t, hostOf(t, uri))
+	fake := testsocks5.Start(t, hostOf(t, uri))
 	connects := map[string]func(func(string) (string, bool)) error{
 		"Connect": func(environment func(string) (string, bool)) error {
 			client, err := bus.Connect([]string{uri}, bus.WithEnvironment(environment))
@@ -214,7 +215,7 @@ func TestASetProxyIsRemoteReach(t *testing.T) {
 		},
 	}
 	for name, connect := range connects {
-		err := connect(lookupOf(map[string]string{bus.SOCKS5ProxyEnvVar: fake.addr}))
+		err := connect(lookupOf(map[string]string{bus.SOCKS5ProxyEnvVar: fake.Addr}))
 		if !errors.Is(err, bus.ErrRemoteNATS) {
 			t.Fatalf("%s to %s through a proxy, no opt-in: %v, want a %v", name, uri, err, bus.ErrRemoteNATS)
 		}
@@ -222,16 +223,16 @@ func TestASetProxyIsRemoteReach(t *testing.T) {
 			t.Fatalf("%s refusal %q does not name both %s and %s", name, err, bus.SOCKS5ProxyEnvVar, bus.AllowRemoteEnvVar)
 		}
 	}
-	if accepted := fake.accepted.Load(); accepted != 0 {
+	if accepted := fake.Accepted(); accepted != 0 {
 		t.Fatalf("the proxy accepted %d connections while every connect was refused, want none", accepted)
 	}
 
 	for name, connect := range connects {
-		if err := connect(proxied(fake.addr)); err != nil {
+		if err := connect(proxied(fake.Addr)); err != nil {
 			t.Fatalf("%s to %s through a proxy with %s=1: %v", name, uri, bus.AllowRemoteEnvVar, err)
 		}
 	}
-	if got := len(fake.connects()); got != len(connects) {
+	if got := len(fake.Requests()); got != len(connects) {
 		t.Fatalf("the proxy received %d requests, want one for each of the %d connects", got, len(connects))
 	}
 }
