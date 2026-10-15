@@ -23,29 +23,35 @@ on:
       - ".github/workflows/release-envoy-infra.yaml"
   workflow_dispatch:
 
-# The release job declares its own permissions; nothing runs under this workflow-level default.
+# Every job declares its own permissions (build, publish below); nothing runs under this
+# workflow-level default.
 permissions: {}
 
+# One run at a time, build and publish together, so a run's version step always sees the tag the
+# run before it pushed. A pending run GitHub drops in favor of a newer one loses nothing: the
+# version step bumps from the last tag to HEAD, not this commit alone.
+concurrency:
+  group: release-envoy-infra
+  cancel-in-progress: false
+
 jobs:
-  release:
-    # Only main releases the plugin: a workflow_dispatch from another branch skips this job.
+  # Versions, vets, tests, builds and smoke-tests the plugin, and hands its archives to publish as
+  # an artifact. It runs the module's code and every third-party module it links, so it holds no
+  # write scope and no secret: whatever that code does to this VM (a planted binary on the path, an
+  # environment variable for later steps, the runner's memory) never meets the deploy key, the
+  # write token or the OIDC token, which publish holds on a VM of its own.
+  build:
+    # Only main releases the plugin: a workflow_dispatch from another branch skips this job, and
+    # publish with it.
     if: github.ref == 'refs/heads/main'
-    concurrency:
-      # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
-      # loses nothing: the version step bumps from the last tag to HEAD, not this commit alone.
-      group: release-envoy-infra
-      cancel-in-progress: false
     runs-on: ubuntu-24.04
-    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
-    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
-    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      skip: ${{ steps.version.outputs.skip }}
     steps:
-      # No credential is left in the checkout: the deploy key reaches the "Tag release" step alone,
-      # not the build, the Pulumi CLI or the plugin binary the smoke test runs.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -62,9 +68,10 @@ jobs:
           # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
           # HEAD, where the range below would be empty and skip the release it never finished.
           # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
-          # not envoy-infra-vX.Y.Z): "Tag release" accepts its own tag at this commit and "Create
-          # GitHub release" reuses a published release and publishes a draft one. The job tags the
-          # commit it checked out and commits no bump, so `tagged` takes no package directory.
+          # not envoy-infra-vX.Y.Z): publish's "Tag release" accepts its own tag at this commit and
+          # its "Create GitHub release" reuses a published release and publishes a draft one. The
+          # workflow tags the commit it checked out and commits no bump, so `tagged` takes no
+          # package directory.
           TAGGED=$(.github/scripts/release-push.sh tagged envoy-infra-v)
           if [ -n "$TAGGED" ]; then
             {
@@ -220,19 +227,50 @@ jobs:
           jq -e --arg v "$VERSION" \
             '.version == $v and .pluginDownloadURL == "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"' \
             <<<"$schema"
+      # The archives and SHA256SUMS, exactly as built and smoke-tested, for publish.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.version.outputs.skip != 'true'
+        with:
+          name: envoy-infra-assets
+          path: assets/
+          if-no-files-found: error
+
+  # Attests build's archives, tags the commit and releases them. It runs no Go, no Pulumi CLI and
+  # no plugin, only release-push.sh and the pinned actions below, so the scopes and the deploy key
+  # it holds never meet the code build runs.
+  publish:
+    needs: build
+    if: needs.build.outputs.skip != 'true'
+    runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
+    # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
+    # signing certificate's OIDC token). The tag push uses the deploy key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      # For release-push.sh and the tag, with every tag (the existing-tag check below reads them).
+      # No credential is left in the checkout: the deploy key reaches the "Tag release" step alone.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: envoy-infra-assets
+          path: assets
       # Build provenance for the archives Pulumi installs, which the release below uploads exactly,
       # with SHA256SUMS. A consumer verifies an archive against this workflow's signing identity
       # before installing it, with the command packages/envoy/infra/README.md ("Install") gives.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        if: steps.version.outputs.skip != 'true'
         with:
           subject-path: assets/pulumi-resource-envoy-infra-v*.tar.gz
       # The only step that holds the deploy key. release-push.sh push-tag writes it to a directory
       # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       - name: Tag release
-        if: steps.version.outputs.skip != 'true'
         env:
-          TAG: ${{ steps.version.outputs.release_tag }}
+          TAG: ${{ needs.build.outputs.release_tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
@@ -242,11 +280,10 @@ jobs:
           git tag "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
       - name: Create GitHub release
-        if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.version.outputs.release_tag }}
-          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ needs.build.outputs.release_tag }}
+          VERSION: ${{ needs.build.outputs.version }}
         # release-push.sh `release`: creates the release, reuses a published one, or publishes a
         # draft an earlier attempt left, with this run's assets.
         run: .github/scripts/release-push.sh release "$TAG" "envoy-infra v$VERSION" assets/*
