@@ -116,8 +116,9 @@ versions. Never add the module to the root `go.work`.
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. The hub's cloud-config is its instance template's `user-data`, and a template cannot
   change, so any change to the cloud-config's text replaces every hub's VM on its next update.
-  Change them only with the goldens. `gcp/fetch_key_test.go` runs the key fetcher's script as the
-  golden holds it, so a change to the script is tested there.
+  Change them only with the goldens. `gcp/fetch_key_test.go`, `gcp/tailnet_joined_test.go` and
+  `gcp/data_disk_test.go` run the key fetcher, the joined script and the data disk's bootcmd
+  entries as the golden holds them, so a change to any of them is tested there.
 - **Permission sets.** `core/permissions.go` builds each set from names that
   `packages/envoy/internal/bus` and `internal/contracts` export, and the plugin and the command
   compile no other Envoy package (`go list -deps ./cmd/...`), so a change to Envoy's stores cuts no
