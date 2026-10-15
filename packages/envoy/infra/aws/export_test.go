@@ -1,9 +1,13 @@
 package aws
 
-import "github.com/sjawhar/envoy/infra/core"
+// The refusal tables are in package aws_test, so they build from the same example inputs as the
+// components' tests, and run against each component's resolver directly, as host's do.
 
-// The renderings' tests are in package aws_test, so they build from the same example inputs as
-// the component's.
+// Validate refuses what NewNatsService refuses before it requires a provider.
+func (args *NatsServiceArgs) Validate() error {
+	_, err := args.validate()
+	return err
+}
 
-// Core is the authorization as core.Authorization takes it.
-func (a *AuthorizationArgs) Core() *core.Authorization { return a.core() }
+// Validate refuses what NewWebhookListener refuses before it requires a provider.
+func (args *WebhookListenerArgs) Validate() error { return args.validate() }

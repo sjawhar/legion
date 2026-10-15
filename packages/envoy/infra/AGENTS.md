@@ -37,8 +37,8 @@ versions. Never add the module to the root `go.work`.
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `render/` | `envoy-infra render`: one subcommand per rendering of `aws/rendering`, each flag setting a component input. |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
-| `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. |
-| `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its tests are `aws/`'s, which build each component and its renderings from one example. |
+| `aws/` | `aws:NatsService` (`natsservice.go`) and `aws:WebhookListener` (`webhooklistener.go`): their resources, refusals and outputs, with the goldens of their container definitions in `testdata/`. `fargate.go` holds what both register identically: each child's options, its tags, the log group and the task definition's base. |
+| `aws/rendering/` | What the AWS components render, with no Pulumi in it: the container definitions, the NATS start script, the listener's environment and read policy, the metric filters and the alarms' text. Its own tests hold `ListenerEnv.Check`'s refusals; `aws/`'s pin its texts, building each component from one example. |
 | `internal/providers/` | `Require`, the providers check. |
 | `internal/pulumitest/` | The live tests' harness. |
 
@@ -58,9 +58,7 @@ versions. Never add the module to the root `go.work`.
   default provider of the plugin's own SDK version, and only then registers anything. The refusal
   table runs against the resolver directly; one test drives the constructor with a refused input
   and one per missing provider, each asserting nothing registered beyond the test's providers. The
-  AWS components refuse in the same order, in `WebhookListenerArgs.validate` and at the top of
-  `NewNatsService`, before they require `aws`, and their refusal tables drive the constructor under
-  mocks, each row asserting that only the provider registered.
+  AWS components resolve in `NatsServiceArgs.validate` and `WebhookListenerArgs.validate`.
 - **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
   listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`), run once
   before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one value that may be
@@ -71,8 +69,9 @@ versions. Never add the module to the root `go.work`.
   (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
   a control character, and with a watchdog the listener's name, which it echoes in double quotes,
   may hold no `"`, `$`, backtick, `\` or line break. Each table tests its own refusals: core's are
-  in `core`, and a component's or a command's table holds its own plus one row for each input whose
-  core refusal it passes on, showing where that refusal goes.
+  in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a
+  command's table holds its own plus one row for each input whose shared refusal it passes on,
+  showing where that refusal goes.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,

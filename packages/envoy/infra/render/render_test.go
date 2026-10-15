@@ -595,17 +595,18 @@ func listenerFlags(drop []string, set ...string) []string {
 }
 
 func TestWebhookListenerEnvRefusals(t *testing.T) {
-	githubFlags := []string{"reviewer-app-id", "mention-trigger"}
 	requireRefused(t, []refusal{
-		// The webhook flags, as the component refuses its webhook inputs.
+		// The environment, as the component refuses it. rendering.ListenerEnv.Check's refusals are
+		// tested in rendering and core.ListenerConfig's in core; one row per input they refuse
+		// shows the flag that input maps to.
+		{
+			name: "--webhook github alone",
+			args: listenerFlags([]string{"webhook"}, "--webhook", "github"),
+			want: `refused: --webhook: webhooks ["github"] is not supported: this version takes [] or ["github" "slack"]`,
+		},
 		{
 			name: "--webhook github without --reviewer-app-id",
 			args: listenerFlags([]string{"reviewer-app-id"}),
-			want: `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"`,
-		},
-		{
-			name: "--webhook github with a blank --reviewer-app-id",
-			args: listenerFlags([]string{"reviewer-app-id"}, "--reviewer-app-id", " "),
 			want: `refused: --reviewer-app-id: reviewerAppId is required with webhook "github"`,
 		},
 		{
@@ -613,49 +614,6 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			args: listenerFlags([]string{"mention-trigger"}),
 			want: `refused: --mention-trigger: mentionTrigger is required with webhook "github"`,
 		},
-		{
-			name: "--reviewer-app-id without --webhook github",
-			args: listenerFlags([]string{"webhook", "mention-trigger"}, "--webhook", "slack"),
-			want: `refused: --reviewer-app-id: reviewerAppId is given for webhook "github", which webhooks does not list`,
-		},
-		{
-			name: "--mention-trigger without --webhook github",
-			args: listenerFlags([]string{"webhook", "reviewer-app-id"}, "--webhook", "slack"),
-			want: `refused: --mention-trigger: mentionTrigger is given for webhook "github", which webhooks does not list`,
-		},
-		{
-			name: "--reviewer-app-id with no --webhook",
-			args: listenerFlags([]string{"webhook", "mention-trigger"}),
-			want: `refused: --reviewer-app-id: reviewerAppId is given for webhook "github", which webhooks does not list`,
-		},
-		{
-			name: "--mention-trigger with no --webhook",
-			args: listenerFlags([]string{"webhook", "reviewer-app-id"}),
-			want: `refused: --mention-trigger: mentionTrigger is given for webhook "github", which webhooks does not list`,
-		},
-		// The webhooks lists this version takes: none, or github then slack.
-		{
-			name: "--webhook github alone",
-			args: listenerFlags([]string{"webhook"}, "--webhook", "github"),
-			want: `refused: --webhook: webhooks ["github"] is not supported: this version takes [] or ["github" "slack"]`,
-		},
-		{
-			name: "--webhook slack alone",
-			args: listenerFlags(append([]string{"webhook"}, githubFlags...), "--webhook", "slack"),
-			want: `refused: --webhook: webhooks ["slack"] is not supported: this version takes [] or ["github" "slack"]`,
-		},
-		{
-			name: "slack before github",
-			args: listenerFlags([]string{"webhook"}, "--webhook", "slack", "--webhook", "github"),
-			want: `refused: --webhook: webhooks ["slack" "github"] is not supported: this version takes [] or ["github" "slack"]`,
-		},
-		{
-			name: "a webhook the component does not know",
-			args: listenerFlags(nil, "--webhook", "ghostwispr"),
-			want: `refused: --webhook: webhooks ["github" "slack" "ghostwispr"] is not supported`,
-		},
-		// The rest of the environment, as the component refuses it. core.ListenerConfig's refusals
-		// are tested in core; one row per input each refuses shows the flag that input maps to.
 		{
 			name: "a blank --machine-id",
 			args: listenerFlags([]string{"machine-id"}, "--machine-id", " "),
