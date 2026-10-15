@@ -428,7 +428,7 @@ reloads systemd and starts the units in this order. They are started and never e
 | --- | --- |
 | `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. |
 | `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It wants the fetch and starts after it ends, but does not require it. |
-| `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` to the host's iptables unless the rule is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without it the health check never reaches NATS. |
+| `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
 
 Both container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
@@ -445,10 +445,11 @@ sixth failure. Nothing of the key or the token is printed or passed in a command
 Manager's base URL, which its tests use.
 
 NATS listens for clients on 4222 and serves its monitoring endpoints on 8222, on every interface.
-The hub's firewall rule and `nats-firewall` admit Google's health checks to 8222, and neither
-opens another port. Tailscale accepts what arrives on its own interface, `tailscale0`, so the
-tailnet's policy decides which peers reach 4222, and 8222's `/varz`, `/connz` and `/jsz` too (on
-COS that rule is still to be proven: see
+The hub's VPC firewall rule and `nats-firewall` admit Google's health checks to 8222, and
+`nats-firewall` admits the tailnet's interface, `tailscale0`, to 4222; nothing else is opened. So
+the tailnet's policy decides which peers reach 4222. 8222's `/varz`, `/connz` and `/jsz` are
+reachable over the tailnet only through Tailscale's own accept rule for `tailscale0`, as are its
+other ports (see
 [What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
 
 ## The hub's data disk
@@ -544,10 +545,11 @@ or a tailnet, so the first deployment is where these hold or fail. Watch them on
   `pulumi up`'s wait for `STABLE` ends within the provider's timeout despite autohealing's
   300-second initial delay. Google Cloud accepts `maxSurgeFixed: 0` with `maxUnavailableFixed: 1`
   on a zonal group of one, and the template's `namePrefix`.
-- Clients reach 4222 over the tailnet. Tailscale v1.104.1's image writes its accept rule for
-  `tailscale0` with iptables-legacy, and if COS filters with nftables that rule does not override
-  COS's drop policy. `iptables -V` on the VM names the backend; under `nf_tables`, expect 4222
-  unreachable over the tailnet.
+- Clients reach 4222 over the tailnet through `nats-firewall`'s rule, added with COS's own
+  `/sbin/iptables` as the health checks' is, whichever backend Tailscale v1.104.1's image writes
+  its own accept rule for `tailscale0` with. `iptables -V` on the VM names COS's backend; under
+  `nf_tables`, Tailscale's own rule, written with iptables-legacy, does not open 8222 over the
+  tailnet.
 - The key fetcher runs on COS's `/bin/sh`, curl, jq, base64 and mktemp, and the service account's
   grant reaches Secret Manager within the fetcher's six attempts at the first boot. When every
   attempt fails, containerboot, finding no key, exits at its 60-second boot timeout

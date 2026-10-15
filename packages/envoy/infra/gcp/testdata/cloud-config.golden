@@ -93,12 +93,13 @@ write_files:
     permissions: "0644"
     content: |
       [Unit]
-      Description=Open the host firewall to Google's health checks on NATS's monitoring port
+      Description=Open the host firewall to Google's health checks on NATS's monitoring port, and to the tailnet on its client port
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
       ExecStart=/bin/sh -c '/sbin/iptables -w -C INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT || /sbin/iptables -w -A INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT'
+      ExecStart=/bin/sh -c '/sbin/iptables -w -C INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT || /sbin/iptables -w -A INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT'
   - path: /etc/systemd/system/nats.service
     permissions: "0644"
     content: |

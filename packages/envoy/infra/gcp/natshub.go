@@ -171,6 +171,7 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	}
 	s.vm = vm{
 		hostname:       args.Hostname,
+		keySecret:      args.Hostname + tailnetAuthKeySuffix,
 		tags:           args.Tags,
 		natsImage:      args.NatsImage,
 		tailscaleImage: args.TailscaleImage,
@@ -239,7 +240,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		return nil, err
 	}
 	child := pulumi.Parent(comp)
-	hostname := s.vm.hostname
+	hostname, keySecret := s.vm.hostname, s.vm.keySecret
 	// The account's id and the VM's network tag.
 	hubName := hostname + "-hub"
 
@@ -250,21 +251,21 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		return nil, err
 	}
 
-	secret, err := secretmanager.NewSecret(ctx, hostname+tailnetAuthKeySuffix, &secretmanager.SecretArgs{
-		SecretId:    pulumi.String(hostname + tailnetAuthKeySuffix),
+	secret, err := secretmanager.NewSecret(ctx, keySecret, &secretmanager.SecretArgs{
+		SecretId:    pulumi.String(keySecret),
 		Replication: secretmanager.SecretReplicationArgs{Auto: &secretmanager.SecretReplicationAutoArgs{}},
 	}, child)
 	if err != nil {
 		return nil, err
 	}
-	version, err := secretmanager.NewSecretVersion(ctx, hostname+tailnetAuthKeySuffix, &secretmanager.SecretVersionArgs{
+	version, err := secretmanager.NewSecretVersion(ctx, keySecret, &secretmanager.SecretVersionArgs{
 		Secret:     secret.ID(),
 		SecretData: pulumi.ToSecret(args.TailnetAuthKey.ToStringOutput()).(pulumi.StringOutput),
 	}, child)
 	if err != nil {
 		return nil, err
 	}
-	accessor, err := secretmanager.NewSecretIamMember(ctx, hostname+tailnetAuthKeySuffix+"-accessor", &secretmanager.SecretIamMemberArgs{
+	accessor, err := secretmanager.NewSecretIamMember(ctx, keySecret+"-accessor", &secretmanager.SecretIamMemberArgs{
 		SecretId: secret.ID(),
 		Role:     pulumi.String("roles/secretmanager.secretAccessor"),
 		Member:   account.Member,

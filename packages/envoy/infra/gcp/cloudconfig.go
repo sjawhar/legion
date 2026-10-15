@@ -20,11 +20,13 @@ const (
 	keyDir       = "/run/envoy"
 	keyPath      = keyDir + "/tailnet-auth-key"
 	unitDir      = "/etc/systemd/system/"
+	// tailnetInterface is the interface tailscaled's kernel networking (TS_USERSPACE=false) makes.
+	tailnetInterface = "tailscale0"
 
-	fetchKeyUnit   = "fetch-tailnet-key.service"
-	tailscaledUnit = "tailscaled.service"
-	firewallUnit   = "nats-firewall.service"
-	natsUnit       = "nats.service"
+	fetchKeyService   = "fetch-tailnet-key.service"
+	tailscaledService = "tailscaled.service"
+	firewallService   = "nats-firewall.service"
+	natsService       = "nats.service"
 )
 
 // vm is what the hub VM's cloud-config is built from. Every field comes from a plain input, so
@@ -32,6 +34,7 @@ const (
 // key at boot.
 type vm struct {
 	hostname       string
+	keySecret      string // the secret id of the tailnet auth key, which the VM fetches at boot
 	tags           []string
 	natsImage      string
 	tailscaleImage string
@@ -62,9 +65,18 @@ type writeFile struct {
 // two containers keep their state in, and leaves the key file empty and readable by root alone, so
 // that tailscaled's bind mount is always of a file.
 //
-// write_files holds the NATS configuration, the key fetcher and the four units; runcmd loads the
-// units and starts them in order. They are started, never enabled: /etc does not outlive the boot.
+// write_files holds the NATS configuration, the key fetcher and the units; runcmd loads the units
+// and starts them in order. They are started, never enabled: /etc does not outlive the boot.
 func (v vm) document() cloudConfig {
+	files := []writeFile{
+		{Path: natsConfPath, Permissions: "0644", Content: v.natsConf},
+		{Path: fetchKeyPath, Permissions: "0755", Content: fetchKeyScript},
+	}
+	runcmd := []string{"systemctl daemon-reload"}
+	for _, u := range v.units() {
+		files = append(files, writeFile{Path: unitDir + u.name, Permissions: "0644", Content: u.text})
+		runcmd = append(runcmd, "systemctl start "+u.name)
+	}
 	return cloudConfig{
 		Bootcmd: []string{
 			"test -c /dev/net/tun || modprobe tun",
@@ -76,21 +88,22 @@ func (v vm) document() cloudConfig {
 			"mkdir -p -m 0700 " + keyDir,
 			"install -m 0600 /dev/null " + keyPath,
 		},
-		WriteFiles: []writeFile{
-			{Path: natsConfPath, Permissions: "0644", Content: v.natsConf},
-			{Path: fetchKeyPath, Permissions: "0755", Content: fetchKeyScript},
-			{Path: unitDir + fetchKeyUnit, Permissions: "0644", Content: v.fetchKeyUnit()},
-			{Path: unitDir + tailscaledUnit, Permissions: "0644", Content: v.tailscaledUnit()},
-			{Path: unitDir + firewallUnit, Permissions: "0644", Content: firewallUnitText()},
-			{Path: unitDir + natsUnit, Permissions: "0644", Content: v.natsUnit()},
-		},
-		Runcmd: []string{
-			"systemctl daemon-reload",
-			"systemctl start " + fetchKeyUnit,
-			"systemctl start " + tailscaledUnit,
-			"systemctl start " + firewallUnit,
-			"systemctl start " + natsUnit,
-		},
+		WriteFiles: files,
+		Runcmd:     runcmd,
+	}
+}
+
+// unitFile is one of the VM's systemd units: its file name under unitDir, and its text.
+type unitFile struct{ name, text string }
+
+// units are the VM's units, in the order runcmd starts them: the key is fetched before tailscaled
+// starts, and the host firewall opened before NATS starts.
+func (v vm) units() []unitFile {
+	return []unitFile{
+		{fetchKeyService, v.fetchKeyUnit()},
+		{tailscaledService, v.tailscaledUnit()},
+		{firewallService, firewallUnit()},
+		{natsService, v.natsUnit()},
 	}
 }
 
@@ -168,7 +181,7 @@ func (v vm) fetchKeyUnit() string {
 		"[Service]",
 		"Type=oneshot",
 		"RemainAfterExit=yes",
-		"ExecStart="+fetchKeyPath+" "+keyPath+" "+v.hostname+tailnetAuthKeySuffix,
+		"ExecStart="+fetchKeyPath+" "+keyPath+" "+v.keySecret,
 	)
 }
 
@@ -176,12 +189,9 @@ func (v vm) fetchKeyUnit() string {
 // fetched, and starts after the fetch ends, but does not require it: a node whose tailnet state
 // is on the disk never reads the key (TS_AUTH_ONCE), so a failed fetch must not keep it down.
 // containerboot hands the key file's path to the tailscale CLI, which reads it (tailscale v1.104.1
-// cmd/containerboot/tailscaled.go:120-121). Each container unit refuses to start unless the data
-// disk is mounted, rather than keep its state on the tmpfs beneath, and is restarted when its
-// container exits.
+// cmd/containerboot/tailscaled.go:120-121).
 func (v vm) tailscaledUnit() string {
-	run := []string{
-		"/usr/bin/docker", "run", "--rm", "--name", "tailscaled", "--network", "host",
+	return containerUnit("Tailscale, which joins this hub to the tailnet", fetchKeyService, "tailscaled", []string{
 		"--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
 		"-v", dataMount + "/tailscale:/var/lib/tailscale",
 		"-v", keyPath + ":" + keyPath + ":ro",
@@ -192,38 +202,29 @@ func (v vm) tailscaledUnit() string {
 		"-e", "TS_HOSTNAME=" + v.hostname,
 		"-e", "TS_EXTRA_ARGS=--advertise-tags=" + strings.Join(v.tags, ","),
 		v.tailscaleImage,
-	}
-	return unit(
-		"[Unit]",
-		"Description=Tailscale, which joins this hub to the tailnet",
-		"Requires=docker.service",
-		"Wants=network-online.target "+fetchKeyUnit,
-		"After=docker.service network-online.target "+fetchKeyUnit,
-		"RequiresMountsFor="+dataMount,
-		"AssertPathIsMountPoint="+dataMount,
-		"",
-		"[Service]",
-		"ExecStart="+strings.Join(run, " "),
-		"Restart=always",
-		"RestartSec=10",
-	)
+	})
 }
 
-// firewallUnitText opens Container-Optimized OS's host firewall, which accepts incoming
-// connections for SSH alone (https://cloud.google.com/container-optimized-os/docs/how-to/firewall),
-// to Google's health checks on the monitoring port: the sources the VPC firewall rule admits. It
-// adds the rule only when the rule is not there yet. The tailnet needs no rule: tailscaled accepts
-// all it receives on its own interface (tailscale v1.104.1 util/linuxfw/iptables_runner.go:229-233).
-func firewallUnitText() string {
-	rule := "INPUT -p tcp -s " + strings.Join(healthCheckRanges, ",") + " --dport " + strconv.Itoa(monitorPort) + " -j ACCEPT"
+// firewallUnit opens Container-Optimized OS's host firewall, which accepts incoming connections for
+// SSH alone (https://cloud.google.com/container-optimized-os/docs/how-to/firewall), to Google's
+// health checks on the monitoring port, the sources the VPC firewall rule admits, and to the
+// tailnet's interface on the client port. Each rule is added only when it is not there yet. The
+// tailnet's rule is needed although tailscaled writes an accept rule for its own interface: the
+// image writes that rule with the iptables backend it picks, and when the host filters with
+// another, the host's drop policy drops the packet whatever that rule accepts. Both rules here
+// are added with the host's own /sbin/iptables.
+func firewallUnit() string {
+	healthChecks := "INPUT -p tcp -s " + strings.Join(healthCheckRanges, ",") + " --dport " + strconv.Itoa(monitorPort) + " -j ACCEPT"
+	tailnet := "INPUT -i " + tailnetInterface + " -p tcp --dport " + strconv.Itoa(natsPort) + " -j ACCEPT"
 	return unit(
 		"[Unit]",
-		"Description=Open the host firewall to Google's health checks on NATS's monitoring port",
+		"Description=Open the host firewall to Google's health checks on NATS's monitoring port, and to the tailnet on its client port",
 		"",
 		"[Service]",
 		"Type=oneshot",
 		"RemainAfterExit=yes",
-		"ExecStart=/bin/sh -c '/sbin/iptables -w -C "+rule+" || /sbin/iptables -w -A "+rule+"'",
+		"ExecStart=/bin/sh -c '/sbin/iptables -w -C "+healthChecks+" || /sbin/iptables -w -A "+healthChecks+"'",
+		"ExecStart=/bin/sh -c '/sbin/iptables -w -C "+tailnet+" || /sbin/iptables -w -A "+tailnet+"'",
 	)
 }
 
@@ -231,28 +232,35 @@ func firewallUnitText() string {
 // the health checks in. The configuration file holds the authorization alone; the server's other
 // options are its arguments.
 func (v vm) natsUnit() string {
-	run := []string{
-		"/usr/bin/docker", "run", "--rm", "--name", "nats", "--network", "host",
+	return containerUnit("NATS with JetStream", firewallService, "nats", []string{
 		"-v", dataMount + "/nats:/data",
 		"-v", natsConfPath + ":" + natsConfPath + ":ro",
 		v.natsImage,
 		"-c", natsConfPath, "-js", "--store_dir", "/data", "-m", strconv.Itoa(monitorPort), "--server_name", v.hostname,
-	}
-	return unit(
+	}, "ExecStop=/usr/bin/docker stop -t 30 nats")
+}
+
+// containerUnit is a unit that runs one container, name, on the host's network, with run its
+// docker run arguments after --name and --network, and service any [Service] lines between its
+// ExecStart and its restart policy. It requires docker and wants, and starts after, the network and
+// after. It refuses to start unless the data disk is mounted, rather than keep its container's
+// state on the tmpfs beneath, and is restarted 10 seconds after its container exits.
+func containerUnit(description, after, name string, run []string, service ...string) string {
+	exec := append([]string{"/usr/bin/docker", "run", "--rm", "--name", name, "--network", "host"}, run...)
+	lines := []string{
 		"[Unit]",
-		"Description=NATS with JetStream",
+		"Description=" + description,
 		"Requires=docker.service",
-		"Wants=network-online.target "+firewallUnit,
-		"After=docker.service network-online.target "+firewallUnit,
-		"RequiresMountsFor="+dataMount,
-		"AssertPathIsMountPoint="+dataMount,
+		"Wants=network-online.target " + after,
+		"After=docker.service network-online.target " + after,
+		"RequiresMountsFor=" + dataMount,
+		"AssertPathIsMountPoint=" + dataMount,
 		"",
 		"[Service]",
-		"ExecStart="+strings.Join(run, " "),
-		"ExecStop=/usr/bin/docker stop -t 30 nats",
-		"Restart=always",
-		"RestartSec=10",
-	)
+		"ExecStart=" + strings.Join(exec, " "),
+	}
+	lines = append(lines, service...)
+	return unit(append(lines, "Restart=always", "RestartSec=10")...)
 }
 
 // unit joins a unit file's lines, each ending in a newline.

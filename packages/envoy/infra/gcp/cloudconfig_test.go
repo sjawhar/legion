@@ -2,6 +2,7 @@ package gcp_test
 
 import (
 	"bytes"
+	"slices"
 	"strings"
 	"testing"
 
@@ -36,42 +37,50 @@ func TestCloudConfigParsesBackIntoTheSameDocument(t *testing.T) {
 // The order matters: the disk is formatted only when it holds no filesystem, then mounted, and
 // the directories the containers bind are made on it; the key file exists, empty, before any
 // container binds it; the units are written before they are loaded and started, the key fetched
-// before tailscaled starts, the host firewall opened before NATS starts.
+// before tailscaled starts, the host firewall opened before NATS starts. The golden pins each
+// entry's text; these are the relations between them.
 func TestCloudConfigOrdersBootcmdFilesAndUnits(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
-	require.Equal(t, []string{
-		"test -c /dev/net/tun || modprobe tun",
-		"blkid -p /dev/disk/by-id/google-data >/dev/null || [ $? -ne 2 ] || " +
-			"mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data",
-		"mkdir -p /mnt/disks/data",
-		"mount -o discard,defaults /dev/disk/by-id/google-data /mnt/disks/data",
-		"mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale",
-		"mkdir -p -m 0700 /run/envoy",
-		"install -m 0600 /dev/null /run/envoy/tailnet-auth-key",
-	}, doc.Bootcmd)
+	format := indexOf(t, doc.Bootcmd, "mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data")
+	mount := indexOf(t, doc.Bootcmd, "mount -o discard,defaults /dev/disk/by-id/google-data /mnt/disks/data")
+	dirs := indexOf(t, doc.Bootcmd, "mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale")
+	require.Less(t, format, mount, "the disk is formatted before it is mounted")
+	require.Less(t, mount, dirs, "the containers' directories are made on the mounted disk")
+	indexOf(t, doc.Bootcmd, "install -m 0600 /dev/null /run/envoy/tailnet-auth-key")
 
-	var files []string
+	var units []string
 	for _, f := range doc.WriteFiles {
-		files = append(files, f.Path+" "+f.Permissions)
+		if name, ok := strings.CutPrefix(f.Path, "/etc/systemd/system/"); ok {
+			units = append(units, name)
+			require.Equal(t, "0644", f.Permissions, f.Path)
+		}
 	}
-	require.Equal(t, []string{
-		"/etc/nats/nats-server.conf 0644",
-		"/etc/envoy/fetch-tailnet-key 0755",
-		"/etc/systemd/system/fetch-tailnet-key.service 0644",
-		"/etc/systemd/system/tailscaled.service 0644",
-		"/etc/systemd/system/nats-firewall.service 0644",
-		"/etc/systemd/system/nats.service 0644",
-	}, files)
+	started := []string{}
+	for _, c := range doc.Runcmd[1:] {
+		started = append(started, strings.Fields(c)[len(strings.Fields(c))-1])
+	}
+	require.Equal(t, "systemctl daemon-reload", doc.Runcmd[0], "the units are loaded before any starts")
+	require.Equal(t, units, started, "runcmd starts every unit write_files writes, in the order it writes them")
+	require.Less(t, slices.Index(started, "fetch-tailnet-key.service"), slices.Index(started, "tailscaled.service"))
+	require.Less(t, slices.Index(started, "nats-firewall.service"), slices.Index(started, "nats.service"))
+	require.Subset(t, started, []string{"fetch-tailnet-key.service", "tailscaled.service", "nats-firewall.service", "nats.service"})
+	for _, c := range doc.Runcmd {
+		require.NotContains(t, c, "enable", "/etc does not outlive the boot, so no unit is enabled")
+	}
+}
 
-	require.Equal(t, []string{
-		"systemctl daemon-reload",
-		"systemctl start fetch-tailnet-key.service",
-		"systemctl start tailscaled.service",
-		"systemctl start nats-firewall.service",
-		"systemctl start nats.service",
-	}, doc.Runcmd)
+// indexOf returns the index of the first entry of list that holds text.
+func indexOf(t *testing.T, list []string, text string) int {
+	t.Helper()
+	for i, entry := range list {
+		if strings.Contains(entry, text) {
+			return i
+		}
+	}
+	t.Fatalf("no entry holds %q: %q", text, list)
+	return -1
 }
 
 // fileOf returns the content of the cloud-config's file at path.
@@ -87,26 +96,23 @@ func fileOf(t *testing.T, doc gcp.CloudConfig, path string) string {
 }
 
 // Container-Optimized OS's host firewall accepts incoming connections for SSH alone
-// (https://cloud.google.com/container-optimized-os/docs/how-to/firewall), so the VM opens the
-// monitoring port to Google's health checks, the sources the VPC firewall rule admits, before NATS
-// starts, adding the rule only when it is not there yet. The tailnet needs no rule: tailscaled
-// accepts all it receives on its own interface (tailscale v1.104.1
-// util/linuxfw/iptables_runner.go:229-233).
-func TestCloudConfigOpensTheHostFirewallToTheHealthChecksAlone(t *testing.T) {
+// (https://cloud.google.com/container-optimized-os/docs/how-to/firewall), so before NATS starts the
+// VM opens the monitoring port to Google's health checks, the sources the VPC firewall rule admits,
+// and the client port to the tailnet's interface, each rule only when it is not there yet. The
+// tailnet's rule is the host's own, whichever iptables backend Tailscale's image writes its rules
+// with.
+func TestCloudConfigOpensTheHostFirewallToTheHealthChecksAndTheTailnet(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
-	require.Equal(t, strings.Join([]string{
-		"[Unit]",
-		"Description=Open the host firewall to Google's health checks on NATS's monitoring port",
-		"",
-		"[Service]",
-		"Type=oneshot",
-		"RemainAfterExit=yes",
-		"ExecStart=/bin/sh -c '" +
-			"/sbin/iptables -w -C INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT || " +
-			"/sbin/iptables -w -A INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT'",
-	}, "\n")+"\n", fileOf(t, doc, "/etc/systemd/system/nats-firewall.service"))
+	firewall := fileOf(t, doc, "/etc/systemd/system/nats-firewall.service")
+	for _, rule := range []string{
+		"INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT",
+		"INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT",
+	} {
+		require.Contains(t, firewall, "\nExecStart=/bin/sh -c '/sbin/iptables -w -C "+rule+" || /sbin/iptables -w -A "+rule+"'\n")
+	}
+	require.Equal(t, 2, strings.Count(firewall, "\nExecStart="), "the unit opens nothing else")
 	nats := fileOf(t, doc, "/etc/systemd/system/nats.service")
 	require.Contains(t, nats, "\nWants=network-online.target nats-firewall.service\n")
 	require.Contains(t, nats, "\nAfter=docker.service network-online.target nats-firewall.service\n")

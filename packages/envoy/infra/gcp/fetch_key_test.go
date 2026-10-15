@@ -15,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
+
+	"github.com/sjawhar/envoy/infra/gcp"
 )
 
 // The script these tests run is the one the golden cloud-config writes, byte for byte, run as
@@ -31,20 +33,9 @@ const (
 // fetchScript returns the content the golden cloud-config writes to /etc/envoy/fetch-tailnet-key.
 func fetchScript(t *testing.T) string {
 	t.Helper()
-	var doc struct {
-		WriteFiles []struct {
-			Path    string `yaml:"path"`
-			Content string `yaml:"content"`
-		} `yaml:"write_files"`
-	}
+	var doc gcp.CloudConfig
 	require.NoError(t, yaml.Unmarshal([]byte(readGolden(t, "cloud-config.golden")), &doc))
-	for _, f := range doc.WriteFiles {
-		if f.Path == "/etc/envoy/fetch-tailnet-key" {
-			return f.Content
-		}
-	}
-	t.Fatal("the golden cloud-config writes no /etc/envoy/fetch-tailnet-key")
-	return ""
+	return fileOf(t, doc, "/etc/envoy/fetch-tailnet-key")
 }
 
 // accessResponse is Secret Manager's answer to an access call for a version holding payload.
