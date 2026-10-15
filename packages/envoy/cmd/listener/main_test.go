@@ -3838,6 +3838,75 @@ func TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailu
 	}
 }
 
+// TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoveries guards the resets
+// of disconnectedFailureThreshold's count: brief outages, each shorter than the bound and each
+// ended by a probe that reads connected (a healthy probe, or a failure while connected), must never
+// add up to a restart, however many of them a listener rides out. Without the resets, three NATS
+// restarts of a few probe intervals each terminate a listener that recovered in place every time.
+func TestRunSelfHealthMonitor_DisconnectedFailuresDoNotAccumulateAcrossRecoveries(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// between is the probe result that ends each outage: nil is a healthy probe, an error is a
+		// failure read while connected.
+		between error
+	}{
+		{name: "a healthy probe ends each outage", between: nil},
+		{name: "a failure while connected ends each outage", between: errors.New("interest kv: context deadline exceeded")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outage := errors.New("interest kv: nats: outbound buffer limit exceeded")
+			const outages = 3
+			cycle := disconnectedFailureThreshold // threshold-1 disconnected failures, then one connected probe
+			var calls atomic.Int32
+			var disconnected atomic.Bool
+			finished := make(chan struct{})
+			probe := func() error {
+				n := int(calls.Add(1))
+				if n > outages*cycle {
+					disconnected.Store(false)
+					select {
+					case finished <- struct{}{}:
+					default:
+					}
+					return nil
+				}
+				if n%cycle == 0 {
+					disconnected.Store(false)
+					return tc.between
+				}
+				disconnected.Store(true)
+				return outage
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			terminated := make(chan struct{}, 1)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				runSelfHealthMonitor(ctx, logging.New("test"), probe,
+					func(error) bool { return false },
+					func() bool { return !disconnected.Load() },
+					nil,
+					func() { terminated <- struct{}{} }, time.Millisecond, 3)
+			}()
+			select {
+			case <-finished:
+			case <-terminated:
+				t.Fatalf("the monitor terminated after %d probes: %d outages of %d disconnected failures each, every one ended by a connected probe, must not add up to the bound",
+					calls.Load(), outages, disconnectedFailureThreshold-1)
+			case <-time.After(5 * time.Second):
+				t.Fatalf("probe calls = %d, want more than %d", calls.Load(), outages*cycle)
+			}
+			cancel()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("monitor did not stop after shutdown")
+			}
+		})
+	}
+}
+
 // A self-health rebuild moves an interest registry whose connection closed to the client's live
 // one, as it does for the session and CI stores. The registry's buckets and watcher were bound to
 // the connection Open took, so a rewatch on that connection's handles could only fail again and the
