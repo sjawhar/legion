@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/stretchr/testify/require"
@@ -21,6 +22,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const (
@@ -64,19 +66,24 @@ type fakeGCP struct {
 	bearer   func(token string) error
 
 	mode       string   // the command's mode, whose calls the fake answers
-	calls      []string // each call's method, in order
+	calls      []string // each call, in order: its method, and an access by number as "AccessSecretVersion <n>"
 	unexpected []string
 	added      int      // AddSecretVersion calls that wrote a version
 	sent       []string // every payload AddSecretVersion was sent, written or failed
 
-	failures     map[string]codes.Code // the code a call fails with, by its method
-	failAfterAdd map[string]codes.Code // the code a call fails with once a version was added
-	pageSize     int                   // versions per ListSecretVersions page; 0 for all at once
-	repeatToken  bool                  // every ListSecretVersions page names the same next page token
-	addState     secretmanagerpb.SecretVersion_State
-	racing       *gcpVersion // another writer's version, added right after the store's
-	lateWriter   *gcpVersion // another writer's version, added just before AccessSecretVersion reads
-	echoRequests bool        // every error message quotes the request
+	failures     map[string]codes.Code // the code a call fails with, by its name as calls records it
+	failAfterAdd map[string]codes.Code // the same, once a version was added
+	expireAt     *time.Time            // the secret's expire_time, which Secret Manager answers when it is set to expire
+	earlyWriter  *gcpVersion           // another writer's version, added just before the store's
+	// what an access of a version by number answers, once the store added a version, instead of
+	// that version's value
+	numberReadsBack string
+	pageSize        int  // versions per ListSecretVersions page; 0 for all at once
+	repeatToken     bool // every ListSecretVersions page names the same next page token
+	addState        secretmanagerpb.SecretVersion_State
+	racing          *gcpVersion // another writer's version, added right after the store's
+	lateWriter      *gcpVersion // another writer's version, added just before AccessSecretVersion reads
+	echoRequests    bool        // every error message quotes the request
 	// Secret Manager's listings and its latest alias are eventually consistent: after a version is
 	// added, the next lagList listings leave it out and the next lagAccess reads of latest answer
 	// NOT_FOUND, as they do for a secret with no version.
@@ -129,14 +136,18 @@ func (f *fakeGCP) intercept(ctx context.Context, req any, info *grpc.UnaryServer
 	if !slices.Contains(gcpModeCalls[f.mode], method) {
 		return nil, f.reject(fmt.Sprintf("%s from %s, which makes only %s", method, f.mode, strings.Join(gcpModeCalls[f.mode], ", ")))
 	}
-	f.calls = append(f.calls, method)
+	call := method
+	if access, ok := req.(*secretmanagerpb.AccessSecretVersionRequest); ok && path.Base(access.GetName()) != gcpLatest {
+		call += " " + path.Base(access.GetName())
+	}
+	f.calls = append(f.calls, call)
 	if add, ok := req.(*secretmanagerpb.AddSecretVersionRequest); ok {
 		f.sent = append(f.sent, string(add.GetPayload().GetData()))
 	}
-	if code, ok := f.failures[method]; ok {
+	if code, ok := f.failures[call]; ok {
 		return nil, f.fail(code, req)
 	}
-	if code, ok := f.failAfterAdd[method]; ok && f.added > 0 {
+	if code, ok := f.failAfterAdd[call]; ok && f.added > 0 {
 		return nil, f.fail(code, req)
 	}
 	return handler(ctx, req)
@@ -167,7 +178,11 @@ func (f *fakeGCP) GetSecret(_ context.Context, req *secretmanagerpb.GetSecretReq
 	if !f.exists {
 		return nil, status.Error(codes.NotFound, "Secret ["+gcpSecret+"] not found.")
 	}
-	return &secretmanagerpb.Secret{Name: "projects/000000000000/secrets/" + gcpSecretID}, nil
+	secret := &secretmanagerpb.Secret{Name: "projects/000000000000/secrets/" + gcpSecretID}
+	if f.expireAt != nil {
+		secret.Expiration = &secretmanagerpb.Secret_ExpireTime{ExpireTime: timestamppb.New(*f.expireAt)}
+	}
+	return secret, nil
 }
 
 func (f *fakeGCP) GetSecretVersion(_ context.Context, req *secretmanagerpb.GetSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
@@ -240,6 +255,10 @@ func (f *fakeGCP) AddSecretVersion(_ context.Context, req *secretmanagerpb.AddSe
 	if state == secretmanagerpb.SecretVersion_STATE_UNSPECIFIED {
 		state = enabled
 	}
+	if f.earlyWriter != nil {
+		f.with(f.earlyWriter.value, f.earlyWriter.state)
+		f.earlyWriter = nil
+	}
 	f.added++
 	f.with(string(data), state)
 	mine := f.versions[len(f.versions)-1]
@@ -250,8 +269,11 @@ func (f *fakeGCP) AddSecretVersion(_ context.Context, req *secretmanagerpb.AddSe
 }
 
 func (f *fakeGCP) AccessSecretVersion(_ context.Context, req *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+	if req.GetName() != gcpLatestOf {
+		return f.accessByNumber(req)
+	}
 	if !proto.Equal(req, &secretmanagerpb.AccessSecretVersionRequest{Name: gcpLatestOf}) {
-		return nil, f.reject("AccessSecretVersion " + prototext.Format(req) + ": the latest version alone")
+		return nil, f.reject("AccessSecretVersion " + prototext.Format(req) + ": a version's name alone")
 	}
 	if f.lateWriter != nil {
 		f.with(f.lateWriter.value, f.lateWriter.state)
@@ -274,6 +296,33 @@ func (f *fakeGCP) AccessSecretVersion(_ context.Context, req *secretmanagerpb.Ac
 	}, nil
 }
 
+// accessByNumber answers an access of one version by its number, which Secret Manager keeps strongly
+// consistent with the add: none of the fake's lags applies to it.
+func (f *fakeGCP) accessByNumber(req *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+	var number int
+	if _, err := fmt.Sscanf(req.GetName(), gcpSecret+"/versions/%d", &number); err != nil ||
+		!proto.Equal(req, &secretmanagerpb.AccessSecretVersionRequest{Name: fmt.Sprintf("%s/versions/%d", gcpSecret, number)}) {
+		return nil, f.reject("AccessSecretVersion " + prototext.Format(req) + ": a version's name alone")
+	}
+	if !f.exists {
+		return nil, f.notFound()
+	}
+	for _, v := range f.versions {
+		if v.number != number {
+			continue
+		}
+		if v.state != enabled {
+			return nil, status.Errorf(codes.FailedPrecondition, "Secret Version [%s] is in %s state.", versionName(v.number), v.state)
+		}
+		value := v.value
+		if f.added > 0 && f.numberReadsBack != "" {
+			value = f.numberReadsBack
+		}
+		return &secretmanagerpb.AccessSecretVersionResponse{Name: versionName(v.number), Payload: &secretmanagerpb.SecretPayload{Data: []byte(value)}}, nil
+	}
+	return nil, status.Errorf(codes.NotFound, "Secret Version [%s] not found.", versionName(number))
+}
+
 // values is every secret value the fake holds or will be sent: none may reach an output.
 func (f *fakeGCP) values() []string {
 	f.mu.Lock()
@@ -283,7 +332,8 @@ func (f *fakeGCP) values() []string {
 		all = append(all, v.value)
 	}
 	all = append(all, f.sent...)
-	for _, v := range []*gcpVersion{f.racing, f.lateWriter} {
+	all = append(all, f.numberReadsBack)
+	for _, v := range []*gcpVersion{f.racing, f.lateWriter, f.earlyWriter} {
 		if v != nil {
 			all = append(all, v.value)
 		}
@@ -341,7 +391,7 @@ func runGCPAs(t *testing.T, f *fakeGCP, name string, args ...string) (code int, 
 	f.setMode(args[0])
 	var out, errs bytes.Buffer
 	code = Command(context.Background(), append(args, "--store", GCPSecretManager, "--name", name),
-		&out, &errs, Stores{GCPSecretManager: OpenGCP})
+		&out, &errs, Stores{GCPSecretManager: GCP})
 	stdout, stderr = out.String(), errs.String()
 	for _, value := range f.values() {
 		if value != "" { // a destroyed version holds none, and "" is in every text

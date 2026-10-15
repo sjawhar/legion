@@ -414,7 +414,7 @@ func runAWS(t *testing.T, f *fakeAWS, args ...string) (code int, stdout, stderr 
 	f.generating = len(args) > 0 && args[0] == "generate"
 	f.mu.Unlock()
 	code = Command(context.Background(), append(args, "--store", AWSSecretsManager, "--name", awsSecret, "--region", awsRegion),
-		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+		&out, &errs, Stores{AWSSecretsManager: AWS})
 	stdout, stderr = out.String(), errs.String()
 	for _, value := range f.values() {
 		require.NotContains(t, stdout+stderr, value, "a seed reached an output")
@@ -506,12 +506,19 @@ func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
 		want  string
 		lists int
 	}{
+		// DescribeSecret names the AWSCURRENT version: generate refuses on it before it lists.
+		{"an AWSCURRENT version", func(f *fakeAWS) *fakeAWS { return f.holding(seedValue) },
+			"already holds version v1, which AWSCURRENT names", 0},
+		// The listing counts the versions DescribeSecret does not label, across every page.
 		{"a deprecated version DescribeSecret does not show", func(f *fakeAWS) *fakeAWS {
 			f.versions = []awsVersion{{id: "v1", value: seedValue}}
 			return f
 		}, "already holds 1 version(s)", 1},
-		{"versions on every page", func(f *fakeAWS) *fakeAWS { f.pageSize = 2; return f.holding(seedValue, seedValue, seedValue) },
-			"already holds 3 version(s)", 2},
+		{"deprecated versions on every page", func(f *fakeAWS) *fakeAWS {
+			f.pageSize = 2
+			f.versions = []awsVersion{{id: "v1", value: seedValue}, {id: "v2", value: seedValue}, {id: "v3", value: seedValue}}
+			return f
+		}, "already holds 3 version(s)", 2},
 		{"a listing that repeats its page token", func(f *fakeAWS) *fakeAWS { f.repeatToken = true; return f },
 			"list-secret-version-ids " + awsSecret + " failed: the listing handed out page token page-2 twice", 2},
 		{"absent", func(f *fakeAWS) *fakeAWS { f.exists = false; return f }, awsSecret + " does not exist", 0},
@@ -885,7 +892,7 @@ func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 	serve(t, f)
 	var out, errs bytes.Buffer
 	code := Command(context.Background(), []string{"check", "--store", AWSSecretsManager, "--name", awsSecret},
-		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+		&out, &errs, Stores{AWSSecretsManager: AWS})
 	require.Equal(t, 2, code)
 	require.Equal(t, "refused: "+awsSecret+": no AWS region: pass --region, or name one in AWS_REGION or the profile\n", errs.String())
 	require.Empty(t, f.recorded())
@@ -946,7 +953,7 @@ func TestAWSErrorsAreRenderedByCodeOrClassNeverByTheirText(t *testing.T) {
 		{&smithy.OperationError{Err: fmt.Errorf("get identity: %w", errors.New(canary))}, "errorString"},
 	}
 	for _, row := range rows {
-		got := awsFailed("put-secret-value", awsSecret, row.err).Error()
+		got := failed("put-secret-value", awsSecret, row.err).Error()
 		require.Equal(t, "put-secret-value "+awsSecret+" failed: "+row.want, got)
 		require.NotContains(t, got, canary)
 	}

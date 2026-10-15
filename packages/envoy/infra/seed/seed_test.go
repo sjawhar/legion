@@ -37,29 +37,25 @@ type fakeStore struct {
 	t       *testing.T
 	exists  bool
 	deleted bool
-	// versions in the order they were written; current is the one the store serves by default.
+	// versions in the order they were written; current is the one the store names as its default.
 	versions []version
 	current  string
 	calls    []string
 	puts     [][]byte
-	// newest makes the store's default the newest version whatever its state, as GCP's
-	// versions/latest is; unreadable is then that version's state when it is not served, and
-	// unreadableAtCurrent the state it enters just before Current reads it.
-	newest              bool
-	unreadable          string
-	unreadableAtCurrent string
+	// unserved is the state of the default version when the store does not serve it, and
+	// unservedAtCurrent the state it enters just before Current reads it.
+	unserved, unservedAtCurrent string
 
-	describeErr             error    // every Describe fails
-	describeErrAfterCurrent error    // a Describe once Current was called fails
-	versionsErr             error    // every Versions fails
-	versionsErrAfterPut     error    // a Versions once Put has written fails
-	putErr                  error    // Put fails and writes nothing
-	putErrAfterWrite        error    // Put writes, then answers its version with this error
-	currentErr              error    // Current fails
-	readBack                []byte   // what Current answers instead of the stored value
-	racing                  *version // another writer's version, which lands with Put's
-	lateWriter              *version // another writer's version, which lands just before Current reads and is served
-	beforePut               func()   // runs as Put is called, before it writes
+	describeErr         error    // every Describe fails
+	versionsErr         error    // every Versions fails
+	versionsErrAfterPut error    // a Versions once Put has written fails
+	putErr              error    // Put fails and writes nothing
+	putErrAfterWrite    error    // Put writes, then answers its version with this error
+	currentErr          error    // Current fails
+	readBack            []byte   // what Current answers instead of the stored value
+	racing              *version // another writer's version, which lands with Put's
+	lateWriter          *version // another writer's version, which lands just before Current reads and is served
+	beforePut           func()   // runs as Put is called, before it writes
 	// An eventually consistent store: after the write, the next lagVersions listings count the
 	// versions as they were before it, and the next lagCurrent reads find no version served.
 	lagVersions, lagCurrent int
@@ -67,18 +63,7 @@ type fakeStore struct {
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
 
-// latest gives f the default GCP's Secret Manager has: the newest version, labelled latest.
-func (f *fakeStore) latest() *fakeStore {
-	f.newest = true
-	return f
-}
-
-func (f *fakeStore) Label() string {
-	if f.newest {
-		return "latest"
-	}
-	return "AWSCURRENT"
-}
+func (f *fakeStore) Label() string { return "AWSCURRENT" }
 
 func (f *fakeStore) holding(values ...string) *fakeStore {
 	for i, v := range values {
@@ -102,27 +87,17 @@ func (f *fakeStore) Describe(_ context.Context, name string) (seed.Description, 
 	if f.describeErr != nil {
 		return seed.Description{}, f.describeErr
 	}
-	if f.describeErrAfterCurrent != nil && slices.Contains(f.calls, "current") {
-		return seed.Description{}, f.describeErrAfterCurrent
-	}
 	switch {
 	case !f.exists:
 		return seed.Description{}, nil
 	case f.deleted:
 		return seed.Description{Exists: true, ScheduledForDeletion: true, DeletionDate: "2026-09-30 00:00:00+00:00"}, nil
-	case f.newest:
-		d := seed.Description{Exists: true, DefaultIsNewest: true}
-		if len(f.versions) > 0 {
-			d.NewestVersion, d.NewestState = f.versions[len(f.versions)-1].id, "ENABLED"
-			if f.unreadable != "" {
-				d.NewestState = f.unreadable
-			} else {
-				d.CurrentVersion = d.NewestVersion
-			}
-		}
-		return d, nil
 	}
-	return seed.Description{Exists: true, CurrentVersion: f.current}, nil
+	d := seed.Description{Exists: true}
+	if f.current != "" {
+		d.Default = &seed.Version{ID: f.current, State: f.unserved}
+	}
+	return d, nil
 }
 
 func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
@@ -166,11 +141,14 @@ func (f *fakeStore) Current(_ context.Context, name string) (string, []byte, err
 	if f.currentErr != nil {
 		return "", nil, f.currentErr
 	}
-	if f.unreadableAtCurrent != "" {
-		f.unreadable, f.unreadableAtCurrent = f.unreadableAtCurrent, ""
+	if f.unservedAtCurrent != "" {
+		f.unserved, f.unservedAtCurrent = f.unservedAtCurrent, ""
 	}
-	if f.newest && f.unreadable != "" {
-		return "", nil, errors.New("access-secret-version " + secretName + "/versions/latest failed: FailedPrecondition")
+	if f.unserved != "" {
+		return "", nil, &seed.Unserved{
+			Version: seed.Version{ID: f.current, State: f.unserved},
+			Err:     errors.New("get-secret-value " + secretName + " failed: " + f.unserved),
+		}
 	}
 	if len(f.puts) > 0 && f.lagCurrent > 0 {
 		f.lagCurrent--
@@ -218,11 +196,11 @@ type opened struct {
 func run(t *testing.T, store *fakeStore, args ...string) (code int, stdout, stderr string, o *opened) {
 	t.Helper()
 	o = &opened{}
-	stores := seed.Stores{"fake-store": func(_ context.Context, region, account string) (seed.Store, error) {
+	stores := seed.Stores{"fake-store": {Help: "the fake store's own help", Open: func(_ context.Context, region, account string) (seed.Store, error) {
 		o.calls++
 		o.region, o.account = region, account
 		return store, nil
-	}}
+	}}}
 	var out, errs bytes.Buffer
 	code = seed.Command(context.Background(), args, &out, &errs, stores)
 	return code, out.String(), errs.String(), o
@@ -310,17 +288,19 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 		{"generate: absent", mode("generate"), func(f *fakeStore) *fakeStore { f.exists = false; return f }, "does not exist"},
 		{"generate: scheduled for deletion", mode("generate"), func(f *fakeStore) *fakeStore { f.deleted = true; return f },
 			"is scheduled for deletion (2026-09-30 00:00:00+00:00)"},
-		{"generate: one version", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) }, "already holds 1 version(s)"},
-		// A version without the default label is still a seed someone may have read.
-		{"generate: two versions", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed, readmeSeed) }, "already holds 2 version(s)"},
-		// A store whose default is the newest version names it from metadata alone, whatever its
-		// state: generate refuses on that before it lists.
-		{"generate: a latest version", mode("generate"), func(f *fakeStore) *fakeStore { return f.latest().holding(readmeSeed) },
-			"already holds version v1, which latest names"},
-		{"generate: a disabled latest version", mode("generate"), func(f *fakeStore) *fakeStore {
-			f.unreadable = "DISABLED"
-			return f.latest().holding(readmeSeed, readmeSeed)
-		}, "already holds version v2, which latest names"},
+		// The default version, whatever its state, is named from metadata alone: generate refuses
+		// on it before it lists.
+		{"generate: a default version", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) },
+			"already holds version v1, which AWSCURRENT names"},
+		{"generate: a default version the store does not serve", mode("generate"), func(f *fakeStore) *fakeStore {
+			f.unserved = "DISABLED"
+			return f.holding(readmeSeed, readmeSeed)
+		}, "already holds version v2, which AWSCURRENT names"},
+		// A version the store does not name as its default is still a seed someone may have read.
+		{"generate: versions and no default", mode("generate"), func(f *fakeStore) *fakeStore {
+			f.holding(readmeSeed, readmeSeed).current = ""
+			return f
+		}, "already holds 2 version(s)"},
 		{"generate: describe fails", mode("generate"), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f }, "AccessDeniedException"},
 		{"generate: listing versions fails", mode("generate"), func(f *fakeStore) *fakeStore {
 			f.versionsErr = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
@@ -332,8 +312,6 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 			func(f *fakeStore) *fakeStore { f.deleted = true; return f.holding(readmeSeed) }, "is scheduled for deletion"},
 		{"verify: no default version", mode("verify", "--public-key", readmePublicKey), func(f *fakeStore) *fakeStore { return f },
 			"has no AWSCURRENT version; nothing to verify"},
-		{"verify: no latest version", mode("verify", "--public-key", readmePublicKey), func(f *fakeStore) *fakeStore { return f.latest() },
-			"has no latest version; nothing to verify"},
 		{"verify: describe fails", mode("verify", "--public-key", otherPublic), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f.holding(readmeSeed) },
 			"AccessDeniedException"},
 		{"verify: reading fails", mode("verify", "--public-key", otherPublic), func(f *fakeStore) *fakeStore {
@@ -366,9 +344,9 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 // A refusal of the store's opener (the account check) exits 2 before the store is called.
 func TestARefusedOpenExitsTwoBeforeAnyStoreCall(t *testing.T) {
 	store := newStore(t)
-	stores := seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) {
+	stores := seed.Stores{"fake-store": {Open: func(context.Context, string, string) (seed.Store, error) {
 		return nil, fmt.Errorf("%w: these credentials are for account 111111111111, but --expect-account is 000000000000", seed.ErrRefused)
-	}}
+	}}}
 	var out, errs bytes.Buffer
 	code := seed.Command(context.Background(), mode("generate", "--expect-account", "000000000000"), &out, &errs, stores)
 	require.Equal(t, 2, code)
@@ -412,86 +390,36 @@ func TestVerify(t *testing.T) {
 	})
 }
 
-// A store whose default is the newest version whatever its state (GCP's versions/latest) gets
-// check's latest lines: no versions, the newest version, or the newest version and the state it is
-// in when the store does not serve it.
-func TestCheckPrintsTheLatestLines(t *testing.T) {
-	rows := []struct {
-		name  string
-		store func(*fakeStore) *fakeStore
-		want  string
-	}{
-		{"absent", func(f *fakeStore) *fakeStore { f.exists = false; return f.latest() }, secretName + ": absent"},
-		{"no versions", func(f *fakeStore) *fakeStore { return f.latest() }, secretName + ": present, no versions"},
-		{"enabled", func(f *fakeStore) *fakeStore { return f.latest().holding(readmeSeed, readmeSeed) },
-			secretName + ": present; latest: version v2"},
-		{"disabled", func(f *fakeStore) *fakeStore {
-			f.unreadable = "DISABLED"
-			return f.latest().holding(readmeSeed, readmeSeed)
-		},
-			secretName + ": present; latest: version v2 is DISABLED"},
-		{"destroyed", func(f *fakeStore) *fakeStore { f.unreadable = "DESTROYED"; return f.latest().holding(readmeSeed) },
-			secretName + ": present; latest: version v1 is DESTROYED"},
-	}
-	for _, row := range rows {
-		t.Run(row.name, func(t *testing.T) {
-			store := row.store(newStore(t))
+// A default version the store names but does not serve gets check's line with its state, which
+// verify fails with, exit 1: a failed check, not a refusal, though nothing was written. When
+// Describe already names it so, verify reads no value; when it stops being served between Describe
+// and Current, Current answers it as an Unserved.
+func TestADefaultVersionTheStoreDoesNotServe(t *testing.T) {
+	for _, state := range []string{"DISABLED", "DESTROYED"} {
+		want := secretName + ": present; AWSCURRENT: version v2 is " + state
+		t.Run(state+"/check", func(t *testing.T) {
+			store := newStore(t).holding(readmeSeed, readmeSeed)
+			store.unserved = state
 			code, out, errs, _ := run(t, store, mode("check")...)
 			require.Equal(t, 0, code, errs)
-			require.Equal(t, row.want+"\n", out)
-			require.Empty(t, errs)
+			require.Equal(t, want+"\n", out)
 			require.Equal(t, []string{"describe"}, store.calls)
-			requireNoValue(t, store, out, errs)
-
-			line, err := seed.Check(context.Background(), row.store(newStore(t)), secretName)
-			require.NoError(t, err)
-			require.Equal(t, row.want, line)
 		})
-	}
-}
-
-func TestVerifyOfTheLatestVersion(t *testing.T) {
-	_, otherPublic := testnats.User(t)
-	for _, row := range []struct {
-		key, want string
-		code      int
-	}{
-		{readmePublicKey, secretName + " latest (version v2) derives " + readmePublicKey + ": yes", 0},
-		{otherPublic, secretName + " latest (version v2) derives " + otherPublic + ": no", 1},
-	} {
-		store := newStore(t).latest().holding(readmeSeed, readmeSeed)
-		code, out, errs, _ := run(t, store, mode("verify", "--public-key", row.key)...)
-		require.Equal(t, row.code, code, errs)
-		require.Equal(t, row.want+"\n", out)
-		require.Empty(t, errs)
-		require.Equal(t, []string{"describe", "current"}, store.calls)
-		requireNoValue(t, store, out, errs)
-	}
-}
-
-// A latest version the store does not serve fails verify with check's line for it, exit 1: a failed
-// check, not a refusal, though nothing was written. When Describe already reports it, verify reads no
-// value; when it stops being served between Describe and Current, Current fails and verify describes
-// the secret again to tell that from a refused read.
-func TestVerifyOfAnUnreadableLatestVersionFailsWithItsState(t *testing.T) {
-	for _, state := range []string{"DISABLED", "DESTROYED"} {
 		for _, when := range []struct {
 			name  string
 			set   func(*fakeStore)
 			calls []string
 		}{
-			{"before verify", func(f *fakeStore) { f.unreadable = state }, []string{"describe"}},
-			{"between describe and current", func(f *fakeStore) { f.unreadableAtCurrent = state },
-				[]string{"describe", "current", "describe"}},
+			{"before verify", func(f *fakeStore) { f.unserved = state }, []string{"describe"}},
+			{"between describe and current", func(f *fakeStore) { f.unservedAtCurrent = state }, []string{"describe", "current"}},
 		} {
-			t.Run(state+"/"+when.name, func(t *testing.T) {
-				want := secretName + ": present; latest: version v2 is " + state
-				unreadable := func() *fakeStore {
-					f := newStore(t).latest().holding(readmeSeed, readmeSeed)
+			t.Run(state+"/verify/"+when.name, func(t *testing.T) {
+				unserved := func() *fakeStore {
+					f := newStore(t).holding(readmeSeed, readmeSeed)
 					when.set(f)
 					return f
 				}
-				store := unreadable()
+				store := unserved()
 				code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
 				require.Equal(t, 1, code, errs)
 				require.Equal(t, want+"\n", out)
@@ -499,7 +427,7 @@ func TestVerifyOfAnUnreadableLatestVersionFailsWithItsState(t *testing.T) {
 				require.Equal(t, when.calls, store.calls)
 				requireNoValue(t, store, out, errs)
 
-				line, err := seed.Verify(context.Background(), unreadable(), secretName, readmePublicKey)
+				line, err := seed.Verify(context.Background(), unserved(), secretName, readmePublicKey)
 				require.ErrorIs(t, err, seed.ErrMismatch)
 				require.NotErrorIs(t, err, seed.ErrRefused)
 				require.Equal(t, want, line)
@@ -508,31 +436,15 @@ func TestVerifyOfAnUnreadableLatestVersionFailsWithItsState(t *testing.T) {
 	}
 }
 
-// When Current fails for a store whose default is the newest version and describing the secret again
-// shows that version still served, or fails, the read's own failure is the refusal, exit 2.
-func TestVerifyRefusesAFailedReadOfAServedLatestVersion(t *testing.T) {
-	readFails := errors.New("access-secret-version " + secretName + "/versions/latest failed: PermissionDenied")
-	for _, row := range []struct {
-		name  string
-		store func(*fakeStore) *fakeStore
-	}{
-		{"still served", func(f *fakeStore) *fakeStore { f.currentErr = readFails; return f }},
-		{"describing again fails", func(f *fakeStore) *fakeStore {
-			f.unreadableAtCurrent = "DISABLED"
-			f.describeErrAfterCurrent = errors.New("get-secret " + secretName + " failed: Unavailable")
-			return f
-		}},
-	} {
-		t.Run(row.name, func(t *testing.T) {
-			store := row.store(newStore(t).latest().holding(readmeSeed))
-			code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
-			require.Equal(t, 2, code, errs)
-			require.Empty(t, out)
-			require.Equal(t, []string{"describe", "current", "describe"}, store.calls)
-			require.True(t, strings.HasPrefix(errs, "refused: access-secret-version "+secretName+"/versions/latest failed: "), errs)
-			requireNoValue(t, store, out, errs)
-		})
-	}
+// Any other failed read is the refusal, exit 2, with the read's own error.
+func TestVerifyRefusesAFailedRead(t *testing.T) {
+	store := newStore(t).holding(readmeSeed)
+	store.currentErr = errors.New("get-secret-value " + secretName + " failed: AccessDeniedException")
+	code, out, errs, _ := run(t, store, mode("verify", "--public-key", readmePublicKey)...)
+	require.Equal(t, 2, code, errs)
+	require.Empty(t, out)
+	require.Equal(t, []string{"describe", "current"}, store.calls)
+	require.Equal(t, "refused: get-secret-value "+secretName+" failed: AccessDeniedException\n", errs)
 }
 
 // A stored value that is no user seed gets verify's not-a-seed line and exit 1, with the reason
@@ -718,7 +630,7 @@ func TestGeneratePrintsThePublicKeyBeforeItsWrite(t *testing.T) {
 	printed := "(Put was not called)"
 	store.beforePut = func() { printed = out.String() }
 	code := seed.Command(context.Background(), mode("generate"), &out, &errs,
-		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
+		seed.Stores{"fake-store": {Open: func(context.Context, string, string) (seed.Store, error) { return store, nil }}})
 	require.Equal(t, 0, code, errs.String())
 	public := publicKeyOfSeed(t, store.puts[0])
 	require.Equal(t, "public key: "+public+"\n", printed)
@@ -746,7 +658,7 @@ var errStdout = errors.New("write /dev/stdout: bad file descriptor")
 func commandWith(store *fakeStore, stdout io.Writer, args ...string) (code int, stderr string) {
 	var errs bytes.Buffer
 	code = seed.Command(context.Background(), args, stdout, &errs,
-		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
+		seed.Stores{"fake-store": {Open: func(context.Context, string, string) (seed.Store, error) { return store, nil }}})
 	return code, errs.String()
 }
 
@@ -821,8 +733,8 @@ func TestNoSeedReachesAnOutputOrAnError(t *testing.T) {
 		"malformed":          func(f *fakeStore) *fakeStore { return f.holding(readmeSeed[:5] + "A" + readmeSeed[6:]) },
 		"reads back canary":  func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed); return f },
 		"reads back garbled": func(f *fakeStore) *fakeStore { f.readBack = []byte(readmeSeed + "\n"); return f },
-		"latest":             func(f *fakeStore) *fakeStore { return f.latest().holding(readmeSeed) },
-		"latest disabled":    func(f *fakeStore) *fakeStore { f.unreadable = "DISABLED"; return f.latest().holding(readmeSeed) },
+		"default unserved":   func(f *fakeStore) *fakeStore { f.unserved = "DISABLED"; return f.holding(readmeSeed) },
+		"unserved at read":   func(f *fakeStore) *fakeStore { f.unservedAtCurrent = "DISABLED"; return f.holding(readmeSeed) },
 	}
 	invocations := [][]string{
 		mode("check"),
@@ -894,10 +806,30 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 	}
 }
 
+// The usage takes each store's help from its StoreType, and names no store the caller did not hand
+// the command.
 func TestHelpExitsZero(t *testing.T) {
 	code, out, errs, o := run(t, newStore(t), "--help")
 	require.Equal(t, 0, code)
 	require.Empty(t, out)
 	require.Contains(t, errs, "usage: envoy-infra seed {check|generate|verify}")
+	require.Contains(t, errs, "Stores:\n  fake-store\n    \tthe fake store's own help\n")
+	require.NotContains(t, errs, seed.AWSSecretsManager)
+	require.NotContains(t, errs, seed.GCPSecretManager)
 	require.Zero(t, o.calls)
+}
+
+// A store type's CheckName refuses a --name before the store is opened, exit 2.
+func TestAStoreTypesNameRuleRefusesBeforeTheOpen(t *testing.T) {
+	opened := false
+	stores := seed.Stores{"fake-store": {
+		Open:      func(context.Context, string, string) (seed.Store, error) { opened = true; return newStore(t), nil },
+		CheckName: func(string) error { return errors.New("--name for --store fake-store is not of its form") },
+	}}
+	var out, errs bytes.Buffer
+	code := seed.Command(context.Background(), mode("check"), &out, &errs, stores)
+	require.Equal(t, 2, code)
+	require.Empty(t, out.String())
+	require.Equal(t, "refused: --name for --store fake-store is not of its form\n", errs.String())
+	require.False(t, opened)
 }

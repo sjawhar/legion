@@ -38,6 +38,9 @@ import (
 )
 
 func TestGCPCheck(t *testing.T) {
+	// The date is printed as the AWS store prints DeletedDate, whose format TestAWSCheck pins;
+	// time.Local is left alone, since the gRPC client's goroutines read it.
+	expires := time.Unix(1759190400, 500_000_000)
 	seedValue, _ := testnats.User(t)
 	metadataOnly := []string{"GetSecret", "GetSecretVersion"}
 	rows := []struct {
@@ -47,9 +50,12 @@ func TestGCPCheck(t *testing.T) {
 		calls []string
 	}{
 		{"absent", func(f *fakeGCP) *fakeGCP { f.exists = false; return f }, gcpSecret + ": absent", []string{"GetSecret"}},
-		{"no versions", func(f *fakeGCP) *fakeGCP { return f }, gcpSecret + ": present, no versions", metadataOnly},
+		// Secret Manager deletes a secret, with every version, when its expire_time comes.
+		{"set to expire", func(f *fakeGCP) *fakeGCP { f.expireAt = &expires; return f.with(seedValue, enabled) },
+			gcpSecret + ": present, scheduled for deletion (" + pythonDate(expires, time.Local) + ")", []string{"GetSecret"}},
+		{"no versions", func(f *fakeGCP) *fakeGCP { return f }, gcpSecret + ": present; latest: no", metadataOnly},
 		{"enabled", func(f *fakeGCP) *fakeGCP { return f.with(seedValue, disabled).with(seedValue, enabled) },
-			gcpSecret + ": present; latest: version 2", metadataOnly},
+			gcpSecret + ": present; latest: yes (version 2)", metadataOnly},
 		// versions/latest names the newest version whatever its state, so an enabled older version
 		// does not make the secret's default readable.
 		{"disabled", func(f *fakeGCP) *fakeGCP { return f.with(seedValue, enabled).with(seedValue, disabled) },
@@ -76,8 +82,9 @@ func TestGCPGenerateWritesTheBareSeedAndReadsItBack(t *testing.T) {
 	code, out, errs := runGCP(t, f, "generate")
 	require.Equal(t, 0, code, errs)
 	require.Empty(t, errs)
-	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion", "ListSecretVersions", "AccessSecretVersion"},
-		f.recorded())
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion",
+		"AccessSecretVersion 1", "ListSecretVersions", "AccessSecretVersion"}, f.recorded(),
+		"version 1 is read by number before the write, to find none, and after it, to read the write back")
 	require.Len(t, f.versions, 1)
 	written := f.versions[0]
 	require.True(t, strings.HasPrefix(written.value, "SU"), "the payload is the bare seed string")
@@ -116,6 +123,29 @@ func TestGCPGenerateRefusesBeforeWriting(t *testing.T) {
 			f.unnamed = 1
 			return f.with("", destroyed)
 		}, "already holds 1 version(s)", 1},
+		// latest and the listing are eventually consistent, and can both lag behind a version the
+		// secret holds; reading version 1 by number cannot, and finds it in any state.
+		{"a version neither latest nor the listing shows", func(f *fakeGCP) *fakeGCP {
+			f.unlisted, f.unnamed = 1, 1
+			return f.with(seedValue, enabled)
+		}, "already holds 1 version(s)", 1},
+		{"a disabled version neither latest nor the listing shows", func(f *fakeGCP) *fakeGCP {
+			f.unlisted, f.unnamed = 1, 1
+			return f.with(seedValue, disabled)
+		}, "already holds 1 version(s)", 1},
+		{"a destroyed version neither latest nor the listing shows", func(f *fakeGCP) *fakeGCP {
+			f.unlisted, f.unnamed = 1, 1
+			return f.with("", destroyed)
+		}, "already holds 1 version(s)", 1},
+		{"reading version 1 is denied", func(f *fakeGCP) *fakeGCP {
+			f.failures = map[string]codes.Code{"AccessSecretVersion 1": codes.PermissionDenied}
+			return f
+		}, "access-secret-version " + gcpSecret + "/versions/1 failed: PermissionDenied", 1},
+		{"set to expire", func(f *fakeGCP) *fakeGCP {
+			expires := time.Now().Add(time.Hour)
+			f.expireAt = &expires
+			return f
+		}, "is scheduled for deletion", 0},
 		{"versions on every page, which latest does not name yet", func(f *fakeGCP) *fakeGCP {
 			f.pageSize, f.unnamed = 2, 3
 			return f.with("", destroyed).with(seedValue, disabled).with(seedValue, enabled)
@@ -177,6 +207,15 @@ func TestGCPGenerateAfterItsWrite(t *testing.T) {
 			f.lateWriter = &gcpVersion{value: theirs, state: enabled}
 			return f
 		}, "error after writing: version 1 was written, but " + gcpSecret + " serves version 2 by default: another writer raced this one"},
+		// An access by number is strongly consistent with the add, so the write's own read-back
+		// reads version 1 that way, before latest and the listing are asked about another writer.
+		{"reading version 1 back fails", func(f *fakeGCP) *fakeGCP {
+			f.failAfterAdd = map[string]codes.Code{"AccessSecretVersion 1": codes.PermissionDenied}
+			return f
+		}, "error after writing: version 1 was written, but reading it back by number failed: access-secret-version " + gcpSecret +
+			"/versions/1 failed: PermissionDenied; run check"},
+		{"version 1 reads back as another value", func(f *fakeGCP) *fakeGCP { f.numberReadsBack = theirs; return f },
+			"error after writing: version 1 was written, but " + gcpSecret + "/versions/1 reads back another value; run check"},
 		{"reading back fails", func(f *fakeGCP) *fakeGCP {
 			f.failAfterAdd = map[string]codes.Code{"AccessSecretVersion": codes.PermissionDenied}
 			return f
@@ -217,27 +256,27 @@ func TestGCPGenerateCallsAFailedWriteUnknownNotRefused(t *testing.T) {
 	require.Equal(t, "version id: unknown\n", rest)
 	require.Equal(t, "error after writing: add-secret-version "+gcpSecret+" failed: Unavailable; "+
 		"whether a version was written is unknown, run check\n", errs)
-	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}, f.recorded(),
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion"}, f.recorded(),
 		"one AddSecretVersion, not retried, and no call after it")
 }
 
 // Secret Manager numbers a secret's versions from 1, one more for each (resources.proto,
-// SecretVersion.name), so a write answered with any other number shows the secret held a version
-// both eventually consistent reads before the write, latest and the listing, missed: an error after
-// the write, with nothing read back.
+// SecretVersion.name), and generate found no version 1 before the write, so a write answered with
+// any other number is another writer's version landing between that read and the add: an error
+// after the write, with nothing read back.
 func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
 	earlier, _ := testnats.User(t)
-	f := newFakeGCP(t).with(earlier, enabled)
-	f.unlisted, f.unnamed = 1, 1
+	f := newFakeGCP(t)
+	f.earlyWriter = &gcpVersion{value: earlier, state: enabled}
 	serveGCP(t, f)
 	code, out, errs := runGCP(t, f, "generate")
 	require.Equal(t, 1, code, errs)
 	require.Equal(t, 1, f.added)
 	require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[1].value)+"\nversion id: 2\n", out)
-	require.Equal(t, "error after writing: version 2 was written, not version 1: "+gcpSecret+" held a version "+
-		"neither latest nor the listing showed before the write; run check\n", errs)
-	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}, f.recorded(),
-		"no read-back after the write")
+	require.Equal(t, "error after writing: version 2 was written, not version 1: another version landed in "+gcpSecret+
+		" after generate found it held none; run check\n", errs)
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion"},
+		f.recorded(), "no read-back after the write")
 }
 
 // Secret Manager's listings and its latest alias are eventually consistent: only an access by
@@ -247,7 +286,8 @@ func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
 // error after the write.
 func TestGCPGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
 	SetReadBackWaits(t, time.Millisecond, time.Millisecond, time.Millisecond)
-	before := []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AddSecretVersion"}
+	before := []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion",
+		"AccessSecretVersion 1"}
 	t.Run("caught up", func(t *testing.T) {
 		f := newFakeGCP(t)
 		f.lagList, f.lagAccess = 1, 2
@@ -257,8 +297,7 @@ func TestGCPGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
 		require.Empty(t, errs)
 		require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[0].value)+"\nversion id: 1\n", out)
 		require.Equal(t, slices.Concat(before, []string{
-			"ListSecretVersions",                        // the listing leaves the write out
-			"ListSecretVersions", "AccessSecretVersion", // latest is not found yet
+			"ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion", // the listing leaves the write out, latest is not found yet
 			"ListSecretVersions", "AccessSecretVersion", // nor now
 			"ListSecretVersions", "AccessSecretVersion",
 		}), f.recorded())
@@ -320,7 +359,8 @@ func TestGCPVerify(t *testing.T) {
 		})
 	}
 	// The newest version can stop being served after GetSecretVersion reported it: here a disabled
-	// version lands just before AccessSecretVersion reads, which Secret Manager then refuses.
+	// version lands just before AccessSecretVersion reads, which Secret Manager then refuses, and the
+	// store names that version with one more GetSecretVersion.
 	t.Run("a latest version disabled between describe and access", func(t *testing.T) {
 		f := newFakeGCP(t).with(seedValue, enabled)
 		f.lateWriter = &gcpVersion{value: seedValue, state: disabled}
@@ -329,7 +369,7 @@ func TestGCPVerify(t *testing.T) {
 		require.Equal(t, 1, code, errs)
 		require.Equal(t, gcpSecret+": present; latest: version 2 is DISABLED\n", out)
 		require.Empty(t, errs)
-		require.Equal(t, []string{"GetSecret", "GetSecretVersion", "AccessSecretVersion", "GetSecret", "GetSecretVersion"}, f.recorded())
+		require.Equal(t, []string{"GetSecret", "GetSecretVersion", "AccessSecretVersion", "GetSecretVersion"}, f.recorded())
 	})
 	t.Run("no versions", func(t *testing.T) {
 		f := newFakeGCP(t)
@@ -347,8 +387,8 @@ func TestGCPVerify(t *testing.T) {
 		require.Equal(t, 2, code)
 		require.Empty(t, out)
 		require.Equal(t, "refused: access-secret-version "+gcpLatestOf+" failed: PermissionDenied\n", errs)
-		require.Equal(t, []string{"GetSecret", "GetSecretVersion", "AccessSecretVersion", "GetSecret", "GetSecretVersion"}, f.recorded(),
-			"a failed read describes the secret again, which shows the latest version still served")
+		require.Equal(t, []string{"GetSecret", "GetSecretVersion", "AccessSecretVersion"}, f.recorded(),
+			"a read refused for any reason but the version's state asks nothing more")
 	})
 }
 
@@ -488,7 +528,7 @@ func TestGCPCredentials(t *testing.T) {
 		require.NoError(t, os.Unsetenv("GOOGLE_OAUTH_ACCESS_TOKEN"))
 		code, out, errs := runGCP(t, f, "check")
 		require.Equal(t, 0, code, errs)
-		require.Equal(t, gcpSecret+": present, no versions\n", out)
+		require.Equal(t, gcpSecret+": present; latest: no\n", out)
 		require.Equal(t, []string{"GetSecret", "GetSecretVersion"}, f.recorded())
 	})
 	t.Run("GOOGLE_OAUTH_ACCESS_TOKEN over application default credentials", func(t *testing.T) {
@@ -498,7 +538,7 @@ func TestGCPCredentials(t *testing.T) {
 		t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", file)
 		code, out, errs := runGCP(t, f, "check")
 		require.Equal(t, 0, code, errs)
-		require.Equal(t, gcpSecret+": present, no versions\n", out)
+		require.Equal(t, gcpSecret+": present; latest: no\n", out)
 	})
 	t.Run("an empty GOOGLE_OAUTH_ACCESS_TOKEN", func(t *testing.T) {
 		f := newFakeGCP(t)
@@ -723,7 +763,7 @@ func TestGCPErrorsAreRenderedByCodeNeverByTheirText(t *testing.T) {
 		{errors.New(canary), "errorString"},
 	}
 	for _, row := range rows {
-		got := gcpFailed("add-secret-version", gcpSecret, row.err).Error()
+		got := failed("add-secret-version", gcpSecret, row.err).Error()
 		require.Equal(t, "add-secret-version "+gcpSecret+" failed: "+row.want, got)
 		require.NotContains(t, got, canary)
 	}

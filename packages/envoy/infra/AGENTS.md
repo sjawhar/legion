@@ -134,12 +134,15 @@ with its logger off (`seed/awsstore.go`, `loadAWSConfig`), and the Secret Manage
 discarding logger whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says (`seed/gcpstore.go`,
 `gcpClientOptions`), since at debug it prints each payload base64-encoded, where a search for the
 seed finds nothing. `seed/seed_test.go` searches every byte the command writes, and every error and
-line it returns, for a canary seed. A new store implements `seed.Store`, whose `Label` names the
-version its lines call the default and whose `Current` answers an error that matches
-`seed.ErrNotServed` when it finds no version to serve, which `generate` waits out after its write,
-and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`. A store whose names have a form also
-joins `nameRules` in `seed/seed.go`: `Command` applies it before it opens the store, since the
-refusal of an open prints `--name`, where a seed may have been pasted.
+line it returns, for a canary seed. A new store implements `seed.Store`: its `Label` names the
+version its lines call the default, its `Describe` names that version in `Description.Default`, with
+a `State` when the store will not serve it, and its `Current` answers an error that matches
+`seed.ErrNotServed` when it finds no version to serve, which `generate` waits out after its write, or
+a `*seed.Unserved` when the version it names is one it will not serve. Every mode reads those
+alone, so no store's kind is a branch in `seed.go`. The store also gets a `seed.StoreType`, with its
+opener, its `CheckName` when its names have a form (`Command` applies it before it opens the store,
+since the refusal of an open prints `--name`, where a seed may have been pasted) and its line of
+help, and that type joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's calls are the grant an operator gives it, listed per store under "The calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the

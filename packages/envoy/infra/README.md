@@ -555,13 +555,18 @@ or a tailnet, so the first deployment is where these hold or fail. Watch them on
   measured on systemd 255, not on COS's own.
 - `envoy-infra seed` against Secret Manager itself: that `versions/latest` names a newest version
   that is `DISABLED` or `DESTROYED`, that `GetSecretVersion` on `latest` answers `NOT_FOUND` for a
-  secret with no version, and that `ListSecretVersions` with no filter lists `DESTROYED` versions.
-  The store's lines under [What `check` and `verify` print](#what-check-and-verify-print) rest on
-  these. Also that, after `generate`'s write, `AccessSecretVersion` on a `latest` that names no
-  version yet answers `NOT_FOUND`, and how often the listing and `latest` show the write within
+  secret with no version, that `ListSecretVersions` with no filter lists `DESTROYED` versions, and
+  that `GetSecret` answers `expire_time` for a secret given a `ttl` or an `expireTime`. The store's
+  lines under [What `check` and `verify` print](#what-check-and-verify-print) rest on these. Also
+  that `AccessSecretVersion` on `versions/1` answers `NOT_FOUND` for a secret with no version and
+  `FAILED_PRECONDITION` for a disabled or destroyed version 1, which `generate`'s check before the
+  write rests on; that, after `generate`'s write, `AccessSecretVersion` on a `latest` that names no
+  version yet answers `NOT_FOUND`; and how often the listing and `latest` show the write within
   `generate`'s pauses, 7.75 seconds in all. Google documents both as eventually consistent, and
-  such operations as converging typically within minutes; a write they do not show in time ends as
-  an error after writing, and `check` and `verify` then confirm it.
+  such operations as converging typically within minutes, but may take a few hours. A write they do
+  not show in time ends as an error after writing, though `generate` read version 1 back by number;
+  `generate` run again then refuses the secret, which holds version 1, and `check` and `verify`
+  confirm the write once `latest` names it.
 
 ## Examples
 
@@ -809,7 +814,8 @@ client speaks TLS to every endpoint, so a seed is never sent in plain text.
    ```
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
-   secret that is absent, is scheduled for deletion or holds any version, deprecated ones
+   secret that is absent, is scheduled for deletion or holds any version: one `DescribeSecret` names
+   as `AWSCURRENT`, before it lists any, and otherwise any the listing shows, deprecated ones
    included, so it never replaces a seed a client may already read. It prints the public key just
    before the write, so the key is on your terminal whatever happens next, and the version id once
    the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
@@ -857,24 +863,30 @@ envoy-infra seed verify --store gcp-secret-manager --name projects/example-proje
 ```
 
 ```text
-projects/example-project/secrets/envoy-nats-seed-example-host-a: present, no versions
+projects/example-project/secrets/envoy-nats-seed-example-host-a: present; latest: no
 public key: U<55 more characters>
 version id: 1
 projects/example-project/secrets/envoy-nats-seed-example-host-a latest (version 1) derives <the public key>: yes
 ```
 
-`generate` refuses a secret that holds any version, whatever its state, destroyed ones included.
-Secret Manager's listings and `latest` are eventually consistent with a new version (only an
-access by version number is not:
-[resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)), so it
-reads both before the write: it refuses, naming the version, when `latest` names one, as
-`refused: <name> already holds version <n>, which latest names …`, and otherwise when the listing
-shows any. Secret Manager numbers a secret's versions from 1, so the version it adds must be
-version 1: any other number shows the secret held a version both reads missed, and `generate`
-stops with an error after writing, naming that version. It reads back `versions/latest`, the
-version Secret Manager serves by default, which must be the one it added; while the listing shows
-no version yet, or `latest` names none, it waits as it does on Secrets Manager. A `latest` that
-names a version it will not serve, such as a disabled one, is no wait but an error after writing.
+`generate` refuses a secret set to expire, since Secret Manager deletes it with every version when
+its `expire_time` comes, and a secret that holds any version, whatever its state, destroyed ones
+included. Secret Manager's listings and `latest` are eventually consistent with a new version, and
+only an access by version number is not
+([resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)). So
+it refuses, naming the version, when `latest` names one, as
+`refused: <name> already holds version <n>, which latest names …`; otherwise when the listing shows
+any; and, when it shows none, when an access of `versions/1`, the number every secret's first
+version gets, finds a version in any state. Then the version it adds must be version 1: any other
+number is another writer's version that landed after those reads, and `generate` stops with an
+error after writing, naming it. It reads version 1 back by number, which must be the value it
+wrote, then `versions/latest`, the version Secret Manager serves by default, which must be the one
+it added; while the listing shows no version yet, or `latest` names none, it waits as it does on
+Secrets Manager. A `latest` that names a version it will not serve, such as a disabled one, is no
+wait but an error after writing. Once a secret holds a second version, `latest` names it and cannot
+be pointed back at version 1: disabling or destroying version 2 leaves `latest` naming a version it
+will not serve. A version 2 is undone only by adding version 1's seed again, as version 3, or by
+moving every client to version 2's key.
 
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.
@@ -888,16 +900,17 @@ The client reads the seed from the store when it is deployed, such as into `host
 | `<name>: absent` | does not exist. |
 | `<name>: present, scheduled for deletion (<date>)` | is deleted and waiting out its recovery window. The date is in this machine's time zone, as `2026-11-01 12:00:00+00:00`, with microseconds after the seconds when it has any. |
 | `<name>: present; AWSCURRENT: no` | exists and serves no version by default. `generate` writes to it unless it holds another version, which `check` does not list. |
-| `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. |
+| `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. `generate` refuses it. |
 
 On Secret Manager it prints one of:
 
 | Line | The secret |
 | --- | --- |
 | `<name>: absent` | does not exist. |
-| `<name>: present, no versions` | exists and holds no version. `generate` writes to it. |
-| `<name>: present; latest: version <n>` | serves version `<n>`, its newest, by default. |
-| `<name>: present; latest: version <n> is <STATE>` | its newest version, `<n>`, is `DISABLED` or `DESTROYED`. Secret Manager's default, `versions/latest`, names the newest version whatever its state, so the secret serves no value by default, even when an older version is enabled. |
+| `<name>: present, scheduled for deletion (<date>)` | is set to expire at `<date>`, given as on Secrets Manager: Secret Manager deletes it, with every version, then. `generate` and `verify` refuse it. |
+| `<name>: present; latest: no` | exists, and `latest` names no version: it holds none, or `latest` has not caught up with one just added. `generate` writes to it unless a version is listed, or `versions/1` is found. |
+| `<name>: present; latest: yes (version <n>)` | serves version `<n>`, its newest, by default. `generate` refuses it. |
+| `<name>: present; latest: version <n> is <STATE>` | its newest version, `<n>`, is `DISABLED` or `DESTROYED`. Secret Manager's default, `versions/latest`, names the newest version whatever its state, so the secret serves no value by default, even when an older version is enabled. `generate` refuses it. |
 
 `verify` reads the version the store serves by default, whose label `<label>` is `AWSCURRENT` or
 `latest`, and prints one of:
@@ -907,7 +920,7 @@ On Secret Manager it prints one of:
 | `<name> <label> (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
 | `<name> <label> (version <id>) derives <key>: no` | 1: it is the seed of another user. |
 | `<name> <label> (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
-| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked and the read fails, after it looks again. |
+| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked, once the read is refused for that version's state. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal.
@@ -939,13 +952,14 @@ A secret encrypted with a customer managed KMS key, rather than `aws/secretsmana
 (`generate`), as [Secrets Manager's encryption](https://docs.aws.amazon.com/secretsmanager/latest/userguide/security-encryption.html)
 describes.
 
-On Secret Manager, where each version call names `versions/latest`:
+On Secret Manager, where a version call names `versions/latest` unless the table names
+`versions/1`:
 
 | Mode | Calls | Permissions |
 | --- | --- | --- |
 | `check` | `GetSecret`, `GetSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get` |
-| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` fails, `GetSecret` and `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
-| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AddSecretVersion`, `ListSecretVersions`, `AccessSecretVersion`, the last two again after each pause while Secret Manager has not caught up with the write | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
+| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` answers `FAILED_PRECONDITION`, `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
+| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` on `versions/1`, `AddSecretVersion`, `AccessSecretVersion` on `versions/1`, then `ListSecretVersions` and `AccessSecretVersion`, with `AccessSecretVersion` on `versions/1` between them when the listing shows no version, again after each pause while Secret Manager has not caught up with the write, and `GetSecretVersion` when the last answers `FAILED_PRECONDITION` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
 
 Each permission is the one the API reference names for its call:
 [GetSecret](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get),
@@ -954,8 +968,9 @@ Each permission is the one the API reference names for its call:
 [AddSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/addVersion)
 and [AccessSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access).
 `verify` stops after `GetSecretVersion` when the newest version is not enabled. When
-`AccessSecretVersion` fails, it looks at the newest version again: one disabled or destroyed since
-gets its `is <STATE>` line, exit 1, and otherwise the read's failure is refused, exit 2. Of the
+`AccessSecretVersion` answers `FAILED_PRECONDITION`, the newest version was disabled or destroyed
+since: one `GetSecretVersion` names it, for its `is <STATE>` line, exit 1. Any other failed read is
+refused, exit 2. Of the
 [predefined roles](https://cloud.google.com/secret-manager/docs/access-control), Secret Manager
 Viewer (`roles/secretmanager.viewer`) holds `check`'s permissions, `verify` also needs Secret
 Manager Secret Accessor (`roles/secretmanager.secretAccessor`), and `generate` needs both and Secret

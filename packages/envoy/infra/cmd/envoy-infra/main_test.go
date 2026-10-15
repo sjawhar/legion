@@ -53,10 +53,10 @@ func TestVersionPrintsTheStampedRelease(t *testing.T) {
 
 // noStore fails the test if a command opens a store: neither --version nor the usage reads one.
 func noStore(t *testing.T) seed.Stores {
-	return seed.Stores{seed.AWSSecretsManager: func(context.Context, string, string) (seed.Store, error) {
+	return seed.Stores{seed.AWSSecretsManager: {Open: func(context.Context, string, string) (seed.Store, error) {
 		t.Error("a store was opened")
 		return nil, errors.New("no store in this test")
-	}}
+	}}}
 }
 
 // brokenStdout fails every write, as a closed stdout does.
