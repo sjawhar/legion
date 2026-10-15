@@ -32,9 +32,14 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 
 	runCtx, cancel := context.WithCancel(ctx)
 	var names []string
+	var clients []*bus.Client
 	stop, err := StartIntakes(runCtx, func(name string) (*bus.Client, error) {
 		names = append(names, name)
-		return bus.Connect([]string{natsURL}, bus.WithName(name))
+		client, err := bus.Connect([]string{natsURL}, bus.WithName(name))
+		if err == nil {
+			clients = append(clients, client)
+		}
+		return client, err
 	}, pool, fake.newTestClient())
 	if err != nil {
 		cancel()
@@ -105,6 +110,15 @@ func TestBothIntakesKeepTheirSubscriptions(t *testing.T) {
 		}, func() string {
 			return fmt.Sprintf("%s holds messages its intake never acknowledged: %s", durable, consumers())
 		})
+	}
+
+	// stop waits for both intakes, which stop once ctx is cancelled, and closes both clients.
+	cancel()
+	stop()
+	for i, client := range clients {
+		if !client.Conn.IsClosed() {
+			t.Errorf("the %s client is open after stop", names[i])
+		}
 	}
 }
 
