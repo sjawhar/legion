@@ -85,12 +85,18 @@ versions. Never add the module to the root `go.work`.
   `github:` backend strips on install. A mise pin names that archive per platform with a tool alias
   (`README.md`, "The command"), since the same tag carries the plugin's archives and
   `github:sjawhar/legion` the `legion` command's. Changing either side breaks every consumer's
-  install. A commit releases both only when it touches a path that workflow's push paths name and
-  a path `.github/envoy-infra-release-paths` lists (the pathspecs its version step cuts a version
-  from), so a `packages/envoy` package either command starts compiling in, directly or through
-  another import, goes into both. `.github/scripts/check-envoy-infra-release-paths.sh` derives
-  that set from `go list -deps` of every command under `cmd/` for every target and fails naming
-  each path and list that misses it.
+  install. A version is cut only from what the plugin and the command build from: the workflow's
+  version step lists, with `go list -deps ./cmd/...` for each target, the directories of the
+  workspace's modules either compiles in, and adds those modules' `go.mod` and `go.sum`, the
+  `go.work` files, the notices script and the target list. A commit to the module's README,
+  AGENTS.md or live-test harness cuts none. The workflow's push paths take all of
+  `packages/envoy/**`, so a package either starts compiling in needs no list edited.
+- **Release jobs.** The workflow's `build` job (`contents: read`, no secret) runs everything that
+  runs the module's code or its dependencies: the version step's `go list`, vet, the unit tests,
+  the builds of both commands and their smoke tests. It hands `publish` the archives as an artifact
+  and the version as job outputs. `publish` holds the write scopes, the OIDC token and the deploy
+  key, and runs only the pinned actions and `release-push.sh`. A step that runs Go, the Pulumi CLI
+  or either command goes in `build`, never in `publish`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
@@ -121,7 +127,7 @@ JSON 1.1 and STS's query protocol, which fails a test on any request it does not
 (`seed/awsstore_test.go`), and the command built as the release job stamps it, for its
 `--version` (`cmd/envoy-infra/main_test.go`). The tests that start nats-server containers on this
 machine's Docker through `testnats` carry the `natslive` build tag, so a plain `go test ./...`, as
-a release job runs it, starts none: `core/nats_auth_live_test.go` (the rendered authorization on a
+the release job runs it, starts none: `core/nats_auth_live_test.go` (the rendered authorization on a
 real server: its users connect, a client with no credential is refused, the grants hold) and
 `seed/seed_live_test.go` (a generated seed connects, and a client without it is refused), each on
 `testnats.Image` and `testnats.HubImage`. The `envoy-infra-go` job in
@@ -134,10 +140,9 @@ go test ./...
 go test -tags natslive ./core/ ./seed/
 ```
 
-The required `lint` job of `.github/workflows/pr-and-main.yaml` runs the release path check and
-compiles the module's commands for every release target; its `test` job runs the check's own
-tests, `.github/scripts/check-envoy-infra-release-paths.test.sh`. Run those steps from those jobs
-after changing what they cover.
+The release job runs vet and the unit tests again before it builds. The required `lint` job of
+`.github/workflows/pr-and-main.yaml` compiles the module's commands for every release target. Run
+those steps from those jobs after changing what they cover.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit

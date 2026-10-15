@@ -17,6 +17,9 @@ a build provenance attestation for every archive.
 
 ### The plugin
 
+Pulumi CLI 3.257.0 or later; the plugin is tested with 3.268.0. `pulumi package add` takes
+`--server` from 3.256.0 on, and keeps it in `Pulumi.yaml` from 3.257.0 on.
+
 The plugin runs on the machine that runs `pulumi`, and logs in to the Docker hosts it deploys to, so
 verify an archive before installing it. Each release's archives carry build provenance from
 `.github/workflows/release-envoy-infra.yaml` on `main`; `--repo` alone would accept an attestation
@@ -182,6 +185,8 @@ The listener refuses these before it registers anything, with an error naming wh
 - a `watchdog.host` containing `@` or `://`;
 - `watchdog` on a listener whose name contains `"`, `$`, a backtick, `\` or a line break, since the
   watchdog's script echoes the name in double quotes;
+- `adopt.watchdog` without `watchdog`, since nothing would take the old command over and the
+  update would delete it;
 - a missing provider (see [Providers](#providers)).
 
 `natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when

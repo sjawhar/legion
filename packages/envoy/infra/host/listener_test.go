@@ -344,6 +344,13 @@ func TestListenerRefusesInvalidInputs(t *testing.T) {
 			err:  []string{"watchdog.host", `"agent@example-host-a"`},
 		},
 		{
+			name: "adopt.watchdog without a watchdog",
+			edit: func(a *host.ListenerArgs) {
+				a.Adopt = &host.AdoptArgs{Watchdog: pulumi.StringRef("example-host-a-watchdog")}
+			},
+			err: []string{`adopt.watchdog names "example-host-a-watchdog", but watchdog is not set`},
+		},
+		{
 			name: "port 0",
 			edit: func(a *host.ListenerArgs) { a.Port = pulumi.IntRef(0) },
 			err:  []string{"port 0 is outside 1-65535"},

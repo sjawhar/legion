@@ -280,10 +280,10 @@ its header comment updated, and report that this cuts patch releases of `legion`
 - [ ] **Step 6: CI job.** Add `envoy-infra-go` to `envoy-and-contracts.yaml`, gated on the
 existing `envoy` filter, modelled on `envoy-go` (`:744-811`): SHA-pinned checkout and setup-go
 (`go-version-file: packages/envoy/infra/go.mod`, `cache-dependency-path: packages/envoy/infra/go.sum`),
-`TESTCONTAINERS_RYUK_DISABLED: "true"`, the NATS image pre-pull reading
-`packages/envoy/internal/testnats/nats.go`'s `const Image` (Task 2.1 adds `const HubImage` to it),
-then in `packages/envoy/infra`: `test -z "$(gofmt -l .)"`, `go vet -tags pulumilive,natslive ./...`,
-`go test ./...`. The workflow
+then in `packages/envoy/infra`: `test -z "$(gofmt -l .)"`, `go vet -tags pulumilive ./...`,
+`go test ./...`. Slice 1 starts no container in this job, so `TESTCONTAINERS_RYUK_DISABLED: "true"`,
+the NATS image pre-pull reading `packages/envoy/internal/testnats/nats.go`'s `const Image` and the
+`natslive` vet tag arrive with slice 2, whose tests start NATS. The workflow
 has no aggregate job (verified), so nothing else lists it.
 
 - [ ] **Step 7: correct the spec** (R1, R2). Replace "nested under `packages/envoy` and added to
@@ -301,7 +301,8 @@ listen host, seed and webhooks" with "the remote-NATS opt-in, port, host bridge 
 
 **Files:**
 - Create: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`
-- Modify: `packages/envoy/internal/bus/reach.go` (export `LocalNATSURL`)
+- Modify: `packages/envoy/internal/bus/reach.go` (export `LocalNATSURL`) and `nkey.go` (export
+  `NkeySeedEnvVar`, the seed variable's name, which `core.EnvNATSSeed` reuses)
 
 **Interfaces:**
 - Produces:
@@ -310,14 +311,14 @@ listen host, seed and webhooks" with "the remote-NATS opt-in, port, host bridge 
 type ListenerConfig struct {
 	MachineID  string
 	NATSURLs   []string
-	Port       int    // 0 means 9020
+	Port       int    // required: 1-65535; the component passes core.DefaultListenerPort (9020) when its input is unset
 	HostBridge string // "" leaves ENVOY_HOST_BRIDGE unset
 }
 
 // ListenerEnv returns the listener's non-secret environment, KEY=value, in a fixed order.
 func ListenerEnv(c ListenerConfig) ([]string, error)
 
-const EnvNATSSeed = "NATS_NKEY_SEED" // its value is a secret; the component appends it
+const EnvNATSSeed = bus.NkeySeedEnvVar // "NATS_NKEY_SEED"; its value is a secret; the component appends it
 ```
 
 The contract implemented is the listener's own: `packages/envoy/internal/config/config.go:23-63`
@@ -511,8 +512,9 @@ pins) passed in `options.providers`:
 v3.268.0 from `https://get.pulumi.com/releases/sdk/pulumi-v3.268.0-linux-x64.tar.gz`, verifying
 SHA-256 `903cafeaa9f6327e4bf53a8b7b99ae660f26198acfa804a2f982bf5de3f1de0b` before extracting;
 download `pulumi-resource-docker-v4.11.0-linux-amd64.tar.gz` from pulumi-docker's v4.11.0 release,
-verify it against the SHA-256 in that release's checksums file (written into the workflow as a
-literal), and set `ENVOY_INFRA_DOCKER_PLUGIN` to that tarball: the live harness installs it into
+verify it against the SHA-256 GitHub records for that release asset (written into the workflow as
+a literal; the release's checksums file lists only SHA-1, which the workflow's comment cross-checks),
+and set `ENVOY_INFRA_DOCKER_PLUGIN` to that tarball: the live harness installs it into
 a temporary `PULUMI_HOME` of its own per test binary, and fails naming the variable when it is
 unset. Then in `packages/envoy/infra`: `go test -tags pulumilive -v -timeout 15m ./host/`, and
 `go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra && pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'`.
@@ -1373,7 +1375,7 @@ Items to verify, each with the row that settles it and where its result goes:
 | E6. Rendered authorization admits and refuses as designed, on 2.10 and on the hub image, and matches the reference renderer's goldens byte for byte | 2 | infrastructure | real nats-server containers | CI runner | Task 2.1 |
 | E7. The listener reaches "healthy" under `HostPermissions`, and a session under the same user receives | 4 | infrastructure | real nats-server and this branch's listener binary | CI runner | Task 4.1 live test |
 | E8. Seed generate and verify against Secret Manager; a generated seed connects | 2, 4 | infrastructure | in-repo fake stores and real nats-server (Tasks 2.2, 4.2); Secret Manager in the first GCP deployment | that deployment's operator | Tasks 2.2, 4.2, 4.4 |
-| E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by Jason or Rajashree, and Sami's tailnet, policy and OAuth-client steps | Task 4.4 |
+| E9. `gcp:NatsHub` serves NATS over the tailnet, admits a seeded client, refuses one without, keeps its tailnet identity and stream across `recreate-instances` | 4 | infrastructure | the first GCP deployment, applied from the branch's plugin | its operator; prerequisites: the project's billing linked by the organization's billing administrator, and the operator's tailnet, policy and OAuth-client steps | Task 4.4 |
 | E10. The CLI checks and verifies the existing AWS deployment's live seed read-only, printing the reference script's lines | 2 | infrastructure | that deployment's staging Secrets Manager, from the devbox, with the branch-built CLI | the devbox's `staging` profile (`--expect-account` refuses any other) | Task 2.3 |
 | E11. The existing AWS deployment's staging, production and dispatch previews create, update, replace or delete no cloud resource, with only state-only creates (component and provider resources) and outputs unchanged | 3 | infrastructure | that deployment's own stacks and backend, from the devbox, with this branch's plugin by path | the devbox's `staging` profile for staging, its instance identity for production and dispatch | Task 3.3; the deployment's own plan |
 
@@ -1404,6 +1406,10 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
 
 - `bus.localNATSURL` → `bus.LocalNATSURL`: `git grep -n localNATSURL -- packages/` → `reach.go:38,46,50`
   only. Rename, behaviour unchanged.
+- The seed variable's name is exported as `bus.NkeySeedEnvVar` (`"NATS_NKEY_SEED"`), which
+  `core.EnvNATSSeed` reuses: `git grep -n NkeySeedEnvVar` → `bus/nkey.go` (the constant and its three
+  uses, which spelled the literal before) and `infra/core/listener_env.go`. Value unchanged. Rollout:
+  immediate.
 - The listener's durable and queue names move into `bus.ListenerDurable`/`ListenerQueue`:
   `git grep -n -e '"listener-"' -e '"envoy-listener-"' -- packages/envoy` → `cmd/listener/main.go:531,634`
   (now call the functions) and the tests `main_test.go:2260,2277`, `reconnect_shutdown_test.go:158`,

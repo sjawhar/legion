@@ -76,7 +76,7 @@ Sami, 2026-10-13 and 2026-10-14:
 Every component creates its resources with the providers the consumer passes in (the `providers`
 resource option), never with default providers of the plugin's own versions.
 
-**Release**: `release.yaml` builds the plugin per OS and architecture from
+**Release**: a workflow of its own, `release-envoy-infra.yaml`, builds the plugin per OS and architecture from
 `.github/envoy-infra-targets.json` (a file of its own, since the shared targets file is a release
 input of the other Go binaries) and attaches it to a GitHub release tagged
 `envoy-infra-v<version>`, with assets named `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz`.

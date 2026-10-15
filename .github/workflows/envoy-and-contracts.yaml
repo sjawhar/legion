@@ -862,8 +862,7 @@ jobs:
   # workspace. Vet compiles the files behind the live-test tags (pulumilive, natslive) too. The unit
   # tests start no container; the natslive files run in a step of their own against real
   # nats-server, on testnats.Image and testnats.HubImage, pulled first for the reason envoy-go's own
-  # pull step gives. The release path check and the per-target compile run in pr-and-main.yaml's
-  # required lint job.
+  # pull step gives. The per-target compile runs in pr-and-main.yaml's required lint job.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
