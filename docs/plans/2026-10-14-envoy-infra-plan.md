@@ -1615,8 +1615,9 @@ and five units, built from one ordered list that also drives `runcmd`'s starts (
 `/mnt/disks/data/tailnet-joined`); `tailscaled` (the `docker run` of `tailscaleImage` with
 `TS_AUTHKEY=file:…`, `TS_AUTH_ONCE=true`, `TS_STATE_DIR` on the disk, kernel networking,
 `TS_HOSTNAME` and `--advertise-tags`; `Wants`, not `Requires`, the fetch); `tailnet-joined` (a
-simple service that, once `tailscale status --json` reports `Running`, writes the marker and
-empties the key file, so no later boot fetches the key; tailscaled's own state file exists before
+simple service that, once `tailscale status --json` reports `Running`, empties the key file and,
+only once that has succeeded, writes the marker, so no later boot fetches the key, and is run
+again 10 seconds after a failed run; tailscaled's own state file exists before
 login, so it cannot serve as the marker); `nats-firewall` (oneshot, adding with the host's
 iptables, each unless present, `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT`
 and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT`, the second because tailscaled's own accept
@@ -1669,8 +1670,8 @@ Items to verify, each with the row that settles it and where its result goes:
   first command on the VM is `iptables -V`; under nft, 8222 is not reachable over the tailnet,
   since only Tailscale's own rule would open it (E9; same).
 - `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` reporting
-  `Running` on COS once the node has joined, so `tailnet-joined` writes its marker and drops the
-  key (E9; same).
+  `Running` on COS once the node has joined, so `tailnet-joined` drops the key and writes its
+  marker (E9; same).
 - A v4 docker provider diffing unset v5-only inputs (E3 in CI, E4 on the existing deployment).
 - The GCP seed store against the real Secret Manager: `versions/latest` names a DISABLED or
   DESTROYED newest version; `GetSecretVersion` on `latest` answers NOT_FOUND with no versions; an

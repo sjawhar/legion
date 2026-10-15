@@ -2,7 +2,6 @@ package gcp_test
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,35 +30,59 @@ type joinedRun struct {
 	marker, key    string
 }
 
-func runJoined(t *testing.T, states ...string) joinedRun {
+// joinedHarness is the golden's joined script with docker and sleep stubbed, a data disk directory
+// for the marker and a key file, which persist across the runs of one test, as across boots.
+type joinedHarness struct {
+	script, bin, logs string
+	marker, key       string
+}
+
+func newJoinedHarness(t *testing.T) *joinedHarness {
 	t.Helper()
 	var doc gcp.CloudConfig
 	require.NoError(t, yamlUnmarshalGolden(t, &doc))
-	script := filepath.Join(t.TempDir(), "tailnet-joined")
-	require.NoError(t, os.WriteFile(script, []byte(fileOf(t, doc, "/etc/envoy/tailnet-joined")), 0o700))
-	bin := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(bin, "docker"), []byte(dockerStub), 0o700))
-	require.NoError(t, os.WriteFile(filepath.Join(bin, "sleep"), []byte(sleepStub), 0o700))
-	logs := t.TempDir()
-	disk := t.TempDir()
-	run := joinedRun{marker: filepath.Join(disk, "tailnet-joined"), key: filepath.Join(t.TempDir(), "tailnet-auth-key")}
-	require.NoError(t, os.WriteFile(run.key, []byte(authKey), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(logs, "docker"), nil, 0o600))
+	h := &joinedHarness{
+		script: filepath.Join(t.TempDir(), "tailnet-joined"),
+		bin:    t.TempDir(),
+		logs:   t.TempDir(),
+		marker: filepath.Join(t.TempDir(), "tailnet-joined"),
+		key:    filepath.Join(t.TempDir(), "tailnet-auth-key"),
+	}
+	require.NoError(t, os.WriteFile(h.script, []byte(fileOf(t, doc, "/etc/envoy/tailnet-joined")), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(h.bin, "docker"), []byte(dockerStub), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(h.bin, "sleep"), []byte(sleepStub), 0o700))
+	require.NoError(t, os.WriteFile(h.key, []byte(authKey), 0o600))
+	return h
+}
 
-	cmd := exec.Command("/bin/sh", script, run.marker, run.key)
+// run runs the script once, as one boot's tailnet-joined.service does, with docker answering the
+// states given, and returns what it printed and its error.
+func (h *joinedHarness) run(t *testing.T, states ...string) (string, error) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(h.logs, "docker"), nil, 0o600))
+	require.NoError(t, os.RemoveAll(filepath.Join(h.logs, "sleeps")))
+	cmd := shellCommand(t, h.script, h.marker, h.key)
 	cmd.Env = []string{
-		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
-		"DOCKER_LOG=" + filepath.Join(logs, "docker"),
-		"SLEEP_LOG=" + filepath.Join(logs, "sleeps"),
+		"PATH=" + h.bin + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"DOCKER_LOG=" + filepath.Join(h.logs, "docker"),
+		"SLEEP_LOG=" + filepath.Join(h.logs, "sleeps"),
 		"STATES=" + strings.Join(states, " "),
 	}
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, string(out))
-	require.Empty(t, string(out), "the script prints nothing")
-	docker, err := os.ReadFile(filepath.Join(logs, "docker"))
+	return string(out), err
+}
+
+func runJoined(t *testing.T, states ...string) joinedRun {
+	t.Helper()
+	h := newJoinedHarness(t)
+	out, err := h.run(t, states...)
+	require.NoError(t, err, out)
+	require.Empty(t, out, "the script prints nothing")
+	run := joinedRun{marker: h.marker, key: h.key}
+	docker, err := os.ReadFile(filepath.Join(h.logs, "docker"))
 	require.NoError(t, err)
 	run.docker = strings.Split(strings.TrimSuffix(string(docker), "\n"), "\n")
-	if sleeps, err := os.ReadFile(filepath.Join(logs, "sleeps")); err == nil {
+	if sleeps, err := os.ReadFile(filepath.Join(h.logs, "sleeps")); err == nil {
 		run.sleeps = strings.Fields(string(sleeps))
 	}
 	return run
@@ -94,6 +117,31 @@ func TestTailnetJoinedAtOnceWhenTheNodeRuns(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// The key is dropped before the marker is written, so a drop that fails leaves no marker: the
+// script exits non-zero without one, its unit runs it again 10 seconds later, and every later
+// boot fetches and drops the key again until a drop succeeds. Here the key file cannot be emptied
+// (its path is a directory, which refuses the truncation whoever runs the script); the next run,
+// as the next boot, finds a key file it can empty and writes the marker.
+func TestTailnetJoinedWritesNoMarkerWhenTheKeyCannotBeDropped(t *testing.T) {
+	h := newJoinedHarness(t)
+	require.NoError(t, os.Remove(h.key))
+	require.NoError(t, os.Mkdir(h.key, 0o700))
+	out, err := h.run(t, "Running")
+	require.Error(t, err, "a failed drop is a failed run, which its unit retries")
+	_, statErr := os.Stat(h.marker)
+	require.ErrorIs(t, statErr, os.ErrNotExist, "no marker, so the next boot fetches and drops the key again: %s", out)
+
+	require.NoError(t, os.Remove(h.key))
+	require.NoError(t, os.WriteFile(h.key, []byte(authKey), 0o600))
+	out, err = h.run(t, "Running")
+	require.NoError(t, err, out)
+	_, statErr = os.Stat(h.marker)
+	require.NoError(t, statErr, "the next run writes the marker")
+	key, err := os.ReadFile(h.key)
+	require.NoError(t, err)
+	require.Empty(t, key, "and has dropped the key first")
+}
+
 // The fetch is skipped at every boot after the marker is written, and runs only on a mounted data
 // disk, where the marker is; tailnet-joined starts after tailscaled and watches for the marker's
 // absence too.
@@ -110,6 +158,7 @@ func TestCloudConfigFetchesTheKeyOnlyUntilTheHubHasJoined(t *testing.T) {
 	require.Contains(t, joined, "\nAssertPathIsMountPoint=/mnt/disks/data\n")
 	require.Contains(t, joined, "\nExecStart=/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key\n")
 	require.Contains(t, joined, "\nType=simple\n", "its start returns at once, so runcmd goes on to NATS")
+	require.Contains(t, joined, "\nRestart=on-failure\nRestartSec=10\n", "a failed key drop is tried again this boot")
 
 	started := strings.Join(doc.Runcmd, "\n")
 	require.Less(t, strings.Index(started, "start tailscaled.service"), strings.Index(started, "start tailnet-joined.service"))

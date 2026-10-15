@@ -74,7 +74,7 @@ write_files:
         jq -e '.BackendState == "Running"' >/dev/null; do
         sleep 5
       done
-      touch "$marker" && : >"$key"
+      : >"$key" && touch "$marker"
   - path: /etc/systemd/system/fetch-tailnet-key.service
     permissions: "0644"
     content: |
@@ -119,6 +119,8 @@ write_files:
       Type=simple
       RemainAfterExit=yes
       ExecStart=/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key
+      Restart=on-failure
+      RestartSec=10
   - path: /etc/systemd/system/nats-firewall.service
     permissions: "0644"
     content: |

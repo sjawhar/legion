@@ -139,7 +139,7 @@ They are started and never enabled, since `/etc` does not outlive the boot.
 | --- | --- |
 | `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
 | `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It wants the fetch and starts after it ends, but does not require it. |
-| `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it writes the marker and empties the key file, which stays for the container's bind mount. A simple service, so its start returns at once. |
+| `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it empties the key file, which stays for the container's bind mount, and only once that has succeeded writes the marker. A simple service, so its start returns at once; a run that fails, as one whose key drop fails does, is run again 10 seconds later. |
 | `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
 
@@ -182,8 +182,10 @@ Keeping the tailnet state there is what lets a recreated VM rejoin the tailnet a
 under the same name, without logging in again. With `TS_AUTH_ONCE=true`, containerboot logs in
 with `TS_AUTHKEY` only when the state holds no login (tailscale v1.104.1
 `cmd/containerboot/main.go:583-682`), so the VM logs in with `tailnetAuthKey` at its first boot
-alone. Once the node runs, `tailnet-joined` writes `/mnt/disks/data/tailnet-joined` and empties the
-key file, and no later boot fetches the key: it is on the VM no longer than the first login needs.
+alone. Once the node runs, `tailnet-joined` empties the key file, then writes
+`/mnt/disks/data/tailnet-joined`, and no later boot fetches the key: it is on the VM no longer
+than the first login needs. A drop that fails writes no marker, so the unit tries again this boot
+and every later boot fetches and drops the key again until a drop succeeds.
 The marker is not tailscaled's own state file, which tailscaled writes before it logs in (tailscale
 v1.104.1 `ipn/ipnlocal/local.go:3185-3190`), so a first boot whose login failed fetches the key
 again. The same is why `tailscaled.service` does not require the fetch: on a later boot the key file
@@ -252,7 +254,7 @@ its first `pulumi up`:
 - `/dev/net/tun` exists on COS without `modprobe`, so the Tailscale container starts.
 - `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` answers on COS
   with Tailscale v1.104.1's image, and reports `"BackendState": "Running"` once the node has
-  joined, so `tailnet-joined` writes its marker and empties the key file.
+  joined, so `tailnet-joined` empties the key file and writes its marker.
 - The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and a new persistent
   disk's first MiB reads as zeros, so the first boot formats it; `fsck.ext4` runs on COS as its
   documentation shows; and after `gcloud compute instance-groups managed recreate-instances` the

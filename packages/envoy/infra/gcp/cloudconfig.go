@@ -214,10 +214,12 @@ func (v vm) fetchKeyUnit() string {
 
 // joinedScript waits, by /bin/sh, until the Tailscale container reports the node Running, asking
 // every 5 seconds through containerboot's socket (TS_SOCKET's default, tailscale v1.104.1
-// cmd/containerboot/settings.go:125), then writes the marker it is given and empties the key file,
-// keeping the file itself, which tailscaled's container binds. A node that has joined logs in
-// from its state on the data disk at every later boot (TS_AUTH_ONCE), so the key is on the VM no
-// longer than the first login needs. tailscaled writes its state file before it logs in (tailscale
+// cmd/containerboot/settings.go:125), then empties the key file, keeping the file itself, which
+// tailscaled's container binds, and only once that has succeeded writes the marker it is given. A
+// node that has joined logs in from its state on the data disk at every later boot (TS_AUTH_ONCE),
+// so the key is on the VM no longer than the first login needs. A drop that fails writes no marker
+// and exits non-zero: its unit runs the script again, and every later boot fetches and drops the
+// key again until a drop succeeds. tailscaled writes its state file before it logs in (tailscale
 // v1.104.1 ipn/ipnlocal/local.go:3185-3190, 4496-4526), so the file's existence does not mean the
 // node has joined: hence the marker.
 const joinedScript = `#!/bin/sh
@@ -229,12 +231,13 @@ until docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --js
   jq -e '.BackendState == "Running"' >/dev/null; do
   sleep 5
 done
-touch "$marker" && : >"$key"
+: >"$key" && touch "$marker"
 `
 
 // joinedUnit runs the joined script once tailscaled has started, until the node has joined, on a
 // mounted data disk that holds no marker yet. It is a simple service, so its start returns at once
-// and runcmd goes on to NATS, and it stays active once the script exits.
+// and runcmd goes on to NATS, and it stays active once the script exits. A run that fails, as one
+// whose key drop fails does, is run again 10 seconds later.
 func joinedUnit() string {
 	return unit(
 		"[Unit]",
@@ -248,6 +251,8 @@ func joinedUnit() string {
 		"Type=simple",
 		"RemainAfterExit=yes",
 		"ExecStart="+joinedPath+" "+joinedMarker+" "+keyPath,
+		"Restart=on-failure",
+		"RestartSec=10",
 	)
 }
 

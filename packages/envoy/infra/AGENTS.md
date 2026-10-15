@@ -228,7 +228,10 @@ under `/bin/sh` with `docker` and `sleep` stubbed (`gcp/tailnet_joined_test.go`,
 `jq`), the data disk's format and mount entries under `/bin/sh` against blank, ext4, damaged and
 missing disk images, with `mkfs.ext4`, `fsck.ext4` and `mount` stubbed (`gcp/data_disk_test.go`,
 which needs util-linux's `blkid` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
-skips, without one), the seed command against a fake `Store` (`seed/seed_test.go`), the AWS SDK
+skips, without one), each under `/bin/sh` or the shell `ENVOY_TEST_SHELL` names, as `bash` or
+`busybox sh` (`gcp/shell_test.go`; busybox's shell runs its own `sleep`, `cmp` and `mount` ahead of
+`PATH`, so rows that stub those fail under it), the seed command against a fake `Store`
+(`seed/seed_test.go`), the AWS SDK
 against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which
 fails a test on any request it does not expect (`seed/awsfake_test.go`, the store's tests in
 `seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over TLS
