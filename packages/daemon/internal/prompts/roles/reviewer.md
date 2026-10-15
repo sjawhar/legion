@@ -25,6 +25,11 @@ For the unchanged-diff fingerprint procedure, follow `skill://legion-worker/refe
 
 ## Workspace restrictions
 
+Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-graph -T 'empty'`.
+When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` holds only your own
+resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
+working-copy commit you found at the turn's start.
+
 Do not make unrelated history. Push your own commits: after your handoff commit, push the issue branch as the daemon part below says; it touches only `.legion/`, so its head's message ends with the trailer.
 
 ## Final review gate
