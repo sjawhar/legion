@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T20:46:35Z",
+  "completed": "2026-10-15T21:42:06Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "headSha": "b260042886232813edbe84fba6ce2a8205fcc937",
-  "ci": "Tests run 38802597920 (lint, typecheck, test success) and PR Title success at b260042886232813edbe84fba6ce2a8205fcc937; the branch head 1c50ba5e is the round-4 implement handoff alone (skip-checks)",
+  "headSha": "247c104ed24763579f037a47326ac67f85ccd5e4",
+  "ci": "Tests run 38809967155 (lint, typecheck, test success) and PR Title run 38811227924 success at 247c104ed24763579f037a47326ac67f85ccd5e4; the branch head a6fbc223 is the round-5 implement handoff alone (skip-checks)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 4 (the review's reopened Critical and Important): the implementer's push-main shapes re-driven on my own bare-origin rig (/tmp/pt/rig4.sh; a two-commit seed, src/guard.js as a canary, a pre-receive hook logging every ref): shape A (a manifest-only branch commit at the release version carrying scripts.postinstall) → `HEAD's packages/pkg/package.json differs from main's in more than .version = 1.0.1`, hook log empty, planted text in no output; A′ (the exact bump) lands; shape B (a merge commit, first parent an older main commit) → `has 2 parents; the version-bump commit has one`, src/guard.js intact. Its two checker mutations (job-level continue-on-error; defaults.run.shell: 'cat {0}') re-applied to copies of the real release.yaml → each exit 1 as reported. Harness totals re-run here (162 and 281) and CI run 38802597920 green. Rounds 1–3 stand (the `version` arm is byte-identical to round 3's; the workflows are unchanged since round 3)."
+    "how": "Round 5: the implementer's `# keep the toolchain pinned \\` + `bun install` mutation re-applied (raw, backslash kept) to a copy of the real release.yaml → `step 'Helper' runs 'bun'` at this head, where the same shape passed green at b2600428; bash's reading confirmed (`printf '# c \\\\\\necho RAN\\n' | bash` prints RAN; `printf x \\\\` then a line runs that line). Its case 2g (a doctored shape-A commit on an older main commit) and the held variant (main already past the version) re-driven on my own bare-origin rig: both `::error::HEAD's packages/pkg/package.json differs from its parent's in more than .version = …` on attempt 1, no rebase, hook log empty; the clean bump on the same base still rebases and lands or takes the superseded exit. Harness totals re-run here (165 and 299) and CI run 38809967155 green. Rounds 1–4 stand (the `version` arm and the workflows unchanged since round 3)."
   },
   "failures": [],
   "failed": 0,
@@ -18,9 +18,26 @@
     "observed": "Results: 75 passed, 15 failed (the five new cases; every pre-existing case passes). A throwaway prototype of the fix in /tmp (npm allow-list {view, publish}; bash/sh/source/. skipped like exec; shell: read as a command; a DEPLOY_KEY regex covering the index form; a build job with no permissions anywhere refused) makes all 90 checks pass and still accepts the three real workflows (7 credentialed, 8 build jobs), so the red cases ask for no change to the workflows.",
     "round2": "The five red cases of 8617f1d8 pass at 8b299ab3 (harness 101 passed, 0 failed); the implementer appended three cases (another secret and the whole secrets context in a build job; docker run with imagetools/login/buildx version allowed; Actions/Checkout without persist-credentials).",
     "round3": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 135 passed, 0 failed, 49 cases).",
-    "round4": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 162 passed, 0 failed, 57 cases)."
+    "round4": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 162 passed, 0 failed, 57 cases).",
+    "round5": "No new red test. The five red cases of 8617f1d8 still pass (harness 165 passed, 0 failed, 58 cases)."
   },
   "proof": [
+    {
+      "criterion": "Done when, bullet 5 (round 5, the review's Important): the checker's tokeniser strips comments before joining continuations and joins only an unescaped trailing backslash, so a comment's trailing backslash (or an escaped one) cannot hide the next line's command from the credentialed-job rule.",
+      "surface": "The checker over mutated copies of the real .github/workflows/release.yaml (/tmp/mut/probes5.sh, the mutation text passed as raw Python strings so the backslashes reach the YAML) and over the real three; bash itself for the ground truth of each shape.",
+      "command": "bash /tmp/mut/probes5.sh; printf '# c \\\\\\necho RAN\\n' | bash; printf 'printf x \\\\\\\\\\necho RAN\\n' | bash; .github/scripts/check-release-credentials.sh; .github/scripts/check-release-credentials.test.sh",
+      "observed": "`# keep the toolchain pinned \\` then `bun install --frozen-lockfile` in a legion_publish step → `step 'Helper' runs 'bun'`, exit 1 (bash prints RAN for the comment-backslash shape: the comment ends at the newline); `printf x \\\\` then `bun install` → `runs 'bun'` (bash prints `x` then runs the next line); `bun \\` continued onto `install` → `runs 'bun'` (the real join); `#bun install` at a line's start → a comment, green; `echo \"#\" \\` continued onto `&& bun install` → named; `echo \"a\" # c \\` then `bun install` → named; a `scripts/foo.sh` on a continued argument line under a comment line → green. Earlier probe sets re-run: 22/22, 14/14, 18/18, 13/13 (plus the two probes whose own quoting is broken, each proven caught on a correct run). Real workflows: `7 credentialed job(s) and 8 build job(s)`. Harness: 165 passed, 58 cases.",
+      "headSha": "247c104ed24763579f037a47326ac67f85ccd5e4",
+      "negativeControl": "The `# … \\` + `bun install` shape passed the checker green at the previous head b2600428 (the review's reproduction) and is named here; the real continuation and the continued argument line behave as before."
+    },
+    {
+      "criterion": "Done when, bullets 3 and 6 (round 5, the review's minors): `push-main` checks the bump's paths and manifest content against HEAD's own parent before any push, rebase or superseded-version exit, so a doctored commit on an older main commit is refused rather than dropped, and the refusal says what is enforced.",
+      "surface": "The bare origin of /tmp/pt/rig4.sh (two-commit seed, src/guard.js canary, a pre-receive hook logging every ref) re-run whole, then clones detached three commits behind main's tip for the parent-side shapes.",
+      "command": "bash /tmp/pt/rig4.sh; then push-main on clones at HEAD~3: a doctored manifest (postinstall) at 1.0.8 (N1), the same at 1.0.2 while main holds 1.0.7 (N2), a clean bump at 1.0.2 (N3), a clean bump at 1.0.8 (N4); a bump that adds packages/new/package.json (N5)",
+      "observed": "N1: `::error::HEAD's packages/pkg/package.json differs from its parent's in more than .version = 1.0.8. push-main pushes the one version-bump commit, which changes only packages/pkg/package.json, onto main's tip: its parent's packages/pkg/package.json with .version set to v1.0.8 and nothing else, as JSON…`, rc 1, summary written, hook log empty, no rebase attempted. N2 (the held variant): the same refusal, rc 1 — at b2600428 this shape took the superseded exit with rc 0. N3: `::notice title=Version bump not pushed::… holds v1.0.7, a later release than v1.0.2, so this version bump is superseded.`, rc 0, nothing pushed. N4: rebased, `Resolving the … version-line conflict to v1.0.8`, landed, main's manifest 1.0.8. N5: `::error::packages/new/package.json is missing at HEAD's parent …, so HEAD adds it rather than bumping it`, hook empty. The 16 round-4 scenarios (A, A2, A3, A4, B, F, G, G2, H, A′, C, J, C2, D, E, I) behave as in round 4, the refusals now ending in the enforced-rule sentence. TMPDIR empty after every case; the planted text and the key's text in no output.",
+      "headSha": "247c104ed24763579f037a47326ac67f85ccd5e4",
+      "negativeControl": "N2 versus N3 on the same base and version: the doctored manifest is refused (rc 1) where the clean bump is dropped with the superseded notice (rc 0) — the refusal is the content, not the base or the version."
+    },
     {
       "criterion": "Done when, bullets 3 and 6 (round 4, the review's reopened Critical): `push-main` pushes exactly the one version-bump commit — one parent that is main's fetched tip, a tree differing from main's in the manifest alone, the manifest differing in `.version` alone — so a workflow_dispatch from a branch lands nothing but that exact bump, and every read in the arm fails through `fail_outstanding`.",
       "surface": "A bare origin at /tmp/pt/w4/origin.git with a two-commit seed (main's tip has a parent), `src/guard.js` as a canary, a pre-receive hook appending `push: <ref> <sha>` for every ref that reaches it; clones detached at origin/main (and at older main commits); a throwaway ed25519 key as DEPLOY_KEY; url.insteadOf mapping the script's SSH URL to the bare origin; a private TMPDIR.",
@@ -119,6 +136,8 @@
     }
   ],
   "notes": [
+    "Round 5 correction to round 4's record: round 4's two backslash probes (`bun \\` + `install`; a continued argument line) were mis-built — Python's string continuation had already joined their lines before the YAML was written, so they exercised one-line commands, not the join. This round's probes pass the text raw; the real continuation is joined and named, the comment-backslash and escaped-backslash shapes are not joined, and the continued argument line is allowed.",
+    "Round 5: no residual gap found in the tokeniser's comment/continuation handling among the seven shapes probed.",
     "Round 4: no residual gap found. A mode-only change to the manifest (executable bit) alongside the exact bump would pass the content rule (`git diff --name-only` lists the file; the JSON is equal) — harmless (a file mode on package.json) and not reproduced here since `jq > tmp && mv` rewrites the mode; noted for completeness.",
     "Round 3: no residual checker gap found among the probes; the header's documented pass-through class is now `xargs`/`nohup` and a variable in command position. The one false-positive class (a `shell:` first word other than bash/sh, e.g. `/bin/bash`, and `npm` with a leading flag) is conservative and absent from the real workflows.",
     "A bash killed by SIGTERM mid-push (a cancelled job) does not run its EXIT trap, so the deploy-key directory would outlive the command on the runner's disk until the ephemeral runner is destroyed; the spec covers exit paths, not signals, and GitHub-hosted runners are ephemeral — noted for completeness.",
@@ -128,7 +147,7 @@
     "Environment: PyYAML (a uv venv), jq 1.7 and openssh-client 10.0 were installed under $HOME/.local for the local runs; the pod image has none of them (the implement handoff recorded the same for its container). The `jq` builtin of the harness shell is jaq; the scripts ran under bash with the real jq first on PATH.",
     "Tests not re-run: lint, typecheck and the unit suites are CI's (cited above); `go version -m` on a cross-built agent-secrets binary and `agent-secrets --version` were not re-measured here (planner's measurement in plan.json specDepartures; first executed on the merge-triggered listener run)."
   ],
-  "round": 4,
+  "round": 5,
   "resolvedFailures": [
     {
       "round": 1,
