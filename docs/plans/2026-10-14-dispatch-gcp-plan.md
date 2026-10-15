@@ -325,11 +325,11 @@ Branch `envoy-bus-socks5` in its own clone (`~/.worktrees/legion/envoy-bus-socks
 ### Task 5.1: `ENVOY_NATS_SOCKS5_PROXY` in `internal/bus`
 
 **Files:**
-- Create: `packages/envoy/internal/bus/socks5.go`, `socks5_test.go`
+- Create: `packages/envoy/internal/bus/socks5.go`, `socks5_test.go`, `socks5_dialer_test.go`
 - Modify: `packages/envoy/internal/bus/nats.go` (`connectOpts`, `connect`, `connectWithContext`,
-  `Dial`, `newClient`, the `Client` struct, and the replacement dial at `:662` in
+  `Dial`, `newClient`, the `Client` struct, and the replacement dial in
   `ensureConnWithContext`), `reach.go` (Finding 12: a set proxy is remote reach),
-  `.github/workflows/envoy-and-contracts.yaml:995` (`./internal/bus/` joins the `envoy-go-race`
+  `.github/workflows/envoy-and-contracts.yaml` (`./internal/bus/` joins the `envoy-go-race`
   job's packages), the two tests
   that call `connectWithContext` with today's arity, `connect_deadline_test.go:22` and
   `stream_config_test.go:103,132` (each gains the new `nil` dialer argument),
@@ -349,20 +349,24 @@ Branch `envoy-bus-socks5` in its own clone (`~/.worktrees/legion/envoy-bus-socks
 const SOCKS5ProxyEnvVar = "ENVOY_NATS_SOCKS5_PROXY"
 
 // socks5Dialer is the nats.CustomDialer a proxied connect installs. Each Dial is bounded by
-// timeout, the bus's connect timeout, since nats.go applies its own only to its default dialer.
-// It records the last error a Dial returned, for the message connectWithContext builds when
-// nats.go reports only ErrNoServers (nats.go discards "connection refused"). The record is safe
-// for concurrent use: nats.go dials from its own reconnect goroutine (nats.go@v1.50.0:3038,
-// doReconnect → createConn) while a later recovery dial on the bus's goroutine reads it.
+// timeout: the bus's connect timeout, or what remains of a connect's deadline when that is shorter
+// (bounded), since nats.go applies a connect's own timeout only to its default dialer. It records
+// the last error a Dial returned, which connectWithContext names when nats.go reports only
+// ErrNoServers (nats.go discards "connection refused"). The record is shared by every copy bounded
+// makes and is safe for concurrent use: nats.go dials from its own reconnect goroutine
+// (nats.go@v1.50.0:3038, doReconnect → createConn), and a client's background recovery and a
+// publish's replacement dial can connect at once, each storing while the other loads.
 type socks5Dialer struct {
 	address string              // the proxy's host:port, for the error that names it
 	proxy   proxy.ContextDialer // golang.org/x/net/proxy.SOCKS5 over a net.Dialer
 	timeout time.Duration
-	lastErr atomic.Pointer[error]
+	lastErr *atomic.Pointer[error]
 }
 
-// Dial connects through the proxy and records the error it returns. Pointer receiver: the
-// record must land on the one dialer every connect of this Client installs, not on a copy.
+// bounded is d with its timeout cut to remaining when that is shorter, sharing d's record.
+func (d *socks5Dialer) bounded(remaining time.Duration) *socks5Dialer
+
+// Dial connects through the proxy and records the error it returns.
 func (d *socks5Dialer) Dial(network, address string) (net.Conn, error)
 
 // LastError is the error the latest Dial returned, or nil.
@@ -372,45 +376,52 @@ func (d *socks5Dialer) LastError() error
 func (d *socks5Dialer) Address() string
 
 // socks5Proxy reads SOCKS5ProxyEnvVar through lookup. Unset is (nil, nil): a direct dial. Set, the
-// value must be host:port (net.SplitHostPort, a non-empty host and port, no scheme); anything else
-// is an error naming the variable, before anything dials. The *socks5Dialer it returns is the one
-// value connectWithContext takes as its dialer, so the connect reads the address and the last
-// error from it and never reads the lookup itself.
+// value must be host:port (CheckSOCKS5Proxy); anything else is an error naming the variable, before
+// anything dials. The *socks5Dialer it returns is the one value connectWithContext takes as its
+// dialer, so the connect reads the address and the last error from it and never reads the lookup
+// itself.
 func socks5Proxy(lookup func(string) (string, bool)) (*socks5Dialer, error)
 ```
 
 `connectWithContext` takes a `dialer *socks5Dialer` after `credential` (a typed nil when no proxy
 is set, never an interface holding a nil pointer); when it is not nil the options get
-`next.CustomDialer = dialer` and `next.SkipHostLookup = true` (R18). `connect`, `Dial`
-and `newClient` read the dialer from the lookup they already read the credential from
-(`nats.go:285-294`, `:319-333`), and `Client` keeps it in a `dialer` field beside `credential`
-(`:107`) for the replacement connection `nats.go:662` dials.
+`next.CustomDialer` and `next.SkipHostLookup = true` (R18). The dialer installed is
+`dialer.bounded(remaining)` when the connect has a deadline, so a proxied attempt ends with it as
+a direct one does. `connect`, `Dial` and `newClient` read the dialer from the lookup they already
+read the credential from, and `Client` keeps it in a `dialer` field beside `credential` for the
+replacement connection `ensureConnWithContext` dials.
 
 Two rules the dialer carries (Findings 4 and 12 of the plan gate):
 
 - **A set proxy is remote reach.** With a proxy, a loopback URL no longer names this machine's
-  server: the proxy chooses the destination. `refuseRemoteNATS` (`reach.go:33-44`) reads only the
-  URL today, and the dev sign-in fence's NATS guard is `ENVOY_ALLOW_REMOTE_NATS` alone
-  (`cmd/dispatch/main.go:634-636`). So `refuseRemoteNATS` also refuses when `SOCKS5ProxyEnvVar` is
-  set and `AllowRemoteEnvVar` is not `"1"`, with an error naming both variables, before anything
-  dials. Every planned deployment already sets `ENVOY_ALLOW_REMOTE_NATS=1`: the pod's Dispatch
+  server: the proxy chooses the destination. `refuseRemoteNATS` (`reach.go`) refuses when
+  `SOCKS5ProxyEnvVar` is set and `AllowRemoteEnvVar` is not `"1"`, with an error naming both
+  variables and not the proxy's value, before anything dials. The dev sign-in fence's NATS guard
+  is `ENVOY_ALLOW_REMOTE_NATS` alone (`cmd/dispatch/main.go:634-636`), so it keeps a proxy out too.
+  Every planned deployment already sets `ENVOY_ALLOW_REMOTE_NATS=1`: the pod's Dispatch
   environment (Task 7.4) and `ListenerEnv` for any non-loopback URL (`core/listener_env.go:67-87`).
-- **A dead proxy is named.** nats.go discards a dial error containing "connection refused" and
-  returns `ErrNoServers` (`nats.go@v1.50.0/nats.go:2705-2716`), and `connectWithContext` returns
-  that last error (`internal/bus/nats.go:254,272`), which names no address. So `*socks5Dialer`
-  records the last error each `Dial` returned in its `atomic.Pointer[error]` (`LastError`), and
-  when a dialer is set and the attempts end in `nats.ErrNoServers`, `connectWithContext` returns
-  an error naming `ENVOY_NATS_SOCKS5_PROXY`, `dialer.Address()` and `dialer.LastError()`. The
-  record is written by nats.go's reconnect goroutine and read by the bus's connect, so the
-  atomic is load-bearing, and the test that reads it (case 3, and case 1's reconnect) runs under
-  the race detector: Task 5.1 adds `./internal/bus/` to the `envoy-go-race` job's package list
-  (`.github/workflows/envoy-and-contracts.yaml:995`, the one step that runs `-race`; `envoy-go`'s
-  `go test ./...` at `:935` does not), with the bus package's ~10 s negative control inside that
-  job's 30-minute package deadline.
+- **A failed proxied connect is named.** Once a dialer is set, a deferred wrap gives every error
+  `connectWithContext` returns the prefix `bus: NATS connect through the SOCKS5 proxy
+  ENVOY_NATS_SOCKS5_PROXY=<address> failed:`, whatever failed: the ten attempts ran out, or the
+  context ended first, as a publish's 5 s replacement dial does. nats.go discards a dial error
+  containing "connection refused" and returns `ErrNoServers` (`nats.go@v1.50.0/nats.go:2705-2716`),
+  which names no address, so when the attempts end in `ErrNoServers` the wrapped error is
+  `dialer.LastError()`. The record is written on the goroutine nats.go dials from and read by
+  another connect on the same dialer, so it is an `atomic.Pointer[error]`, and
+  `TestConnectsSharingADialerRecordItsLastError` runs two connects on one dialer at once under the
+  race detector: Task 5.1 adds `./internal/bus/` to the `envoy-go-race` job's package list (the
+  one step that runs `-race`; `envoy-go`'s `go test` does not). With the record a plain field,
+  that test fails there.
 
-`bus` exports the address check, `func CheckSOCKS5Proxy(value string) error` (a non-empty host
-and port from `net.SplitHostPort`, no scheme), which `socks5Proxy` calls and `core.ListenerConfig.CheckPlain`
-calls too (Task 7.2), so the rule is spelled once.
+`bus` exports the address check, `func CheckSOCKS5Proxy(value string) error`, which `socks5Proxy`
+calls and `core.ListenerConfig.CheckPlain` calls too (Task 7.2), so the rule is spelled once. It
+refuses an empty value, whitespace around the value, a scheme, a value `net.SplitHostPort` cannot
+split, an empty host, an IPv6 address with a zone (every proxy a deployment names is loopback, and
+a zone is free text), a host that is neither an IP address nor a DNS name as Go's resolver reads
+one (labels of 1 to 63 letters, digits, hyphens and underscores, at most 253 bytes, so userinfo, a
+path, whitespace and control bytes are refused), a port that is not a number, and a port outside
+1-65535. Its error says what is wrong and never prints the value, which can carry credentials and
+reaches the process's log.
 
 - [ ] **Step 1: failing tests** in `socks5_test.go`. A `fakeSOCKS5` server in the test: it accepts
   on a loopback port, reads the greeting (`05 <n> <methods>`), answers `05 00`, reads a CONNECT
@@ -435,16 +446,32 @@ calls too (Task 7.2), so the rule is spelled once.
      own address and `fake.connects()` is empty. A second case with no `WithEnvironment` (the
      process environment, `ENVOY_ALLOW_REMOTE_NATS=1` set the same way) goes through the proxy:
      the two together show the lookup, not the process environment, decides.
-  3. `TestADeadProxyFailsTheConnectNamingIt`: `ENVOY_NATS_SOCKS5_PROXY=127.0.0.1:1` (nothing listens;
-     `settings_test.go:449-450` uses the same port for the same reason); `bus.Connect` and `bus.Dial`
-     each return an error whose text contains `ENVOY_NATS_SOCKS5_PROXY`, `127.0.0.1:1` and
-     `connection refused` (the recorded dial error, since nats.go's own result would be the bare
-     `nats: no servers available for connection`, `nats.go@v1.50.0:2705-2716`). Each takes the bus's
-     ten attempts a second apart (`nats.go:219-274`), about 10 s; the test says so in a comment.
-  4. `TestAMalformedProxyIsRefusedBeforeAnyDial`: for `socks5://127.0.0.1:1055`, `127.0.0.1`
-     (no port), `:1055` (no host) and `""` (set but empty), `bus.Connect` fails at once with an
-     error naming `ENVOY_NATS_SOCKS5_PROXY`, and the fake saw no connection. `remote_nats_test.go:148-170`
-     is the pattern for a case that must fail before it dials.
+  3. `TestAFailedConnectThroughAProxyNamesIt`: three proxies, each through `bus.Connect` and
+     `bus.Dial`, every one on loopback: `127.0.0.1:1` (nothing listens; `settings_test.go`'s
+     `localNATS` uses the same port for the same reason), a fake that closes the connection without
+     answering, and a fake that answers the CONNECT `05 04` (host unreachable). Each error contains
+     `ENVOY_NATS_SOCKS5_PROXY` and the proxy's address; the first also `connection refused` (the
+     recorded dial error, since nats.go's own result would be the bare `nats: no servers available
+     for connection`), the third `host unreachable`. Each takes the bus's ten attempts a second
+     apart, about 10 s; the subtests run in parallel.
+  3a. `TestAPublishWhoseDeadlineEndsFirstNamesTheProxy`: a client connected through a fake, whose
+     proxy and connection then go away; `PublishCore`'s replacement dial ends on its 5 s deadline
+     before its ten attempts, and the error is `context.DeadlineExceeded` naming
+     `ENVOY_NATS_SOCKS5_PROXY` and the proxy's address.
+  3b. `TestAProxiedDialEndsAtTheConnectsDeadline` and `TestConnectsSharingADialerRecordItsLastError`
+     (internal, `socks5_dialer_test.go`): a proxy that never answers holds the dial for the
+     connect's one-second deadline, not the 5 s connect timeout; two connects on one dead-proxy
+     dialer at once both name the proxy and `connection refused`.
+  4. `TestAMalformedProxyIsRefusedBeforeAnyDial`: every value `CheckSOCKS5Proxy` refuses (a scheme,
+     no port, no host, `socks`, `+1`, `0`, `65536`, `""`, whitespace around or inside, an IPv6
+     zone, userinfo, a path, a control byte, an empty label, a label or a name too long) fails
+     `bus.Connect` and `bus.Dial` in under a second, naming `ENVOY_NATS_SOCKS5_PROXY`, and the fake
+     saw no connection; an out-of-range port is refused as out of range.
+     `TestAWellFormedProxyIsAccepted` passes IPv4, bracketed IPv6, `localhost`, a trailing dot,
+     leading-zero and highest ports, hyphens and underscores, and the longest label and name.
+     `TestARefusalNeverPrintsTheProxyValue` holds that a value carrying a secret (in userinfo, a
+     URL or an IPv6 zone) appears in no refusal of `Connect`, `ConnectOwningStream` or `Dial`, with
+     or without `ENVOY_ALLOW_REMOTE_NATS=1`.
   5. `TestASetProxyIsRemoteReach` (in `remote_nats_test.go`, beside its cases): a loopback URL with
      `ENVOY_NATS_SOCKS5_PROXY` set and `ENVOY_ALLOW_REMOTE_NATS` unset is refused with
      `bus.ErrRemoteNATS`, the error naming both variables, before any dial (the fake saw nothing),
@@ -471,11 +498,10 @@ calls too (Task 7.2), so the rule is spelled once.
   plugin's workspace (`packages/envoy/infra/go.work`) then needs `golang.org/x/net
   v0.58.0/go.mod`'s checksum, which Envoy's tidied `go.sum` no longer carries, and the go command
   adds it to `packages/envoy/infra/go.work.sum` on the first build there. That daemon `go.mod`
-  line is a release path of the `legion` release and the worker
-  image (`release.yaml` and `worker-image.yaml` trigger on `packages/daemon/**`
-  `[INFERENCE: their path filters are not re-read here; the PR's CI run shows which jobs the
-  change starts]`), so slice 5's PR body says a daemon release with no daemon code change is
-  expected from it.
+  line makes `release.yaml`'s `legion` job cut a `legion-v*` release with no daemon code change:
+  its version step reads commits under `packages/daemon/`, and `release-bump.sh` makes a
+  `feat(…)` subject a minor bump. The worker image is rebuilt either way, since `release.yaml`'s
+  `legion` filter covers `packages/envoy/**`. Slice 5's PR body says so.
 - [ ] **Step 4: pass**: `go test ./internal/bus/` and `go test -race ./internal/bus/` (the
   `envoy-go-race` job's command for the package), `go vet ./...` in `packages/envoy`; from
   `packages/envoy/infra`, `go build ./...` (the plugin compiles `bus`; `golang.org/x/net` stays an
@@ -495,17 +521,19 @@ edit.
 
 - [ ] **Step 1: failing test.** A case `"ENVOY_NATS_SOCKS5_PROXY"` in `TestEverySettingReachesItsReader`
   (`settings_test.go:427-1153`), beside `"ENVOY_ALLOW_REMOTE_NATS"` (`:711-723`): with
-  `"ENVOY_NATS_SOCKS5_PROXY": "socks5://127.0.0.1:1055"`, `natsConnect(values, localNATS)` fails with
-  an error naming `ENVOY_NATS_SOCKS5_PROXY`; with `"ENVOY_ALLOW_REMOTE_NATS": "1"` and the address
+  `"ENVOY_ALLOW_REMOTE_NATS": "1"` and `"ENVOY_NATS_SOCKS5_PROXY": "socks5://127.0.0.1:1055"`,
+  `natsConnect(values, localNATS)` fails with the address check's refusal (`is a URL`, naming
+  `ENVOY_NATS_SOCKS5_PROXY`, not `bus.ErrRemoteNATS`, so the reach refusal cannot pass it in the
+  check's place); with `"ENVOY_ALLOW_REMOTE_NATS": "1"` and the address
   of a refusing SOCKS5 fake (about 30 lines in `cmd/dispatch`'s test package: it reads the
   greeting and the CONNECT, records the request, answers `05 05 00 01 00000000 0000`, connection
   refused, and relays nothing; `bus` exports no test helper), `natsConnect(values, localNATS)`
   fails and the fake recorded at least one request for `127.0.0.1:1` with address type `0x01`
-  (the bus makes ten attempts, `internal/bus/nats.go:219`, so the count is ten over about 10 s,
-  not one): the table's value reached the bus. Until the row exists the case fails in
-  `settingValues.lookup`'s panic (`settings.go:182-188`), which is the test the table is for.
+  (the bus makes ten attempts, so the count is ten over about 10 s, not one): the table's value
+  reached the bus. Until the row exists the case fails in `settingValues.lookup`'s panic
+  (`settings.go:182-188`), which is the test the table is for.
 - [ ] **Step 2: the row**, after `NATS_NKEY_SEED` (`settings.go:71-72`):
-  `{Name: "ENVOY_NATS_SOCKS5_PROXY", Required: "no", Description: "SOCKS5 proxy, as host:port, that every NATS connection Dispatch makes goes through, each server's host name handed to the proxy unresolved; unset, Dispatch dials NATS directly. A deployment that reaches NATS through a tailnet sidecar's SOCKS5 server (tailscaled's TS_SOCKS5_SERVER) sets it."}`.
+  `{Name: "ENVOY_NATS_SOCKS5_PROXY", Required: "no", Description: "SOCKS5 proxy, as `host:port`, that every NATS connection Dispatch makes goes through, each server's host name handed to the proxy unresolved; unset, Dispatch dials NATS directly. A set proxy needs `ENVOY_ALLOW_REMOTE_NATS=1`, since the proxy chooses the server. A deployment that reaches NATS through a tailnet sidecar's SOCKS5 server (tailscaled's `TS_SOCKS5_SERVER`) sets it."}`.
   No reader changes: the server, `redeliver-webhooks` and the agent conversation relay already hand
   the table's lookup to the bus (`main.go:164,185`, `redeliver.go:71`).
 - [ ] **Step 3: pass** `go test ./cmd/dispatch/ -run 'Settings|Reader'`; `envoy-dispatch settings`
@@ -1203,7 +1231,7 @@ New contracts (`ENVOY_NATS_SOCKS5_PROXY`, `core.DispatchPermissions`, `gcp:NatsU
 
 ## Evidence
 
-Read 2026-10-14 at the slice 4 head (`/home/sami/.worktrees/legion/envoy-infra-gcp`):
+Read 2026-10-14 at the slice 4 head (`envoy-infra-gcp` at 5194ca07):
 `packages/envoy/internal/bus/nats.go:22-64,102-110,149-208,211-294,319-340,359-443,662`,
 `connect_deadline_test.go:22`, `stream_config_test.go:103,132`, `reach.go:25-63`, `nkey.go:14-67`, `kv.go:28-45`, `stream.go:13-40,65-80,113-119,234-264`;
 `cmd/dispatch/settings.go:11-21,40-127,181-187`, `settings_test.go:134-147,427-450,711-727,1149-1153`;

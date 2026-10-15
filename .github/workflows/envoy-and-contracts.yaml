@@ -915,11 +915,11 @@ jobs:
   # this package under -race before a PR claimed it), delivery (its intake handler reads the
   # routing settings the poll loop publishes, from NATS's delivery goroutine), store (the
   # pool's one-connection guard, and the hold mark of its own each concurrent read takes), and
-  # the bus (its SOCKS5 dialer records each dial's error from nats.go's reconnect goroutine for a
-  # connect on the bus's own to read), all under the race detector. A read that walks a live
-  # document without its lock races the room's peers, which no ordinary run shows: the unit-test
-  # step above runs without -race (LEGION-499). Its own job beside envoy-go because -race runs
-  # these packages several times slower, and with its own package deadline, since go test's
+  # the bus (two connects on one SOCKS5 dialer record each dial's error in one record and read it
+  # back, TestConnectsSharingADialerRecordItsLastError), all under the race detector. A read that
+  # walks a live document without its lock races the room's peers, which no ordinary run shows: the
+  # unit-test step above runs without -race (LEGION-499). Its own job beside envoy-go because -race
+  # runs these packages several times slower, and with its own package deadline, since go test's
   # ten-minute default is a whole package's. pmdoc's tests shell out to the generated TypeScript
   # fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to
   # date" step), so this job needs Bun installed and its workspace linked the same way, though not
