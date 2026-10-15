@@ -548,18 +548,21 @@ target, so a platform-only break fails the pull request.
 of Step 1, plus `workflow_dispatch`; `permissions: {}` at the top; workflow-level
 `concurrency: {group: release-envoy-infra-${{ github.ref }}, cancel-in-progress: false}`, so one
 run's publish always tags before the next run's build versions; waiting on no other release. Two
-jobs, both `if: github.ref == 'refs/heads/main'`:
+jobs; only `build` carries `if: github.ref == 'refs/heads/main'`, and `publish` runs only after it:
 - `build` (`contents: read`, checkout with full history and `persist-credentials: false`): the
   version step, `go vet -tags pulumilive ./...` and `go test ./...` in the module, the per-target
-  build with `-trimpath`, the notices, `SHA256SUMS`, the smoke test, then `upload-artifact` of
-  `assets/` and the version as job outputs. It runs the module's code and every module it links,
-  so it holds no write scope and no secret.
+  build with `-trimpath`, the notices, the smoke test, then `upload-artifact` of the archives and
+  the version as a job output. It runs the module's code and every module it links, so it holds no
+  write scope, no secret and no OIDC token.
 - `publish` (`needs: build`; `contents: write`, `id-token: write`, `attestations: write`): runs no
-  Go, Pulumi or plugin code. It refuses a tag other than `envoy-infra-v$VERSION` or a `VERSION`
-  that isn't plain X.Y.Z; downloads the artifact and requires exactly the expected file names
-  (one archive per target in its own checkout of the targets file, plus `SHA256SUMS`); runs
-  `sha256sum -c SHA256SUMS`; attests; pushes the tag with the deploy key through
-  `release-push.sh push-tag`; and releases. Build chooses the bytes, never the names.
+  Go, Pulumi or plugin code. It refuses a `VERSION` that isn't plain X.Y.Z (`is_plain_version`),
+  derives the tag itself as `envoy-infra-v$VERSION`, and through `release-push.sh handed` requires
+  exactly the expected archives, as regular files (one per target in its own checkout of the
+  targets file, and per archive kind). It then writes `SHA256SUMS` over that list itself, so
+  the sums are publish's own record of the bytes it was handed. It pushes the tag with the deploy
+  key through `release-push.sh push-tag`, attests the archives only after the tag is pushed (a
+  refused tag leaves no attestation), and releases. Build chooses the bytes, never the names or
+  their sums.
 
 The version step:
 
@@ -582,9 +585,9 @@ writes (`:286-297`). Build per target with `CGO_ENABLED=0`, `-trimpath` and
 with the binary and notices at the archive root. Smoke the linux/amd64 binary with the pinned
 Pulumi CLI:
 `pulumi package get-schema <binary> | jq -e --arg v "$VERSION" '.version == $v and .pluginDownloadURL == "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}"'`.
-In `publish`, attest provenance with `actions/attest-build-provenance` on exactly the archives
-(consumers run `gh attestation verify` on them), then push the tag and release through
-`release-push.sh tagged`, `push-tag` and `release`, as the other release workflows do.
+In `publish`, once the tag is pushed, attest provenance with `actions/attest-build-provenance` on
+exactly the archives (consumers run `gh attestation verify` on them), then release through
+`release-push.sh release`, as the other release workflows do.
 
 - [ ] **Step 3: R3.** In `release-envoy-listener.yaml` add `- "!packages/envoy/infra/**"` after
 `- "packages/envoy/**"` and `':(exclude)packages/envoy/infra'` after `--` in the bump. Run
@@ -1444,7 +1447,7 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
 | `secretsmanager:GetSecretValue` on the API token and the seed | the listener's execution role | `aws:WebhookListener`'s role-policy children | AWS IAM | E11 (policies unchanged) |
 | `roles/secretmanager.secretAccessor` on the hub's tailnet auth key | the hub VM's service account | `gcp:NatsHub`'s `SecretIamMember` | Secret Manager IAM | E9 (the VM joins only if it reads the key) |
 | Writing a host's seed secret | the operator running `envoy-infra seed generate` | the operator's role in the consumer's account or project (the consumer's plan names it) | Secrets Manager or Secret Manager IAM | E8 |
-| `contents: write`, `id-token: write`, `attestations: write`, deploy-key tag push | `release-envoy-infra.yaml`'s job (the deploy key on its tag step only) | the job's `permissions` block and `secrets.DEPLOY_KEY` | GitHub | E5 (the first release run) |
+| `contents: write`, `id-token: write`, `attestations: write`, deploy-key tag push | `release-envoy-infra.yaml`'s `publish` job (the deploy key on its tag step only; `build` holds `contents: read` only) | the job's `permissions` block and `secrets.DEPLOY_KEY` | GitHub | E5 (the first release run) |
 | Root on a watchdog host (writes `/etc/envoy`, `/usr/local/bin`, systemd units) | `root` at the consumer's `watchdog.host`, pulumi-command's default user | that host's SSH configuration | the host | E4 when the existing deployment has a watchdog; otherwise not exercised |
 
 ## Evidence
