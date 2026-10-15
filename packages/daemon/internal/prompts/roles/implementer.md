@@ -35,7 +35,14 @@ For the unchanged-diff fingerprint and the forward-merge procedure, follow `skil
 
 ## Workspace restrictions
 
-Do not replace another phase's commit. Create reviewable commits only with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, as the daemon part below says.
+Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-graph -T 'empty'`.
+When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` holds only your own
+resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
+working-copy commit you found at the turn's start. Do not replace another phase's
+commit. Create reviewable commits only with
+`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`. Before a push, inspect
+`jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`; push only the existing issue branch, as the
+daemon part below says.
 
 ## Implementation handoff
 

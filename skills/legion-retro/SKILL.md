@@ -69,6 +69,12 @@ Do not start retro before step 2 or skip it because the change seems mechanical;
 
 ## Durable outputs
 
+Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-graph -T 'empty'`.
+When it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; otherwise `@` holds only your own
+resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split` the
+working-copy commit you found at the turn's start; `skill://legion-worker` explains the
+shared-workspace authorship rule.
+
 Write the integrated learning as one or more discoverable documents under `docs/solutions/`.
 Organize by reusable topic rather than by pull request, but never edit a document you did not
 write this retro — not its frontmatter, not its body. Two trees' retros can land within the same

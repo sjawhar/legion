@@ -259,7 +259,7 @@ that turns Envoy off, stops the bridge naming it. Every process the rigs start a
 server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
 `NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
 `NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
-users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, resolves the operator's seed the same way. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, resolves the operator's seed the same way and reads the one newest message matching each preflight subject within the caller's budget. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The shim routes `gh` to that App only from the operator's own Oh My Pi session, so the run
