@@ -27,6 +27,19 @@ func buildCLI(t *testing.T, out string, args ...string) {
 	}
 }
 
+// awsEnv is the whole environment of the binary run against endpoint: dummy static credentials, a
+// home with no AWS files and no instance metadata, so the SDK reaches nothing but endpoint.
+func awsEnv(t *testing.T, endpoint string) []string {
+	t.Helper()
+	home := t.TempDir()
+	return []string{
+		"PATH=/usr/bin:/bin", "HOME=" + home,
+		"AWS_ENDPOINT_URL=" + endpoint, "AWS_ACCESS_KEY_ID=AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY=example-signing-key",
+		"AWS_CONFIG_FILE=" + filepath.Join(home, "config"), "AWS_SHARED_CREDENTIALS_FILE=" + filepath.Join(home, "credentials"),
+		"AWS_EC2_METADATA_DISABLED=true",
+	}
+}
+
 // TestVersionPrintsTheStampedRelease: the release job stamps the CLI with
 // `-ldflags "-X main.version=<X.Y.Z>"`, so a build stamped that way prints exactly that version
 // and nothing else, without any AWS configuration. Any other build prints 0.0.0-dev, as the plugin
@@ -145,15 +158,9 @@ func TestAnInterruptDuringTheWriteEndsAsAnErrorAfterWriting(t *testing.T) {
 	defer server.Close()
 	defer close(release)
 
-	home := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	cmd := exec.Command(binary, "seed", "generate", "--store", "aws-secrets-manager", "--name", name, "--region", "us-east-1")
-	cmd.Env = []string{
-		"PATH=/usr/bin:/bin", "HOME=" + home,
-		"AWS_ENDPOINT_URL=" + server.URL, "AWS_ACCESS_KEY_ID=AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY=example-signing-key",
-		"AWS_CONFIG_FILE=" + filepath.Join(home, "config"), "AWS_SHARED_CREDENTIALS_FILE=" + filepath.Join(home, "credentials"),
-		"AWS_EC2_METADATA_DISABLED=true",
-	}
+	cmd.Env = awsEnv(t, server.URL)
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -193,13 +200,7 @@ func TestGenerateRefusesANullStdout(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 	}))
 	defer server.Close()
-	home := t.TempDir()
-	env := []string{
-		"PATH=/usr/bin:/bin", "HOME=" + home,
-		"AWS_ENDPOINT_URL=" + server.URL, "AWS_ACCESS_KEY_ID=AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY=example-signing-key",
-		"AWS_CONFIG_FILE=" + filepath.Join(home, "config"), "AWS_SHARED_CREDENTIALS_FILE=" + filepath.Join(home, "credentials"),
-		"AWS_EC2_METADATA_DISABLED=true",
-	}
+	env := awsEnv(t, server.URL)
 	args := []string{"seed", "generate", "--store", "aws-secrets-manager", "--name", name, "--region", "us-east-1"}
 	want := "refused: " + name + ": stdout is the null device, where the public key would be lost (a closed stdout is " +
 		"one too: Go opens it on /dev/null); send stdout somewhere you can read. Nothing was written\n"
