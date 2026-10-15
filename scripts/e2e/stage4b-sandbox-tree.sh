@@ -3608,9 +3608,9 @@ begin repository-tools
 pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
 fixture_dir=/legion/workspaces/$repo/${tree2,,}
 # The shim warms the index after the agent starts, so the planner's first turn can end before the
-# index is built.
-on_tree "$tree2" until_true 600 "tree 2's CodeGraph index to initialize in $fixture_dir" sh -c \
-  "timeout 60 kubectl --context '$operator' -n '$namespace' exec '$pod' -c planner -- sh -c 'cd $fixture_dir && codegraph status --json' | jq -e '.initialized == true' >/dev/null"
+# index is built. codegraph_initialized: the index in the planner's checkout answers initialized.
+codegraph_initialized() { pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -e '.initialized == true' >/dev/null; }
+on_tree "$tree2" until_true 600 "tree 2's CodeGraph index to initialize in $fixture_dir" codegraph_initialized
 codegraph_status=$(pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -c '{initialized, fileCount, nodeCount, edgeCount, languages, state: .index.state}')
 note "tree 2's CodeGraph index in $fixture_dir: $codegraph_status"
 nonce="repository-tools-$RANDOM$RANDOM"
@@ -3659,7 +3659,7 @@ note "tree 2's planner loaded the fixture's extension, tool and both MCP servers
 # Five settings as the agent reads them: three defaults nothing above the repository sets and the
 # repository leaves alone, the repository's own images.urls.enabled, and retry.modelFallback, which
 # the repository sets false and the operator's overlay sets true: the operator's wins.
-pid=$(agent_pid "$pod" planner) || fail "tree 2's planner container $pod does not hold exactly one Oh My Pi under a legion worker-shim: $(tr '\n' ';' <<<"$argv")"
+pid=$(agent_pid "$pod" planner) || fail "tree 2's planner container $pod does not hold exactly one Oh My Pi under a legion worker-shim: $(pod_commands "$pod" planner | tr '\n' ';')"
 settings=
 for pair in 'compaction.remoteEndpoint=""' 'memory.backend="off"' images.urls.enabled=true dev.autoqa=false retry.modelFallback=true; do
   key=${pair%%=*} want=${pair#*=}
