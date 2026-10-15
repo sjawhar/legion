@@ -607,10 +607,12 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
 path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
-argument that sets `-c`, `-config`, `-user`, `-pass` or `-auth` (with one dash or two, and with or
-without `=`), naming its index: nats-server takes the last value of a flag, so a later `-c` would
-load another file in place of the rendered one, and the others would add a credential beside its
-nkey users.
+argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or
+`-routes` (with one dash or two, and with or without `=`), naming its index: nats-server takes the
+last value of a flag, so a later `-c` would load another file in place of the rendered one;
+`-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
+has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
+and a server routed to it would see every message its users publish.
 
 ## Changing the module
 

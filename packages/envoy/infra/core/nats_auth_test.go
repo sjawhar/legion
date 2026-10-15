@@ -265,12 +265,13 @@ func TestStartScriptRefusesAnEmptyPath(t *testing.T) {
 	require.ErrorContains(t, err, "path")
 }
 
-// nats-server parses its arguments with Go's flag package, so each of its configuration and
-// credential flags takes one dash or two and a value after `=` or as the next argument: -c and
-// --config load another file in place of the rendered one, and -user, -pass and -auth add a
-// credential beside its nkey users (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351).
-// StartScript refuses each, naming its index and the flag and never the value, which may be a
-// password.
+// nats-server parses its arguments with Go's flag package, so each of its configuration, credential
+// and route flags takes one dash or two and a value after `=` or as the next argument: -c and
+// --config load another file in place of the rendered one; -user, -pass and -auth add a
+// credential beside its nkey users (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351);
+// and -cluster, -cluster_listen and -routes open or solicit a route, which the rendered block,
+// having no cluster authorization, leaves unauthenticated (:5368-5370). StartScript refuses each,
+// naming its index and the flag and never the value, which may be a password.
 func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 	rows := []struct{ arg, flag string }{
 		{"-c", "c"},
@@ -285,6 +286,12 @@ func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 		{"--user=example-user", "user"},
 		{"-pass", "pass"},
 		{"--pass=example-password", "pass"},
+		{"-cluster", "cluster"},
+		{"--cluster=nats://0.0.0.0:6222", "cluster"},
+		{"-cluster_listen", "cluster_listen"},
+		{"--cluster_listen=nats://0.0.0.0:6222", "cluster_listen"},
+		{"-routes", "routes"},
+		{"--routes=nats://example-host-b.internal.example:6222", "routes"},
 	}
 	for _, row := range rows {
 		t.Run(row.arg, func(t *testing.T) {
@@ -298,9 +305,10 @@ func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 	}
 }
 
-// A flag whose name only begins like one of those is another flag, and a value is not a flag.
+// A flag whose name only begins like one of those is another flag, and a value is not a flag. A
+// cluster name opens no route on its own.
 func TestStartScriptAcceptsOtherArguments(t *testing.T) {
-	args := []string{"-js", "--cluster", "nats://0.0.0.0:6222", "-cluster_name", "example", "--users_file", "-m", "8222", "c", "config"}
+	args := []string{"-js", "-cluster_name", "example", "--cluster_advertise", "example", "--users_file", "-m", "8222", "c", "config", "cluster"}
 	_, err := placeholder().StartScript(header, args, "/tmp/nats-server.conf")
 	require.NoError(t, err)
 }

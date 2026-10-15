@@ -260,11 +260,16 @@ func (a Authorization) StartScript(header []string, serverArgs []string, path st
 
 // authorizationFlags are the nats-server flags a server argument must not set, with what each does
 // to the rendered authorization. nats-server parses its arguments with Go's flag package, so each
-// takes one dash or two (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351).
+// takes one dash or two (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351, :5368-5370).
+// The rendered block has no cluster authorization, so a route opened or solicited by a flag is
+// unauthenticated, and a server routed to it sees every message its users publish.
 var authorizationFlags = map[string]string{
-	"c":      "loads another configuration file in place of the rendered one",
-	"config": "loads another configuration file in place of the rendered one",
-	"auth":   "adds a token beside the rendered nkey users",
-	"user":   "adds a user beside the rendered nkey users",
-	"pass":   "sets a password beside the rendered nkey users",
+	"c":              "loads another configuration file in place of the rendered one",
+	"config":         "loads another configuration file in place of the rendered one",
+	"auth":           "adds a token beside the rendered nkey users",
+	"user":           "adds a user beside the rendered nkey users",
+	"pass":           "sets a password beside the rendered nkey users",
+	"cluster":        "opens or solicits a route that no client permission binds",
+	"cluster_listen": "opens or solicits a route that no client permission binds",
+	"routes":         "opens or solicits a route that no client permission binds",
 }

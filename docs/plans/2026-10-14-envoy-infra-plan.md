@@ -732,12 +732,14 @@ These semantics are ported from the reference implementation, and the unit tests
   - Duplicate names, or duplicate keys.
   - A `NoAuthUser` that names no user, names a pending user, or names a user with `HasSeed`.
   - In `Render`, a header line holding `\r` or `\n` (`:194-198`).
-  - In `StartScript`, an empty path (`:237-239`), and a server argument that sets `-c`, `-config`,
-    `-user`, `-pass` or `-auth`, with one dash or two and with or without `=value`, named by index
-    and flag and never by value (`:240-246, 255-264`). nats-server parses its arguments with Go's
-    flag package and takes a flag's last value, so a later `-c` would load another file in place of
-    the rendered one, and the others would add a credential beside its nkey users (nats-server
-    v2.10.29 `server/opts.go:5343-5345, 5350-5351`).
+  - In `StartScript`, an empty path (`:243-245`), and a server argument that sets `-c`, `-config`,
+    `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or `-routes`, with one dash or two and
+    with or without `=value`, named by index and flag and never by value (`:246-252, 261-275`).
+    nats-server parses its arguments with Go's flag package and takes a flag's last value, so a
+    later `-c` would load another file in place of the rendered one, `-user`, `-pass` and `-auth`
+    would add a credential beside its nkey users, and the route flags would open or solicit a route
+    the block, having no cluster authorization, leaves unauthenticated (nats-server v2.10.29
+    `server/opts.go:5343-5345, 5350-5351, 5368-5370`).
 - **How the block is rendered.** The lines are, in order:
   - each header line as `# <line>`;
   - `authorization {`;
