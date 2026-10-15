@@ -699,6 +699,10 @@ func TestUsageErrorsExitTwoWithTheUsageBeforeOpeningTheStore(t *testing.T) {
 		{"verify without a public key", mode("verify"), "--public-key is required by verify"},
 		{"a public key for check", mode("check", "--public-key", readmePublicKey), "--public-key is accepted by verify only"},
 		{"a public key for generate", mode("generate", "--public-key", readmePublicKey), "--public-key is accepted by verify only"},
+		// An empty value, which `--expect-account "$ACCOUNT"` becomes with the variable unset, is
+		// not "not given": it is refused before the store opens.
+		{"an empty --expect-account for check", mode("check", "--expect-account", ""), "--expect-account is given empty"},
+		{"an empty --expect-account for generate", mode("generate", "--expect-account="), "--expect-account is given empty"},
 		// There is no seed flag: a seed never reaches argv on purpose.
 		{"a seed flag", mode("generate", "--seed", readmeSeed), "flag provided but not defined: -seed"},
 		{"a seed flag with =", mode("generate", "--seed="+readmeSeed), "flag provided but not defined: -seed"},

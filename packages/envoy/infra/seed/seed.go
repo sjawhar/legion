@@ -398,6 +398,9 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		return usage("--public-key is required by verify")
 	case mode != "verify" && given["public-key"]:
 		return usage("--public-key is accepted by verify only")
+	case given["expect-account"] && account == "":
+		// `--expect-account "$ACCOUNT"` with the variable unset would otherwise skip the check.
+		return usage("--expect-account is given empty; it is a 12-digit AWS account id, or leave the flag out")
 	}
 
 	s, err := stores[store](ctx, region, account)

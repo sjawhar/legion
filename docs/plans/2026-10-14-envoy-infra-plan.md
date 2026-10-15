@@ -875,7 +875,8 @@ it, so a write in flight ends as an unanswered write does, below (`main.go:19-28
 is the reference implementation's, with these additions:
 - **Before any Secrets Manager call or the account check** (`awsstore.go:39-62`), it refuses,
   exit 2:
-  - an `--expect-account` that is not 12 digits (`:40-42`);
+  - an `--expect-account` that is not 12 digits (`:40-42`), or given empty, which `Command`
+    refuses as a usage error before the store opens (`seed.go:401-403`);
   - no region from `--region` or the AWS configuration (`:47-49`);
   - a Secrets Manager endpoint the configuration overrides that is not `https`, unless its host is
     `localhost` or a loopback address, since the seed would cross a network in plain text
