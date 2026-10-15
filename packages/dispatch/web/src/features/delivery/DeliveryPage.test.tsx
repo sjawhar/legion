@@ -212,7 +212,8 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     population_authors: ["octocat"],
     pr_checks_rollup_job_name: null,
     pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
-    production_job_name: "widgets-release",
+    production_job_names: ["widgets-release"],
+    production_apply_step_name: null,
     staging_apply_job_name: null,
     staging_e2e_job_name: null,
     updated_at: "2026-10-07T12:00:00Z",
@@ -243,7 +244,7 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     fireEvent.change(screen.getByLabelText("Deploy workflow"), {
       target: { value: ".github/workflows/deploy.yml" },
     });
-    fireEvent.change(screen.getByLabelText("Production job"), {
+    fireEvent.change(screen.getByLabelText("Production jobs"), {
       target: { value: "widgets-release" },
     });
     fireEvent.change(screen.getByLabelText("PR checks workflow"), {

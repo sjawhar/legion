@@ -82,14 +82,18 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   7 no longer ships; the server resolves the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
-  on it), `curl`, `wget`, and `chromium` for the browser tools, installed without its Recommends (no
+  on it), `curl`, `wget`, `jq`, `ssh-keygen` (from `openssh-client`, which also brings `ssh`, `scp` and
+  `sftp`; whether those reach anything is the deployment's NetworkPolicy, not the image's business),
+  and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
   `PATH`, and downloads Chrome for Testing into its cache only with none of those — so the image's
   `chromium` is the one every worker gets, with nothing downloaded, and the probe runs that same
   resolution. The image sets no `PUPPETEER_EXECUTABLE_PATH`: a variable the image's `ENV` sets is one
   `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
-  probe checks (it runs that executable), not something to refuse. `uv` still installs each project's own Python, from its
+  probe checks (it runs that executable), not something to refuse. `jq` and `ssh-keygen` are real
+  binaries so a worker's subprocesses — `bun test`, a script, a subagent's shell — find them, where the
+  harness's `jq` builtin reaches only the bash tool. `uv` still installs each project's own Python, from its
   `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
   Sandbox pod that is on the issue's volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
   elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
@@ -150,7 +154,7 @@ leaves those agents' models unresolved (`--skip-agent-models`). It then checks e
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv` and `kubectl` on `PATH` with `go version`
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq` and `ssh-keygen` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
@@ -180,11 +184,13 @@ A step of its own, before that final one, runs every toolchain command listed ab
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
 version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
-into a scratch directory the step removes. It reruns only when the toolchain or an earlier layer
-changes, so a commit that only rebuilds `legion` needs no package registry.
+`python3`, `curl`, `wget`, `jq --version`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
+into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
+throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. It reruns only
+when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
+registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 

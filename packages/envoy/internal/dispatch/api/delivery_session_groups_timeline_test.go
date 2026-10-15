@@ -42,7 +42,7 @@ func seedGroupsTimeline(t *testing.T, database *store.Store, firstSessions []str
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)

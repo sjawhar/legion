@@ -2,7 +2,9 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
@@ -37,20 +39,22 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 // eventOwnerKey refuses an event with none of those unless its payload names a specific session
 // target (the ownerless-event path exists for session-addressed messages, not settings) -- there
 // is no project-scoped equivalent for a cross-project configuration table, so this intentionally
-// does not force one. The Pipeline page's three job names are optional: absent, null or blank
-// each stores null, and a name is stored trimmed.
+// does not force one. Production job names are required and stored trimmed; the production apply
+// step and the Pipeline page's three job names are optional, and absent, null or blank values store
+// null.
 func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		DeployRepo            string       `json:"deploy_repo"`
-		DeployWorkflowPath    string       `json:"deploy_workflow_path"`
-		ProductionJobName     string       `json:"production_job_name"`
-		PRChecksWorkflowPath  string       `json:"pr_checks_workflow_path"`
-		PopulationAuthors     []string     `json:"population_authors"`
-		ExcludedRepos         []string     `json:"excluded_repos"`
-		StagingE2EJobName     *string      `json:"staging_e2e_job_name"`
-		StagingApplyJobName   *string      `json:"staging_apply_job_name"`
-		PRChecksRollupJobName *string      `json:"pr_checks_rollup_job_name"`
-		Actor                 *model.Actor `json:"actor"`
+		DeployRepo              string       `json:"deploy_repo"`
+		DeployWorkflowPath      string       `json:"deploy_workflow_path"`
+		ProductionJobNames      []string     `json:"production_job_names"`
+		ProductionApplyStepName *string      `json:"production_apply_step_name"`
+		PRChecksWorkflowPath    string       `json:"pr_checks_workflow_path"`
+		PopulationAuthors       []string     `json:"population_authors"`
+		ExcludedRepos           []string     `json:"excluded_repos"`
+		StagingE2EJobName       *string      `json:"staging_e2e_job_name"`
+		StagingApplyJobName     *string      `json:"staging_apply_job_name"`
+		PRChecksRollupJobName   *string      `json:"pr_checks_rollup_job_name"`
+		Actor                   *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
@@ -67,7 +71,6 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	}
 	for name, value := range map[string]string{
 		"deploy_workflow_path":    input.DeployWorkflowPath,
-		"production_job_name":     input.ProductionJobName,
 		"pr_checks_workflow_path": input.PRChecksWorkflowPath,
 	} {
 		if strings.TrimSpace(value) == "" {
@@ -77,6 +80,11 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(input.PopulationAuthors) == 0 {
 		writeError(w, "DELIVERY_SETTINGS_INPUT", http.StatusBadRequest, "population_authors must name at least one author")
+		return
+	}
+	productionJobNames, refusal := trimmedProductionJobNames(input.ProductionJobNames)
+	if refusal != "" {
+		writeError(w, "DELIVERY_SETTINGS_INPUT", http.StatusBadRequest, refusal)
 		return
 	}
 
@@ -92,12 +100,16 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	settings, err := delivery.PutSettings(r.Context(), s.deps.Store.Pool, delivery.DeliverySettings{
-		DeployRepo: repoOwner + "/" + repoName, DeployWorkflowPath: input.DeployWorkflowPath,
-		ProductionJobName: input.ProductionJobName, PRChecksWorkflowPath: input.PRChecksWorkflowPath,
-		PopulationAuthors: input.PopulationAuthors, ExcludedRepos: input.ExcludedRepos,
-		StagingE2EJobName:     optionalJobName(input.StagingE2EJobName),
-		StagingApplyJobName:   optionalJobName(input.StagingApplyJobName),
-		PRChecksRollupJobName: optionalJobName(input.PRChecksRollupJobName),
+		DeployRepo:              repoOwner + "/" + repoName,
+		DeployWorkflowPath:      input.DeployWorkflowPath,
+		ProductionJobNames:      productionJobNames,
+		ProductionApplyStepName: optionalJobName(input.ProductionApplyStepName),
+		PRChecksWorkflowPath:    input.PRChecksWorkflowPath,
+		PopulationAuthors:       input.PopulationAuthors,
+		ExcludedRepos:           input.ExcludedRepos,
+		StagingE2EJobName:       optionalJobName(input.StagingE2EJobName),
+		StagingApplyJobName:     optionalJobName(input.StagingApplyJobName),
+		PRChecksRollupJobName:   optionalJobName(input.PRChecksRollupJobName),
 	}, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -117,4 +129,24 @@ func optionalJobName(name *string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+// trimmedProductionJobNames is production_job_names as delivery_settings stores it: each name
+// trimmed, in order. It refuses an empty list, a blank name and a name given twice once trimmed,
+// since every reader matches a job by its exact name.
+func trimmedProductionJobNames(raw []string) ([]string, string) {
+	if len(raw) == 0 {
+		return nil, "production_job_names must name at least one job"
+	}
+	names := make([]string, len(raw))
+	for i, name := range raw {
+		names[i] = strings.TrimSpace(name)
+		if names[i] == "" {
+			return nil, fmt.Sprintf("production_job_names[%d] is blank", i)
+		}
+		if slices.Contains(names[:i], names[i]) {
+			return nil, fmt.Sprintf("production_job_names names %q twice", names[i])
+		}
+	}
+	return names, ""
 }

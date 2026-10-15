@@ -307,7 +307,7 @@ func TestListWorkflowRunJobsMapsEveryField(t *testing.T) {
 		mustEncode(t, w, map[string]any{
 			"total_count": 2,
 			"jobs": []map[string]any{
-				{"name": "build", "conclusion": "success", "started_at": "2024-01-01T00:00:00Z", "completed_at": "2024-01-01T00:05:00Z"},
+				{"name": "build", "conclusion": "success", "started_at": "2024-01-01T00:00:00Z", "completed_at": "2024-01-01T00:05:00Z", "steps": []map[string]any{{"name": "Run ./.github/actions/apply", "conclusion": "success", "number": 3}}},
 				{"name": "deploy", "conclusion": "skipped", "started_at": nil, "completed_at": nil},
 			},
 		})
@@ -327,11 +327,41 @@ func TestListWorkflowRunJobsMapsEveryField(t *testing.T) {
 	if jobs[0].StartedAt == nil || !jobs[0].StartedAt.Equal(*ptrTime("2024-01-01T00:00:00Z")) {
 		t.Fatalf("jobs[0].StartedAt = %v", jobs[0].StartedAt)
 	}
+	if len(jobs[0].Steps) != 1 || jobs[0].Steps[0].Name != "Run ./.github/actions/apply" || jobs[0].Steps[0].Conclusion == nil || *jobs[0].Steps[0].Conclusion != "success" {
+		t.Fatalf("jobs[0].Steps = %+v, want its apply step with success", jobs[0].Steps)
+	}
 	if jobs[1].Name != "deploy" || jobs[1].Conclusion == nil || *jobs[1].Conclusion != "skipped" {
 		t.Fatalf("jobs[1] = %+v", jobs[1])
 	}
 	if jobs[1].StartedAt != nil || jobs[1].CompletedAt != nil {
 		t.Fatalf("jobs[1] in-progress job carries a time: %+v", jobs[1])
+	}
+}
+
+// TestRunJobsRecordsTheApplyStepOfAListedJob proves that only listed production jobs carry the
+// configured apply step and its conclusion into the stored representation.
+func TestRunJobsRecordsTheApplyStepOfAListedJob(t *testing.T) {
+	const step = "Run ./.github/actions/apply"
+	fetched := []FetchedJob{
+		{Name: "production / production-apply", Conclusion: new("success"), Steps: []FetchedStep{{Name: "Set up job", Conclusion: new("success")}, {Name: step, Conclusion: new("skipped")}}},
+		{Name: "production-apply / production-apply", Conclusion: new("success"), Steps: []FetchedStep{{Name: "Set up job", Conclusion: new("success")}}},
+		{Name: "build", Conclusion: new("success"), Steps: []FetchedStep{{Name: step, Conclusion: new("success")}}},
+	}
+	production := Production{JobNames: []string{"production / production-apply", "production-apply / production-apply"}, ApplyStep: new(step)}
+	jobs := RunJobs("acme/widgets", 1, fetched, production)
+	if jobs[0].ApplyStep == nil || *jobs[0].ApplyStep != step || jobs[0].ApplyStepConclusion == nil || *jobs[0].ApplyStepConclusion != DeliveryJobConclusionSkipped {
+		t.Fatalf("listed job = %+v, want the step read as skipped", jobs[0])
+	}
+	if jobs[1].ApplyStep == nil || jobs[1].ApplyStepConclusion != nil {
+		t.Fatalf("listed job without the step = %+v, want the step's name and no conclusion", jobs[1])
+	}
+	if jobs[2].ApplyStep != nil || jobs[2].ApplyStepConclusion != nil {
+		t.Fatalf("unlisted job = %+v, want neither", jobs[2])
+	}
+	for _, job := range RunJobs("acme/widgets", 1, fetched, Production{JobNames: production.JobNames}) {
+		if job.ApplyStep != nil || job.ApplyStepConclusion != nil {
+			t.Fatalf("with no step configured, job %q = %+v, want neither", job.Name, job)
+		}
 	}
 }
 

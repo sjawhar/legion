@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/bus"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -213,6 +214,46 @@ func TestAJobOfATrackedDeployRunRecordsItsJobsWhileItRuns(t *testing.T) {
 	}
 }
 
+// TestAJobIntakeRecordsTheConfiguredProductionApplyStep exercises the early job-event path: it
+// keeps the configuration observed with the event through the delayed listing and stores that
+// listed job's configured step.
+func TestAJobIntakeRecordsTheConfiguredProductionApplyStep(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	settings := seedDeliverySettings(t, ctx, pool)
+	const step = "Run ./.github/actions/apply"
+	settings.ProductionApplyStepName = new(step)
+	if _, err := PutSettings(ctx, pool, settings, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("set production apply step: %v", err)
+	}
+	seedRunningDeployRun(t, ctx, pool)
+	fake := newJobsFake(t)
+	fake.mu.Lock()
+	fake.production = map[string]any{
+		"name": "widgets-release / widgets-release", "started_at": "2026-09-03T12:05:00Z",
+		"completed_at": "2026-09-03T12:09:00Z", "conclusion": "success",
+		"steps": []map[string]any{{"name": step, "conclusion": "success"}},
+	}
+	fake.mu.Unlock()
+	clock := newFakeJobClock()
+	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
+	jobs.receive(ctx, jobPayload("acme/widgets", 500))
+	clock.Advance(jobQuiet)
+	stored, err := ListRunJobs(ctx, pool, "acme/widgets", 500)
+	if err != nil || len(stored) != 2 {
+		t.Fatalf("ListRunJobs = %+v, %v; want the two fetched jobs", stored, err)
+	}
+	for _, job := range stored {
+		if job.Name != "widgets-release / widgets-release" {
+			continue
+		}
+		if job.ApplyStep == nil || *job.ApplyStep != step || job.ApplyStepConclusion == nil || *job.ApplyStepConclusion != DeliveryJobConclusionSuccess {
+			t.Fatalf("production job = %+v, want configured apply step success", job)
+		}
+		return
+	}
+	t.Fatal("the stored jobs have no production job")
+}
+
 // TestAJobOfAnUntrackedRunCostsNoGitHubCall: a job of a run Dispatch does not store schedules
 // nothing and asks GitHub for nothing, not even a token.
 func TestAJobOfAnUntrackedRunCostsNoGitHubCall(t *testing.T) {
@@ -313,7 +354,7 @@ func TestAStaleJobsReadStaysForTheBackfill(t *testing.T) {
 	fake.mu.Unlock()
 
 	jobs := newJobIntake(nil, pool, fake.newTestClient(), newFakeJobClock())
-	jobs.read(ctx, runKey{repo: "acme/widgets", runID: 500})
+	jobs.read(ctx, runKey{repo: "acme/widgets", runID: 500}, Production{})
 	if err := <-completed; err != nil {
 		t.Fatalf("store the run completion: %v", err)
 	}
@@ -517,7 +558,7 @@ func TestTheJobIntakeReadsAtMostABoundedNumberOfRunsAtOnce(t *testing.T) {
 	clock := &concurrentJobClock{}
 	jobs := newJobIntake(nil, pool, github, clock)
 	for id := int64(600); id < 600+runs; id++ {
-		jobs.schedule(runKey{repo: "acme/widgets", runID: id})
+		jobs.schedule(runKey{repo: "acme/widgets", runID: id}, Production{})
 	}
 	fired := clock.fireAll()
 	// Runs before the pool's and the fake's cleanups, so no read outlives the test into them.
@@ -587,7 +628,7 @@ func TestAQueuedJobReadsDeadlineStartsOnceItHoldsItsSlot(t *testing.T) {
 	clock := &concurrentJobClock{}
 	jobs := newJobIntake(nil, pool, fake.newTestClient(), clock)
 	for id := int64(700); id < 700+runs; id++ {
-		jobs.schedule(runKey{repo: "acme/widgets", runID: id})
+		jobs.schedule(runKey{repo: "acme/widgets", runID: id}, Production{})
 	}
 	began := time.Now()
 	clock.fireAll().Wait()
