@@ -14,6 +14,7 @@ import (
 
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // listenerType is the component's token. pulumi-go-provider derives the same one from the
@@ -86,17 +87,17 @@ type listenerPlan struct {
 // registers nothing and needs no engine, so NewListener calls it first, and a refusal leaves
 // nothing behind.
 //
-// It refuses first a name or one of its own string inputs that holds an nkey user seed
-// (core.HoldsSeed), naming it and never the value: the name reaches every refusal and every
+// It refuses first a name or one of its own string inputs that holds an nkey seed
+// (bus.HoldsSeed), naming it and never the value: the name reaches every refusal and every
 // child's name, and each string input a refusal, a resource's inputs or an alias. machineId and
 // hostBridge are core.ListenerConfig.Check's to refuse, natsUrls Env's, and seed is the one input
 // that is a seed.
 func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
-	if core.HoldsSeed(name) {
+	if bus.HoldsSeed(name) {
 		return listenerPlan{}, fmt.Errorf("%s: %w", listenerType, core.SeedRefusal("the listener's name"))
 	}
 	for _, in := range stringInputs(args) {
-		if core.HoldsSeed(in.value) {
+		if bus.HoldsSeed(in.value) {
 			return listenerPlan{}, fmt.Errorf("%s %s: %w", listenerType, name, core.SeedRefusal(in.input))
 		}
 	}

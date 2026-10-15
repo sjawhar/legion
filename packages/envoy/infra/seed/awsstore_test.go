@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -631,8 +632,21 @@ func percentEncoded(text string) string {
 func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
 	seedValue, _ := testnats.User(t)
 	pemText := caBundle(t)
-	const notEchoed = ": an nkey user seed, which is never AWS configuration (not echoed)"
+	const notEchoed = ": an nkey seed, which is never AWS configuration (not echoed)"
 	profile := func(name, key string) string { return fmt.Sprintf("the shared config's profile %q: %s", name, key) }
+	// split cuts v in two DNS labels, as a host a seed is split across.
+	split := func(v string) string { return v[:len(v)/2] + "." + v[len(v)/2:] }
+	// shown reports whether text shows the seed in any spelling a reader takes for it: in either
+	// case, and with '.', '-', '_' and whitespace removed.
+	shown := func(text string) bool {
+		joined := strings.Map(func(r rune) rune {
+			if strings.ContainsRune(".-_ \t\r\n", r) {
+				return -1
+			}
+			return unicode.ToUpper(r)
+		}, text)
+		return strings.Contains(joined, seedValue)
+	}
 	rows := []struct {
 		name  string
 		args  []string // check's flags beyond --store and --name
@@ -645,6 +659,8 @@ func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
 	}{
 		// The environment.
 		{name: "AWS_REGION", setup: func(c configCase, v string) { c.env("AWS_REGION", v) }, want: "AWS_REGION", clean: awsRegion, reach: true},
+		{name: "AWS_REGION, lowercase", setup: func(c configCase, v string) { c.env("AWS_REGION", strings.ToLower(v)) },
+			want: "AWS_REGION", clean: awsRegion, reach: true},
 		{name: "AWS_DEFAULT_REGION", setup: func(c configCase, v string) { c.env("AWS_REGION", "", "AWS_DEFAULT_REGION", v) },
 			want: "AWS_DEFAULT_REGION", clean: awsRegion, reach: true},
 		{name: "AWS_PROFILE", setup: func(c configCase, v string) {
@@ -670,6 +686,14 @@ func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
 		}, want: "the shared config file's default path", clean: "home", reach: true},
 		{name: "AWS_ENDPOINT_URL's path", setup: func(c configCase, v string) { c.env("AWS_ENDPOINT_URL", c.url+"/"+v) },
 			want: "AWS_ENDPOINT_URL", clean: "clean-path", reach: true},
+		{name: "AWS_ENDPOINT_URL's path, lowercase", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL", c.url+"/"+strings.ToLower(v))
+		}, want: "AWS_ENDPOINT_URL", clean: "clean-path", reach: true},
+		// A host that is not loopback is refused for plain http, before any request, so the control
+		// stops there too; the binary check sends the same shape over https through a proxy.
+		{name: "AWS_ENDPOINT_URL's host, split across DNS labels", setup: func(c configCase, v string) {
+			c.env("AWS_ENDPOINT_URL", "http://"+split(v)+".example.test")
+		}, want: "AWS_ENDPOINT_URL", clean: "cleanlabels"},
 		{name: "AWS_ENDPOINT_URL's path, percent-encoded", setup: func(c configCase, v string) {
 			c.env("AWS_ENDPOINT_URL", c.url+"/"+percentEncoded(v))
 		}, want: "AWS_ENDPOINT_URL", clean: "clean-path", reach: true},
@@ -863,7 +887,7 @@ func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
 						f.forgetUnexpected()
 						return
 					}
-					require.NotContains(t, out.String()+errs.String(), seedValue, "the seed reached an output")
+					require.False(t, shown(out.String()+errs.String()), "the seed reached an output: %q", errs.String())
 					require.Zero(t, f.requests(), "no request reached the fake")
 					require.False(t, ran, "no credential_process ran")
 					require.Equal(t, 2, code, errs.String())

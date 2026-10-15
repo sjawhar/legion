@@ -19,6 +19,7 @@ import (
 	"github.com/nats-io/nkeys"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // Store is a secret store holding the seed. None of its errors carries a value: each names the call
@@ -406,19 +407,19 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	// A flag's value reaches the result lines, the refusals and the store's requests (--name is
 	// every line's subject and the secret id it sends, --region the endpoint the SDK resolves), so a
-	// value that holds an nkey user seed (core.HoldsSeed), whole or inside it, is refused naming the
+	// value that holds an nkey seed (bus.HoldsSeed), whole or inside it, is refused naming the
 	// flag, before the store opens. Visit visits the flags in name order.
 	given := map[string]bool{}
 	var seeded []string
 	fs.Visit(func(f *flag.Flag) {
 		given[f.Name] = true
-		if core.HoldsSeed(f.Value.String()) {
+		if bus.HoldsSeed(f.Value.String()) {
 			seeded = append(seeded, "--"+f.Name)
 		}
 	})
 	switch {
 	case len(seeded) > 0:
-		return usage(strings.Join(seeded, ", ") + ": an nkey user seed, which is never an argument (not echoed)")
+		return usage(strings.Join(seeded, ", ") + ": an nkey seed, which is never an argument (not echoed)")
 	case fs.NArg() > 0:
 		return usage("unexpected arguments after the flags")
 	case store == "":

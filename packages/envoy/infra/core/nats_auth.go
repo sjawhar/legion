@@ -8,6 +8,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // User is one nkey user of a NATS server's authorization block.
@@ -38,7 +40,7 @@ var userName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$`)
 // refusal names the user, by index and name, and the field.
 //
 // First it refuses a user's name, a rule entry (allow or deny, publish or subscribe, a queue group
-// included) or noAuthUser that holds an nkey user seed (HoldsSeed), naming its path and never the
+// included) or noAuthUser that holds an nkey seed (bus.HoldsSeed), naming its path and never the
 // value, since a refusal quotes each and the rendered block writes them (seedField). The nkey
 // field needs no such check: one that is not a user public key is refused without being quoted.
 //
@@ -105,7 +107,7 @@ func (a Authorization) user(name string) (User, bool) {
 // name only once that name is known to hold none.
 func (a Authorization) seedField() string {
 	for i, u := range a.Users {
-		if HoldsSeed(u.Name) {
+		if bus.HoldsSeed(u.Name) {
 			return fmt.Sprintf("users[%d]: name", i)
 		}
 	}
@@ -121,13 +123,13 @@ func (a Authorization) seedField() string {
 				field   string
 				entries []string
 			}{{d.field + ".allow", d.rules.Allow}, {d.field + ".deny", d.rules.Deny}} {
-				if j := slices.IndexFunc(list.entries, HoldsSeed); j >= 0 {
+				if j := slices.IndexFunc(list.entries, bus.HoldsSeed); j >= 0 {
 					return fmt.Sprintf("users[%d] %q: %s[%d]", i, u.Name, list.field, j)
 				}
 			}
 		}
 	}
-	if HoldsSeed(a.NoAuthUser) {
+	if bus.HoldsSeed(a.NoAuthUser) {
 		return "noAuthUser"
 	}
 	return ""
@@ -243,13 +245,13 @@ func (a Authorization) Render(header []string) (string, error) {
 	return a.render(header), nil
 }
 
-// checkHeader refuses a header line holding an nkey user seed (HoldsSeed), which the rendered text
+// checkHeader refuses a header line holding an nkey seed (bus.HoldsSeed), which the rendered text
 // would carry, and a line holding a line break. nats-server's config lexer ends a comment at \n or
 // \r (conf/lex.go isNL), so a line holding either would carry the rest of it out of the comment and
 // into the configuration.
 func checkHeader(header []string) error {
 	for i, line := range header {
-		if HoldsSeed(line) {
+		if bus.HoldsSeed(line) {
 			return SeedRefusal(fmt.Sprintf("header[%d]", i))
 		}
 		if strings.ContainsAny(line, "\r\n") {
@@ -297,7 +299,7 @@ func (r *Rules) object() Object {
 
 // StartScript returns the `sh -c` script that writes Render's text to configPath and execs
 // nats-server with --config configPath and serverArgs. It refuses a config path or a server
-// argument that holds an nkey user seed (HoldsSeed), which the script would carry, naming it and
+// argument that holds an nkey seed (bus.HoldsSeed), which the script would carry, naming it and
 // never the value, and a server argument that would set aside the rendered authorization
 // (authorizationFlags). Each refusal is an InputError naming its input as a component's schema
 // does: authorization (Validate's refusal, run once here), configPath, serverArgs and
@@ -309,11 +311,11 @@ func (a Authorization) StartScript(configHeader, serverArgs []string, configPath
 	if configPath == "" {
 		return "", InputErrorf("configPath", "configPath is required with authorization: the start script writes the configuration there")
 	}
-	if HoldsSeed(configPath) {
+	if bus.HoldsSeed(configPath) {
 		return "", InputErrorf("configPath", "%w", SeedRefusal("configPath"))
 	}
 	for i, arg := range serverArgs {
-		if HoldsSeed(arg) {
+		if bus.HoldsSeed(arg) {
 			return "", InputErrorf("serverArgs", "%w", SeedRefusal(fmt.Sprintf("serverArgs[%d]", i)))
 		}
 		name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")

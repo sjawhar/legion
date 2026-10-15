@@ -1,10 +1,10 @@
 package host_test
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 	"testing"
+	"unicode"
 
 	p "github.com/pulumi/pulumi-go-provider"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
@@ -115,13 +115,53 @@ func object(fields map[string]string) property.Value {
 	return property.New(property.NewMap(m))
 }
 
-// A listener refuses an nkey user seed in each of its inputs but seed, through the plugin's
+// carriedText is every string in inputs, one per line, secrets and nested values included: what a
+// registration carries to the engine and the provider.
+func carriedText(inputs resource.PropertyMap) string {
+	var texts []string
+	var walk func(v resource.PropertyValue)
+	walk = func(v resource.PropertyValue) {
+		switch {
+		case v.IsString():
+			texts = append(texts, v.StringValue())
+		case v.IsSecret():
+			walk(v.SecretValue().Element)
+		case v.IsOutput():
+			walk(v.OutputValue().Element)
+		case v.IsArray():
+			for _, e := range v.ArrayValue() {
+				walk(e)
+			}
+		case v.IsObject():
+			for k, e := range v.ObjectValue() {
+				texts = append(texts, string(k))
+				walk(e)
+			}
+		}
+	}
+	walk(resource.NewObjectProperty(inputs))
+	return strings.Join(texts, "\n")
+}
+
+// A listener refuses an nkey seed in each of its inputs but seed, through the plugin's
 // Construct as a consumer's program reaches it, naming the input and never quoting the seed, and
 // no resource it registers carries the seed in its inputs or aliases. machineId, hostBridge and
 // natsUrls are refused by core, the rest by the listener. Each row's clean value, in the same
 // place, constructs the listener. seed is the one input that is a seed, and is accepted.
 func TestConstructRefusesASeedInEveryInputButSeed(t *testing.T) {
 	const url = "nats://hub.internal.example:4222"
+	// split cuts v in two DNS labels; joined is text in either case with '.', '-', '_' and
+	// whitespace removed, as a reader joins a seed split over them.
+	split := func(v string) string { return v[:len(v)/2] + "." + v[len(v)/2:] }
+	joined := func(text string) string {
+		return strings.Map(func(r rune) rune {
+			if strings.ContainsRune(".-_ \t\r\n", r) {
+				return -1
+			}
+			return unicode.ToUpper(r)
+		}, text)
+	}
+	shown := func(text string) bool { return strings.Contains(joined(text), seedValue) }
 	rows := []struct {
 		name  string
 		setup func(inputs map[string]property.Value, v string) string // returns the listener's name
@@ -129,46 +169,60 @@ func TestConstructRefusesASeedInEveryInputButSeed(t *testing.T) {
 		clean string
 	}{
 		{"the listener's name", func(_ map[string]property.Value, v string) string { return "host-" + v },
-			listenerType + ": the listener's name holds an nkey user seed (not echoed)", "example"},
+			listenerType + ": the listener's name holds an nkey seed (not echoed)", "example"},
+		{"the listener's name, lowercase", func(_ map[string]property.Value, v string) string { return "host-" + strings.ToLower(v) },
+			listenerType + ": the listener's name holds an nkey seed (not echoed)", "example"},
 		{"machineId", func(in map[string]property.Value, v string) string {
 			in["machineId"] = property.New("host-" + v)
 			return "example-host-a"
-		}, "machineId holds an nkey user seed (not echoed)", "example"},
+		}, "machineId holds an nkey seed (not echoed)", "example"},
 		{"natsUrls", func(in map[string]property.Value, v string) string {
 			in["natsUrls"] = property.New(property.NewArray([]property.Value{
 				property.New(url), property.New("nats://example:" + v + "@hub.internal.example:4222"),
 			}))
 			return "example-host-a"
-		}, "natsUrls[1] holds an nkey user seed (not echoed)", "password"},
+		}, "natsUrls[1] holds an nkey seed (not echoed)", "password"},
 		{"image", func(in map[string]property.Value, v string) string {
 			in["image"] = property.New("ghcr.io/example/envoy:" + v)
 			return "example-host-a"
-		}, "image holds an nkey user seed (not echoed)", "example"},
+		}, "image holds an nkey seed (not echoed)", "example"},
+		{"image, lowercase", func(in map[string]property.Value, v string) string {
+			in["image"] = property.New("ghcr.io/example/envoy:" + strings.ToLower(v))
+			return "example-host-a"
+		}, "image holds an nkey seed (not echoed)", "example"},
 		{"containerName", func(in map[string]property.Value, v string) string {
 			in["containerName"] = property.New("envoy-" + v)
 			return "example-host-a"
-		}, "containerName holds an nkey user seed (not echoed)", "example"},
+		}, "containerName holds an nkey seed (not echoed)", "example"},
 		{"hostBridge", func(in map[string]property.Value, v string) string {
 			in["hostBridge"] = property.New("bridge-" + v + ".example")
 			return "example-host-a"
-		}, "hostBridge holds an nkey user seed (not echoed)", "example"},
+		}, "hostBridge holds an nkey seed (not echoed)", "example"},
+		{"hostBridge, split across DNS labels", func(in map[string]property.Value, v string) string {
+			in["hostBridge"] = property.New(split(v) + ".example")
+			return "example-host-a"
+		}, "hostBridge holds an nkey seed (not echoed)", "cleanlabels"},
 		{"watchdog.host", func(in map[string]property.Value, v string) string {
 			in["watchdog"] = object(map[string]string{"host": "host-" + v + ".example"})
 			return "example-host-a"
-		}, "watchdog.host holds an nkey user seed (not echoed)", "example"},
+		}, "watchdog.host holds an nkey seed (not echoed)", "example"},
+		{"watchdog.host, split across DNS labels", func(in map[string]property.Value, v string) string {
+			in["watchdog"] = object(map[string]string{"host": split(v) + ".example"})
+			return "example-host-a"
+		}, "watchdog.host holds an nkey seed (not echoed)", "cleanlabels"},
 		{"adopt.container", func(in map[string]property.Value, v string) string {
 			in["adopt"] = object(map[string]string{"container": "envoy-listener-" + v})
 			return "example-host-a"
-		}, "adopt.container holds an nkey user seed (not echoed)", "example"},
+		}, "adopt.container holds an nkey seed (not echoed)", "example"},
 		{"adopt.image", func(in map[string]property.Value, v string) string {
 			in["adopt"] = object(map[string]string{"image": "envoy-image-" + v})
 			return "example-host-a"
-		}, "adopt.image holds an nkey user seed (not echoed)", "example"},
+		}, "adopt.image holds an nkey seed (not echoed)", "example"},
 		{"adopt.watchdog", func(in map[string]property.Value, v string) string {
 			in["watchdog"] = object(map[string]string{"host": "example-host-a"})
 			in["adopt"] = object(map[string]string{"watchdog": "envoy-watchdog-" + v})
 			return "example-host-a"
-		}, "adopt.watchdog holds an nkey user seed (not echoed)", "example"},
+		}, "adopt.watchdog holds an nkey seed (not echoed)", "example"},
 	}
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
@@ -176,15 +230,15 @@ func TestConstructRefusesASeedInEveryInputButSeed(t *testing.T) {
 			inputs["natsUrls"] = property.New(property.NewArray([]property.Value{property.New(url)}))
 			name := row.setup(inputs, seedValue)
 			m, err := constructNamed(t, name, inputs)
-			require.Error(t, err, "a seed is refused")
-			require.NotContains(t, err.Error(), seedValue, "the refusal quotes the seed")
-			require.ErrorContains(t, err, row.want)
 			for _, r := range m.Registrations() {
-				require.NotContains(t, r.Name+fmt.Sprint(r.Inputs.Mappable()), seedValue, "%s %s carries the seed", r.Type, r.Name)
+				require.False(t, shown(r.Name+"\n"+carriedText(r.Inputs)), "%s %s carries the seed", r.Type, r.Name)
 				for _, alias := range r.RPC.GetAliases() {
-					require.NotContains(t, alias.String(), seedValue, "%s %s's alias carries the seed", r.Type, r.Name)
+					require.False(t, shown(alias.String()), "%s %s's alias carries the seed", r.Type, r.Name)
 				}
 			}
+			require.Error(t, err, "a seed is refused")
+			require.False(t, shown(err.Error()), "the refusal quotes the seed")
+			require.ErrorContains(t, err, row.want)
 
 			inputs = plainInputs()
 			inputs["natsUrls"] = property.New(property.NewArray([]property.Value{property.New(url)}))
@@ -194,12 +248,12 @@ func TestConstructRefusesASeedInEveryInputButSeed(t *testing.T) {
 			container := m.One(t, containerType)
 			var carried []string
 			for _, r := range m.Registrations() {
-				carried = append(carried, r.Name+fmt.Sprint(r.Inputs.Mappable()))
+				carried = append(carried, r.Name, carriedText(r.Inputs))
 				for _, alias := range r.RPC.GetAliases() {
 					carried = append(carried, alias.String())
 				}
 			}
-			require.Contains(t, strings.Join(carried, "\n"), row.clean, "the clean value reaches a resource")
+			require.Contains(t, joined(strings.Join(carried, "\n")), joined(row.clean), "the clean value reaches a resource")
 			require.NotEmpty(t, container.Name)
 		})
 	}

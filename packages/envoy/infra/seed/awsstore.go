@@ -23,7 +23,7 @@ import (
 	smithyendpoints "github.com/aws/smithy-go/endpoints"
 	"github.com/aws/smithy-go/logging"
 
-	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 // AWSSecretsManager is the --store value of AWS Secrets Manager.
@@ -91,14 +91,14 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	return &awsStore{client: client, region: cfg.Region, account: account}, nil
 }
 
-// checkedAWSConfig loads the caller's AWS configuration and refuses a seed (core.HoldsSeed)
+// checkedAWSConfig loads the caller's AWS configuration and refuses a seed (bus.HoldsSeed)
 // anywhere in what it carries into a client, naming where it came from and never the value
 // (awsConfigSeed). --region, the environment the SDK reads and the files' default paths are checked
 // before loading, since the loader's own errors quote values: a profile it cannot find, an
 // AWS_MAX_ATTEMPTS that is no number. A load error that still quotes a seed quotes the files'.
 // After loading, configSeed checks every profile the loader read and the resolved aws.Config.
 func checkedAWSConfig(ctx context.Context, region string) (aws.Config, error) {
-	if core.HoldsSeed(region) {
+	if bus.HoldsSeed(region) {
 		return aws.Config{}, awsConfigSeed("--region")
 	}
 	if name := awsEnvironmentSeed(); name != "" {
@@ -108,7 +108,7 @@ func checkedAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 		{"the shared config file's default path", config.DefaultSharedConfigFilename()},
 		{"the shared credentials file's default path", config.DefaultSharedCredentialsFilename()},
 	} {
-		if core.HoldsSeed(file.path) {
+		if bus.HoldsSeed(file.path) {
 			return aws.Config{}, awsConfigSeed(file.source)
 		}
 	}
@@ -119,9 +119,9 @@ func checkedAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 		}
 		var missing config.SharedConfigProfileNotExistError
 		switch {
-		case errors.As(err, &missing) && core.HoldsSeed(missing.Profile):
+		case errors.As(err, &missing) && bus.HoldsSeed(missing.Profile):
 			return aws.Config{}, awsConfigSeed("a profile the shared config names")
-		case core.HoldsSeed(err.Error()):
+		case bus.HoldsSeed(err.Error()):
 			return aws.Config{}, awsConfigSeed("a value the shared config or credentials file holds")
 		}
 		return aws.Config{}, refuse("load the AWS configuration: %v", err)
@@ -147,7 +147,7 @@ func awsEnvironmentSeed() string {
 	}
 	slices.Sort(names)
 	for _, name := range slices.Compact(names) {
-		if core.HoldsSeed(os.Getenv(name)) {
+		if bus.HoldsSeed(os.Getenv(name)) {
 			return name
 		}
 	}
@@ -214,7 +214,7 @@ func sharedConfigSeed(shared config.SharedConfig) string {
 // Its source profile is left to the caller, as a level of its own named by its own profile name,
 // which is the source_profile this level has already checked.
 func profileSeed(c config.SharedConfig) string {
-	if core.HoldsSeed(c.Profile) {
+	if bus.HoldsSeed(c.Profile) {
 		return "the name of a profile the shared config reads"
 	}
 	c.Source = nil
@@ -275,14 +275,14 @@ func sharedConfigKey(path string) string {
 	return path
 }
 
-// seedPath returns where in v a string holds a seed (core.HoldsSeed): exported field names joined
+// seedPath returns where in v a string holds a seed (bus.HoldsSeed): exported field names joined
 // by ".", and map keys in brackets. It follows pointers, slices and maps, never interfaces or
 // functions, which hold code rather than configuration. A map key that holds a seed ends the path
 // at its map, so the path never quotes it.
 func seedPath(v reflect.Value) (string, bool) {
 	switch v.Kind() {
 	case reflect.String:
-		return "", core.HoldsSeed(v.String())
+		return "", bus.HoldsSeed(v.String())
 	case reflect.Pointer:
 		if v.IsNil() {
 			return "", false
@@ -333,20 +333,20 @@ func fieldPath(name, rest string) string {
 // endpointSeed resolves the endpoints the command sends to with the clients' own resolvers, the
 // parameters bound as each client binds them (bindEndpointParams in secretsmanager v1.50.4 and sts
 // v1.51.4 endpoints.go): Secrets Manager's, and STS's, regional and global. It names one whose URL
-// or headers hold a seed, or returns "". core.HoldsSeed reads every part of a URL: path, query,
-// fragment and userinfo, percent-encoded or not. The SDK resolves an endpoint only as it sends a
-// request, so this resolves them before the first one; an endpoint that fails to resolve is one no
-// request is sent to either.
+// or headers hold a seed, or returns "". bus.HoldsSeed reads every part of a URL, path, query,
+// fragment and userinfo, in either case, percent-encoded or not. The SDK resolves an endpoint only
+// as it sends a request, so this resolves them before the first one; an endpoint that fails to
+// resolve is one no request is sent to either.
 func endpointSeed(ctx context.Context, secrets secretsmanager.Options, identity sts.Options) string {
 	holds := func(endpoint smithyendpoints.Endpoint, err error) bool {
 		if err != nil {
 			return false
 		}
-		if core.HoldsSeed(endpoint.URI.String()) {
+		if bus.HoldsSeed(endpoint.URI.String()) {
 			return true
 		}
 		for _, values := range endpoint.Headers {
-			if slices.ContainsFunc(values, core.HoldsSeed) {
+			if slices.ContainsFunc(values, bus.HoldsSeed) {
 				return true
 			}
 		}
@@ -391,10 +391,10 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 	return config.LoadDefaultConfig(ctx, options...)
 }
 
-// awsConfigSeed refuses a value of the AWS configuration that holds an nkey user seed, naming
-// source, where it came from.
+// awsConfigSeed refuses a value of the AWS configuration that holds an nkey seed, naming source,
+// where it came from.
 func awsConfigSeed(source string) error {
-	return refuse("%s: an nkey user seed, which is never AWS configuration (not echoed)", source)
+	return refuse("%s: an nkey seed, which is never AWS configuration (not echoed)", source)
 }
 
 // endpointCheck refuses a configured Secrets Manager endpoint (AWS_ENDPOINT_URL,
