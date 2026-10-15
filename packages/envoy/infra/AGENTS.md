@@ -97,8 +97,9 @@ versions. Never add the module to the root `go.work`.
   `Check`'s refusals of `machineId`, `port` and `hostBridge` through one call, so it has one row.
   A store's tests assert the store's own answers, and `seed_test.go` the modes' messages over them.
   The hub reads none of its Inputs by value at construct: its resolver checks only that
-  `tailnetAuthKey` is set and that `subnetwork` comes with `network`, and `network` and
-  `subnetwork` are checked for a seed once they resolve (`gcp.refuseSeed`). Its resolver refuses a
+  `tailnetAuthKey` is set and that `subnetwork` comes with `network`; `network`, `subnetwork` and
+  the secret `tailnetAuthKey` are checked for a seed once they resolve (`gcp.refuseSeed`,
+  `gcp.refuseSeedInSecret`, which keeps the key secret and never quotes it). Its resolver refuses a
   seed (`bus.HoldsSeed`) in every string input the hub itself carries first (`gcp.seededInput`:
   hostname, tags, zone, machine type, images, each user's machine id), naming the input's path
   and never its value; a string input added to the hub joins that list, with a row in
@@ -154,7 +155,7 @@ versions. Never add the module to the root `go.work`.
   change, so any change to the cloud-config's text replaces every hub's VM on its next update.
   Change them only with the goldens. `gcp/fetch_key_test.go`, `gcp/tailnet_joined_test.go` and
   `gcp/data_disk_test.go` run the key fetcher, the joined script and the data disk's bootcmd
-  entries as the golden holds them, so a change to any of them is tested there.
+  entry as the golden holds them, so a change to any of them is tested there.
 - **Permission sets.** `core/permissions.go` builds each set from names that
   `packages/envoy/internal/bus` and `internal/contracts` export, and the plugin and the command
   compile no other Envoy package (`go list -deps ./cmd/...`), so a change to Envoy's stores cuts no
@@ -204,7 +205,11 @@ than close it with a claim (an etag-guarded `UpdateSecret` before the add), whic
 clear. The store also gets a `seed.StoreType`, with its opener, its `CheckName` when its names have
 a form (`Command` applies it before it opens the store, since the refusal of an open prints
 `--name`, where a seed may have been pasted) and its line of help, and that type joins the
-`seed.Stores` map in `cmd/envoy-infra/main.go`.
+`seed.Stores` map in `cmd/envoy-infra/main.go`. A program may call `Check`, `Generate`, `Verify`
+or a store's methods with a name the command's flag rule never saw, and every line, refusal and
+error after a write quotes the name, so each of them first refuses a name holding a seed
+(`seededName`, naming no part of it); a new store's methods call it first too, with a row in
+`TestBothStoresRefuseASeedInTheName` (`seed/seededname_test.go`).
 
 Each mode's calls are the grant an operator gives it, listed per store under "The calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the
@@ -225,10 +230,14 @@ hub's cloud-config against its golden (`gcp/cloudconfig_test.go`), the key fetch
 first on its `PATH` that records each wait (`gcp/fetch_key_test.go`, which needs `curl`, `jq`,
 `base64` and `mktemp` on this machine and fails, never skips, without one), the joined script
 under `/bin/sh` with `docker` and `sleep` stubbed (`gcp/tailnet_joined_test.go`, which needs
-`jq`), the data disk's format and mount entries under `/bin/sh` against blank, ext4, damaged and
-missing disk images, with `mkfs.ext4`, `fsck.ext4` and `mount` stubbed (`gcp/data_disk_test.go`,
-which needs util-linux's `blkid` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
-skips, without one), the seed command against a fake `Store` (`seed/seed_test.go`), the AWS SDK
+`jq`), the data disk's entry under `/bin/sh` against zeroed, ext4, zeroed-first-MiB, last-MiB,
+damaged-superblock and missing disk images, and twice on one it refuses, with `blockdev`,
+`mkfs.ext4`, `fsck.ext4` and `mount` stubbed and `cmp` recorded (`gcp/data_disk_test.go`, which
+needs util-linux's `blkid`, GNU `cmp` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
+skips, without one), each under `/bin/sh` or the shell `ENVOY_TEST_SHELL` names, as `bash` or
+`busybox sh` (`gcp/shell_test.go`; busybox's shell runs its own `sleep`, `cmp`, `blockdev` and
+`mount` ahead of `PATH`, so rows that stub or record those fail under it), the seed command
+against a fake `Store` (`seed/seed_test.go`), the AWS SDK
 against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which
 fails a test on any request it does not expect (`seed/awsfake_test.go`, the store's tests in
 `seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over TLS

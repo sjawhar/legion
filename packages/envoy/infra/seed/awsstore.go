@@ -437,8 +437,13 @@ func (s *awsStore) Label() string { return awsCurrent }
 
 // Describe reads DescribeSecret alone, and refuses a secret whose ARN puts it in another region than
 // the client's, or, with --expect-account, in another account: STS and Secrets Manager each resolve
-// their own endpoint, so the account STS answered need not be the account of this secret.
+// their own endpoint, so the account STS answered need not be the account of this secret. Like each
+// of the store's methods, it first refuses a name that holds an nkey seed (seededName), which every
+// one of its errors would quote.
 func (s *awsStore) Describe(ctx context.Context, name string) (Description, error) {
+	if err := seededName(name); err != nil {
+		return Description{}, err
+	}
 	out, err := s.client.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(name)})
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
@@ -483,6 +488,9 @@ func (s *awsStore) expected(name, secretARN string) error {
 // Versions counts every version ListSecretVersionIds lists with IncludeDeprecated, across every
 // page: an unlabelled version is still a seed a client may have read.
 func (s *awsStore) Versions(ctx context.Context, name string) (int, error) {
+	if err := seededName(name); err != nil {
+		return 0, err
+	}
 	return countVersions("list-secret-version-ids", name, func(token string) (int, string, error) {
 		in := &secretsmanager.ListSecretVersionIdsInput{SecretId: aws.String(name), IncludeDeprecated: aws.Bool(true)}
 		if token != "" {
@@ -506,6 +514,9 @@ func (s *awsStore) Versions(ctx context.Context, name string) (int, error) {
 // first version already written with another value is ResourceExistsException, a refusal: nothing
 // was written. The written version must be AWSCURRENT.
 func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, error) {
+	if err := seededName(name); err != nil {
+		return "", err
+	}
 	out, err := s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
 		SecretId:           aws.String(name),
 		SecretString:       aws.String(string(value)),
@@ -531,6 +542,9 @@ func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, 
 // Current reads the AWSCURRENT version's SecretString. Secrets Manager answers
 // ResourceNotFoundException when no version is AWSCURRENT, as just after a first write it may.
 func (s *awsStore) Current(ctx context.Context, name string) (string, []byte, error) {
+	if err := seededName(name); err != nil {
+		return "", nil, err
+	}
 	out, err := s.client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(name)})
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {

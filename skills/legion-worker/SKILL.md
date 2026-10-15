@@ -158,25 +158,25 @@ An issue that renames a repository, package, or URL across the codebase also fol
 `skill://legion-worker/references/systematic-rename.md`; one that deletes code, a command, or
 documentation follows `skill://legion-worker/references/cleanup-deletion.md`.
 
-Create isolated commits with `jj -R "$LEGION_WORKSPACE" new` and reviewable ones with
-`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`, each holding only your phase's paths.
+Create reviewable commits with `jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`, each holding only your phase's paths.
 
 Commit attribution is automatic: the extension exports a `JJ_CONFIG` overlay when your
 session starts, so every jj commit you make carries an `Omp-Session: <this-session-id>`
 trailer with no action from you. Do not add attribution trailers by hand.
 
-Your pane's environment already supplies your phase's author and committer identity
-(`JJ_USER`/`JJ_EMAIL` and the Git author/committer variables, set by the daemon when it opened
-the pane; the daemon also re-authors the workspace's working copy for your role at each
-assignment, since `jj split`/`jj describe` keep its author). Never set or override
-`user.name`/`user.email` in any jj or Git scope — not `jj config set`, not `--config`, not
-`git config`: `--config` outranks the pane environment and would put the wrong App back on your
-commits, and the repository-scoped jj config is one file shared by every issue workspace of the
-clone. Legion has two GitHub Apps, not one per role: your role's App is the **implement** App
-if you are the implementer or the merger, and the **review** App if you are the planner, tester,
-reviewer, or an architect (in Legion's own deployment, `legion-implementer[bot]` and
-`legion-reviewer[bot]`). A planner's commits authored by the review App are right. Before a push,
-check
+Your pane's environment already supplies your phase's author and committer identity (`JJ_USER`/`JJ_EMAIL` and the Git author/committer variables, set by the daemon when it opened the pane).
+Before your turn's first commit, run `jj -R "$LEGION_WORKSPACE" log -r @ --no-graph -T 'empty'`.
+If it prints `true`, run `jj -R "$LEGION_WORKSPACE" new @-`; if it prints `false`, `@` holds only
+your own resumed edits, so run `jj -R "$LEGION_WORKSPACE" new`. Never `jj describe` or `jj split`
+the working-copy commit you found at the start of your turn: it can carry the previous role's
+author, and those commands keep it. Never set or override `user.name`/`user.email`
+in any jj or Git scope — not `jj config set`, not `--config`, not `git config`: `--config` outranks
+the pane environment and would put the wrong App back on your commits, and the repository-scoped jj
+config is one file shared by every issue workspace of the clone. Legion has two GitHub Apps, not
+one per role: your role's App is the **implement** App if you are the implementer or the merger,
+and the **review** App if you are the planner, tester, reviewer, or an architect (in Legion's own
+deployment, `legion-implementer[bot]` and `legion-reviewer[bot]`). A planner's commits authored
+by the review App are right. Before a push, check
 `jj -R "$LEGION_WORKSPACE" log -r 'main@origin..@' -T 'author.email() ++ " | " ++ committer.email() ++ " " ++ description.first_line() ++ "\n"'`
 shows your role's App in both columns **on every commit you made** — not on the whole list:
 earlier phases' commits are legitimately authored by their own role's App. Their *committer* is

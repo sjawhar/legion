@@ -130,7 +130,7 @@ func fetch(t *testing.T, f *fakeGCP) fetchRun {
 	out := filepath.Join(dir, "tailnet-auth-key")
 	require.NoError(t, os.WriteFile(out, nil, 0o600))
 
-	cmd := exec.Command("/bin/sh", script, out, fetchSecret)
+	cmd := shellCommand(t, script, out, fetchSecret)
 	cmd.Env = []string{
 		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
 		"SLEEP_LOG=" + sleepLog,

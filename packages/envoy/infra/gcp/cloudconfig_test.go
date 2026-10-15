@@ -34,20 +34,27 @@ func TestCloudConfigParsesBackIntoTheSameDocument(t *testing.T) {
 	require.Equal(t, doc, parsed)
 }
 
-// The order matters: the disk is formatted only when it holds no filesystem, then mounted, and
-// the directories the containers bind are made on it; the key file exists, empty, before any
-// container binds it; the units are written before they are loaded and started, the key fetched
-// before tailscaled starts, the host firewall opened before NATS starts. The golden pins each
-// entry's text; these are the relations between them.
+// The order matters: the mount point exists before the disk entry runs, which formats the disk
+// only when it is proven empty and then mounts it, and the directories the containers bind are
+// made on it; the key file exists, empty, before any container binds it; the units are written
+// before they are loaded and started, the key fetched before tailscaled starts, the host firewall
+// opened before NATS starts. The golden pins each entry's text; these are the relations between
+// them.
 func TestCloudConfigOrdersBootcmdFilesAndUnits(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
-	format := indexOf(t, doc.Bootcmd, "mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard ")
-	mount := indexOf(t, doc.Bootcmd, "mount -o discard,defaults ")
+	mountPoint := slices.Index(doc.Bootcmd, "mkdir -p /mnt/disks/data")
+	disk := indexOf(t, doc.Bootcmd, "blkid -p ")
 	dirs := indexOf(t, doc.Bootcmd, "mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale")
+	require.NotEqual(t, -1, mountPoint, "the mount point is made")
+	require.Less(t, mountPoint, disk, "the mount point exists before the disk is mounted on it")
+	entry := doc.Bootcmd[disk]
+	format := strings.Index(entry, "mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard ")
+	mount := strings.Index(entry, "mount -o discard,defaults ")
+	require.NotEqual(t, -1, format)
 	require.Less(t, format, mount, "the disk is formatted before it is mounted")
-	require.Less(t, mount, dirs, "the containers' directories are made on the mounted disk")
+	require.Less(t, disk, dirs, "the containers' directories are made on the mounted disk")
 	indexOf(t, doc.Bootcmd, "install -m 0600 /dev/null /run/envoy/tailnet-auth-key")
 
 	var units []string

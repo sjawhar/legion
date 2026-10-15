@@ -356,9 +356,14 @@ func (s *gcpStore) Current(ctx context.Context, name string) (string, []byte, er
 	return number, value, nil
 }
 
-// gcpName refuses a name that is not a global secret's, without quoting it: a seed may have been
-// pasted there.
+// gcpName refuses a name that holds an nkey seed (seededName) or is not a global secret's, without
+// quoting it: a seed may have been pasted there. It is the command's name rule for the store and
+// the first check of each of the store's methods, so a store a program opens itself refuses one
+// too; OpenGCP takes no name.
 func gcpName(name string) error {
+	if err := seededName(name); err != nil {
+		return err
+	}
 	if !gcpSecretName.MatchString(name) {
 		return fmt.Errorf("--name for --store %s is a secret's name, projects/<project>/secrets/<secret>", GCPSecretManager)
 	}

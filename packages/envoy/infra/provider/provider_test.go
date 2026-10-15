@@ -112,7 +112,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.True(t, ok, "the schema lists envoy-infra:gcp:NatsHub")
 	require.True(t, hub.IsComponent)
 	require.ElementsMatch(t, []string{
-		"users", "tailnetAuthKey", "hostname", "tags", "zone", "machineType", "diskSizeGb", "natsImage",
+		"users", "tailnetAuthKey", "hostname", "tags", "zone", "machineType", "diskType", "diskSizeGb", "natsImage",
 		"tailscaleImage", "network", "subnetwork",
 	}, slices.Collect(maps.Keys(hub.InputProperties)))
 	require.ElementsMatch(t, []string{"users", "tailnetAuthKey", "hostname", "tags", "zone", "natsImage", "tailscaleImage"},

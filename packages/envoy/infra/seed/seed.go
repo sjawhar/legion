@@ -118,9 +118,23 @@ func afterWritef(format string, args ...any) error {
 	return &afterWrite{msg: fmt.Sprintf(format, args...)}
 }
 
+// seededName refuses a secret's name that holds an nkey seed (bus.HoldsSeed), naming no part of it:
+// every line, refusal and error after a write that a mode or a store makes quotes the name, and the
+// exported API, unlike the command, takes the name as its caller gives it. Check, Generate, Verify
+// and each store's methods call it first.
+func seededName(name string) error {
+	if bus.HoldsSeed(name) {
+		return refuse("the secret's name holds an nkey seed, which is never a secret's name (not echoed)")
+	}
+	return nil
+}
+
 // Check returns the report line for the secret: absent, scheduled for deletion, or present with the
 // version the store names as its default, in that store's label. It reads no value.
 func Check(ctx context.Context, s Store, name string) (string, error) {
+	if err := seededName(name); err != nil {
+		return "", err
+	}
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", refuse("%v", err)
@@ -181,6 +195,9 @@ func pythonDate(t time.Time, loc *time.Location) string {
 // when Put answered one: a version may exist, and verify needs the key to check it. A Put the
 // store refuses wrote nothing, and its error matches ErrRefused.
 func Generate(ctx context.Context, s Store, name string, announce func(publicKey string) error) (publicKey, version string, err error) {
+	if err := seededName(name); err != nil {
+		return "", "", err
+	}
 	d, err := s.Describe(ctx, name)
 	if err != nil {
 		return "", "", refuse("%v", err)
@@ -299,6 +316,9 @@ func readBack(ctx context.Context, s Store, name, version string) (read string, 
 // after the read when Current answers it as Unserved. publicKey is never echoed unless it is a user
 // public key: a seed pasted there by mistake must not reach the terminal twice.
 func Verify(ctx context.Context, s Store, name, publicKey string) (string, error) {
+	if err := seededName(name); err != nil {
+		return "", err
+	}
 	if !core.IsUserPublicKey(publicKey) {
 		return "", refuse("%s: --public-key is not an nkey user public key (U and 55 base32 characters with a valid checksum)", name)
 	}

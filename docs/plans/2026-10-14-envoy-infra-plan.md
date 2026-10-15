@@ -1134,10 +1134,13 @@ type NatsServiceArgs struct {
 	Memory           string `pulumi:"memory"`
 	PlatformVersion  string `pulumi:"platformVersion"`
 
-	BaseTags           map[string]string `pulumi:"baseTags"`   // the component adds `service` per child
-	MetricNamespace    string            `pulumi:"metricNamespace"`
-	WaitForSteadyState *bool             `pulumi:"waitForSteadyState,optional"` // unset leaves the input unset
-	Adopt              bool              `pulumi:"adopt,optional"`
+	BaseTags        map[string]string `pulumi:"baseTags"` // the component adds `service` per child
+	MetricNamespace string            `pulumi:"metricNamespace"`
+	// The four log metric filters are named <prefix>-route-disconnect-filter,
+	// <prefix>-slow-consumer-filter, <prefix>-jetstream-error-filter and <prefix>-auth-error-filter.
+	MetricFilterLogicalNamePrefix string `pulumi:"metricFilterLogicalNamePrefix"`
+	WaitForSteadyState            *bool  `pulumi:"waitForSteadyState,optional"` // unset leaves the input unset
+	Adopt                         bool   `pulumi:"adopt,optional"`
 }
 
 type NatsService struct {
@@ -1501,7 +1504,10 @@ deployment; the live test below re-proves it against this branch's listener.)
     `ErrNotServed`, which `generate`'s read-back waits out; `FAILED_PRECONDITION` is an `*Unserved`,
     named by one `GetSecretVersion`.
 
-  `--name` takes `projects/<p>/secrets/<s>`, checked before the store opens without echoing it.
+  `--name` takes `projects/<p>/secrets/<s>`, checked before the store opens without echoing it,
+  and each of the store's methods checks it again, as `Check`, `Generate` and `Verify` and the AWS
+  store's methods do, refusing a name that holds a seed before any call (`seededName`), since a
+  program calls them with names the command's flag rule never saw.
   `--region` and `--expect-account` are refused. It authenticates with Application Default
   Credentials or `GOOGLE_OAUTH_ACCESS_TOKEN`, takes `SECRET_MANAGER_ENDPOINT` as `https` only, and
   logs nothing whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says. Before any call it refuses, naming the
@@ -1533,7 +1539,8 @@ type NatsHubArgs struct {
 	Tags           []string           `pulumi:"tags"`        // "tag:<name>"
 	Zone           string             `pulumi:"zone"`
 	MachineType    *string            `pulumi:"machineType,optional"` // default "e2-small"
-	DiskSizeGb     *int               `pulumi:"diskSizeGb,optional"`  // default 20
+	DiskType       *string            `pulumi:"diskType,optional"`    // "pd-balanced" (default) or "pd-ssd"
+	DiskSizeGb     *int               `pulumi:"diskSizeGb,optional"`  // default 20; at most 252, or 506 for pd-ssd
 	NatsImage      string             `pulumi:"natsImage"`            // ^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
 	TailscaleImage string             `pulumi:"tailscaleImage"`       // the same rule
 	Network        pulumi.StringPtrInput `pulumi:"network,optional"`  // a name or self link; created when absent
@@ -1571,10 +1578,14 @@ user in both clouds, and the `gcp` package imports no `aws` package. The schema 
 own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also refuses, naming the
 input: a seed (`bus.HoldsSeed`: any type, either case, whole, inside a longer value, split by
 `.`, `-`, `_` or whitespace, or percent-encoded) in a string input the hub itself carries
-(hostname, tags, zone, machine type, images, a user's machine id), by the input's path and never
-its value, leaving a user's name and rule entries to core's refusal, and in `network` or
-`subnetwork` once they resolve; a hostname outside its rule, no tags or a tag outside
-`^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or `machineType`, a `diskSizeGb` below 1, no
+(hostname, tags, zone, machine type, disk type, images, a user's machine id), by the input's path
+and never its value, leaving a user's name and rule entries to core's refusal, and in `network`,
+`subnetwork` and the secret `tailnetAuthKey` once they resolve, the key's value kept secret and
+never quoted; a hostname outside its rule, no tags or a tag outside
+`^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone, `machineType` or `diskType`, a `diskType` other than
+`pd-balanced` or `pd-ssd` (`pd-standard` reads too slowly for the first boot's read to fit the
+group's 3600 s, and E2 attaches `hyperdisk-balanced` only through Google's account team), a
+`diskSizeGb` below 1 or above the largest whose initial delay fits 3600 s (naming it), no
 `tailnetAuthKey`, and `subnetwork` without `network`. Only `tailnetAuthKey`, `network` and
 `subnetwork` take another resource's output.
 
@@ -1591,23 +1602,29 @@ component, after `providers.Require(..., "gcp")`:
 - `compute.HealthCheck`: HTTP 8222 `/healthz`, `CheckIntervalSec: 10`, `UnhealthyThreshold: 6`.
 - `compute.InstanceTemplate`: `NamePrefix: <hostname>-`, boot disk
   `projects/cos-cloud/global/images/family/cos-stable`, a data disk `DeviceName: "data"`,
-  `Boot: false`, `AutoDelete: false`, `DiskSizeGb`, an empty `AccessConfigs` entry for egress, the
-  account with `cloud-platform` scope, the VM tag, `Metadata: {"user-data": <cloud-config>}`.
+  `Boot: false`, `AutoDelete: false`, `DiskSizeGb`, `DiskType`, an empty `AccessConfigs` entry for
+  egress, the account with `cloud-platform` scope, the VM tag,
+  `Metadata: {"user-data": <cloud-config>}`.
 - `compute.InstanceGroupManager`: `BaseInstanceName: <hostname>`, `Zone`, `TargetSize: 1`,
   `Versions: [{InstanceTemplate: template.SelfLinkUnique}]`,
   `StatefulDisks: [{DeviceName: "data", DeleteRule: "NEVER"}]`,
-  `AutoHealingPolicies: {HealthCheck, InitialDelaySec: 300}`,
+  `AutoHealingPolicies: {HealthCheck, InitialDelaySec: 300 + ceil(1.25 × (S + S/64 + 1024) / R)}`
+  (`S` the disk's MiB, `R` 100 MiB/s for pd-balanced or 200 for pd-ssd; 573 s by default),
   `UpdatePolicy: {Type: "PROACTIVE", MinimalAction: "REPLACE", ReplacementMethod: "RECREATE", MaxSurgeFixed: 0, MaxUnavailableFixed: 1}`,
-  `WaitForInstances: true`, `WaitForInstancesStatus: "STABLE"`, and `DependsOn` the secret's
-  version and the account's grant, which the first VM reads at boot.
+  `WaitForInstances: true`, `WaitForInstancesStatus: "STABLE"`, create and update timeouts of the
+  initial delay plus the provider's 15 minutes, and `DependsOn` the secret's version and the
+  account's grant, which the first VM reads at boot.
 
 Cloud-config (`cloudconfig.go`, `gopkg.in/yaml.v3`, re-run on every COS boot; the full text is
 `testdata/cloud-config.golden` and `docs/nats-hub.md` describes it): `bootcmd` loads `tun` unless
 `/dev/net/tun` exists; formats `/dev/disk/by-id/google-data` only when `blkid -p` finds no
-filesystem and its first MiB reads as zeros, otherwise leaving it with a line on stderr; runs
-`fsck.ext4 -p` and mounts it at `/mnt/disks/data` only when fsck's exit status is below 4; creates
-`nats/` and `tailscale/` under it; and creates `/run/envoy` (0700) and an empty
-`/run/envoy/tailnet-auth-key` (0600). `write_files` writes the authorization, the key fetcher
+filesystem and GNU `cmp` reads the whole device, `blockdev --getsize64` bytes, as zeros, and
+otherwise leaves a disk without a filesystem unmounted and unwritten; runs `fsck.ext4 -p` on a
+disk with a filesystem and mounts it at `/mnt/disks/data` only when fsck's exit status is below 4;
+prints one line per boot that leaves the disk unmounted, naming the device and the reason
+(`envoy-hub: data disk … left unmounted: …`); creates `nats/` and `tailscale/` under it; and
+creates `/run/envoy` (0700) and an empty `/run/envoy/tailnet-auth-key` (0600). `write_files`
+writes the authorization, the key fetcher
 `/etc/envoy/fetch-tailnet-key` (six attempts, ten seconds apart; `GCE_METADATA_HOST` and
 `SECRET_MANAGER_ENDPOINT` replace its endpoints), the joined script `/etc/envoy/tailnet-joined`,
 and five units, built from one ordered list that also drives `runcmd`'s starts (never `enable`):
@@ -1615,8 +1632,9 @@ and five units, built from one ordered list that also drives `runcmd`'s starts (
 `/mnt/disks/data/tailnet-joined`); `tailscaled` (the `docker run` of `tailscaleImage` with
 `TS_AUTHKEY=file:…`, `TS_AUTH_ONCE=true`, `TS_STATE_DIR` on the disk, kernel networking,
 `TS_HOSTNAME` and `--advertise-tags`; `Wants`, not `Requires`, the fetch); `tailnet-joined` (a
-simple service that, once `tailscale status --json` reports `Running`, writes the marker and
-empties the key file, so no later boot fetches the key; tailscaled's own state file exists before
+simple service that, once `tailscale status --json` reports `Running`, empties the key file and,
+only once that has succeeded, writes the marker, so no later boot fetches the key, and is run
+again 10 seconds after a failed run; tailscaled's own state file exists before
 login, so it cannot serve as the marker); `nats-firewall` (oneshot, adding with the host's
 iptables, each unless present, `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT`
 and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT`, the second because tailscaled's own accept
@@ -1659,18 +1677,26 @@ Items to verify, each with the row that settles it and where its result goes:
 - The stateful policy end to end (E9; same).
 - The fetch script on COS (its `/bin/sh`, `curl`, `jq`, `base64`, `mktemp`), and the account's
   Secret Manager grant taking effect inside the fetch's retry window on first boot (E9; same).
-- `/dev/disk/by-id/google-data` present when `bootcmd` runs; a new persistent disk's first MiB
-  reading as zeros, so the first boot formats it; `fsck.ext4` on COS; no reformat on a recreate
-  (`blkid -p` exits 0); and `waitForInstances: STABLE` within the provider's timeout given
-  autohealing's 300 s initial delay (E9; same).
+- `/dev/disk/by-id/google-data` present when `bootcmd` runs; a new persistent disk reading as
+  zeros to its end, so the first boot formats it; `fsck.ext4` on COS; no read or reformat on a
+  recreate (`blkid -p` exits 0); and `waitForInstances: STABLE` within the group's timeouts given
+  the derived initial delay, 573 s by default (E9; same).
+- The first boot's read of a real persistent disk, unmeasured: the initial delay assumes
+  100 MiB/s for `pd-balanced` (below its documented 140 MiB/s baseline) and 200 MiB/s for `pd-ssd`
+  (the E2 shared-core read limit). Measured only on a workstation, on loop devices over sparse
+  files, which read no disk: GNU cmp 3.10 took 18.1 s for 20 GiB, 222.7 s for 252 GiB and 458.2 s
+  for 506 GiB, 1131 to 1158 MiB/s, so cmp's own cost (E9; same).
+- The `envoy-hub: data disk … left unmounted` line reaching the serial console and the journal,
+  and `docs/nats-hub.md`'s "Repairing the data disk" commands against a real group, which follow
+  and parse under gcloud 561.0.0's help but have not run (E9; same).
 - `NamePrefix` on the instance template under pulumi-gcp's autonaming (E9; same).
 - 4222 reachable over the tailnet through `nats-firewall`'s `tailscale0` rule, added with COS's
   own iptables whichever backend the tailscale v1.104.1 image writes its own accept with. E9's
   first command on the VM is `iptables -V`; under nft, 8222 is not reachable over the tailnet,
   since only Tailscale's own rule would open it (E9; same).
 - `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` reporting
-  `Running` on COS once the node has joined, so `tailnet-joined` writes its marker and drops the
-  key (E9; same).
+  `Running` on COS once the node has joined, so `tailnet-joined` drops the key and writes its
+  marker (E9; same).
 - A v4 docker provider diffing unset v5-only inputs (E3 in CI, E4 on the existing deployment).
 - The GCP seed store against the real Secret Manager: `versions/latest` names a DISABLED or
   DESTROYED newest version; `GetSecretVersion` on `latest` answers NOT_FOUND with no versions; an
@@ -1680,9 +1706,9 @@ Items to verify, each with the row that settles it and where its result goes:
   `AccessSecretVersion` on a `latest` naming no version yet answers NOT_FOUND; and how often the
   listing and `latest` show the write within `generate`'s 7.75 s of pauses, both being eventually
   consistent (E8; the first GCP deployment).
-- Two statements the hub's document makes from Google's documentation: raising `diskSizeGb` later
-  does not grow the kept data disk, and deleting the hub leaves that disk behind, detached (E9;
-  same).
+- Two statements the hub's document makes from Google's documentation: raising `diskSizeGb` or
+  changing `diskType` later does not change the kept data disk, and deleting the hub leaves that
+  disk behind, detached (E9; same).
 - `envoy-infra seed generate` against the real Secrets Manager. E10 ran `check` and `verify`
   read-only against the existing deployment's live seed, so the write path (`PutSecretValue`, its
   `AWSCURRENT` stage, the re-list and the read-back waits in `packages/envoy/infra/seed/seed.go`,
@@ -1843,6 +1869,12 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   The file is inside `release-envoy-listener.yaml`'s push paths and bump pathspec, so #1954's squash
   commit starts a listener release run, and a `feat` title cuts a `legion-envoy` version with no
   change to the image or the binaries.
+- `envoy-infra:gcp:NatsHub` (slice 4) gains the input `diskType`, and the data disk's type
+  changes from the API's default, `pd-standard`, to `pd-balanced`; the group's initial delay
+  becomes derived from `diskType` and `diskSizeGb` (573 s by default, 300 s before), with create
+  and update timeouts to match, and a `diskSizeGb` past 252 (pd-balanced) or 506 (pd-ssd) is
+  refused. No release has carried the hub (`git tag -l 'envoy-infra-v*'` names none that holds
+  `gcp/`), so no consumer migrates. Rollout: immediate.
 
 ## Permission source census
 

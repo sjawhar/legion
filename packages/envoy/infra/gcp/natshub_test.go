@@ -190,7 +190,7 @@ func wantChildren(t *testing.T, network, subnetwork string) []child {
 			"machineType": "e2-small",
 			"disks": []any{
 				map[string]any{"sourceImage": "projects/cos-cloud/global/images/family/cos-stable", "boot": true},
-				map[string]any{"deviceName": "data", "boot": false, "autoDelete": false, "diskSizeGb": float64(20)},
+				map[string]any{"deviceName": "data", "boot": false, "autoDelete": false, "diskSizeGb": float64(20), "diskType": "pd-balanced"},
 			},
 			"networkInterfaces": []any{nic},
 			"serviceAccount": map[string]any{
@@ -208,7 +208,7 @@ func wantChildren(t *testing.T, network, subnetwork string) []child {
 			"statefulDisks":    []any{map[string]any{"deviceName": "data", "deleteRule": "NEVER"}},
 			"autoHealingPolicies": map[string]any{
 				"healthCheck":     "example-hub-healthz-self-link",
-				"initialDelaySec": float64(300),
+				"initialDelaySec": float64(573),
 			},
 			"updatePolicy": map[string]any{
 				"type":                "PROACTIVE",
@@ -305,6 +305,31 @@ func plainStrings(v resource.PropertyValue) []string {
 	return nil
 }
 
+// allStrings returns every string v holds, a secret's included.
+func allStrings(v resource.PropertyValue) []string {
+	switch {
+	case v.IsSecret():
+		return allStrings(v.SecretValue().Element)
+	case v.IsString():
+		return []string{v.StringValue()}
+	case v.IsArray():
+		var out []string
+		for _, e := range v.ArrayValue() {
+			out = append(out, allStrings(e)...)
+		}
+		return out
+	case v.IsObject():
+		var out []string
+		for _, e := range v.ObjectValue() {
+			out = append(out, allStrings(e)...)
+		}
+		return out
+	case v.IsOutput():
+		return allStrings(v.OutputValue().Element)
+	}
+	return nil
+}
+
 // await returns the value o resolves to. It runs inside the program, so the value is read on the
 // test's goroutine, after the engine resolved it.
 func await(t *testing.T, o pulumi.StringOutput) string {
@@ -360,16 +385,54 @@ func TestNatsHubGroupWaitsForTheKeyAndItsGrant(t *testing.T) {
 		"the VM is created after the grant that lets it read the key")
 }
 
-func TestNatsHubMachineTypeAndDiskSizeReachTheTemplate(t *testing.T) {
+func TestNatsHubMachineTypeAndDiskReachTheTemplate(t *testing.T) {
 	args := exampleArgs()
 	args.MachineType = pulumi.StringRef("e2-medium")
+	args.DiskType = pulumi.StringRef("pd-ssd")
 	args.DiskSizeGb = pulumi.IntRef(50)
 	m, err := run(t, args, nil, true)
 	require.NoError(t, err)
 
 	in := m.One(t, templateType).Inputs.Mappable()
 	require.Equal(t, "e2-medium", in["machineType"])
-	require.Equal(t, float64(50), in["disks"].([]any)[1].(map[string]any)["diskSizeGb"])
+	data := in["disks"].([]any)[1].(map[string]any)
+	require.Equal(t, float64(50), data["diskSizeGb"])
+	require.Equal(t, "pd-ssd", data["diskType"])
+	require.Equal(t, float64(632), m.One(t, groupType).Inputs.Mappable()["autoHealingPolicies"].(map[string]any)["initialDelaySec"])
+}
+
+// The group's initial delay covers the first boot's full read of the data disk and its format:
+// 300 + ceil(1.25 * (S + S/64 + 1024) / R) seconds, S the disk's size in MiB and R the read rate
+// assumed for its type, 100 MiB/s for pd-balanced and 200 MiB/s for pd-ssd. The rows are the
+// default, the smallest disk, and the largest disk of each type whose delay fits the group's 3600 s.
+// pulumi up waits for the group to be stable, which its VM is once healthy, so the group's create
+// and update timeouts are that delay after the provider's own 15 minutes.
+func TestNatsHubInitialDelayCoversTheFirstBootsFullRead(t *testing.T) {
+	for _, row := range []struct {
+		diskType *string
+		size     *int
+		delay    float64
+		timeout  string
+	}{
+		{nil, nil, 573, "24m33s"},
+		{pulumi.StringRef("pd-balanced"), pulumi.IntRef(1), 326, "20m26s"},
+		{pulumi.StringRef("pd-balanced"), pulumi.IntRef(252), 3589, "1h14m49s"},
+		{pulumi.StringRef("pd-ssd"), pulumi.IntRef(1), 313, "20m13s"},
+		{pulumi.StringRef("pd-ssd"), pulumi.IntRef(506), 3596, "1h14m56s"},
+	} {
+		args := exampleArgs()
+		args.DiskType, args.DiskSizeGb = row.diskType, row.size
+		m, err := run(t, args, nil, true)
+		require.NoError(t, err)
+		group := m.One(t, groupType)
+		got := group.Inputs.Mappable()["autoHealingPolicies"].(map[string]any)["initialDelaySec"]
+		require.Equal(t, row.delay, got, "diskType %v, diskSizeGb %v", row.diskType, row.size)
+		timeouts := group.RPC.GetCustomTimeouts()
+		require.NotNil(t, timeouts, "diskType %v, diskSizeGb %v", row.diskType, row.size)
+		require.Equal(t, row.timeout, timeouts.GetCreate(), "diskType %v, diskSizeGb %v", row.diskType, row.size)
+		require.Equal(t, row.timeout, timeouts.GetUpdate(), "diskType %v, diskSizeGb %v", row.diskType, row.size)
+		require.Empty(t, timeouts.GetDelete(), "the delete keeps the provider's timeout")
+	}
 }
 
 func TestNatsHubRefusesAMissingProviderBeforeRegistering(t *testing.T) {
@@ -473,6 +536,41 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			err:  []string{"diskSizeGb 0"},
 		},
 		{
+			name: "a pd-balanced disk one GiB past the largest whose read fits the delay",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskSizeGb = pulumi.IntRef(253) },
+			err:  []string{"diskSizeGb 253", "pd-balanced", "100 MiB/s", "3600", "the largest diskSizeGb that fits is 252"},
+		},
+		{
+			name: "a pd-ssd disk one GiB past the largest whose read fits the delay",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskType, a.DiskSizeGb = pulumi.StringRef("pd-ssd"), pulumi.IntRef(507) },
+			err:  []string{"diskSizeGb 507", "pd-ssd", "200 MiB/s", "the largest diskSizeGb that fits is 506"},
+		},
+		{
+			name: "a disk size past any delay",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskSizeGb = pulumi.IntRef(1 << 62) },
+			err:  []string{"diskSizeGb 4611686018427387904", "the largest diskSizeGb that fits is 252"},
+		},
+		{
+			name: "a pd-standard disk",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef("pd-standard") },
+			err:  []string{`diskType "pd-standard"`, "0.12 MiB/s per GiB", "3600"},
+		},
+		{
+			name: "a hyperdisk-balanced disk",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef("hyperdisk-balanced") },
+			err:  []string{`diskType "hyperdisk-balanced"`, "E2", "account team"},
+		},
+		{
+			name: "another disk type",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef("pd-extreme") },
+			err:  []string{`diskType "pd-extreme"`, "pd-balanced or pd-ssd"},
+		},
+		{
+			name: "an empty disk type",
+			edit: func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef("") },
+			err:  []string{"diskType is empty", "pd-balanced"},
+		},
+		{
 			name: "no tailnet auth key",
 			edit: func(a *gcp.NatsHubArgs) { a.TailnetAuthKey = nil },
 			err:  []string{"tailnetAuthKey is required"},
@@ -558,13 +656,14 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 
 // A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
-// quote and the user data holds; the zone and machine type, which reach the group and the
-// template; the images, which reach the user data; and a user's machine id, which the hub turns
+// quote and the user data holds; the zone, machine type and disk type, which reach the group and
+// the template; the images, which reach the user data; and a user's machine id, which the hub turns
 // into that user's rules. The seed is found as bus.HoldsSeed finds it: any type, either case, whole,
 // inside a longer value, split by '.', '-', '_' or whitespace, or percent-encoded. A user's name and
 // rule entries are core's to refuse (TestNatsHubPassesOnCoresSeedRefusalOfUsers); a seed as a
 // user's nkey is core's to refuse, unquoted (the resolver table's "a user whose public key is a
-// seed"); and tailnetAuthKey, a secret that reaches the secret version alone, is not checked.
+// seed"); and tailnetAuthKey, a secret Input, is checked once it resolves
+// (TestConstructRefusesASeedAsTheTailnetAuthKey).
 func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
 	inside := "example-" + seed
@@ -578,6 +677,8 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a seed in a tag", "tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + seed} }},
 		{"a seed inside the zone", "zone", func(a *gcp.NatsHubArgs) { a.Zone = inside }},
 		{"a seed inside the machine type", "machineType", func(a *gcp.NatsHubArgs) { a.MachineType = pulumi.StringRef(inside) }},
+		{"a seed inside the disk type", "diskType", func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef(inside) }},
+		{"a lowercase disk type", "diskType", func(a *gcp.NatsHubArgs) { a.DiskType = pulumi.StringRef("pd-" + lower) }},
 		{"a seed in the NATS image", "natsImage", func(a *gcp.NatsHubArgs) { a.NatsImage = "example.invalid/" + seed + digest }},
 		{"a seed in the Tailscale image", "tailscaleImage", func(a *gcp.NatsHubArgs) {
 			a.TailscaleImage = "example.invalid/" + seed + digest
