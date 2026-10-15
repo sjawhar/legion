@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "phase": "production_check",
+  "issue": "LEGION-631",
+  "recordedAt": "2026-10-15T04:20:00Z",
+  "mergeCommit": "e8fcbd2f52f769940c3d08c8b0ea9d33bb46edf1",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1843",
+  "release": {
+    "tag": "legion-v13.2.0",
+    "legionCommit": "3f1ed0313ccdcda3f43fbd5652c526f1695f2b6a",
+    "workerImage": "ghcr.io/sjawhar/legion-worker@sha256:c69e8c5d0ad9317c0b57a897542fb67f36c02b58189eb196866c86e0545058d6",
+    "daemonPod": "legion-daemon-legion-8654758867-4k62z",
+    "compareMergeToRelease": "ahead by 154"
+  },
+  "note": "Drives 3 and 4 of the production check (PR comment 6106059155): this .legion/-only commit is pushed from the implementer's pod with plain jj as the implement App, its message ending with two empty lines and `skip-checks: true`, so GitHub starts no workflow run for it. The branch is merged; the tree's close deletes it."
+}
