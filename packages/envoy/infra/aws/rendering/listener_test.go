@@ -14,7 +14,7 @@ import (
 func listenerEnv() rendering.ListenerEnv {
 	appID, trigger := "1234567", "@legion"
 	return rendering.ListenerEnv{
-		MachineId:      "example-machine",
+		MachineID:      "example-machine",
 		ListenHost:     "0.0.0.0",
 		HostBridge:     "127.0.0.1",
 		NatsReplicas:   1,
@@ -102,7 +102,7 @@ func TestListenerEnvCheck(t *testing.T) {
 		// The rest of the environment.
 		{
 			name:   "a blank machineId, refused by core.ListenerConfig.Check",
-			mutate: func(e *rendering.ListenerEnv) { e.MachineId = " " },
+			mutate: func(e *rendering.ListenerEnv) { e.MachineID = " " },
 			input:  "machineId", err: "machineId is required",
 		},
 		{

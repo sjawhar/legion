@@ -217,7 +217,7 @@ func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 	}
 
 	env := rendering.ListenerEnv{
-		MachineId:    machineID,
+		MachineID:    machineID,
 		NatsUrls:     natsURLs,
 		ListenHost:   listenHost,
 		HostBridge:   hostBridge,

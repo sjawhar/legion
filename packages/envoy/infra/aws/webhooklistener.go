@@ -22,7 +22,7 @@ const webhookListenerType = "envoy-infra:aws:WebhookListener"
 // WebhookListenerArgs are the inputs of an envoy-infra:aws:WebhookListener. Every field that holds
 // a value of the deployment is required and has no default.
 type WebhookListenerArgs struct {
-	MachineId string                  `pulumi:"machineId"`
+	MachineID string                  `pulumi:"machineId"`
 	NatsUrls  pulumi.StringArrayInput `pulumi:"natsUrls"`
 	Image     string                  `pulumi:"image"`
 	Region    string                  `pulumi:"region"` // the container's awslogs-region
@@ -175,16 +175,17 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 		webhookArns.ToStringMapOutput(),
 		seedArn,
 	).ApplyT(func(v []any) (string, error) {
+		natsUrls, logGroupName, tokenArn, webhookSecretArns, seed := v[0].([]string), v[1].(string), v[2].(string),
+			v[3].(map[string]string), v[4].(string)
 		c := rendering.ListenerContainer{
 			Image:             args.Image,
-			Env:               args.environment(v[0].([]string)),
-			WebhookSecretArns: v[3].(map[string]string),
-			ApiTokenSecretArn: v[2].(string),
-			LogGroup:          v[1].(string),
+			Env:               args.environment(natsUrls),
+			WebhookSecretArns: webhookSecretArns,
+			ApiTokenSecretArn: tokenArn,
+			LogGroup:          logGroupName,
 			Region:            args.Region,
 		}
 		if args.SeedSecretArn != nil {
-			seed := v[4].(string)
 			c.SeedSecretArn = &seed
 		}
 		definitions, err := rendering.ListenerContainerDefinitions(c)
@@ -317,7 +318,7 @@ func (args *WebhookListenerArgs) webhookSecretArns() map[string]pulumi.StringPtr
 // environment returns the inputs the container's environment is made of, with natsUrls.
 func (args *WebhookListenerArgs) environment(natsUrls []string) rendering.ListenerEnv {
 	return rendering.ListenerEnv{
-		MachineId:      args.MachineId,
+		MachineID:      args.MachineID,
 		NatsUrls:       natsUrls,
 		ListenHost:     args.ListenHost,
 		HostBridge:     args.HostBridge,

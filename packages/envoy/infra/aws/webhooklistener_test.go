@@ -36,7 +36,7 @@ const (
 // the reference's own render from the same values, with a seed.
 func exampleListenerArgs() *envoyaws.WebhookListenerArgs {
 	return &envoyaws.WebhookListenerArgs{
-		MachineId: "example-machine",
+		MachineID: "example-machine",
 		NatsUrls:  pulumi.StringArray{pulumi.String("nats://example-bus.example-namespace.internal.example:4222")},
 		Image:     "example.registry/envoy@sha256:" + strings.Repeat("0", 64),
 		Region:    "example-region-1",
@@ -584,7 +584,7 @@ func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T
 		return rendering.ListenerContainer{
 			Image: "example.registry/envoy@sha256:" + strings.Repeat("0", 64),
 			Env: rendering.ListenerEnv{
-				MachineId:      "example-machine",
+				MachineID:      "example-machine",
 				NatsUrls:       []string{"nats://example-bus.example-namespace.internal.example:4222"},
 				ListenHost:     "0.0.0.0",
 				HostBridge:     "127.0.0.1",

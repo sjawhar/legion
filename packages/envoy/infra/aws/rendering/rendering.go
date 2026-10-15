@@ -5,16 +5,7 @@
 // the same functions, so the command links neither Pulumi nor the AWS provider's SDK.
 //
 // The AWS provider compares every string a component registers byte for byte, so each text here
-// is written exactly as the reference implementation wrote it. Its tests are package aws's, which
-// build a component and its renderings from one example.
+// is written exactly as the reference implementation wrote it. Package aws's tests pin the texts,
+// building each component from one example; this package's own tests hold ListenerEnv.Check's
+// refusals.
 package rendering
-
-// MetricFilter is one log metric filter a component registers on its log group: the pattern of
-// the log lines it counts and the metric it counts them into. `envoy-infra render metric-filters
-// --json` prints a component's filters under these fields' JSON names.
-type MetricFilter struct {
-	LogicalName     string `json:"logicalName"`
-	Pattern         string `json:"pattern"`
-	MetricName      string `json:"metricName"`
-	MetricNamespace string `json:"metricNamespace"`
-}

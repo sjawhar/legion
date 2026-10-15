@@ -195,6 +195,7 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	}
 
 	definitions := pulumi.All(logGroup.Name, args.TailnetClientSecretArn).ApplyT(func(v []any) string {
+		logGroupName, tailnetSecretArn := v[0].(string), v[1].(string)
 		return rendering.NatsContainerDefinitions(rendering.NatsContainers{
 			NatsImage:        args.NatsImage,
 			Launch:           launch,
@@ -202,8 +203,8 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 			TailnetHostname:  args.TailnetHostname,
 			TailnetTags:      args.TailnetTags,
 			TailnetEphemeral: args.TailnetEphemeral,
-			TailnetSecretArn: v[1].(string),
-			LogGroup:         v[0].(string),
+			TailnetSecretArn: tailnetSecretArn,
+			LogGroup:         logGroupName,
 			Region:           args.Region,
 		})
 	}).(pulumi.StringOutput)

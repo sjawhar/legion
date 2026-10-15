@@ -994,10 +994,12 @@ value is required and has no default, and the brief gives the deployment's value
 ### Task 3.1: `envoy-infra:aws:NatsService`
 
 **Files:** Create `packages/envoy/infra/aws/natsservice.go`, `natsservice_test.go`, `metricfilter.go`,
-`fargate.go` (what both AWS components register identically), `aws/rendering/nats.go` and
-`rendering.go` (the container definitions and the start script, with no Pulumi, which Task 3.3's
-`render` shares), and `testdata/nats-*.golden`. Modify `provider.go` (register), `go.mod` and
-`go.sum` (pulumi-aws Go SDK v7, the latest release when the task starts).
+`fargate.go` (what both AWS components register identically), and in `aws/rendering/` (what the
+components render, with no Pulumi, which Task 3.3's `render` shares) `rendering.go`, `nats.go`
+(the container definitions and the start script), `containers.go` (the container-JSON parts both
+components write) and `metricfilters.go` (both components' filters and the listener's alarms'
+text), and `testdata/nats-*.golden`. Modify `provider.go` (register), `go.mod` and `go.sum`
+(pulumi-aws Go SDK v7, the latest release when the task starts).
 
 **Interfaces:**
 
@@ -1110,15 +1112,15 @@ type NatsService struct {
 ### Task 3.2: `envoy-infra:aws:WebhookListener`
 
 **Files:** Create `packages/envoy/infra/aws/webhooklistener.go`, `webhooklistener_test.go`,
-`aws/rendering/listener.go` and its `listener_test.go` (the environment's refusals, the container
-definitions, the read policy and the log signals' text, with no Pulumi), and
-`testdata/listener-*.golden`; modify `provider.go`.
+`aws/rendering/listener.go` and its `listener_test.go` (the webhooks, the environment's refusals,
+the container definitions and the read policy, with no Pulumi), and `testdata/listener-*.golden`;
+modify `provider.go`.
 
 **Interfaces:**
 
 ```go
 type WebhookListenerArgs struct {
-	MachineId string                  `pulumi:"machineId"`
+	MachineID string                  `pulumi:"machineId"`
 	NatsUrls  pulumi.StringArrayInput `pulumi:"natsUrls"`
 	Image     string                  `pulumi:"image"`
 	Region    string                  `pulumi:"region"` // the container's awslogs-region

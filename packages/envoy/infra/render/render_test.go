@@ -212,7 +212,7 @@ func natsArgs() *envoyaws.NatsServiceArgs {
 // listenerArgs are placeholder inputs of a WebhookListener.
 func listenerArgs() *envoyaws.WebhookListenerArgs {
 	return &envoyaws.WebhookListenerArgs{
-		MachineId: "example-machine",
+		MachineID: "example-machine",
 		NatsUrls:  pulumi.ToStringArray([]string{"nats://example-bus.example-namespace.internal.example:4222"}),
 		Image:     "example.registry/envoy@sha256:" + strings.Repeat("0", 64),
 		Region:    "example-region-1",

@@ -79,51 +79,12 @@ func NatsContainerDefinitions(c NatsContainers) string {
 			environment("TS_ENABLE_HEALTH_CHECK", "true"),
 			environment("TS_LOCAL_ADDR_PORT", tailnetLocalAddrPort),
 		}},
-		{Key: "secrets", Value: []core.Object{
-			{{Key: "name", Value: "TS_OAUTH_SECRET"}, {Key: "valueFrom", Value: c.TailnetSecretArn}},
-		}},
+		{Key: "secrets", Value: []core.Object{secret("TS_OAUTH_SECRET", c.TailnetSecretArn)}},
 		{Key: "mountPoints", Value: []core.Object{mountPoint("tsnet-state", "/var/lib/tailscale")}},
 		{Key: "healthCheck", Value: healthCheck("wget -qO- http://"+tailnetLocalAddrPort+"/healthz || exit 1", 60)},
 		{Key: "logConfiguration", Value: logConfiguration(c.LogGroup, c.Region, "tailscale-sidecar")},
 	}
 	return core.PyJSON([]core.Object{nats, sidecar}, core.PyJSONOptions{EnsureASCII: true})
-}
-
-func portMapping(port int) core.Object {
-	return core.Object{{Key: "containerPort", Value: port}, {Key: "protocol", Value: "tcp"}}
-}
-
-func mountPoint(volume, path string) core.Object {
-	return core.Object{
-		{Key: "sourceVolume", Value: volume},
-		{Key: "containerPath", Value: path},
-		{Key: "readOnly", Value: false},
-	}
-}
-
-func healthCheck(command string, startPeriod int) core.Object {
-	return core.Object{
-		{Key: "command", Value: []string{"CMD-SHELL", command}},
-		{Key: "interval", Value: 30},
-		{Key: "timeout", Value: 5},
-		{Key: "retries", Value: 3},
-		{Key: "startPeriod", Value: startPeriod},
-	}
-}
-
-func logConfiguration(group, region, streamPrefix string) core.Object {
-	return core.Object{
-		{Key: "logDriver", Value: "awslogs"},
-		{Key: "options", Value: core.Object{
-			{Key: "awslogs-group", Value: group},
-			{Key: "awslogs-region", Value: region},
-			{Key: "awslogs-stream-prefix", Value: streamPrefix},
-		}},
-	}
-}
-
-func environment(name, value string) core.Object {
-	return core.Object{{Key: "name", Value: name}, {Key: "value", Value: value}}
 }
 
 // NatsLaunch returns the NATS container's launch fields. Without authorization the image's own
@@ -165,28 +126,4 @@ func NatsStartScript(authorization core.Authorization, configHeader, serverArgs 
 		return "", core.InputErrorf("configHeader", "configHeader: %w", err)
 	}
 	return script, nil
-}
-
-// natsMetricFilters are the nats-server log lines a NatsService counts: each filter's name between
-// the prefix and -filter, its pattern and the metric it counts into.
-var natsMetricFilters = []struct{ name, pattern, metric string }{
-	{"route-disconnect", `"Router connection closed"`, "RouteDisconnections"},
-	{"slow-consumer", `"Slow Consumer Detected"`, "SlowConsumers"},
-	{"jetstream-error", `?"JetStream out of" ?"JetStream failed to store" ?"JetStream being DISABLED" ?"NO quorum, stalled"`, "JetStreamErrors"},
-	// nats-server's own log text for a refused credential and a denied subject.
-	{"auth-error", `?"authentication error" ?"Subscription Violation" ?"Publish Violation"`, "AuthErrors"},
-}
-
-// NatsMetricFilters returns the log metric filters a NatsService whose
-// metricFilterLogicalNamePrefix is prefix and whose metricNamespace is namespace registers, in the
-// order it registers them: <prefix>-route-disconnect-filter, <prefix>-slow-consumer-filter,
-// <prefix>-jetstream-error-filter and <prefix>-auth-error-filter.
-func NatsMetricFilters(prefix, namespace string) []MetricFilter {
-	filters := make([]MetricFilter, len(natsMetricFilters))
-	for i, f := range natsMetricFilters {
-		filters[i] = MetricFilter{
-			LogicalName: prefix + "-" + f.name + "-filter", Pattern: f.pattern, MetricName: f.metric, MetricNamespace: namespace,
-		}
-	}
-	return filters
 }
