@@ -134,8 +134,8 @@ so cloud-init applies the hub's cloud-config at every boot. The whole document, 
    blkid finds a filesystem on is not read: it is checked with `fsck.ext4 -p` and mounted when fsck
    left no error it could not fix (exit status below 4). Every other disk is left unmounted and
    unwritten. Among them is an ext4 disk whose first MiB or primary superblock was zeroed: blkid
-   finds no filesystem on it, yet it still holds its data, which `e2fsck` can reach from a backup
-   superblock and `mkfs.ext4`'s discard would destroy.
+   finds no filesystem on it, yet it still holds its files' blocks, which `mkfs.ext4`'s discard
+   would destroy, and a damaged superblock alone `e2fsck` repairs from a backup.
 3. A disk left unmounted gets one line, at every boot that leaves it, naming the device and the
    reason and nothing the disk holds, as
    `envoy-hub: data disk /dev/disk/by-id/google-data left unmounted: blkid finds no filesystem on it, and it does not read as zeros to its end; see docs/nats-hub.md, "Repairing the data disk"`.
@@ -323,16 +323,21 @@ its `hostname`.
    gcloud compute ssh <vm> --zone <zone> --tunnel-through-iap
    ```
 
-5. On the VM, repair the disk as its line says. For a filesystem whose primary superblock, or
-   first MiB, is gone, check it from the first backup superblock, at block 32768 of the 4 KiB
-   blocks `mkfs.ext4` makes on a disk of 1 GiB or more, and let e2fsck fix what it finds:
+5. On the VM, repair the disk as its line says. For a filesystem whose primary superblock is
+   damaged, check it from the first backup superblock, at block 32768 of the 4 KiB blocks
+   `mkfs.ext4` makes on a disk of 1 GiB or more, and let e2fsck fix what it finds:
 
    ```sh
    sudo e2fsck -fy -b 32768 -B 4096 /dev/disk/by-id/google-data
    ```
 
-   e2fsck exits 1 when it has fixed errors. A disk that holds nothing worth keeping, such as one
-   whose first format stopped partway, is formatted only by your decision:
+   e2fsck exits 1 when it has fixed errors. On a 1 GiB loop disk whose superblock alone was
+   zeroed, this brought back every file, byte for byte. A disk whose whole first MiB is gone has
+   also lost the start of its inode tables, the root directory's among them: the same command
+   makes it mountable but empty, every file gone (on the same loop disk it left none). Run it there
+   only if you mean to give up what the disk held; until then the files' blocks are still in the
+   snapshot from step 3, for a recovery tool to read. A disk that holds nothing worth keeping, such
+   as one whose first format stopped partway, is formatted only by your decision:
    `sudo mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data`.
 
 6. Restart the VM, so that its boot finds the filesystem and mounts the disk, and check that the

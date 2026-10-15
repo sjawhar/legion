@@ -182,8 +182,8 @@ func diskStubs(t *testing.T, path string, edits map[string]string) map[string]st
 // first byte that is not zero. A disk blkid finds a filesystem on is checked and mounted without a
 // read. Any other disk is left unmounted, with one line naming the device and the reason and
 // nothing of what the disk holds: a filesystem whose first MiB or primary superblock was zeroed
-// still holds its data, which e2fsck can reach from a backup superblock and mkfs.ext4's discard
-// would destroy.
+// still holds its files' blocks, which mkfs.ext4's discard would destroy, and a damaged superblock
+// alone e2fsck repairs from a backup.
 func TestTheDataDiskIsFormattedOnlyWhenItReadsAsZerosToItsEnd(t *testing.T) {
 	entry := bootcmdEntry(t, "blkid -p ")
 	calls := func(disk string, steps ...string) []string {

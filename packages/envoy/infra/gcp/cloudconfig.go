@@ -104,10 +104,11 @@ func (v vm) document() cloudConfig {
 // with the options Compute Engine documents for a persistent disk
 // (https://cloud.google.com/compute/docs/disks/format-mount-disk-linux), when fsck left no error it
 // could not fix (exit status below 4). Every other disk is left unmounted and unwritten, among them
-// a filesystem whose first MiB or primary superblock was zeroed, whose data e2fsck can still reach
-// from a backup superblock and mkfs.ext4's discard would destroy. The entry then prints one line
-// naming the device and the reason and nothing the disk holds, at every boot that refuses it; an
-// unmounted disk keeps both containers down, since their units refuse to start without it.
+// a filesystem whose first MiB or primary superblock was zeroed, which still holds its files'
+// blocks for mkfs.ext4's discard to destroy (a damaged superblock alone, e2fsck repairs from a
+// backup). The entry then prints one line naming the device and the reason and nothing the disk
+// holds, at every boot that refuses it; an unmounted disk keeps both containers down, since their
+// units refuse to start without it.
 const dataDiskEntry = `d=` + dataDevice + `
 data_disk() {
   blkid -p "$d" >/dev/null; s=$?
