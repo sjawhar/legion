@@ -4,15 +4,15 @@
 //
 //   bun scripts/e2e/lib/nats-stream.ts last <nats-url> <stream> <subject-filter> <seconds>
 //     prints {"subject","time","seq"} of the newest message on the filter (wildcards allowed), read
-//     through an ordered consumer that starts at the last message per subject; exits 1 when the
-//     stream holds none within <seconds>
+//     through one ordered consumer delivery that starts at the stream's last matching message; exits
+//     1 when the stream holds none within <seconds>
 //   bun scripts/e2e/lib/nats-stream.ts consumers <nats-url> <stream> <name-prefix>
 //     prints one {"name","filters","pending"} line per durable consumer whose name starts with the
 //     prefix
 //   bun scripts/e2e/lib/nats-stream.ts delete <nats-url> <stream> <name>
 //     deletes one durable consumer and prints "deleted"; one that does not exist is already gone:
 //     it prints "absent" and exits 0 too, so a caller says which it was
-import { connect, DeliverPolicy } from "nats";
+import { connect, DeliverPolicy, type JsMsg } from "nats";
 import type { NatsSeed } from "../../../packages/envoy-client/src/envoy-settings";
 import { messageFor } from "../../../packages/envoy-client/src/errors";
 import { natsAuthOptions } from "../../../packages/envoy-client/src/nats-auth";
@@ -52,27 +52,30 @@ try {
     const js = nc.jetstream();
     const consumer = await js.consumers.get(stream, {
       filterSubjects: [argument],
-      deliver_policy: DeliverPolicy.LastPerSubject,
+      deliver_policy: DeliverPolicy.Last,
     });
-    let newest: { subject: string; time: string; seq: number } | undefined;
-    const deadline = Date.now() + seconds * 1000;
-    // Last-per-subject delivers the newest message of every matching subject; the newest of those
-    // is the stream's newest message on the filter.
-    while (Date.now() < deadline) {
-      const message = await consumer.next({
-        expires: Math.min(2000, Math.max(deadline - Date.now(), 100)),
-      });
-      if (!message) break;
-      const time = new Date(message.info.timestampNanos / 1e6).toISOString();
-      if (!newest || message.seq > newest.seq)
-        newest = { subject: message.subject, time, seq: message.seq };
-      if (message.info.pending === 0) break;
+    const timeoutMilliseconds = Math.ceil(seconds * 1000);
+    let stopTimer = () => {};
+    let message: JsMsg | null | undefined;
+    try {
+      message = await Promise.race([
+        consumer.next({ expires: Math.max(1000, timeoutMilliseconds) }),
+        new Promise<undefined>((resolve) => {
+          const timer = setTimeout(resolve, timeoutMilliseconds);
+          stopTimer = () => clearTimeout(timer);
+        }),
+      ]);
+    } finally {
+      stopTimer();
     }
-    if (!newest) {
+    if (!message) {
       process.stderr.write(`nats-stream: stream ${stream} holds no message on ${argument}\n`);
       process.exitCode = 1;
     } else {
-      process.stdout.write(`${JSON.stringify(newest)}\n`);
+      const time = new Date(message.info.timestampNanos / 1e6).toISOString();
+      process.stdout.write(
+        `${JSON.stringify({ subject: message.subject, time, seq: message.seq })}\n`
+      );
     }
   } else if (command === "consumers") {
     const jsm = await nc.jetstreamManager();
