@@ -3064,9 +3064,16 @@ runs in CI's `envoy-go` job.
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
 image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,
 smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
-`org.opencontainers.image.revision` with that sha. Its `release` job (moving `:latest`, the
-`legion-envoy-v*` tag and the GitHub release) runs only on `refs/heads/main`, so a branch
-dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
+`org.opencontainers.image.revision` with that sha. Its `release_build` and `release_publish`
+jobs run only on `refs/heads/main`, so a branch dispatch publishes one immutable image, for a dev
+slot to pin before merge, and moves no tag. `release_build` holds no secret: it computes the
+version with `release-push.sh version` and builds and checks the agent-secrets binaries
+(`agent-secrets --version` on the linux/amd64 binary; `go version -m` on all six for the recorded
+`buildversion.tag`). `release_publish` moves `:latest`, confirms the version against the tags
+inside its concurrency group (`release-push.sh version --expect`, which fails when another run
+took the tag first; the remedy is re-running the whole run, not `--failed`), checks the hand-over
+(`release-push.sh handed`), tags with `release-push.sh push-tag` (the deploy key reaches only that
+step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
 `cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux
@@ -3077,9 +3084,9 @@ names, `agent-secrets-darwin-<arch>.tar.gz` holds `bin/agent-secrets` alone. Eac
 `bin/` in one top-level `agent-secrets/` directory — mise's `github:` backend auto-strips exactly
 one leading directory, so the installed tree still ends up `bin/agent-secrets` (and
 `bin/agent-secrets-helper` on Linux), the layout its installer expects; a bare `bin/...` top level
-would itself be the directory mise strips. The release job builds them, once it has decided the
-tag, so it can stamp that tag into each binary, and attests every `agent-secrets-*.tar.gz`; the
-build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
+would itself be the directory mise strips. `release_build` builds them with the tag it decided
+stamped in, and `release_publish` attests every `agent-secrets-*.tar.gz`; the `build` matrix job
+builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
 the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those
 notices for every archive and compiles the darwin client on each pull request. A host installs

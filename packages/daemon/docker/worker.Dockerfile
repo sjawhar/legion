@@ -110,8 +110,9 @@ ARG PI_CODEGRAPH_VERSION=0.1.1
 # plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
-# jq: the same omp.extensions rewrite release.yaml's pi_envoy and pi_legion jobs run. python3/make/g++:
-# native devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
+# jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
+# python3/make/g++: native devDependencies in the workspace lockfile (mirrors
+# packages/envoy/docker/Dockerfile).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -156,10 +157,10 @@ COPY skills skills
 COPY scripts/pi-plugin-prepack.sh scripts/pi-plugin-prepack.sh
 COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
-# Each plugin ships from this checkout with the steps release.yaml's pi_envoy and pi_legion jobs run
-# before `bun pm pack`: the manifest pointed at the one packed bundle (the prepack refuses to pack
-# with the source manifest). Each tarball is unpacked into a directory: `omp plugin install` links a
-# directory and rejects a tarball path (ENOTDIR).
+# Each plugin ships from this checkout with the steps release.yaml's pi_envoy_build and
+# pi_legion_build jobs run before `bun pm pack`: the manifest pointed at the one packed bundle (the
+# prepack refuses to pack with the source manifest). Each tarball is unpacked into a directory: `omp
+# plugin install` links a directory and rejects a tarball path (ENOTDIR).
 WORKDIR /repo/packages/pi-envoy
 RUN jq '.omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
     && mv tmp.json package.json \

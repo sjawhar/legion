@@ -145,10 +145,12 @@ asserted by the test with the variable pointed at a temp file.
 ## 4. The resolver's safety rests on a contract the producer keeps, not one it checks
 
 "Take main's copy, reset only `.version`" is safe because the bump commit that `release-push.sh
-tag` creates touches only the manifest, and only its version line (the workflow writes the
-manifest with the same `jq '.version = $v'`; pi_envoy's `.omp.extensions` rewrite is restored
-before `tag`). Nothing at the point of use asserts that. If `tag` ever commits a second file — a
-changelog — in the same commit, the resolver would still take main's copy of the manifest and
+tag` creates touches only the manifest, and only its version line: the publish job makes it on its
+own checkout, whose manifest differs from the committed one only in `.version` (the job writes it
+with the same `jq '.version = $v'`; pi_envoy's `.omp.extensions` rewrite happens in the build job,
+whose tree is discarded), and `push-main` pushes it with the deploy key from its own environment,
+as `push-tag` does. Nothing at the point of use asserts that. If `tag` ever commits a second file
+— a changelog — in the same commit, the resolver would still take main's copy of the manifest and
 push, silently discarding nothing from the manifest but leaving the changelog to git's ordinary
 conflict handling (it would conflict as a second path and abort, which is the safe outcome). The
 mirror modify/delete shape — the *bump* commit deleting the manifest while main modified it — is

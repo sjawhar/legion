@@ -10,8 +10,8 @@ import (
 )
 
 // TestVersionNamesTheStampedRelease: the sitting runbook checks a helper restart with
-// `agent-secrets-helper --version`, so a build stamped as the release job stamps it prints exactly
-// the tag, and does so without any of the configuration `serve` needs (it answers before
+// `agent-secrets-helper --version`, so a build stamped as the release_build job stamps it prints
+// exactly the tag, and does so without any of the configuration `serve` needs (it answers before
 // loadConfig). Any other build says devel rather than naming a release it is not.
 func TestVersionNamesTheStampedRelease(t *testing.T) {
 	dir := t.TempDir()

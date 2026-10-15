@@ -118,7 +118,7 @@ jobs:
           key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'packages/envoy/infra/go.sum', 'scripts/go-third-party-notices.sh') }}
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
-      # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
+      # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion_build job and
       # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
       # them, and release-envoy-infra.yaml, whose targets .github/envoy-infra-targets.json lists).
       # Writing them here for each of those builds fails the pull request that brings in a module

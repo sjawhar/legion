@@ -85,17 +85,21 @@ versions. Never add the module to the root `go.work`.
   `packages/envoy/**`, so a package the plugin starts compiling in needs no list edited.
 - **Release jobs.** The workflow's `build` job (`contents: read`, no secret) runs everything that
   runs the module's code or its dependencies: the version step's `go list`, vet, the unit tests,
-  the build and the smoke test. It hands `publish` the archives as an artifact and the version as
-  a job output, nothing else. `publish` holds the write scopes, the OIDC token and the deploy key,
-  and runs only the pinned actions, `jq`, `sha256sum` and `release-push.sh`. It names the archives
-  itself, from that version and its own checkout of the target list, one `archives+=` line per
-  kind of archive; `release-push.sh handed` refuses a version that is not X.Y.Z and an artifact
-  that is not exactly those archives, each a regular file, and prints the tag
-  `envoy-infra-v<version>`; and `publish` writes `SHA256SUMS` over them. So `build` chooses the
-  archives' bytes, and not their names, the tag or the sums. An archive the release adds gets its
-  `archives+=` line in that step. The attestation runs after the tag step, so a run whose tag is
-  refused leaves no attestation. A step that runs Go, the Pulumi CLI or the plugin goes in
-  `build`, never in `publish`.
+  the build and the smoke test. Its version step is the shared `release-push.sh version
+  envoy-infra-v …` call over the paths `go list` computes; there is no first-release constant, the
+  line starts from a tag. It hands `publish` the archives as an artifact and the version as a job
+  output, nothing else, and ends with the tripwire step `release-push.sh no-credential`. `publish`
+  holds the write scopes, the OIDC token and the deploy key, sets `cache-mode: none` so no cache is
+  restored in the job that holds the credentials, and runs only the pinned actions, `jq`,
+  `sha256sum` and `release-push.sh`. It names the archives itself, from that version and its own
+  checkout of the target list, one `archives+=` line per kind of archive; `release-push.sh handed`
+  refuses a version that is not X.Y.Z and an artifact that is not exactly those archives, each a
+  regular file, and prints the tag `envoy-infra-v<version>`; and `publish` writes `SHA256SUMS` over
+  them. So `build` chooses the archives' bytes, and not their names, the tag or the sums. An
+  archive the release adds gets its `archives+=` line in that step. The attestation runs after the
+  tag step, so a run whose tag is refused leaves no attestation. A step that runs Go, the Pulumi
+  CLI or the plugin goes in `build`, never in `publish`.
+  `.github/scripts/check-release-credentials.sh` holds that shape for all three release workflows.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
@@ -107,9 +111,10 @@ The unit tests need neither the Pulumi CLI nor Docker. They run components under
 `host.resolveListener` directly, and the plugin in process through pulumi-go-provider's
 `integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`). CI runs them in
 the `envoy-infra-go` job of `.github/workflows/envoy-and-contracts.yaml`, with gofmt and vet under
-the live tests' build tag; the release job runs vet and the unit tests again before it builds. The
-required `lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for
-every release target. Run those steps from those jobs after changing what they cover.
+the live tests' build tag; the release workflow's `build` job runs vet and the unit tests again
+before it builds. The required `lint` job of `.github/workflows/pr-and-main.yaml` compiles the
+module's commands for every release target. Run those steps from those jobs after changing what
+they cover.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit

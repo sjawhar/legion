@@ -1344,16 +1344,17 @@ prepack copies the repository's `skills/` and the bundle resolves `@legion/*` th
 `node_modules`:
 
 1. save the package's `package.json` and arm an `EXIT` trap that copies it back byte-identical
-   (`.github/workflows/release.yaml`'s pi_envoy and pi_legion jobs save it to
-   `$RUNNER_TEMP/<package>-manifest.json` in "Point extensions at the packed bundle");
+   (`.github/workflows/release.yaml`'s `pi_envoy_build` and `pi_legion_build` jobs rewrite the
+   manifest in "Point extensions at the packed bundle" and discard their tree, so only this script
+   restores);
 2. rewrite `omp.extensions` to `["dist/<entry>.js"]` with `jq`, where `extensions/<entry>.ts` is
    the committed manifest's one entry (the same step, and the `jq '.omp.extensions = …'` line of
    `packages/daemon/docker/worker.Dockerfile`'s plugin `RUN` for that package);
 3. `bun pm pack --destination <out dir>`, whose `prepack` builds `dist/` (the release's "Pack
    extension" step, `scripts/pi-plugin-prepack.sh`); the bundle inlines `package.json`, so it is
    built while the manifest names the packed bundle, as the release builds it;
-4. copy the saved manifest back and check it byte for byte (the release's "Restore committed
-   manifest").
+4. copy the saved manifest back and check it byte for byte (this script's own need: the checkout
+   is reused, where the release's build job tree is discarded).
 
 Each step cites its source by what it runs, never by line number: the lines move with every edit
 above them. The release's version bump (its "Set release version" step) is not a step: the tarball

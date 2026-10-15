@@ -24,10 +24,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   resolves the task agents and skills named by the prompts the image's own `legion` embeds
   (`packages/daemon/cmd/legion/probe_image.go`);
 - `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
-  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
-  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two roots a pod names as Oh
-  My Pi's explicit extensions — a role relaunched onto a newer plugin contract in a kept pod loads
-  the generation directory's copies instead, installed from npm at
+  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy_build` and
+  `pi_legion_build` jobs run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two
+  roots a pod names as Oh My Pi's explicit extensions — a role relaunched onto a newer plugin contract
+  in a kept pod loads the generation directory's copies instead, installed from npm at
   `$XDG_STATE_HOME/legion-plugins/g<generation>/node_modules/@sjawhar/{pi-envoy,pi-legion}`
   ("Contract discipline" below) — the Envoy plugin first, with extension discovery on. Neither is linked
   into the OMP profile: a plugin both installed and named by `--extension` loads twice, and the image
@@ -201,8 +201,8 @@ Where the digest is published:
   `<legion version>` worker-image tag.
 
 Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
-PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion` job
-released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
+PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
+job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
 inspecting one does not print a worker-image digest.
@@ -251,9 +251,10 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `legion` job on every `main` push that touches any file the image builds from, (2) on every head of a pull
-request against `main` whose diff touches any of those files — building the PR head and publishing `sha-`
-only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. The
+the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
+from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
+the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
+workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,
@@ -284,10 +285,13 @@ host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is n
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps the `legion` job's recorded outputs) or by pushing the branch again. A whole-run rerun of a
-`release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a `legion-v` tag, re-executes
-`legion`, which releases that tag again: the image is rebuilt, the `<legion version>` tag moves to the rebuild's
-digest, and the release body's "Worker image" names that digest.
+(`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A
+whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
+`legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
+rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
+that digest. `release-envoy-listener.yaml` is the exception to `--failed`: when its `release_publish` fails at
+"Confirm the version" because another run took the tag first, only a whole-run re-run (`gh run rerun <run-id>`
+without `--failed`) heals it, since `release_build` must compute the version again and re-stamp the binaries.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
