@@ -1,8 +1,6 @@
-# Envoy on one machine: a NATS server with JetStream of its own, and the Envoy listener in front of
-# it, both on loopback. Sessions on this machine register, subscribe, claim roles and message each
-# other; nothing on another machine reaches either service, and no GitHub or Slack webhook arrives.
-# The Envoy page of the docs site ("Running Envoy on one machine", from
-# docs/site/src/content/docs/dispatch/envoy.md) covers running it.
+# Envoy on one machine: a NATS server with JetStream of its own and the Envoy listener, both on
+# loopback. The Envoy page of the docs site ("Running Envoy on one machine", from
+# docs/site/src/content/docs/dispatch/envoy.md) covers what it serves and how to run it.
 name: envoy-single-node
 
 services:
@@ -26,8 +24,8 @@ services:
       retries: 3
       start_period: 5s
     volumes:
-      # The ENVOY_NOTIFICATIONS stream and Envoy's key-value buckets (sessions, subscriptions,
-      # roles): a restart keeps every session's registration and every queued event.
+      # The ENVOY_NOTIFICATIONS stream and Envoy's key-value buckets: a restart keeps each
+      # session's subscriptions and role claims and the last 72 hours of events.
       - nats-data:/data
 
   listener:
