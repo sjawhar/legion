@@ -574,6 +574,25 @@ func TestGCPRefusesASeedInItsConfiguration(t *testing.T) {
 			func(s string) string { return "https://secretmanager.googleapis.com/" + percentEncoded(s) }},
 		{"a seed percent-encoded in an endpoint's query", "SECRET_MANAGER_ENDPOINT",
 			func(s string) string { return "https://secretmanager.googleapis.com/?k=" + percentEncoded(s) }},
+		// A reader or a decoder takes a seed in lowercase, or split by '.', '-', '_' or whitespace, as
+		// the seed.
+		{"a lowercase access token", "GOOGLE_OAUTH_ACCESS_TOKEN", func(s string) string { return "ya29." + strings.ToLower(s) }},
+		{"an access token split by a space", "GOOGLE_OAUTH_ACCESS_TOKEN", func(s string) string { return split(s, " ") }},
+		{"a lowercase credentials path", "GOOGLE_APPLICATION_CREDENTIALS",
+			func(s string) string { return "/home/example/" + strings.ToLower(s) + ".json" }},
+		{"a credentials path split by a hyphen", "GOOGLE_APPLICATION_CREDENTIALS",
+			func(s string) string { return "/home/example/" + split(s, "-") + ".json" }},
+		{"a lowercase quota project", "GOOGLE_CLOUD_QUOTA_PROJECT", func(s string) string { return strings.ToLower(s) }},
+		{"a quota project split by an underscore", "GOOGLE_CLOUD_QUOTA_PROJECT", func(s string) string { return split(s, "_") }},
+		{"a lowercase universe domain", "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+			func(s string) string { return strings.ToLower(s) + ".example.com" }},
+		{"a universe domain split across DNS labels", "GOOGLE_CLOUD_UNIVERSE_DOMAIN",
+			func(s string) string { return split(s, ".") + ".example.com" }},
+		{"a lowercase metadata host", "GCE_METADATA_HOST", func(s string) string { return strings.ToLower(s) + ":80" }},
+		{"a metadata host split across DNS labels", "GCE_METADATA_HOST", func(s string) string { return split(s, ".") + ":80" }},
+		{"a lowercase endpoint host", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "https://" + strings.ToLower(s) }},
+		{"an endpoint host split across DNS labels", "SECRET_MANAGER_ENDPOINT",
+			func(s string) string { return "https://" + split(s, ".") + ".example.com" }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			seedValue, _ := testnats.User(t)
@@ -593,6 +612,9 @@ func TestGCPRefusesASeedInItsConfiguration(t *testing.T) {
 
 // whole is a configuration value that is the seed itself.
 func whole(seed string) string { return seed }
+
+// split is seed with sep between its halves.
+func split(seed, sep string) string { return seed[:len(seed)/2] + sep + seed[len(seed)/2:] }
 
 // serviceAccount writes a service account key, as Application Default Credentials find one through
 // GOOGLE_APPLICATION_CREDENTIALS, and returns it with a check that a bearer token is a JWT that key

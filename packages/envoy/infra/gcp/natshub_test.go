@@ -567,32 +567,61 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 	seed, _ := testnats.User(t)
 	inside := "example-" + seed
+	lower := strings.ToLower(seed)
 	digest := "@sha256:" + strings.Repeat("0", 64)
 	for _, row := range []struct {
-		input string
-		edit  func(*gcp.NatsHubArgs)
+		name, input string
+		edit        func(*gcp.NatsHubArgs)
 	}{
-		{"hostname", func(a *gcp.NatsHubArgs) { a.Hostname = seed }},
-		{"tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + seed} }},
-		{"zone", func(a *gcp.NatsHubArgs) { a.Zone = inside }},
-		{"machineType", func(a *gcp.NatsHubArgs) { a.MachineType = pulumi.StringRef(inside) }},
-		{"natsImage", func(a *gcp.NatsHubArgs) { a.NatsImage = "example.invalid/" + seed + digest }},
-		{"tailscaleImage", func(a *gcp.NatsHubArgs) { a.TailscaleImage = "example.invalid/" + seed + digest }},
-		{"users[1].name", func(a *gcp.NatsHubArgs) { a.Users[1].Name = seed }},
-		{"users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(inside) }},
-		{"users[1].permissions.publish.allow[0]", func(a *gcp.NatsHubArgs) {
+		{"a seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = seed }},
+		{"a seed in a tag", "tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + seed} }},
+		{"a seed inside the zone", "zone", func(a *gcp.NatsHubArgs) { a.Zone = inside }},
+		{"a seed inside the machine type", "machineType", func(a *gcp.NatsHubArgs) { a.MachineType = pulumi.StringRef(inside) }},
+		{"a seed in the NATS image", "natsImage", func(a *gcp.NatsHubArgs) { a.NatsImage = "example.invalid/" + seed + digest }},
+		{"a seed in the Tailscale image", "tailscaleImage", func(a *gcp.NatsHubArgs) {
+			a.TailscaleImage = "example.invalid/" + seed + digest
+		}},
+		{"a seed as a user's name", "users[1].name", func(a *gcp.NatsHubArgs) { a.Users[1].Name = seed }},
+		{"a seed inside a machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(inside) }},
+		{"a seed in a publish allow entry", "users[1].permissions.publish.allow[0]", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Permissions.Publish.Allow = []string{"notifications." + seed}
 		}},
-		{"users[1].permissions.subscribe.deny[0]", func(a *gcp.NatsHubArgs) {
+		{"a seed percent-encoded in a subscribe deny entry", "users[1].permissions.subscribe.deny[0]", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Permissions.Subscribe.Deny = []string{percentEncoded(seed)}
 		}},
+		// A reader or a decoder takes a seed in lowercase, or split by '.', '-', '_' or whitespace, as
+		// the seed.
+		{"a lowercase seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = lower }},
+		{"a hostname split by a hyphen", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = splitSeed(lower, "-") }},
+		{"a lowercase seed in a tag", "tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + lower} }},
+		{"a tag split by a hyphen", "tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + splitSeed(seed, "-")} }},
+		{"a lowercase zone", "zone", func(a *gcp.NatsHubArgs) { a.Zone = "us-" + lower }},
+		{"a zone split by a hyphen", "zone", func(a *gcp.NatsHubArgs) { a.Zone = splitSeed(lower, "-") }},
+		{"a lowercase machine type", "machineType", func(a *gcp.NatsHubArgs) { a.MachineType = pulumi.StringRef(lower) }},
+		{"a machine type split by an underscore", "machineType", func(a *gcp.NatsHubArgs) {
+			a.MachineType = pulumi.StringRef(splitSeed(seed, "_"))
+		}},
+		{"a lowercase NATS image", "natsImage", func(a *gcp.NatsHubArgs) { a.NatsImage = "example.invalid/" + lower + digest }},
+		{"a NATS image split across path parts", "natsImage", func(a *gcp.NatsHubArgs) {
+			a.NatsImage = "example.invalid/" + splitSeed(lower, ".") + digest
+		}},
+		{"a lowercase Tailscale image", "tailscaleImage", func(a *gcp.NatsHubArgs) {
+			a.TailscaleImage = "example.invalid/" + lower + digest
+		}},
+		{"a Tailscale image split by a hyphen", "tailscaleImage", func(a *gcp.NatsHubArgs) {
+			a.TailscaleImage = "example.invalid/" + splitSeed(lower, "-") + digest
+		}},
+		{"a lowercase machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(lower) }},
+		{"a machine id split by a space", "users[0].machineId", func(a *gcp.NatsHubArgs) {
+			a.Users[0].MachineID = pulumi.StringRef(splitSeed(seed, " "))
+		}},
 	} {
-		t.Run(row.input, func(t *testing.T) {
+		t.Run(row.name, func(t *testing.T) {
 			args := exampleArgs()
 			row.edit(args)
 			err := gcp.ResolveNatsHub(args)
 			require.EqualError(t, err, row.input+": an nkey user seed, which is never an input of the hub (not echoed)")
-			require.NotContains(t, err.Error(), seed)
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 		})
 	}
 }
@@ -603,27 +632,34 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 func TestNatsHubRefusesASeedInItsNetworkWhenItResolves(t *testing.T) {
 	seed, _ := testnats.User(t)
 	for _, row := range []struct {
-		input string
-		edit  func(*gcp.NatsHubArgs)
+		name, input string
+		edit        func(*gcp.NatsHubArgs)
 	}{
-		{"network", func(a *gcp.NatsHubArgs) {
+		{"a seed in the network", "network", func(a *gcp.NatsHubArgs) {
 			a.Network = pulumi.String("projects/example-project/global/networks/" + seed)
 		}},
-		{"subnetwork", func(a *gcp.NatsHubArgs) {
+		{"a seed in the subnetwork", "subnetwork", func(a *gcp.NatsHubArgs) {
 			a.Network = pulumi.String("example-network")
 			a.Subnetwork = pulumi.String("example-" + seed)
 		}},
+		{"a lowercase network", "network", func(a *gcp.NatsHubArgs) {
+			a.Network = pulumi.String("projects/example-project/global/networks/" + strings.ToLower(seed))
+		}},
+		{"a subnetwork split by a hyphen", "subnetwork", func(a *gcp.NatsHubArgs) {
+			a.Network = pulumi.String("example-network")
+			a.Subnetwork = pulumi.String(splitSeed(strings.ToLower(seed), "-"))
+		}},
 	} {
-		t.Run(row.input, func(t *testing.T) {
+		t.Run(row.name, func(t *testing.T) {
 			args := exampleArgs()
 			row.edit(args)
 			m, err := run(t, args, nil, true)
 			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: "+row.input+
 				": an nkey user seed, which is never an input of the hub (not echoed)")
-			require.NotContains(t, err.Error(), seed)
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
 			for _, r := range m.Registrations() {
 				for _, s := range plainStrings(resource.NewProperty(r.Inputs)) {
-					require.NotContains(t, s, seed, "%s %s holds the seed", r.Type, r.Name)
+					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
 				}
 			}
 		})
@@ -638,6 +674,9 @@ func percentEncoded(text string) string {
 	}
 	return b.String()
 }
+
+// splitSeed is seed with sep between its halves.
+func splitSeed(seed, sep string) string { return seed[:len(seed)/2] + sep + seed[len(seed)/2:] }
 
 // The names GCP gets from the hostname, for the shortest and longest hostname the rule admits:
 // each fits its own rule. The rules: a service account id is 6-30 characters, RFC 1035
