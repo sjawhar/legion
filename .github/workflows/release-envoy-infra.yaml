@@ -316,6 +316,7 @@ jobs:
             os=${target%/*}
             arch=${target#*/}
             archives+=("pulumi-resource-envoy-infra-v$VERSION-$os-$arch.tar.gz")
+            archives+=("envoy-infra-$os-$arch.tar.gz")
           done
           expected=("${archives[@]}" SHA256SUMS)
           # is_one_of <name> <list...>: whether <name> is one of <list>.
@@ -367,9 +368,11 @@ jobs:
             printf 'assets/%s\n' "${expected[@]}"
             echo "FILES"
           } >> "$GITHUB_OUTPUT"
-      # Build provenance for the archives Pulumi installs, which the release below uploads exactly,
-      # with SHA256SUMS. A consumer verifies an archive against this workflow's signing identity
-      # before installing it, with the command packages/envoy/infra/README.md ("Install") gives.
+      # Build provenance for both kinds of archive the check above lists: the plugin's, which Pulumi
+      # installs, and the command's, which writes seeds under its operator's credentials. The release
+      # below uploads them exactly, with SHA256SUMS. A consumer verifies an archive against this
+      # workflow's signing identity before installing it, with the commands
+      # packages/envoy/infra/README.md ("Install") gives for each.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ${{ steps.assets.outputs.subjects }}

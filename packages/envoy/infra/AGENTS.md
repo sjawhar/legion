@@ -97,7 +97,7 @@ versions. Never add the module to the root `go.work`.
   and the version as job outputs. `publish` holds the write scopes, the OIDC token and the deploy
   key, and runs only the pinned actions, `release-push.sh` and its own check of what `build` handed
   over: the version X.Y.Z, the tag `envoy-infra-v<version>`, exactly the archives its own checkout
-  of the target list names plus `SHA256SUMS`,
+  of the target list names, the plugin's and the command's for each target, plus `SHA256SUMS`,
   each archive's bytes matching `SHA256SUMS`. So `build` chooses the archives' bytes but not their
   names. An archive the release adds goes into that check's list. A step that runs Go, the Pulumi
   CLI or either command goes in `build`, never in `publish`.
