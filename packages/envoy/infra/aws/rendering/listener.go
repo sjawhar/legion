@@ -18,6 +18,18 @@ const (
 	ListenerContainerName = "envoy-listener"
 )
 
+// Webhook is one webhook a WebhookListener serves: its name in ENVOY_WEBHOOKS, the component input
+// holding its secret's ARN, and the variable ECS injects that secret as.
+type Webhook struct {
+	Name, SecretInput, SecretEnv string
+}
+
+// Webhooks are the webhooks this version knows, in the order the container lists their secrets.
+var Webhooks = []Webhook{
+	{Name: "github", SecretInput: "githubWebhookSecretArn", SecretEnv: "ENVOY_GITHUB_WEBHOOK_SECRET"},
+	{Name: "slack", SecretInput: "slackSigningSecretArn", SecretEnv: "ENVOY_SLACK_SIGNING_SECRET"},
+}
+
 // supportedWebhooks are the webhooks lists this version takes, the lists whose container
 // definitions the reference renders byte for byte: none, which leaves ENVOY_WEBHOOKS unset so the
 // listener mounts no webhook route, and github then slack.
@@ -150,10 +162,9 @@ type ListenerContainer struct {
 	Image string
 	Env   ListenerEnv
 
-	GitHubWebhookSecretArn string // written only with github
-	SlackSigningSecretArn  string // written only with slack
-	ApiTokenSecretArn      string
-	SeedSecretArn          *string // nil injects no seed
+	WebhookSecretArns map[string]string // each listed webhook's secret ARN, by its name
+	ApiTokenSecretArn string
+	SeedSecretArn     *string // nil injects no seed
 
 	LogGroup string
 	Region   string
@@ -161,7 +172,8 @@ type ListenerContainer struct {
 
 // ListenerContainerDefinitions returns a WebhookListener task's container definitions, written as
 // json.dumps writes the reference's list: its dict order, ensure_ascii on. The environment is the
-// Env's Variables, and each webhook's secret is written only with its webhook.
+// Env's Variables, and each webhook's secret is written only with its webhook, from
+// WebhookSecretArns; a listed webhook with no ARN there is refused.
 func ListenerContainerDefinitions(c ListenerContainer) (string, error) {
 	env, err := c.Env.Variables()
 	if err != nil {
@@ -174,11 +186,15 @@ func ListenerContainerDefinitions(c ListenerContainer) (string, error) {
 	}
 
 	var secrets []core.Object
-	if slices.Contains(c.Env.Webhooks, "github") {
-		secrets = append(secrets, secret("ENVOY_GITHUB_WEBHOOK_SECRET", c.GitHubWebhookSecretArn))
-	}
-	if slices.Contains(c.Env.Webhooks, "slack") {
-		secrets = append(secrets, secret("ENVOY_SLACK_SIGNING_SECRET", c.SlackSigningSecretArn))
+	for _, w := range Webhooks {
+		if !slices.Contains(c.Env.Webhooks, w.Name) {
+			continue
+		}
+		arn, ok := c.WebhookSecretArns[w.Name]
+		if !ok {
+			return "", fmt.Errorf("webhook %q is listed with no secret ARN", w.Name)
+		}
+		secrets = append(secrets, secret(w.SecretEnv, arn))
 	}
 	secrets = append(secrets, secret("ENVOY_API_TOKEN", c.ApiTokenSecretArn))
 	if c.SeedSecretArn != nil {

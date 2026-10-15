@@ -568,6 +568,7 @@ func without(t *testing.T, text string, parts ...string) string {
 // and each webhook's secret only with its webhook. The component takes no webhook or github and
 // slack, which the goldens pin through it; github or slack alone reaches only the container
 // definitions, so this test calls them directly, on listener-github-slack-no-seed.golden's inputs.
+// Every row gives both webhooks' ARNs, so what writes a secret is its webhook being listed.
 func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T) {
 	golden := readGolden(t, "listener-github-slack-no-seed.golden")
 	const (
@@ -578,6 +579,27 @@ func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T
 		gitHubOnlyVar = `{"name": "ENVOY_WEBHOOKS", "value": "github"}`
 		slackOnlyVar  = `{"name": "ENVOY_WEBHOOKS", "value": "slack"}`
 	)
+	container := func(webhooks []string, arns map[string]string) rendering.ListenerContainer {
+		appID, trigger := "1234567", "@legion"
+		return rendering.ListenerContainer{
+			Image: "example.registry/envoy@sha256:" + strings.Repeat("0", 64),
+			Env: rendering.ListenerEnv{
+				MachineId:      "example-machine",
+				NatsUrls:       []string{"nats://example-bus.example-namespace.internal.example:4222"},
+				ListenHost:     "0.0.0.0",
+				HostBridge:     "127.0.0.1",
+				NatsReplicas:   1,
+				Webhooks:       webhooks,
+				ReviewerAppId:  &appID,
+				MentionTrigger: &trigger,
+			},
+			WebhookSecretArns: arns,
+			ApiTokenSecretArn: listenerSecretArn + "api-token",
+			LogGroup:          "/ecs/envoy-listener",
+			Region:            "example-region-1",
+		}
+	}
+	both := map[string]string{"github": listenerSecretArn + "github-webhook", "slack": listenerSecretArn + "slack-signing"}
 	for _, row := range []struct {
 		name     string
 		webhooks []string
@@ -588,29 +610,15 @@ func TestListenerContainerDefinitionsWriteEachWebhookOnlyWhenListed(t *testing.T
 		{"none", []string{}, without(t, golden, ", "+webhooks, gitHubEnv, gitHubSecret, slackSecret)},
 	} {
 		t.Run(row.name, func(t *testing.T) {
-			appID, trigger := "1234567", "@legion"
-			definitions, err := rendering.ListenerContainerDefinitions(rendering.ListenerContainer{
-				Image: "example.registry/envoy@sha256:" + strings.Repeat("0", 64),
-				Env: rendering.ListenerEnv{
-					MachineId:      "example-machine",
-					NatsUrls:       []string{"nats://example-bus.example-namespace.internal.example:4222"},
-					ListenHost:     "0.0.0.0",
-					HostBridge:     "127.0.0.1",
-					NatsReplicas:   1,
-					Webhooks:       row.webhooks,
-					ReviewerAppId:  &appID,
-					MentionTrigger: &trigger,
-				},
-				GitHubWebhookSecretArn: listenerSecretArn + "github-webhook",
-				SlackSigningSecretArn:  listenerSecretArn + "slack-signing",
-				ApiTokenSecretArn:      listenerSecretArn + "api-token",
-				LogGroup:               "/ecs/envoy-listener",
-				Region:                 "example-region-1",
-			})
+			definitions, err := rendering.ListenerContainerDefinitions(container(row.webhooks, both))
 			require.NoError(t, err)
 			require.Equal(t, row.want, definitions)
 		})
 	}
+	t.Run("a listed webhook with no secret ARN", func(t *testing.T) {
+		_, err := rendering.ListenerContainerDefinitions(container([]string{"github", "slack"}, map[string]string{"github": both["github"]}))
+		require.EqualError(t, err, `webhook "slack" is listed with no secret ARN`)
+	})
 }
 
 // The ordering inputs come from resources of their own, so a test can tell their dependencies

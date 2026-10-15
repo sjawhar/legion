@@ -136,7 +136,8 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 		return nil, err
 	}
 
-	// The execution role reads the token and, when there is one, the seed into the container.
+	// The execution role reads the token and, when there is one, the seed into the container. The
+	// seed's ARN is resolved once, for its policy and for the container.
 	var policies []pulumi.Resource
 	readPolicy := func(suffix string, arn pulumi.StringOutput) error {
 		policy, err := iam.NewRolePolicy(ctx, name+suffix, &iam.RolePolicyArgs{
@@ -152,38 +153,38 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 	if err := readPolicy("-execution-api-token-read", args.ApiTokenSecretArn.ToStringOutput()); err != nil {
 		return nil, err
 	}
+	seedArn := pulumi.String("").ToStringOutput() // unset: the container injects no seed
 	if args.SeedSecretArn != nil {
-		if err := readPolicy("-execution-nats-nkey-seed-read", given("seedSecretArn", args.SeedSecretArn)); err != nil {
+		seedArn = given("seedSecretArn", args.SeedSecretArn)
+		if err := readPolicy("-execution-nats-nkey-seed-read", seedArn); err != nil {
 			return nil, err
 		}
 	}
 
-	// An ARN for an unlisted webhook was refused, so an absent one is never written.
-	optional := func(field string, in pulumi.StringPtrInput) pulumi.StringOutput {
-		if in == nil {
-			return pulumi.String("").ToStringOutput()
+	// Each listed webhook's secret ARN; validate refused one given for an unlisted webhook.
+	arns, webhookArns := args.webhookSecretArns(), pulumi.StringMap{}
+	for _, w := range rendering.Webhooks {
+		if slices.Contains(args.Webhooks, w.Name) {
+			webhookArns[w.Name] = given(w.SecretInput, arns[w.Name])
 		}
-		return given(field, in)
 	}
 	definitions := pulumi.All(
 		args.NatsUrls.ToStringArrayOutput(),
 		logGroup.Name,
 		args.ApiTokenSecretArn.ToStringOutput(),
-		optional("githubWebhookSecretArn", args.GitHubWebhookSecretArn),
-		optional("slackSigningSecretArn", args.SlackSigningSecretArn),
-		optional("seedSecretArn", args.SeedSecretArn),
+		webhookArns.ToStringMapOutput(),
+		seedArn,
 	).ApplyT(func(v []any) (string, error) {
 		c := rendering.ListenerContainer{
-			Image:                  args.Image,
-			Env:                    args.environment(v[0].([]string)),
-			GitHubWebhookSecretArn: v[3].(string),
-			SlackSigningSecretArn:  v[4].(string),
-			ApiTokenSecretArn:      v[2].(string),
-			LogGroup:               v[1].(string),
-			Region:                 args.Region,
+			Image:             args.Image,
+			Env:               args.environment(v[0].([]string)),
+			WebhookSecretArns: v[3].(map[string]string),
+			ApiTokenSecretArn: v[2].(string),
+			LogGroup:          v[1].(string),
+			Region:            args.Region,
 		}
 		if args.SeedSecretArn != nil {
-			seed := v[5].(string)
+			seed := v[4].(string)
 			c.SeedSecretArn = &seed
 		}
 		definitions, err := rendering.ListenerContainerDefinitions(c)
@@ -289,10 +290,13 @@ func (args *WebhookListenerArgs) validate() error {
 	if args.Webhooks == nil {
 		return errors.New("webhooks is required: give [] for a listener with no webhook")
 	}
-	if err := rendering.CheckWebhookInputs(args.Webhooks, []rendering.WebhookInput{
-		{Webhook: "github", Field: "githubWebhookSecretArn", Given: args.GitHubWebhookSecretArn != nil, Set: args.GitHubWebhookSecretArn != nil},
-		{Webhook: "slack", Field: "slackSigningSecretArn", Given: args.SlackSigningSecretArn != nil, Set: args.SlackSigningSecretArn != nil},
-	}); err != nil {
+	arns := args.webhookSecretArns()
+	inputs := make([]rendering.WebhookInput, len(rendering.Webhooks))
+	for i, w := range rendering.Webhooks {
+		given := arns[w.Name] != nil
+		inputs[i] = rendering.WebhookInput{Webhook: w.Name, Field: w.SecretInput, Given: given, Set: given}
+	}
+	if err := rendering.CheckWebhookInputs(args.Webhooks, inputs); err != nil {
 		return err
 	}
 	// natsUrls may be known only later; the container definitions' apply refuses a bad one.
@@ -303,6 +307,11 @@ func (args *WebhookListenerArgs) validate() error {
 		return errors.New("subnetIds names no subnet: the service has nowhere to place its task")
 	}
 	return refuseServiceTag(args.BaseTags)
+}
+
+// webhookSecretArns are the webhooks' secret ARN inputs, by the name rendering.Webhooks gives each.
+func (args *WebhookListenerArgs) webhookSecretArns() map[string]pulumi.StringPtrInput {
+	return map[string]pulumi.StringPtrInput{"github": args.GitHubWebhookSecretArn, "slack": args.SlackSigningSecretArn}
 }
 
 // environment returns the inputs the container's environment is made of, with natsUrls.
