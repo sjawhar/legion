@@ -1197,40 +1197,48 @@ deployment; the live test below re-proves it against this branch's listener.)
 
 ### Task 4.2: the GCP Secret Manager store for `envoy-infra seed`
 
-**Files:** Create `packages/envoy/infra/seed/gcpstore.go`, `gcpstore_test.go`; modify
-`seed/seed.go` and `seed_test.go` (the line for an unreadable latest version), and
+**Files:** Create `packages/envoy/infra/seed/gcpstore.go`, `gcpstore_test.go`, `gcpfake_test.go`,
+`main_test.go`, `errors.go`; modify `seed/seed.go`, `seed_test.go`, `awsstore.go`, and
 `cmd/envoy-infra/main.go` (`--store gcp-secret-manager`).
 
-- [ ] The store implements Task 2.2's `Store` over `cloud.google.com/go/secretmanager/apiv1`
-  v1.22.0 (confirm the method names in that version's source first):
-  - `Describe` uses `GetSecret`, then `GetSecretVersion` on `versions/latest` for the newest
-    version's number and state (metadata, no value read).
-  - `Versions` uses `ListSecretVersions`, counting every state, destroyed ones included.
-  - `Put` uses `AddSecretVersion`.
-  - `Current` reads `versions/latest` with `AccessSecretVersion`.
+- [x] The seed flow reads one model of a store's default version: `Description.Default`, a
+  `*Version{ID, State}`, nil when the store names none, `State` set when it names one it will not
+  serve. `generate` refuses `Default != nil` for every store, before it lists versions; `verify`
+  refuses `Default == nil` and fails with `check`'s line when `State` is set; a `Current` that finds
+  its default unserved answers an `*Unserved` carrying that version, which `verify` matches with
+  `errors.As`. `Store.Label()` names the default (`AWSCURRENT` or `latest`). `check`'s lines are one
+  shape for every store: `<name>: present; <label>: no`, `<label>: yes (version <id>)`, and
+  `<label>: version <id> is <STATE>`. Each `--store` value is a `StoreType{Open, CheckName, Help}`,
+  so `Command` names no store; the stores share `failed(call, resource, err)` and a
+  `countVersions` page loop that refuses a repeated page token (`errors.go`).
+- [x] The store implements `Store` over `cloud.google.com/go/secretmanager/apiv1` v1.22.0:
+  - `Describe` uses `GetSecret`, a secret with an `expire_time` being scheduled for deletion, then
+    `GetSecretVersion` on `versions/latest` for the default's number and state (metadata, no value).
+  - `Versions` pages `ListSecretVersions` by hand (`InternalFetch`, outside the library's stable
+    interface, since its iterator follows a repeated token forever), counting every state; when
+    the listing shows none it counts 1 if `AccessSecretVersion` on `versions/1`, the one read
+    Secret Manager keeps strongly consistent with the add, finds that version in any state.
+  - `Put` uses `AddSecretVersion`; the version must be 1 and `ENABLED`, and read back by number as
+    the value written.
+  - `Current` reads `versions/latest` with `AccessSecretVersion`: `NOT_FOUND` matches
+    `ErrNotServed`, which `generate`'s read-back waits out; `FAILED_PRECONDITION` is an `*Unserved`,
+    named by one `GetSecretVersion`.
 
-  `--name` takes `projects/<p>/secrets/<s>`. `--expect-account` is refused for this store. It
-  authenticates with Application Default Credentials or `GOOGLE_OAUTH_ACCESS_TOKEN`. Its lines
-  name the version Secret Manager serves by default: `check` prints `<name>: absent`,
-  `<name>: present, no versions`, `<name>: present; latest: version <n>`, or, when the newest
-  version is disabled or destroyed (`versions/latest` names it whatever its state),
-  `<name>: present; latest: version <n> is <STATE>`; `verify` prints
-  `<name> latest (version <n>) derives <key>: yes`, exit 0, or `…: no`, exit 1. When the latest
-  version is unreadable, `verify` fails with the `is <STATE>` line, exit 1 (it wrote nothing, but it
-  is a failed check, not a refused input). `Check` and `Verify` read the newest version's number and
-  state from `Description.NewestVersion` and `NewestState`, and a `latest` with no version
-  (`NewestVersion` empty) is the `no versions` line. Task 2.2 wrote the label as a constant
-  (`seed.go` `defaultLabel = "AWSCURRENT"`); this task moves it onto the store (`Store.Label()`:
-  `AWSCURRENT` or `latest`), so each store's lines take their own label and shape.
-- [ ] Its unit test runs against a gRPC fake server that implements those RPCs, and repeats Task
-  2.2's refusal, read-back and canary cases through this store, plus one whose newest version is
-  disabled and one whose newest version is destroyed.
-- [ ] Commit `feat(envoy-infra): seed command's GCP Secret Manager store`.
+  `--name` takes `projects/<p>/secrets/<s>`, checked before the store opens without echoing it.
+  `--region` and `--expect-account` are refused. It authenticates with Application Default
+  Credentials or `GOOGLE_OAUTH_ACCESS_TOKEN`, takes `SECRET_MANAGER_ENDPOINT` as `https` only, and
+  logs nothing whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says.
+- [x] Its unit test runs against a gRPC fake over TLS (`gcpfake_test.go`, whose certificate the
+  package's one `TestMain` in `main_test.go` trusts) that implements those RPCs, with lags for
+  the listing and `latest`, and repeats Task 2.2's refusal, read-back and canary cases through this
+  store, plus disabled, destroyed, expiring and unseen-version cases.
+- [x] Commit `feat(envoy-infra): seed command's GCP Secret Manager store`.
 
 ### Task 4.3: `envoy-infra:gcp:NatsHub`
 
 **Files:** Create `packages/envoy/infra/gcp/natshub.go`, `cloudconfig.go`, `cloudconfig_test.go`,
-`natshub_test.go`, `fetch_key_test.go`, `testdata/cloud-config.golden`
+`construct_test.go`, `natshub_test.go`, `fetch_key_test.go`, `tailnet_joined_test.go`,
+`data_disk_test.go`, `testdata/cloud-config.golden`
 
 **Interfaces:**
 
@@ -1243,10 +1251,10 @@ type NatsHubArgs struct {
 	Zone           string             `pulumi:"zone"`
 	MachineType    *string            `pulumi:"machineType,optional"` // default "e2-small"
 	DiskSizeGb     *int               `pulumi:"diskSizeGb,optional"`  // default 20
-	NatsImage      string             `pulumi:"natsImage"`            // must contain "@sha256:"
-	TailscaleImage string             `pulumi:"tailscaleImage"`       // must contain "@sha256:"
-	Network        *string            `pulumi:"network,optional"`     // created when absent
-	Subnetwork     *string            `pulumi:"subnetwork,optional"`
+	NatsImage      string             `pulumi:"natsImage"`            // ^[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}$
+	TailscaleImage string             `pulumi:"tailscaleImage"`       // the same rule
+	Network        pulumi.StringPtrInput `pulumi:"network,optional"`  // a name or self link; created when absent
+	Subnetwork     pulumi.StringPtrInput `pulumi:"subnetwork,optional"` // only with network
 }
 
 type NATSUserArgs struct {
@@ -1262,7 +1270,7 @@ type PermissionsArgs struct {
 }
 
 type RulesArgs struct {
-	Allow []string `pulumi:"allow,optional"`
+	Allow []string `pulumi:"allow"`
 	Deny  []string `pulumi:"deny,optional"`
 }
 
@@ -1278,10 +1286,15 @@ and there is no `noAuthUser`. It is validated and rendered before any registrati
 `["Rendered by envoy-infra. Public keys only."]`. The server's other options are command-line
 arguments: `-js --store_dir /data -m 8222 --server_name <hostname>`. A user names `machineId` (the
 usual case, so no consumer spells Envoy's subjects) or `permissions`. Both or neither is refused,
-naming the user.
+naming the user, as are an empty `publicKey` or `machineId`. `gcp:Rules`'s `allow` is required,
+since core refuses an empty one. The schema names the input types `gcp:NatsUser`,
+`gcp:Permissions` and `gcp:Rules`. The constructor also refuses, naming the input: a hostname
+outside its rule, no tags or a tag outside `^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or
+`machineType`, a `diskSizeGb` below 1, no `tailnetAuthKey`, and `subnetwork` without `network`.
+Only `tailnetAuthKey`, `network` and `subnetwork` take another resource's output.
 
-Resources (pulumi-gcp v10.1.0; re-check each field list below against that tag before use), all
-children, after `providers.Require(..., "gcp")`:
+Resources (pulumi-gcp v10.1.0), all children, each named after the hostname rather than the
+component, after `providers.Require(..., "gcp")`:
 - `serviceaccount.Account` `AccountId: <hostname>-hub` (6-30 characters and RFC 1035, which the
   hostname rule guarantees).
 - `secretmanager.Secret` `SecretId: <hostname>-tailnet-auth-key`, `Replication: {Auto: {}}`;
@@ -1300,50 +1313,49 @@ children, after `providers.Require(..., "gcp")`:
   `StatefulDisks: [{DeviceName: "data", DeleteRule: "NEVER"}]`,
   `AutoHealingPolicies: {HealthCheck, InitialDelaySec: 300}`,
   `UpdatePolicy: {Type: "PROACTIVE", MinimalAction: "REPLACE", ReplacementMethod: "RECREATE", MaxSurgeFixed: 0, MaxUnavailableFixed: 1}`,
-  `WaitForInstances: true`, `WaitForInstancesStatus: "STABLE"`.
+  `WaitForInstances: true`, `WaitForInstancesStatus: "STABLE"`, and `DependsOn` the secret's
+  version and the account's grant, which the first VM reads at boot.
 
-Cloud-config (`cloudconfig.go`, `gopkg.in/yaml.v3`, re-run on every COS boot): `bootcmd`:
-`test -c /dev/net/tun || modprobe tun`; format `/dev/disk/by-id/google-data` only when `blkid`
-finds no filesystem; mount it at `/mnt/disks/data`; create `nats/` and `tailscale/` under it;
-create `/run/envoy` (mode 0700) and an empty `/run/envoy/tailnet-auth-key` (mode 0600), so the
-container's bind mount is always a file.
-`write_files`: `/etc/nats/nats-server.conf`; `/etc/envoy/fetch-tailnet-key` (COS mounts `/` read-only; `/etc` is writable and executable) writing the key to
-`/run/envoy/tailnet-auth-key` (mode 0600) from Secret Manager with the metadata server's token,
-taking the metadata host from `GCE_METADATA_HOST` and the Secret Manager base URL from
-`SECRET_MANAGER_ENDPOINT` (defaults `metadata.google.internal` and
-`https://secretmanager.googleapis.com`) and the output path as its first argument; units
-`fetch-tailnet-key` (oneshot), `tailscaled`
-(`docker run --rm --name tailscaled --network host --cap-add NET_ADMIN --device /dev/net/tun -v /mnt/disks/data/tailscale:/var/lib/tailscale -v /run/envoy/tailnet-auth-key:/run/envoy/tailnet-auth-key:ro -e TS_AUTHKEY=file:/run/envoy/tailnet-auth-key -e TS_AUTH_ONCE=true -e TS_STATE_DIR=/var/lib/tailscale -e TS_USERSPACE=false -e TS_HOSTNAME=<hostname> -e TS_EXTRA_ARGS=--advertise-tags=<tags> <tailscaleImage>`;
-containerboot hands the path to the tailscale CLI inside the container, tailscale v1.104.1
-`cmd/containerboot/tailscaled.go:120-121`)
-and `nats`
-(`docker run --rm --name nats --network host -v /mnt/disks/data/nats:/data -v /etc/nats/nats-server.conf:/etc/nats/nats-server.conf:ro <natsImage> -c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <hostname>`,
-`ExecStop=/usr/bin/docker stop -t 30 nats`), each with `RequiresMountsFor=/mnt/disks/data`;
-`tailscaled` also has `After=` and `Wants=fetch-tailnet-key.service` (not `Requires=`: a node
-whose tailnet state is on the disk never reads the key, so a failed fetch on a later boot must not
-keep it down); `fetch-tailnet-key` makes up to six attempts, ten seconds apart, and has
-`RemainAfterExit=yes`. COS's host firewall accepts incoming connections only for SSH, so a oneshot
-`nats-firewall` (`RemainAfterExit=yes`) adds, idempotently (`iptables -w -C … || iptables -w -A …`),
-`INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` for Google's health checks;
-`nats` has `Wants=` and `After=` it. The tailnet path needs no rule: tailscaled accepts inbound on
-`tailscale0` in its own chain (tailscale v1.104.1 `util/linuxfw/iptables_runner.go:229-233`).
-`runcmd`: `systemctl daemon-reload`, then `systemctl start` each unit (never `enable`: COS's `/etc`
-is stateless). The golden pins the bootcmd lines and the ordering.
+Cloud-config (`cloudconfig.go`, `gopkg.in/yaml.v3`, re-run on every COS boot; the full text is
+`testdata/cloud-config.golden` and `docs/nats-hub.md` describes it): `bootcmd` loads `tun` unless
+`/dev/net/tun` exists; formats `/dev/disk/by-id/google-data` only when `blkid -p` finds no
+filesystem and its first MiB reads as zeros, otherwise leaving it with a line on stderr; runs
+`fsck.ext4 -p` and mounts it at `/mnt/disks/data` only when fsck's exit status is below 4; creates
+`nats/` and `tailscale/` under it; and creates `/run/envoy` (0700) and an empty
+`/run/envoy/tailnet-auth-key` (0600). `write_files` writes the authorization, the key fetcher
+`/etc/envoy/fetch-tailnet-key` (six attempts, ten seconds apart; `GCE_METADATA_HOST` and
+`SECRET_MANAGER_ENDPOINT` replace its endpoints), the joined script `/etc/envoy/tailnet-joined`,
+and five units, built from one ordered list that also drives `runcmd`'s starts (never `enable`):
+`fetch-tailnet-key` (oneshot, `RemainAfterExit`, only on a mounted disk without
+`/mnt/disks/data/tailnet-joined`); `tailscaled` (the `docker run` of `tailscaleImage` with
+`TS_AUTHKEY=file:…`, `TS_AUTH_ONCE=true`, `TS_STATE_DIR` on the disk, kernel networking,
+`TS_HOSTNAME` and `--advertise-tags`; `Wants`, not `Requires`, the fetch); `tailnet-joined` (a
+simple service that, once `tailscale status --json` reports `Running`, writes the marker and
+empties the key file, so no later boot fetches the key; tailscaled's own state file exists before
+login, so it cannot serve as the marker); `nats-firewall` (oneshot, adding with the host's
+iptables, each unless present, `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT`
+and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT`, the second because tailscaled's own accept
+rule is in whichever iptables backend its image picks); and `nats` (the `docker run` of
+`natsImage` with the authorization and the store on the disk, stopped with `docker stop -t 30`,
+after the firewall). Both container units come from one builder: `Requires=docker.service`,
+`AssertPathIsMountPoint=/mnt/disks/data`, `Restart=always`, `RestartSec=10`.
 
-- [ ] **Step 1: failing tests.** Cloud-config golden; `fetch_key_test.go` runs the script against
-  an `httptest` server for both endpoints and requires the key file with mode 0600, nothing of the
-  key on stdout or stderr, and a non-zero exit on a 403; mocks: every resource's recorded inputs
-  equal the list, the auth key's `SecretVersion` input is secret, no gcp provider refuses, an
-  invalid user or an image without a digest refuses before any registration, `natsUrl` is
+- [x] **Step 1: failing tests.** Cloud-config golden and its orderings as relations;
+  `fetch_key_test.go`, `tailnet_joined_test.go` and `data_disk_test.go` run the golden's scripts and
+  entries under `/bin/sh` against fakes and stubs; mocks and Construct: every resource's recorded
+  inputs, the auth key only in the secret's version, outputs taken as Inputs and unknown under
+  preview, no gcp provider refuses, every refusal before any registration, `natsUrl` is
   `nats://<hostname>:4222`.
-- [ ] **Step 2: implement, register with `infer.ComponentF(gcp.NewNatsHub)`, pass.** Commit
+- [x] **Step 2: implement, register with `infer.ComponentF(gcp.NewNatsHub)`, pass.** Commit
   `feat(envoy-infra): gcp:NatsHub`.
 
 ### Task 4.4: documentation and the slice's proof
 
-- [ ] README and site: `gcp:NatsHub`'s inputs, with a YAML example using placeholders. Also cover
-  the permission sets, what the VM runs, and why the stateful disk keeps its tailnet identity.
-  Commit `docs(envoy-infra): NATS hub`.
+- [x] README and site: `gcp:NatsHub`'s inputs, with a YAML example using placeholders. Also cover
+  the permission sets, what the VM runs, and why the stateful disk keeps its tailnet identity. The
+  hub's operator text is `packages/envoy/infra/docs/nats-hub.md`, linked from the module README,
+  outside the `gcp/` package so that an edit to it cuts no release. Commit
+  `docs(envoy-infra): NATS hub`.
 - [ ] **Pre-merge proof.** The slice's acceptance (E8, E9) runs in the first GCP deployment's
   repository, per its plan, against this branch's built plugin and CLI. That plan's tester records
   the result there. This PR gets a summary of outcomes and durations, with placeholders only: no
@@ -1362,22 +1374,30 @@ Items to verify, each with the row that settles it and where its result goes:
 - The stateful policy end to end (E9; same).
 - The fetch script on COS (its `/bin/sh`, `curl`, `jq`, `base64`, `mktemp`), and the account's
   Secret Manager grant taking effect inside the fetch's retry window on first boot (E9; same).
-- `/dev/disk/by-id/google-data` present when `bootcmd` runs, no reformat on a recreate (`blkid -p`
-  exits 0), and `waitForInstances: STABLE` within the provider's timeout given autohealing's 300 s
-  initial delay (E9; same).
+- `/dev/disk/by-id/google-data` present when `bootcmd` runs; a new persistent disk's first MiB
+  reading as zeros, so the first boot formats it; `fsck.ext4` on COS; no reformat on a recreate
+  (`blkid -p` exits 0); and `waitForInstances: STABLE` within the provider's timeout given
+  autohealing's 300 s initial delay (E9; same).
 - `NamePrefix` on the instance template under pulumi-gcp's autonaming (E9; same).
-- The containerised tailscaled's own accept rule reaching the host, so 4222 is reachable over the
-  tailnet through COS's firewall: the tailscale v1.104.1 image writes its `ts-input` accept with
-  iptables-legacy, and COS M133 may filter with nft, in which case the legacy accept does not
-  override COS's drop policy. E9's first command on the VM is `iptables -V`; under nft, the
-  `nats-firewall` unit also accepts tcp/4222 on `tailscale0`, or the tailscale container runs with
-  `TS_DEBUG_FIREWALL_MODE=nftables` (E9; same).
+- 4222 reachable over the tailnet through `nats-firewall`'s `tailscale0` rule, added with COS's
+  own iptables whichever backend the tailscale v1.104.1 image writes its own accept with. E9's
+  first command on the VM is `iptables -V`; under nft, 8222 is not reachable over the tailnet,
+  since only Tailscale's own rule would open it (E9; same).
+- `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` reporting
+  `Running` on COS once the node has joined, so `tailnet-joined` writes its marker and drops the
+  key (E9; same).
 - A v4 docker provider diffing unset v5-only inputs (E3 in CI, E4 on the existing deployment).
 - The GCP seed store against the real Secret Manager: `versions/latest` names a DISABLED or
-  DESTROYED newest version, `GetSecretVersion` on `latest` answers NOT_FOUND with no versions, and
-  an unfiltered `ListSecretVersions` includes DESTROYED versions (E8; the first GCP deployment).
-- Two statements the README makes from Google's documentation: raising `diskSizeGb` later does not
-  grow the kept data disk, and deleting the hub leaves that disk behind, detached (E9; same).
+  DESTROYED newest version; `GetSecretVersion` on `latest` answers NOT_FOUND with no versions; an
+  unfiltered `ListSecretVersions` includes DESTROYED versions; `GetSecret` answers `expire_time`
+  for a secret given a `ttl` or `expireTime`; `AccessSecretVersion` on `versions/1` answers
+  NOT_FOUND for no version and FAILED_PRECONDITION for a disabled or destroyed one; after a write,
+  `AccessSecretVersion` on a `latest` naming no version yet answers NOT_FOUND; and how often the
+  listing and `latest` show the write within `generate`'s 7.75 s of pauses, both being eventually
+  consistent (E8; the first GCP deployment).
+- Two statements the hub's document makes from Google's documentation: raising `diskSizeGb` later
+  does not grow the kept data disk, and deleting the hub leaves that disk behind, detached (E9;
+  same).
 
 ## End-to-end verification plan
 
@@ -1427,10 +1447,26 @@ New contracts (component schemas, the CLI) tighten nothing existing. Changes to 
   uses, which spelled the literal before) and `infra/core/listener_env.go`. Value unchanged. Rollout:
   immediate.
 - The listener's durable and queue names move into `bus.ListenerDurable`/`ListenerQueue`:
-  `git grep -n -e '"listener-"' -e '"envoy-listener-"' -- packages/envoy` → `cmd/listener/main.go:531,634`
-  (now call the functions) and the tests `main_test.go:2260,2277`, `reconnect_shutdown_test.go:158`,
-  `shutdown_test.go:113`, `startup_test.go:51` (keep their literals as independent checks). The
-  names produced are unchanged (Task 4.1 Step 1).
+  `git grep -n -e '"listener-"' -e '"envoy-listener-"' -- packages/envoy` finds 8 lines at the
+  merge base `8a4c7882` and at this branch's head: the two functions (`internal/bus/stream.go:41,48`),
+  the tests `cmd/listener/main_test.go:2259,2276`, `reconnect_shutdown_test.go:158`,
+  `shutdown_test.go:113` and `startup_test.go:51` (keeping their literals as independent checks),
+  and `infra/core/nats_auth_test.go:146`, an unrelated test of a refused username.
+  `cmd/listener/main.go` calls the functions. The names produced are unchanged (Task 4.1 Step 1).
+- The key-value bucket names move into `bus`: `store.Bucket`, `store.RoleBucket`,
+  `session.SessionBucket` and `cistore.Bucket` (8, 4, 2 and 4 `git grep -nP` hits under
+  `packages/` at `8a4c7882`) are deleted, and every caller reads `bus.InterestBucket`,
+  `bus.RoleClaimBucket`, `bus.SessionBucket` and `bus.CIStateBucket` (45, 20, 7 and 8 hits at
+  head; 0 of the old names). Values unchanged. Rollout: immediate.
+- `bus.NotificationTopicPrefix` and `bus.ExceptionTopicPrefix` are new exports (0 hits at
+  `8a4c7882`; 2 and 3 at head), read by `usesCoreTransport`, the delivery code and the stream's
+  own subject lists, which spelled the same strings before. Values unchanged.
+- `seed.Store` gains a required `Label()`, and the constant `defaultLabel` (8 hits at `8a4c7882`)
+  is removed. `seed.Description`'s `CurrentVersion` (7 hits under `packages/envoy/infra` at
+  `8a4c7882`) becomes `Default *Version`; `seed.Unserved` is new; and `seed.Stores`' value type
+  becomes `StoreType{Open, CheckName, Help}` (its 6 constructions at `8a4c7882`, 7 at head, all in
+  this module, migrated). No package outside `packages/envoy/infra` implements `Store` or builds a
+  `Stores`. Rollout: immediate.
 - `release-envoy-listener.yaml` no longer runs for `packages/envoy/infra/**`, and its bump ignores
   it: `git grep -n 'packages/envoy' -- .github/` shows no `workflow_run` or other dependent of that
   workflow. Rollout: immediate.
