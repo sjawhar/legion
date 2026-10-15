@@ -80,15 +80,17 @@ versions. Never add the module to the root `go.work`.
 - **Release contract.** `provider.go`'s `downloadURL` names the release
   `.github/workflows/release-envoy-infra.yaml` publishes: tag `envoy-infra-v<version>`, asset
   `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` with the binary at the archive root.
-  The same release carries the command as `envoy-infra-<os>-<arch>.tar.gz`, holding
-  `envoy-infra-<os>-<arch>/envoy-infra` and its `THIRD_PARTY_NOTICES`, the one directory a mise
-  `github:` pin strips. Changing either side breaks every consumer's install. A commit releases
-  both only when it touches a path that workflow's push paths name and a path
-  `.github/envoy-infra-release-paths` lists (the pathspecs its version step cuts a version from),
-  so a `packages/envoy` package either command starts compiling in, directly or through another
-  import, goes into both. `.github/scripts/check-envoy-infra-release-paths.sh` derives that set
-  from `go list -deps` of every command under `cmd/` for every target and fails naming each path
-  and list that misses it.
+  The same release carries the command as `envoy-infra-<os>-<arch>.tar.gz`, holding `envoy-infra`
+  and its `THIRD_PARTY_NOTICES` in one directory, `envoy-infra-<os>-<arch>/`, which mise's
+  `github:` backend strips on install. A mise pin names that archive per platform with a tool alias
+  (`README.md`, "The command"), since the same tag carries the plugin's archives and
+  `github:sjawhar/legion` the `legion` command's. Changing either side breaks every consumer's
+  install. A commit releases both only when it touches a path that workflow's push paths name and
+  a path `.github/envoy-infra-release-paths` lists (the pathspecs its version step cuts a version
+  from), so a `packages/envoy` package either command starts compiling in, directly or through
+  another import, goes into both. `.github/scripts/check-envoy-infra-release-paths.sh` derives
+  that set from `go list -deps` of every command under `cmd/` for every target and fails naming
+  each path and list that misses it.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.

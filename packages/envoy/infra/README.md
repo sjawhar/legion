@@ -60,10 +60,10 @@ program imports `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra/host`.
 
 ### The command
 
-The command's archive is `envoy-infra-<os>-<arch>.tar.gz`. It holds one directory,
-`envoy-infra-<os>-<arch>/`, with the `envoy-infra` binary and its `THIRD_PARTY_NOTICES`; a mise
-`github:` pin strips that directory and installs the binary. The command writes seeds with your
-cloud credentials, so check the archive's provenance before you install it. For linux on amd64:
+The command's archive is `envoy-infra-<os>-<arch>.tar.gz`, holding the `envoy-infra` binary and
+its `THIRD_PARTY_NOTICES` in one directory, `envoy-infra-<os>-<arch>/`. The command writes seeds
+with your cloud credentials, so check the archive's provenance before you install it. For linux on
+amd64:
 
 ```sh
 gh release download envoy-infra-v<version> --repo sjawhar/legion --pattern envoy-infra-linux-amd64.tar.gz
@@ -80,6 +80,29 @@ runner, so an archive attested by any other workflow, branch or runner in the re
 `--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
 explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
 `PATH`; the commands under [NATS seeds](#nats-seeds) call it `envoy-infra`.
+
+To install it with mise, give it a tool alias: `github:sjawhar/legion` is also where the `legion`
+command's releases come from, so a second pin of that repository needs a name of its own. Pin the
+tag, and name each platform's archive with its digest, since each release holds the plugin's
+archives beside the command's:
+
+```toml
+[tool_alias]
+envoy-infra = "github:sjawhar/legion"
+
+[tools.envoy-infra]
+version = "envoy-infra-v<version>"
+platforms.linux-x64   = { asset_pattern = "envoy-infra-linux-amd64.tar.gz", checksum = "sha256:<digest>" }
+platforms.linux-arm64 = { asset_pattern = "envoy-infra-linux-arm64.tar.gz", checksum = "sha256:<digest>" }
+platforms.macos-x64   = { asset_pattern = "envoy-infra-darwin-amd64.tar.gz", checksum = "sha256:<digest>" }
+platforms.macos-arm64 = { asset_pattern = "envoy-infra-darwin-arm64.tar.gz", checksum = "sha256:<digest>" }
+```
+
+Each `<digest>` is the SHA-256 of that platform's archive: `sha256sum` of the one you verified
+above, or GitHub's digest for it, which
+`gh api repos/sjawhar/legion/releases/tags/envoy-infra-v<version> --jq '.assets[] | .name, .digest'`
+lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
+and on `PATH`.
 
 ## What `host:Listener` deploys
 
@@ -500,7 +523,7 @@ exactly these permissions on the secret:
 | --- | --- | --- |
 | `check` | `DescribeSecret` | `secretsmanager:DescribeSecret` |
 | `verify` | `DescribeSecret`, `GetSecretValue` | `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue` |
-| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, `ListSecretVersionIds`, `GetSecretValue`, the last two again after each pause while Secrets Manager has not caught up with the write | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
+| `generate` | `DescribeSecret`, `ListSecretVersionIds`, `PutSecretValue`, then `ListSecretVersionIds`, and `GetSecretValue` once a version is listed, again after each pause while Secrets Manager has not caught up with the write | `secretsmanager:DescribeSecret`, `secretsmanager:ListSecretVersionIds`, `secretsmanager:PutSecretValue`, `secretsmanager:GetSecretValue` |
 
 So a read-only check of a deployment's seed, `check` and `verify`, needs only `DescribeSecret` and
 `GetSecretValue`. `--expect-account` adds `sts:GetCallerIdentity` before them, which needs no
