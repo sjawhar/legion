@@ -758,6 +758,12 @@ A plugin release builds the sets from Envoy's names at its own commit, so a list
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
 a later release.
 
+The listener's set covers a stream it creates, or one a listener of the same names created. A
+stream an older listener created with the role lanes on it is migrated by the listener's start-up
+(`packages/envoy/internal/bus/stream.go`, `migrateRoleLanesOffStream`), which lists the stream's
+consumers, reads and updates every one, and purges the role lanes. The set grants none of those
+calls, so on such a stream, as on a hub given a backup of one, the server refuses the migration.
+
 ## Changing the module
 
 `AGENTS.md` in this directory covers the module's own `go.work`, the rules every component follows,

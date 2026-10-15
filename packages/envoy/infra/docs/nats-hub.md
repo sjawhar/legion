@@ -192,7 +192,8 @@ holds the cloud-config, so a change to anything the cloud-config is rendered fro
 action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
 unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
 clients reconnect then. The new VM gets the same data disk, so it keeps the stream and rejoins the
-tailnet as the same node.
+tailnet as the same node. Its boot disk comes from the `cos-stable` family as it is then, so a new
+template also brings whichever COS release the family names at that moment.
 
 Three inputs work otherwise:
 
