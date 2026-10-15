@@ -2,13 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T21:42:06Z",
+  "completed": "2026-10-15T22:36:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "headSha": "247c104ed24763579f037a47326ac67f85ccd5e4",
-  "ci": "Tests run 38809967155 (lint, typecheck, test success) and PR Title run 38811227924 success at 247c104ed24763579f037a47326ac67f85ccd5e4; the branch head a6fbc223 is the round-5 implement handoff alone (skip-checks)",
+  "headSha": "06765ce13951473740f3a01e8be6a047a8e94270",
+  "ci": "Tests run 38816662485 (lint, typecheck, test success) and PR Title run 38817567906 success at 06765ce13951473740f3a01e8be6a047a8e94270; the branch head c9db65ec is the round-6 implement handoff alone (skip-checks)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 5: the implementer's `# keep the toolchain pinned \\` + `bun install` mutation re-applied (raw, backslash kept) to a copy of the real release.yaml → `step 'Helper' runs 'bun'` at this head, where the same shape passed green at b2600428; bash's reading confirmed (`printf '# c \\\\\\necho RAN\\n' | bash` prints RAN; `printf x \\\\` then a line runs that line). Its case 2g (a doctored shape-A commit on an older main commit) and the held variant (main already past the version) re-driven on my own bare-origin rig: both `::error::HEAD's packages/pkg/package.json differs from its parent's in more than .version = …` on attempt 1, no rebase, hook log empty; the clean bump on the same base still rebases and lands or takes the superseded exit. Harness totals re-run here (165 and 299) and CI run 38809967155 green. Rounds 1–4 stand (the `version` arm and the workflows unchanged since round 3)."
+    "how": "Round 6: the implementer's eight Scanner shapes re-run inside my own 65-body differential of the checker's `commands_of`/`dependency_command` (extracted from the script) against `bash -c` with a logging `bun` stub on PATH — all eight agree with bash as reported (the `;# … \\` shape and the quoted-newline `#` run and are named; three trailing backslashes continue and are not named, two do not and are named; `echo \"bun install\"` is not named); its `;# keep the toolchain pinned \\` mutation re-applied to a copy of the real release.yaml → `step 'Push tag' runs 'bun'`, where the same shape passed green at 247c104e. Harness totals re-run here (184 and 299) and CI run 38816662485 green. Rounds 1–5 stand (release-push.sh changed only in only_bump's wording; the version arm and the workflows unchanged since round 3)."
   },
   "failures": [],
   "failed": 0,
@@ -19,9 +19,18 @@
     "round2": "The five red cases of 8617f1d8 pass at 8b299ab3 (harness 101 passed, 0 failed); the implementer appended three cases (another secret and the whole secrets context in a build job; docker run with imagetools/login/buildx version allowed; Actions/Checkout without persist-credentials).",
     "round3": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 135 passed, 0 failed, 49 cases).",
     "round4": "No new red test: nothing driven this round breaks. The five red cases of 8617f1d8 still pass (harness 162 passed, 0 failed, 57 cases).",
-    "round5": "No new red test. The five red cases of 8617f1d8 still pass (harness 165 passed, 0 failed, 58 cases)."
+    "round5": "No new red test. The five red cases of 8617f1d8 still pass (harness 165 passed, 0 failed, 58 cases).",
+    "round6": "No new red test. The five red cases of 8617f1d8 still pass (harness 184 passed, 0 failed, 66 cases)."
   },
   "proof": [
+    {
+      "criterion": "Done when, bullet 5 (round 6, the review's Important and minors): the checker reads a `run:` in one quote-aware pass as bash does — a `#` opens a comment only at word start (after whitespace, a newline, `;`, `&`, `|`, `(`, `)`, `<`, `>`, a backtick), quotes carry across newlines, an odd run of backslashes before a newline continues the line, substitutions open commands of their own, redirection targets are not words.",
+      "surface": "A differential harness (/tmp/mut/scanner-diff.py): 65 shell bodies, each executed by `bash -c` in a scratch directory with a logging `bun` stub (and `scripts/x.sh`) on PATH, and each read by the checker's own `commands_of` and `dependency_command`, exec'd from the script's heredoc; plus the checker over a mutated copy of the real release.yaml.",
+      "command": "python3 /tmp/mut/scanner-diff.py; python3 (rewrite envoy_plugin_publish's Push tag run to `… push-tag \"$TAG\" ;# keep the toolchain pinned \\` + `bun install --frozen-lockfile` in a copy) && /tmp/mut/tree/.github/scripts/check-release-credentials.sh; .github/scripts/check-release-credentials.sh; .github/scripts/check-release-credentials.test.sh",
+      "observed": "57 of 65 agree (bash runs bun ⇔ the checker names it), among them: `echo a ;# keep pinned \\` + `bun install`, `true |# c \\`, `true &&# c \\`, `a#c`, `$#`, `${x#pre}`, a `#` line then `bun`, `# c \\` then `bun` (runs, named), `printf x \\\\` then `bun` (runs, named), `printf x \\\\\\` then `bun` (joined, not run, not named), four backslashes (runs, named), `bun \\`+`install` (named), `echo \"bun install\"` / `echo 'bun install'` (not run, not named), a double-quoted string across newlines holding `#` and `bun install` beside a real `bun` (named once), `$'#x'; bun`, `x=$(bun …)`, `` y=`bun …` ``, `echo \"$(bun …)\"`, `echo $(echo $(bun …))`, `cat <(bun …)`, `bun … > /dev/null`, `> out.txt bun …`, `echo x > bun` (not run, not named), `{ bun; }`, `( bun )`, if/while/case/for, `! bun`, `time bun`, `[ … ] && bun`, `bun || true`, `FOO=1 bun`, `env FOO=1 bun`, `exec bun`, `bash -c 'bun …'`, `eval \"bun …\"`, `eval 'bu''n install'`, `bun\\ install` (one word: not run, not named), `\"bun\" install`, `b\"un\" install`, `bu\\n install`, `cmds=(bun install); \"${cmds[@]}\"` (named by the assignment), `bash -e scripts/x.sh`, `# c \\` then `scripts/x.sh`, `echo x | bun`, `echo a;`+newline+`bun`, a tab before `bun`, `echo ${HOME}; bun`, an unmatched quote (bash syntax error, nothing named), `echo x >out.txt # c \\` then `bun`, `{ true; } ; bun`, `(true)# c \\` then `bun`. 5 conservative (named, not run): two heredocs holding `bun install`, `(true) bun install` and `echo x >#c` (bash syntax errors), `sh -lc` (its login profile reset the stub PATH — a harness artefact). 3 silent where bash runs bun: `$BUN install` (the documented pass-through), a comment inside backticks (`x=\\`echo a # c\\`; bun install`: bash ends the comment at the tick; the checker at the newline — named in the implementer's handoff as the pass-through class), and `2>&1 bun install` (the fd digit of a redirect written before the command word is kept as the command). The implementer's `;# … \\` mutation on a copy of the real release.yaml → `::error::…:681: job 'envoy_plugin_publish' holds a credential, but step 'Push tag' runs 'bun'`. Real workflows: `7 credentialed job(s) and 8 build job(s)`. Harness: 184 passed, 66 cases. Round 1–5 probe sets: 22, 14, 18, 13, 7 as the shape requires.",
+      "headSha": "06765ce13951473740f3a01e8be6a047a8e94270",
+      "negativeControl": "The `;# … \\` + `bun install` and quoted-newline `#` shapes passed the checker green at 247c104e (the review's regression) and are named here; three trailing backslashes are not named where two are, as bash continues the one and not the other."
+    },
     {
       "criterion": "Done when, bullet 5 (round 5, the review's Important): the checker's tokeniser strips comments before joining continuations and joins only an unescaped trailing backslash, so a comment's trailing backslash (or an escaped one) cannot hide the next line's command from the credentialed-job rule.",
       "surface": "The checker over mutated copies of the real .github/workflows/release.yaml (/tmp/mut/probes5.sh, the mutation text passed as raw Python strings so the backslashes reach the YAML) and over the real three; bash itself for the ground truth of each shape.",
@@ -136,6 +145,8 @@
     }
   ],
   "notes": [
+    "Round 6, two Scanner shapes where bash runs the command and the checker is silent, both in the header's accepted pass-through class and not shapes a maintainer writes (notes, not failures): (a) `2>&1 bun install` — a redirection with an fd digit written before the command word leaves the digit as the command (`bun install 2>&1`, the ordinary order, is named); a one-line fix drops an all-digit word that immediately precedes `<`/`>`; the header's claim that `2>&1` is never a word holds only after the command. (b) a comment inside backticks runs to the newline rather than the closing tick, swallowing what follows the tick on that line (already named in the implementer's trickyParts).",
+    "Round 6: the Scanner names `bun install` inside a heredoc body (bash does not run it) — a conservative false positive no real workflow reaches.",
     "Round 5 correction to round 4's record: round 4's two backslash probes (`bun \\` + `install`; a continued argument line) were mis-built — Python's string continuation had already joined their lines before the YAML was written, so they exercised one-line commands, not the join. This round's probes pass the text raw; the real continuation is joined and named, the comment-backslash and escaped-backslash shapes are not joined, and the continued argument line is allowed.",
     "Round 5: no residual gap found in the tokeniser's comment/continuation handling among the seven shapes probed.",
     "Round 4: no residual gap found. A mode-only change to the manifest (executable bit) alongside the exact bump would pass the content rule (`git diff --name-only` lists the file; the JSON is equal) — harmless (a file mode on package.json) and not reproduced here since `jq > tmp && mv` rewrites the mode; noted for completeness.",
@@ -147,7 +158,7 @@
     "Environment: PyYAML (a uv venv), jq 1.7 and openssh-client 10.0 were installed under $HOME/.local for the local runs; the pod image has none of them (the implement handoff recorded the same for its container). The `jq` builtin of the harness shell is jaq; the scripts ran under bash with the real jq first on PATH.",
     "Tests not re-run: lint, typecheck and the unit suites are CI's (cited above); `go version -m` on a cross-built agent-secrets binary and `agent-secrets --version` were not re-measured here (planner's measurement in plan.json specDepartures; first executed on the merge-triggered listener run)."
   ],
-  "round": 5,
+  "round": 6,
   "resolvedFailures": [
     {
       "round": 1,
