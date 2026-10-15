@@ -353,15 +353,18 @@ func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Del
 	return failing
 }
 
-// DeployJobCard is one Pipeline card's jobs: every name it follows (a renamed job's old and new
-// names, so history and new runs both count) and, for the production card, the apply step whose
-// success makes a successful job a deploy (delivery.Production.Conclusion).
+// DeployJobCardID identifies one Pipeline card within a DeployJobs call.
+type DeployJobCardID string
+
+// DeployJobCard is one Pipeline card, identified by Card. Its embedded production rule gives every
+// name it follows (a renamed job's old and new names, so history and new runs both count) and, for
+// the production card, the apply step whose success makes a successful job a deploy.
 type DeployJobCard struct {
-	Names     []string
-	ApplyStep *string
+	Card DeployJobCardID
+	delivery.Production
 }
 
-// DeployJobs is each card's timing, in cards' order, read from runs in one pass
+// DeployJobs is each card's timing keyed by its Card, read from runs in one pass
 // (pipeline.py:170-185): each followed job's outcome (its conclusion as the card's
 // delivery.Production reads it, so a job that applied nothing is not counted), its minutes from its
 // start to its completion when timed, and the day its run started. The caller passes the deploy
@@ -369,11 +372,11 @@ type DeployJobCard struct {
 // is not counted, adds nothing; every card gets a timing, all of its days empty when no run lists
 // its jobs, and its job field is its names joined by " or ". A name two cards follow counts for the
 // first.
-func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, cards []DeployJobCard, days []string) []DeployJobTiming {
+func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, cards []DeployJobCard, days []string) map[DeployJobCardID]DeployJobTiming {
 	samples := make([][]Sample, len(cards))
 	cardOf := map[string]int{}
 	for i, card := range cards {
-		for _, name := range card.Names {
+		for _, name := range card.JobNames {
 			if _, taken := cardOf[name]; !taken {
 				cardOf[name] = i
 			}
@@ -386,8 +389,7 @@ func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 			if !followed {
 				continue
 			}
-			production := delivery.Production{JobNames: cards[i].Names, ApplyStep: cards[i].ApplyStep}
-			outcome, ok := OutcomeOf(production.Conclusion(job))
+			outcome, ok := OutcomeOf(cards[i].Conclusion(job))
 			if !ok {
 				continue
 			}
@@ -398,9 +400,9 @@ func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 			samples[i] = append(samples[i], sample)
 		}
 	}
-	timings := make([]DeployJobTiming, len(cards))
+	timings := make(map[DeployJobCardID]DeployJobTiming, len(cards))
 	for i, card := range cards {
-		timings[i] = DeployJobTiming{Job: strings.Join(card.Names, " or "), Timing: ComputeTiming(samples[i], days)}
+		timings[card.Card] = DeployJobTiming{Job: strings.Join(card.JobNames, " or "), Timing: ComputeTiming(samples[i], days)}
 	}
 	return timings
 }

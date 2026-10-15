@@ -367,22 +367,22 @@ func TestDeployJobTimingsFollowEachNamedJob(t *testing.T) {
 	}
 
 	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{
-		{Names: []string{stagingE2EJob}},
-		{Names: []string{stagingApplyJob}},
-		{Names: []string{productionApplyJob}},
-		{Names: []string{"never-run / job"}},
+		{Card: "staging_e2e", Production: delivery.Production{JobNames: []string{stagingE2EJob}}},
+		{Card: "staging_apply", Production: delivery.Production{JobNames: []string{stagingApplyJob}}},
+		{Card: "production_apply", Production: delivery.Production{JobNames: []string{productionApplyJob}}},
+		{Card: "never", Production: delivery.Production{JobNames: []string{"never-run / job"}}},
 	}, pipelineDays)
 	if len(timings) != 4 {
-		t.Fatalf("timings = %d, want one per name", len(timings))
+		t.Fatalf("timings = %d, want one per card", len(timings))
 	}
-	e2e := timings[0]
+	e2e := timings["staging_e2e"]
 	if e2e.Job != stagingE2EJob {
 		t.Errorf("staging_e2e.job = %q, want %q", e2e.Job, stagingE2EJob)
 	}
 	assertCell(t, "staging_e2e.days[6]", e2e.Days[6].Cell, 2, new(55.0), new(67.0), 1, 1, 1, new(0.5))
-	assertCell(t, "staging_apply.days[6]", timings[1].Days[6].Cell, 3, new(8.0), new(8.8), 3, 0, 0, new(1.0))
-	assertCell(t, "production_apply.total", timings[2].Total, 1, new(9.0), new(9.0), 1, 0, 0, new(1.0))
-	never := timings[3]
+	assertCell(t, "staging_apply.days[6]", timings["staging_apply"].Days[6].Cell, 3, new(8.0), new(8.8), 3, 0, 0, new(1.0))
+	assertCell(t, "production_apply.total", timings["production_apply"].Total, 1, new(9.0), new(9.0), 1, 0, 0, new(1.0))
+	never := timings["never"]
 	if never.Job != "never-run / job" || len(never.Days) != 7 {
 		t.Errorf("never-run timing = {job %q, %d days}, want its name and 7 days", never.Job, len(never.Days))
 	}
@@ -413,11 +413,11 @@ func TestTheProductionCardMergesItsNamesAndCountsOnlyAppliedJobs(t *testing.T) {
 		runs = append(runs, run)
 		jobsByRun[id] = rows
 	}
-	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{{Names: []string{newName, oldName}, ApplyStep: new(step)}}, pipelineDays)
-	if timings[0].Job != newName+" or "+oldName {
-		t.Errorf("job = %q, want both names", timings[0].Job)
+	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{{Card: "production_apply", Production: delivery.Production{JobNames: []string{newName, oldName}, ApplyStep: new(step)}}}, pipelineDays)
+	if timings["production_apply"].Job != newName+" or "+oldName {
+		t.Errorf("job = %q, want both names", timings["production_apply"].Job)
 	}
-	assertCell(t, "production_apply.total", timings[0].Total, 2, new(10.0), new(10.8), 2, 0, 0, new(1.0))
+	assertCell(t, "production_apply.total", timings["production_apply"].Total, 2, new(10.0), new(10.8), 2, 0, 0, new(1.0))
 }
 
 func assertLeadTimeCell(t *testing.T, name string, got LeadTimeCell, n int, median, p90, maximum *float64) {

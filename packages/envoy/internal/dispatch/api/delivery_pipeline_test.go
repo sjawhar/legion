@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/dispatch/delivery/measures"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -156,6 +157,39 @@ func TestDeliveryPipelineProductionCardMergesJobNames(t *testing.T) {
 	body := deliveryPipelineCompute(settings, pop, pipelineFixtureTime(32, 12, 0), pipelineFixtureTime(32, 12, 0))
 	if body.ProductionApply.Job != oldName+" or "+newName || body.ProductionApply.Total.N != 2 || body.ProductionApply.Total.Success != 2 {
 		t.Fatalf("production_apply = %+v, want two successful results under both names", body.ProductionApply)
+	}
+}
+
+// TestDeliveryPipelineCardKeysSurviveReorderedCards proves each response field reads its card's
+// key, not the order cards were assembled in.
+func TestDeliveryPipelineCardKeysSurviveReorderedCards(t *testing.T) {
+	started := pipelineFixtureTime(32, 8, 0)
+	cards := []measures.DeployJobCard{
+		{Card: pipelineStagingApplyCard, Production: delivery.Production{JobNames: []string{"staging-release / apply"}}},
+		{Card: pipelineProductionApplyCard, Production: delivery.Production{JobNames: []string{"widgets-release / widgets-release"}}},
+		{Card: pipelineStagingE2ECard, Production: delivery.Production{JobNames: []string{"staging-e2e / run"}}},
+	}
+	timings := measures.DeployJobs(
+		[]delivery.DeliveryRun{{RunID: 1, StartedAt: started}},
+		map[int64][]delivery.DeliveryRunJob{1: {
+			{Name: "staging-e2e / run", StartedAt: new(started), CompletedAt: new(started.Add(4 * time.Minute)), Conclusion: new(delivery.DeliveryJobConclusionSuccess)},
+			{Name: "staging-release / apply", StartedAt: new(started), CompletedAt: new(started.Add(7 * time.Minute)), Conclusion: new(delivery.DeliveryJobConclusionSuccess)},
+			{Name: "widgets-release / widgets-release", StartedAt: new(started), CompletedAt: new(started.Add(9 * time.Minute)), Conclusion: new(delivery.DeliveryJobConclusionSuccess)},
+		}},
+		cards,
+		measures.ShownDays(pipelineFixtureTime(32, 12, 0)),
+	)
+	stagingE2E := optionalDeployJobTiming(timings, pipelineStagingE2ECard)
+	stagingApply := optionalDeployJobTiming(timings, pipelineStagingApplyCard)
+	production := timings[pipelineProductionApplyCard]
+	if stagingE2E == nil || stagingE2E.Job != "staging-e2e / run" {
+		t.Fatalf("staging_e2e = %+v, want its card's timing", stagingE2E)
+	}
+	if stagingApply == nil || stagingApply.Job != "staging-release / apply" {
+		t.Fatalf("staging_apply = %+v, want its card's timing", stagingApply)
+	}
+	if production.Job != "widgets-release / widgets-release" {
+		t.Fatalf("production_apply = %+v, want its card's timing", production)
 	}
 }
 

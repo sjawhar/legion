@@ -2,11 +2,12 @@
 -- renames its job keeps the old name beside the new one and both its history and its new runs count;
 -- and an optional apply step, the step whose success means a successful production job applied
 -- (a run a newer run supersedes can finish its production job as success having applied nothing).
--- production_job_names starts as the stored name, one entry. production_job_name stays for a task
--- of the earlier release still serving during the roll, which reads and writes it alone: the trigger
--- turns such a write into a one-name list, and keeps production_job_name at the list's first name
--- on every write, so that task reads a name that matches. This release never names it; a later
--- release's migration drops it with the trigger.
+-- production_job_names starts as the stored name, one entry. During the one rolling-release
+-- compatibility window, an older task still serving reads and writes production_job_name alone;
+-- its bare write deliberately collapses production_job_names to that one name, and the trigger
+-- keeps production_job_name at the list's first name on every write. After the rollout, the
+-- post-deploy settings PUT to this release repairs the list by writing every intended production
+-- job name. This release never names production_job_name; a later release drops it with the trigger.
 alter table delivery_settings
   add column production_job_names text[],
   add column production_apply_step_name text;
