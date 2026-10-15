@@ -17,6 +17,10 @@ const (
 	dataMount    = "/mnt/disks/data"
 	natsConfPath = "/etc/nats/nats-server.conf"
 	fetchKeyPath = "/etc/envoy/fetch-tailnet-key"
+	joinedPath   = "/etc/envoy/tailnet-joined"
+	// joinedMarker is written on the data disk once the hub's node has joined the tailnet: from
+	// then on no boot fetches the tailnet auth key.
+	joinedMarker = dataMount + "/tailnet-joined"
 	keyDir       = "/run/envoy"
 	keyPath      = keyDir + "/tailnet-auth-key"
 	unitDir      = "/etc/systemd/system/"
@@ -25,6 +29,7 @@ const (
 
 	fetchKeyService   = "fetch-tailnet-key.service"
 	tailscaledService = "tailscaled.service"
+	joinedService     = "tailnet-joined.service"
 	firewallService   = "nats-firewall.service"
 	natsService       = "nats.service"
 )
@@ -78,6 +83,7 @@ func (v vm) document() cloudConfig {
 	files := []writeFile{
 		{Path: natsConfPath, Permissions: "0644", Content: v.natsConf},
 		{Path: fetchKeyPath, Permissions: "0755", Content: fetchKeyScript},
+		{Path: joinedPath, Permissions: "0755", Content: joinedScript},
 	}
 	runcmd := []string{"systemctl daemon-reload"}
 	for _, u := range v.units() {
@@ -112,11 +118,13 @@ func (v vm) document() cloudConfig {
 type unitFile struct{ name, text string }
 
 // units are the VM's units, in the order runcmd starts them: the key is fetched before tailscaled
-// starts, and the host firewall opened before NATS starts.
+// starts, tailnet-joined watches tailscaled once it has, and the host firewall is opened before
+// NATS starts.
 func (v vm) units() []unitFile {
 	return []unitFile{
 		{fetchKeyService, v.fetchKeyUnit()},
 		{tailscaledService, v.tailscaledUnit()},
+		{joinedService, joinedUnit()},
 		{firewallService, firewallUnit()},
 		{natsService, v.natsUnit()},
 	}
@@ -184,19 +192,62 @@ until fetch; do
 done
 `
 
-// fetchKeyUnit runs the key fetcher once per boot. It stays active after it exits, so that a
-// later start of tailscaled does not fetch the key again.
+// fetchKeyUnit runs the key fetcher once per boot, on a mounted data disk that holds no joined
+// marker: once the node has joined, the key is never fetched again. It stays active after it
+// exits, so that a later start of tailscaled does not fetch the key again.
 func (v vm) fetchKeyUnit() string {
 	return unit(
 		"[Unit]",
 		"Description=Fetch the tailnet auth key from Secret Manager",
 		"Wants=network-online.target",
 		"After=network-online.target",
+		"ConditionPathExists=!"+joinedMarker,
+		"RequiresMountsFor="+dataMount,
+		"AssertPathIsMountPoint="+dataMount,
 		"",
 		"[Service]",
 		"Type=oneshot",
 		"RemainAfterExit=yes",
 		"ExecStart="+fetchKeyPath+" "+keyPath+" "+v.keySecret,
+	)
+}
+
+// joinedScript waits, by /bin/sh, until the Tailscale container reports the node Running, asking
+// every 5 seconds through containerboot's socket (TS_SOCKET's default, tailscale v1.104.1
+// cmd/containerboot/settings.go:125), then writes the marker it is given and empties the key file,
+// keeping the file itself, which tailscaled's container binds. A node that has joined logs in
+// from its state on the data disk at every later boot (TS_AUTH_ONCE), so the key is on the VM no
+// longer than the first login needs. tailscaled writes its state file before it logs in (tailscale
+// v1.104.1 ipn/ipnlocal/local.go:3185-3190, 4496-4526), so the file's existence does not mean the
+// node has joined: hence the marker.
+const joinedScript = `#!/bin/sh
+# tailnet-joined MARKER KEY_FILE
+set -u
+marker=$1
+key=$2
+until docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null |
+  jq -e '.BackendState == "Running"' >/dev/null; do
+  sleep 5
+done
+touch "$marker" && : >"$key"
+`
+
+// joinedUnit runs the joined script once tailscaled has started, until the node has joined, on a
+// mounted data disk that holds no marker yet. It is a simple service, so its start returns at once
+// and runcmd goes on to NATS, and it stays active once the script exits.
+func joinedUnit() string {
+	return unit(
+		"[Unit]",
+		"Description=Mark this hub joined to the tailnet once Tailscale runs, and drop the tailnet auth key",
+		"After="+tailscaledService,
+		"ConditionPathExists=!"+joinedMarker,
+		"RequiresMountsFor="+dataMount,
+		"AssertPathIsMountPoint="+dataMount,
+		"",
+		"[Service]",
+		"Type=simple",
+		"RemainAfterExit=yes",
+		"ExecStart="+joinedPath+" "+joinedMarker+" "+keyPath,
 	)
 }
 

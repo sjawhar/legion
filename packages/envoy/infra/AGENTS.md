@@ -160,10 +160,12 @@ pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`, `host
 key fetcher's script under `/bin/sh` against `httptest` fakes of the metadata server and Secret
 Manager, with a `sleep` stub first on its `PATH` that records each wait (`gcp/fetch_key_test.go`,
 which needs `curl`, `jq`, `base64` and `mktemp` on this machine and fails, never skips, without
-one), the data disk's format and mount entries under `/bin/sh` against blank, ext4, damaged and
-missing disk images, with `mkfs.ext4`, `fsck.ext4` and `mount` stubbed (`gcp/data_disk_test.go`,
-which needs util-linux's `blkid` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
-skips, without one), the seed command against a fake `Store` (`seed/seed_test.go`), the AWS SDK
+one), the joined script under `/bin/sh` with `docker` and `sleep` stubbed
+(`gcp/tailnet_joined_test.go`, which needs `jq`), the data disk's format and mount entries under
+`/bin/sh` against blank, ext4, damaged and missing disk images, with `mkfs.ext4`, `fsck.ext4` and
+`mount` stubbed (`gcp/data_disk_test.go`, which needs util-linux's `blkid` and e2fsprogs'
+`mkfs.ext4` on this machine and fails, never skips, without one), the seed command against a fake
+`Store` (`seed/seed_test.go`), the AWS SDK
 against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which
 fails a test on any request it does not expect (`seed/awsstore_test.go`), the Secret Manager client
 against a gRPC fake of the service over TLS (`seed/gcpfake_test.go`), which fails a test on any

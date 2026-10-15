@@ -345,7 +345,7 @@ and `instanceGroup`, the group's name.
 | Input | Default | What it is |
 | --- | --- | --- |
 | `users` | required | The NATS server's nkey users. See [The hub's users](#the-hubs-users). |
-| `tailnetAuthKey` | required | A secret: the Tailscale auth key the VM joins the tailnet with. The tailnet must let it advertise `tags`. May come from another resource or stack. |
+| `tailnetAuthKey` | required | A secret: the Tailscale auth key the VM joins the tailnet with. Use a single-use, pre-approved key: the hub's service account can read it for as long as the hub exists, and so can root on the VM, the NATS container included, until the node has joined, so a reusable key would let either add devices with the hub's tags. The tailnet must let it advertise `tags`. May come from another resource or stack. |
 | `hostname` | required | The VM's name on the tailnet and `natsUrl`'s host: 2 to 26 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen (`^[a-z][a-z0-9-]{0,24}[a-z0-9]$`). It also names every child. |
 | `tags` | required | The tailnet tags the VM advertises when it joins, each `tag:<name>`. At least one. |
 | `zone` | required | The zone of the VM and its data disk, such as `us-central1-a`. Changing it makes a new group, with a new data disk: see [Updating a hub](#updating-a-hub). |
@@ -353,7 +353,7 @@ and `instanceGroup`, the group's name.
 | `diskSizeGb` | `20` | The size, in GB, of the data disk the group creates for the hub's first VM. |
 | `natsImage` | required | The NATS server image, pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Its entrypoint takes nats-server's arguments, as the official `nats` image's does. |
 | `tailscaleImage` | required | Tailscale's image, pinned the same way. The unit configures it through containerboot's `TS_*` variables, as Tailscale's own image reads them. |
-| `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one. May come from another resource or stack. |
+| `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address, for its way out, and COS's host firewall accepts SSH, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, the VM's sshd is reachable from the internet: name a network without such a rule, or one whose way out is Cloud NAT. May come from another resource or stack. |
 | `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
 
 Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
@@ -427,14 +427,15 @@ directory.
    the key's bind mount into the Tailscale container is always of a file.
 
 `write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the key fetcher to
-`/etc/envoy/fetch-tailnet-key` and four systemd units to `/etc/systemd/system/`, and `runcmd`
-reloads systemd and starts the units in this order. They are started and never enabled, since
-`/etc` does not outlive the boot.
+`/etc/envoy/fetch-tailnet-key`, the joined script to `/etc/envoy/tailnet-joined` and five systemd
+units to `/etc/systemd/system/`, and `runcmd` reloads systemd and starts the units in this order.
+They are started and never enabled, since `/etc` does not outlive the boot.
 
 | Unit | What it does |
 | --- | --- |
-| `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. |
+| `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
 | `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It wants the fetch and starts after it ends, but does not require it. |
+| `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it writes the marker and empties the key file, which stays for the container's bind mount. A simple service, so its start returns at once. |
 | `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
 
@@ -476,10 +477,15 @@ disk holds both containers' state:
 Keeping the tailnet state there is what lets a recreated VM rejoin the tailnet as the same node,
 under the same name, without logging in again. With `TS_AUTH_ONCE=true`, containerboot logs in
 with `TS_AUTHKEY` only when the state holds no login (tailscale v1.104.1
-`cmd/containerboot/main.go:583-682`), so the VM fetches `tailnetAuthKey` at every boot but logs in
-with it only at the first, and a key that is single-use, or has expired since, serves. The same is
-why `tailscaled.service` does not require the fetch: on a later boot the fetch may fail and leave
-the key file empty, and the node comes up from its state anyway.
+`cmd/containerboot/main.go:583-682`), so the VM logs in with `tailnetAuthKey` at its first boot
+alone. Once the node runs, `tailnet-joined` writes `/mnt/disks/data/tailnet-joined` and empties the
+key file, and no later boot fetches the key: it is on the VM no longer than the first login needs.
+The marker is not tailscaled's own state file, which tailscaled writes before it logs in (tailscale
+v1.104.1 `ipn/ipnlocal/local.go:3185-3190`), so a first boot whose login failed fetches the key
+again. The same is why `tailscaled.service` does not require the fetch: on a later boot the key file
+stays empty, and the node comes up from its state. A node removed from the tailnet therefore does
+not log in again; to have it join anew, put a new key in `tailnetAuthKey`, run `pulumi up`, delete
+`/mnt/disks/data/tailnet-joined` on the VM and restart it.
 
 The group reattaches the same disk to every later VM, so a later `diskSizeGb`, which changes only
 the template, should leave the disk at the size it was created with. Google Cloud's documentation
@@ -510,23 +516,20 @@ Three inputs work otherwise:
 - `hostname` names every child, so a new one is a new hub: Pulumi creates a new set of children,
   whose VM gets a new data disk, so a new tailnet node and an empty stream, then deletes the old
   children, all but the old disk; the old node stays on the tailnet. The new node logs in with
-  `tailnetAuthKey`, which must then be a key the tailnet still accepts.
+  `tailnetAuthKey`, which must then be a new single-use key: the hub's first login spent the last.
 - `zone` replaces the group itself, whose zone cannot change (pulumi-gcp v10.1.0's upstream
   `resource_compute_instance_group_manager.go:120-126`). The group's name is generated, so Pulumi
   creates the new group, under a new name, before it deletes the old one. The new group's VM gets
   a new, empty data disk, so the stream starts empty, and logs in with `tailnetAuthKey`, which must
-  then be a key the tailnet still accepts. It asks for `<h>` while the old node still holds it, so
+  then be a new single-use key. It asks for `<h>` while the old node still holds it, so
   Tailscale names it `<h>-1` ([machine names](https://tailscale.com/docs/concepts/machine-names)),
   and `natsUrl` names the old node, which goes offline when the old group is deleted. The old disk
   is left detached in the old zone. To move a hub to another zone:
 
-  1. Set `zone`, and a `tailnetAuthKey` the tailnet accepts, and run `pulumi up`. It returns once
+  1. Set `zone`, and a new single-use `tailnetAuthKey`, and run `pulumi up`. It returns once
      it has deleted the old group, and with it the old VM.
   2. Remove the old node from the tailnet
      ([remove a device](https://tailscale.com/docs/features/access-control/device-management/how-to/remove)).
-     Not before `pulumi up` returns: a removed node whose VM still runs logs in again with the key
-     that VM fetched at boot, if the key is reusable and unexpired and the tailnet does not
-     require device approval, and takes `<h>` back.
   3. Rename the new node from `<h>-1` to `<h>` (Edit machine name, on the machine names page
      above), which also renames it in MagicDNS.
 
@@ -536,12 +539,15 @@ Three inputs work otherwise:
 ## What a first Google Cloud deployment proves
 
 The unit tests run the hub under Pulumi's mocks, check its cloud-config against the golden, and
-run the key fetcher under `/bin/sh` against fakes of the metadata server and Secret Manager; the
-seed command's Secret Manager store runs against a fake too. None of them runs Google Cloud, COS
-or a tailnet, so the first deployment is where these hold or fail. Watch them on its first
-`pulumi up`:
+run the key fetcher, the joined script and the data disk's entries under `/bin/sh` against fakes
+and stubs; the seed command's Secret Manager store runs against a fake too. None of them runs
+Google Cloud, COS or a tailnet, so the first deployment is where these hold or fail. Watch them on
+its first `pulumi up`:
 
 - `/dev/net/tun` exists on COS without `modprobe`, so the Tailscale container starts.
+- `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` answers on COS
+  with Tailscale v1.104.1's image, and reports `"BackendState": "Running"` once the node has
+  joined, so `tailnet-joined` writes its marker and empties the key file.
 - The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and a new persistent
   disk's first MiB reads as zeros, so the first boot formats it; `fsck.ext4` runs on COS as its
   documentation shows; and after `gcloud compute instance-groups managed recreate-instances` the

@@ -62,6 +62,19 @@ write_files:
         attempt=$((attempt + 1))
         sleep 10
       done
+  - path: /etc/envoy/tailnet-joined
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # tailnet-joined MARKER KEY_FILE
+      set -u
+      marker=$1
+      key=$2
+      until docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null |
+        jq -e '.BackendState == "Running"' >/dev/null; do
+        sleep 5
+      done
+      touch "$marker" && : >"$key"
   - path: /etc/systemd/system/fetch-tailnet-key.service
     permissions: "0644"
     content: |
@@ -69,6 +82,9 @@ write_files:
       Description=Fetch the tailnet auth key from Secret Manager
       Wants=network-online.target
       After=network-online.target
+      ConditionPathExists=!/mnt/disks/data/tailnet-joined
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
 
       [Service]
       Type=oneshot
@@ -89,6 +105,20 @@ write_files:
       ExecStart=/usr/bin/docker run --rm --name tailscaled --network host --cap-add NET_ADMIN --device /dev/net/tun -v /mnt/disks/data/tailscale:/var/lib/tailscale -v /run/envoy/tailnet-auth-key:/run/envoy/tailnet-auth-key:ro -e TS_AUTHKEY=file:/run/envoy/tailnet-auth-key -e TS_AUTH_ONCE=true -e TS_STATE_DIR=/var/lib/tailscale -e TS_USERSPACE=false -e TS_HOSTNAME=example-hub -e TS_EXTRA_ARGS=--advertise-tags=tag:example-host example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
       Restart=always
       RestartSec=10
+  - path: /etc/systemd/system/tailnet-joined.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Mark this hub joined to the tailnet once Tailscale runs, and drop the tailnet auth key
+      After=tailscaled.service
+      ConditionPathExists=!/mnt/disks/data/tailnet-joined
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      ExecStart=/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key
   - path: /etc/systemd/system/nats-firewall.service
     permissions: "0644"
     content: |
@@ -120,5 +150,6 @@ runcmd:
   - systemctl daemon-reload
   - systemctl start fetch-tailnet-key.service
   - systemctl start tailscaled.service
+  - systemctl start tailnet-joined.service
   - systemctl start nats-firewall.service
   - systemctl start nats.service
