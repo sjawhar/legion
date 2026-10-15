@@ -891,10 +891,13 @@ is the reference implementation's, with these additions:
   refuses one in another region than the client's, one in another account than `--expect-account`,
   and an answer with no Secrets Manager ARN (`awsstore.go:121-161`).
 - **`generate`** (`seed.go:135-233, 308-330`). It refuses unless the secret exists, is not
-  scheduled for deletion, and holds no version, deprecated ones included. It prints
+  scheduled for deletion, holds no version, deprecated ones included, and is served by default in
+  no version, which `DescribeSecret` answers even while the listing has not caught up. It prints
   `public key: U…` before it writes, and writes nothing if that print fails (`:165-167`). It writes
-  the bare `SU…` seed string with `PutSecretValue`, whose `ClientRequestToken` the SDK fills and
-  resends on a retry, and requires `AWSCURRENT` among the stages returned (`awsstore.go:196-212`).
+  the bare `SU…` seed string with `PutSecretValue` under one fixed `ClientRequestToken`, which the
+  SDK resends on a retry; a first version another run wrote with another seed is
+  `ResourceExistsException`, a refusal, exit 2, after which no `version id` line is printed. It
+  requires `AWSCURRENT` among the stages returned (`awsstore.go:196-212`).
   It then re-lists the versions and reads the value back, which must be the version it wrote and
   derive the printed key. Secrets Manager's reads are eventually consistent, so while the listing
   shows no version or the store serves none, it looks again after pauses of 0.25, 0.5, 1, 2 and

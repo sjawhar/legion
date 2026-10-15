@@ -28,6 +28,14 @@ const AWSSecretsManager = "aws-secrets-manager"
 // awsCurrent is the staging label of the version Secrets Manager serves by default.
 const awsCurrent = "AWSCURRENT"
 
+// firstVersionToken is the ClientRequestToken of every write generate makes, which is only ever a
+// secret's first version. Secrets Manager names the version by the token: for a token it already
+// holds, it writes nothing when the value is the same and refuses with ResourceExistsException when
+// it differs. So an SDK retry of a lost answer writes no second version, and a second run's
+// first-version write with another seed is refused rather than written beside the first. A version
+// id is per secret, so one constant serves every secret.
+const firstVersionToken = "037f74cb-0e19-4a2d-b95f-6fba44b44b4d"
+
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
 // OpenAWS opens Secrets Manager under the caller's own AWS configuration (the environment, then the
@@ -190,14 +198,19 @@ func (s *awsStore) Versions(ctx context.Context, name string) (int, error) {
 	}
 }
 
-// Put writes value as a SecretString. The SDK fills in a fresh ClientRequestToken for each call and
-// its retries resend that token, so a lost answer retried writes no second version. The written
-// version must be AWSCURRENT.
+// Put writes value as a SecretString under firstVersionToken, which the SDK's retries resend. A
+// first version already written with another value is ResourceExistsException, a refusal: nothing
+// was written. The written version must be AWSCURRENT.
 func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	out, err := s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
-		SecretId:     aws.String(name),
-		SecretString: aws.String(string(value)),
+		SecretId:           aws.String(name),
+		SecretString:       aws.String(string(value)),
+		ClientRequestToken: aws.String(firstVersionToken),
 	})
+	var exists *types.ResourceExistsException
+	if errors.As(err, &exists) {
+		return "", refuse("%v; another generate wrote this secret's first version, with another seed", awsFailed("put-secret-value", name, err))
+	}
 	if err != nil {
 		return "", awsFailed("put-secret-value", name, err)
 	}

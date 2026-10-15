@@ -56,6 +56,9 @@ type fakeStore struct {
 	// An eventually consistent store: after the write, the next lagVersions listings count the
 	// versions as they were before it, and the next lagCurrent reads find no version served.
 	lagVersions, lagCurrent int
+	// listsNone makes every listing before a write count no version, as a listing that has not
+	// caught up with another writer's first version does.
+	listsNone bool
 }
 
 func newStore(t *testing.T) *fakeStore { return &fakeStore{t: t, exists: true} }
@@ -99,6 +102,9 @@ func (f *fakeStore) Versions(_ context.Context, name string) (int, error) {
 	}
 	if len(f.puts) > 0 && f.versionsErrAfterPut != nil {
 		return 0, f.versionsErrAfterPut
+	}
+	if len(f.puts) == 0 && f.listsNone {
+		return 0, nil
 	}
 	if len(f.puts) > 0 && f.lagVersions > 0 {
 		f.lagVersions--
@@ -273,6 +279,12 @@ func TestEveryRefusalExitsTwoAndWritesNothing(t *testing.T) {
 		{"generate: one version", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed) }, "already holds 1 version(s)"},
 		// A version without the default label is still a seed someone may have read.
 		{"generate: two versions", mode("generate"), func(f *fakeStore) *fakeStore { return f.holding(readmeSeed, readmeSeed) }, "already holds 2 version(s)"},
+		// DescribeSecret names a version served by default, though the listing, which is eventually
+		// consistent, does not show it yet: a client may already read that seed.
+		{"generate: a served version the listing does not show", mode("generate"), func(f *fakeStore) *fakeStore {
+			f.listsNone = true
+			return f.holding(readmeSeed)
+		}, "already serves version v1 by default (AWSCURRENT)"},
 		{"generate: describe fails", mode("generate"), func(f *fakeStore) *fakeStore { f.describeErr = denied; return f }, "AccessDeniedException"},
 		{"generate: listing versions fails", mode("generate"), func(f *fakeStore) *fakeStore {
 			f.versionsErr = errors.New("list-secret-version-ids " + secretName + " failed: ThrottlingException")
@@ -535,6 +547,28 @@ func countOf(calls []string, call string) int {
 		}
 	}
 	return n
+}
+
+// putRefusal is a store's refusal of a write: another writer's first version, with another value,
+// is already there, so this one wrote nothing.
+type putRefusal struct{}
+
+func (putRefusal) Error() string {
+	return "put-secret-value " + secretName + " failed: ResourceExistsException; another generate wrote this secret's first version"
+}
+func (putRefusal) Is(target error) bool { return target == seed.ErrRefused }
+
+// A Put the store refuses wrote nothing: generate exits 2 with the refusal, and after the public key
+// it printed before the write, it prints no version id, since no version holds that key.
+func TestGenerateRefusesWhenTheStoreRefusesItsWrite(t *testing.T) {
+	store := newStore(t)
+	store.putErr = putRefusal{}
+	code, out, errs, _ := run(t, store, mode("generate")...)
+	require.Equal(t, 2, code)
+	require.Equal(t, "public key: "+publicKeyOfSeed(t, store.puts[0])+"\n", out)
+	require.Equal(t, "refused: put-secret-value "+secretName+" failed: ResourceExistsException; another generate "+
+		"wrote this secret's first version; nothing was written, and the public key above is not stored\n", errs)
+	requireNoValue(t, store, out, errs)
 }
 
 // generate prints the public key before it writes the seed, so the key is on the terminal whatever

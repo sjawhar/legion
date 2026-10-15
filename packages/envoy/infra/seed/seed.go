@@ -32,7 +32,8 @@ type Store interface {
 	// Versions counts every version the secret holds, deprecated ones included.
 	Versions(ctx context.Context, name string) (int, error)
 	// Put writes value as the secret's first version and returns its version id. An error with a
-	// version id means that version was written; one without may follow a write that landed.
+	// version id means that version was written; one matching ErrRefused means nothing was, since
+	// another writer's first version is already there; any other may follow a write that landed.
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
 	// clears it once read. When the store serves no version, the error matches ErrNotServed.
@@ -120,11 +121,12 @@ func existing(d Description, name string) error {
 }
 
 // Generate makes an nkey user and writes its seed as the secret's first version: it refuses a
-// secret that is absent, scheduled for deletion or holds any version, so it never replaces a seed a
-// client may already read. It then lists the versions again, to check the secret holds that version
-// alone, and reads back the version served by default, which must be that version and derive the
-// public key it returns. Once Put has been called, every return carries the public key, and the
-// version id when Put answered one: a version may exist, and verify needs the key to check it.
+// secret that is absent, scheduled for deletion, served by default or holding any version, so it
+// never replaces a seed a client may already read. It then lists the versions again, to check the
+// secret holds that version alone, and reads back the version served by default, which must be that
+// version and derive the public key it returns. Once Put has been called, every return carries the
+// public key, and the version id when Put answered one: a version may exist, and verify needs the
+// key to check it. A Put the store refuses wrote nothing, and its error matches ErrRefused.
 func Generate(ctx context.Context, s Store, name string) (publicKey, version string, err error) {
 	return generate(ctx, s, name, func(string) error { return nil })
 }
@@ -148,6 +150,12 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 		return "", "", refuse("%s already holds %d version(s). generate writes only a secret's first version, so it "+
 			"never replaces a seed a client may already read; use check or verify", name, held)
 	}
+	if d.CurrentVersion != "" {
+		// The listing is eventually consistent; DescribeSecret's default version is a witness too.
+		return "", "", refuse("%s already serves version %s by default (%s), though its versions listing shows none. "+
+			"generate writes only a secret's first version, so it never replaces a seed a client may already read; "+
+			"use check or verify", name, d.CurrentVersion, defaultLabel)
+	}
 	user, err := nkeys.CreateUser()
 	if err != nil {
 		return "", "", refuse("make an nkey user for %s: %v", name, err)
@@ -166,6 +174,9 @@ func generate(ctx context.Context, s Store, name string, announce func(publicKey
 		return "", "", refuse("%s: could not print the public key: %v; nothing was written", name, err)
 	}
 	version, err = s.Put(ctx, name, value)
+	if errors.Is(err, ErrRefused) {
+		return publicKey, "", refuse("%v; nothing was written, and the public key above is not stored", err)
+	}
 	if err != nil {
 		if version == "" {
 			return publicKey, "", afterWritef("%v; whether a version was written is unknown, run check", err)
@@ -314,7 +325,8 @@ func generateMode(ctx context.Context, s Store, name, _ string, stdout io.Writer
 		announced = true
 		return nil
 	})
-	if !announced {
+	if !announced || errors.Is(err, ErrRefused) {
+		// A refusal after the key was printed is a write the store refused: no version holds the key.
 		return err
 	}
 	if version == "" {

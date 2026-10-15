@@ -463,8 +463,12 @@ from, a secret of the same name in another account.
    ```
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
-   secret that is absent, is scheduled for deletion or holds any version, deprecated ones
-   included, so it never replaces a seed a client may already read. It prints the public key just
+   secret that is absent, is scheduled for deletion, holds any version, deprecated ones included, or
+   is already served by default, even when the versions listing, which Secrets Manager answers
+   eventually consistently, does not show it yet, so it never replaces a seed a client may already
+   read. Every write uses one fixed `ClientRequestToken`, so a second run's first-version write with
+   another seed, racing this one, is refused (`ResourceExistsException`, exit 2) rather than written
+   beside it, and the key that run printed is not stored. It prints the public key just
    before the write, so the key is on your terminal whatever happens next, and the version id once
    the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
    somewhere you can read: `>/dev/null`, or a closed stdout, which a Go program sees as
