@@ -367,10 +367,10 @@ func TestDeployJobTimingsFollowEachNamedJob(t *testing.T) {
 	}
 
 	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{
-		{Card: "staging_e2e", Production: delivery.Production{JobNames: []string{stagingE2EJob}}},
-		{Card: "staging_apply", Production: delivery.Production{JobNames: []string{stagingApplyJob}}},
-		{Card: "production_apply", Production: delivery.Production{JobNames: []string{productionApplyJob}}},
-		{Card: "never", Production: delivery.Production{JobNames: []string{"never-run / job"}}},
+		{CardID: "staging_e2e", Production: delivery.Production{JobNames: []string{stagingE2EJob}}},
+		{CardID: "staging_apply", Production: delivery.Production{JobNames: []string{stagingApplyJob}}},
+		{CardID: "production_apply", Production: delivery.Production{JobNames: []string{productionApplyJob}}},
+		{CardID: "never", Production: delivery.Production{JobNames: []string{"never-run / job"}}},
 	}, pipelineDays)
 	if len(timings) != 4 {
 		t.Fatalf("timings = %d, want one per card", len(timings))
@@ -413,7 +413,7 @@ func TestTheProductionCardMergesItsNamesAndCountsOnlyAppliedJobs(t *testing.T) {
 		runs = append(runs, run)
 		jobsByRun[id] = rows
 	}
-	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{{Card: "production_apply", Production: delivery.Production{JobNames: []string{newName, oldName}, ApplyStep: new(step)}}}, pipelineDays)
+	timings := DeployJobs(runs, jobsByRun, []DeployJobCard{{CardID: "production_apply", Production: delivery.Production{JobNames: []string{newName, oldName}, ApplyStep: new(step)}}}, pipelineDays)
 	if timings["production_apply"].Job != newName+" or "+oldName {
 		t.Errorf("job = %q, want both names", timings["production_apply"].Job)
 	}

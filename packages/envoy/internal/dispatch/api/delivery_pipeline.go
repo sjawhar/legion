@@ -134,19 +134,22 @@ func deliveryPipelineCompute(settings delivery.DeliverySettings, pop pipelinePop
 	}
 	run, slowest, failing := measures.PRChecks(pop.checks.Runs, pop.checks.Jobs, days, at, rollup)
 	cards := []measures.DeployJobCard{{
-		Card:       pipelineProductionApplyCard,
+		CardID:     pipelineProductionApplyCard,
 		Production: settings.Production(),
 	}}
-	if settings.StagingE2EJobName != nil {
+	for _, optional := range []struct {
+		cardID measures.DeployJobCardID
+		name   *string
+	}{
+		{pipelineStagingE2ECard, settings.StagingE2EJobName},
+		{pipelineStagingApplyCard, settings.StagingApplyJobName},
+	} {
+		if optional.name == nil {
+			continue
+		}
 		cards = append(cards, measures.DeployJobCard{
-			Card:       pipelineStagingE2ECard,
-			Production: delivery.Production{JobNames: []string{*settings.StagingE2EJobName}},
-		})
-	}
-	if settings.StagingApplyJobName != nil {
-		cards = append(cards, measures.DeployJobCard{
-			Card:       pipelineStagingApplyCard,
-			Production: delivery.Production{JobNames: []string{*settings.StagingApplyJobName}},
+			CardID:     optional.cardID,
+			Production: delivery.Production{JobNames: []string{*optional.name}},
 		})
 	}
 	timings := measures.DeployJobs(pop.deploys.Runs, pop.deploys.Jobs, cards, days)

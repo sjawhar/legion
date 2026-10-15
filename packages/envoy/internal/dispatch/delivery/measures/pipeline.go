@@ -356,15 +356,15 @@ func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Del
 // DeployJobCardID identifies one Pipeline card within a DeployJobs call.
 type DeployJobCardID string
 
-// DeployJobCard is one Pipeline card, identified by Card. Its embedded production rule gives every
+// DeployJobCard is one Pipeline card, identified by CardID. Its embedded production rule gives every
 // name it follows (a renamed job's old and new names, so history and new runs both count) and, for
 // the production card, the apply step whose success makes a successful job a deploy.
 type DeployJobCard struct {
-	Card DeployJobCardID
+	CardID DeployJobCardID
 	delivery.Production
 }
 
-// DeployJobs is each card's timing keyed by its Card, read from runs in one pass
+// DeployJobs is each card's timing keyed by its CardID, read from runs in one pass
 // (pipeline.py:170-185): each followed job's outcome (its conclusion as the card's
 // delivery.Production reads it, so a job that applied nothing is not counted), its minutes from its
 // start to its completion when timed, and the day its run started. The caller passes the deploy
@@ -402,7 +402,7 @@ func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 	}
 	timings := make(map[DeployJobCardID]DeployJobTiming, len(cards))
 	for i, card := range cards {
-		timings[card.Card] = DeployJobTiming{Job: strings.Join(card.JobNames, " or "), Timing: ComputeTiming(samples[i], days)}
+		timings[card.CardID] = DeployJobTiming{Job: strings.Join(card.JobNames, " or "), Timing: ComputeTiming(samples[i], days)}
 	}
 	return timings
 }

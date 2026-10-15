@@ -165,9 +165,9 @@ func TestDeliveryPipelineProductionCardMergesJobNames(t *testing.T) {
 func TestDeliveryPipelineCardKeysSurviveReorderedCards(t *testing.T) {
 	started := pipelineFixtureTime(32, 8, 0)
 	cards := []measures.DeployJobCard{
-		{Card: pipelineStagingApplyCard, Production: delivery.Production{JobNames: []string{"staging-release / apply"}}},
-		{Card: pipelineProductionApplyCard, Production: delivery.Production{JobNames: []string{"widgets-release / widgets-release"}}},
-		{Card: pipelineStagingE2ECard, Production: delivery.Production{JobNames: []string{"staging-e2e / run"}}},
+		{CardID: pipelineStagingApplyCard, Production: delivery.Production{JobNames: []string{"staging-release / apply"}}},
+		{CardID: pipelineProductionApplyCard, Production: delivery.Production{JobNames: []string{"widgets-release / widgets-release"}}},
+		{CardID: pipelineStagingE2ECard, Production: delivery.Production{JobNames: []string{"staging-e2e / run"}}},
 	}
 	timings := measures.DeployJobs(
 		[]delivery.DeliveryRun{{RunID: 1, StartedAt: started}},
