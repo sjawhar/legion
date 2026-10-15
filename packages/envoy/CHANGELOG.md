@@ -4,6 +4,18 @@
 
 ### Added
 
+- `ENVOY_NATS_SOCKS5_PROXY` sends every NATS connection of the bus through a SOCKS5 proxy, as
+  `host:port`: the first, nats.go's reconnects in place, and the replacement a client's recovery
+  dials, for `envoy-listener`, `envoy-dispatch` (a row of its settings table), `natstail` and the
+  MCP bridge. The proxy is handed each server's host name as the URL spells it, unresolved, so a
+  proxy that resolves names this process cannot (a userspace Tailscale container's SOCKS5 server
+  and MagicDNS) reaches them. A value that is not `host:port` (whitespace around it, a scheme, a
+  host that is neither an IP address nor a DNS name, a port outside 1-65535, or empty) is refused
+  before anything dials, and a set proxy is remote reach, refused without
+  `ENVOY_ALLOW_REMOTE_NATS=1`, since the proxy chooses the server. Neither refusal prints the
+  value. A connect through the proxy that fails names the setting and the proxy's address, with
+  the proxy's own dial error where nats.go alone would report only `nats: no servers available
+  for connection`. Unset, the bus dials NATS directly, as before.
 - A human's answer to a decision block carries his approval forward (LEGION-573). When the
   version his answer writes differs from the version he approved only in its ask blocks, every
   block it holds that is not as the approved version held it is one he answered, and at least one
