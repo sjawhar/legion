@@ -20,6 +20,7 @@ import (
 type ConnectOption func(*connectOpts)
 
 type connectOpts struct {
+	name                        string
 	replicas                    int
 	publishAcknowledgementClock AcknowledgementClock
 	environment                 func(string) (string, bool)
@@ -27,7 +28,7 @@ type connectOpts struct {
 
 // parseConnectOptions applies options over the defaults every connect starts from.
 func parseConnectOptions(options []ConnectOption) connectOpts {
-	opts := connectOpts{replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
+	opts := connectOpts{name: "envoy", replicas: 1, publishAcknowledgementClock: wallClock{}, environment: os.LookupEnv}
 	for _, o := range options {
 		o(&opts)
 	}
@@ -61,6 +62,14 @@ func WithReplicas(n int) ConnectOption {
 // the same lookup as its environment parameter.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 	return func(o *connectOpts) { o.environment = lookup }
+}
+
+// WithName names the client, in place of "envoy": the name the NATS server's connection listings
+// (its /connz endpoint, `nats server report connections`) show for the connection the client dials
+// first and for each one it dials to replace a closed one, and the name field of the client's
+// lifecycle log lines (`envoy nats disconnected`, `envoy nats recovery attempt` and the rest).
+func WithName(name string) ConnectOption {
+	return func(o *connectOpts) { o.name = name }
 }
 
 type subscriptionTransport uint8
@@ -100,10 +109,17 @@ type recoverableSubscription struct {
 	binding chan struct{}
 }
 
+// Client is a NATS connection that publishes notifications and holds at most one JetStream
+// subscription and one core subscription, which it keeps across a reconnect and binds again on a
+// connection it dials to replace a closed one. Subscribe and SubscribeCore enforce that: a call on
+// the subject (and queue group) the transport already holds replaces its subscription, and any
+// other is refused with ErrSubscriptionHeld, so a caller that needs two durables takes one Client
+// per durable.
 type Client struct {
 	Conn                        *nats.Conn
 	js                          nats.JetStreamContext
 	urls                        []string
+	name                        string
 	credential                  nats.Option
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
@@ -159,19 +175,19 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	opts.ReconnectBufSize = -1
 	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
 		if err != nil {
-			slog.Info("envoy nats disconnected", slog.String("error", err.Error()))
+			slog.Info("envoy nats disconnected", slog.String("name", name), slog.String("error", err.Error()))
 			return
 		}
-		slog.Info("envoy nats disconnected")
+		slog.Info("envoy nats disconnected", slog.String("name", name))
 	}
 	opts.ReconnectedCB = func(nc *nats.Conn) {
-		slog.Info("envoy nats reconnected", slog.String("url", nc.ConnectedUrl()))
+		slog.Info("envoy nats reconnected", slog.String("name", name), slog.String("url", nc.ConnectedUrl()))
 		if reconnectCB != nil {
 			reconnectCB(nc)
 		}
 	}
 	opts.ClosedCB = func(_ *nats.Conn) {
-		slog.Info("envoy nats connection closed")
+		slog.Info("envoy nats connection closed", slog.String("name", name))
 		if closedCB != nil {
 			closedCB()
 		}
@@ -200,10 +216,10 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 			level = slog.LevelWarn
 		}
 		if sub != nil {
-			slog.Log(context.Background(), level, "envoy nats async error", slog.String("subject", sub.Subject), slog.String("error", err.Error()))
+			slog.Log(context.Background(), level, "envoy nats async error", slog.String("name", name), slog.String("subject", sub.Subject), slog.String("error", err.Error()))
 			return
 		}
-		slog.Log(context.Background(), level, "envoy nats async error", slog.String("error", err.Error()))
+		slog.Log(context.Background(), level, "envoy nats async error", slog.String("name", name), slog.String("error", err.Error()))
 	}
 	return opts
 }
@@ -297,6 +313,8 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 // ENVOY_NOTIFICATIONS stream. Every caller that only publishes or only tails uses it -- natstail,
 // the MCP bridge and envoy-dispatch's operator commands own nothing on the server they reach, and
 // a stream ensure from one of them rewrites a resource several deployments share (LEGION-249).
+// envoy-dispatch's delivery intakes use it too: each binds its durable on the stream Dispatch's
+// publisher owns (ConnectOwningStream), and leaves the stream itself alone.
 //
 // Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
 // names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
@@ -326,11 +344,12 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	}
 	c := &Client{
 		urls:                        urls,
+		name:                        opts.name,
 		credential:                  credential,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect("envoy", urls, credential, c.onReconnect, c.onClosed)
+	nc, err := connect(c.name, urls, credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -365,8 +384,9 @@ func (c *Client) Connected() bool {
 	return c.Conn != nil && c.Conn.Status() == nats.CONNECTED
 }
 
-// Subscribe creates the listener's recoverable JetStream subscription. The client keeps one
-// JetStream subscription: a later call unsubscribes the handle an earlier one returned.
+// Subscribe creates the client's recoverable JetStream subscription. The client keeps one
+// JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
+// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -381,8 +401,9 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 
 // SubscribeCore creates a recoverable core NATS subscription. The optional queue
 // identifies the stable queue group that shares role-lane delivery between
-// overlapping listeners. The client keeps one core subscription: a later call
-// unsubscribes the handle an earlier one returned.
+// overlapping listeners. The client keeps one core subscription: a later call on the same
+// subject and queue replaces it, unsubscribing the handle an earlier one returned, and any other
+// call is refused with ErrSubscriptionHeld.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
 	if err := c.ensureConn(); err != nil {
 		return nil, err
@@ -406,7 +427,8 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 // stays when the bind fails, so a later restore binds it. A bind of the transport's subscription
 // already in flight, a restore's or another registration's, is waited for first. Once Drain or
 // Close has stopped the client it registers nothing, as a restore binds nothing: replacing the
-// transport's subscription would unsubscribe one the drain is letting finish.
+// transport's subscription would unsubscribe one the drain is letting finish. A registration on
+// another subject or queue group than the transport's subscription is refused (ErrSubscriptionHeld).
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
 	subscription := &c.subscriptions[next.transport]
@@ -420,11 +442,21 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 		c.subscriptionsMu.Unlock()
 		return nil, errStopped
 	}
-	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
-	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
-	// old handle, bound to that consumer's deliver inbox, would otherwise stay subscribed for good.
-	// For a consumer the library created, Unsubscribe also deletes it, as it always does. It runs
-	// before the bind, which a durable still bound to the old handle would refuse.
+	// A registration on another subject, or the same subject in another queue group, would replace
+	// a subscription its caller still relies on, and stop it delivering with nothing logged: two of
+	// Dispatch's delivery intakes on one client lost a durable that way (LEGION-690). It is refused,
+	// and the held subscription goes on delivering.
+	if subscription.handler != nil && (subscription.subject != next.subject || subscription.queue != next.queue) {
+		held := describeSubscription(subscription.subject, subscription.queue)
+		c.subscriptionsMu.Unlock()
+		return nil, fmt.Errorf("%w: holds %s, asked for %s", ErrSubscriptionHeld, held, describeSubscription(next.subject, next.queue))
+	}
+	// Registering the held subject again replaces the transport's subscription, so the one it
+	// replaces stops delivering: the listener's self-health rebuild re-registers after its durable
+	// consumer was lost, and the old handle, bound to that consumer's deliver inbox, would otherwise
+	// stay subscribed for good. For a consumer the library created, Unsubscribe also deletes it, as
+	// it always does. It runs before the bind, which a durable still bound to the old handle would
+	// refuse.
 	replaced := subscription.active
 	*subscription = next
 	subscription.binding = make(chan struct{})
@@ -437,6 +469,15 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 		return nil, err
 	}
 	return sub, nil
+}
+
+// describeSubscription names a subscription in ErrSubscriptionHeld's error: its subject, and its
+// queue group when it has one.
+func describeSubscription(subject, queue string) string {
+	if queue == "" {
+		return fmt.Sprintf("%q", subject)
+	}
+	return fmt.Sprintf("%q in queue group %q", subject, queue)
 }
 
 // bind subscribes registration's handler, through js for a JetStream subscription and on conn for
@@ -489,6 +530,12 @@ func (c *Client) SubOK() bool {
 	c.subscriptionsMu.Unlock()
 	return connOK && subOK
 }
+
+// ErrSubscriptionHeld is what Subscribe and SubscribeCore return for a registration on another
+// subject, or the same subject in another queue group, than the subscription the client already
+// holds on that transport. The held subscription goes on delivering; a caller that needs another
+// durable takes another Client.
+var ErrSubscriptionHeld = errors.New("bus: client already holds a subscription of this transport")
 
 // errStopped is what a client refuses once Drain or Close stopped it: dialling or installing a
 // connection, or re-subscribing.
@@ -659,7 +706,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 		}
 	}
 
-	nc, err := connectWithContext(ctx, "envoy", c.urls, c.credential, c.onReconnect, c.onClosed)
+	nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.onReconnect, c.onClosed)
 	if err != nil {
 		return err
 	}
