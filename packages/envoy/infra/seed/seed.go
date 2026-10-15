@@ -107,13 +107,6 @@ func refuse(format string, args ...any) error {
 	return &refusal{msg: fmt.Sprintf(format, args...)}
 }
 
-// isSeed reports whether value is an nkey user seed, as core.UserSeedPublicKey reads one. Each
-// store refuses a seed in its configuration with it.
-func isSeed(value string) bool {
-	_, err := core.UserSeedPublicKey([]byte(value))
-	return err == nil
-}
-
 // afterWrite is an error once Put has returned. It wraps nothing, so no store error it quotes can
 // make it a refusal.
 type afterWrite struct{ msg string }
@@ -489,13 +482,13 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 	}
 	// A flag's value reaches the result lines, the refusals and the store's requests (--name is
 	// every line's subject and the secret id it sends, --region the endpoint the SDK resolves), so a
-	// value that is an nkey user seed is refused naming the flag, before the store opens. Visit
-	// visits the flags in name order.
+	// value that holds an nkey user seed (core.HoldsSeed), whole or inside it, is refused naming the
+	// flag, before the store opens. Visit visits the flags in name order.
 	given := map[string]bool{}
 	var seeded []string
 	fs.Visit(func(f *flag.Flag) {
 		given[f.Name] = true
-		if _, err := core.UserSeedPublicKey([]byte(f.Value.String())); err == nil {
+		if core.HoldsSeed(f.Value.String()) {
 			seeded = append(seeded, "--"+f.Name)
 		}
 	})

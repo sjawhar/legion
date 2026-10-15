@@ -48,48 +48,97 @@ func (l *stringList) Set(value string) error {
 
 // subcommand is one subcommand's flag set and the problems it reports.
 type subcommand struct {
-	fs     *flag.FlagSet
-	stderr io.Writer
-	flags  map[string]string // the flag that sets each component input
+	fs         *flag.FlagSet
+	stderr     io.Writer
+	flags      map[string]string // the flag that sets each component input
+	printUsage func()            // writes the subcommand's synopsis and flags to stderr
 }
 
 func newSubcommand(name, synopsis string, stderr io.Writer, flags map[string]string) *subcommand {
 	fs := flag.NewFlagSet("envoy-infra render "+name, flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	fs.Usage = func() {
+	// The flag package's own messages quote an undefined flag word whole and a value it cannot
+	// parse, and a seed pasted there would be that word or value, so Parse writes nowhere and parse
+	// reports each problem itself, as `envoy-infra seed` does.
+	fs.SetOutput(io.Discard)
+	fs.Usage = func() {}
+	s := &subcommand{fs: fs, stderr: stderr, flags: flags}
+	s.printUsage = func() {
 		fmt.Fprintf(stderr, "usage: envoy-infra render %s %s\n\n", name, synopsis)
+		fs.SetOutput(stderr)
 		fs.PrintDefaults()
+		fs.SetOutput(io.Discard)
 	}
-	return &subcommand{fs: fs, stderr: stderr, flags: flags}
+	return s
 }
 
 // usage reports a usage error, then the subcommand's usage, and returns its exit code.
 func (s *subcommand) usage(problem string) int {
 	fmt.Fprintf(s.stderr, "%s: %s\n", s.fs.Name(), problem)
-	s.fs.Usage()
+	s.printUsage()
 	return 2
 }
 
 // parse parses args and checks that each of required was given. It returns the flags given, and
-// the exit code when the command must stop: 0 after --help, 2 on a usage error.
+// the exit code when the command must stop: 0 after --help, 2 on a usage error or a refusal.
+//
+// Every flag's value reaches the rendering this command prints, and the refusals of core and
+// rendering quote values, so a value that holds an nkey user seed (core.HoldsSeed), whole or
+// inside it, is refused before anything reads it, naming the flags and never the value.
 func (s *subcommand) parse(args []string, required ...string) (map[string]bool, int, bool) {
 	if err := s.fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
+		switch {
+		case errors.Is(err, flag.ErrHelp):
+			s.printUsage()
 			return nil, 0, true
+		case strings.HasPrefix(err.Error(), "flag needs an argument: -"):
+			// The flag package says this only of a flag it defines, so the name is one of ours.
+			return nil, s.usage(err.Error()), true
 		}
-		return nil, 2, true // the flag package has printed the problem and the usage
+		if name := malformedFlag(s.fs, err); name != "" {
+			return nil, s.usage("--" + name + ": a malformed value (not echoed: a seed may have been pasted there)"), true
+		}
+		return nil, s.usage("a flag this command does not take, or a malformed one (not echoed: a seed may have been pasted there)"), true
+	}
+	given := map[string]bool{}
+	var seeded []string
+	s.fs.Visit(func(f *flag.Flag) {
+		given[f.Name] = true
+		if core.HoldsSeed(f.Value.String()) {
+			seeded = append(seeded, "--"+f.Name)
+		}
+	})
+	if len(seeded) > 0 {
+		fmt.Fprintf(s.stderr, "refused: %s: an nkey user seed, which is never an argument (not echoed)\n", strings.Join(seeded, ", "))
+		return nil, 2, true
 	}
 	if s.fs.NArg() > 0 {
 		return nil, s.usage("unexpected arguments after the flags"), true
 	}
-	given := map[string]bool{}
-	s.fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	for _, name := range required {
 		if !given[name] {
 			return nil, s.usage("--" + name + " is required"), true
 		}
 	}
 	return given, 0, false
+}
+
+// malformedFlag returns the name of the flag whose value the flag package could not parse, read
+// from its message, "invalid value %q for flag -%s: %v" or, for a boolean flag, "invalid boolean
+// value %q for -%s: %v"; "" for any other error. The quoted value comes first, so the name follows
+// the message's last marker, and only a flag the set defines is returned.
+func malformedFlag(fs *flag.FlagSet, err error) string {
+	msg := err.Error()
+	if !strings.HasPrefix(msg, "invalid value ") && !strings.HasPrefix(msg, "invalid boolean value ") {
+		return ""
+	}
+	for _, marker := range []string{" for flag -", " for -"} {
+		if i := strings.LastIndex(msg, marker); i >= 0 {
+			if name, _, _ := strings.Cut(msg[i+len(marker):], ":"); fs.Lookup(name) != nil {
+				return name
+			}
+		}
+	}
+	return ""
 }
 
 // refused reports a refusal of the value the flag name sets and returns its exit code.
@@ -160,6 +209,11 @@ func natsStartScript(args []string, stdout, stderr io.Writer) int {
 
 	text, err := os.ReadFile(authorizationFile)
 	if err != nil {
+		return s.refused("authorization-file", err)
+	}
+	// The file's names, subjects and keys reach the script and the refusals below, which quote
+	// them, so a seed anywhere in it is refused first, naming where it is and never the value.
+	if err := fileSeed(text); err != nil {
 		return s.refused("authorization-file", err)
 	}
 	// encoding/json matches each key to the core.Authorization field whose JSON key, the schema's
@@ -346,4 +400,56 @@ func sameKeys(path string, given, want any) error {
 		}
 	}
 	return nil
+}
+
+// fileSeed refuses a JSON file text that holds an nkey user seed (core.HoldsSeed), naming the field
+// it is in: a key's path ends at its object, so the refusal never quotes the key. A seed the file
+// holds outside any string or key, or in a file that is no JSON value, is refused naming no field.
+func fileSeed(text []byte) error {
+	var value any
+	if json.Unmarshal(text, &value) == nil {
+		if path, key, ok := seedAt("", value); ok {
+			prefix := ""
+			if path != "" {
+				prefix = path + ": "
+			}
+			if key {
+				return errors.New(prefix + "a key holding an nkey user seed (not echoed)")
+			}
+			return errors.New(prefix + "an nkey user seed, which the file never holds (not echoed)")
+		}
+	}
+	if core.HoldsSeed(string(text)) {
+		return errors.New("an nkey user seed, which the file never holds (not echoed)")
+	}
+	return nil
+}
+
+// seedAt returns where in value, a decoded JSON value at path, a key or a string holds a seed, and
+// whether it is a key. It reads an object's keys in sorted order.
+func seedAt(path string, value any) (string, bool, bool) {
+	switch v := value.(type) {
+	case string:
+		return path, false, core.HoldsSeed(v)
+	case []any:
+		for i, element := range v {
+			if at, key, ok := seedAt(fmt.Sprintf("%s[%d]", path, i), element); ok {
+				return at, key, true
+			}
+		}
+	case map[string]any:
+		for _, name := range slices.Sorted(maps.Keys(v)) {
+			if core.HoldsSeed(name) {
+				return path, true, true
+			}
+			next := name
+			if path != "" {
+				next = path + "." + name
+			}
+			if at, key, ok := seedAt(next, v[name]); ok {
+				return at, key, true
+			}
+		}
+	}
+	return "", false, false
 }

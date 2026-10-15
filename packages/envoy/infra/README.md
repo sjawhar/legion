@@ -853,6 +853,13 @@ component refuses is refused, naming the flag, as `refused: --<flag>: <reason>` 
 error prints the usage and exits 2. It reads only its flags and the file `--authorization-file`
 names, and calls no API.
 
+An nkey user seed is never echoed. A flag value that holds one, whole or inside it, percent-encoded
+or not, is refused before anything reads it, naming the flags and never the value (`refused:
+--<flag>: an nkey user seed, which is never an argument`). So is a seed anywhere in the
+`--authorization-file`, naming its field (`users[0].name`, `users[0].publish.allow[0]`), or the
+object whose key holds it. A flag the command does not take, and a value a numeric or boolean flag
+cannot parse, are reported without quoting what was given, as `envoy-infra seed` reports them.
+
 ### nats-start-script
 
 ```text
@@ -949,18 +956,19 @@ envoy-infra seed {check|generate|verify} --store gcp-secret-manager --name proje
 
 With `aws-secrets-manager`, the command runs under your own AWS configuration, as the AWS SDK loads
 it: the environment, then the shared configuration and credentials files. `--region` overrides the
-region it names. Before any call, it refuses a region or a profile name in that configuration that
-is an nkey user seed, without echoing it (see "What `check` and `verify` print"); a Secrets
-Manager endpoint you configure (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or a
-profile's `services` section) that is not `https`, unless it is this machine's loopback address,
-since a seed would cross the network in plain text; and it retrieves your credentials, and with
-none it can use, it stops with `refused: <name>: no usable AWS credentials …`. With
-`--expect-account`, it then asks STS whose credentials they are and refuses, before any other call,
-unless they are that account's; an empty `--expect-account`, as `--expect-account "$ACCOUNT"`
-becomes with the variable unset, is a usage error, never a skipped check. STS and Secrets Manager
-each resolve their own endpoint, so the secret is checked too: `DescribeSecret`, every mode's first
-call, answers the secret's ARN, and the command refuses a secret in another region than the one it
-sends to, and with `--expect-account` one in another account, before it reads or writes a seed.
+region it names. Before any request or credential retrieval, it refuses a seed anywhere in that
+configuration or in the endpoints it resolves from it, without echoing it (see "What `check` and
+`verify` print"); then a Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL`,
+`AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is not `https`, unless
+it is this machine's loopback address, since a seed would cross the network in plain text; and it
+retrieves your credentials, and with none it can use, it stops with
+`refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks STS whose
+credentials they are and refuses, before any other call, unless they are that account's; an empty
+`--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage
+error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so the
+secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and the
+command refuses a secret in another region than the one it sends to, and with `--expect-account`
+one in another account, before it reads or writes a seed.
 Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
 from, a secret of the same name in another account.
 
@@ -1086,21 +1094,47 @@ it refuses, naming the version, when `latest` names one, as
 enabled, `refused: <name> already holds version <n>, which latest names though it is <STATE> …`;
 otherwise when the listing shows any; and, when it shows none, when an access of `versions/1`, the
 number every secret's first version gets, finds a version in any state. Its write reads `versions/1`
-by number once more just before `AddSecretVersion`, which takes no request id or precondition, and
-refuses, writing nothing, when another `generate` wrote this secret's first version after those
-checks: `refused: add-secret-version <name>: <name>/versions/1 already exists; another generate
-wrote this secret's first version, with another seed; nothing was written, and the public key above
-is not stored`, exit 2, as Secrets Manager's `ResourceExistsException` is. Then the version it adds
-must be version 1: any other number is another writer's version that landed between that read and
-the add, as two runs at the same moment can, and `generate` stops with an error after writing,
-naming it. It reads version 1 back by number, which
-must be the value it wrote, then `versions/latest`, the version Secret Manager serves by default,
-which must be the one it added; while the listing shows no version yet, or `latest` names none, it
-waits as it does on Secrets Manager. A `latest` that names a version it will not serve, such as a
-disabled one, is no wait but an error after writing. Once a secret holds a second version,
-`latest` names it and cannot be pointed back at version 1: disabling or destroying version 2
-leaves `latest` naming a version it will not serve. A version 2 is undone only by adding version
-1's seed again, as version 3, or by moving every client to version 2's key.
+by number once more just before `AddSecretVersion`, and refuses, writing nothing, when another
+`generate` wrote this secret's first version after those checks:
+`refused: add-secret-version <name>: <name>/versions/1 already exists; another generate wrote this
+secret's first version, with another seed; nothing was written, and the public key above is not
+stored`, exit 2, as Secrets Manager's `ResourceExistsException` is. It then reads version 1 back by
+number, which must be the value it wrote, then `versions/latest`, the version Secret Manager serves
+by default, which must be the one it added; while the listing shows no version yet, or `latest`
+names none, it waits as it does on Secrets Manager. A `latest` that names a version it will not
+serve, such as a disabled one, is no wait but an error after writing.
+
+Secret Manager has no conditional add: `AddSecretVersion` takes no request id and no precondition.
+So one window stays open, between a run's read of `versions/1` and its add, a single round trip:
+when two `generate` runs for one secret both read in it before either adds, both adds land, the
+first as version 1 and the other as version 2, which `latest` names and serves. `latest` is the
+most recently created version whatever its state, so disabling or destroying version 2 alone leaves
+no seed served. What each run reports:
+
+- The run whose add landed as version 2 always stops with an error after writing, exit 1, that
+  says what happened (another `generate` wrote version 1 first, so this run's version 2 is the one
+  `latest` serves), what it means (the key the other run printed does not derive the served seed),
+  and the commands that recover: keep this run's seed, by putting the key it printed in the NATS
+  authorization and destroying version 1, or keep the other run's, by copying version 1 to a new
+  version, as below, and destroying version 2; then `check`, and `verify` with the key kept.
+- The run whose add landed as version 1 stops with an error after writing, exit 1, if its read-back
+  sees version 2 (`<name> now holds 2 version(s), not only version 1: another writer raced this
+  one`, or `latest` serving version 2); if version 2 lands after its read-back, it succeeds, and
+  only the other run's message tells you its key is not the one served.
+
+The copy, which pipes the seed between the two commands and prints nothing, is gcloud's own raw
+read of a version:
+
+```sh
+gcloud secrets versions access <name>/versions/1 --format='get(payload.data)' \
+  | tr '_-' '/+' | base64 -d \
+  | gcloud secrets versions add <name> --data-file=-
+```
+
+The store takes that window over closing it with a claim on the secret, such as an
+etag-guarded `UpdateSecret` before the add: the claim would need `secretmanager.secrets.update`,
+beyond the roles below, and a run that died holding it would leave it for someone to clear before
+any later `generate` could write.
 
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.
@@ -1138,21 +1172,42 @@ On Secret Manager it prints one of:
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal. Before any store opens, the command refuses a flag whose
-value is an nkey user seed (`--name`, `--region`, or any other), naming the flag and not the value:
-`--name` is every line's subject and the secret id the store is sent, and `--region` names the
-endpoint the SDK resolves. An unknown mode, an argument after the flags and a flag the command does
-not take are not echoed either. The AWS store does the same, before any call, for a region or a
-profile name that is a seed in the AWS configuration: `AWS_REGION`, `AWS_DEFAULT_REGION`,
-`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, the shared config profile's `region`, or a profile the shared
-config names that does not exist, such as a `source_profile`. The refusal names where the value came
-from, as `refused: <name>: AWS_PROFILE: an nkey user seed, which is never AWS configuration (not
-echoed)`. The Secret Manager store does the same for each variable whose value it, or a library it
-calls, sends in a request, dials as a host or quotes in an error: `GOOGLE_OAUTH_ACCESS_TOKEN` (the
-bearer token), `GOOGLE_APPLICATION_CREDENTIALS` (quoted when the file cannot be opened),
-`GOOGLE_CLOUD_QUOTA_PROJECT` (sent as `x-goog-user-project`), `GOOGLE_CLOUD_UNIVERSE_DOMAIN` and
-`GCE_METADATA_HOST` (hosts it dials), and `SECRET_MANAGER_ENDPOINT` or its host, as
-`refused: <name>: GOOGLE_APPLICATION_CREDENTIALS: an nkey user seed, which is never Google Cloud
-configuration (not echoed)`.
+value holds an nkey user seed, whole or inside it (`--name`, `--region`, or any other), naming the
+flag and not the value: `--name` is every line's subject and the secret id the store is sent, and
+`--region` names the endpoint the SDK resolves. An unknown mode, an argument after the flags and a
+flag the command does not take are not echoed either.
+
+The AWS store refuses a seed anywhere the AWS configuration carries one into a client, the
+configuration before any client is built and the endpoints before any request:
+
+- any `AWS_` environment variable, every one the SDK reads among them (`AWS_REGION`,
+  `AWS_PROFILE`, `AWS_CONFIG_FILE`, `AWS_ENDPOINT_URL` and `AWS_ENDPOINT_URL_<SERVICE>`,
+  `AWS_ACCESS_KEY_ID`, `AWS_SESSION_TOKEN`, `AWS_ROLE_ARN`, `AWS_SDK_UA_APP_ID`,
+  `AWS_CONTAINER_CREDENTIALS_FULL_URI` and the rest), and `_X_AMZN_TRACE_ID`, which the SDK sends
+  as a header on Lambda;
+- the default paths of the shared config and credentials files, under `$HOME`;
+- every value of the shared config profile the SDK reads, and of each `source_profile` it names:
+  `region`, `source_profile`, `role_arn`, `role_session_name`, `external_id`, `mfa_serial`,
+  `credential_source`, `credential_process`, `web_identity_token_file`, `sso_session` and its
+  `sso-session` section's `sso_region` and `sso_start_url`, `endpoint_url` and each `services`
+  section's `endpoint_url`, the credentials file's keys, `sdk_ua_app_id`, `ca_bundle`, and any
+  other;
+- the Secrets Manager and STS endpoints, as the SDK resolves them.
+
+A seed is found anywhere in a value: whole, inside a path or a URL's path, query, fragment or
+userinfo, or percent-encoded. The refusal names where the value came from, never the value, as
+`refused: <name>: AWS_ENDPOINT_URL: an nkey user seed, which is never AWS configuration (not
+echoed)` or `refused: <name>: the shared config's profile "example": source_profile: …`.
+
+The Secret Manager store refuses a seed, before any call, in each variable whose value it, or a
+library it calls, sends in a request, dials as a host or quotes in an error:
+`GOOGLE_OAUTH_ACCESS_TOKEN` (the bearer token), `GOOGLE_APPLICATION_CREDENTIALS` (quoted when the
+file cannot be opened), `GOOGLE_CLOUD_QUOTA_PROJECT` (sent as `x-goog-user-project`),
+`GOOGLE_CLOUD_UNIVERSE_DOMAIN` and `GCE_METADATA_HOST` (hosts it dials), and
+`SECRET_MANAGER_ENDPOINT`. As for the AWS store, a seed is found anywhere in the value: whole,
+inside a path, a token, a host or a project, or percent-encoded, as in an endpoint's path or query.
+The refusal names the variable, as `refused: <name>: GOOGLE_APPLICATION_CREDENTIALS: an nkey user
+seed, which is never Google Cloud configuration (not echoed)`.
 
 ### Exit codes
 

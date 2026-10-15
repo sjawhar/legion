@@ -306,23 +306,47 @@ func TestGCPGenerateCallsAFailedWriteUnknownNotRefused(t *testing.T) {
 		"one AddSecretVersion, not retried, and no call after it")
 }
 
-// Secret Manager numbers a secret's versions from 1, one more for each (resources.proto,
-// SecretVersion.name), and Put found no version 1 just before its add, so a write answered with any
-// other number is another writer's version that landed between that read and the add, as two
-// simultaneous runs can: an error after the write, with nothing read back.
-func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
-	earlier, _ := testnats.User(t)
+// Two generate runs overlap on one secret so that both read version 1, and find none, before either
+// adds: Secret Manager has no conditional add, so both adds land, A's as version 1 and B's as
+// version 2, which latest names. B's error after the write says, in order, what happened, what it
+// means for A's key, and the gcloud and envoy-infra commands that recover; nothing is read back.
+// verify then shows the consequence it states: the served seed derives B's key, not A's.
+func TestGCPOverlappingGenerateRunsWhoseReadsBothPrecedeBothAdds(t *testing.T) {
+	seedA, keyA := testnats.User(t)
 	f := newFakeGCP(t)
-	f.earlyWriter = &gcpVersion{value: earlier, state: enabled}
+	f.earlyWriter = &gcpVersion{value: seedA, state: enabled} // A's add lands between B's read and B's add
 	serveGCP(t, f)
 	code, out, errs := runGCP(t, f, "generate")
 	require.Equal(t, 1, code, errs)
 	require.Equal(t, 1, f.added)
-	require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[1].value)+"\nversion id: 2\n", out)
-	require.Equal(t, "error after writing: version 2 was written, not version 1: another version landed in "+gcpSecret+
-		" between generate's read of version 1 and its write; run check\n", errs)
+	keyB := publicKeyOfSeed(t, f.versions[1].value)
+	require.Equal(t, "public key: "+keyB+"\nversion id: 2\n", out)
+
+	what := "version 2 was written, not version 1: another generate wrote version 1 of " + gcpSecret + " between this " +
+		"run's read of version 1 and its write, so this run's version 2 is now the newest, the one latest serves.\n"
+	consequence := "The public key the other run printed does not derive the served seed, so a client given it is " +
+		"refused; the public key above does.\n"
+	recovery := "To keep this run's seed, put the public key above in the NATS authorization in place of the other " +
+		"run's, then destroy the other run's version:\n" +
+		"  gcloud secrets versions destroy " + gcpSecret + "/versions/1\n" +
+		"To keep the other run's seed instead, copy version 1 to a new version, then destroy this run's (destroying " +
+		"or disabling version 2 alone leaves latest naming it, and no seed is served):\n" +
+		"  gcloud secrets versions access " + gcpSecret + "/versions/1 --format='get(payload.data)' | tr '_-' '/+' | " +
+		"base64 -d | gcloud secrets versions add " + gcpSecret + " --data-file=-\n" +
+		"  gcloud secrets versions destroy " + gcpSecret + "/versions/2\n" +
+		"Then check the secret, and verify the key you kept:\n" +
+		"  envoy-infra seed check --store gcp-secret-manager --name " + gcpSecret + "\n" +
+		"  envoy-infra seed verify --store gcp-secret-manager --name " + gcpSecret + " --public-key <the key you kept>\n"
+	require.Equal(t, "error after writing: "+what+consequence+recovery, errs, "what happened, its consequence, the recovery")
 	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion 1",
 		"AddSecretVersion"}, f.recorded(), "no read-back after the write")
+
+	code, out, errs = runGCP(t, f, "verify", "--public-key", keyA)
+	require.Equal(t, 1, code, errs)
+	require.True(t, strings.HasSuffix(out, " derives "+keyA+": no\n"), out)
+	code, out, errs = runGCP(t, f, "verify", "--public-key", keyB)
+	require.Equal(t, 0, code, errs)
+	require.True(t, strings.HasSuffix(out, " derives "+keyB+": yes\n"), out)
 }
 
 // Secret Manager's listings and its latest alias are eventually consistent: only an access by
@@ -523,42 +547,52 @@ func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 // fake found GOOGLE_APPLICATION_CREDENTIALS quoted on stderr ("open <seed>: no such file or
 // directory"), GOOGLE_OAUTH_ACCESS_TOKEN and GOOGLE_CLOUD_QUOTA_PROJECT in request headers (the
 // bearer token, x-goog-user-project), and GOOGLE_CLOUD_UNIVERSE_DOMAIN, GCE_METADATA_HOST and an
-// https endpoint's host dialed. An http endpoint is refused by the endpoint's form, which quotes
-// nothing.
+// https endpoint's host dialed. A seed is found as core.HoldsSeed finds one: the whole value, inside
+// a longer one (a path, a token, a host, a project), or percent-encoded, as in an endpoint's path or
+// query, which the endpoint's form would refuse but only after the seed check names the variable.
 func TestGCPRefusesASeedInItsConfiguration(t *testing.T) {
-	httpEndpoint := "refused: " + gcpSecret + ": SECRET_MANAGER_ENDPOINT is https://<host>[:<port>], as https://secretmanager.googleapis.com\n"
 	for _, row := range []struct {
-		variable, prefix, source string
-		want                     string // the refusal, when it is not the configuration-seed one
+		name, variable string
+		value          func(seed string) string
 	}{
-		{"GOOGLE_OAUTH_ACCESS_TOKEN", "", "GOOGLE_OAUTH_ACCESS_TOKEN", ""},
-		{"GOOGLE_APPLICATION_CREDENTIALS", "", "GOOGLE_APPLICATION_CREDENTIALS", ""},
-		{"GOOGLE_CLOUD_QUOTA_PROJECT", "", "GOOGLE_CLOUD_QUOTA_PROJECT", ""},
-		{"GOOGLE_CLOUD_UNIVERSE_DOMAIN", "", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", ""},
-		{"GCE_METADATA_HOST", "", "GCE_METADATA_HOST", ""},
-		{"SECRET_MANAGER_ENDPOINT", "", "SECRET_MANAGER_ENDPOINT", ""},
-		{"SECRET_MANAGER_ENDPOINT", "https://", "the host of SECRET_MANAGER_ENDPOINT", ""},
-		{"SECRET_MANAGER_ENDPOINT", "http://", "SECRET_MANAGER_ENDPOINT over http", httpEndpoint},
+		{"a whole access token", "GOOGLE_OAUTH_ACCESS_TOKEN", whole},
+		{"a seed inside an access token", "GOOGLE_OAUTH_ACCESS_TOKEN", func(s string) string { return "ya29." + s + ".x" }},
+		{"a whole credentials path", "GOOGLE_APPLICATION_CREDENTIALS", whole},
+		{"a seed inside a credentials path", "GOOGLE_APPLICATION_CREDENTIALS",
+			func(s string) string { return "/home/example/.config/" + s + ".json" }},
+		{"a whole quota project", "GOOGLE_CLOUD_QUOTA_PROJECT", whole},
+		{"a seed inside a quota project", "GOOGLE_CLOUD_QUOTA_PROJECT", func(s string) string { return "example-" + s }},
+		{"a whole universe domain", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", whole},
+		{"a seed inside a universe domain", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", func(s string) string { return s + ".example.com" }},
+		{"a whole metadata host", "GCE_METADATA_HOST", whole},
+		{"a seed inside a metadata host", "GCE_METADATA_HOST", func(s string) string { return "metadata-" + s + ":80" }},
+		{"a whole endpoint", "SECRET_MANAGER_ENDPOINT", whole},
+		{"an endpoint whose host is a seed", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "https://" + s }},
+		{"a seed inside an endpoint's host", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "https://" + s + ".example.com" }},
+		{"an http endpoint whose host is a seed", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "http://" + s }},
+		{"a seed percent-encoded in an endpoint's path", "SECRET_MANAGER_ENDPOINT",
+			func(s string) string { return "https://secretmanager.googleapis.com/" + percentEncoded(s) }},
+		{"a seed percent-encoded in an endpoint's query", "SECRET_MANAGER_ENDPOINT",
+			func(s string) string { return "https://secretmanager.googleapis.com/?k=" + percentEncoded(s) }},
 	} {
-		t.Run(row.source, func(t *testing.T) {
+		t.Run(row.name, func(t *testing.T) {
 			seedValue, _ := testnats.User(t)
 			f := newFakeGCP(t)
 			serveGCP(t, f)
-			t.Setenv(row.variable, row.prefix+seedValue)
+			t.Setenv(row.variable, row.value(seedValue))
 			code, out, errs := runGCP(t, f, "check")
 			require.Equal(t, 2, code, errs)
 			require.Empty(t, out)
-			want := row.want
-			if want == "" {
-				want = "refused: " + gcpSecret + ": " + row.source + ": an nkey user seed, which is never Google Cloud " +
-					"configuration (not echoed)\n"
-			}
-			require.Equal(t, want, errs)
+			require.Equal(t, "refused: "+gcpSecret+": "+row.variable+": an nkey user seed, which is never Google Cloud "+
+				"configuration (not echoed)\n", errs)
 			require.Empty(t, f.recorded(), "no call was made")
 			require.NotContains(t, strings.Join(f.headers, "\n"), seedValue)
 		})
 	}
 }
+
+// whole is a configuration value that is the seed itself.
+func whole(seed string) string { return seed }
 
 // serviceAccount writes a service account key, as Application Default Credentials find one through
 // GOOGLE_APPLICATION_CREDENTIALS, and returns it with a check that a bearer token is a JWT that key

@@ -17,6 +17,8 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/sjawhar/envoy/infra/core"
 )
 
 // GCPSecretManager is the --store value of Google Cloud Secret Manager.
@@ -55,8 +57,11 @@ var gcpConfigEnv = []string{
 // set. It refuses --region and --expect-account, which are Secrets Manager's: a Secret Manager
 // secret is global, and its name names its project.
 //
-// A variable of gcpConfigEnv whose value is an nkey user seed is refused first, naming the variable
-// and never the value, as the AWS store refuses a seed in its configuration.
+// A variable of gcpConfigEnv whose value holds an nkey user seed (core.HoldsSeed: whole, inside a
+// longer value such as a path, a token or a host, or percent-encoded) is refused first, naming the
+// variable and never the value, as the AWS store refuses a seed in its configuration. The check
+// covers SECRET_MANAGER_ENDPOINT's whole value, its host, path and query included, so it comes
+// before the endpoint's form, whose refusal quotes nothing either.
 func OpenGCP(ctx context.Context, region, account string) (Store, error) {
 	if account != "" {
 		return nil, refuse("--expect-account is not accepted with --store %s: it checks an AWS account, and the secret's name names its project", GCPSecretManager)
@@ -65,7 +70,7 @@ func OpenGCP(ctx context.Context, region, account string) (Store, error) {
 		return nil, refuse("--region is not accepted with --store %s: its secrets are global, named projects/<project>/secrets/<secret>", GCPSecretManager)
 	}
 	for _, name := range gcpConfigEnv {
-		if isSeed(os.Getenv(name)) {
+		if core.HoldsSeed(os.Getenv(name)) {
 			return nil, gcpConfigSeed(name)
 		}
 	}
@@ -113,9 +118,6 @@ func gcpEndpoint(raw string) (string, error) {
 		u.RawQuery != "" || u.Fragment != "" {
 		return "", refuse("SECRET_MANAGER_ENDPOINT is https://<host>[:<port>], as https://secretmanager.googleapis.com")
 	}
-	if isSeed(u.Hostname()) {
-		return "", gcpConfigSeed("the host of SECRET_MANAGER_ENDPOINT")
-	}
 	port := u.Port()
 	if port == "" {
 		port = "443"
@@ -123,8 +125,8 @@ func gcpEndpoint(raw string) (string, error) {
 	return net.JoinHostPort(u.Hostname(), port), nil
 }
 
-// gcpConfigSeed refuses a value of the Google Cloud configuration that is an nkey user seed, naming
-// source, where it came from.
+// gcpConfigSeed refuses a value of the Google Cloud configuration that holds an nkey user seed,
+// naming source, where it came from.
 func gcpConfigSeed(source string) error {
 	return refuse("%s: an nkey user seed, which is never Google Cloud configuration (not echoed)", source)
 }
@@ -240,8 +242,8 @@ func (s *gcpStore) holds(ctx context.Context, name, number string) (bool, error)
 // one's checks. The library does not retry AddSecretVersion, so a lost answer leaves the write
 // unknown rather than doubled. The added version must be version 1, since Secret Manager numbers a
 // secret's versions from 1, one more for each (resources.proto, SecretVersion.name): any other
-// number is another writer's version that landed between the read and the add. It must be ENABLED,
-// and read back by its number as value.
+// number is another generate's version that landed between the read and the add, the window
+// gcpOvertaken describes. It must be ENABLED, and read back by its number as value.
 func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	if err := gcpName(name); err != nil {
 		return "", err
@@ -267,8 +269,7 @@ func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, 
 		return "", err
 	}
 	if number != "1" {
-		return number, fmt.Errorf("version %s was written, not version 1: another version landed in %s between "+
-			"generate's read of version 1 and its write; run check", number, name)
+		return number, gcpOvertaken(name, number)
 	}
 	if added.GetState() != secretmanagerpb.SecretVersion_ENABLED {
 		return number, fmt.Errorf("version %s was written but is %s; run check", number, added.GetState())
@@ -285,6 +286,36 @@ func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, 
 		return number, fmt.Errorf("version %s was written, but %s reads back another value; run check", number, version)
 	}
 	return number, nil
+}
+
+// gcpOvertaken is the error of a Put whose add landed as version number, not 1: another generate's
+// add landed between this Put's read of version 1 and its own. Secret Manager has no conditional
+// add, and the store takes this window over a claim on the secret (an etag-guarded UpdateSecret
+// before the add), which would need secretmanager.secrets.update and leave a dead run's claim for
+// someone to clear. The error says, in order, what happened, what it means for the other run's
+// key, and the commands that recover: keep this run's seed, or copy version 1 to a new version
+// and destroy this one, since latest is the most recently created version whatever its state
+// (secretmanagerpb service.pb.go, AccessSecretVersionRequest.name), so disabling or destroying
+// this version alone would leave no seed served.
+func gcpOvertaken(name, number string) error {
+	mine := name + "/versions/" + number
+	first := name + "/versions/1"
+	return fmt.Errorf("version %[2]s was written, not version 1: another generate wrote version 1 of %[1]s between "+
+		"this run's read of version 1 and its write, so this run's version %[2]s is now the newest, the one latest serves.\n"+
+		"The public key the other run printed does not derive the served seed, so a client given it is refused; the "+
+		"public key above does.\n"+
+		"To keep this run's seed, put the public key above in the NATS authorization in place of the other run's, then "+
+		"destroy the other run's version:\n"+
+		"  gcloud secrets versions destroy %[3]s\n"+
+		"To keep the other run's seed instead, copy version 1 to a new version, then destroy this run's (destroying or "+
+		"disabling version %[2]s alone leaves latest naming it, and no seed is served):\n"+
+		"  gcloud secrets versions access %[3]s --format='get(payload.data)' | tr '_-' '/+' | base64 -d | gcloud "+
+		"secrets versions add %[1]s --data-file=-\n"+
+		"  gcloud secrets versions destroy %[4]s\n"+
+		"Then check the secret, and verify the key you kept:\n"+
+		"  envoy-infra seed check --store %[5]s --name %[1]s\n"+
+		"  envoy-infra seed verify --store %[5]s --name %[1]s --public-key <the key you kept>",
+		name, number, first, mine, GCPSecretManager)
 }
 
 // Current reads versions/latest with AccessSecretVersion. Secret Manager answers NOT_FOUND when
