@@ -93,11 +93,15 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
   probe checks (it runs that executable), not something to refuse. `jq` and `ssh-keygen` are real
   binaries so a worker's subprocesses — `bun test`, a script, a subagent's shell — find them, where the
-  harness's `jq` builtin reaches only the bash tool. `uv` still installs each project's own Python, from its
-  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
-  Sandbox pod that is on the issue's volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
-  elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
-  own eval, not a project's interpreter.
+  harness's `jq` builtin reaches only the bash tool. A subprocess's `jq` is therefore the image's
+  `/usr/bin/jq`, trixie's, while the bash tool's own `jq` stays the harness's builtin, a different
+  engine (jaq), so an expression is checked with the engine the script will run
+  (`docs/solutions/legion/worker-pane-shell-gotchas.md`, "The bash tool's `jq` is jaq"). `uv` still
+  installs each project's own Python, from its `.python-version` or `requires-python`, the first time
+  the project runs (`uv sync`, `uv run`): in a Sandbox pod that is on the issue's volume
+  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
+  `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's own eval, not a project's
+  interpreter.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under

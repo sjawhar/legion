@@ -644,6 +644,8 @@ RUN set -eu; \
     for dir in /opt/legion /opt/legion/bin; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
+    setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
