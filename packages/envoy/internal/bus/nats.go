@@ -110,9 +110,10 @@ type recoverableSubscription struct {
 
 // Client is a NATS connection that publishes notifications and holds at most one JetStream
 // subscription and one core subscription, which it keeps across a reconnect and binds again on a
-// connection it dials to replace a closed one. Subscribe replaces the JetStream subscription and
-// SubscribeCore the core one, each unsubscribing the handle the previous call returned, so a
-// caller that needs two durables takes one Client per durable.
+// connection it dials to replace a closed one. Subscribe and SubscribeCore enforce that: a call on
+// the subject (and queue group) the transport already holds replaces its subscription, and any
+// other is refused with ErrSubscriptionHeld, so a caller that needs two durables takes one Client
+// per durable.
 type Client struct {
 	Conn                        *nats.Conn
 	js                          nats.JetStreamContext
@@ -383,7 +384,8 @@ func (c *Client) Connected() bool {
 }
 
 // Subscribe creates the client's recoverable JetStream subscription. The client keeps one
-// JetStream subscription: a later call unsubscribes the handle an earlier one returned.
+// JetStream subscription: a later call on the same subject replaces it, unsubscribing the handle
+// an earlier one returned, and a call on another subject is refused with ErrSubscriptionHeld.
 func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats.SubOpt) (*nats.Subscription, error) {
 	c.mu.Lock()
 	conn, js := c.Conn, c.js
@@ -398,8 +400,9 @@ func (c *Client) Subscribe(subject string, handler nats.MsgHandler, opts ...nats
 
 // SubscribeCore creates a recoverable core NATS subscription. The optional queue
 // identifies the stable queue group that shares role-lane delivery between
-// overlapping listeners. The client keeps one core subscription: a later call
-// unsubscribes the handle an earlier one returned.
+// overlapping listeners. The client keeps one core subscription: a later call on the same
+// subject and queue replaces it, unsubscribing the handle an earlier one returned, and any other
+// call is refused with ErrSubscriptionHeld.
 func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues ...string) (*nats.Subscription, error) {
 	if err := c.ensureConn(); err != nil {
 		return nil, err
@@ -423,7 +426,8 @@ func (c *Client) SubscribeCore(subject string, handler nats.MsgHandler, queues .
 // stays when the bind fails, so a later restore binds it. A bind of the transport's subscription
 // already in flight, a restore's or another registration's, is waited for first. Once Drain or
 // Close has stopped the client it registers nothing, as a restore binds nothing: replacing the
-// transport's subscription would unsubscribe one the drain is letting finish.
+// transport's subscription would unsubscribe one the drain is letting finish. A registration on
+// another subject or queue group than the transport's subscription is refused (ErrSubscriptionHeld).
 func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.Conn, js nats.JetStreamContext) (*nats.Subscription, error) {
 	c.subscriptionsMu.Lock()
 	subscription := &c.subscriptions[next.transport]
@@ -437,11 +441,21 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 		c.subscriptionsMu.Unlock()
 		return nil, errStopped
 	}
-	// Registering replaces the transport's subscription, so the one it replaces stops delivering:
-	// the listener's self-health rebuild re-registers after its durable consumer was lost, and the
-	// old handle, bound to that consumer's deliver inbox, would otherwise stay subscribed for good.
-	// For a consumer the library created, Unsubscribe also deletes it, as it always does. It runs
-	// before the bind, which a durable still bound to the old handle would refuse.
+	// A registration on another subject, or the same subject in another queue group, would replace
+	// a subscription its caller still relies on, and stop it delivering with nothing logged: two of
+	// Dispatch's delivery intakes on one client lost a durable that way (LEGION-690). It is refused,
+	// and the held subscription goes on delivering.
+	if subscription.handler != nil && (subscription.subject != next.subject || subscription.queue != next.queue) {
+		held := describeSubscription(subscription.subject, subscription.queue)
+		c.subscriptionsMu.Unlock()
+		return nil, fmt.Errorf("%w: holds %s, asked for %s", ErrSubscriptionHeld, held, describeSubscription(next.subject, next.queue))
+	}
+	// Registering the held subject again replaces the transport's subscription, so the one it
+	// replaces stops delivering: the listener's self-health rebuild re-registers after its durable
+	// consumer was lost, and the old handle, bound to that consumer's deliver inbox, would otherwise
+	// stay subscribed for good. For a consumer the library created, Unsubscribe also deletes it, as
+	// it always does. It runs before the bind, which a durable still bound to the old handle would
+	// refuse.
 	replaced := subscription.active
 	*subscription = next
 	subscription.binding = make(chan struct{})
@@ -454,6 +468,15 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 		return nil, err
 	}
 	return sub, nil
+}
+
+// describeSubscription names a subscription in ErrSubscriptionHeld's error: its subject, and its
+// queue group when it has one.
+func describeSubscription(subject, queue string) string {
+	if queue == "" {
+		return fmt.Sprintf("%q", subject)
+	}
+	return fmt.Sprintf("%q in queue group %q", subject, queue)
 }
 
 // bind subscribes registration's handler, through js for a JetStream subscription and on conn for
@@ -506,6 +529,12 @@ func (c *Client) SubOK() bool {
 	c.subscriptionsMu.Unlock()
 	return connOK && subOK
 }
+
+// ErrSubscriptionHeld is what Subscribe and SubscribeCore return for a registration on another
+// subject, or the same subject in another queue group, than the subscription the client already
+// holds on that transport. The held subscription goes on delivering; a caller that needs another
+// durable takes another Client.
+var ErrSubscriptionHeld = errors.New("bus: client already holds a subscription of this transport")
 
 // errStopped is what a client refuses once Drain or Close stopped it: dialling or installing a
 // connection, or re-subscribing.

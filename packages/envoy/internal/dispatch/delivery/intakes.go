@@ -30,9 +30,8 @@ const (
 // Close, so the clients stay open until the publisher closes, and such a message can be
 // acknowledged while Dispatch shuts down.
 //
-// The intakes cannot share a client: a bus.Client keeps one JetStream subscription, and the second
-// intake's bind would unsubscribe the first's (bus.Client.Subscribe). Nothing binds that durable
-// again, so it would stay on the server unbound, its messages pending, until the process restarts.
+// The intakes cannot share a client: a bus.Client holds one JetStream subscription, and refuses the
+// second intake's bind with bus.ErrSubscriptionHeld.
 func StartIntakes(ctx context.Context, connect func(name string) (*bus.Client, error), pool *store.Pool, github *githubapp.Client) (stop func(), err error) {
 	if github == nil {
 		slog.Info("dispatch delivery: no GitHub App key — the intakes are idle")

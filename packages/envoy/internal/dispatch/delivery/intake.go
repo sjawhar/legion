@@ -283,8 +283,8 @@ func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*nat
 // durable's config out from under itself rather than resuming its cursor. Unlike the listener's own
 // consumer, this package skips the rolling-deploy bind-retry/backoff machinery
 // (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet. It subscribes through
-// client.Subscribe, which replaces the one JetStream subscription a bus.Client holds, so each
-// durable bound here takes a client of its own.
+// client.Subscribe, which refuses a second durable on one bus.Client (bus.ErrSubscriptionHeld), so
+// each durable bound here takes a client of its own.
 func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bool) {
 	js := client.JS()
 	name, subject := wanted.Durable, wanted.FilterSubject

@@ -369,10 +369,9 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
 	if natsClient != nil {
 		// The intake and the job intake (LEGION-690) each bind a durable, so each takes a client of
-		// its own: a bus.Client keeps one JetStream subscription (delivery.StartIntakes). Their
-		// clients stay open until the publisher closes, so a message still in its handler can be
-		// acknowledged while Dispatch shuts down; stop waits for both Runs, which return once ctx is
-		// cancelled, and not for that handler.
+		// its own (delivery.StartIntakes). Their clients stay open until the publisher closes, so a
+		// message still in its handler can be acknowledged while Dispatch shuts down; stop waits for
+		// both Runs, which return once ctx is cancelled, and not for that handler.
 		connectIntake := func(name string) (*bus.Client, error) {
 			return bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup), bus.WithName(name))
 		}

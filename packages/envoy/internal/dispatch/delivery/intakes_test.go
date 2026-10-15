@@ -245,3 +245,59 @@ func TestIntakesWhoseSecondConnectFailsStartNeither(t *testing.T) {
 		}
 	}
 }
+
+// TestTwoIntakesOnOneClientRefuseTheSecondBind: the intakes on one client, as cmd/dispatch wired
+// them before StartIntakes, no longer lose a durable silently. The job intake binds first; the
+// delivery intake's bind on the same client is refused with bus.ErrSubscriptionHeld and logged at
+// ERROR, and the job intake's durable keeps its subscriber.
+func TestTwoIntakesOnOneClientRefuseTheSecondBind(t *testing.T) {
+	logs := captureLogs(t)
+	pool, ctx := deliveryTestPool(t)
+	shared := intakeTestClient(t)
+	github := newFakeGitHub(t).newTestClient()
+	pushBound := func(durable string) bool {
+		info, err := shared.JS().ConsumerInfo(bus.Stream, durable)
+		return err == nil && info.PushBound
+	}
+
+	jobsCtx, stopJobs := context.WithCancel(ctx)
+	jobsDone := make(chan struct{})
+	go func() {
+		defer close(jobsDone)
+		newJobIntake(shared, pool, github, realJobClock{}).Run(jobsCtx)
+	}()
+	t.Cleanup(func() {
+		stopJobs()
+		<-jobsDone
+	})
+	waitFor(t, 20*time.Second, func() bool { return pushBound(jobConsumerName) }, func() string {
+		return "the job intake never bound its durable"
+	})
+
+	seedDeliverySettings(t, ctx, pool)
+	startIntake(t, newIntake(shared, pool, github))
+	var refusal map[string]any
+	waitFor(t, 20*time.Second, func() bool {
+		for _, record := range logs() {
+			message, _ := record["error"].(string)
+			if record["msg"] == "dispatch delivery: bind NATS consumer" && record["name"] == deliveryConsumerName &&
+				strings.Contains(message, bus.ErrSubscriptionHeld.Error()) {
+				refusal = record
+				return true
+			}
+		}
+		return false
+	}, func() string {
+		return fmt.Sprintf("the delivery intake's bind on the job intake's client was not refused with %q; %s=%t %s=%t",
+			bus.ErrSubscriptionHeld, jobConsumerName, pushBound(jobConsumerName), deliveryConsumerName, pushBound(deliveryConsumerName))
+	})
+	if refusal["level"] != "ERROR" {
+		t.Fatalf("the refused bind was logged at %v, want ERROR: %v", refusal["level"], refusal)
+	}
+	if !pushBound(jobConsumerName) {
+		t.Fatal("the job intake's durable lost its subscriber to the refused bind")
+	}
+	if pushBound(deliveryConsumerName) {
+		t.Fatal("the delivery intake's durable is bound on a client that holds the job intake's")
+	}
+}
