@@ -3737,7 +3737,7 @@ func TestRunSelfHealthMonitor_RetriesPastTransientFailures(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		runSelfHealthMonitor(ctx, logger, probe, nil, nil, nil, time.Millisecond, 3)
+		runSelfHealthMonitor(ctx, logger, probe, nil, nil, nil, nil, time.Millisecond, 3)
 		close(done)
 	}()
 
@@ -3770,6 +3770,7 @@ func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T
 	// Mirrors isUnrecoverableSelfHealthFailure's own rule while disconnected: never terminal, so
 	// rebuild must never run for this failure.
 	isUnrecoverable := func(error) bool { return false }
+	connected := func() bool { return false }
 	var rebuilds atomic.Int32
 	rebuild := func() error { rebuilds.Add(1); return nil }
 	ctx, cancel := context.WithCancel(context.Background())
@@ -3778,7 +3779,7 @@ func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, rebuild,
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, connected, rebuild,
 			func() { terminated <- struct{}{} }, time.Millisecond, 3)
 	}()
 	select {
@@ -3793,6 +3794,47 @@ func TestRunSelfHealthMonitor_TerminatesAfterSustainedDisconnection(t *testing.T
 	}
 	if got := rebuilds.Load(); got != 0 {
 		t.Fatalf("rebuilds = %d, want 0: a disconnected client is never rebuilt", got)
+	}
+}
+
+// TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailure guards
+// disconnectedFailureThreshold's scope: it counts only failures while connected reads false, never
+// an unclassified failure the client reads while still connected (a JetStream deadline isUnrecoverable
+// does not recognise, say). Past disconnectedFailureThreshold consecutive connected failures, the
+// monitor must still be running: mixing the two counts would terminate a listener whose NATS is up
+// over a fault that never touches the disconnected path at all.
+func TestRunSelfHealthMonitor_DoesNotTerminateOnSustainedConnectedTransientFailure(t *testing.T) {
+	var probeCalls atomic.Int32
+	probe := func() error {
+		probeCalls.Add(1)
+		return errors.New("interest kv: context deadline exceeded")
+	}
+	isUnrecoverable := func(error) bool { return false }
+	connected := func() bool { return true }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	terminated := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isUnrecoverable, connected, nil,
+			func() { terminated <- struct{}{} }, time.Millisecond, 3)
+	}()
+	deadline := time.After(2 * time.Second)
+	for probeCalls.Load() < disconnectedFailureThreshold*2 {
+		select {
+		case <-terminated:
+			t.Fatalf("the monitor terminated after %d connected, non-terminal failures: the disconnected threshold must not count these", probeCalls.Load())
+		case <-deadline:
+			t.Fatalf("probe calls = %d, want at least %d", probeCalls.Load(), disconnectedFailureThreshold*2)
+		case <-time.After(time.Millisecond):
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("monitor did not stop after shutdown")
 	}
 }
 
@@ -3823,6 +3865,7 @@ func TestRunSelfHealthMonitor_MovesADeadInterestRegistryToTheLiveConnection(t *t
 	monitorUntilRecovered(t, "the registry on the live connection", 5*time.Second, time.Millisecond,
 		registry.Ping,
 		func(err error) bool { return errors.Is(err, natsgo.ErrConnectionClosed) },
+		client.Connected,
 		func() error {
 			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "interest", cache: registry}})
 		},
@@ -3887,6 +3930,7 @@ func TestRunSelfHealthMonitor_RebuildsTerminalWatcher(t *testing.T) {
 		func(err error) bool {
 			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "session", cache: sessions}})
 		},
+		client.Connected,
 		func() error {
 			rebuilds.Add(1)
 			return rewatchListenerKVWatchers(client.Conn, []listenerCache{{name: "session", cache: sessions}})
@@ -3941,7 +3985,7 @@ func TestRunSelfHealthMonitor_KeepsRunningThroughFaultsEachRebuildRepairs(t *tes
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		runSelfHealthMonitor(ctx, logging.New("test"), probe, isTerminal, rebuild,
+		runSelfHealthMonitor(ctx, logging.New("test"), probe, isTerminal, func() bool { return true }, rebuild,
 			func() { terminated <- struct{}{} }, interval, 3)
 	}()
 
@@ -4015,6 +4059,7 @@ func TestRunSelfHealthMonitor_ExitsAfterThreeRebuildsThatLeaveAFault(t *testing.
 				runSelfHealthMonitor(ctx, logging.NewWithWriter("test", &logs),
 					probe,
 					func(err error) bool { return errors.Is(err, stuck) },
+					func() bool { return true },
 					rebuild,
 					func() { terminated <- struct{}{} },
 					time.Millisecond,
@@ -4096,6 +4141,7 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 		runSelfHealthMonitor(ctx, logging.New("test"),
 			func() error { return checkSelfHealth(caches, nil) },
 			func(err error) bool { return isUnrecoverableSelfHealthFailure(err, client, caches) },
+			client.Connected,
 			func() error {
 				rebuilds.Add(1)
 				return rewatchListenerKVWatchers(client.Conn, caches)
@@ -4121,9 +4167,9 @@ func TestRunSelfHealthMonitor_RestartsWithoutItsRoleBucket(t *testing.T) {
 }
 
 // monitorUntilRecovered runs the self-health monitor with the listener's threshold of three over
-// probe, isUnrecoverable and rebuild, until a probe passes. It fails the test when the monitor
-// terminates first or nothing recovers within wait, naming what should have recovered.
-func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Duration, probe func() error, isUnrecoverable func(error) bool, rebuild func() error) {
+// probe, isUnrecoverable, connected and rebuild, until a probe passes. It fails the test when the
+// monitor terminates first or nothing recovers within wait, naming what should have recovered.
+func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Duration, probe func() error, isUnrecoverable func(error) bool, connected func() bool, rebuild func() error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -4146,6 +4192,7 @@ func monitorUntilRecovered(t *testing.T, what string, wait, interval time.Durati
 				return err
 			},
 			isUnrecoverable,
+			connected,
 			rebuild,
 			func() { terminated <- struct{}{} },
 			interval,
@@ -4224,6 +4271,7 @@ func TestSelfHealthRebuildsAnInterestWatcherThatEndedWhileConnected(t *testing.T
 		func(err error) bool {
 			return isUnrecoverableSelfHealthFailure(err, client, []listenerCache{{name: "interest", cache: registry}})
 		},
+		client.Connected,
 		func() error {
 			return rebuildListenerDependencies(client, []listenerCache{{name: "interest", cache: registry}}, nil, "", nil)
 		},
