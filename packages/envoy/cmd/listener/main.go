@@ -153,7 +153,10 @@ func rebuildListenerDependencies(
 // has not come back (a NATS restart or deploy taking longer than expected, or a local forward that
 // keeps accepting connections without actually reaching the server), and nats.go's in-place
 // reconnect has no way to notice that and give up on its own. At the production interval (30s)
-// this is 10 minutes.
+// this is 10 minutes of reading as disconnected. A transport that stalls the open connection
+// rather than closing it reads as connected until nats.go's ping check marks it stale (its
+// defaults: a ping every 2 minutes, 2 outstanding), so there the exit comes about 15 minutes
+// after the stall.
 const disconnectedFailureThreshold = 20
 
 // runSelfHealthMonitor leaves transient dependency timeouts degraded while
