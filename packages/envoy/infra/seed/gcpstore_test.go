@@ -82,9 +82,9 @@ func TestGCPGenerateWritesTheBareSeedAndReadsItBack(t *testing.T) {
 	code, out, errs := runGCP(t, f, "generate")
 	require.Equal(t, 0, code, errs)
 	require.Empty(t, errs)
-	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion",
-		"AccessSecretVersion 1", "ListSecretVersions", "AccessSecretVersion"}, f.recorded(),
-		"version 1 is read by number before the write, to find none, and after it, to read the write back")
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion 1",
+		"AddSecretVersion", "AccessSecretVersion 1", "ListSecretVersions", "AccessSecretVersion"}, f.recorded(),
+		"version 1 is read by number in the checks and by Put just before the write, to find none, and after it, to read the write back")
 	require.Len(t, f.versions, 1)
 	written := f.versions[0]
 	require.True(t, strings.HasPrefix(written.value, "SU"), "the payload is the bare seed string")
@@ -96,6 +96,51 @@ func TestGCPGenerateWritesTheBareSeedAndReadsItBack(t *testing.T) {
 	code, _, errs = runGCP(t, again, "generate")
 	require.Equal(t, 0, code, errs)
 	require.NotEqual(t, written.value, again.versions[0].value, "each generate makes a user of its own")
+}
+
+// The Secret Manager store keeps every Store's contract against the fake. AddSecretVersion has no
+// request id or precondition, so Put reads version 1 by number, strongly consistent with an add,
+// and refuses when it exists: a second first version is refused, and nothing is written.
+func TestGCPStoreKeepsTheStoreContract(t *testing.T) {
+	testStoreContract(t, func(t *testing.T) (Store, string) { return gcpStoreOn(t, newFakeGCP(t)), gcpSecret })
+}
+
+// A failed read of version 1 just before the add wrote nothing, so Put refuses: ErrRefused, no
+// version id, no AddSecretVersion.
+func TestGCPPutRefusesWhenItCannotReadVersionOne(t *testing.T) {
+	f := newFakeGCP(t)
+	f.failures = map[string]codes.Code{"AccessSecretVersion 1": codes.PermissionDenied}
+	s := gcpStoreOn(t, f)
+	version, err := s.Put(context.Background(), gcpSecret, []byte("example-first-value"))
+	require.ErrorIs(t, err, ErrRefused)
+	require.Empty(t, version)
+	require.EqualError(t, err, "access-secret-version "+gcpSecret+"/versions/1 failed: PermissionDenied; nothing was written")
+	require.Equal(t, []string{"AccessSecretVersion 1"}, f.recorded())
+	require.Empty(t, f.versions)
+}
+
+// Two generate runs overlap on one secret: A's first version lands after B's checks found the
+// secret empty, just before B writes. B's Put finds version 1 by number and refuses: exit 2, no
+// version id line, nothing written, and A's seed stays the one served.
+func TestGCPOverlappingGenerateRunsLeaveTheFirstSeedServed(t *testing.T) {
+	seedA, keyA := testnats.User(t)
+	f := newFakeGCP(t)
+	f.landing = &gcpVersion{value: seedA, state: enabled}
+	f.landsAfter = "AccessSecretVersion 1" // B's last check before its write
+	serveGCP(t, f)
+	code, out, errs := runGCP(t, f, "generate")
+	require.Equal(t, 2, code, errs)
+	require.True(t, strings.HasPrefix(out, "public key: "), out)
+	require.NotContains(t, out, "version id")
+	require.Equal(t, "refused: add-secret-version "+gcpSecret+": "+gcpSecret+"/versions/1 already exists; another generate "+
+		"wrote this secret's first version, with another seed; nothing was written, and the public key above is not stored\n", errs)
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion 1"},
+		f.recorded(), "B's Put reads version 1 and sends no AddSecretVersion")
+	require.Len(t, f.versions, 1, "B wrote nothing")
+
+	code, out, errs = runGCP(t, f, "verify", "--public-key", keyA)
+	require.Equal(t, 0, code, errs)
+	require.True(t, strings.HasSuffix(out, " derives "+keyA+": yes\n"), out)
 }
 
 func TestGCPGenerateRefusesBeforeWriting(t *testing.T) {
@@ -256,14 +301,15 @@ func TestGCPGenerateCallsAFailedWriteUnknownNotRefused(t *testing.T) {
 	require.Equal(t, "version id: unknown\n", rest)
 	require.Equal(t, "error after writing: add-secret-version "+gcpSecret+" failed: Unavailable; "+
 		"whether a version was written is unknown, run check\n", errs)
-	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion"}, f.recorded(),
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion 1",
+		"AddSecretVersion"}, f.recorded(),
 		"one AddSecretVersion, not retried, and no call after it")
 }
 
 // Secret Manager numbers a secret's versions from 1, one more for each (resources.proto,
-// SecretVersion.name), and generate found no version 1 before the write, so a write answered with
-// any other number is another writer's version landing between that read and the add: an error
-// after the write, with nothing read back.
+// SecretVersion.name), and Put found no version 1 just before its add, so a write answered with any
+// other number is another writer's version that landed between that read and the add, as two
+// simultaneous runs can: an error after the write, with nothing read back.
 func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
 	earlier, _ := testnats.User(t)
 	f := newFakeGCP(t)
@@ -274,9 +320,9 @@ func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
 	require.Equal(t, 1, f.added)
 	require.Equal(t, "public key: "+publicKeyOfSeed(t, f.versions[1].value)+"\nversion id: 2\n", out)
 	require.Equal(t, "error after writing: version 2 was written, not version 1: another version landed in "+gcpSecret+
-		" after generate found it held none; run check\n", errs)
-	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion"},
-		f.recorded(), "no read-back after the write")
+		" between generate's read of version 1 and its write; run check\n", errs)
+	require.Equal(t, []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion 1",
+		"AddSecretVersion"}, f.recorded(), "no read-back after the write")
 }
 
 // Secret Manager's listings and its latest alias are eventually consistent: only an access by
@@ -286,8 +332,8 @@ func TestGCPGenerateAfterWritingAVersionOtherThanTheFirst(t *testing.T) {
 // error after the write.
 func TestGCPGenerateWaitsForTheStoreToShowItsWrite(t *testing.T) {
 	SetReadBackWaits(t, time.Millisecond, time.Millisecond, time.Millisecond)
-	before := []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AddSecretVersion",
-		"AccessSecretVersion 1"}
+	before := []string{"GetSecret", "GetSecretVersion", "ListSecretVersions", "AccessSecretVersion 1", "AccessSecretVersion 1",
+		"AddSecretVersion", "AccessSecretVersion 1"}
 	t.Run("caught up", func(t *testing.T) {
 		f := newFakeGCP(t)
 		f.lagList, f.lagAccess = 1, 2
@@ -437,8 +483,8 @@ func TestGCPRefusesANameThatIsNoGlobalSecret(t *testing.T) {
 	}
 }
 
-// A --name the store would refuse is refused before the store opens, so no refusal of the open
-// quotes it: a seed pasted there must not reach the terminal, whatever else is wrong.
+// A seed pasted as --name is refused by the command's flag rule, before the store's name rule and
+// before the store opens, so no refusal of the open quotes it, whatever else is wrong.
 func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 	pasted, _ := testnats.User(t)
 	for _, row := range []struct {
@@ -465,8 +511,51 @@ func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 			require.Equal(t, 2, code, errs)
 			require.Empty(t, out)
 			require.NotContains(t, errs, pasted)
-			require.Equal(t, "refused: --name for --store gcp-secret-manager is a secret's name, projects/<project>/secrets/<secret>\n", errs)
+			require.True(t, strings.HasPrefix(errs, "envoy-infra seed: --name: an nkey user seed, which is never an argument (not echoed)\n"), errs)
 			require.Empty(t, f.recorded())
+		})
+	}
+}
+
+// A seed in a variable whose value the Secret Manager store, or a library it calls, sends in a
+// request, dials as a host or quotes in an error is refused before any call, naming the variable
+// and never its value. With each variable those libraries read set to a seed, a run against the
+// fake found GOOGLE_APPLICATION_CREDENTIALS quoted on stderr ("open <seed>: no such file or
+// directory"), GOOGLE_OAUTH_ACCESS_TOKEN and GOOGLE_CLOUD_QUOTA_PROJECT in request headers (the
+// bearer token, x-goog-user-project), and GOOGLE_CLOUD_UNIVERSE_DOMAIN, GCE_METADATA_HOST and an
+// https endpoint's host dialed. An http endpoint is refused by the endpoint's form, which quotes
+// nothing.
+func TestGCPRefusesASeedInItsConfiguration(t *testing.T) {
+	httpEndpoint := "refused: " + gcpSecret + ": SECRET_MANAGER_ENDPOINT is https://<host>[:<port>], as https://secretmanager.googleapis.com\n"
+	for _, row := range []struct {
+		variable, prefix, source string
+		want                     string // the refusal, when it is not the configuration-seed one
+	}{
+		{"GOOGLE_OAUTH_ACCESS_TOKEN", "", "GOOGLE_OAUTH_ACCESS_TOKEN", ""},
+		{"GOOGLE_APPLICATION_CREDENTIALS", "", "GOOGLE_APPLICATION_CREDENTIALS", ""},
+		{"GOOGLE_CLOUD_QUOTA_PROJECT", "", "GOOGLE_CLOUD_QUOTA_PROJECT", ""},
+		{"GOOGLE_CLOUD_UNIVERSE_DOMAIN", "", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", ""},
+		{"GCE_METADATA_HOST", "", "GCE_METADATA_HOST", ""},
+		{"SECRET_MANAGER_ENDPOINT", "", "SECRET_MANAGER_ENDPOINT", ""},
+		{"SECRET_MANAGER_ENDPOINT", "https://", "the host of SECRET_MANAGER_ENDPOINT", ""},
+		{"SECRET_MANAGER_ENDPOINT", "http://", "SECRET_MANAGER_ENDPOINT over http", httpEndpoint},
+	} {
+		t.Run(row.source, func(t *testing.T) {
+			seedValue, _ := testnats.User(t)
+			f := newFakeGCP(t)
+			serveGCP(t, f)
+			t.Setenv(row.variable, row.prefix+seedValue)
+			code, out, errs := runGCP(t, f, "check")
+			require.Equal(t, 2, code, errs)
+			require.Empty(t, out)
+			want := row.want
+			if want == "" {
+				want = "refused: " + gcpSecret + ": " + row.source + ": an nkey user seed, which is never Google Cloud " +
+					"configuration (not echoed)\n"
+			}
+			require.Equal(t, want, errs)
+			require.Empty(t, f.recorded(), "no call was made")
+			require.NotContains(t, strings.Join(f.headers, "\n"), seedValue)
 		})
 	}
 }

@@ -91,6 +91,10 @@ type fakeGCP struct {
 	// The same before the store's write: until it adds a version, the listing leaves out the first
 	// unlisted versions the secret holds, and latest the first unnamed ones.
 	unlisted, unnamed int
+	// another writer's first version, which lands once the call landsAfter has been answered
+	landing    *gcpVersion
+	landsAfter string
+	headers    []string // every request header the fake received, as "key: value"
 }
 
 func newFakeGCP(t *testing.T) *fakeGCP {
@@ -126,6 +130,11 @@ func (f *fakeGCP) intercept(ctx context.Context, req any, info *grpc.UnaryServer
 	defer f.mu.Unlock()
 	method := path.Base(info.FullMethod)
 	md, _ := metadata.FromIncomingContext(ctx)
+	for key, values := range md {
+		for _, value := range values {
+			f.headers = append(f.headers, key+": "+value)
+		}
+	}
 	authorization := md.Get("authorization")
 	if len(authorization) != 1 || !strings.HasPrefix(authorization[0], "Bearer ") {
 		return nil, f.reject(method + " without a bearer token")
@@ -150,7 +159,12 @@ func (f *fakeGCP) intercept(ctx context.Context, req any, info *grpc.UnaryServer
 	if code, ok := f.failAfterAdd[call]; ok && f.added > 0 {
 		return nil, f.fail(code, req)
 	}
-	return handler(ctx, req)
+	resp, err := handler(ctx, req)
+	if f.landing != nil && call == f.landsAfter {
+		f.with(f.landing.value, f.landing.state)
+		f.landing = nil
+	}
+	return resp, err
 }
 
 // reject records a call the store should never make and answers it with an error.
@@ -333,7 +347,7 @@ func (f *fakeGCP) values() []string {
 	}
 	all = append(all, f.sent...)
 	all = append(all, f.numberReadsBack)
-	for _, v := range []*gcpVersion{f.racing, f.lateWriter, f.earlyWriter} {
+	for _, v := range []*gcpVersion{f.racing, f.lateWriter, f.earlyWriter, f.landing} {
 		if v != nil {
 			all = append(all, v.value)
 		}
@@ -399,4 +413,15 @@ func runGCPAs(t *testing.T, f *fakeGCP, name string, args ...string) (code int, 
 		}
 	}
 	return code, stdout, stderr
+}
+
+// gcpStoreOn serves f and opens the Secret Manager store against it, answering generate's calls,
+// the only mode that lists and writes versions.
+func gcpStoreOn(t *testing.T, f *fakeGCP) Store {
+	t.Helper()
+	f.setMode("generate")
+	serveGCP(t, f)
+	s, err := OpenGCP(context.Background(), "", "")
+	require.NoError(t, err)
+	return s
 }

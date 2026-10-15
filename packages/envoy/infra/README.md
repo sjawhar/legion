@@ -949,19 +949,20 @@ envoy-infra seed {check|generate|verify} --store gcp-secret-manager --name proje
 
 With `aws-secrets-manager`, the command runs under your own AWS configuration, as the AWS SDK loads
 it: the environment, then the shared configuration and credentials files. `--region` overrides the
-region it names. Before any call, it refuses a Secrets Manager endpoint you configure
-(`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is
-not `https`, unless it is this machine's loopback address, since a seed would cross the network in
-plain text; and it retrieves your credentials, and with none it can use, it stops with
-`refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks STS whose
-credentials they are and refuses, before any other call, unless they are that account's; an empty
-`--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage
-error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so the
-secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and the
-command refuses a secret in another region than the one it sends to, and with `--expect-account`
-one in another account, before it reads or writes a seed. Pass `--expect-account` whenever you name
-a secret, so that a seed is never written to, or read from, a secret of the same name in another
-account.
+region it names. Before any call, it refuses a region or a profile name in that configuration that
+is an nkey user seed, without echoing it (see "What `check` and `verify` print"); a Secrets
+Manager endpoint you configure (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or a
+profile's `services` section) that is not `https`, unless it is this machine's loopback address,
+since a seed would cross the network in plain text; and it retrieves your credentials, and with
+none it can use, it stops with `refused: <name>: no usable AWS credentials …`. With
+`--expect-account`, it then asks STS whose credentials they are and refuses, before any other call,
+unless they are that account's; an empty `--expect-account`, as `--expect-account "$ACCOUNT"`
+becomes with the variable unset, is a usage error, never a skipped check. STS and Secrets Manager
+each resolve their own endpoint, so the secret is checked too: `DescribeSecret`, every mode's first
+call, answers the secret's ARN, and the command refuses a secret in another region than the one it
+sends to, and with `--expect-account` one in another account, before it reads or writes a seed.
+Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
+from, a secret of the same name in another account.
 
 With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
 store refuses `--region` and `--expect-account`, and has no flag of its own to expect a project:
@@ -1084,9 +1085,15 @@ it refuses, naming the version, when `latest` names one, as
 `refused: <name> already serves version <n> by default (latest) …`, or, for a version that is not
 enabled, `refused: <name> already holds version <n>, which latest names though it is <STATE> …`;
 otherwise when the listing shows any; and, when it shows none, when an access of `versions/1`, the
-number every secret's first version gets, finds a version in any state. Then the version it adds
-must be version 1: any other number is another writer's version that landed after those reads, and
-`generate` stops with an error after writing, naming it. It reads version 1 back by number, which
+number every secret's first version gets, finds a version in any state. Its write reads `versions/1`
+by number once more just before `AddSecretVersion`, which takes no request id or precondition, and
+refuses, writing nothing, when another `generate` wrote this secret's first version after those
+checks: `refused: add-secret-version <name>: <name>/versions/1 already exists; another generate
+wrote this secret's first version, with another seed; nothing was written, and the public key above
+is not stored`, exit 2, as Secrets Manager's `ResourceExistsException` is. Then the version it adds
+must be version 1: any other number is another writer's version that landed between that read and
+the add, as two runs at the same moment can, and `generate` stops with an error after writing,
+naming it. It reads version 1 back by number, which
 must be the value it wrote, then `versions/latest`, the version Secret Manager serves by default,
 which must be the one it added; while the listing shows no version yet, or `latest` names none, it
 waits as it does on Secrets Manager. A `latest` that names a version it will not serve, such as a
@@ -1130,15 +1137,30 @@ On Secret Manager it prints one of:
 | `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked, once the read is refused for that version's state. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
-pasted there must not reach the terminal.
+pasted there must not reach the terminal. Before any store opens, the command refuses a flag whose
+value is an nkey user seed (`--name`, `--region`, or any other), naming the flag and not the value:
+`--name` is every line's subject and the secret id the store is sent, and `--region` names the
+endpoint the SDK resolves. An unknown mode, an argument after the flags and a flag the command does
+not take are not echoed either. The AWS store does the same, before any call, for a region or a
+profile name that is a seed in the AWS configuration: `AWS_REGION`, `AWS_DEFAULT_REGION`,
+`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, the shared config profile's `region`, or a profile the shared
+config names that does not exist, such as a `source_profile`. The refusal names where the value came
+from, as `refused: <name>: AWS_PROFILE: an nkey user seed, which is never AWS configuration (not
+echoed)`. The Secret Manager store does the same for each variable whose value it, or a library it
+calls, sends in a request, dials as a host or quotes in an error: `GOOGLE_OAUTH_ACCESS_TOKEN` (the
+bearer token), `GOOGLE_APPLICATION_CREDENTIALS` (quoted when the file cannot be opened),
+`GOOGLE_CLOUD_QUOTA_PROJECT` (sent as `x-goog-user-project`), `GOOGLE_CLOUD_UNIVERSE_DOMAIN` and
+`GCE_METADATA_HOST` (hosts it dials), and `SECRET_MANAGER_ENDPOINT` or its host, as
+`refused: <name>: GOOGLE_APPLICATION_CREDENTIALS: an nkey user seed, which is never Google Cloud
+configuration (not echoed)`.
 
 ### Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | 0 | Done: `check` printed its line, `generate` wrote the seed, read it back and printed the public key and version id, or `verify` printed that the stored seed derives the key. A result that cannot be printed on stdout is never exit 0. |
-| 1 | `verify` found another key, no seed, or a newest Secret Manager version that is not enabled; or `generate` failed after it began its write, including a version id it could not print. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
-| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the error's code, AWS's or Secret Manager's gRPC status code, as `refused: describe-secret <name> failed: AccessDeniedException` or `refused: get-secret <name> failed: PermissionDenied`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. |
+| 1 | `verify` found another key, no seed, or a newest Secret Manager version that is not enabled; or `generate` failed after it began its write, including a version id it could not print, but not a write the store refused, which is exit 2. A version may then exist: `generate` has printed the public key, then the version id, `version id: unknown` when the write never answered, then `error after writing: <what failed>`. An interrupt (Ctrl-C) or `SIGTERM` during the write ends it the same way. Run `check`, and `verify` with that key, before anything else. |
+| 2 | Refused before any write, printed as `refused: <reason>`, or a usage error. Nothing was written, so fix what the message names and run it again. A store call that fails before the write, such as one the credentials are not allowed, is a refusal naming the call, the secret and the error's code, AWS's or Secret Manager's gRPC status code, as `refused: describe-secret <name> failed: AccessDeniedException` or `refused: get-secret <name> failed: PermissionDenied`. So is a result `check` or `verify` cannot print, and a public key `generate` cannot print, which stops it before the write: `refused: <name>: could not print the public key: <error>; nothing was written`. So is the first write the store refuses because another `generate` already wrote this secret's first version, Secrets Manager's `ResourceExistsException` or Secret Manager's `versions/1` found just before the add: it comes after the public key is printed, but no version holds that key, and no `version id` line follows: `refused: put-secret-value <name> failed: ResourceExistsException; another generate wrote this secret's first version, with another seed; nothing was written, and the public key above is not stored`, or `refused: add-secret-version <name>: <name>/versions/1 already exists; …` on Secret Manager. Run `check`, then `verify` with the other run's key. |
 
 ### The calls each mode makes
 
@@ -1166,7 +1188,7 @@ On Secret Manager, where a version call names `versions/latest` unless the table
 | --- | --- | --- |
 | `check` | `GetSecret`, `GetSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get` |
 | `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` answers `FAILED_PRECONDITION`, `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
-| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` on `versions/1`, `AddSecretVersion`, `AccessSecretVersion` on `versions/1`, then `ListSecretVersions` and `AccessSecretVersion`, with `AccessSecretVersion` on `versions/1` between them when the listing shows no version, again after each pause while Secret Manager has not caught up with the write, and `GetSecretVersion` when the last answers `FAILED_PRECONDITION` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
+| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` on `versions/1`, and again just before `AddSecretVersion`, `AccessSecretVersion` on `versions/1`, then `ListSecretVersions` and `AccessSecretVersion`, with `AccessSecretVersion` on `versions/1` between them when the listing shows no version, again after each pause while Secret Manager has not caught up with the write, and `GetSecretVersion` when the last answers `FAILED_PRECONDITION` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
 
 Each permission is the one the API reference names for its call:
 [GetSecret](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get),

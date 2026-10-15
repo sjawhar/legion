@@ -39,16 +39,35 @@ var (
 	gcpVersionName = regexp.MustCompile(`^projects/[^/]+/secrets/[^/]+/versions/([0-9]+)$`)
 )
 
+// gcpConfigEnv are the environment variables whose value the store, or the libraries it calls,
+// send in a request, dial as a host or quote in an error: the access token, sent as the bearer
+// token; the key file's path, quoted when it cannot be opened (cloud.google.com/go/auth v0.22.0
+// internal/credsfile); the quota project, sent as x-goog-user-project (internal/internal.go:110);
+// the universe domain, the default endpoint's host (grpctransport); the metadata server's host
+// (cloud.google.com/go/compute/metadata v0.9.0 metadata.go); and the endpoint override.
+var gcpConfigEnv = []string{
+	"GOOGLE_OAUTH_ACCESS_TOKEN", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_QUOTA_PROJECT",
+	"GOOGLE_CLOUD_UNIVERSE_DOMAIN", "GCE_METADATA_HOST", "SECRET_MANAGER_ENDPOINT",
+}
+
 // OpenGCP opens Secret Manager under Application Default Credentials, or under the access token in
 // GOOGLE_OAUTH_ACCESS_TOKEN when that is set, at the endpoint SECRET_MANAGER_ENDPOINT names when it is
 // set. It refuses --region and --expect-account, which are Secrets Manager's: a Secret Manager
 // secret is global, and its name names its project.
+//
+// A variable of gcpConfigEnv whose value is an nkey user seed is refused first, naming the variable
+// and never the value, as the AWS store refuses a seed in its configuration.
 func OpenGCP(ctx context.Context, region, account string) (Store, error) {
 	if account != "" {
 		return nil, refuse("--expect-account is not accepted with --store %s: it checks an AWS account, and the secret's name names its project", GCPSecretManager)
 	}
 	if region != "" {
 		return nil, refuse("--region is not accepted with --store %s: its secrets are global, named projects/<project>/secrets/<secret>", GCPSecretManager)
+	}
+	for _, name := range gcpConfigEnv {
+		if isSeed(os.Getenv(name)) {
+			return nil, gcpConfigSeed(name)
+		}
 	}
 	opts, err := gcpClientOptions()
 	if err != nil {
@@ -94,11 +113,20 @@ func gcpEndpoint(raw string) (string, error) {
 		u.RawQuery != "" || u.Fragment != "" {
 		return "", refuse("SECRET_MANAGER_ENDPOINT is https://<host>[:<port>], as https://secretmanager.googleapis.com")
 	}
+	if isSeed(u.Hostname()) {
+		return "", gcpConfigSeed("the host of SECRET_MANAGER_ENDPOINT")
+	}
 	port := u.Port()
 	if port == "" {
 		port = "443"
 	}
 	return net.JoinHostPort(u.Hostname(), port), nil
+}
+
+// gcpConfigSeed refuses a value of the Google Cloud configuration that is an nkey user seed, naming
+// source, where it came from.
+func gcpConfigSeed(source string) error {
+	return refuse("%s: an nkey user seed, which is never Google Cloud configuration (not echoed)", source)
 }
 
 // gcpStore is Store over Secret Manager's gRPC API. Every error names the call, the resource and the
@@ -205,15 +233,27 @@ func (s *gcpStore) holds(ctx context.Context, name, number string) (bool, error)
 	return false, failed("access-secret-version", version, err)
 }
 
-// Put adds value as a version with AddSecretVersion, which takes no request id and which the library
-// does not retry, so a lost answer leaves the write unknown rather than doubled. The added version
-// must be version 1, since Secret Manager numbers a secret's versions from 1, one more for each
-// (resources.proto, SecretVersion.name), and generate found no version 1 before the write: any other
-// number is another writer's version landing in between. It must be ENABLED, and read back by its
-// number, strongly consistent with the add, as value.
+// Put adds value as the secret's first version with AddSecretVersion. AddSecretVersion takes no
+// request id and no precondition, so Put first reads version 1 by number, the one read Secret
+// Manager keeps strongly consistent with an add, and refuses with ErrRefused, writing nothing, when
+// version 1 exists in any state: another generate wrote this secret's first version after this
+// one's checks. The library does not retry AddSecretVersion, so a lost answer leaves the write
+// unknown rather than doubled. The added version must be version 1, since Secret Manager numbers a
+// secret's versions from 1, one more for each (resources.proto, SecretVersion.name): any other
+// number is another writer's version that landed between the read and the add. It must be ENABLED,
+// and read back by its number as value.
 func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	if err := gcpName(name); err != nil {
 		return "", err
+	}
+	first := name + "/versions/1"
+	taken, err := s.holds(ctx, name, "1")
+	if err != nil {
+		return "", refuse("%v; nothing was written", err)
+	}
+	if taken {
+		return "", refuse("add-secret-version %s: %s already exists; another generate wrote this secret's first version, "+
+			"with another seed", name, first)
 	}
 	added, err := s.client.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{
 		Parent:  name,
@@ -227,8 +267,8 @@ func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, 
 		return "", err
 	}
 	if number != "1" {
-		return number, fmt.Errorf("version %s was written, not version 1: another version landed in %s after generate "+
-			"found it held none; run check", number, name)
+		return number, fmt.Errorf("version %s was written, not version 1: another version landed in %s between "+
+			"generate's read of version 1 and its write; run check", number, name)
 	}
 	if added.GetState() != secretmanagerpb.SecretVersion_ENABLED {
 		return number, fmt.Errorf("version %s was written but is %s; run check", number, added.GetState())
