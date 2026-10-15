@@ -65,8 +65,11 @@ versions. Never add the module to the root `go.work`.
   (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
   a control character, and with a watchdog the listener's name, which it echoes in double quotes,
   may hold no `"`, `$`, backtick, `\` or line break. Each table tests its own refusals: core's are
-  in `core`, and a component's or a command's table holds its own plus one row for each input whose
-  core refusal it passes on, showing where that refusal goes.
+  in `core`, and a component's or a command's table holds its own plus one row for each core call
+  whose refusals it passes on, showing where they go and that each is the `core.InputError` naming
+  its input. host passes on `Check`'s refusals of `machineId`, `port` and `hostBridge` through one
+  call, so it has one row. A store's tests assert the store's own answers, and `seed_test.go` the
+  modes' messages over them.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
