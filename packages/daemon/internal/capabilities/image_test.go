@@ -228,12 +228,13 @@ func TestToolchainSummaryNamesTheListToolchainChecks(t *testing.T) {
 		t.Fatalf("toolchain() = %q, not ok; the stubs must make it pass", detail)
 	}
 	const prefix = "on PATH: "
-	if !strings.HasPrefix(detail, prefix) {
+	listed, ok := strings.CutPrefix(detail, prefix)
+	if !ok {
 		t.Fatalf("toolchain() = %q, want it to begin %q", detail, prefix)
 	}
-	paths, _, _ := strings.Cut(detail, "; ")
+	paths, _, _ := strings.Cut(listed, "; ")
 	var names []string
-	for _, path := range strings.Split(strings.TrimPrefix(paths, prefix), ", ") {
+	for _, path := range strings.Split(paths, ", ") {
 		names = append(names, filepath.Base(path))
 	}
 	want := "builds and runs with the generic toolchain: " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
