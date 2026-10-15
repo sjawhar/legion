@@ -86,12 +86,15 @@ versions. Never add the module to the root `go.work`.
 - **Release jobs.** The workflow's `build` job (`contents: read`, no secret) runs everything that
   runs the module's code or its dependencies: the version step's `go list`, vet, the unit tests,
   the build and the smoke test. It hands `publish` the archives as an artifact and the version as
-  job outputs. `publish` holds the write scopes, the OIDC token and the deploy key, and runs only
-  the pinned actions, `release-push.sh` and its own check of what `build` handed over: the version
-  X.Y.Z, the tag `envoy-infra-v<version>`, exactly the archives its own checkout of the target list
-  names plus `SHA256SUMS`, each archive's bytes matching `SHA256SUMS`. So `build` chooses the
-  archives' bytes but not their names. An archive the release adds goes into that check's list. A
-  step that runs Go, the Pulumi CLI or the plugin goes in `build`, never in `publish`.
+  a job output, nothing else. `publish` holds the write scopes, the OIDC token and the deploy key,
+  and runs only the pinned actions, `jq`, `sha256sum` and `release-push.sh`. It names the archives
+  itself, from that version and its own checkout of the target list, one `archives+=` line per
+  kind of archive; `release-push.sh handed` refuses a version that is not X.Y.Z and an artifact
+  that is not exactly those archives, each a regular file, and prints the tag
+  `envoy-infra-v<version>`; and `publish` writes `SHA256SUMS` over them. So `build` chooses the
+  archives' bytes, and not their names, the tag or the sums. An archive the release adds gets its
+  `archives+=` line in that step. A step that runs Go, the Pulumi CLI or the plugin goes in
+  `build`, never in `publish`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
