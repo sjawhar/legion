@@ -10,21 +10,16 @@ name: Release envoy-infra
 on:
   push:
     branches: [main]
-    # The plugin's inputs: its module, every package of packages/envoy it compiles in, the
-    # manifests that set the versions it builds with (its own go.work binds packages/envoy), the
-    # notices script that writes its archives' notices, the list of the targets it builds, the list
-    # of the paths a version is cut from, and this workflow.
-    # .github/scripts/check-envoy-infra-release-paths.sh fails the build when this list misses a
-    # package the plugin compiles in or a path .github/envoy-infra-release-paths names.
+    # Every input the plugin's build reads: packages/envoy (its module, and through its go.work
+    # the Envoy module whose packages it compiles in), the notices script that writes its archives'
+    # notices, the list of the targets it builds, the Pulumi CLI install the smoke test runs, and
+    # this workflow. Which of them cut a version, the version step decides from what the plugin
+    # compiles.
     paths:
-      - "packages/envoy/infra/**"
-      - "packages/envoy/internal/bus/**"
-      - "packages/envoy/internal/contracts/**"
-      - "packages/envoy/go.mod"
-      - "packages/envoy/go.sum"
+      - "packages/envoy/**"
       - "scripts/go-third-party-notices.sh"
       - ".github/envoy-infra-targets.json"
-      - ".github/envoy-infra-release-paths"
+      - ".github/actions/install-pulumi/**"
       - ".github/workflows/release-envoy-infra.yaml"
   workflow_dispatch:
 
@@ -55,15 +50,15 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/infra/go.mod
+          cache-dependency-path: |
+            packages/envoy/infra/go.sum
+            packages/envoy/go.sum
       - name: Determine next version
         id: version
         run: |
-          # The paths a version is cut from, one pathspec per line: the plugin compiles in the Envoy
-          # packages they name and renders grants from their exported subject names, so a commit to
-          # one of them releases it. .github/scripts/check-envoy-infra-release-paths.sh holds the
-          # list to `go list -deps` and to this workflow's push paths.
-          mapfile -t paths < .github/envoy-infra-release-paths
-
           # A re-run after "Tag release" pushed the tag checks out this same commit with that tag at
           # HEAD, where the range below would be empty and skip the release it never finished.
           # Release that tag again instead (release-push.sh, `tagged`, which refuses a tag that is
@@ -84,7 +79,7 @@ jobs:
           PREV_TAG=$(git tag -l 'envoy-infra-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
             # The first release is 0.1.0, as the listener's first was: the history of the paths
-            # above predates the plugin, and its breaking commits say nothing about its API.
+            # below predates the plugin, and its breaking commits say nothing about its API.
             VERSION="0.1.0"
             {
               echo "version=$VERSION"
@@ -97,6 +92,46 @@ jobs:
           # release-bump.sh refuses a previous version that is not X.Y.Z, since the newest tag's name
           # is whatever its pusher chose.
           PREV_VERSION="${PREV_TAG#envoy-infra-v}"
+
+          # The paths a version is cut from, as the build defines them: every directory of the
+          # workspace's own modules (the main modules of packages/envoy/infra/go.work) that the
+          # plugin compiles in, for each target .github/envoy-infra-targets.json lists, since GOOS
+          # and GOARCH decide which files, and so which imports, a build compiles in; the go.mod and
+          # go.sum of each of those modules and the go.work and go.work.sum binding them, which set
+          # the versions it builds with; and the notices script and the target list, which decide
+          # what the archives hold. A commit touching none of them, such as one to the module's
+          # README or its live-test harness, cuts no version.
+          infra=packages/envoy/infra
+          paths=(scripts/go-third-party-notices.sh .github/envoy-infra-targets.json)
+          # add <absolute path>: the path relative to the checkout, refused outside it.
+          add() {
+            case $1 in
+              "$PWD"/*) paths+=("${1#"$PWD"/}") ;;
+              *) echo "::error::$1, a path the plugin builds from, is outside the checkout"; exit 1 ;;
+            esac
+          }
+          targets=$(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json)
+          [ -n "$targets" ] || { echo "::error::.github/envoy-infra-targets.json lists no envoy-infra target"; exit 1; }
+          for target in $targets; do
+            dirs=$(CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" go -C "$infra" list -deps \
+              -f '{{with .Module}}{{if .Main}}{{$.Dir}}{{end}}{{end}}' ./cmd/...)
+            while IFS= read -r dir; do
+              [ -z "$dir" ] || add "$dir/"
+            done <<< "$dirs"
+          done
+          gomods=$(go -C "$infra" list -m -f '{{.GoMod}}')
+          while IFS= read -r gomod; do
+            add "$gomod"
+            [ ! -f "${gomod%.mod}.sum" ] || add "${gomod%.mod}.sum"
+          done <<< "$gomods"
+          gowork=$(go -C "$infra" env GOWORK)
+          add "$gowork"
+          [ ! -f "$gowork.sum" ] || add "$gowork.sum"
+          sorted=$(printf '%s\n' "${paths[@]}" | sort -u)
+          mapfile -t paths <<< "$sorted"
+          echo "A version is cut from commits to:"
+          printf '  %s\n' "${paths[@]}"
+
           # The notices script and the target list are runtime inputs of the archives, so any change
           # to one needs a new tag rather than a CI-only rebuild. release-bump.sh reads a
           # --patch-path only when it is also one of the paths after --.
@@ -122,13 +157,6 @@ jobs:
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
           echo "Bumping $PREV_TAG -> envoy-infra-v${VERSION}"
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: steps.version.outputs.skip != 'true'
-        with:
-          go-version-file: packages/envoy/infra/go.mod
-          cache-dependency-path: |
-            packages/envoy/infra/go.sum
-            packages/envoy/go.sum
       # The module's vet, its live-test tag included, and its unit tests, before anything is built:
       # envoy-and-contracts.yaml's envoy-infra-go job, which runs them on a pull request, is not a
       # required check, so the release checks the behaviour it publishes itself, as

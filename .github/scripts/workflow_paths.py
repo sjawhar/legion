@@ -2,9 +2,8 @@
 them: a walk of the repository's files, a path glob as a regex, an ordered pattern list where `!`
 negates, and a workflow's events.
 
-check-image-trigger-paths.sh and check-envoy-infra-release-paths.sh import it from the repository
-they check, each running `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3` from that
-repository's root.
+check-image-trigger-paths.sh imports it from the repository it checks, running
+`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3` from that repository's root.
 """
 
 import re

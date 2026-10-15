@@ -857,8 +857,8 @@ jobs:
   # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
   # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
   # the Envoy binaries and the daemon build with, and every go command below runs in that
-  # workspace. Vet compiles the files behind the live-test tag (pulumilive) too. The release path
-  # check and the per-target compile run in pr-and-main.yaml's required lint job.
+  # workspace. Vet compiles the files behind the live-test tag (pulumilive) too. The per-target
+  # compile runs in pr-and-main.yaml's required lint job.
   envoy-infra-go:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'

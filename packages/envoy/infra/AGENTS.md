@@ -77,12 +77,12 @@ versions. Never add the module to the root `go.work`.
 - **Release contract.** `provider.go`'s `downloadURL` names the release
   `.github/workflows/release-envoy-infra.yaml` publishes: tag `envoy-infra-v<version>`, asset
   `pulumi-resource-envoy-infra-v<version>-<os>-<arch>.tar.gz` with the binary at the archive root.
-  Changing one side breaks every consumer's install. A commit releases the plugin only when it
-  touches a path that workflow's push paths name and a path `.github/envoy-infra-release-paths`
-  lists (the pathspecs its version step cuts a version from), so a `packages/envoy` package the
-  plugin starts compiling in, directly or through another import, goes into both.
-  `.github/scripts/check-envoy-infra-release-paths.sh` derives that set from `go list -deps` for
-  every target and fails naming each path and list that misses it.
+  Changing one side breaks every consumer's install. A version is cut only from what the plugin
+  builds from: the workflow's version step lists, with `go list -deps` for each target, the
+  directories of the workspace's modules the plugin compiles in, and adds those modules' `go.mod`
+  and `go.sum`, the `go.work` files, the notices script and the target list. A commit to the
+  module's README, AGENTS.md or live-test harness cuts none. The workflow's push paths take all of
+  `packages/envoy/**`, so a package the plugin starts compiling in needs no list edited.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
@@ -94,10 +94,9 @@ The unit tests need neither the Pulumi CLI nor Docker. They run components under
 `host.resolveListener` directly, and the plugin in process through pulumi-go-provider's
 `integration.NewServer` (`provider/provider_test.go`, `host/construct_test.go`). CI runs them in
 the `envoy-infra-go` job of `.github/workflows/envoy-and-contracts.yaml`, with gofmt and vet under
-the live tests' build tag. The required `lint` job of `.github/workflows/pr-and-main.yaml` runs the
-release path check and compiles the module's commands for every release target; its `test` job
-runs the check's own tests, `.github/scripts/check-envoy-infra-release-paths.test.sh`. Run those
-steps from those jobs after changing what they cover.
+the live tests' build tag; the release job runs vet and the unit tests again before it builds. The
+required `lint` job of `.github/workflows/pr-and-main.yaml` compiles the module's commands for
+every release target. Run those steps from those jobs after changing what they cover.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit

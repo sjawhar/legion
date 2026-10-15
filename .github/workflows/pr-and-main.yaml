@@ -156,12 +156,6 @@ jobs:
           done
           wc -l "$notices"/*
 
-      # release-envoy-infra.yaml releases the envoy-infra plugin only for a commit to a path it
-      # names, so its push paths and .github/envoy-infra-release-paths must cover every package the
-      # plugin compiles in.
-      - name: Check release-envoy-infra.yaml's paths cover every package the plugin compiles in
-        run: .github/scripts/check-envoy-infra-release-paths.sh
-
 
   typecheck:
     runs-on: ubuntu-24.04
@@ -270,11 +264,6 @@ jobs:
         with:
           go-version-file: packages/daemon/go.mod
           cache-dependency-path: packages/daemon/go.sum
-
-      # After the Go install: the check under test runs `go list` over each case's miniature
-      # workspace, which imports only the standard library, so nothing is downloaded.
-      - name: Test the envoy-infra release path check
-        run: .github/scripts/check-envoy-infra-release-paths.test.sh
 
       # The tmux runtime's tests drive a real tmux server and skip without one, and the daemon
       # supervises under tmux and refuses to start without it.
