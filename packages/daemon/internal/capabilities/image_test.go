@@ -14,7 +14,7 @@ import (
 
 // stubBinaries are the binaries the image rows look for, each a stub answering what the checks
 // run: `go version` and `chromium --version`.
-var stubBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "chromium"}
+var stubBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
 
 const stubScript = `#!/bin/sh
 case "$1" in
@@ -152,7 +152,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
 		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + ", " + filepath.Join(s.bin, "kubectl") + "; go version go1.26.8 linux/amd64",
+		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + ", " + filepath.Join(s.bin, "kubectl") + ", " + filepath.Join(s.bin, "jq") + ", " + filepath.Join(s.bin, "ssh-keygen") + "; go version go1.26.8 linux/amd64",
 		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {
@@ -197,18 +197,23 @@ func TestCheckImageNamesEveryMissingRow(t *testing.T) {
 	}
 }
 
-// One binary off PATH names that binary alone.
+// One binary off PATH names that binary alone. Each name is removed alone: a case removing two
+// would pass with one of them forgotten from toolchain()'s list.
 func TestCheckImageNamesTheOneBinaryOffPATH(t *testing.T) {
-	s := newStubs(t)
-	s.remove("python3")
+	for _, name := range []string{"python3", "jq", "ssh-keygen"} {
+		t.Run(name, func(t *testing.T) {
+			s := newStubs(t)
+			s.remove(name)
 
-	lines, err := CheckImage(context.Background(), s.image())
+			lines, err := CheckImage(context.Background(), s.image())
 
-	if want := "capability toolchain is missing: python3 is not on PATH"; err == nil || err.Error() != want {
-		t.Fatalf("CheckImage = %v, want %q", err, want)
-	}
-	if got := byName(lines)[Toolchain]; got.Status != missing || got.Detail != "python3 is not on PATH" {
-		t.Errorf("toolchain line = %+v, want missing naming python3", got)
+			if want := "capability toolchain is missing: " + name + " is not on PATH"; err == nil || err.Error() != want {
+				t.Fatalf("CheckImage = %v, want %q", err, want)
+			}
+			if got := byName(lines)[Toolchain]; got.Status != missing || got.Detail != name+" is not on PATH" {
+				t.Errorf("toolchain line = %+v, want missing naming %s", got, name)
+			}
+		})
 	}
 }
 

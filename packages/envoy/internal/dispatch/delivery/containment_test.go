@@ -25,12 +25,12 @@ func TestProductionApplies(t *testing.T) {
 		3: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(2 * time.Hour))}},
 	}
 
-	applies, _ := ProductionApplies(runs, jobsByRun, jobName)
-	if len(applies) != 1 {
-		t.Fatalf("expected 1 apply, got %d", len(applies))
+	judged := ProductionApplies(runs, jobsByRun, Production{JobNames: []string{jobName}})
+	if len(judged.Applies) != 1 {
+		t.Fatalf("expected 1 apply, got %d", len(judged.Applies))
 	}
-	if applies[0].RunID != 3 {
-		t.Errorf("expected apply for run 3, got run %d", applies[0].RunID)
+	if judged.Applies[0].RunID != 3 {
+		t.Errorf("expected apply for run 3, got run %d", judged.Applies[0].RunID)
 	}
 }
 
@@ -53,7 +53,7 @@ func TestProductionAppliesSetsApartOnlyARunWithNoProductionJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode the recorded job list: %v", err)
 	}
-	devOnly := RunJobs("acme/widgets", 1, fetched)
+	devOnly := RunJobs("acme/widgets", 1, fetched, Production{})
 
 	base := time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC)
 	success := DeliveryRunConclusionSuccess
@@ -62,12 +62,12 @@ func TestProductionAppliesSetsApartOnlyARunWithNoProductionJob(t *testing.T) {
 		runs[i] = DeliveryRun{Repo: "acme/widgets", RunID: int64(i + 1), HeadCommitAt: base.Add(time.Duration(i) * time.Hour), Conclusion: &success}
 	}
 	setApart := func(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, jobName string) ([]Apply, []int64) {
-		applies, unmatched := ProductionApplies(runs, jobsByRun, jobName)
+		judged := ProductionApplies(runs, jobsByRun, Production{JobNames: []string{jobName}})
 		ids := []int64{}
-		for _, run := range unmatched {
+		for _, run := range judged.Unmatched {
 			ids = append(ids, run.Run.RunID)
 		}
-		return applies, ids
+		return judged.Applies, ids
 	}
 	jobsByRun := map[int64][]DeliveryRunJob{
 		// The dev-only run: its production job skipped under the caller's name. No deploy, and,
@@ -89,7 +89,7 @@ func TestProductionAppliesSetsApartOnlyARunWithNoProductionJob(t *testing.T) {
 	if !slices.Equal(ids, []int64{2, 3, 5}) {
 		t.Fatalf("runs set apart = %v, want [2 3 5]: never the dev-only run 1 nor the deploy 4", ids)
 	}
-	if _, unmatched := ProductionApplies(runs, jobsByRun, jobName); !slices.Equal(unmatched[0].JobNames, []string{"prod-apply / prod-apply"}) {
+	if unmatched := ProductionApplies(runs, jobsByRun, Production{JobNames: []string{jobName}}).Unmatched; !slices.Equal(unmatched[0].JobNames, []string{"prod-apply / prod-apply"}) {
 		t.Errorf("run 2's job names = %v, want every job it holds", unmatched[0].JobNames)
 	}
 
@@ -104,7 +104,7 @@ func TestProductionAppliesSetsApartOnlyARunWithNoProductionJob(t *testing.T) {
 
 	// A listing in which every run skipped production: nothing shows the configured name is real,
 	// so each run is set apart, the price of not mistaking a typo for a skipped call.
-	everySkipped := map[int64][]DeliveryRunJob{1: devOnly, 2: RunJobs("acme/widgets", 2, fetched)}
+	everySkipped := map[int64][]DeliveryRunJob{1: devOnly, 2: RunJobs("acme/widgets", 2, fetched, Production{})}
 	if _, ids := setApart(runs[:2], everySkipped, jobName); !slices.Equal(ids, []int64{1, 2}) {
 		t.Fatalf("a listing with no production job: runs set apart = %v, want [1 2]", ids)
 	}
@@ -122,6 +122,80 @@ func TestProductionAppliesSetsApartOnlyARunWithNoProductionJob(t *testing.T) {
 	}
 	if applies, ids := setApart(runs[:2], nested, nestedName); len(applies) != 0 || len(ids) != 0 {
 		t.Fatalf("a nested call skipped: applies = %+v, set apart = %v, want neither", applies, ids)
+	}
+}
+
+// TestProductionAppliesMatchesEveryListedName proves a renamed production job's old and new
+// names both count while an unmatched run and a skipped caller keep their existing safeguards.
+func TestProductionAppliesMatchesEveryListedName(t *testing.T) {
+	const oldName, newName = "production-apply / production-apply", "production / production-apply"
+	production := Production{JobNames: []string{newName, oldName}}
+	base := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	success := DeliveryRunConclusionSuccess
+	runs := make([]DeliveryRun, 4)
+	for i := range runs {
+		runs[i] = DeliveryRun{Repo: "acme/widgets", RunID: int64(i + 1), HeadCommitAt: base.Add(time.Duration(i) * time.Hour), Conclusion: &success}
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		1: {{Name: oldName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(time.Hour))}},
+		2: {{Name: newName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(2 * time.Hour))}},
+		3: {{Name: "prod / apply", Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base)}},
+		4: {{Name: "production", Conclusion: new(DeliveryJobConclusionSkipped)}},
+	}
+	judged := ProductionApplies(runs, jobsByRun, production)
+	var applied []int64
+	for _, apply := range judged.Applies {
+		applied = append(applied, apply.RunID)
+	}
+	if !slices.Equal(applied, []int64{1, 2}) {
+		t.Fatalf("applies = %v, want runs 1 (old name) and 2 (new name)", applied)
+	}
+	if len(judged.Unmatched) != 1 || judged.Unmatched[0].Run.RunID != 3 || !slices.Equal(judged.Unmatched[0].JobNames, []string{"prod / apply"}) {
+		t.Fatalf("unmatched = %+v, want run 3 alone, naming its job", judged.Unmatched)
+	}
+	alone := ProductionApplies([]DeliveryRun{runs[0], runs[3]}, jobsByRun, production)
+	if len(alone.Unmatched) != 1 || alone.Unmatched[0].Run.RunID != 4 {
+		t.Fatalf("unmatched without a run of the new name = %+v, want run 4", alone.Unmatched)
+	}
+}
+
+// TestProductionAppliesCountsOnlyAJobThatApplied proves the optional apply-step rule distinguishes
+// a stored historical job from a stood-down job and names a configured step that is absent.
+func TestProductionAppliesCountsOnlyAJobThatApplied(t *testing.T) {
+	const name, step = "production / production-apply", "Run ./.github/actions/apply"
+	production := Production{JobNames: []string{name}, ApplyStep: new(step)}
+	base := time.Date(2026, 10, 15, 2, 0, 0, 0, time.UTC)
+	success := DeliveryRunConclusionSuccess
+	job := func(applyStep *string, stepConclusion *DeliveryJobConclusion) []DeliveryRunJob {
+		return []DeliveryRunJob{{Name: name, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base), ApplyStep: applyStep, ApplyStepConclusion: stepConclusion}}
+	}
+	runs := make([]DeliveryRun, 5)
+	for i := range runs {
+		runs[i] = DeliveryRun{Repo: "acme/widgets", RunID: int64(i + 1), HeadCommitAt: base, Conclusion: &success}
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		1: job(new(step), new(DeliveryJobConclusionSuccess)),
+		2: job(new(step), new(DeliveryJobConclusionSkipped)),
+		3: job(new(step), nil),
+		4: job(nil, nil),
+		5: job(new("Run something else"), new(DeliveryJobConclusionSkipped)),
+	}
+	judged := ProductionApplies(runs, jobsByRun, production)
+	var applied []int64
+	for _, apply := range judged.Applies {
+		applied = append(applied, apply.RunID)
+	}
+	if !slices.Equal(applied, []int64{1, 4, 5}) {
+		t.Fatalf("applies = %v, want 1 (applied), 4 (stored before steps) and 5 (read for another step)", applied)
+	}
+	if len(judged.StepMissing) != 1 || judged.StepMissing[0].RunID != 3 {
+		t.Fatalf("step-missing = %+v, want run 3 alone", judged.StepMissing)
+	}
+	if len(judged.Unmatched) != 0 {
+		t.Fatalf("unmatched = %+v, want none: every run holds the production job", judged.Unmatched)
+	}
+	if got := production.Conclusion(jobsByRun[2][0]); got == nil || *got != DeliveryJobConclusionSkipped {
+		t.Fatalf("the stood-down job's conclusion = %v, want skipped", got)
 	}
 }
 
@@ -190,15 +264,15 @@ func TestProductionAppliesReadsTheRunsCreation(t *testing.T) {
 	for i, run := range runs {
 		jobsByRun[run.RunID] = []DeliveryRunJob{{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(merged.Add(time.Duration(30+10*i) * time.Minute))}}
 	}
-	applies, _ := ProductionApplies(runs, jobsByRun, jobName)
+	judged := ProductionApplies(runs, jobsByRun, Production{JobNames: []string{jobName}})
 	created := map[int64]time.Time{}
-	for _, apply := range applies {
+	for _, apply := range judged.Applies {
 		created[apply.RunID] = apply.CreatedAt
 	}
 	if !created[1].Equal(merged.Add(2*time.Minute)) || !created[2].Equal(merged.Add(25*time.Minute)) || !created[3].Equal(merged.Add(-30*time.Minute)) {
 		t.Fatalf("applies' creation = %v, want run 1's created_at, run 2's start (no created_at), run 3's created_at", created)
 	}
-	if got := FirstShippingApply(merged, applies); got == nil || got.RunID != 1 {
+	if got := FirstShippingApply(merged, judged.Applies); got == nil || got.RunID != 1 {
 		t.Fatalf("FirstShippingApply = %+v, want the merge queue's run 1", got)
 	}
 }

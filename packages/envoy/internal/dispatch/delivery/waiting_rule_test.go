@@ -22,6 +22,16 @@ type waitingRun struct {
 	head, started, done time.Time
 	created             *time.Time
 	result              DeliveryJobConclusion
+	jobName             string
+	stoodDown           bool
+	withoutStepData     bool
+	jobs                []waitingRunJob
+}
+
+type waitingRunJob struct {
+	name                       string
+	done                       time.Time
+	stoodDown, withoutStepData bool
 }
 
 // waitingPR is one merged pull request a waiting-rule history holds.
@@ -31,7 +41,11 @@ type waitingPR struct {
 	merged time.Time
 }
 
-const waitingRepo, waitingJob = "acme/widgets", "widgets-release / widgets-release"
+const (
+	waitingRepo, waitingJob = "acme/widgets", "widgets-release / widgets-release"
+	renamedWaitingJob       = "release / release"
+	waitingStep             = "Run ./.github/actions/apply"
+)
 
 // TestTheWaitingSQLAgreesWithTheShippingRule: ListPullRequestsWaitingAt states in SQL when a
 // deploy ships a pull request, and FirstShippingApply states it in Go; nothing else keeps the two
@@ -59,6 +73,8 @@ func TestTheWaitingSQLAgreesWithTheShippingRule(t *testing.T) {
 		{id: 305, branch: "main", head: day(8, 12), created: new(day(8, 12)), started: day(8, 12), done: day(8, 13), result: DeliveryJobConclusionCancelled},
 		// A re-run: created on day 9 at midnight, its re-run started at 02:00, done after at.
 		{id: 306, branch: "main", head: day(9, 0).Add(-10 * time.Minute), created: new(day(9, 0)), started: day(9, 2), done: day(12, 0), result: DeliveryJobConclusionSuccess},
+		// A superseded run: its production job succeeded having applied nothing, so it ships nothing.
+		{id: 307, branch: "main", head: day(9, 3), created: new(day(9, 3)), started: day(9, 3), done: day(9, 4), result: DeliveryJobConclusionSuccess, stoodDown: true},
 	}
 	prs := []waitingPR{
 		{waitingRepo, 401, time.Date(2024, 2, 28, 0, 0, 0, 0, time.UTC)}, // shipped by 300
@@ -73,7 +89,7 @@ func TestTheWaitingSQLAgreesWithTheShippingRule(t *testing.T) {
 		{"acme/other", 408, day(7, 0)},                                   // another repository: nothing tracks its deploys
 	}
 	seedWaitingHistory(t, ctx, pool, runs, prs)
-	sqlSet, goSet := waitingSets(t, ctx, pool, at)
+	sqlSet, goSet := waitingSets(t, ctx, pool, at, Production{JobNames: []string{waitingJob}, ApplyStep: new(waitingStep)})
 	if !maps.Equal(sqlSet, goSet) {
 		t.Fatalf("waiting at %s:\n  SQL (ListPullRequestsWaitingAt): %s\n  Go (FirstShippingApply):        %s",
 			at.Format(time.RFC3339), describeWaiting(sqlSet), describeWaiting(goSet))
@@ -87,6 +103,74 @@ func TestTheWaitingSQLAgreesWithTheShippingRule(t *testing.T) {
 	}
 	if !maps.Equal(goSet, want) {
 		t.Fatalf("waiting at %s = %s; want %s", at.Format(time.RFC3339), describeWaiting(goSet), describeWaiting(want))
+	}
+}
+
+// TestTheWaitingSQLAgreesWithTheShippingRuleForProductionJobNamesAndStepData proves the SQL and Go
+// rules agree when a production rule follows both sides of a job rename, and when a successful
+// listed job was stored before its configured apply step was recorded.
+func TestTheWaitingSQLAgreesWithTheShippingRuleForProductionJobNamesAndStepData(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	day := func(d int) time.Time { return time.Date(2024, 4, d, 0, 0, 0, 0, time.UTC) }
+	for _, test := range []struct {
+		name       string
+		production Production
+		runs       []waitingRun
+		prs        []waitingPR
+		at         time.Time
+		want       map[int]string
+	}{
+		{
+			name:       "both production job names",
+			production: Production{JobNames: []string{waitingJob, renamedWaitingJob}, ApplyStep: new(waitingStep)},
+			runs: []waitingRun{
+				{id: 401, branch: "main", head: day(1).Add(-time.Hour), created: new(day(1)), started: day(1), done: day(1).Add(time.Hour), result: DeliveryJobConclusionSuccess},
+				{id: 402, branch: "main", head: day(2).Add(-time.Hour), created: new(day(2)), started: day(2), done: day(2).Add(time.Hour), result: DeliveryJobConclusionSuccess, jobName: renamedWaitingJob},
+			},
+			prs: []waitingPR{
+				{waitingRepo, 701, day(1).Add(-time.Hour)},
+				{waitingRepo, 702, day(1).Add(time.Hour)},
+			},
+			at:   day(4),
+			want: map[int]string{},
+		},
+		{
+			name:       "listed job without apply step data",
+			production: Production{JobNames: []string{waitingJob}, ApplyStep: new(waitingStep)},
+			runs: []waitingRun{
+				{id: 403, branch: "main", head: day(1).Add(-time.Hour), created: new(day(1)), started: day(1), done: day(1).Add(time.Hour), result: DeliveryJobConclusionSuccess, withoutStepData: true},
+			},
+			prs:  []waitingPR{{waitingRepo, 703, day(1).Add(-time.Hour)}},
+			at:   day(4),
+			want: map[int]string{},
+		},
+		{
+			name:       "later listed job applied",
+			production: Production{JobNames: []string{renamedWaitingJob, waitingJob}, ApplyStep: new(waitingStep)},
+			runs: []waitingRun{{
+				id: 404, branch: "main", head: day(1).Add(-time.Hour), created: new(day(1)), started: day(1),
+				done: day(1).Add(3 * time.Hour), result: DeliveryJobConclusionSuccess,
+				jobs: []waitingRunJob{
+					{name: renamedWaitingJob, done: day(1).Add(time.Hour), stoodDown: true},
+					{name: waitingJob, done: day(1).Add(2 * time.Hour)},
+				},
+			}},
+			prs:  []waitingPR{{waitingRepo, 704, day(1).Add(-time.Hour)}},
+			at:   day(1).Add(90 * time.Minute),
+			want: map[int]string{704: shipment(new(int64(404)), new(day(1).Add(2*time.Hour)))},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			seedWaitingHistory(t, ctx, pool, test.runs, test.prs)
+			sqlSet, goSet := waitingSets(t, ctx, pool, test.at, test.production)
+			if !maps.Equal(sqlSet, goSet) {
+				t.Fatalf("waiting set:\n  SQL (ListPullRequestsWaitingAt): %s\n  Go (FirstShippingApply):        %s",
+					describeWaiting(sqlSet), describeWaiting(goSet))
+			}
+			if !maps.Equal(goSet, test.want) {
+				t.Fatalf("Go waiting set = %s, want %s", describeWaiting(goSet), describeWaiting(test.want))
+			}
+		})
 	}
 }
 
@@ -121,6 +205,8 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleOverMergeQueueHistories(t *testin
 				run.started = created.Add(minutes(14, 54)) // a re-run
 			case 4:
 				run.created, run.started = nil, created // stored before created_at
+			case 5:
+				run.stoodDown = true
 			}
 			// Distinct per run: the two rules order applies by completion alone, and break a tie
 			// each its own way.
@@ -143,7 +229,7 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleOverMergeQueueHistories(t *testin
 		}
 		at := base.Add(minutes(24*60, 14*24*60))
 		seedWaitingHistory(t, ctx, pool, runs, prs)
-		sqlSet, goSet := waitingSets(t, ctx, pool, at)
+		sqlSet, goSet := waitingSets(t, ctx, pool, at, Production{JobNames: []string{waitingJob}, ApplyStep: new(waitingStep)})
 		if !maps.Equal(sqlSet, goSet) {
 			t.Fatalf("seed %d, waiting at %s:\n  SQL (ListPullRequestsWaitingAt): %s\n  Go (FirstShippingApply):        %s",
 				seed, at.Format(time.RFC3339), describeWaiting(sqlSet), describeWaiting(goSet))
@@ -169,10 +255,37 @@ func seedWaitingHistory(t *testing.T, ctx context.Context, pool *store.Pool, run
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		if err := UpsertRunJobs(ctx, pool, waitingRepo, run.id, []DeliveryRunJob{
-			{Repo: waitingRepo, RunID: run.id, Name: waitingJob, StartedAt: &started, CompletedAt: &done, Conclusion: new(run.result)},
-		}, true); err != nil {
-			t.Fatalf("seed run %d's job: %v", run.id, err)
+		jobs := run.jobs
+		if len(jobs) == 0 {
+			jobs = []waitingRunJob{{
+				name: run.jobName, done: run.done, stoodDown: run.stoodDown, withoutStepData: run.withoutStepData,
+			}}
+		}
+		rows := make([]DeliveryRunJob, 0, len(jobs))
+		for _, job := range jobs {
+			name := job.name
+			if name == "" {
+				name = waitingJob
+			}
+			done := job.done
+			if done.IsZero() {
+				done = run.done
+			}
+			conclusion := new(DeliveryJobConclusionSuccess)
+			if job.stoodDown {
+				conclusion = new(DeliveryJobConclusionSkipped)
+			}
+			applyStep, applyStepConclusion := new(waitingStep), conclusion
+			if job.withoutStepData {
+				applyStep, applyStepConclusion = nil, nil
+			}
+			rows = append(rows, DeliveryRunJob{
+				Repo: waitingRepo, RunID: run.id, Name: name, StartedAt: &started, CompletedAt: &done,
+				Conclusion: new(run.result), ApplyStep: applyStep, ApplyStepConclusion: applyStepConclusion,
+			})
+		}
+		if err := UpsertRunJobs(ctx, pool, waitingRepo, run.id, rows, true); err != nil {
+			t.Fatalf("seed run %d's jobs: %v", run.id, err)
 		}
 	}
 	for _, pr := range prs {
@@ -190,9 +303,9 @@ func seedWaitingHistory(t *testing.T, ctx context.Context, pool *store.Pool, run
 // waitingSets is the stored history's waiting set at at as the SQL states it and as the Go rule
 // derives it from the reads the timeline handler makes, over all of time, each pull request with
 // the run that ships it after at.
-func waitingSets(t *testing.T, ctx context.Context, pool *store.Pool, at time.Time) (sqlSet, goSet map[int]string) {
+func waitingSets(t *testing.T, ctx context.Context, pool *store.Pool, at time.Time, production Production) (sqlSet, goSet map[int]string) {
 	t.Helper()
-	waiting, err := ListPullRequestsWaitingAt(ctx, pool, waitingRepo, waitingJob, at)
+	waiting, err := ListPullRequestsWaitingAt(ctx, pool, waitingRepo, production, at)
 	if err != nil {
 		t.Fatalf("ListPullRequestsWaitingAt: %v", err)
 	}
@@ -218,7 +331,7 @@ func waitingSets(t *testing.T, ctx context.Context, pool *store.Pool, at time.Ti
 	if err != nil {
 		t.Fatalf("ListRunJobsForRuns: %v", err)
 	}
-	applies, _ := ProductionApplies(deployRuns, jobs, waitingJob)
+	applies := ProductionApplies(deployRuns, jobs, production).Applies
 	goSet = map[int]string{}
 	for _, pr := range stored {
 		if ComputeDeployedStatus(pr, waitingRepo, nil) == DeployedStatusNotTracked {

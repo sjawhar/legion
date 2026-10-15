@@ -2638,9 +2638,10 @@ export interface DeliveryPR {
   readonly unfetchable_reason: string | null;
 }
 
-/** A run's production job (the configured `production_job_name`): its result and when it finished,
- *  both null while it runs. A successful one is a production deploy, drawn at `completed_at`; a
- *  failed one is a pipeline failure even when no other job failed. */
+/** A run's production job (the one of `production_job_names` it holds): its conclusion as a deploy
+ *  reads it, `skipped` for a job that succeeded with its apply step not succeeding, and when it
+ *  finished. A successful one is a production deploy, drawn at `completed_at`; a failed one is a
+ *  pipeline failure even when no other job failed. */
 export interface DeliveryRunProduction {
   readonly conclusion: DeliveryJobConclusion | null;
   readonly completed_at: string | null;
@@ -2939,7 +2940,8 @@ export interface DeliveryJobTiming extends DeliveryTiming {
   readonly name: string;
 }
 
-/** One deploy-workflow job's timing in push runs on main, by the job name the settings give. */
+/** One deploy-workflow job's timing in push runs on main, by the job names the card follows, joined
+ *  by `or`. */
 export interface DeliveryDeployJobTiming extends DeliveryTiming {
   readonly job: string;
 }
@@ -3137,16 +3139,23 @@ export type DeliveryLiveServerFrame =
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
  * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
- * Which repository deploys, its deploy and PR-checks workflow paths, the deploy workflow's job
- * whose success is a production deploy, whose merged pull requests count, and the three optional
- * job names the Pipeline page follows besides the production job. The last three timestamps and
+ * Which repository deploys, its deploy and PR-checks workflow paths, the deploy workflow's
+ * production jobs and optional apply step, whose merged pull requests count, and the three optional
+ * job names the Pipeline page follows besides the production jobs. The last three timestamps and
  * the error are the reconcile's own, cleared by every write.
  */
 export interface DeliverySettings {
   /** `owner/repo`, lowercased as the server stores it. */
   readonly deploy_repo: string;
   readonly deploy_workflow_path: string;
-  readonly production_job_name: string;
+  /** The deploy workflow's production jobs, as a run lists each (a reusable workflow's job reads
+   *  `<caller> / <job>`): a run's production job is the one whose name is here. A deploy repository
+   *  that renames its job lists the old name beside the new, so history and new runs both count. */
+  readonly production_job_names: readonly string[];
+  /** The production job's step whose success means it applied, as GitHub lists the step; null when
+   *  any successful production job is a deploy. A production job that succeeded with this step not
+   *  succeeding (a superseded run that stood down) is no deploy. */
+  readonly production_apply_step_name: string | null;
   readonly pr_checks_workflow_path: string;
   /** GitHub logins as GitHub's REST API spells them, compared exactly: an App's ends in `[bot]`. */
   readonly population_authors: readonly string[];
@@ -3166,12 +3175,14 @@ export interface DeliverySettings {
   readonly updated_at: string;
 }
 
-/** `PUT /api/v1/settings/delivery`'s body, which replaces the whole record. The three job names
- *  are optional: absent, null or blank each stores null. */
+/** `PUT /api/v1/settings/delivery`'s body, which replaces the whole record. Production job names
+ *  are trimmed and must contain at least one unique non-blank name; the apply step and the three
+ *  Pipeline job names are optional, and absent, null or blank values store null. */
 export interface DeliverySettingsInput {
   readonly deploy_repo: string;
   readonly deploy_workflow_path: string;
-  readonly production_job_name: string;
+  readonly production_job_names: readonly string[];
+  readonly production_apply_step_name?: string | null;
   readonly pr_checks_workflow_path: string;
   readonly population_authors: readonly string[];
   readonly excluded_repos: readonly string[];

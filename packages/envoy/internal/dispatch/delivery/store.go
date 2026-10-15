@@ -21,14 +21,14 @@ import (
 
 // SettingsColumns is the delivery_settings select list ScanSettings reads, in scan order; every
 // query that returns the settings row selects exactly this.
-const SettingsColumns = `deploy_repo, deploy_workflow_path, production_job_name, pr_checks_workflow_path, population_authors, excluded_repos, staging_e2e_job_name, staging_apply_job_name, pr_checks_rollup_job_name, last_event_at, last_reconcile_at, last_error, updated_by, updated_at`
+const SettingsColumns = `deploy_repo, deploy_workflow_path, production_job_names, production_apply_step_name, pr_checks_workflow_path, population_authors, excluded_repos, staging_e2e_job_name, staging_apply_job_name, pr_checks_rollup_job_name, last_event_at, last_reconcile_at, last_error, updated_by, updated_at`
 
 // ScanSettings decodes one SettingsColumns row into a DeliverySettings.
 func ScanSettings(row pgx.Row) (DeliverySettings, error) {
 	var settings DeliverySettings
 	var updatedBy []byte
 	if err := row.Scan(
-		&settings.DeployRepo, &settings.DeployWorkflowPath, &settings.ProductionJobName,
+		&settings.DeployRepo, &settings.DeployWorkflowPath, &settings.ProductionJobNames, &settings.ProductionApplyStepName,
 		&settings.PRChecksWorkflowPath, &settings.PopulationAuthors, &settings.ExcludedRepos,
 		&settings.StagingE2EJobName, &settings.StagingApplyJobName, &settings.PRChecksRollupJobName,
 		&settings.LastEventAt, &settings.LastReconcileAt, &settings.LastError, &updatedBy, &settings.UpdatedAt,
@@ -87,15 +87,16 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 	return ScanSettings(pool.QueryRow(ctx, `
 		with cleared as (delete from delivery_reconcile_progress)
 		insert into delivery_settings (
-			singleton, deploy_repo, deploy_workflow_path, production_job_name,
+			singleton, deploy_repo, deploy_workflow_path, production_job_names, production_apply_step_name,
 			pr_checks_workflow_path, population_authors, excluded_repos,
 			staging_e2e_job_name, staging_apply_job_name, pr_checks_rollup_job_name, updated_by
 		)
-		values (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		values (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		on conflict (singleton) do update set
 			deploy_repo = excluded.deploy_repo,
 			deploy_workflow_path = excluded.deploy_workflow_path,
-			production_job_name = excluded.production_job_name,
+			production_job_names = excluded.production_job_names,
+			production_apply_step_name = excluded.production_apply_step_name,
 			pr_checks_workflow_path = excluded.pr_checks_workflow_path,
 			population_authors = excluded.population_authors,
 			excluded_repos = excluded.excluded_repos,
@@ -108,7 +109,7 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 			updated_by = excluded.updated_by,
 			updated_at = now()
 		returning `+SettingsColumns,
-		settings.DeployRepo, settings.DeployWorkflowPath, settings.ProductionJobName,
+		settings.DeployRepo, settings.DeployWorkflowPath, settings.ProductionJobNames, settings.ProductionApplyStepName,
 		settings.PRChecksWorkflowPath, populationAuthors, excludedRepos,
 		settings.StagingE2EJobName, settings.StagingApplyJobName, settings.PRChecksRollupJobName, actorJSON,
 	))
@@ -385,22 +386,23 @@ type WaitingPullRequest struct {
 // not shipped by then, oldest merge first, up to maxPullRequestsPerWindow, each with the run that
 // shipped it afterwards: what the timeline's waiting line starts its window from. A pull request
 // ships with the earliest-finishing successful production job of a run on main that GitHub created
-// after its merge (containment.go, with ListRuns' "main"), so one merged before the latest creation
-// among the runs whose job finished before at had shipped by then, and every one merged at or
-// after it had not: that creation, read through delivery_runs_kind_created newest first, is the one
-// bound this needs. A run on another branch, or one stored before head_branch was (null until the
-// reconcile's backfill fills it), ships nothing here either. The shipping run is read here rather
-// than from the window's own runs, which start at the window and so can miss a run created before
-// it.
-func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo, productionJobName string, at time.Time) ([]WaitingPullRequest, error) {
+// after its merge (containment.go, with ListRuns' "main"), judged by Production.Conclusion. One
+// merged before the latest creation among the runs whose job finished before at had shipped by then,
+// and every one merged at or after it had not: that creation, read through
+// delivery_runs_kind_created newest first, is the one bound this needs. A run on another branch, or
+// one stored before head_branch was (null until the reconcile's backfill fills it), ships nothing
+// here either. The shipping run is read here rather than from the window's own runs, which start at
+// the window and so can miss a run created before it.
+func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo string, production Production, at time.Time) ([]WaitingPullRequest, error) {
 	rows, err := pool.Query(ctx, `
 		select `+PullRequestColumns+`, ship.run_id, ship.completed_at
 		from delivery_pull_requests pr
 		left join lateral (
 			select r.run_id, j.completed_at
 			from delivery_runs r
-			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = $2
+			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = any($2)
 			where r.repo = $1 and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success'
+				and ($5::text is null or j.apply_step is distinct from $5 or j.apply_step_conclusion = 'success')
 				and j.completed_at is not null and `+runCreatedAt+` > pr.merged_at
 			order by j.completed_at
 			limit 1
@@ -408,14 +410,16 @@ func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo
 		where pr.repo = $1 and pr.merged_at < $3 and pr.merged_at >= coalesce((
 			select `+runCreatedAt+`
 			from delivery_runs r
-			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = $2
-			where r.repo = $1 and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success' and j.completed_at < $3
+			join delivery_run_jobs j on j.repo = r.repo and j.run_id = r.run_id and j.name = any($2)
+			where r.repo = $1 and r.kind = 'deploy' and r.head_branch = 'main' and j.conclusion = 'success'
+				and ($5::text is null or j.apply_step is distinct from $5 or j.apply_step_conclusion = 'success')
+				and j.completed_at < $3
 			order by `+runCreatedAt+` desc
 			limit 1
 		), '-infinity')
 		order by pr.merged_at
 		limit $4
-	`, deployRepo, productionJobName, at, maxPullRequestsPerWindow)
+	`, deployRepo, production.JobNames, at, maxPullRequestsPerWindow, production.ApplyStep)
 	if err != nil {
 		return nil, err
 	}
@@ -575,18 +579,25 @@ func UpsertRun(ctx context.Context, pool *store.Pool, run DeliveryRun) error {
 }
 
 // JobColumns is the delivery_run_jobs select list ScanJob reads, in scan order.
-const JobColumns = `repo, run_id, name, started_at, completed_at, conclusion`
+const JobColumns = `repo, run_id, name, started_at, completed_at, conclusion, apply_step, apply_step_conclusion`
 
 // ScanJob decodes one JobColumns row into a DeliveryRunJob.
 func ScanJob(row pgx.Row) (DeliveryRunJob, error) {
 	var job DeliveryRunJob
-	var conclusion *string
-	if err := row.Scan(&job.Repo, &job.RunID, &job.Name, &job.StartedAt, &job.CompletedAt, &conclusion); err != nil {
+	var conclusion, stepConclusion *string
+	if err := row.Scan(
+		&job.Repo, &job.RunID, &job.Name, &job.StartedAt, &job.CompletedAt, &conclusion,
+		&job.ApplyStep, &stepConclusion,
+	); err != nil {
 		return DeliveryRunJob{}, err
 	}
 	if conclusion != nil {
 		c := DeliveryJobConclusion(*conclusion)
 		job.Conclusion = &c
+	}
+	if stepConclusion != nil {
+		c := DeliveryJobConclusion(*stepConclusion)
+		job.ApplyStepConclusion = &c
 	}
 	return job, nil
 }
@@ -623,17 +634,21 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 	// statement's own rule (a finished job is never replaced by an unfinished one), leaving the
 	// stored row as writing each job in turn would.
 	type foldedJob struct {
-		name                   string
-		startedAt, completedAt *time.Time
-		conclusion             *string
+		name                                       string
+		startedAt, completedAt                     *time.Time
+		conclusion, applyStep, applyStepConclusion *string
 	}
 	index := make(map[string]int, len(jobs))
 	folded := make([]foldedJob, 0, len(jobs))
 	for _, job := range jobs {
-		row := foldedJob{name: job.Name, startedAt: job.StartedAt, completedAt: job.CompletedAt}
+		row := foldedJob{name: job.Name, startedAt: job.StartedAt, completedAt: job.CompletedAt, applyStep: job.ApplyStep}
 		if job.Conclusion != nil {
 			c := string(*job.Conclusion)
 			row.conclusion = &c
+		}
+		if job.ApplyStepConclusion != nil {
+			c := string(*job.ApplyStepConclusion)
+			row.applyStepConclusion = &c
 		}
 		i, seen := index[job.Name]
 		if !seen {
@@ -663,19 +678,25 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 		started := make([]*time.Time, len(folded))
 		completed := make([]*time.Time, len(folded))
 		conclusions := make([]*string, len(folded))
+		steps := make([]*string, len(folded))
+		stepConclusions := make([]*string, len(folded))
 		for i, row := range folded {
-			names[i], started[i], completed[i], conclusions[i] = row.name, row.startedAt, row.completedAt, row.conclusion
+			names[i], started[i], completed[i], conclusions[i], steps[i], stepConclusions[i] =
+				row.name, row.startedAt, row.completedAt, row.conclusion, row.applyStep, row.applyStepConclusion
 		}
 		if _, err := tx.Exec(ctx, `
-			insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
-			select $1, $2, job.name, job.started_at, job.completed_at, job.conclusion
-			from unnest($3::text[], $4::timestamptz[], $5::timestamptz[], $6::text[]) as job (name, started_at, completed_at, conclusion)
+			insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion, apply_step, apply_step_conclusion)
+			select $1, $2, job.name, job.started_at, job.completed_at, job.conclusion, job.apply_step, job.apply_step_conclusion
+			from unnest($3::text[], $4::timestamptz[], $5::timestamptz[], $6::text[], $7::text[], $8::text[])
+				as job (name, started_at, completed_at, conclusion, apply_step, apply_step_conclusion)
 			on conflict (repo, run_id, name) do update set
 				started_at = excluded.started_at,
 				completed_at = excluded.completed_at,
-				conclusion = excluded.conclusion
+				conclusion = excluded.conclusion,
+				apply_step = excluded.apply_step,
+				apply_step_conclusion = excluded.apply_step_conclusion
 			where delivery_run_jobs.completed_at is null or excluded.completed_at is not null
-		`, repo, runID, names, started, completed, conclusions); err != nil {
+		`, repo, runID, names, started, completed, conclusions, steps, stepConclusions); err != nil {
 			return fmt.Errorf("upsert the jobs of run %d: %w", runID, err)
 		}
 	}

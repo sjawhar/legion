@@ -99,7 +99,7 @@ var Table = []Capability{
 	{GitHub, SiteLive, "reads and writes GitHub through its plain `gh` and `git` on its role's App token file", "dispatch://LEGION-631", ""},
 	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", "", ""},
 	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", "", ""},
-	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun, uv and kubectl", "", ""},
+	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun, uv, kubectl, jq and ssh-keygen", "", ""},
 	{ResourceLimits, SiteDeployment, "runs within the CPU and memory the deployment's pod resources give it", "", ""},
 	{PoolCapacity, SiteDeployment, "starts in a Legion pool with room for the image probe's reservation at boot", "", ""},
 	{Network, SiteWithheld, "reaches beyond the pod's own network: the pod is the boundary", "dispatch://LEGION-5", ""},
