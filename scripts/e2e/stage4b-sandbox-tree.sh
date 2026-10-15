@@ -3662,32 +3662,39 @@ for marker in omp-extension omp-tool mcp-root mcp-omp; do
   grep -qw -- "$marker" <<<"$markers" || fail "tree 2's planner never loaded the fixture's $marker: markers [${markers:-none}]"
 done
 note "tree 2's planner loaded the fixture's extension, tool and both MCP servers [${markers}]"
-# Five settings as the agent reads them: three defaults nothing above the repository sets and the
-# repository leaves alone, the repository's own images.urls.enabled, and retry.modelFallback, which
-# the repository sets false and the operator's overlay sets true: the operator's wins.
+# Five settings, each read twice: as the agent reads it (agent_setting, under the process's own
+# environment, so under PI_CONFIG_FILES' overlays) and with no environment but PATH and HOME
+# (bare_setting: no overlay, so Oh My Pi's own default under the repository's .omp/config.yml). The
+# relation between the two reads is what is asserted, never a literal default: Oh My Pi's defaults
+# move between pins (compaction.remoteEndpoint read "" in one build and null in the next; dev.autoqa
+# false, then true), and the same binary in the same pod is the only source of the default it
+# applies. Three keys nothing sets, so both reads are that default and agree; images.urls.enabled,
+# which the repository sets true and nothing above it touches, so both reads are true; and
+# retry.modelFallback, which the repository sets false and the operator's overlay sets true, so the
+# agent reads true where the bare read is the repository's false: the overlay reached the agent
+# through PI_CONFIG_FILES in its environment, which is what the agent's reads ran under, and
+# nothing else. A leaked or missing overlay shows as the two reads agreeing where they must differ,
+# or differing where they must agree.
 pid=$(agent_pid "$pod" planner) || fail "tree 2's planner container $pod does not hold exactly one Oh My Pi under a legion worker-shim: $(pod_commands "$pod" planner | tr '\n' ';')"
 settings=
-for pair in 'compaction.remoteEndpoint=""' 'memory.backend="off"' images.urls.enabled=true dev.autoqa=false retry.modelFallback=true; do
-  key=${pair%%=*} want=${pair#*=}
-  case $key in
-    images.urls.enabled) why="the repository's .omp/config.yml sets it and nothing above the repository does" ;;
-    retry.modelFallback) why="the operator's overlay sets it true over the repository's false" ;;
-    *) why="Oh My Pi's default, which neither the repository nor an overlay sets" ;;
-  esac
+for key in compaction.remoteEndpoint memory.backend dev.autoqa images.urls.enabled retry.modelFallback; do
   got=$(agent_setting "$pod" planner "$pid" "$fixture_dir" "$key" 2>"$work/setting-stderr") || fail "omp config get $key under tree 2's planner's environment (pid $pid) in $fixture_dir failed: $got $(tr '\n' ' ' <"$work/setting-stderr")"
-  [ "$got" = "$want" ] || fail "$key reads $got under tree 2's planner's own environment (pid $pid) in $fixture_dir, want $want: $why"
-  settings="$settings $key=$got"
+  bare=$(bare_setting "$pod" planner "$fixture_dir" "$key" 2>"$work/setting-stderr") || fail "omp config get $key with no environment but PATH and HOME in $fixture_dir failed: $bare $(tr '\n' ' ' <"$work/setting-stderr")"
+  case $key in
+    retry.modelFallback)
+      [ "$got" = true ] && [ "$bare" = false ] ||
+        fail "retry.modelFallback reads $got under tree 2's planner's own environment (pid $pid) and $bare with no environment but PATH and HOME in $fixture_dir, want true over the repository's false: the operator's overlay must reach the agent through its environment and win" ;;
+    images.urls.enabled)
+      [ "$got" = true ] && [ "$bare" = true ] ||
+        fail "images.urls.enabled reads $got under tree 2's planner's own environment (pid $pid) and $bare with no environment but PATH and HOME in $fixture_dir, want true both ways: the repository's .omp/config.yml sets it and nothing above the repository does" ;;
+    *)
+      [ "$got" = "$bare" ] ||
+        fail "$key reads $got under tree 2's planner's own environment (pid $pid) and $bare with no environment but PATH and HOME in $fixture_dir; neither the repository nor an overlay sets it, so both must be Oh My Pi's default" ;;
+  esac
+  settings="$settings $key=$got/$bare"
 done
-note "settings as tree 2's planner (pid $pid) reads them in $fixture_dir:${settings}"
-# The control: the same reads with no environment but PATH and HOME give the repository's own
-# values, false and true. The operator's true reached the agent through PI_CONFIG_FILES in its
-# environment, which is what the reads above ran under, and nothing else.
-for pair in retry.modelFallback=false images.urls.enabled=true; do
-  key=${pair%%=*} want=${pair#*=}
-  got=$(bare_setting "$pod" planner "$fixture_dir" "$key" 2>"$work/setting-stderr") || fail "omp config get $key with no environment but PATH and HOME in $fixture_dir failed: $got $(tr '\n' ' ' <"$work/setting-stderr")"
-  [ "$got" = "$want" ] || fail "control: $key reads $got in $fixture_dir with no environment but PATH and HOME, want the repository's $want, so the agent's environment is not what carries the operator's overlay"
-done
-note "control: with no environment but PATH and HOME, retry.modelFallback reads the repository's false and images.urls.enabled its true in $fixture_dir"
+note "settings as tree 2's planner (pid $pid) reads them in $fixture_dir, each beside the read with no environment but PATH and HOME (agent/bare):${settings}"
+note "control: retry.modelFallback differs between the two reads (the operator's true over the repository's false) and images.urls.enabled does not (the repository's true both ways), so the agent's environment is what carries the overlay"
 send_agent "$tree2" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary."
 on_tree "$tree2" wait_for_phase "$tree2" implementing "$plan_seconds"
 pass
