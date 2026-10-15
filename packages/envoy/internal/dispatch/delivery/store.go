@@ -634,8 +634,8 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 	// statement's own rule (a finished job is never replaced by an unfinished one), leaving the
 	// stored row as writing each job in turn would.
 	type foldedJob struct {
-		name                                     string
-		startedAt, completedAt                   *time.Time
+		name                                       string
+		startedAt, completedAt                     *time.Time
 		conclusion, applyStep, applyStepConclusion *string
 	}
 	index := make(map[string]int, len(jobs))

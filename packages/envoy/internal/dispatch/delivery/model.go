@@ -19,21 +19,21 @@ import (
 // cleared the next time a pass succeeds -- LastReconcileAt does not advance on a failed pass, so
 // the two together answer both "when did this last actually work" and "what's wrong right now."
 type DeliverySettings struct {
-	DeployRepo               string      `json:"deploy_repo"`
-	DeployWorkflowPath       string      `json:"deploy_workflow_path"`
-	ProductionJobNames       []string    `json:"production_job_names"`
-	ProductionApplyStepName  *string     `json:"production_apply_step_name"`
-	PRChecksWorkflowPath     string      `json:"pr_checks_workflow_path"`
-	PopulationAuthors        []string    `json:"population_authors"`
-	ExcludedRepos            []string    `json:"excluded_repos"`
-	StagingE2EJobName        *string     `json:"staging_e2e_job_name"`
-	StagingApplyJobName      *string     `json:"staging_apply_job_name"`
-	PRChecksRollupJobName    *string     `json:"pr_checks_rollup_job_name"`
-	LastEventAt              *time.Time  `json:"last_event_at"`
-	LastReconcileAt          *time.Time  `json:"last_reconcile_at"`
-	LastError                *string     `json:"last_error"`
-	UpdatedBy                model.Actor `json:"updated_by"`
-	UpdatedAt                time.Time   `json:"updated_at"`
+	DeployRepo              string      `json:"deploy_repo"`
+	DeployWorkflowPath      string      `json:"deploy_workflow_path"`
+	ProductionJobNames      []string    `json:"production_job_names"`
+	ProductionApplyStepName *string     `json:"production_apply_step_name"`
+	PRChecksWorkflowPath    string      `json:"pr_checks_workflow_path"`
+	PopulationAuthors       []string    `json:"population_authors"`
+	ExcludedRepos           []string    `json:"excluded_repos"`
+	StagingE2EJobName       *string     `json:"staging_e2e_job_name"`
+	StagingApplyJobName     *string     `json:"staging_apply_job_name"`
+	PRChecksRollupJobName   *string     `json:"pr_checks_rollup_job_name"`
+	LastEventAt             *time.Time  `json:"last_event_at"`
+	LastReconcileAt         *time.Time  `json:"last_reconcile_at"`
+	LastError               *string     `json:"last_error"`
+	UpdatedBy               model.Actor `json:"updated_by"`
+	UpdatedAt               time.Time   `json:"updated_at"`
 }
 
 // Production is the rule that names a run's production job and says whether it applied: the job
@@ -185,14 +185,14 @@ func (run DeliveryRun) Created() time.Time {
 // RunJobs records ApplyStep and ApplyStepConclusion only when the job is listed in a production
 // rule whose apply step is configured.
 type DeliveryRunJob struct {
-	Repo                 string                 `json:"repo"`
-	RunID                int64                  `json:"run_id"`
-	Name                 string                 `json:"name"`
-	StartedAt            *time.Time             `json:"started_at"`
-	CompletedAt          *time.Time             `json:"completed_at"`
-	Conclusion           *DeliveryJobConclusion `json:"conclusion"`
-	ApplyStep            *string                `json:"apply_step"`
-	ApplyStepConclusion  *DeliveryJobConclusion `json:"apply_step_conclusion"`
+	Repo                string                 `json:"repo"`
+	RunID               int64                  `json:"run_id"`
+	Name                string                 `json:"name"`
+	StartedAt           *time.Time             `json:"started_at"`
+	CompletedAt         *time.Time             `json:"completed_at"`
+	Conclusion          *DeliveryJobConclusion `json:"conclusion"`
+	ApplyStep           *string                `json:"apply_step"`
+	ApplyStepConclusion *DeliveryJobConclusion `json:"apply_step_conclusion"`
 }
 
 // DeployedStatus is a population pull request's deploy state: "not_tracked" for a PR outside the

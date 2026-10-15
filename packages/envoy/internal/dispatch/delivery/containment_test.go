@@ -272,7 +272,7 @@ func TestProductionAppliesReadsTheRunsCreation(t *testing.T) {
 	if !created[1].Equal(merged.Add(2*time.Minute)) || !created[2].Equal(merged.Add(25*time.Minute)) || !created[3].Equal(merged.Add(-30*time.Minute)) {
 		t.Fatalf("applies' creation = %v, want run 1's created_at, run 2's start (no created_at), run 3's created_at", created)
 	}
-	if got := FirstShippingApply(merged, applies); got == nil || got.RunID != 1 {
+	if got := FirstShippingApply(merged, judged.Applies); got == nil || got.RunID != 1 {
 		t.Fatalf("FirstShippingApply = %+v, want the merge queue's run 1", got)
 	}
 }

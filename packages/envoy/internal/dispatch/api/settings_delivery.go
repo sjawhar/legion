@@ -44,17 +44,17 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 // null.
 func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		DeployRepo               string       `json:"deploy_repo"`
-		DeployWorkflowPath       string       `json:"deploy_workflow_path"`
-		ProductionJobNames       []string     `json:"production_job_names"`
-		ProductionApplyStepName  *string      `json:"production_apply_step_name"`
-		PRChecksWorkflowPath     string       `json:"pr_checks_workflow_path"`
-		PopulationAuthors        []string     `json:"population_authors"`
-		ExcludedRepos            []string     `json:"excluded_repos"`
-		StagingE2EJobName        *string      `json:"staging_e2e_job_name"`
-		StagingApplyJobName      *string      `json:"staging_apply_job_name"`
-		PRChecksRollupJobName    *string      `json:"pr_checks_rollup_job_name"`
-		Actor                    *model.Actor `json:"actor"`
+		DeployRepo              string       `json:"deploy_repo"`
+		DeployWorkflowPath      string       `json:"deploy_workflow_path"`
+		ProductionJobNames      []string     `json:"production_job_names"`
+		ProductionApplyStepName *string      `json:"production_apply_step_name"`
+		PRChecksWorkflowPath    string       `json:"pr_checks_workflow_path"`
+		PopulationAuthors       []string     `json:"population_authors"`
+		ExcludedRepos           []string     `json:"excluded_repos"`
+		StagingE2EJobName       *string      `json:"staging_e2e_job_name"`
+		StagingApplyJobName     *string      `json:"staging_apply_job_name"`
+		PRChecksRollupJobName   *string      `json:"pr_checks_rollup_job_name"`
+		Actor                   *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
