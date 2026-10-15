@@ -1586,7 +1586,7 @@ death_charge() {
 # resumed session that answers in seconds, which is how a run lost three ends after their turns.
 hold_end_charged() {
   local claim=$1 charge out
-  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, run \`sleep 300\` as one bash call (timeout 600 seconds), then reply WAITING and wait for the targeted message. Change nothing."
+  local task="Stage 4b proof: your previous process was ended after its task's turn was over, so this is a new task for the same phase. Read what your role says to read, then reply WAITING and wait for the targeted message, after the \`sleep 300\` the proof's instructions ask of an implementer on a new task. Change nothing."
   charge=$(death_charge "$claim" "$ended_incarnation") ||
     fail "the daemon log has no death of $claim's process $ended_incarnation, which the proof ended"
   if [ "$charge" != uncharged ]; then
