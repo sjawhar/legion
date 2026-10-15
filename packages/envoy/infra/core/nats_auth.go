@@ -195,13 +195,26 @@ func (a Authorization) Render(header []string) (string, error) {
 	if err := a.Validate(); err != nil {
 		return "", err
 	}
-	// nats-server's config lexer ends a comment at \n or \r (conf/lex.go isNL), so a header line
-	// holding either would carry the rest of it out of the comment and into the configuration.
+	if err := checkHeader(header); err != nil {
+		return "", err
+	}
+	return a.render(header), nil
+}
+
+// checkHeader refuses a header line holding a line break. nats-server's config lexer ends a comment
+// at \n or \r (conf/lex.go isNL), so a line holding either would carry the rest of it out of the
+// comment and into the configuration.
+func checkHeader(header []string) error {
 	for i, line := range header {
 		if strings.ContainsAny(line, "\r\n") {
-			return "", fmt.Errorf("header[%d] holds a line break; each header line is one comment line", i)
+			return fmt.Errorf("header[%d] holds a line break; each header line is one comment line", i)
 		}
 	}
+	return nil
+}
+
+// render is Render's text, for an authorization Validate accepts and a header checkHeader accepts.
+func (a Authorization) render(header []string) string {
 	var b strings.Builder
 	for _, line := range header {
 		b.WriteString("# " + line + "\n")
@@ -224,7 +237,7 @@ func (a Authorization) Render(header []string) (string, error) {
 		b.WriteString("# " + a.NoAuthUser + ": a client presenting no credential becomes this user\n")
 		b.WriteString("no_auth_user: " + PyJSON(fallback.NKey, PyJSONOptions{EnsureASCII: true}) + "\n")
 	}
-	return b.String(), nil
+	return b.String()
 }
 
 // object is the rules as the block writes them: deny only when it names an entry.
@@ -236,26 +249,31 @@ func (r *Rules) object() Object {
 	return object
 }
 
-// StartScript returns the `sh -c` script that writes Render's text to path and execs nats-server
-// with --config path and serverArgs. It refuses a server argument that would set aside the
-// rendered authorization (authorizationFlags).
-func (a Authorization) StartScript(header []string, serverArgs []string, path string) (string, error) {
-	if path == "" {
-		return "", errors.New("path is required: the start script writes the configuration there")
+// StartScript returns the `sh -c` script that writes Render's text to configPath and execs
+// nats-server with --config configPath and serverArgs. It refuses a server argument that would set
+// aside the rendered authorization (authorizationFlags). Each refusal is an InputError naming its
+// input as a component's schema does: authorization (Validate's refusal, run once here),
+// configPath, serverArgs and configHeader, checked in that order, so a caller passes a refusal on
+// as it is.
+func (a Authorization) StartScript(configHeader, serverArgs []string, configPath string) (string, error) {
+	if err := a.Validate(); err != nil {
+		return "", InputErrorf("authorization", "authorization: %w", err)
+	}
+	if configPath == "" {
+		return "", InputErrorf("configPath", "configPath is required with authorization: the start script writes the configuration there")
 	}
 	for i, arg := range serverArgs {
 		name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")
 		if why, ok := authorizationFlags[name]; ok && strings.HasPrefix(arg, "-") {
 			// The value is not quoted: after -pass or -auth it is a credential.
-			return "", fmt.Errorf("serverArgs[%d] sets nats-server's -%s, which %s", i, name, why)
+			return "", InputErrorf("serverArgs", "serverArgs[%d] sets nats-server's -%s, which %s", i, name, why)
 		}
 	}
-	text, err := a.Render(header)
-	if err != nil {
-		return "", err
+	if err := checkHeader(configHeader); err != nil {
+		return "", InputErrorf("configHeader", "configHeader: %w", err)
 	}
-	command := append([]string{"nats-server", "--config", path}, serverArgs...)
-	return "set -eu; printf '%s' " + ShellQuote(text) + " > " + ShellQuote(path) + "; exec " + ShellJoin(command), nil
+	command := append([]string{"nats-server", "--config", configPath}, serverArgs...)
+	return "set -eu; printf '%s' " + ShellQuote(a.render(configHeader)) + " > " + ShellQuote(configPath) + "; exec " + ShellJoin(command), nil
 }
 
 // authorizationFlags are the nats-server flags a server argument must not set, with what each does

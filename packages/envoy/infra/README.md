@@ -616,7 +616,9 @@ argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-clu
 last value of a flag, so a later `-c` would load another file in place of the rendered one;
 `-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
 has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
-and a server routed to it would see every message its users publish.
+and a server routed to it would see every message its users publish. Each of its refusals is a
+`core.InputError` naming the input it refuses: `authorization`, `configPath`, `serverArgs` or
+`configHeader`.
 
 ## Changing the module
 

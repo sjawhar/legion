@@ -202,7 +202,8 @@ func TestValidateRefuses(t *testing.T) {
 			_, err := a.Render(header)
 			require.ErrorContains(t, err, r.err, "Render renders only what Validate accepts")
 			_, err = a.StartScript(header, nil, "/tmp/nats-server.conf")
-			require.ErrorContains(t, err, r.err, "StartScript renders only what Validate accepts")
+			requireInputError(t, err, "authorization", r.err)
+			require.EqualError(t, err, "authorization: "+a.Validate().Error(), "StartScript renders only what Validate accepts")
 		})
 	}
 }
@@ -237,12 +238,14 @@ func TestValidateAccepts(t *testing.T) {
 	}
 }
 
+// Render refuses a header line holding a line break; StartScript refuses it as configHeader.
 func TestRenderRefusesAHeaderLineWithALineBreak(t *testing.T) {
 	for _, line := range []string{"one\ntwo", "one\rtwo"} {
 		_, err := placeholder().Render([]string{"fine", line})
-		require.ErrorContains(t, err, "header[1]")
+		require.EqualError(t, err, "header[1] holds a line break; each header line is one comment line")
 		_, err = placeholder().StartScript([]string{"fine", line}, nil, "/tmp/nats-server.conf")
-		require.ErrorContains(t, err, "header[1]")
+		requireInputError(t, err, "configHeader", "header[1]")
+		require.EqualError(t, err, "configHeader: header[1] holds a line break; each header line is one comment line")
 	}
 }
 
@@ -262,7 +265,8 @@ func TestRenderWithoutAFallbackOrAHeader(t *testing.T) {
 
 func TestStartScriptRefusesAnEmptyPath(t *testing.T) {
 	_, err := placeholder().StartScript(header, nil, "")
-	require.ErrorContains(t, err, "path")
+	requireInputError(t, err, "configPath", "configPath")
+	require.EqualError(t, err, "configPath is required with authorization: the start script writes the configuration there")
 }
 
 // nats-server parses its arguments with Go's flag package, so each of its configuration, credential
@@ -297,7 +301,7 @@ func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
 		t.Run(row.arg, func(t *testing.T) {
 			script, err := placeholder().StartScript(header, []string{"-js", row.arg, "value"}, "/tmp/nats-server.conf")
 			require.Empty(t, script)
-			require.ErrorContains(t, err, "serverArgs[1] sets nats-server's -"+row.flag+",")
+			requireInputError(t, err, "serverArgs", "serverArgs[1] sets nats-server's -"+row.flag+",")
 			if _, value, ok := strings.Cut(row.arg, "="); ok {
 				require.NotContains(t, err.Error(), value)
 			}

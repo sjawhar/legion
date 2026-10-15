@@ -698,8 +698,9 @@ type Authorization struct {
 func (a Authorization) Validate() error
 // Render returns the authorization block: the header lines, each as "# <line>", then the block.
 func (a Authorization) Render(header []string) (string, error)
-// StartScript returns the `sh -c` script that writes Render's text to path and execs nats-server.
-func (a Authorization) StartScript(header []string, serverArgs []string, path string) (string, error)
+// StartScript returns the `sh -c` script that writes Render's text to configPath and execs
+// nats-server. Each refusal is an InputError naming its input.
+func (a Authorization) StartScript(configHeader, serverArgs []string, configPath string) (string, error)
 
 // IsUserPublicKey reports whether key is a user public key: 56 base32 characters whose 35 bytes
 // are the user prefix byte, the key and a valid checksum (nkey.go:29-34).
@@ -718,7 +719,7 @@ type Object []Field
 ```
 
 These semantics are ported from the reference implementation, and the unit tests pin each one:
-- **What is refused** (`nats_auth.go:44-153, 188-198, 236-264`). Every refusal of a user names it,
+- **What is refused** (`nats_auth.go:44-153, 194-214, 252-293`). Every refusal of a user names it,
   by index and name, and the field.
   - No users.
   - Every user pending. That would render a block with no users, which is R7's case.
@@ -742,15 +743,20 @@ These semantics are ported from the reference implementation, and the unit tests
     `server/client.go:3044-3051`, `:1199-1203`), and `testnats.Image` is 2.10.29.
   - Duplicate names, or duplicate keys.
   - A `NoAuthUser` that names no user, names a pending user, or names a user with `HasSeed`.
-  - In `Render`, a header line holding `\r` or `\n` (`:194-198`).
-  - In `StartScript`, an empty path (`:243-245`), and a server argument that sets `-c`, `-config`,
-    `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or `-routes`, with one dash or two and
-    with or without `=value`, named by index and flag and never by value (`:246-252, 261-275`).
-    nats-server parses its arguments with Go's flag package and takes a flag's last value, so a
-    later `-c` would load another file in place of the rendered one, `-user`, `-pass` and `-auth`
-    would add a credential beside its nkey users, and the route flags would open or solicit a route
-    the block, having no cluster authorization, leaves unauthenticated (nats-server v2.10.29
-    `server/opts.go:5343-5345, 5350-5351, 5368-5370`).
+  - A header line holding `\r` or `\n` (`checkHeader`, `:204-214`), in `Render` and `StartScript`.
+  - In `StartScript`, an empty `configPath` (`:262-264`), and a server argument that sets `-c`,
+    `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or `-routes`, with one dash
+    or two and with or without `=value`, named by index and flag and never by value (`:265-271,
+    279-293`). nats-server parses its arguments with Go's flag package and takes a flag's last
+    value, so a later `-c` would load another file in place of the rendered one, `-user`, `-pass`
+    and `-auth` would add a credential beside its nkey users, and the route flags would open or
+    solicit a route the block, having no cluster authorization, leaves unauthenticated (nats-server
+    v2.10.29 `server/opts.go:5343-5345, 5350-5351, 5368-5370`).
+  - `StartScript`'s refusals are `InputError`s naming the input as a component's schema does, in
+    the order it checks them (`:252-277`): `authorization` (Validate's refusal, prefixed
+    `authorization: `; Validate runs once), `configPath`, `serverArgs`, and `configHeader`
+    (prefixed `configHeader: `). A caller passes each on as it is, with no sorting of core's
+    errors. `Render`'s refusals are plain errors.
 - **How the block is rendered.** The lines are, in order:
   - each header line as `# <line>`;
   - `authorization {`;
