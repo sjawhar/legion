@@ -679,8 +679,12 @@ written here.
   - add `ConnectSeed(t, uri, seed string, opts ...nats.Option)` (`:406-424`): it connects as the
     user of a seed, or with no credential, and returns the server's answer. `core`'s and `seed`'s
     live tests and testnats' own tests use it.
-- Modify: `.github/workflows/envoy-and-contracts.yaml`: `envoy-go`'s pull step pulls `HubImage`
-  beside `Image` (`envoy-and-contracts.yaml:806-819`), as `envoy-infra-go`'s does (`:880-891`).
+- Create: `.github/actions/pull-test-images/action.yml`, a composite action that pulls each image a
+  job's tests start, read from the Go constant that declares it (`<file> <const>` per line) or
+  given, with the bounded retry. `envoy-and-contracts.yaml`'s `envoy-go` (testnats' `Image` and
+  `HubImage`, and tests3's `Image`), `envoy-infra-go` (`Image`, `HubImage`), `envoy-go-race`
+  (`Image`) and `envoy-smoke` (`Image` and the smoke image's base images) use it in place of four
+  copies of that step, and the `envoy` and `envoy_image` filters and the trigger paths name it.
 
 **Interfaces:**
 
