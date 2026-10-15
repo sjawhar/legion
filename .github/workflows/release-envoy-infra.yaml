@@ -236,7 +236,7 @@ jobs:
           path: assets/
           if-no-files-found: error
 
-  # Checks what build hands over, writes SHA256SUMS, attests build's archives, tags the commit and
+  # Checks what build hands over, writes SHA256SUMS, tags the commit, attests build's archives and
   # releases them. It runs no Go, no Pulumi CLI and no plugin, only release-push.sh, jq, sha256sum
   # and the pinned actions below, so the scopes and the deploy key it holds never meet the code
   # build runs.
@@ -292,12 +292,6 @@ jobs:
             printf 'assets/%s\n' "${archives[@]}" SHA256SUMS
             echo "FILES"
           } >> "$GITHUB_OUTPUT"
-      # Build provenance for the archives Pulumi installs, which the release below uploads exactly,
-      # with SHA256SUMS. A consumer verifies an archive against this workflow's signing identity
-      # before installing it, with the command packages/envoy/infra/README.md ("Install") gives.
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: ${{ steps.assets.outputs.subjects }}
       # The only step that holds the deploy key. release-push.sh push-tag writes it to a directory
       # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       - name: Tag release
@@ -311,6 +305,14 @@ jobs:
           fi
           git tag "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
+      # Build provenance for the archives Pulumi installs, which the release below uploads exactly,
+      # with SHA256SUMS. A consumer verifies an archive against this workflow's signing identity
+      # before installing it, with the command packages/envoy/infra/README.md ("Install") gives. It
+      # runs after "Tag release", so a run whose tag step refuses (the tag already names another
+      # commit) leaves no attestation for archives no release carries.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

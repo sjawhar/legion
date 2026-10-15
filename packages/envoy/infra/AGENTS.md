@@ -93,7 +93,8 @@ versions. Never add the module to the root `go.work`.
   that is not exactly those archives, each a regular file, and prints the tag
   `envoy-infra-v<version>`; and `publish` writes `SHA256SUMS` over them. So `build` chooses the
   archives' bytes, and not their names, the tag or the sums. An archive the release adds gets its
-  `archives+=` line in that step. A step that runs Go, the Pulumi CLI or the plugin goes in
+  `archives+=` line in that step. The attestation runs after the tag step, so a run whose tag is
+  refused leaves no attestation. A step that runs Go, the Pulumi CLI or the plugin goes in
   `build`, never in `publish`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
