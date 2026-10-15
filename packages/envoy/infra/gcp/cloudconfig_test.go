@@ -43,8 +43,8 @@ func TestCloudConfigOrdersBootcmdFilesAndUnits(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
-	format := indexOf(t, doc.Bootcmd, "mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data")
-	mount := indexOf(t, doc.Bootcmd, "mount -o discard,defaults /dev/disk/by-id/google-data /mnt/disks/data")
+	format := indexOf(t, doc.Bootcmd, "mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard ")
+	mount := indexOf(t, doc.Bootcmd, "mount -o discard,defaults ")
 	dirs := indexOf(t, doc.Bootcmd, "mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale")
 	require.Less(t, format, mount, "the disk is formatted before it is mounted")
 	require.Less(t, mount, dirs, "the containers' directories are made on the mounted disk")

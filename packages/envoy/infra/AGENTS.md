@@ -160,14 +160,18 @@ pulumi-go-provider's `integration.NewServer` (`provider/provider_test.go`, `host
 key fetcher's script under `/bin/sh` against `httptest` fakes of the metadata server and Secret
 Manager, with a `sleep` stub first on its `PATH` that records each wait (`gcp/fetch_key_test.go`,
 which needs `curl`, `jq`, `base64` and `mktemp` on this machine and fails, never skips, without
-one), the seed command against a fake `Store` (`seed/seed_test.go`), the AWS SDK against an
-`httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which fails a test
-on any request it does not expect (`seed/awsstore_test.go`), the Secret Manager client against a
-gRPC fake of the service over TLS (`seed/gcpfake_test.go`), which fails a test on any call outside
-the mode's or any request it does not expect (`seed/gcpstore_test.go`), and the command built as the
-release job stamps it, for its `--version` (`cmd/envoy-infra/main_test.go`). The seed package has
-one `TestMain` (`seed/main_test.go`), which makes the fake's certificate a root the whole test
-binary trusts, through `SSL_CERT_FILE`; setup any other seed test needs goes into it. The tests
+one), the data disk's format and mount entries under `/bin/sh` against blank, ext4, damaged and
+missing disk images, with `mkfs.ext4`, `fsck.ext4` and `mount` stubbed (`gcp/data_disk_test.go`,
+which needs util-linux's `blkid` and e2fsprogs' `mkfs.ext4` on this machine and fails, never
+skips, without one), the seed command against a fake `Store` (`seed/seed_test.go`), the AWS SDK
+against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's query protocol, which
+fails a test on any request it does not expect (`seed/awsstore_test.go`), the Secret Manager client
+against a gRPC fake of the service over TLS (`seed/gcpfake_test.go`), which fails a test on any
+call outside the mode's or any request it does not expect (`seed/gcpstore_test.go`), and the
+command built as the release job stamps it, for its `--version` (`cmd/envoy-infra/main_test.go`).
+The seed package has one `TestMain` (`seed/main_test.go`), which makes the fake's certificate a
+root the whole test binary trusts, through `SSL_CERT_FILE`; setup any other seed test needs goes
+into it. The tests
 that start nats-server containers on this machine's Docker through `testnats` carry the `natslive`
 build tag, so a plain `go test ./...`, as the release job runs it, starts none. Each runs on
 `testnats.Image` and `testnats.HubImage`: `core/nats_auth_live_test.go` (the rendered authorization

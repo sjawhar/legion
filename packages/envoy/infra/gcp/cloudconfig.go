@@ -58,12 +58,19 @@ type writeFile struct {
 // document returns the VM's cloud-config.
 //
 // bootcmd runs first at every boot. It loads the tun module unless the kernel already has the
-// device. It formats the data disk only when blkid finds nothing on it, which it reports as exit
-// status 2: a disk blkid cannot read some other way is left as it is, and its mount fails. It
-// mounts the disk with the options Compute Engine documents for a persistent disk
-// (https://cloud.google.com/compute/docs/disks/format-mount-disk-linux), makes the directories the
-// two containers keep their state in, and leaves the key file empty and readable by root alone, so
-// that tailscaled's bind mount is always of a file.
+// device. It formats the data disk only when blkid finds no filesystem on it (exit status 2) and
+// its first MiB reads, whole, as zeros, as a new persistent disk's does. blkid exits 2 too on a
+// filesystem whose primary superblock is damaged, which e2fsck can repair from a backup superblock
+// and mkfs.ext4's discard would destroy, and on a device it cannot open: every disk but a blank one
+// is left as it is, with a line on stderr. It checks the disk with fsck.ext4 -p, as Container-
+// Optimized OS's documentation does before a mount
+// (https://cloud.google.com/container-optimized-os/docs/concepts/disks-and-filesystem), and mounts
+// it, with the options Compute Engine documents for a persistent disk
+// (https://cloud.google.com/compute/docs/disks/format-mount-disk-linux), only when fsck left no
+// error it could not fix (exit status below 4). An unmounted disk keeps both containers down:
+// their units refuse to start unless it is mounted. It makes the directories the two containers
+// keep their state in, and leaves the key file empty and readable by root alone, so that
+// tailscaled's bind mount is always of a file.
 //
 // write_files holds the NATS configuration, the key fetcher and the units; runcmd loads the units
 // and starts them in order. They are started, never enabled: /etc does not outlive the boot.
@@ -80,10 +87,18 @@ func (v vm) document() cloudConfig {
 	return cloudConfig{
 		Bootcmd: []string{
 			"test -c /dev/net/tun || modprobe tun",
-			"blkid -p " + dataDevice + " >/dev/null || [ $? -ne 2 ] || " +
-				"mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard " + dataDevice,
+			"d=" + dataDevice + "; blkid -p \"$d\" >/dev/null; s=$?; " +
+				"if [ $s -eq 0 ]; then :; " +
+				"elif [ $s -ne 2 ]; then echo \"envoy-infra: blkid -p $d exited $s; not formatting it\" >&2; " +
+				"elif [ \"$(head -c 1048576 \"$d\" 2>/dev/null | wc -c)\" -ne 1048576 ]; then " +
+				"echo \"envoy-infra: $d does not read; not formatting it\" >&2; " +
+				"elif [ -n \"$(head -c 1048576 \"$d\" | tr -d '\\000' | head -c 1)\" ]; then " +
+				"echo \"envoy-infra: $d holds data but no filesystem blkid knows; not formatting it\" >&2; " +
+				"else mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard \"$d\"; fi",
 			"mkdir -p " + dataMount,
-			"mount -o discard,defaults " + dataDevice + " " + dataMount,
+			"d=" + dataDevice + "; fsck.ext4 -p \"$d\"; s=$?; " +
+				"if [ $s -lt 4 ]; then mount -o discard,defaults \"$d\" " + dataMount + "; " +
+				"else echo \"envoy-infra: fsck.ext4 -p $d exited $s; not mounting it\" >&2; fi",
 			"mkdir -p " + dataMount + "/nats " + dataMount + "/tailscale",
 			"mkdir -p -m 0700 " + keyDir,
 			"install -m 0600 /dev/null " + keyPath,

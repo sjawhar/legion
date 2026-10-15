@@ -412,10 +412,17 @@ directory.
 `bootcmd` runs first, in this order:
 
 1. It loads the `tun` module unless `/dev/net/tun` exists.
-2. It formats the data disk, `/dev/disk/by-id/google-data`, as ext4 only when `blkid -p` finds
-   nothing on it (exit status 2), so a disk with a filesystem is never formatted again, and one
-   blkid fails to read in any other way is left as it is and fails to mount.
-3. It mounts the disk at `/mnt/disks/data` and makes `nats/` and `tailscale/` on it.
+2. It formats the data disk, `/dev/disk/by-id/google-data`, as ext4 only when `blkid -p` finds no
+   filesystem on it (exit status 2) and its first MiB reads, whole, as zeros, as a new persistent
+   disk's does. blkid also exits 2 for a filesystem whose primary superblock is damaged, which
+   `e2fsck` can repair from a backup superblock, and for a device it cannot open, so any disk but
+   a blank one is left as it is, with a line on stderr naming why, such as
+   `envoy-infra: /dev/disk/by-id/google-data holds data but no filesystem blkid knows; not formatting it`.
+3. It runs `fsck.ext4 -p` on the disk, and mounts it at `/mnt/disks/data` only when fsck left no
+   error it could not fix (exit status below 4); otherwise it says so on stderr and leaves it
+   unmounted. An unmounted disk keeps NATS and Tailscale down, since their units refuse to start
+   without it, until an operator repairs the disk and restarts the VM. It then makes `nats/` and
+   `tailscale/` under the mount point.
 4. It makes `/run/envoy`, mode 0700, and an empty `/run/envoy/tailnet-auth-key`, mode 0600, so
    the key's bind mount into the Tailscale container is always of a file.
 
@@ -535,9 +542,11 @@ or a tailnet, so the first deployment is where these hold or fail. Watch them on
 `pulumi up`:
 
 - `/dev/net/tun` exists on COS without `modprobe`, so the Tailscale container starts.
-- The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and after
-  `gcloud compute instance-groups managed recreate-instances` the new VM finds its filesystem
-  (`blkid -p` exits 0) rather than formatting it, and keeps the stream and its tailnet node.
+- The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and a new persistent
+  disk's first MiB reads as zeros, so the first boot formats it; `fsck.ext4` runs on COS as its
+  documentation shows; and after `gcloud compute instance-groups managed recreate-instances` the
+  new VM finds its filesystem (`blkid -p` exits 0) rather than formatting it, and keeps the stream
+  and its tailnet node.
 - Two statements this README takes from Google Cloud's documentation: a later `diskSizeGb` leaves
   the kept data disk at the size it was created with, and deleting the hub leaves that disk
   behind, detached (see [The hub's data disk](#the-hubs-data-disk)).

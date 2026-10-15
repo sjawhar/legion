@@ -1,9 +1,9 @@
 #cloud-config
 bootcmd:
   - test -c /dev/net/tun || modprobe tun
-  - blkid -p /dev/disk/by-id/google-data >/dev/null || [ $? -ne 2 ] || mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data
+  - 'd=/dev/disk/by-id/google-data; blkid -p "$d" >/dev/null; s=$?; if [ $s -eq 0 ]; then :; elif [ $s -ne 2 ]; then echo "envoy-infra: blkid -p $d exited $s; not formatting it" >&2; elif [ "$(head -c 1048576 "$d" 2>/dev/null | wc -c)" -ne 1048576 ]; then echo "envoy-infra: $d does not read; not formatting it" >&2; elif [ -n "$(head -c 1048576 "$d" | tr -d ''\000'' | head -c 1)" ]; then echo "envoy-infra: $d holds data but no filesystem blkid knows; not formatting it" >&2; else mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$d"; fi'
   - mkdir -p /mnt/disks/data
-  - mount -o discard,defaults /dev/disk/by-id/google-data /mnt/disks/data
+  - 'd=/dev/disk/by-id/google-data; fsck.ext4 -p "$d"; s=$?; if [ $s -lt 4 ]; then mount -o discard,defaults "$d" /mnt/disks/data; else echo "envoy-infra: fsck.ext4 -p $d exited $s; not mounting it" >&2; fi'
   - mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale
   - mkdir -p -m 0700 /run/envoy
   - install -m 0600 /dev/null /run/envoy/tailnet-auth-key
