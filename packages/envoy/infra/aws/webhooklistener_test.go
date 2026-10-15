@@ -16,6 +16,7 @@ import (
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/aws/rendering"
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 )
 
 const (
@@ -100,11 +101,11 @@ var exampleListenerOutputs = map[string]string{
 
 // runListener constructs a listener named example-listener with args, passing it an aws provider
 // when withProvider is set, and returns what the mocks saw, its outputs and the run's error.
-func runListener(t *testing.T, args *envoyaws.WebhookListenerArgs, withProvider bool) (*mocks, map[string]string, error) {
+func runListener(t *testing.T, args *envoyaws.WebhookListenerArgs, withProvider bool) (*pulumitest.Mocks, map[string]string, error) {
 	t.Helper()
-	m := &mocks{}
+	m := newMocks()
 	var out map[string]string
-	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+	err := m.Run(func(ctx *pulumi.Context) error {
 		var opts []pulumi.ResourceOption
 		if withProvider {
 			prov, err := aws.NewProvider(ctx, "example-aws", &aws.ProviderArgs{Region: pulumi.String("example-region-1")})
@@ -122,7 +123,7 @@ func runListener(t *testing.T, args *envoyaws.WebhookListenerArgs, withProvider 
 			"taskDefinitionArn": l.TaskDefinitionArn, "internalUrl": l.InternalUrl,
 		})
 		return err
-	}, pulumi.WithMocks("p", "s", m))
+	})
 	return m, out, err
 }
 
@@ -294,13 +295,13 @@ func TestWebhookListenerRegistersTheReferenceChildren(t *testing.T) {
 			m, out, err := runListener(t, args, true)
 			require.NoError(t, err)
 
-			require.Equal(t, "example-listener", m.one(t, webhookListenerType).name)
-			children := m.children(t)
+			require.Equal(t, "example-listener", m.One(t, webhookListenerType).Name)
+			children := childrenOf(t, m)
 			requireChildren(t, listenerChildren(t, row.golden, row.seed), children)
 			for name, c := range children {
-				require.Equal(t, listenerURN, c.rpc.GetParent(), "%s's parent is the component", name)
-				require.Contains(t, c.rpc.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
-				require.Empty(t, c.rpc.GetAliases(), "%s is adopted from nothing", name)
+				require.Equal(t, listenerURN, c.RPC.GetParent(), "%s's parent is the component", name)
+				require.Contains(t, c.RPC.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
+				require.Empty(t, c.RPC.GetAliases(), "%s is adopted from nothing", name)
 			}
 			require.Equal(t, exampleListenerOutputs, out)
 		})
@@ -314,12 +315,12 @@ func TestWebhookListenerTagsEachChildWithItsService(t *testing.T) {
 	require.NoError(t, err)
 
 	tagged := 0
-	for name, c := range m.children(t) {
-		switch c.typ {
+	for name, c := range childrenOf(t, m) {
+		switch c.Type {
 		case rolePolicyType, metricFilterType:
-			require.NotContains(t, c.inputs, resource.PropertyKey("tags"), "%s carries no tags", name)
+			require.NotContains(t, c.Inputs, resource.PropertyKey("tags"), "%s carries no tags", name)
 		default:
-			require.Equal(t, tags("example-listener"), c.inputs["tags"].Mappable(), "%s's tags", name)
+			require.Equal(t, tags("example-listener"), c.Inputs["tags"].Mappable(), "%s's tags", name)
 			tagged++
 		}
 	}
@@ -345,7 +346,7 @@ func TestWebhookListenerOrdersTheTaskDefinitionAfterItsPolicies(t *testing.T) {
 			for _, name := range policies {
 				urns = append(urns, "urn:pulumi:s::p::"+webhookListenerType+"$"+rolePolicyType+"::"+name)
 			}
-			require.Subset(t, m.one(t, taskDefinitionType).rpc.GetDependencies(), urns)
+			require.Subset(t, m.One(t, taskDefinitionType).RPC.GetDependencies(), urns)
 		})
 	}
 }
@@ -353,7 +354,7 @@ func TestWebhookListenerOrdersTheTaskDefinitionAfterItsPolicies(t *testing.T) {
 func TestWebhookListenerServiceWaitsFifteenMinutes(t *testing.T) {
 	m, _, err := runListener(t, exampleListenerArgs(), true)
 	require.NoError(t, err)
-	timeouts := m.one(t, ecsServiceType).rpc.GetCustomTimeouts()
+	timeouts := m.One(t, ecsServiceType).RPC.GetCustomTimeouts()
 	require.Equal(t, "15m", timeouts.GetCreate())
 	require.Equal(t, "15m", timeouts.GetUpdate())
 	require.Empty(t, timeouts.GetDelete())
@@ -365,7 +366,7 @@ func TestWebhookListenerAdoptAliasesEachChildToItsRootLevelName(t *testing.T) {
 	args.Adopt = true
 	m, _, err := runListener(t, args, true)
 	require.NoError(t, err)
-	requireAdopted(t, exampleListenerChildren(t, true), m.children(t))
+	requireAdopted(t, exampleListenerChildren(t, true), childrenOf(t, m))
 }
 
 // A listener that serves no webhook carries none of a webhook's settings or secrets: no
@@ -384,7 +385,7 @@ func TestWebhookListenerWithNoWebhooksWritesNoWebhookSetting(t *testing.T) {
 		Environment []entry `json:"environment"`
 		Secrets     []entry `json:"secrets"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(m.one(t, taskDefinitionType).inputs["containerDefinitions"].StringValue()), &containers))
+	require.NoError(t, json.Unmarshal([]byte(m.One(t, taskDefinitionType).Inputs["containerDefinitions"].StringValue()), &containers))
 	require.Len(t, containers, 1)
 	names := func(entries []entry) []string {
 		var out []string
@@ -407,15 +408,15 @@ func TestWebhookListenerAlarmsNameItsLogGroup(t *testing.T) {
 	require.NoError(t, err)
 
 	alarms := 0
-	for name, c := range m.children(t) {
-		switch c.typ {
+	for name, c := range childrenOf(t, m) {
+		switch c.Type {
 		case metricAlarmType:
-			description := c.inputs["alarmDescription"].StringValue()
+			description := c.Inputs["alarmDescription"].StringValue()
 			require.Contains(t, description, "/ecs/example-hooks", "%s's description", name)
 			require.NotContains(t, description, "/ecs/envoy-listener", "%s's description", name)
 			alarms++
 		case metricFilterType:
-			require.Equal(t, "/ecs/example-hooks", c.inputs["logGroupName"].StringValue(), "%s's log group", name)
+			require.Equal(t, "/ecs/example-hooks", c.Inputs["logGroupName"].StringValue(), "%s's log group", name)
 		}
 	}
 	require.Equal(t, 5, alarms)
@@ -453,7 +454,7 @@ func TestWebhookListenerRefusesAGivenArnThatResolvesToNoValue(t *testing.T) {
 func TestWebhookListenerRefusesWithoutAnAWSProviderBeforeRegistering(t *testing.T) {
 	m, _, err := runListener(t, exampleListenerArgs(), false)
 	require.ErrorContains(t, err, `envoy-infra:aws:WebhookListener needs a "aws" provider in its providers option`)
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }
 
 // validate refuses each input NewWebhookListener cannot build from. The table runs against validate
@@ -551,7 +552,7 @@ func TestWebhookListenerRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	args.SubnetIds = nil
 	m, _, err := runListener(t, args, true)
 	require.ErrorContains(t, err, "envoy-infra:aws:WebhookListener example-listener: subnetIds names no subnet")
-	require.Equal(t, []string{awsProviderType}, m.types(), "nothing but the provider is registered")
+	require.Equal(t, []string{awsProviderType}, m.Types(), "nothing but the provider is registered")
 }
 
 // without returns text with each part removed, requiring each to occur in it exactly once.
@@ -643,11 +644,11 @@ func TestWebhookListenerConstructTakesEveryInputFieldFromAnotherResource(t *test
 	m, _, err := construct(t, webhookListenerType, "example-listener", listenerInputs(t, fromUpstream), false)
 	require.NoError(t, err)
 
-	children := m.children(t)
+	children := childrenOf(t, m)
 	requireChildren(t, exampleListenerChildren(t, true), children)
 	for name, c := range children {
-		require.Equal(t, constructedListenerURN, c.rpc.GetParent(), "%s's parent is the component", name)
-		require.Contains(t, c.rpc.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
+		require.Equal(t, constructedListenerURN, c.RPC.GetParent(), "%s's parent is the component", name)
+		require.Contains(t, c.RPC.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
 	}
 	for _, dep := range []struct{ child, input string }{
 		{"example-listener-cloudmap", "namespaceId"},
@@ -662,7 +663,7 @@ func TestWebhookListenerConstructTakesEveryInputFieldFromAnotherResource(t *test
 		{"example-listener-service", "loadBalancers"},
 		{"example-listener-publish-failure", "alarmActions"},
 	} {
-		require.Contains(t, children[dep.child].rpc.GetPropertyDependencies()[dep.input].GetUrns(), string(upstream),
+		require.Contains(t, children[dep.child].RPC.GetPropertyDependencies()[dep.input].GetUrns(), string(upstream),
 			"%s's %s depends on the resource its input comes from", dep.child, dep.input)
 	}
 
@@ -671,10 +672,10 @@ func TestWebhookListenerConstructTakesEveryInputFieldFromAnotherResource(t *test
 		"urn:pulumi:stack::project::" + webhookListenerType + "$" + rolePolicyType + "::example-listener-execution-api-token-read",
 		"urn:pulumi:stack::project::" + webhookListenerType + "$" + rolePolicyType + "::example-listener-execution-nats-nkey-seed-read",
 	}
-	require.Subset(t, children["example-listener-task"].rpc.GetDependencies(), append(policies, string(tokenVersion)))
-	require.Contains(t, children["example-listener-service"].rpc.GetDependencies(), string(natsService))
+	require.Subset(t, children["example-listener-task"].RPC.GetDependencies(), append(policies, string(tokenVersion)))
+	require.Contains(t, children["example-listener-service"].RPC.GetDependencies(), string(natsService))
 	for name, c := range children {
-		for input, deps := range c.rpc.GetPropertyDependencies() {
+		for input, deps := range c.RPC.GetPropertyDependencies() {
 			require.NotContains(t, deps.GetUrns(), string(tokenVersion), "%s's %s", name, input)
 			require.NotContains(t, deps.GetUrns(), string(natsService), "%s's %s", name, input)
 		}
@@ -685,12 +686,12 @@ func TestWebhookListenerConstructTakesUnknownInputFieldsUnderPreview(t *testing.
 	m, _, err := construct(t, webhookListenerType, "example-listener", inputs(t, exampleListenerArgs(), unknownFromUpstream), true)
 	require.NoError(t, err)
 
-	children := m.children(t)
+	children := childrenOf(t, m)
 	want := exampleListenerChildren(t, true)
 	require.ElementsMatch(t, slices.Collect(maps.Keys(want)), slices.Collect(maps.Keys(children)), "children's names")
 	for name, c := range children {
-		require.Equal(t, want[name].typ, c.typ, "%s's type", name)
-		require.Equal(t, constructedListenerURN, c.rpc.GetParent(), "%s's parent is the component", name)
+		require.Equal(t, want[name].typ, c.Type, "%s's type", name)
+		require.Equal(t, constructedListenerURN, c.RPC.GetParent(), "%s's parent is the component", name)
 	}
 	for _, unknown := range []struct{ child, input string }{
 		{"example-listener-cloudmap", "namespaceId"},
@@ -700,13 +701,13 @@ func TestWebhookListenerConstructTakesUnknownInputFieldsUnderPreview(t *testing.
 		{"example-listener-service", "cluster"},
 		{"example-listener-publish-failure", "alarmActions"},
 	} {
-		v := children[unknown.child].inputs[resource.PropertyKey(unknown.input)]
+		v := children[unknown.child].Inputs[resource.PropertyKey(unknown.input)]
 		require.True(t, v.ContainsUnknowns(), "%s's %s from an unknown input is unknown, not %s",
 			unknown.child, unknown.input, v.TypeString())
 	}
 	// What depends on no Input field is as in a run with known inputs.
 	for _, name := range []string{"example-listener-log-group", "example-listener-publish-failure-filter"} {
-		require.Equal(t, want[name].inputs, children[name].inputs.Mappable(), "%s's inputs", name)
+		require.Equal(t, want[name].inputs, children[name].Inputs.Mappable(), "%s's inputs", name)
 	}
 }
 
@@ -724,7 +725,7 @@ func TestWebhookListenerConstructTakesSecretArnsWithNoDependency(t *testing.T) {
 	}
 	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
 	require.NoError(t, err)
-	requireChildren(t, exampleListenerChildren(t, true), m.children(t))
+	requireChildren(t, exampleListenerChildren(t, true), childrenOf(t, m))
 }
 
 // A consumer's `webhooks: []` reaches the component through Construct as an empty list, not as a
@@ -745,14 +746,14 @@ func TestWebhookListenerConstructTakesAnEmptyWebhooksListButNotAnOmittedOne(t *t
 		require.True(t, in["webhooks"].IsArray())
 		m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
 		require.NoError(t, err)
-		requireChildren(t, listenerChildren(t, "listener-no-webhooks-seed.golden", true), m.children(t))
+		requireChildren(t, listenerChildren(t, "listener-no-webhooks-seed.golden", true), childrenOf(t, m))
 	})
 	t.Run("webhooks omitted", func(t *testing.T) {
 		in := withoutWebhookInputs()
 		delete(in, "webhooks")
 		m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
 		require.ErrorContains(t, err, "envoy-infra:aws:WebhookListener example-listener: webhooks is required: give [] for a listener with no webhook")
-		require.Empty(t, m.types())
+		require.Empty(t, m.Types())
 	})
 }
 
@@ -777,7 +778,7 @@ func TestWebhookListenerConstructRefusesAListedWebhookWithoutItsSecret(t *testin
 	delete(in, "slackSigningSecretArn")
 	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
 	require.ErrorContains(t, err, `slackSigningSecretArn is required with webhook "slack"`)
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }
 
 // A plain field is for a literal: Construct refuses one whose input carries a dependency, before
@@ -787,5 +788,5 @@ func TestWebhookListenerConstructRefusesAPlainFieldFromAnotherResource(t *testin
 	in["image"] = fromUpstream(exampleListenerArgs().Image)
 	m, _, err := construct(t, webhookListenerType, "example-listener", in, false)
 	require.ErrorContains(t, err, "image")
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }

@@ -8,24 +8,20 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 
-	"github.com/blang/semver"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
 	p "github.com/pulumi/pulumi-go-provider"
-	"github.com/pulumi/pulumi-go-provider/integration"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
-	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"github.com/stretchr/testify/require"
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/core"
-	"github.com/sjawhar/envoy/infra/provider"
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 )
 
 const (
@@ -49,84 +45,35 @@ const (
 	secretArn   = "arn:aws:secretsmanager:example-region-1:000000000000:secret:example/tailnet-oauth"
 )
 
-// registration is one resource the mock engine was asked to register.
-type registration struct {
-	typ, name string
-	inputs    resource.PropertyMap
-	rpc       *pulumirpc.RegisterResourceRequest
+// newMocks returns the mock engine the AWS components' tests run on. It answers as the AWS provider
+// would for what a component reads back: an arn for a task definition and a Cloud Map service, and
+// for an ECS service, which the component does not name, an autoname and its ARN as its id.
+func newMocks() *pulumitest.Mocks {
+	return &pulumitest.Mocks{Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
+		switch args.TypeToken {
+		case taskDefinitionType, cloudMapServiceType:
+			return "", resource.PropertyMap{"arn": resource.NewProperty("arn:example:" + args.Name)}
+		case ecsServiceType:
+			return "arn:example:" + args.Name, resource.PropertyMap{"name": resource.NewProperty(args.Name + "-autonamed")}
+		}
+		return "", nil
+	}}
 }
 
-// mocks records every registration and answers as the AWS provider would for what the component
-// reads back: the inputs as state, an arn for a task definition and a Cloud Map service, and for
-// an ECS service, which the component does not name, an autoname and its ARN as its id.
-type mocks struct {
-	mu         sync.Mutex
-	registered []registration
-}
-
-func (m *mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.registered = append(m.registered, registration{
-		typ: args.TypeToken, name: args.Name, inputs: args.Inputs, rpc: args.RegisterRPC,
-	})
-	state := args.Inputs.Copy()
-	id := args.Name + "-id"
-	switch args.TypeToken {
-	case taskDefinitionType, cloudMapServiceType:
-		state["arn"] = resource.NewProperty("arn:example:" + args.Name)
-	case ecsServiceType:
-		state["name"] = resource.NewProperty(args.Name + "-autonamed")
-		id = "arn:example:" + args.Name
-	}
-	return id, state, nil
-}
-
-func (m *mocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
-	return args.Args, nil
-}
-
-// types lists the type of every registration, in order.
-func (m *mocks) types() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	types := make([]string, 0, len(m.registered))
-	for _, r := range m.registered {
-		types = append(types, r.typ)
-	}
-	return types
-}
-
-// children returns the component's children by name, failing on a name registered twice.
-func (m *mocks) children(t *testing.T) map[string]registration {
+// childrenOf returns the component's children m registered, by name, failing on a name registered
+// twice.
+func childrenOf(t *testing.T, m *pulumitest.Mocks) map[string]pulumitest.Registration {
 	t.Helper()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	children := map[string]registration{}
-	for _, r := range m.registered {
-		if r.typ == awsProviderType || strings.HasPrefix(r.typ, "envoy-infra:") {
+	children := map[string]pulumitest.Registration{}
+	for _, r := range m.Registrations() {
+		if r.Type == awsProviderType || strings.HasPrefix(r.Type, "envoy-infra:") {
 			continue
 		}
-		_, dup := children[r.name]
-		require.False(t, dup, "%s is registered twice", r.name)
-		children[r.name] = r
+		_, dup := children[r.Name]
+		require.False(t, dup, "%s is registered twice", r.Name)
+		children[r.Name] = r
 	}
 	return children
-}
-
-// one returns the single registration of type typ.
-func (m *mocks) one(t *testing.T, typ string) registration {
-	t.Helper()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var found []registration
-	for _, r := range m.registered {
-		if r.typ == typ {
-			found = append(found, r)
-		}
-	}
-	require.Len(t, found, 1, "registrations of %s", typ)
-	return found[0]
 }
 
 // awaitOutputs awaits each of outputs inside the program and returns its value under its schema
@@ -158,11 +105,11 @@ var exampleOutputs = map[string]string{
 
 // run constructs a component named example-nats with args, passing it an aws provider when
 // withProvider is set, and returns what the mocks saw, the component's outputs and the run's error.
-func run(t *testing.T, args *envoyaws.NatsServiceArgs, withProvider bool) (*mocks, map[string]string, error) {
+func run(t *testing.T, args *envoyaws.NatsServiceArgs, withProvider bool) (*pulumitest.Mocks, map[string]string, error) {
 	t.Helper()
-	m := &mocks{}
+	m := newMocks()
 	var out map[string]string
-	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+	err := m.Run(func(ctx *pulumi.Context) error {
 		var opts []pulumi.ResourceOption
 		if withProvider {
 			prov, err := aws.NewProvider(ctx, "example-aws", &aws.ProviderArgs{Region: pulumi.String("example-region-1")})
@@ -181,7 +128,7 @@ func run(t *testing.T, args *envoyaws.NatsServiceArgs, withProvider bool) (*mock
 			"internalUrl": n.InternalUrl, "metricNamespace": n.MetricNamespace,
 		})
 		return err
-	}, pulumi.WithMocks("p", "s", m))
+	})
 	return m, out, err
 }
 
@@ -428,12 +375,12 @@ func exampleChildren(t *testing.T, golden string) map[string]child {
 }
 
 // requireChildren requires the registered children to be exactly want: type, name and inputs.
-func requireChildren(t *testing.T, want map[string]child, got map[string]registration) {
+func requireChildren(t *testing.T, want map[string]child, got map[string]pulumitest.Registration) {
 	t.Helper()
 	require.ElementsMatch(t, slices.Collect(maps.Keys(want)), slices.Collect(maps.Keys(got)), "children's names")
 	for name, w := range want {
-		require.Equal(t, w.typ, got[name].typ, "%s's type", name)
-		require.Equal(t, w.inputs, got[name].inputs.Mappable(), "%s's inputs", name)
+		require.Equal(t, w.typ, got[name].Type, "%s's type", name)
+		require.Equal(t, w.inputs, got[name].Inputs.Mappable(), "%s's inputs", name)
 	}
 }
 
@@ -453,13 +400,13 @@ func TestNatsServiceRegistersTheReferenceChildren(t *testing.T) {
 			m, out, err := run(t, args, true)
 			require.NoError(t, err)
 
-			require.Equal(t, "example-nats", m.one(t, natsServiceType).name)
-			children := m.children(t)
+			require.Equal(t, "example-nats", m.One(t, natsServiceType).Name)
+			children := childrenOf(t, m)
 			requireChildren(t, exampleChildren(t, row.golden), children)
 			for name, c := range children {
-				require.Equal(t, componentURN, c.rpc.GetParent(), "%s's parent is the component", name)
-				require.Contains(t, c.rpc.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
-				require.Empty(t, c.rpc.GetAliases(), "%s is adopted from nothing", name)
+				require.Equal(t, componentURN, c.RPC.GetParent(), "%s's parent is the component", name)
+				require.Contains(t, c.RPC.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
+				require.Empty(t, c.RPC.GetAliases(), "%s is adopted from nothing", name)
 			}
 			require.Equal(t, exampleOutputs, out)
 		})
@@ -471,7 +418,7 @@ func TestNatsServiceRegistersTheReferenceChildren(t *testing.T) {
 func TestNatsServiceTagsEachChildWithItsService(t *testing.T) {
 	m, _, err := run(t, exampleArgs(), true)
 	require.NoError(t, err)
-	children := m.children(t)
+	children := childrenOf(t, m)
 
 	for _, row := range []struct{ child, service string }{
 		{"example-nats-efs", "example-nats"},
@@ -486,13 +433,13 @@ func TestNatsServiceTagsEachChildWithItsService(t *testing.T) {
 		{"example-nats-service", "example-nats"},
 	} {
 		t.Run(row.child, func(t *testing.T) {
-			require.Equal(t, tags(row.service), children[row.child].inputs["tags"].Mappable())
+			require.Equal(t, tags(row.service), children[row.child].Inputs["tags"].Mappable())
 		})
 	}
 	for name, c := range children {
-		switch c.typ {
+		switch c.Type {
 		case ruleType, mountTargetType, metricFilterType:
-			require.NotContains(t, c.inputs, resource.PropertyKey("tags"), "%s carries no tags", name)
+			require.NotContains(t, c.Inputs, resource.PropertyKey("tags"), "%s carries no tags", name)
 		}
 	}
 }
@@ -502,20 +449,20 @@ func TestNatsServiceECSServiceDependsOnEveryMountTarget(t *testing.T) {
 	require.NoError(t, err)
 
 	var mountTargets []string
-	for name := range m.children(t) {
+	for name := range childrenOf(t, m) {
 		if strings.Contains(name, "-mt-") {
 			mountTargets = append(mountTargets, "urn:pulumi:s::p::"+natsServiceType+"$"+mountTargetType+"::"+name)
 		}
 	}
 	require.Len(t, mountTargets, 4)
-	require.Subset(t, m.one(t, ecsServiceType).rpc.GetDependencies(), mountTargets)
+	require.Subset(t, m.One(t, ecsServiceType).RPC.GetDependencies(), mountTargets)
 }
 
 func TestNatsServiceWaitForSteadyState(t *testing.T) {
 	t.Run("unset leaves the service's input unset", func(t *testing.T) {
 		m, _, err := run(t, exampleArgs(), true)
 		require.NoError(t, err)
-		require.NotContains(t, m.one(t, ecsServiceType).inputs, resource.PropertyKey("waitForSteadyState"))
+		require.NotContains(t, m.One(t, ecsServiceType).Inputs, resource.PropertyKey("waitForSteadyState"))
 	})
 	for _, v := range []bool{true, false} {
 		t.Run(fmt.Sprintf("%v reaches the service", v), func(t *testing.T) {
@@ -523,7 +470,7 @@ func TestNatsServiceWaitForSteadyState(t *testing.T) {
 			args.WaitForSteadyState = pulumi.BoolRef(v)
 			m, _, err := run(t, args, true)
 			require.NoError(t, err)
-			require.Equal(t, resource.NewProperty(v), m.one(t, ecsServiceType).inputs["waitForSteadyState"])
+			require.Equal(t, resource.NewProperty(v), m.One(t, ecsServiceType).Inputs["waitForSteadyState"])
 		})
 	}
 }
@@ -534,16 +481,16 @@ func TestNatsServiceAdoptAliasesEachChildToItsRootLevelName(t *testing.T) {
 	args.Adopt = true
 	m, _, err := run(t, args, true)
 	require.NoError(t, err)
-	requireAdopted(t, exampleChildren(t, "nats-authorized.golden"), m.children(t))
+	requireAdopted(t, exampleChildren(t, "nats-authorized.golden"), childrenOf(t, m))
 }
 
 // requireAdopted requires the children to be exactly want's names, each with one alias that has
 // no parent and no other name or type.
-func requireAdopted(t *testing.T, want map[string]child, children map[string]registration) {
+func requireAdopted(t *testing.T, want map[string]child, children map[string]pulumitest.Registration) {
 	t.Helper()
 	require.ElementsMatch(t, slices.Collect(maps.Keys(want)), slices.Collect(maps.Keys(children)), "children's names")
 	for name, c := range children {
-		aliases := c.rpc.GetAliases()
+		aliases := c.RPC.GetAliases()
 		require.Len(t, aliases, 1, "aliases of %s", name)
 		spec := aliases[0].GetSpec()
 		require.NotNil(t, spec, "%s's alias is a spec", name)
@@ -564,13 +511,13 @@ func TestNatsServiceEphemeralTailnetKey(t *testing.T) {
 	golden := readGolden(t, "nats-unauthorized.golden")
 	require.Equal(t, 1, strings.Count(golden, "?ephemeral=false&"))
 	require.Equal(t, resource.NewProperty(strings.Replace(golden, "?ephemeral=false&", "?ephemeral=true&", 1)),
-		m.one(t, taskDefinitionType).inputs["containerDefinitions"])
+		m.One(t, taskDefinitionType).Inputs["containerDefinitions"])
 }
 
 func TestNatsServiceRefusesWithoutAnAWSProviderBeforeRegistering(t *testing.T) {
 	m, _, err := run(t, exampleArgs(), false)
 	require.ErrorContains(t, err, `envoy-infra:aws:NatsService needs a "aws" provider in its providers option`)
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }
 
 // validate refuses each input NewNatsService cannot build from. The table runs against validate
@@ -657,7 +604,7 @@ func TestNatsServiceRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	args.SubnetIds = nil
 	m, _, err := run(t, args, true)
 	require.ErrorContains(t, err, "envoy-infra:aws:NatsService example-nats: subnetIds names no subnet")
-	require.Equal(t, []string{awsProviderType}, m.types(), "nothing but the provider is registered")
+	require.Equal(t, []string{awsProviderType}, m.Types(), "nothing but the provider is registered")
 }
 
 // The plugin's Construct copies a consumer's inputs into NatsServiceArgs, and refuses a
@@ -746,24 +693,14 @@ func unknownFromUpstream(string) property.Value {
 	return property.New(property.Computed).WithDependencies([]resource.URN{upstream})
 }
 
-// construct serves the plugin in process with the mocks behind it, constructs a component of type
-// typ named name from inputs with an aws provider, and returns what the mocks saw, the response
-// and Construct's error.
-func construct(t *testing.T, typ, name string, inputs map[string]property.Value, dryRun bool) (*mocks, p.ConstructResponse, error) {
+// construct constructs a component of type typ named name from inputs with an aws provider,
+// through the plugin's Construct on the AWS mock engine, and returns what the engine saw, the
+// response and Construct's error.
+func construct(t *testing.T, typ, name string, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	prov, err := provider.New()
-	require.NoError(t, err)
-	m := &mocks{}
-	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
-		integration.WithProvider(prov), integration.WithMocks(m))
-	require.NoError(t, err)
-	resp, err := server.Construct(p.ConstructRequest{
-		Urn:    resource.NewURN("s", "p", "", tokens.Type(typ), name),
-		DryRun: dryRun,
-		Inputs: property.NewMap(inputs),
-		Providers: map[tokens.Package]p.ProviderReference{
-			"aws": {Urn: resource.URN(providerURN), ID: "example-aws-id"},
-		},
+	m := newMocks()
+	resp, err := pulumitest.Construct(t, m, typ, name, inputs, dryRun, map[tokens.Package]p.ProviderReference{
+		"aws": {Urn: resource.URN(providerURN), ID: "example-aws-id"},
 	})
 	return m, resp, err
 }
@@ -772,11 +709,11 @@ func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
 	m, _, err := construct(t, natsServiceType, "example-nats", inputs(t, exampleArgs(), fromUpstream), false)
 	require.NoError(t, err)
 
-	children := m.children(t)
+	children := childrenOf(t, m)
 	requireChildren(t, exampleChildren(t, "nats-authorized.golden"), children)
 	for name, c := range children {
-		require.Equal(t, constructedURN, c.rpc.GetParent(), "%s's parent is the component", name)
-		require.Contains(t, c.rpc.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
+		require.Equal(t, constructedURN, c.RPC.GetParent(), "%s's parent is the component", name)
+		require.Contains(t, c.RPC.GetProvider(), providerURN+"::", "%s uses the aws provider the component was given", name)
 	}
 	for _, dep := range []struct{ child, input string }{
 		{"example-nats-efs-sg", "vpcId"},
@@ -792,7 +729,7 @@ func TestConstructTakesEveryInputFieldFromAnotherResource(t *testing.T) {
 		{"example-nats-service", "cluster"},
 		{"example-nats-service", "networkConfiguration"},
 	} {
-		require.Contains(t, children[dep.child].rpc.GetPropertyDependencies()[dep.input].GetUrns(), string(upstream),
+		require.Contains(t, children[dep.child].RPC.GetPropertyDependencies()[dep.input].GetUrns(), string(upstream),
 			"%s's %s depends on the resource its input comes from", dep.child, dep.input)
 	}
 }
@@ -808,19 +745,19 @@ func TestConstructTakesNoAuthorizationWithoutItsInputs(t *testing.T) {
 	}
 	m, _, err := construct(t, natsServiceType, "example-nats", in, false)
 	require.NoError(t, err)
-	requireChildren(t, exampleChildren(t, "nats-unauthorized.golden"), m.children(t))
+	requireChildren(t, exampleChildren(t, "nats-unauthorized.golden"), childrenOf(t, m))
 }
 
 func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {
 	m, _, err := construct(t, natsServiceType, "example-nats", inputs(t, exampleArgs(), unknownFromUpstream), true)
 	require.NoError(t, err)
 
-	children := m.children(t)
+	children := childrenOf(t, m)
 	want := exampleChildren(t, "nats-authorized.golden")
 	require.ElementsMatch(t, slices.Collect(maps.Keys(want)), slices.Collect(maps.Keys(children)), "children's names")
 	for name, c := range children {
-		require.Equal(t, want[name].typ, c.typ, "%s's type", name)
-		require.Equal(t, constructedURN, c.rpc.GetParent(), "%s's parent is the component", name)
+		require.Equal(t, want[name].typ, c.Type, "%s's type", name)
+		require.Equal(t, constructedURN, c.RPC.GetParent(), "%s's parent is the component", name)
 	}
 	for _, unknown := range []struct{ child, input string }{
 		{"example-nats-efs-sg", "vpcId"},
@@ -829,13 +766,13 @@ func TestConstructTakesUnknownInputFieldsUnderPreview(t *testing.T) {
 		{"example-nats-task", "containerDefinitions"},
 		{"example-nats-service", "cluster"},
 	} {
-		v := children[unknown.child].inputs[resource.PropertyKey(unknown.input)]
+		v := children[unknown.child].Inputs[resource.PropertyKey(unknown.input)]
 		require.True(t, v.ContainsUnknowns(), "%s's %s from an unknown input is unknown, not %s",
 			unknown.child, unknown.input, v.TypeString())
 	}
 	// What depends on no Input field is as in a run with known inputs.
-	require.Equal(t, want["example-nats-log-group"].inputs, children["example-nats-log-group"].inputs.Mappable())
-	require.Equal(t, want["example-nats-efs"].inputs, children["example-nats-efs"].inputs.Mappable())
+	require.Equal(t, want["example-nats-log-group"].inputs, children["example-nats-log-group"].Inputs.Mappable())
+	require.Equal(t, want["example-nats-efs"].inputs, children["example-nats-efs"].Inputs.Mappable())
 }
 
 // A stack output a consumer builds from a component output would preview as changed if the output
@@ -860,5 +797,5 @@ func TestConstructRefusesAPlainFieldFromAnotherResource(t *testing.T) {
 	in["region"] = fromUpstream(args.Region)
 	m, _, err := construct(t, natsServiceType, "example-nats", in, false)
 	require.ErrorContains(t, err, "region")
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }

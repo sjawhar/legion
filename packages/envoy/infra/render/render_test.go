@@ -8,15 +8,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws"
-	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/infra/render"
 )
 
@@ -33,65 +32,26 @@ func run(args ...string) (stdout, stderr string, code int) {
 	return out.String(), errs.String(), code
 }
 
-// registration is one resource the mock engine was asked to register.
-type registration struct {
-	typ, name string
-	inputs    resource.PropertyMap
-}
-
-// mocks records every registration and answers with its inputs as its state.
-type mocks struct {
-	mu         sync.Mutex
-	registered []registration
-}
-
-func (m *mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.registered = append(m.registered, registration{typ: args.TypeToken, name: args.Name, inputs: args.Inputs})
-	return args.Name + "-id", args.Inputs.Copy(), nil
-}
-
-func (m *mocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
-	return args.Args, nil
-}
-
-// ofType returns every registration of type typ.
-func (m *mocks) ofType(typ string) []registration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var found []registration
-	for _, r := range m.registered {
-		if r.typ == typ {
-			found = append(found, r)
-		}
-	}
-	return found
-}
-
-// registered runs construct under the mock engine, handing it an aws provider, and returns what
-// it registered.
-func registered(t *testing.T, construct func(*pulumi.Context, pulumi.ResourceOption) error) *mocks {
+// registered runs construct on pulumitest's mock engine, handing it an aws provider, and returns
+// what it registered. render's tests read only inputs back, so the engine computes nothing.
+func registered(t *testing.T, construct func(*pulumi.Context, pulumi.ResourceOption) error) *pulumitest.Mocks {
 	t.Helper()
-	m := &mocks{}
-	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+	m := &pulumitest.Mocks{}
+	require.NoError(t, m.Run(func(ctx *pulumi.Context) error {
 		prov, err := aws.NewProvider(ctx, "example-aws", &aws.ProviderArgs{Region: pulumi.String("example-region-1")})
 		if err != nil {
 			return err
 		}
 		return construct(ctx, pulumi.Providers(prov))
-	}, pulumi.WithMocks("p", "s", m))
-	require.NoError(t, err)
+	}))
 	return m
 }
 
 // container returns the container named name from the task definition m registered.
-func container(t *testing.T, m *mocks, name string) map[string]any {
+func container(t *testing.T, m *pulumitest.Mocks, name string) map[string]any {
 	t.Helper()
-	tasks := m.ofType(taskDefinitionType)
-	require.Len(t, tasks, 1)
 	var containers []map[string]any
-	require.NoError(t, json.Unmarshal([]byte(tasks[0].inputs["containerDefinitions"].StringValue()), &containers))
+	require.NoError(t, json.Unmarshal([]byte(m.One(t, taskDefinitionType).Inputs["containerDefinitions"].StringValue()), &containers))
 	for _, c := range containers {
 		if c["name"] == name {
 			return c
@@ -465,11 +425,14 @@ func TestMetricFiltersAreTheFiltersEachComponentRegisters(t *testing.T) {
 			require.False(t, decoder.More(), "one JSON value")
 
 			var want []filter
-			for _, r := range registered(t, c.construct).ofType(metricFilterType) {
-				transformation := r.inputs["metricTransformation"].ObjectValue()
+			for _, r := range registered(t, c.construct).Registrations() {
+				if r.Type != metricFilterType {
+					continue
+				}
+				transformation := r.Inputs["metricTransformation"].ObjectValue()
 				want = append(want, filter{
-					LogicalName:     r.name,
-					Pattern:         r.inputs["pattern"].StringValue(),
+					LogicalName:     r.Name,
+					Pattern:         r.Inputs["pattern"].StringValue(),
 					MetricName:      transformation["name"].StringValue(),
 					MetricNamespace: transformation["namespace"].StringValue(),
 				})
