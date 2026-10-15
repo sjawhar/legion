@@ -197,8 +197,8 @@ func TestCheckImageNamesEveryMissingRow(t *testing.T) {
 	}
 }
 
-// One binary off PATH names that binary alone — one case per name, so a name forgotten from the
-// toolchain list fails here.
+// One binary off PATH names that binary alone. Each name is removed alone: a case removing two
+// would pass with one of them forgotten from toolchain()'s list.
 func TestCheckImageNamesTheOneBinaryOffPATH(t *testing.T) {
 	for _, name := range []string{"python3", "jq", "ssh-keygen"} {
 		t.Run(name, func(t *testing.T) {

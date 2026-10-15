@@ -462,8 +462,8 @@ func stalePluginBlocked(r *liveRig) string {
 }
 
 // pluginPackageInfo reads an installed plugin's package.json through node, as the wrapper's own
-// install check does — the worker image has no jq. version is pkg.version; contract is
-// pkg.legion.daemonApiVersion as a string, or "" when the package names none, as pi-envoy's does.
+// install check does. version is pkg.version; contract is pkg.legion.daemonApiVersion as a
+// string, or "" when the package names none, as pi-envoy's does.
 func (r *liveRig) pluginPackageInfo(c *liveClaim, path string) (version, contract string, err error) {
 	const script = `const pkg = require(process.argv[1]); console.log(pkg.version); console.log(pkg.legion && typeof pkg.legion.daemonApiVersion === 'number' ? pkg.legion.daemonApiVersion : '');`
 	out, err := r.exec(c, "node", "-e", script, path)
