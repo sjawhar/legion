@@ -165,10 +165,10 @@ machine reaches it, and no GitHub or Slack webhook arrives, so no pull request o
 reach the sessions.
 
 You need Docker Engine with the Compose plugin (`docker compose version` answers) and a checkout
-of this repository; the images are public. It listens on `4222` (NATS), `8222` (NATS monitoring)
-and `9020` (the listener). When something else on the machine uses one, move it in `.env`
-(`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port wherever a command
-below names the default.
+of this repository; the images are public. The two services listen on `4222` (NATS), `8222` (NATS
+monitoring) and `9020` (the listener). When something else on the machine uses one, move it in
+`.env` (`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port wherever a
+command or the `envoy.json` below names the default.
 
 1. Write the machine's settings:
 
