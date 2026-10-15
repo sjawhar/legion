@@ -897,7 +897,10 @@ prints the version the release stamps in (`main.go:17, 35-41`). `--help`, at eit
 the usage and exits 0. An unknown command or mode, and a flag the command does not take or a
 malformed one, is a usage error, exit 2, and is not echoed, since a seed may have been pasted there
 (`main.go:42-52`, `seed.go:362-408`); other usage errors exit 2 too, a defined flag missing its value
-named (`:398-424`). An interrupt or SIGTERM cancels the command's context instead of killing
+named (`:398-424`). So is a flag whose value is an nkey user seed, which `core.UserSeedPublicKey`
+accepts: `--name` and `--region` reach every line, the refusals and the store's requests, so any
+flag holding a seed is refused naming the flag and not the value, before the store opens
+(`seed.go:409-423`). An interrupt or SIGTERM cancels the command's context instead of killing
 it, so a write in flight ends as an unanswered write does, below (`main.go:19-28`). Its behaviour
 is the reference implementation's, with these additions:
 - **Before any Secrets Manager call or the account check** (`awsstore.go:39-62`), it refuses,

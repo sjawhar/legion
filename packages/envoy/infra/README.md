@@ -515,7 +515,11 @@ The client reads the seed from the store when it is deployed, such as into `host
 | `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
-pasted there must not reach the terminal.
+pasted there must not reach the terminal. Before any store opens, the command refuses a flag whose
+value is an nkey user seed (`--name`, `--region`, or any other), naming the flag and not the value:
+`--name` is every line's subject and the secret id the store is sent, and `--region` names the
+endpoint the SDK resolves. An unknown mode, an argument after the flags and a flag the command does
+not take are not echoed either.
 
 ### Exit codes
 
