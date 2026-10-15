@@ -35,6 +35,8 @@ type Store interface {
 	// Put writes value as the secret's first version and returns its version id. An error with a
 	// version id means that version was written; one matching ErrRefused means nothing was, since
 	// another writer's first version is already there; any other may follow a write that landed.
+	// A store's Put must refuse a second first version with an error matching ErrRefused, or two
+	// overlapping generate runs both write and the second's seed is served (testStoreContract).
 	Put(ctx context.Context, name string, value []byte) (version string, err error)
 	// Current reads the version the store serves by default. The value is the caller's, who
 	// clears it once read. When the store serves no version, the error matches ErrNotServed.

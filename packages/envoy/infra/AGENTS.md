@@ -119,7 +119,10 @@ the error's text, which can quote the request; the AWS SDK runs with its logger 
 (`seed/awsstore.go`, `loadAWSConfig`). `seed/seed_test.go` searches every byte the command writes,
 and every error and line it returns, for a canary seed. A new store implements `seed.Store`, its
 `Current` answering an error that matches `seed.ErrNotServed` when it serves no version, which
-`generate` waits out after its write, and joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
+`generate` waits out after its write. Its `Put` must refuse a second first version with an error
+matching `seed.ErrRefused`, or the overlap race reopens: two `generate` runs can each find the
+secret empty, and only the store sees both writes. Its tests run `testStoreContract`
+(`seed/store_contract_test.go`), and it joins the `seed.Stores` map in `cmd/envoy-infra/main.go`.
 
 Each mode's AWS calls are the grant an operator gives it, listed under "The AWS calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the

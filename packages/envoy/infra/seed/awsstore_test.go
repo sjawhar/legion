@@ -101,6 +101,20 @@ func TestAWSGenerateWritesTheBareSeedWithTheFirstVersionTokenAndReadsItBack(t *t
 	require.Equal(t, firstVersionToken, f.tokens[0])
 }
 
+// The AWS store keeps every Store's contract against the fake, which applies Secrets Manager's
+// ClientRequestToken rules: it refuses a second first version since every Put sends
+// firstVersionToken.
+func TestAWSStoreKeepsTheStoreContract(t *testing.T) {
+	testStoreContract(t, func(t *testing.T) (Store, string) {
+		f := newFakeAWS(t)
+		f.generating = true // the contract counts versions, as only generate does
+		serve(t, f)
+		s, err := OpenAWS(context.Background(), awsRegion, "")
+		require.NoError(t, err)
+		return s, awsSecret
+	})
+}
+
 // Two generate runs overlap on one secret. B's checks are answered as they would have been before
 // A's write landed, so B finds the secret empty; A has written and printed its key. B's write carries
 // the same first-version token with another seed, so Secrets Manager refuses it
