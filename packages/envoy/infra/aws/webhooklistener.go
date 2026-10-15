@@ -3,7 +3,6 @@ package aws
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/cloudwatch"
@@ -87,7 +86,8 @@ type WebhookListener struct {
 
 // NewWebhookListener registers the listener. Each child is named from name as the reference names
 // its root-level resource from envoy-listener, the Cloud Map service by cloudMapServiceLogicalName.
-// It refuses invalid inputs and a missing aws provider before it registers anything.
+// It resolves its inputs (validate), then requires an aws provider, and only then registers
+// anything.
 func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerArgs, opts ...pulumi.ResourceOption) (*WebhookListener, error) {
 	if err := args.validate(); err != nil {
 		return nil, fmt.Errorf("%s %s: %w", webhookListenerType, name, err)
@@ -100,13 +100,8 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 	if err := ctx.RegisterComponentResource(webhookListenerType, name, comp, opts...); err != nil {
 		return nil, err
 	}
-	child := []pulumi.ResourceOption{pulumi.Parent(comp)}
-	if args.Adopt {
-		child = append(child, pulumi.Aliases([]pulumi.Alias{{NoParent: pulumi.Bool(true)}}))
-	}
-	serviceTags := map[string]string{"service": name}
-	maps.Copy(serviceTags, args.BaseTags) // which holds no service: refused by validate
-	tags := pulumi.ToStringMap(serviceTags)
+	child := childOptions(comp, args.Adopt)
+	tags := serviceTags(args.BaseTags, name)
 	// given resolves an optional Input field the consumer set; one that resolves to no value is an
 	// error naming the field, never a container that silently lacks it or names nothing.
 	given := func(field string, in pulumi.StringPtrInput) pulumi.StringOutput {
@@ -118,11 +113,7 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 		}).(pulumi.StringOutput)
 	}
 
-	logGroup, err := cloudwatch.NewLogGroup(ctx, name+"-log-group", &cloudwatch.LogGroupArgs{
-		Name:            pulumi.String(args.LogGroupName),
-		RetentionInDays: pulumi.Int(args.LogRetentionDays),
-		Tags:            tags,
-	}, child...)
+	logGroup, err := newLogGroup(ctx, name, args.LogGroupName, args.LogRetentionDays, tags, child)
 	if err != nil {
 		return nil, err
 	}
@@ -203,17 +194,11 @@ func NewWebhookListener(ctx *pulumi.Context, name string, args *WebhookListenerA
 	}).(pulumi.StringOutput)
 	// A task must not start before the token's version exists or before its execution role may
 	// read what the container names.
-	task, err := ecs.NewTaskDefinition(ctx, name+"-task", &ecs.TaskDefinitionArgs{
-		Family:                  pulumi.String(args.Family),
-		Cpu:                     pulumi.String(args.Cpu),
-		Memory:                  pulumi.String(args.Memory),
-		NetworkMode:             pulumi.String("awsvpc"),
-		RequiresCompatibilities: pulumi.StringArray{pulumi.String("FARGATE")},
-		ExecutionRoleArn:        args.ExecutionRoleArn,
-		TaskRoleArn:             args.TaskRoleArn,
-		ContainerDefinitions:    definitions,
-		Tags:                    tags,
-	}, append(slices.Clip(child), pulumi.DependsOn(policies), dependsOnInput(args.ApiTokenSecretVersionId))...)
+	task, err := ecs.NewTaskDefinition(ctx, name+"-task", fargateTask{
+		family: args.Family, cpu: args.Cpu, memory: args.Memory,
+		executionRoleArn: args.ExecutionRoleArn, taskRoleArn: args.TaskRoleArn,
+		containerDefinitions: definitions, tags: tags,
+	}.args(), append(slices.Clip(child), pulumi.DependsOn(policies), dependsOnInput(args.ApiTokenSecretVersionId))...)
 	if err != nil {
 		return nil, err
 	}
@@ -317,10 +302,7 @@ func (args *WebhookListenerArgs) validate() error {
 	if len(args.SubnetIds) == 0 {
 		return errors.New("subnetIds names no subnet: the service has nowhere to place its task")
 	}
-	if _, ok := args.BaseTags["service"]; ok {
-		return errors.New(`baseTags holds "service", which the component sets on each child`)
-	}
-	return nil
+	return refuseServiceTag(args.BaseTags)
 }
 
 // environment returns the inputs the container's environment is made of, with natsUrls.

@@ -4,11 +4,9 @@ package aws
 import (
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strconv"
 
-	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/cloudwatch"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ec2"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/ecs"
 	"github.com/pulumi/pulumi-aws/sdk/v7/go/aws/efs"
@@ -144,28 +142,12 @@ type NatsService struct {
 
 // NewNatsService registers the NATS service. Each child is named from name as the reference names
 // its root-level resource from envoy-nats, the Cloud Map service by cloudMapServiceLogicalName and
-// the metric filters by metricFilterLogicalNamePrefix. It refuses invalid inputs and a missing aws
-// provider before it registers anything.
+// the metric filters by metricFilterLogicalNamePrefix. It resolves its inputs (validate), then
+// requires an aws provider, and only then registers anything.
 func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opts ...pulumi.ResourceOption) (*NatsService, error) {
-	refuse := func(err error) (*NatsService, error) {
-		return nil, fmt.Errorf("%s %s: %w", natsServiceType, name, err)
-	}
-	var authorization *core.Authorization
-	if args.Authorization != nil {
-		authorization = args.Authorization.core()
-	}
-	launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
+	launch, err := args.validate()
 	if err != nil {
-		return refuse(err)
-	}
-	if len(args.SubnetIds) == 0 {
-		return refuse(errors.New("subnetIds names no subnet: each file system needs a mount target where the task runs"))
-	}
-	if len(args.TailnetTags) == 0 {
-		return refuse(errors.New("tailnetTags names no tag: an auth key made from an OAuth client must advertise one"))
-	}
-	if _, ok := args.BaseTags["service"]; ok {
-		return refuse(errors.New(`baseTags holds "service", which the component sets on each child`))
+		return nil, fmt.Errorf("%s %s: %w", natsServiceType, name, err)
 	}
 	if err := providers.Require(ctx.Context(), natsServiceType, "aws", opts...); err != nil {
 		return nil, err
@@ -175,15 +157,8 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	if err := ctx.RegisterComponentResource(natsServiceType, name, comp, opts...); err != nil {
 		return nil, err
 	}
-	child := []pulumi.ResourceOption{pulumi.Parent(comp)}
-	if args.Adopt {
-		child = append(child, pulumi.Aliases([]pulumi.Alias{{NoParent: pulumi.Bool(true)}}))
-	}
-	tags := func(service string) pulumi.StringMap {
-		t := map[string]string{"service": service}
-		maps.Copy(t, args.BaseTags) // which holds no service: refused above
-		return pulumi.ToStringMap(t)
-	}
+	child := childOptions(comp, args.Adopt)
+	tags := func(service string) pulumi.StringMap { return serviceTags(args.BaseTags, service) }
 
 	// JetStream's store, mounted at /data, owned by the nats image's user (uid and gid 1000).
 	data, err := newFileSystem(ctx, name, "efs", tags(name), args, child, fileSystemShape{
@@ -199,11 +174,7 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 		return nil, err
 	}
 
-	logGroup, err := cloudwatch.NewLogGroup(ctx, name+"-log-group", &cloudwatch.LogGroupArgs{
-		Name:            pulumi.String(args.LogGroupName),
-		RetentionInDays: pulumi.Int(args.LogRetentionDays),
-		Tags:            tags(name),
-	}, child...)
+	logGroup, err := newLogGroup(ctx, name, args.LogGroupName, args.LogRetentionDays, tags(name), child)
 	if err != nil {
 		return nil, err
 	}
@@ -236,21 +207,16 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 			Region:           args.Region,
 		})
 	}).(pulumi.StringOutput)
-	task, err := ecs.NewTaskDefinition(ctx, name+"-task", &ecs.TaskDefinitionArgs{
-		Family:                  pulumi.String(args.Family),
-		Cpu:                     pulumi.String(args.Cpu),
-		Memory:                  pulumi.String(args.Memory),
-		NetworkMode:             pulumi.String("awsvpc"),
-		RequiresCompatibilities: pulumi.StringArray{pulumi.String("FARGATE")},
-		ExecutionRoleArn:        args.ExecutionRoleArn,
-		TaskRoleArn:             args.TaskRoleArn,
-		ContainerDefinitions:    definitions,
-		Volumes: ecs.TaskDefinitionVolumeArray{
-			data.volume("nats-data"),
-			tsnet.volume("tsnet-state"),
-		},
-		Tags: tags(name),
-	}, child...)
+	taskArgs := fargateTask{
+		family: args.Family, cpu: args.Cpu, memory: args.Memory,
+		executionRoleArn: args.ExecutionRoleArn, taskRoleArn: args.TaskRoleArn,
+		containerDefinitions: definitions, tags: tags(name),
+	}.args()
+	taskArgs.Volumes = ecs.TaskDefinitionVolumeArray{
+		data.volume("nats-data"),
+		tsnet.volume("tsnet-state"),
+	}
+	task, err := ecs.NewTaskDefinition(ctx, name+"-task", taskArgs, child...)
 	if err != nil {
 		return nil, err
 	}
@@ -320,6 +286,30 @@ func NewNatsService(ctx *pulumi.Context, name string, args *NatsServiceArgs, opt
 	comp.InternalUrl = pulumi.Sprintf("nats://%s.%s:%d", cloudMap.Name, args.CloudMapNamespaceName, rendering.NatsClientPort)
 	comp.MetricNamespace = pulumi.String(args.MetricNamespace).ToStringOutput()
 	return comp, nil
+}
+
+// validate refuses the inputs NewNatsService cannot build a working service from, each error
+// naming its input: the authorization, configPath, configHeader and serverArgs (through
+// rendering.NatsLaunch), then the service's. It returns the NATS container's launch.
+func (args *NatsServiceArgs) validate() ([]core.Field, error) {
+	var authorization *core.Authorization
+	if args.Authorization != nil {
+		authorization = args.Authorization.core()
+	}
+	launch, err := rendering.NatsLaunch(authorization, args.ConfigHeader, args.ServerArgs, args.ConfigPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(args.SubnetIds) == 0 {
+		return nil, errors.New("subnetIds names no subnet: each file system needs a mount target where the task runs")
+	}
+	if len(args.TailnetTags) == 0 {
+		return nil, errors.New("tailnetTags names no tag: an auth key made from an OAuth client must advertise one")
+	}
+	if err := refuseServiceTag(args.BaseTags); err != nil {
+		return nil, err
+	}
+	return launch, nil
 }
 
 // fileSystemShape is what differs between the service's two file systems.
