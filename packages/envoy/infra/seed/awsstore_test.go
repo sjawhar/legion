@@ -538,6 +538,57 @@ func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 	require.Empty(t, f.recorded())
 }
 
+// The AWS configuration a region or a profile name comes from is not a flag, so Command cannot
+// check it: the store refuses one that is an nkey user seed before any call, naming where it came
+// from and not the value. Otherwise the loader quotes a profile it cannot find ("failed to get
+// shared config profile, <name>"), and a region reaches the request's signature and the ARN check's
+// refusal. --region is not given, so the region is the configuration's.
+func TestAWSASeedInTheAWSConfigurationIsRefusedBeforeAnyCall(t *testing.T) {
+	seedValue, _ := testnats.User(t)
+	const notEchoed = ": an nkey user seed, which is never AWS configuration (not echoed)"
+	config := func(t *testing.T, text string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "config")
+		require.NoError(t, os.WriteFile(path, []byte(text), 0o600))
+		t.Setenv("AWS_CONFIG_FILE", path)
+	}
+	rows := []struct {
+		name  string
+		setup func(t *testing.T)
+		want  string
+	}{
+		{"AWS_REGION", func(t *testing.T) { t.Setenv("AWS_REGION", seedValue) }, "AWS_REGION" + notEchoed},
+		{"AWS_DEFAULT_REGION", func(t *testing.T) { t.Setenv("AWS_DEFAULT_REGION", seedValue) }, "AWS_DEFAULT_REGION" + notEchoed},
+		{"AWS_PROFILE", func(t *testing.T) { t.Setenv("AWS_PROFILE", seedValue) }, "AWS_PROFILE" + notEchoed},
+		{"AWS_DEFAULT_PROFILE", func(t *testing.T) { t.Setenv("AWS_DEFAULT_PROFILE", seedValue) }, "AWS_DEFAULT_PROFILE" + notEchoed},
+		{"the default profile's region", func(t *testing.T) { config(t, "[default]\nregion = "+seedValue+"\n") },
+			`the region of the shared config's profile "default"` + notEchoed},
+		{"a named profile's region", func(t *testing.T) {
+			config(t, "[profile example]\nregion = "+seedValue+"\n")
+			t.Setenv("AWS_PROFILE", "example")
+		}, `the region of the shared config's profile "example"` + notEchoed},
+		{"a source_profile", func(t *testing.T) {
+			config(t, "[profile example]\nregion = "+awsRegion+"\nrole_arn = "+awsRoleARN+"\nsource_profile = "+seedValue+"\n")
+			t.Setenv("AWS_PROFILE", "example")
+		}, "a profile the shared config names" + notEchoed},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			f := newFakeAWS(t)
+			serve(t, f)
+			row.setup(t)
+			var out, errs bytes.Buffer
+			code := Command(context.Background(), []string{"check", "--store", AWSSecretsManager, "--name", awsSecret},
+				&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+			require.NotContains(t, out.String()+errs.String(), seedValue, "the seed reached an output")
+			require.Equal(t, 2, code, errs.String())
+			require.Empty(t, out.String())
+			require.Equal(t, "refused: "+awsSecret+": "+row.want+"\n", errs.String())
+			require.Empty(t, f.recorded(), "no request carried it")
+		})
+	}
+}
+
 func TestAWSErrorsAreRenderedByCodeOrClassNeverByTheirText(t *testing.T) {
 	const canary = "canary-value-7f3e"
 	rows := []struct {

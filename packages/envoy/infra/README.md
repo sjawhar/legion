@@ -413,17 +413,18 @@ envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <sec
 
 The command runs under your own AWS configuration, as the AWS SDK loads it: the environment, then
 the shared configuration and credentials files. `--region` overrides the region it names. Before
-any call, it refuses a Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL`,
-`AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is not `https`, unless
-it is this machine's loopback address, since a seed would cross the network in plain text; and it
-retrieves your credentials, and with none it can use, it stops with `refused: <name>: no usable
-AWS credentials …`. With `--expect-account`, it then asks STS whose credentials they are and
-refuses, before any other call, unless they are that account's; an empty `--expect-account`, as
-`--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage error, never a skipped
-check. STS and Secrets Manager each resolve their own endpoint, so the secret is checked too:
-`DescribeSecret`, every mode's first call, answers the secret's ARN, and the command refuses a
-secret in another region than the one it sends to, and with `--expect-account` one in another
-account, before it reads or writes a seed.
+any call, it refuses a region or a profile name in that configuration that is an nkey user seed,
+without echoing it (see "What `check` and `verify` print"); a Secrets Manager endpoint you
+configure (`AWS_ENDPOINT_URL`, `AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services`
+section) that is not `https`, unless it is this machine's loopback address, since a seed would
+cross the network in plain text; and it retrieves your credentials, and with none it can use, it
+stops with `refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks
+STS whose credentials they are and refuses, before any other call, unless they are that account's;
+an empty `--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a
+usage error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so
+the secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and
+the command refuses a secret in another region than the one it sends to, and with
+`--expect-account` one in another account, before it reads or writes a seed.
 Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
 from, a secret of the same name in another account.
 
@@ -519,7 +520,12 @@ pasted there must not reach the terminal. Before any store opens, the command re
 value is an nkey user seed (`--name`, `--region`, or any other), naming the flag and not the value:
 `--name` is every line's subject and the secret id the store is sent, and `--region` names the
 endpoint the SDK resolves. An unknown mode, an argument after the flags and a flag the command does
-not take are not echoed either.
+not take are not echoed either. The AWS store does the same, before any call, for a region or a
+profile name that is a seed in the AWS configuration: `AWS_REGION`, `AWS_DEFAULT_REGION`,
+`AWS_PROFILE`, `AWS_DEFAULT_PROFILE`, the shared config profile's `region`, or a profile the shared
+config names that does not exist, such as a `source_profile`. The refusal names where the value came
+from, as `refused: <name>: AWS_PROFILE: an nkey user seed, which is never AWS configuration (not
+echoed)`.
 
 ### Exit codes
 
