@@ -256,6 +256,46 @@ func TestStartScriptRefusesAnEmptyPath(t *testing.T) {
 	require.ErrorContains(t, err, "path")
 }
 
+// nats-server parses its arguments with Go's flag package, so each of its configuration and
+// credential flags takes one dash or two and a value after `=` or as the next argument: -c and
+// --config load another file in place of the rendered one, and -user, -pass and -auth add a
+// credential beside its nkey users (nats-server v2.10.29 server/opts.go:5343-5345, :5350-5351).
+// StartScript refuses each, naming its index and the flag and never the value, which may be a
+// password.
+func TestStartScriptRefusesArgumentsThatReplaceTheAuthorization(t *testing.T) {
+	rows := []struct{ arg, flag string }{
+		{"-c", "c"},
+		{"--c", "c"},
+		{"-c=/etc/other.conf", "c"},
+		{"-config", "config"},
+		{"--config", "config"},
+		{"--config=/etc/other.conf", "config"},
+		{"-auth", "auth"},
+		{"--auth=example-token", "auth"},
+		{"-user", "user"},
+		{"--user=example-user", "user"},
+		{"-pass", "pass"},
+		{"--pass=example-password", "pass"},
+	}
+	for _, row := range rows {
+		t.Run(row.arg, func(t *testing.T) {
+			script, err := placeholder().StartScript(header, []string{"-js", row.arg, "value"}, "/tmp/nats-server.conf")
+			require.Empty(t, script)
+			require.ErrorContains(t, err, "serverArgs[1] sets nats-server's -"+row.flag+",")
+			if _, value, ok := strings.Cut(row.arg, "="); ok {
+				require.NotContains(t, err.Error(), value)
+			}
+		})
+	}
+}
+
+// A flag whose name only begins like one of those is another flag, and a value is not a flag.
+func TestStartScriptAcceptsOtherArguments(t *testing.T) {
+	args := []string{"-js", "--cluster", "nats://0.0.0.0:6222", "-cluster_name", "example", "--users_file", "-m", "8222", "c", "config"}
+	_, err := placeholder().StartScript(header, args, "/tmp/nats-server.conf")
+	require.NoError(t, err)
+}
+
 // The start script, run by /bin/sh as a container's `sh -c` runs it, writes exactly Render's text to
 // its path and execs nats-server with --config, the path and the server arguments. A stand-in
 // nats-server on PATH records the arguments it was given. The path holds a space and a quote, so

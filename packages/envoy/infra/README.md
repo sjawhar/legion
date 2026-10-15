@@ -563,7 +563,11 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 ```
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
-path and execs `nats-server --config <path>` with the server's own arguments.
+path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
+argument that sets `-c`, `-config`, `-user`, `-pass` or `-auth` (with one dash or two, and with or
+without `=`), naming its index: nats-server takes the last value of a flag, so a later `-c` would
+load another file in place of the rendered one, and the others would add a credential beside its
+nkey users.
 
 ## Changing the module
 
