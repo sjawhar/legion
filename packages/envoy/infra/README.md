@@ -672,6 +672,24 @@ creating the other. The move changes nothing in AWS only when:
 
 [A preview proves the move](#proving-a-move-with-a-preview).
 
+### Moving back
+
+The move is one-way. After an update with `adopt: true`, the stack's state holds only the
+children, so a program that drops the component and declares the old root-level resources again
+plans to create each of them and delete each child, both EFS file systems included. To move back,
+either:
+
+- give each root-level resource an alias to its child: the same name and type, with the component
+  as its parent (in Python, `pulumi.Alias(parent="<the component's URN>")`); or
+- move the children's state out and back with `pulumi state move`: to a scratch stack, where each
+  becomes a root-level resource, then back to the stack. Moving them within one stack
+  (`--source` and `--dest` the same) removes them from its state.
+
+Prove either with a preview, as for the move onto the components. Until you no longer need a way
+back, set `protect` on the component: each child inherits it, so Pulumi refuses to delete one.
+Before the move back, unprotect the component alone (`pulumi state unprotect <its URN>`), so the
+update can delete it from state.
+
 ### Python example
 
 A program running both components, with its own API token. The `example-*` values and the
