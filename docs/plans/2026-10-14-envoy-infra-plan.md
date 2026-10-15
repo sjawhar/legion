@@ -647,6 +647,14 @@ written here.
   (build tag `natslive`: the real-server tests), `nkey.go` (`IsUserPublicKey` and
   `UserSeedPublicKey`, the one strict nkey parser `core` and `seed` share), `nkey_test.go`,
   `pyfmt.go`, `pyfmt_test.go`, `testdata/authorization.golden`, `testdata/start-script.golden`
+- Modify: `packages/envoy/infra/core/listener_env.go`, `listener_env_test.go`; create
+  `core/input_error.go`. `ListenerConfig` loses `NATSURLs`: `Check()` refuses the config once,
+  before a component registers anything, and `Env(natsURLs)` adds the URLs when they are known and
+  checks only those, replacing slice 1's `CheckPlain` and `ListenerEnv` with the same refusal
+  texts. Each refusal is a `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
+  `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
+  its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
+  3 and 4 build on this API.
 - Modify: `packages/envoy/internal/testnats/nats.go`:
   - add `const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"`
     on one line beside `Image` (`nats.go:41-46`), and `var Images`, the two with each one's short
