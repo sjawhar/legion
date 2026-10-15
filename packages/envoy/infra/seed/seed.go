@@ -266,7 +266,8 @@ func Verify(ctx context.Context, s Store, name, publicKey string) (string, error
 
 // Stores opens each store the command's --store names: in region when it is not "", and, when
 // account is not "" (--expect-account), refusing with ErrRefused unless the store's credentials are
-// that account's, with no call before that check but the one reading them.
+// that account's, with no call before that check but the one reading them. The store then holds
+// each secret it describes to that account as well.
 type Stores map[string]func(ctx context.Context, region, account string) (Store, error)
 
 // mode is one of the command's modes. It prints its result on stdout and returns its error; a

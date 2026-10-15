@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"reflect"
 	"regexp"
 	"slices"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
@@ -28,9 +31,11 @@ const awsCurrent = "AWSCURRENT"
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
 // OpenAWS opens Secrets Manager under the caller's own AWS configuration (the environment, then the
-// shared files), in region when it is not "". It refuses credentials it cannot retrieve before any
-// call, naming the fix. With account, it then refuses unless sts:GetCallerIdentity answers that
-// account, so a seed never lands in, or is read from, another account's secret of the same name.
+// shared files), in region when it is not "". Before any call it refuses a configured Secrets
+// Manager endpoint a seed would cross a network to in plain text (endpointCheck), and credentials
+// it cannot retrieve, naming the fix. With account, it then refuses unless sts:GetCallerIdentity
+// answers that account; Describe holds the secret itself to that account too, so a seed never
+// lands in, or is read from, another account's secret of the same name.
 func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	if account != "" && !awsAccountID.MatchString(account) {
 		return nil, refuse("--expect-account is a 12-digit AWS account id")
@@ -41,6 +46,10 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 	}
 	if cfg.Region == "" {
 		return nil, refuse("no AWS region: pass --region, or name one in AWS_REGION or the profile")
+	}
+	client := secretsmanager.NewFromConfig(cfg)
+	if err := endpointCheck(client.Options().BaseEndpoint); err != nil {
+		return nil, err
 	}
 	// The credentials cache keeps what this retrieves, so the calls below sign with it. A chain that
 	// finds no credentials fails with a plain error whose type names nothing, so only a named
@@ -60,7 +69,7 @@ func OpenAWS(ctx context.Context, region, account string) (Store, error) {
 			return nil, refuse("these credentials are for account %s, but --expect-account is %s; use that account's credentials", got, account)
 		}
 	}
-	return &awsStore{client: secretsmanager.NewFromConfig(cfg)}, nil
+	return &awsStore{client: client, region: cfg.Region, account: account}, nil
 }
 
 // loadAWSConfig loads the caller's AWS configuration with the SDK's logging off: its logger and its
@@ -77,11 +86,38 @@ func loadAWSConfig(ctx context.Context, region string) (aws.Config, error) {
 	return config.LoadDefaultConfig(ctx, options...)
 }
 
+// endpointCheck refuses a configured Secrets Manager endpoint (AWS_ENDPOINT_URL,
+// AWS_ENDPOINT_URL_SECRETS_MANAGER or a profile's services section; nil when none is, and the SDK's
+// own endpoint for the region, which is https, is used) that is not https, unless it is this
+// machine's own loopback address, as a local test endpoint is: a seed travels in a PutSecretValue
+// request and a GetSecretValue answer, and plain text sent to loopback crosses no network.
+func endpointCheck(endpoint *string) error {
+	if endpoint == nil {
+		return nil
+	}
+	u, err := url.Parse(*endpoint)
+	if err != nil {
+		return refuse("the Secrets Manager endpoint is not a URL")
+	}
+	host := u.Hostname()
+	ip := net.ParseIP(host)
+	if u.Scheme == "https" || u.Scheme == "http" && (host == "localhost" || ip != nil && ip.IsLoopback()) {
+		return nil
+	}
+	return refuse("the Secrets Manager endpoint %s is not https, and is not this machine's loopback address: a seed is sent in plain text only to this machine", u.Redacted())
+}
+
 // awsStore is Store over Secrets Manager. Every error names the call, the secret and the AWS error
 // code (or the SDK error's class), never the error's own message, which can quote the request.
-type awsStore struct{ client *secretsmanager.Client }
+type awsStore struct {
+	client  *secretsmanager.Client
+	region  string // the region the client sends to
+	account string // --expect-account; "" when it was not given
+}
 
-// Describe reads DescribeSecret alone.
+// Describe reads DescribeSecret alone, and refuses a secret whose ARN puts it in another region than
+// the client's, or, with --expect-account, in another account: STS and Secrets Manager each resolve
+// their own endpoint, so the account STS answered need not be the account of this secret.
 func (s *awsStore) Describe(ctx context.Context, name string) (Description, error) {
 	out, err := s.client.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(name)})
 	var notFound *types.ResourceNotFoundException
@@ -90,6 +126,9 @@ func (s *awsStore) Describe(ctx context.Context, name string) (Description, erro
 	}
 	if err != nil {
 		return Description{}, awsFailed("describe-secret", name, err)
+	}
+	if err := s.expected(name, aws.ToString(out.ARN)); err != nil {
+		return Description{}, err
 	}
 	if out.DeletedDate != nil {
 		return Description{Exists: true, ScheduledForDeletion: true, DeletionDate: pythonDate(*out.DeletedDate, time.Local)}, nil
@@ -103,6 +142,22 @@ func (s *awsStore) Describe(ctx context.Context, name string) (Description, erro
 		}
 	}
 	return d, nil
+}
+
+// expected refuses the secret whose ARN is secretARN unless it is a Secrets Manager secret in the
+// client's region and, with --expect-account, in that account.
+func (s *awsStore) expected(name, secretARN string) error {
+	parsed, err := arn.Parse(secretARN)
+	switch {
+	case err != nil || parsed.Service != "secretsmanager":
+		return fmt.Errorf("describe-secret %s answered no Secrets Manager ARN, so the secret's account and region cannot be checked", name)
+	case s.account != "" && parsed.AccountID != s.account:
+		return fmt.Errorf("describe-secret %s answered a secret of account %s, but --expect-account is %s: the Secrets Manager endpoint answers for another account",
+			name, parsed.AccountID, s.account)
+	case parsed.Region != s.region:
+		return fmt.Errorf("describe-secret %s answered a secret in region %s, but the client is in region %s", name, parsed.Region, s.region)
+	}
+	return nil
 }
 
 // Versions counts every version ListSecretVersionIds lists with IncludeDeprecated, across every

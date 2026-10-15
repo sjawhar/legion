@@ -384,12 +384,18 @@ envoy-infra seed {check|generate|verify} --store aws-secrets-manager --name <sec
 ```
 
 The command runs under your own AWS configuration, as the AWS SDK loads it: the environment, then
-the shared configuration and credentials files. `--region` overrides the region it names. It
-retrieves your credentials before any call; with none it can use, it stops with `refused: <name>:
-no usable AWS credentials …`. With `--expect-account`, it then asks STS whose credentials they are
-and refuses, before any other call, unless they are that account's. Pass it whenever you name a
-secret, so that a seed is never written to, or read from, a secret of the same name in another
-account.
+the shared configuration and credentials files. `--region` overrides the region it names. Before
+any call, it refuses a Secrets Manager endpoint you configure (`AWS_ENDPOINT_URL`,
+`AWS_ENDPOINT_URL_SECRETS_MANAGER` or a profile's `services` section) that is not `https`, unless
+it is this machine's loopback address, since a seed would cross the network in plain text; and it
+retrieves your credentials, and with none it can use, it stops with `refused: <name>: no usable
+AWS credentials …`. With `--expect-account`, it then asks STS whose credentials they are and
+refuses, before any other call, unless they are that account's. STS and Secrets Manager each
+resolve their own endpoint, so the secret is checked too: `DescribeSecret`, every mode's first
+call, answers the secret's ARN, and the command refuses a secret in another region than the one it
+sends to, and with `--expect-account` one in another account, before it reads or writes a seed.
+Pass `--expect-account` whenever you name a secret, so that a seed is never written to, or read
+from, a secret of the same name in another account.
 
 ### Making a seed
 
