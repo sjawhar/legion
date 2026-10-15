@@ -197,7 +197,9 @@ test("the production apply step round-trips trimmed and an empty value saves nul
     renderForm();
     await screen.findByDisplayValue("acme/widgets");
     expect(field("Production apply step").value).toBe("Run ./.github/actions/apply");
-    fireEvent.change(field("Production apply step"), { target: { value: " Run ./.github/actions/apply " } });
+    fireEvent.change(field("Production apply step"), {
+      target: { value: " Run ./.github/actions/apply " },
+    });
     fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
     await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
     expect(putDeliverySettings.mock.calls[0]?.[0]).toMatchObject({

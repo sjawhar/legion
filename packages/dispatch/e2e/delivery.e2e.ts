@@ -466,7 +466,9 @@ test("an unconfigured Delivery page sets itself up from its form and then shows 
     // stored: the page still offers the setup form.
     await page.getByLabel("Deploy repository").fill("acme/unseen");
     await page.getByLabel("Deploy workflow").fill(".github/workflows/deploy.yml");
-    await page.getByLabel("Production jobs").fill("widgets-release / widgets-release\nrelease / release");
+    await page
+      .getByLabel("Production jobs")
+      .fill("widgets-release / widgets-release\nrelease / release");
     await page.getByLabel("Production apply step").fill("Run ./.github/actions/apply");
     await page.getByLabel("PR checks workflow").fill(".github/workflows/pr-checks.yml");
     await page.getByLabel("Population authors").fill("octocat\noctocat-agent[bot]");
@@ -508,7 +510,9 @@ test("an unconfigured Delivery page sets itself up from its form and then shows 
       await sql(
         `SELECT deploy_repo || ' ' || array_to_string(population_authors, ',') || ' ' || array_to_string(excluded_repos, ',') || ' ' || array_to_string(production_job_names, ',') || ' ' || production_apply_step_name FROM delivery_settings`
       )
-    ).toBe("acme/widgets octocat,octocat-agent[bot] acme/dojo widgets-release / widgets-release,release / release Run ./.github/actions/apply");
+    ).toBe(
+      "acme/widgets octocat,octocat-agent[bot] acme/dojo widgets-release / widgets-release,release / release Run ./.github/actions/apply"
+    );
 
     // Settings shows the same record, to change it later.
     await page.goto("/settings");
