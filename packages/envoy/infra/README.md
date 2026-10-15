@@ -9,6 +9,9 @@ key-value buckets itself when it starts, so it needs only a NATS server with Jet
 
 ## Install
 
+Pulumi CLI 3.257.0 or later; the plugin is tested with 3.268.0. `pulumi package add` takes
+`--server` from 3.256.0 on, and keeps it in `Pulumi.yaml` from 3.257.0 on.
+
 The plugin runs on the machine that runs `pulumi`, and logs in to the Docker hosts it deploys to, so
 verify an archive before installing it. Each release's archives carry build provenance from
 `.github/workflows/release-envoy-infra.yaml` on `main`; `--repo` alone would accept an attestation
