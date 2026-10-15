@@ -38,29 +38,21 @@ var ompSessionTrailer = regexp.MustCompile(`(?m)^Omp-Session:\s*(\S+)\s*$`)
 // both are unexported in their own packages and this package does not depend on either.
 var issueKeyCandidate = regexp.MustCompile(`\b[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*\b`)
 
-// Intake wires the NATS consumer to the database and the GitHub App client. A nil GitHub client
-// (no App credentials) leaves it idle, exactly like architecture.Importer.
+// Intake wires the NATS consumer to the database and the GitHub App client. StartIntakes builds it,
+// and only with the App configured.
 type Intake struct {
 	nats   *bus.Client
 	pool   *store.Pool
 	github *githubapp.Client
 }
 
-// NewIntake builds an Intake. natsClient must already be connected (bus.ConnectOwningStream, as
-// cmd/dispatch wires its own publisher).
-func NewIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *Intake {
+// newIntake builds an Intake on natsClient, a connected client StartIntakes opens for it alone.
+func newIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *Intake {
 	return &Intake{nats: natsClient, pool: pool, github: github}
 }
 
-// HasApp reports whether the GitHub App credentials needed to complete a merged-PR fetch or list
-// a run's jobs are configured.
-func (in *Intake) HasApp() bool {
-	return in != nil && in.github != nil
-}
-
-// Run binds the durable consumer and processes GitHub events until ctx is cancelled. Idle
-// (logged once) without GitHub App credentials or a configured delivery_settings row, mirroring
-// architecture.Run's shape.
+// Run binds the durable consumer and processes GitHub events until ctx is cancelled. Idle until a
+// delivery_settings row exists.
 //
 // The durable carries one filter subject, githubIntakeSubject, which no setting changes, so it is
 // bound once and never rebound. delivery_settings is read on every settingsPollInterval tick and
@@ -76,11 +68,6 @@ func (in *Intake) HasApp() bool {
 // them. Routed rather than ignored because it is the only live-update path for the fork case,
 // which does reach it.
 func (in *Intake) Run(ctx context.Context) {
-	if !in.HasApp() {
-		slog.Info("dispatch delivery: no GitHub App key — intake is idle")
-		return
-	}
-
 	var sub *natsgo.Subscription
 	// The settings the handler routes by. Read on every poll and published here rather than
 	// captured by the handler closure: the durable's filter subject never changes, so a settings
@@ -295,7 +282,9 @@ func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*nat
 // and calling AddConsumer again with a freshly generated one on every restart would try to change a
 // durable's config out from under itself rather than resuming its cursor. Unlike the listener's own
 // consumer, this package skips the rolling-deploy bind-retry/backoff machinery
-// (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet.
+// (bindListenerDurable): Dispatch runs as one instance, not a rolling fleet. It subscribes through
+// client.Subscribe, which refuses a second durable on one bus.Client (bus.ErrSubscriptionHeld), so
+// each durable bound here takes a client of its own.
 func bindDurableConsumer(client *bus.Client, wanted natsgo.ConsumerConfig, deliver natsgo.MsgHandler) (*natsgo.Subscription, bool) {
 	js := client.JS()
 	name, subject := wanted.Durable, wanted.FilterSubject

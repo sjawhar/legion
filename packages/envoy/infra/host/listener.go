@@ -74,8 +74,8 @@ type Listener struct {
 // listenerPlan is what a listener's inputs resolve to before anything registers.
 type listenerPlan struct {
 	containerName string
-	// plain is every field of the listener's environment but NATSURLs, which may be another
-	// resource's output and is known only when the container's envs resolve.
+	// plain is the listener's environment but natsUrls, which may be another resource's output and
+	// is known only when the container's envs resolve.
 	plain    core.ListenerConfig
 	adopt    AdoptArgs
 	packages []string // the provider packages the listener creates resources with
@@ -103,7 +103,7 @@ func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 	if args.Adopt != nil {
 		plan.adopt = *args.Adopt
 	}
-	if err := plan.plain.CheckPlain(); err != nil {
+	if err := plan.plain.Check(); err != nil {
 		return listenerPlan{}, fmt.Errorf("%s %s: %w", listenerType, name, err)
 	}
 	if args.Watchdog == nil {
@@ -173,9 +173,7 @@ func NewListener(ctx *pulumi.Context, name string, args *ListenerArgs, opts ...p
 	}
 
 	listenerEnv := args.NatsUrls.ToStringArrayOutput().ApplyT(func(urls []string) ([]string, error) {
-		config := plan.plain
-		config.NATSURLs = urls
-		return core.ListenerEnv(config)
+		return plan.plain.Env(urls)
 	}).(pulumi.StringArrayOutput)
 	envs := listenerEnv
 	if args.Seed != nil {

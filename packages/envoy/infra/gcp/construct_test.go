@@ -3,15 +3,13 @@ package gcp_test
 import (
 	"testing"
 
-	"github.com/blang/semver"
 	p "github.com/pulumi/pulumi-go-provider"
-	"github.com/pulumi/pulumi-go-provider/integration"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/tokens"
 	"github.com/pulumi/pulumi/sdk/v3/go/property"
 	"github.com/stretchr/testify/require"
 
-	"github.com/sjawhar/envoy/infra/provider"
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 )
 
 // The plugin's Construct copies a consumer's inputs into NatsHubArgs, and refuses a plain-typed
@@ -23,24 +21,14 @@ import (
 // upstream is the resource tailnetAuthKey, network and subnetwork come from.
 var upstream = resource.URN("urn:pulumi:s::p::example:index:Network::upstream")
 
-// construct serves the plugin in process with the mocks behind it, constructs a hub named
+// construct serves the plugin in process with gcp's mocks behind it, constructs a hub named
 // example-hub from inputs with a gcp provider, and returns what the mocks saw, Construct's
 // response and its error.
-func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*mocks, p.ConstructResponse, error) {
+func construct(t *testing.T, inputs map[string]property.Value, dryRun bool) (*pulumitest.Mocks, p.ConstructResponse, error) {
 	t.Helper()
-	prov, err := provider.New()
-	require.NoError(t, err)
-	m := &mocks{}
-	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
-		integration.WithProvider(prov), integration.WithMocks(m))
-	require.NoError(t, err)
-	resp, err := server.Construct(p.ConstructRequest{
-		Urn:    resource.NewURN("s", "p", "", tokens.Type(hubType), "example-hub"),
-		DryRun: dryRun,
-		Inputs: property.NewMap(inputs),
-		Providers: map[tokens.Package]p.ProviderReference{
-			"gcp": {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
-		},
+	m := newMocks()
+	resp, err := pulumitest.Construct(t, m, hubType, "example-hub", inputs, dryRun, map[tokens.Package]p.ProviderReference{
+		"gcp": {Urn: resource.URN("urn:pulumi:s::p::" + gcpProviderType + "::gcp-example"), ID: "gcp-example-id"},
 	})
 	return m, resp, err
 }
@@ -51,12 +39,12 @@ func plainInputs() map[string]property.Value {
 		"users": property.New(property.NewArray([]property.Value{
 			property.New(property.NewMap(map[string]property.Value{
 				"name":      property.New("example-host-a"),
-				"publicKey": property.New(keyA),
+				"nkey":      property.New(keyA),
 				"machineId": property.New("example-host-a"),
 			})),
 			property.New(property.NewMap(map[string]property.Value{
-				"name":      property.New("example-operator"),
-				"publicKey": property.New(keyB),
+				"name": property.New("example-operator"),
+				"nkey": property.New(keyB),
 				"permissions": property.New(property.NewMap(map[string]property.Value{
 					"publish": property.New(property.NewMap(map[string]property.Value{
 						"allow": property.New(property.NewArray([]property.Value{property.New(">")})),
@@ -94,14 +82,14 @@ func TestConstructTakesTheAuthKeyAndNetworkFromAnotherResource(t *testing.T) {
 	m, resp, err := construct(t, inputs, false)
 	require.NoError(t, err)
 
-	requireChildren(t, m, constructURN, wantChildren(t, "example-network", "example-subnetwork"))
+	requireChildren(t, m, constructURN, wantChildren(t, "example-network", "example-subnetwork"), nil)
 	requireNatsURL(t, resp)
 	for typ, field := range map[string]string{
 		versionType:  "secretData",
 		firewallType: "network",
 		templateType: "networkInterfaces",
 	} {
-		require.Contains(t, m.one(t, typ).rpc.GetPropertyDependencies()[field].GetUrns(), string(upstream),
+		require.Contains(t, m.One(t, typ).RPC.GetPropertyDependencies()[field].GetUrns(), string(upstream),
 			"the %s's %s depends on the resource its input comes from", typ, field)
 	}
 }
@@ -116,32 +104,9 @@ func TestConstructTakesAnUnknownAuthKeyAndNetworkUnderPreview(t *testing.T) {
 
 	// The children are the ones a known network records; only the inputs taken from the
 	// unknown network and auth key are unknown.
-	want := wantChildren(t, "example-network", "example-subnetwork")
-	gotNames, wantNames := []string{}, []string{}
-	for _, r := range m.children() {
-		gotNames = append(gotNames, r.typ+"::"+r.name)
-	}
-	for _, c := range want {
-		wantNames = append(wantNames, c.typ+"::"+c.name)
-	}
-	require.ElementsMatch(t, wantNames, gotNames, "the hub's children")
-	unknown := map[string][]string{firewallType: {"network"}, templateType: {"networkInterfaces"}}
-	for _, c := range want {
-		r := m.one(t, c.typ)
-		in := inputsOf(r)
-		for _, field := range unknown[c.typ] {
-			require.True(t, r.inputs[resource.PropertyKey(field)].ContainsUnknowns(),
-				"the %s's %s comes from the unknown network", c.typ, field)
-			delete(in, field)
-			delete(c.inputs, field)
-		}
-		require.Equal(t, c.inputs, in, "the inputs of the %s", c.typ)
-		require.Equal(t, constructURN, r.rpc.GetParent(), "the %s's parent is the hub", c.typ)
-		require.Contains(t, r.rpc.GetProvider(), "::"+gcpProviderType+"::gcp-example::",
-			"the %s uses the gcp provider the hub was given", c.typ)
-	}
-	data, secret := plain(m.one(t, versionType).inputs["secretData"])
-	require.True(t, secret, "the unknown auth key stays a secret")
+	requireChildren(t, m, constructURN, wantChildren(t, "example-network", "example-subnetwork"),
+		map[string][]string{firewallType: {"network"}, templateType: {"networkInterfaces"}})
+	data, _ := pulumitest.Plain(m.One(t, versionType).Inputs["secretData"])
 	require.True(t, data.IsComputed(), "the secret version's secretData is unknown, not %s", data.TypeString())
 	requireNatsURL(t, resp)
 }
@@ -155,5 +120,5 @@ func TestConstructRefusesAPlainFieldFromAnotherResource(t *testing.T) {
 	inputs["tailnetAuthKey"] = property.New(authKey).WithSecret(true)
 	m, _, err := construct(t, inputs, false)
 	require.ErrorContains(t, err, "hostname")
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }

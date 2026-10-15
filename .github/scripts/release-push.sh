@@ -75,14 +75,31 @@
 #            key but the pinned ones; GitHub publishes them at
 #            `gh api meta --jq .ssh_keys`, which release-push.test.sh compares
 #            with these when it can reach GitHub.
+# handed:    check what a build job handed a publish job before the publish job
+#            acts on it, and print the release tag, <tag-prefix><version>. The
+#            version is the build job's output, so it must be X.Y.Z, each field
+#            a number without leading zeros. <dir> must hold exactly the
+#            <file>s, each a regular file (a symlink is not), and nothing else
+#            at any depth. The caller builds the <file> names from the version
+#            and its own checkout, so the build job chooses the files' bytes but
+#            not their names; what the publish job writes into <dir> itself,
+#            such as SHA256SUMS, it writes after this check. Every refusal is an
+#            ::error:: on stderr naming what is wrong, and prints no tag.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag>}
+command=${1:?usage: release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>...}
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
 # leading zero reads as octal).
 is_plain_version() { [[ $1 =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; }
+
+# quote_all <value>...: the values, each %q-quoted, separated by spaces.
+quote_all() {
+  local quoted
+  printf -v quoted '%q ' "$@"
+  printf '%s' "${quoted% }"
+}
 
 # github_known_hosts: GitHub's SSH host keys, the only ones push-tag accepts.
 github_known_hosts() {
@@ -285,6 +302,72 @@ case "$command" in
     printf -v known_hosts '%q' "$ssh_dir/known_hosts"
     GIT_SSH_COMMAND="ssh -F /dev/null -i $key -o IdentitiesOnly=yes -o BatchMode=yes -o UserKnownHostsFile=$known_hosts -o GlobalKnownHostsFile=/dev/null -o StrictHostKeyChecking=yes" \
       git push "git@github.com:$GITHUB_REPOSITORY.git" "refs/tags/$tag"
+    ;;
+  handed)
+    if [ $# -lt 5 ]; then
+      echo "::error::release-push.sh handed: usage: release-push.sh handed <tag-prefix> <version> <dir> <file>..." >&2
+      exit 1
+    fi
+    prefix=$2
+    version=$3
+    dir=${4%/}
+    shift 4
+    if ! is_plain_version "$version"; then
+      echo "::error::release-push.sh handed: version $(quote_all "$version") is not X.Y.Z, each field a number without leading zeros; refusing it" >&2
+      exit 1
+    fi
+    for file in "$@"; do
+      if [ -z "$file" ] || [ "$file" = . ] || [ "$file" = .. ] || [[ $file == */* ]]; then
+        echo "::error::release-push.sh handed: $(quote_all "$file") is not a file name: each <file> is a name in <dir>, with no /" >&2
+        exit 1
+      fi
+    done
+    if [ ! -d "$dir" ] || [ -L "$dir" ]; then
+      echo "::error::release-push.sh handed: $(quote_all "$dir") is not a directory" >&2
+      exit 1
+    fi
+
+    missing=()
+    irregular=()
+    for file in "$@"; do
+      if [ -L "$dir/$file" ] || { [ -e "$dir/$file" ] && [ ! -f "$dir/$file" ]; }; then
+        irregular+=("$file")
+      elif [ ! -e "$dir/$file" ]; then
+        missing+=("$file")
+      fi
+    done
+    # Everything under <dir>, at any depth, sorted so a refusal names it the same way every time.
+    listing=$(mktemp)
+    trap 'rm -f "$listing"' EXIT
+    find "$dir" -mindepth 1 -print0 > "$listing"
+    sort -z -o "$listing" "$listing"
+    extra=()
+    while IFS= read -r -d '' entry; do
+      entry=${entry#"$dir"/}
+      listed=false
+      for file in "$@"; do
+        [ "$file" != "$entry" ] || listed=true
+      done
+      "$listed" || extra+=("$entry")
+    done < "$listing"
+
+    refused=false
+    if [ ${#missing[@]} -gt 0 ]; then
+      echo "::error::release-push.sh handed: $(quote_all "$dir") lacks $(quote_all "${missing[@]}")" >&2
+      refused=true
+    fi
+    for file in "${irregular[@]}"; do
+      echo "::error::release-push.sh handed: $(quote_all "$file") in $(quote_all "$dir") is not a regular file" >&2
+      refused=true
+    done
+    if [ ${#extra[@]} -gt 0 ]; then
+      echo "::error::release-push.sh handed: $(quote_all "$dir") holds what the release does not ship: $(quote_all "${extra[@]}")" >&2
+      refused=true
+    fi
+    if "$refused"; then
+      exit 1
+    fi
+    printf '%s\n' "$prefix$version"
     ;;
   *)
     echo "::error::unknown release-push command: $command"

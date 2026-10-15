@@ -3,8 +3,10 @@
 # same-package race resolution (LEGION-75), and its re-run cases; for
 # `release-push.sh tagged`, which finds the tag an earlier attempt pushed and
 # refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
-# release`, which makes a GitHub release carry the run's assets; and for
-# `release-push.sh push-tag`, which pushes a tag with the deploy key.
+# release`, which makes a GitHub release carry the run's assets; for
+# `release-push.sh push-tag`, which pushes a tag with the deploy key; and for
+# `release-push.sh handed`, which checks the version and the files a build job
+# hands a publish job and prints the release tag.
 #
 # Each push-main case builds a bare origin holding one seed commit
 # (packages/pkg at 1.0.0 plus a README) and two clones, a and b. Clone a plays
@@ -21,7 +23,9 @@
 # a URL rewrite, and two more reach github.com itself: one with the pinned host
 # keys, one with a copy of the script whose pinned key GitHub does not hold.
 # Those, and a comparison of the pinned keys with `gh api meta`, print a SKIP
-# line and count nothing when the network or a gh sign-in is missing.
+# line and count nothing when the network or a gh sign-in is missing. The
+# `handed` cases fill a directory with the archives a release ships, change one
+# thing as a compromised build job could, and run `handed` on it.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
@@ -540,5 +544,111 @@ else
   echo "  SKIP: the published-keys comparison (gh api meta failed: no gh, no sign-in or no network)"
 fi
 
-summary "release-push.sh push-main, tagged, release and push-tag"
+echo
+echo "Case: handed refuses a version or a hand-over a compromised build could make, and prints the tag"
+# Each case fills a directory with the four archives a release of 0.1.0 ships (dummy bytes: the
+# bytes are the build job's to choose), changes one thing, and runs `handed envoy-infra-v
+# <version> <dir>` with the names publish builds from the version it is given. It runs in $hd, so
+# a version that executed would leave its proof file there.
+hd="$work/handed"
+mkdir -p "$hd"
+handed_targets=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
+# handed_run <case> <version> [<mutation>]: fills $hd/<case> with the 0.1.0 archives, runs the
+# shell text <mutation> in it, then runs handed; leaves rc, out (stdout) and err (stderr).
+handed_run() {
+  local name=$1 version=$2 mutation=${3:-} dir="$hd/$1" target names=()
+  mkdir "$dir"
+  for target in "${handed_targets[@]}"; do
+    printf 'archive %s\n' "$target" > "$dir/pulumi-resource-envoy-infra-v0.1.0-$target.tar.gz"
+  done
+  [ -z "$mutation" ] || (cd "$dir" && eval "$mutation")
+  for target in "${handed_targets[@]}"; do
+    names+=("pulumi-resource-envoy-infra-v$version-$target.tar.gz")
+  done
+  set +e
+  out=$(cd "$hd" && "$release_push" handed envoy-infra-v "$version" "$dir" "${names[@]}" 2>"$hd/$name.err")
+  rc=$?
+  set -e
+  err=$(<"$hd/$name.err")
+}
+# refused <description>: the three things every refusal shares, checked at once.
+refused() {
+  check "$1: exits non-zero, prints no tag" "$([ "$rc" != 0 ] && [ -z "$out" ] && echo true || echo false)"
+}
+a=pulumi-resource-envoy-infra-v0.1.0
+
+handed_run real 0.1.0
+check "the real set: exits 0" "$(is "$rc" 0)"
+check "the real set: prints exactly the tag, the prefix and the version" "$(is "$out" envoy-infra-v0.1.0)"
+check "the real set: says nothing on stderr" "$(is "$err" "")"
+
+# shellcheck disable=SC2016 # the literal text a forged version would carry, never expanded
+handed_run substitution '0.1.0$(id>pwned-version)'
+refused "a version with a command substitution"
+check "a version with a command substitution: is refused as not X.Y.Z" "$(contains "$err" 'is not X.Y.Z')"
+check "a version with a command substitution: never runs" \
+  "$([ ! -e "$hd/pwned-version" ] && [ ! -e "$hd/substitution/pwned-version" ] && echo true || echo false)"
+handed_run leading-zero 0.01.0
+refused "a version with a leading zero"
+check "a version with a leading zero: names it" "$(contains "$err" 'version 0.01.0 is not X.Y.Z')"
+handed_run two-fields 0.1
+refused "a version of two fields"
+check "a version of two fields: names it" "$(contains "$err" 'version 0.1 is not X.Y.Z')"
+handed_run trailing-newline $'0.1.0\n'
+refused "a version with a trailing newline"
+check "a version with a trailing newline: is refused as not X.Y.Z" "$(contains "$err" 'is not X.Y.Z')"
+
+handed_run another-release 99.0.0
+refused "another release's version, over this release's archives"
+check "another release's version: names the archives it expected" \
+  "$(contains "$err" "lacks pulumi-resource-envoy-infra-v99.0.0-linux-amd64.tar.gz")"
+check "another release's version: names the archives it was handed" \
+  "$(contains "$err" "does not ship: .*$a-linux-amd64.tar.gz")"
+handed_run missing 0.1.0 "rm $a-darwin-arm64.tar.gz"
+refused "a missing archive"
+check "a missing archive: names it" "$(contains "$err" "lacks $a-darwin-arm64.tar.gz")"
+handed_run extra-file 0.1.0 "printf 'not legion\n' > legion-linux-amd64.tar.gz"
+refused "an extra file"
+check "an extra file: names it" "$(contains "$err" 'does not ship: legion-linux-amd64.tar.gz')"
+handed_run build-sums 0.1.0 "sha256sum -- *.tar.gz > SHA256SUMS"
+refused "a SHA256SUMS the build wrote (publish writes its own)"
+check "a SHA256SUMS the build wrote: names it" "$(contains "$err" 'does not ship: SHA256SUMS')"
+handed_run extra-dir 0.1.0 "mkdir sub && printf x > sub/x"
+refused "an extra directory"
+check "an extra directory: names it and what it holds" "$(contains "$err" 'does not ship: sub sub/x')"
+handed_run newline-name 0.1.0 "printf x > \$'evil\nname'"
+refused "an extra file whose name holds a newline"
+check "an extra file whose name holds a newline: names it quoted" "$(contains "$err" "\$'evil\\\\nname'")"
+handed_run symlink 0.1.0 "rm $a-linux-arm64.tar.gz && ln -s /etc/hostname $a-linux-arm64.tar.gz"
+refused "an archive swapped for a symlink"
+check "an archive swapped for a symlink: says it is not a regular file" \
+  "$(contains "$err" "$a-linux-arm64.tar.gz in .* is not a regular file")"
+check "an archive swapped for a symlink: does not call it missing" "$(is "$(contains "$err" 'lacks')" false)"
+handed_run directory 0.1.0 "rm $a-linux-amd64.tar.gz && mkdir $a-linux-amd64.tar.gz"
+refused "an archive replaced by a directory"
+check "an archive replaced by a directory: says it is not a regular file" \
+  "$(contains "$err" "$a-linux-amd64.tar.gz in .* is not a regular file")"
+
+set +e
+out=$("$release_push" handed envoy-infra-v 0.1.0 "$hd/no-such-dir" "$a-linux-amd64.tar.gz" 2>"$hd/no-dir.err")
+rc=$?
+set -e
+err=$(<"$hd/no-dir.err")
+refused "a directory that does not exist"
+check "a directory that does not exist: names it" "$(contains "$err" 'no-such-dir is not a directory')"
+mkdir "$hd/nested" && mkdir "$hd/nested/sub" && printf x > "$hd/nested/sub/x"
+set +e
+out=$("$release_push" handed envoy-infra-v 0.1.0 "$hd/nested" sub/x 2>"$hd/nested.err")
+rc=$?
+set -e
+err=$(<"$hd/nested.err")
+refused "a file named with a /"
+check "a file named with a /: says each file is a name in the directory" "$(contains "$err" 'sub/x is not a file name')"
+set +e
+out=$("$release_push" handed envoy-infra-v 0.1.0 "$hd/real" 2>"$hd/no-files.err")
+rc=$?
+set -e
+refused "no file to check"
+
+summary "release-push.sh push-main, tagged, release, push-tag and handed"
 

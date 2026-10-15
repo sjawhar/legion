@@ -1,9 +1,9 @@
 #cloud-config
 bootcmd:
   - test -c /dev/net/tun || modprobe tun
-  - blkid -p /dev/disk/by-id/google-data >/dev/null || [ $? -ne 2 ] || mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard /dev/disk/by-id/google-data
+  - 'd=/dev/disk/by-id/google-data; blkid -p "$d" >/dev/null; s=$?; if [ $s -eq 0 ]; then :; elif [ $s -ne 2 ]; then echo "envoy-infra: blkid -p $d exited $s; not formatting it" >&2; elif [ "$(head -c 1048576 "$d" 2>/dev/null | wc -c)" -ne 1048576 ]; then echo "envoy-infra: $d does not read; not formatting it" >&2; elif [ -n "$(head -c 1048576 "$d" | tr -d ''\000'' | head -c 1)" ]; then echo "envoy-infra: $d holds data but no filesystem blkid knows; not formatting it" >&2; else mkfs.ext4 -m 0 -E lazy_itable_init=0,lazy_journal_init=0,discard "$d"; fi'
   - mkdir -p /mnt/disks/data
-  - mount -o discard,defaults /dev/disk/by-id/google-data /mnt/disks/data
+  - 'd=/dev/disk/by-id/google-data; fsck.ext4 -p "$d"; s=$?; if [ $s -lt 4 ]; then mount -o discard,defaults "$d" /mnt/disks/data; else echo "envoy-infra: fsck.ext4 -p $d exited $s; not mounting it" >&2; fi'
   - mkdir -p /mnt/disks/data/nats /mnt/disks/data/tailscale
   - mkdir -p -m 0700 /run/envoy
   - install -m 0600 /dev/null /run/envoy/tailnet-auth-key
@@ -62,6 +62,19 @@ write_files:
         attempt=$((attempt + 1))
         sleep 10
       done
+  - path: /etc/envoy/tailnet-joined
+    permissions: "0755"
+    content: |
+      #!/bin/sh
+      # tailnet-joined MARKER KEY_FILE
+      set -u
+      marker=$1
+      key=$2
+      until docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json 2>/dev/null |
+        jq -e '.BackendState == "Running"' >/dev/null; do
+        sleep 5
+      done
+      touch "$marker" && : >"$key"
   - path: /etc/systemd/system/fetch-tailnet-key.service
     permissions: "0644"
     content: |
@@ -69,6 +82,9 @@ write_files:
       Description=Fetch the tailnet auth key from Secret Manager
       Wants=network-online.target
       After=network-online.target
+      ConditionPathExists=!/mnt/disks/data/tailnet-joined
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
 
       [Service]
       Type=oneshot
@@ -89,16 +105,31 @@ write_files:
       ExecStart=/usr/bin/docker run --rm --name tailscaled --network host --cap-add NET_ADMIN --device /dev/net/tun -v /mnt/disks/data/tailscale:/var/lib/tailscale -v /run/envoy/tailnet-auth-key:/run/envoy/tailnet-auth-key:ro -e TS_AUTHKEY=file:/run/envoy/tailnet-auth-key -e TS_AUTH_ONCE=true -e TS_STATE_DIR=/var/lib/tailscale -e TS_USERSPACE=false -e TS_HOSTNAME=example-hub -e TS_EXTRA_ARGS=--advertise-tags=tag:example-host example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
       Restart=always
       RestartSec=10
+  - path: /etc/systemd/system/tailnet-joined.service
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=Mark this hub joined to the tailnet once Tailscale runs, and drop the tailnet auth key
+      After=tailscaled.service
+      ConditionPathExists=!/mnt/disks/data/tailnet-joined
+      RequiresMountsFor=/mnt/disks/data
+      AssertPathIsMountPoint=/mnt/disks/data
+
+      [Service]
+      Type=simple
+      RemainAfterExit=yes
+      ExecStart=/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key
   - path: /etc/systemd/system/nats-firewall.service
     permissions: "0644"
     content: |
       [Unit]
-      Description=Open the host firewall to Google's health checks on NATS's monitoring port
+      Description=Open the host firewall to Google's health checks on NATS's monitoring port, and to the tailnet on its client port
 
       [Service]
       Type=oneshot
       RemainAfterExit=yes
       ExecStart=/bin/sh -c '/sbin/iptables -w -C INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT || /sbin/iptables -w -A INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT'
+      ExecStart=/bin/sh -c '/sbin/iptables -w -C INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT || /sbin/iptables -w -A INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT'
   - path: /etc/systemd/system/nats.service
     permissions: "0644"
     content: |
@@ -119,5 +150,6 @@ runcmd:
   - systemctl daemon-reload
   - systemctl start fetch-tailnet-key.service
   - systemctl start tailscaled.service
+  - systemctl start tailnet-joined.service
   - systemctl start nats-firewall.service
   - systemctl start nats.service

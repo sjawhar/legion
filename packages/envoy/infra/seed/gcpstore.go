@@ -1,6 +1,7 @@
 package seed
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"time"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -19,6 +21,14 @@ import (
 
 // GCPSecretManager is the --store value of Google Cloud Secret Manager.
 const GCPSecretManager = "gcp-secret-manager"
+
+// GCP is the store type --store gcp-secret-manager names.
+var GCP = StoreType{
+	Open:      OpenGCP,
+	CheckName: gcpName,
+	Help: "Google Cloud Secret Manager. --name is projects/<project>/secrets/<secret>, which names its " +
+		"project; --region and --expect-account are refused.",
+}
 
 // gcpLatest is the alias of the version Secret Manager serves by default: the newest one, whatever
 // its state.
@@ -99,71 +109,108 @@ type gcpStore struct{ client *secretmanager.Client }
 func (s *gcpStore) Label() string { return gcpLatest }
 
 // Describe reads GetSecret, then GetSecretVersion on versions/latest for the newest version's number
-// and state: metadata alone. It names that version as the one served only while it is ENABLED, the
-// one state AccessSecretVersion reads.
+// and state: metadata alone. A secret with an expire_time is scheduled for deletion: Secret Manager
+// deletes it, with every version, when that time comes. The newest version is the default, with its
+// state unless it is ENABLED, the one state AccessSecretVersion reads.
 func (s *gcpStore) Describe(ctx context.Context, name string) (Description, error) {
 	if err := gcpName(name); err != nil {
 		return Description{}, err
 	}
-	_, err := s.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: name})
+	secret, err := s.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: name})
 	if status.Code(err) == codes.NotFound {
 		return Description{}, nil
 	}
 	if err != nil {
-		return Description{}, gcpFailed("get-secret", name, err)
+		return Description{}, failed("get-secret", name, err)
 	}
-	d := Description{Exists: true, DefaultIsNewest: true}
+	if expire := secret.GetExpireTime(); expire != nil {
+		return Description{Exists: true, ScheduledForDeletion: true, DeletionDate: pythonDate(expire.AsTime(), time.Local)}, nil
+	}
+	d := Description{Exists: true}
 	latest := name + "/versions/" + gcpLatest
 	newest, err := s.client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
 	if status.Code(err) == codes.NotFound { // a secret that exists, with no version
 		return d, nil
 	}
 	if err != nil {
-		return Description{}, gcpFailed("get-secret-version", latest, err)
+		return Description{}, failed("get-secret-version", latest, err)
 	}
-	number, err := gcpVersionNumber("get-secret-version", latest, newest.GetName())
+	v, err := gcpDefault("get-secret-version", latest, newest)
 	if err != nil {
 		return Description{}, err
 	}
-	d.NewestVersion, d.NewestState = number, newest.GetState().String()
-	if newest.GetState() == secretmanagerpb.SecretVersion_ENABLED {
-		d.CurrentVersion = number
-	}
+	d.Default = &v
 	return d, nil
+}
+
+// gcpDefault is the Version a SecretVersion that call answered for resource names.
+func gcpDefault(call, resource string, v *secretmanagerpb.SecretVersion) (Version, error) {
+	number, err := gcpVersionNumber(call, resource, v.GetName())
+	if err != nil {
+		return Version{}, err
+	}
+	if v.GetState() == secretmanagerpb.SecretVersion_ENABLED {
+		return Version{ID: number}, nil
+	}
+	return Version{ID: number, State: v.GetState().String()}, nil
 }
 
 // Versions counts every version ListSecretVersions lists with no filter, in every state, destroyed
 // ones included, across every page: a destroyed version held a seed a client may have read. It
-// pages by hand, since the library's iterator follows a repeated page token forever, and refuses one.
+// pages by hand with InternalFetch, which secretmanager v1.22.0 marks outside its stable interface
+// (apiv1/auxiliary.go), since the library's iterator follows a repeated page token forever.
+//
+// The listing, like versions/latest, is eventually consistent with an add, but an access by version
+// number is not, and every version is numbered from 1: so when the listing shows none, Versions
+// counts 1 when versions/1 exists in any state.
 func (s *gcpStore) Versions(ctx context.Context, name string) (int, error) {
 	if err := gcpName(name); err != nil {
 		return 0, err
 	}
 	listing := s.client.ListSecretVersions(ctx, &secretmanagerpb.ListSecretVersionsRequest{Parent: name})
-	handedOut := map[string]bool{}
-	count, token := 0, ""
-	for {
+	count, err := countVersions("list-secret-versions", name, func(token string) (int, string, error) {
 		page, next, err := listing.InternalFetch(0, token)
 		if err != nil {
-			return 0, gcpFailed("list-secret-versions", name, err)
+			return 0, "", failed("list-secret-versions", name, err)
 		}
-		count += len(page)
-		if next == "" {
-			return count, nil
-		}
-		if handedOut[next] {
-			return 0, fmt.Errorf("list-secret-versions %s failed: the listing handed out page token %s twice", name, next)
-		}
-		handedOut[next] = true
-		token = next
+		return len(page), next, nil
+	})
+	if err != nil || count > 0 {
+		return count, err
 	}
+	holds, err := s.holds(ctx, name, "1")
+	if err != nil || !holds {
+		return 0, err
+	}
+	return 1, nil
+}
+
+// holds reads whether the secret holds version number, in any state, with AccessSecretVersion by
+// that number, the one read Secret Manager keeps strongly consistent with the add
+// (https://cloud.google.com/secret-manager/docs/access-secret-version, "Resource consistency"):
+// NOT_FOUND is no such version, FAILED_PRECONDITION a disabled or destroyed one. A value read is
+// cleared at once.
+func (s *gcpStore) holds(ctx context.Context, name, number string) (bool, error) {
+	version := name + "/versions/" + number
+	read, err := s.client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: version})
+	switch status.Code(err) {
+	case codes.OK:
+		clear(read.GetPayload().GetData())
+		return true, nil
+	case codes.NotFound:
+		return false, nil
+	case codes.FailedPrecondition:
+		return true, nil
+	}
+	return false, failed("access-secret-version", version, err)
 }
 
 // Put adds value as a version with AddSecretVersion, which takes no request id and which the library
 // does not retry, so a lost answer leaves the write unknown rather than doubled. The added version
 // must be version 1, since Secret Manager numbers a secret's versions from 1, one more for each
-// (resources.proto, SecretVersion.name): any other number is a version both eventually consistent
-// reads before the write, latest and the listing, missed. It must also be ENABLED.
+// (resources.proto, SecretVersion.name), and generate found no version 1 before the write: any other
+// number is another writer's version landing in between. It must be ENABLED, and read back by its
+// number, strongly consistent with the add, as value.
 func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	if err := gcpName(name); err != nil {
 		return "", err
@@ -173,36 +220,60 @@ func (s *gcpStore) Put(ctx context.Context, name string, value []byte) (string, 
 		Payload: &secretmanagerpb.SecretPayload{Data: value},
 	})
 	if err != nil {
-		return "", gcpFailed("add-secret-version", name, err)
+		return "", failed("add-secret-version", name, err)
 	}
 	number, err := gcpVersionNumber("add-secret-version", name, added.GetName())
 	if err != nil {
 		return "", err
 	}
 	if number != "1" {
-		return number, fmt.Errorf("version %s was written, not version 1: %s held a version neither latest nor "+
-			"the listing showed before the write; run check", number, name)
+		return number, fmt.Errorf("version %s was written, not version 1: another version landed in %s after generate "+
+			"found it held none; run check", number, name)
 	}
 	if added.GetState() != secretmanagerpb.SecretVersion_ENABLED {
 		return number, fmt.Errorf("version %s was written but is %s; run check", number, added.GetState())
+	}
+	version := name + "/versions/" + number
+	read, err := s.client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: version})
+	if err != nil {
+		return number, fmt.Errorf("version %s was written, but reading it back by number failed: %v; run check",
+			number, failed("access-secret-version", version, err))
+	}
+	stored := read.GetPayload().GetData()
+	defer clear(stored)
+	if !bytes.Equal(stored, value) {
+		return number, fmt.Errorf("version %s was written, but %s reads back another value; run check", number, version)
 	}
 	return number, nil
 }
 
 // Current reads versions/latest with AccessSecretVersion. Secret Manager answers NOT_FOUND when
 // latest names no version, as just after a first write it may: an access through latest is
-// eventually consistent with the write.
+// eventually consistent with the write. It answers FAILED_PRECONDITION when latest names a version
+// that is not ENABLED, as one disabled after Describe read it is; one GetSecretVersion then names
+// that version in an *Unserved.
 func (s *gcpStore) Current(ctx context.Context, name string) (string, []byte, error) {
 	if err := gcpName(name); err != nil {
 		return "", nil, err
 	}
 	latest := name + "/versions/" + gcpLatest
 	read, err := s.client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})
-	if status.Code(err) == codes.NotFound {
-		return "", nil, notServed{gcpFailed("access-secret-version", latest, err)}
-	}
-	if err != nil {
-		return "", nil, gcpFailed("access-secret-version", latest, err)
+	switch status.Code(err) {
+	case codes.OK:
+	case codes.NotFound:
+		return "", nil, notServed{failed("access-secret-version", latest, err)}
+	case codes.FailedPrecondition:
+		refused := failed("access-secret-version", latest, err)
+		newest, gerr := s.client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
+		if gerr != nil {
+			return "", nil, refused
+		}
+		if v, verr := gcpDefault("get-secret-version", latest, newest); verr == nil && v.State != "" {
+			return "", nil, &Unserved{Version: v, Err: refused}
+		}
+		return "", nil, refused
+	default:
+		return "", nil, failed("access-secret-version", latest, err)
 	}
 	value := read.GetPayload().GetData()
 	number, err := gcpVersionNumber("access-secret-version", latest, read.GetName())
@@ -229,13 +300,4 @@ func gcpVersionNumber(call, resource, version string) (string, error) {
 		return "", fmt.Errorf("%s %s answered no version number", call, resource)
 	}
 	return match[1], nil
-}
-
-// gcpFailed is "<call> <resource> failed: <code>": the gRPC status code, or, for a context's end or
-// an error without a status, what errorClass names it.
-func gcpFailed(call, resource string, err error) error {
-	if s, ok := status.FromError(err); ok {
-		return fmt.Errorf("%s %s failed: %s", call, resource, s.Code())
-	}
-	return fmt.Errorf("%s %s failed: %s", call, resource, errorClass(err))
 }

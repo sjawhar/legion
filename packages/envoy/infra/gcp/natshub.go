@@ -15,6 +15,7 @@ import (
 
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
+	"github.com/sjawhar/envoy/infra/nats"
 )
 
 // natsHubType is the component's token. pulumi-go-provider derives the same one from the NatsHub
@@ -71,10 +72,11 @@ type NatsHubArgs struct {
 }
 
 // NATSUserArgs are one nkey user of the hub: a host's, as a rule, which its listener and its
-// sessions share. Exactly one of machineId and permissions is set.
+// sessions share. Exactly one of machineId and permissions is set. nkey is named as aws:User names
+// it, so a consumer running both clouds spells a user alike.
 type NATSUserArgs struct {
 	Name        string           `pulumi:"name"`
-	PublicKey   string           `pulumi:"publicKey"`            // the user's public key; never its seed
+	NKey        string           `pulumi:"nkey"`                 // the user's public key; never its seed
 	MachineID   *string          `pulumi:"machineId,optional"`   // permissions = core.HostPermissions(machineId)
 	Permissions *PermissionsArgs `pulumi:"permissions,optional"` // explicit
 }
@@ -83,23 +85,15 @@ type NATSUserArgs struct {
 // type's name for its input type, so the Go name would reach consumers as NATSUserArgsArgs.
 func (u *NATSUserArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "NatsUser") }
 
-// PermissionsArgs are a user's explicit publish and subscribe rules.
+// PermissionsArgs are a user's explicit publish and subscribe rules, each nats:Rules, the one rules
+// type every NATS component takes, whatever its cloud.
 type PermissionsArgs struct {
-	Publish   RulesArgs `pulumi:"publish"`
-	Subscribe RulesArgs `pulumi:"subscribe"`
+	Publish   nats.RulesArgs `pulumi:"publish"`
+	Subscribe nats.RulesArgs `pulumi:"subscribe"`
 }
 
 // Annotate names the type gcp:Permissions in the schema, for the reason NATSUserArgs's gives.
 func (p *PermissionsArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Permissions") }
-
-// RulesArgs are one direction's rules, as core.Rules takes them.
-type RulesArgs struct {
-	Allow []string `pulumi:"allow,optional"`
-	Deny  []string `pulumi:"deny,optional"`
-}
-
-// Annotate names the type gcp:Rules in the schema, for the reason NATSUserArgs's gives.
-func (r *RulesArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "Rules") }
 
 // NatsHub is NATS with JetStream on one Container-Optimized OS VM, joined to a tailnet. The VM is
 // the one instance of a managed group, which recreates it when NATS's /healthz fails and keeps its
@@ -110,15 +104,18 @@ type NatsHub struct {
 	InstanceGroup pulumi.StringOutput `pulumi:"instanceGroup"` // the group's name
 }
 
-// settings are a hub's plain inputs, validated, with the defaults applied.
+// settings are a hub's plain inputs, validated, with the defaults applied, and what they render:
+// the VM's cloud-config, from vm, as its user data.
 type settings struct {
 	vm          vm
+	userData    string
 	zone        string
 	machineType string
 	diskSizeGb  int
 }
 
-// newSettings validates args and renders the NATS configuration. Every refusal names the input.
+// newSettings validates args and renders the NATS configuration and the VM's user data. Every
+// refusal names the input.
 func newSettings(args *NatsHubArgs) (settings, error) {
 	if !hostnameRule.MatchString(args.Hostname) {
 		return settings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
@@ -171,10 +168,14 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 	}
 	s.vm = vm{
 		hostname:       args.Hostname,
+		keySecret:      args.Hostname + tailnetAuthKeySuffix,
 		tags:           args.Tags,
 		natsImage:      args.NatsImage,
 		tailscaleImage: args.TailscaleImage,
 		natsConf:       conf,
+	}
+	if s.userData, err = s.vm.userData(); err != nil {
+		return settings{}, fmt.Errorf("render the cloud-config: %w", err)
 	}
 	return s, nil
 }
@@ -186,8 +187,8 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 	auth := core.Authorization{Users: make([]core.User, 0, len(users))}
 	for i, u := range users {
 		where := fmt.Sprintf("users[%d] %q", i, u.Name)
-		if u.PublicKey == "" {
-			return core.Authorization{}, fmt.Errorf("%s: publicKey is required", where)
+		if u.NKey == "" {
+			return core.Authorization{}, fmt.Errorf("%s: nkey is required", where)
 		}
 		var perms core.Permissions
 		switch {
@@ -207,7 +208,7 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, or permissions", where)
 		}
 		auth.Users = append(auth.Users, core.User{
-			Name: u.Name, NKey: u.PublicKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
+			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,
 		})
 	}
 	return auth, nil
@@ -226,10 +227,6 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", natsHubType, name, err)
 	}
-	userData, err := s.vm.userData()
-	if err != nil {
-		return nil, fmt.Errorf("%s %s: render the cloud-config: %w", natsHubType, name, err)
-	}
 	if err := providers.Require(ctx.Context(), natsHubType, "gcp", opts...); err != nil {
 		return nil, err
 	}
@@ -239,7 +236,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		return nil, err
 	}
 	child := pulumi.Parent(comp)
-	hostname := s.vm.hostname
+	hostname, keySecret := s.vm.hostname, s.vm.keySecret
 	// The account's id and the VM's network tag.
 	hubName := hostname + "-hub"
 
@@ -250,21 +247,21 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		return nil, err
 	}
 
-	secret, err := secretmanager.NewSecret(ctx, hostname+tailnetAuthKeySuffix, &secretmanager.SecretArgs{
-		SecretId:    pulumi.String(hostname + tailnetAuthKeySuffix),
+	secret, err := secretmanager.NewSecret(ctx, keySecret, &secretmanager.SecretArgs{
+		SecretId:    pulumi.String(keySecret),
 		Replication: secretmanager.SecretReplicationArgs{Auto: &secretmanager.SecretReplicationAutoArgs{}},
 	}, child)
 	if err != nil {
 		return nil, err
 	}
-	version, err := secretmanager.NewSecretVersion(ctx, hostname+tailnetAuthKeySuffix, &secretmanager.SecretVersionArgs{
+	version, err := secretmanager.NewSecretVersion(ctx, keySecret, &secretmanager.SecretVersionArgs{
 		Secret:     secret.ID(),
 		SecretData: pulumi.ToSecret(args.TailnetAuthKey.ToStringOutput()).(pulumi.StringOutput),
 	}, child)
 	if err != nil {
 		return nil, err
 	}
-	accessor, err := secretmanager.NewSecretIamMember(ctx, hostname+tailnetAuthKeySuffix+"-accessor", &secretmanager.SecretIamMemberArgs{
+	accessor, err := secretmanager.NewSecretIamMember(ctx, keySecret+"-accessor", &secretmanager.SecretIamMemberArgs{
 		SecretId: secret.ID(),
 		Role:     pulumi.String("roles/secretmanager.secretAccessor"),
 		Member:   account.Member,
@@ -335,7 +332,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 			Scopes: pulumi.StringArray{pulumi.String(cloudPlatformScope)},
 		},
 		Tags:     pulumi.StringArray{pulumi.String(hubName)},
-		Metadata: pulumi.StringMap{"user-data": pulumi.String(userData)},
+		Metadata: pulumi.StringMap{"user-data": pulumi.String(s.userData)},
 	}, child)
 	if err != nil {
 		return nil, err

@@ -5,7 +5,6 @@ import (
 	"os"
 	"regexp"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/nats-io/nkeys"
@@ -13,10 +12,11 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
-	pulumirpc "github.com/pulumi/pulumi/sdk/v3/proto/go"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/gcp"
+	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	"github.com/sjawhar/envoy/infra/nats"
 )
 
 const (
@@ -44,103 +44,48 @@ const (
 	// one the plugin's Construct gives it under integration.NewServer's mocks.
 	hubURN       = "urn:pulumi:s::p::" + hubType + "::example-hub"
 	constructURN = "urn:pulumi:stack::project::" + hubType + "::example-hub"
-	// createdNetwork is the self link the mocks give the network the hub creates.
-	createdNetwork = "example-hub-network-self-link"
 )
 
-// registration is one resource the mock engine was asked to register.
-type registration struct {
-	typ, name string
-	inputs    resource.PropertyMap
-	rpc       *pulumirpc.RegisterResourceRequest
-}
-
-// mocks records every registration. Each resource's state is its inputs, less any that is unknown
-// (preview reads a missing output as unknown), plus the outputs the hub reads, as the gcp provider
-// would compute them: an account's email and member, a network's and a health check's self link,
-// a template's unique self link and a group's name.
-type mocks struct {
-	mu         sync.Mutex
-	registered []registration
-}
-
-func (m *mocks) NewResource(args pulumi.MockResourceArgs) (string, resource.PropertyMap, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.registered = append(m.registered, registration{
-		typ: args.TypeToken, name: args.Name, inputs: args.Inputs, rpc: args.RegisterRPC,
-	})
-	state := resource.PropertyMap{}
-	for k, v := range args.Inputs {
-		if !v.ContainsUnknowns() {
-			state[k] = v
+// newMocks is the mock engine with the outputs the hub reads, as the gcp provider computes them:
+// an account's email and member, a network's and a health check's self link, a template's unique
+// self link and a group's name.
+func newMocks() *pulumitest.Mocks {
+	return &pulumitest.Mocks{Computed: func(args pulumi.MockResourceArgs) (string, resource.PropertyMap) {
+		out := resource.PropertyMap{}
+		switch args.TypeToken {
+		case accountType:
+			email := args.Inputs["accountId"].StringValue() + "@example-project.iam.gserviceaccount.com"
+			out["email"] = resource.NewProperty(email)
+			out["member"] = resource.NewProperty("serviceAccount:" + email)
+		case networkType, healthCheckType:
+			out["selfLink"] = resource.NewProperty(args.Name + "-self-link")
+		case templateType:
+			out["selfLinkUnique"] = resource.NewProperty(args.Name + "-self-link-unique")
+		case groupType:
+			out["name"] = resource.NewProperty(args.Name + "-group")
 		}
-	}
-	switch args.TypeToken {
-	case accountType:
-		email := args.Inputs["accountId"].StringValue() + "@example-project.iam.gserviceaccount.com"
-		state["email"] = resource.NewProperty(email)
-		state["member"] = resource.NewProperty("serviceAccount:" + email)
-	case networkType, healthCheckType:
-		state["selfLink"] = resource.NewProperty(args.Name + "-self-link")
-	case templateType:
-		state["selfLinkUnique"] = resource.NewProperty(args.Name + "-self-link-unique")
-	case groupType:
-		state["name"] = resource.NewProperty(args.Name + "-group")
-	}
-	return args.Name + "-id", state, nil
-}
-
-func (m *mocks) Call(args pulumi.MockCallArgs) (resource.PropertyMap, error) {
-	return args.Args, nil
-}
-
-// one returns the single registration of type typ.
-func (m *mocks) one(t *testing.T, typ string) registration {
-	t.Helper()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var found []registration
-	for _, r := range m.registered {
-		if r.typ == typ {
-			found = append(found, r)
-		}
-	}
-	require.Len(t, found, 1, "registrations of %s", typ)
-	return found[0]
-}
-
-// types lists the type of every registration, in order.
-func (m *mocks) types() []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	types := make([]string, 0, len(m.registered))
-	for _, r := range m.registered {
-		types = append(types, r.typ)
-	}
-	return types
+		return "", out
+	}}
 }
 
 // children returns every registration but the hub and the test's provider.
-func (m *mocks) children() []registration {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var children []registration
-	for _, r := range m.registered {
-		if r.typ != hubType && r.typ != gcpProviderType {
-			children = append(children, r)
+func children(m *pulumitest.Mocks) []pulumitest.Registration {
+	var out []pulumitest.Registration
+	for _, r := range m.Registrations() {
+		if r.Type != hubType && r.Type != gcpProviderType {
+			out = append(out, r)
 		}
 	}
-	return children
+	return out
 }
 
 // run constructs a hub named example-hub from args, with a gcp provider when withProvider is set,
 // and returns what the mocks saw and the run's error. check, when not nil, runs on the constructed
 // hub inside the program.
-func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProvider bool) (*mocks, error) {
+func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProvider bool) (*pulumitest.Mocks, error) {
 	t.Helper()
-	m := &mocks{}
-	err := pulumi.RunErr(func(ctx *pulumi.Context) error {
+	m := newMocks()
+	err := m.Run(func(ctx *pulumi.Context) error {
 		var opts []pulumi.ResourceOption
 		if withProvider {
 			prov, err := gcpsdk.NewProvider(ctx, "gcp-example", &gcpsdk.ProviderArgs{})
@@ -157,7 +102,7 @@ func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProv
 			check(hub)
 		}
 		return nil
-	}, pulumi.WithMocks("p", "s", m))
+	})
 	return m, err
 }
 
@@ -166,10 +111,10 @@ func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProv
 func exampleArgs() *gcp.NatsHubArgs {
 	return &gcp.NatsHubArgs{
 		Users: []gcp.NATSUserArgs{
-			{Name: "example-host-a", PublicKey: keyA, MachineID: pulumi.StringRef("example-host-a")},
-			{Name: "example-operator", PublicKey: keyB, Permissions: &gcp.PermissionsArgs{
-				Publish:   gcp.RulesArgs{Allow: []string{">"}},
-				Subscribe: gcp.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
+			{Name: "example-host-a", NKey: keyA, MachineID: pulumi.StringRef("example-host-a")},
+			{Name: "example-operator", NKey: keyB, Permissions: &gcp.PermissionsArgs{
+				Publish:   nats.RulesArgs{Allow: []string{">"}},
+				Subscribe: nats.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 			}},
 		},
 		TailnetAuthKey: pulumi.String(authKey),
@@ -188,18 +133,10 @@ func readGolden(t *testing.T, name string) string {
 	return string(b)
 }
 
-// plain returns v's value with any secret wrapper removed, and whether there was one.
-func plain(v resource.PropertyValue) (resource.PropertyValue, bool) {
-	if v.IsSecret() {
-		return v.SecretValue().Element, true
-	}
-	return v, false
-}
-
 // inputsOf returns a registration's inputs as plain Go values, secretData left out: it is checked
 // as a secret on its own.
-func inputsOf(r registration) map[string]any {
-	in := r.inputs.Mappable()
+func inputsOf(r pulumitest.Registration) map[string]any {
+	in := r.Inputs.Mappable()
 	delete(in, "secretData")
 	return in
 }
@@ -210,11 +147,15 @@ type child struct {
 	inputs    map[string]any
 }
 
-// wantChildren are the children exampleArgs register, with network and subnetwork the values the
-// firewall and the template name ("" for no subnetwork); the hub creates a network when network is
-// createdNetwork.
+// wantChildren are the children exampleArgs register, with network and subnetwork the hub's inputs
+// ("" for none given): with no network, the hub creates one and the firewall and the template name
+// its self link.
 func wantChildren(t *testing.T, network, subnetwork string) []child {
 	t.Helper()
+	created := network == ""
+	if created {
+		network = "example-hub-network-self-link"
+	}
 	email := "example-hub-hub@example-project.iam.gserviceaccount.com"
 	nic := map[string]any{"network": network, "accessConfigs": []any{map[string]any{}}}
 	if subnetwork != "" {
@@ -279,7 +220,7 @@ func wantChildren(t *testing.T, network, subnetwork string) []child {
 			"waitForInstancesStatus": "STABLE",
 		}},
 	}
-	if network == createdNetwork {
+	if created {
 		children = append(children, child{networkType, "example-hub-network", map[string]any{"autoCreateSubnetworks": true}})
 	}
 	return children
@@ -287,13 +228,15 @@ func wantChildren(t *testing.T, network, subnetwork string) []child {
 
 // requireChildren requires the registrations to be exactly want's children, each with its inputs,
 // a child of the hub at URN parent on the gcp provider the hub was given, and requires the auth key
-// to reach the secret version alone, as a secret.
-func requireChildren(t *testing.T, m *mocks, parent string, want []child) {
+// to reach the secret version alone, as a secret. unknown names, by type, the inputs that must be
+// unknown, as those taken from an unknown input are under preview; want's value for them is not
+// compared.
+func requireChildren(t *testing.T, m *pulumitest.Mocks, parent string, want []child, unknown map[string][]string) {
 	t.Helper()
-	got := m.children()
+	got := children(m)
 	gotNames := make([]string, 0, len(got))
 	for _, r := range got {
-		gotNames = append(gotNames, r.typ+"::"+r.name)
+		gotNames = append(gotNames, r.Type+"::"+r.Name)
 	}
 	wantNames := make([]string, 0, len(want))
 	for _, c := range want {
@@ -301,29 +244,34 @@ func requireChildren(t *testing.T, m *mocks, parent string, want []child) {
 	}
 	require.ElementsMatch(t, wantNames, gotNames, "the hub's children")
 	for _, c := range want {
-		r := m.one(t, c.typ)
-		require.Equal(t, c.inputs, inputsOf(r), "the inputs of the %s", c.typ)
-		require.Equal(t, parent, r.rpc.GetParent(), "the %s's parent is the hub", c.typ)
-		require.Contains(t, r.rpc.GetProvider(), "::"+gcpProviderType+"::gcp-example::",
+		r := m.One(t, c.typ)
+		in := inputsOf(r)
+		for _, field := range unknown[c.typ] {
+			require.True(t, r.Inputs[resource.PropertyKey(field)].ContainsUnknowns(),
+				"the %s's %s comes from an unknown input", c.typ, field)
+			delete(in, field)
+			delete(c.inputs, field)
+		}
+		require.Equal(t, c.inputs, in, "the inputs of the %s", c.typ)
+		require.Equal(t, parent, r.RPC.GetParent(), "the %s's parent is the hub", c.typ)
+		require.Contains(t, r.RPC.GetProvider(), "::"+gcpProviderType+"::gcp-example::",
 			"the %s uses the gcp provider the hub was given", c.typ)
 	}
 	requireAuthKeyOnlyInTheSecretVersion(t, m)
 }
 
 // requireAuthKeyOnlyInTheSecretVersion requires the secret version's secretData to be the auth
-// key, as a secret, and no plain value of any registration to hold it.
-func requireAuthKeyOnlyInTheSecretVersion(t *testing.T, m *mocks) {
+// key, as a secret, unknown under preview, and no plain value of any registration to hold it.
+func requireAuthKeyOnlyInTheSecretVersion(t *testing.T, m *pulumitest.Mocks) {
 	t.Helper()
-	data, secret := plain(m.one(t, versionType).inputs["secretData"])
+	data, secret := pulumitest.Plain(m.One(t, versionType).Inputs["secretData"])
 	require.True(t, secret, "the secret version's secretData is a secret")
 	if !data.IsComputed() {
 		require.Equal(t, authKey, data.StringValue())
 	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, r := range m.registered {
-		for _, s := range plainStrings(resource.NewProperty(r.inputs)) {
-			require.NotContains(t, s, authKey, "a plain input of %s %s holds the auth key", r.typ, r.name)
+	for _, r := range m.Registrations() {
+		for _, s := range plainStrings(resource.NewProperty(r.Inputs)) {
+			require.NotContains(t, s, authKey, "a plain input of %s %s holds the auth key", r.Type, r.Name)
 		}
 	}
 }
@@ -373,8 +321,8 @@ func TestNatsHubRegistersEveryChildWithTheListedInputs(t *testing.T) {
 	}, true)
 	require.NoError(t, err)
 
-	require.Equal(t, "example-hub", m.one(t, hubType).name)
-	requireChildren(t, m, hubURN, wantChildren(t, createdNetwork, ""))
+	require.Equal(t, "example-hub", m.One(t, hubType).Name)
+	requireChildren(t, m, hubURN, wantChildren(t, "", ""), nil)
 	require.Equal(t, "nats://example-hub:4222", natsURL)
 	require.Equal(t, "example-hub-group", instanceGroup, "instanceGroup is the group's name")
 }
@@ -386,8 +334,8 @@ func TestNatsHubOnTheConsumersNetworkCreatesNone(t *testing.T) {
 	m, err := run(t, args, nil, true)
 	require.NoError(t, err)
 
-	requireChildren(t, m, hubURN, wantChildren(t, "example-network", "example-subnetwork"))
-	require.NotContains(t, m.types(), networkType)
+	requireChildren(t, m, hubURN, wantChildren(t, "example-network", "example-subnetwork"), nil)
+	require.NotContains(t, m.Types(), networkType)
 }
 
 func TestNatsHubNetworkFromAnOutputReachesTheFirewallAndTheTemplate(t *testing.T) {
@@ -396,14 +344,14 @@ func TestNatsHubNetworkFromAnOutputReachesTheFirewallAndTheTemplate(t *testing.T
 	m, err := run(t, args, nil, true)
 	require.NoError(t, err)
 
-	requireChildren(t, m, hubURN, wantChildren(t, "example-network", ""))
+	requireChildren(t, m, hubURN, wantChildren(t, "example-network", ""), nil)
 }
 
 func TestNatsHubGroupWaitsForTheKeyAndItsGrant(t *testing.T) {
 	m, err := run(t, exampleArgs(), nil, true)
 	require.NoError(t, err)
 
-	deps := m.one(t, groupType).rpc.GetDependencies()
+	deps := m.One(t, groupType).RPC.GetDependencies()
 	child := "urn:pulumi:s::p::" + hubType + "$"
 	require.Contains(t, deps, child+versionType+"::example-hub-tailnet-auth-key",
 		"the VM is created after the key it fetches at boot")
@@ -418,7 +366,7 @@ func TestNatsHubMachineTypeAndDiskSizeReachTheTemplate(t *testing.T) {
 	m, err := run(t, args, nil, true)
 	require.NoError(t, err)
 
-	in := m.one(t, templateType).inputs.Mappable()
+	in := m.One(t, templateType).Inputs.Mappable()
 	require.Equal(t, "e2-medium", in["machineType"])
 	require.Equal(t, float64(50), in["disks"].([]any)[1].(map[string]any)["diskSizeGb"])
 }
@@ -426,10 +374,12 @@ func TestNatsHubMachineTypeAndDiskSizeReachTheTemplate(t *testing.T) {
 func TestNatsHubRefusesAMissingProviderBeforeRegistering(t *testing.T) {
 	m, err := run(t, exampleArgs(), nil, false)
 	require.ErrorContains(t, err, `envoy-infra:gcp:NatsHub needs a "gcp" provider in its providers option`)
-	require.Empty(t, m.types())
+	require.Empty(t, m.Types())
 }
 
-func TestNatsHubRefusesInvalidInputsBeforeRegistering(t *testing.T) {
+// The resolver refuses every invalid input, naming it, with no engine; the constructor's own test
+// below shows a refusal stops it before anything registers.
+func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 	user, err := nkeys.CreateUser()
 	require.NoError(t, err)
 	seed, err := user.Seed()
@@ -540,7 +490,7 @@ func TestNatsHubRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 			name: "a user naming both a machine id and permissions",
 			edit: func(a *gcp.NatsHubArgs) {
 				a.Users[0].Permissions = &gcp.PermissionsArgs{
-					Publish: gcp.RulesArgs{Allow: []string{">"}}, Subscribe: gcp.RulesArgs{Allow: []string{">"}},
+					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
 			err: []string{`users[0] "example-host-a"`, "machineId", "permissions"},
@@ -557,12 +507,12 @@ func TestNatsHubRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 		},
 		{
 			name: "a user without a public key",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[0].PublicKey = "" },
-			err:  []string{`users[0] "example-host-a"`, "publicKey"},
+			edit: func(a *gcp.NatsHubArgs) { a.Users[0].NKey = "" },
+			err:  []string{`users[0] "example-host-a"`, "nkey"},
 		},
 		{
 			name: "a user whose public key is a seed",
-			edit: func(a *gcp.NatsHubArgs) { a.Users[0].PublicKey = string(seed) },
+			edit: func(a *gcp.NatsHubArgs) { a.Users[0].NKey = string(seed) },
 			err:  []string{`users[0] "example-host-a"`, "never a seed"},
 		},
 		{
@@ -585,16 +535,24 @@ func TestNatsHubRefusesInvalidInputsBeforeRegistering(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			args := exampleArgs()
 			c.edit(args)
-			m, err := run(t, args, nil, true)
+			err := gcp.ResolveNatsHub(args)
 			require.Error(t, err)
-			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: ")
 			for _, want := range c.err {
 				require.ErrorContains(t, err, want)
 			}
 			require.NotContains(t, err.Error(), authKey)
-			require.Equal(t, []string{gcpProviderType}, m.types(), "nothing registered beyond the test's provider")
 		})
 	}
+}
+
+// A refused input stops the constructor, named as the hub and its name, before it registers
+// anything beyond the test's provider.
+func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
+	args := exampleArgs()
+	args.Hostname = "ab-"
+	m, err := run(t, args, nil, true)
+	require.ErrorContains(t, err, `envoy-infra:gcp:NatsHub example-hub: hostname "ab-"`)
+	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
 // The names GCP gets from the hostname, for the shortest and longest hostname the rule admits:
@@ -625,18 +583,18 @@ func TestNatsHubDerivedNamesFitGCPForTheShortestAndLongestHostname(t *testing.T)
 			m, err := run(t, args, func(h *gcp.NatsHub) { natsURL = await(t, h.NatsUrl) }, true)
 			require.NoError(t, err)
 
-			require.Regexp(t, accountID, m.one(t, accountType).inputs["accountId"].StringValue())
-			require.Regexp(t, secretID, m.one(t, secretType).inputs["secretId"].StringValue())
-			template := m.one(t, templateType).inputs.Mappable()
+			require.Regexp(t, accountID, m.One(t, accountType).Inputs["accountId"].StringValue())
+			require.Regexp(t, secretID, m.One(t, secretType).Inputs["secretId"].StringValue())
+			template := m.One(t, templateType).Inputs.Mappable()
 			tag := template["tags"].([]any)[0].(string)
 			require.Regexp(t, rfc1035(63), tag)
-			require.Equal(t, []any{tag}, m.one(t, firewallType).inputs.Mappable()["targetTags"],
+			require.Equal(t, []any{tag}, m.One(t, firewallType).Inputs.Mappable()["targetTags"],
 				"the firewall targets the template's tag")
 			require.LessOrEqual(t, len(template["namePrefix"].(string)), 37)
 			require.Regexp(t, rfc1035(63), template["namePrefix"].(string)+strings.Repeat("a", 26))
-			require.Regexp(t, baseInstanceName, m.one(t, groupType).inputs["baseInstanceName"].StringValue())
+			require.Regexp(t, baseInstanceName, m.One(t, groupType).Inputs["baseInstanceName"].StringValue())
 			for _, typ := range []string{networkType, firewallType, healthCheckType, groupType} {
-				require.Regexp(t, rfc1035(63), m.one(t, typ).name+"-abc1234", "the autoname of the %s", typ)
+				require.Regexp(t, rfc1035(63), m.One(t, typ).Name+"-abc1234", "the autoname of the %s", typ)
 			}
 			require.Regexp(t, dnsLabel, hostname)
 			require.Equal(t, "nats://"+hostname+":4222", natsURL)

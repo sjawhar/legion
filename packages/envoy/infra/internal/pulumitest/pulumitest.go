@@ -1,6 +1,8 @@
-// Package pulumitest is the live tests' harness: it builds the envoy-infra plugin from this module
-// and runs the pulumi CLI on Pulumi YAML programs that use it, each stack on a file backend of its
-// own in a temporary directory, under a PULUMI_HOME the test binary makes for itself.
+// Package pulumitest is the components' test harness. Its mock engine (Mocks, mocks.go) records
+// what a component registers under pulumi.WithMocks or the plugin's in-process Construct. The rest
+// is the live tests': it builds the envoy-infra plugin from this module and runs the pulumi CLI on
+// Pulumi YAML programs that use it, each stack on a file backend of its own in a temporary
+// directory, under a PULUMI_HOME the test binary makes for itself.
 package pulumitest
 
 import (

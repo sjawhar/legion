@@ -17,6 +17,10 @@
   names the setting and the proxy's address, with the proxy's own dial error where nats.go alone
   would report only `nats: no servers available for connection`, and a proxied dial ends at a
   connect's deadline as a direct one does. Unset, the bus dials NATS directly, as before.
+- `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
+  (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
+  `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
+  Envoy on one machine") walks through starting it and pointing a machine's sessions at it.
 - A human's answer to a decision block carries his approval forward (LEGION-573). When the
   version his answer writes differs from the version he approved only in its ask blocks, every
   block it holds that is not as the approved version held it is one he answered, and at least one
@@ -743,6 +747,19 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- Dispatch's job intake now receives job events (LEGION-690). It shared Dispatch's publisher
+  client with the delivery intake, and a `bus.Client` held one JetStream subscription, so
+  whichever intake bound second unsubscribed the other, whose durable then sat unbound with its
+  messages pending. Each intake now connects on its own, and a `bus.Client` refuses a second
+  subscription on another subject (`bus.ErrSubscriptionHeld`) rather than replacing the first.
+  With the GitHub App configured, Dispatch holds four NATS connections where it held two, named
+  `dispatch`, `dispatch-agent-stream`, `dispatch-intake` and `dispatch-job-intake` on the server,
+  and exits at boot when it cannot open them, so a NATS user or account with a connection limit
+  must allow four; without the App it holds two, as before. Each bus client's lifecycle log lines
+  now carry its name. On its first start the job intake's durable is handed every job event it has
+  not acknowledged, up to the stream's 72-hour retention, and reads at most eight runs' jobs from
+  GitHub at once while it drains, before it settles at nothing pending.
 
 - The `GET /ws/delivery` socket gives itself a read buffer, so a page that stops answering its
   pings loses the socket with no close frame (1006 to the page) under any gorilla/websocket

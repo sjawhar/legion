@@ -74,6 +74,9 @@ type fakeAWS struct {
 	// version, and the next staleGets reads find no AWSCURRENT version, as a read just after a
 	// write may.
 	staleLists, staleGets int
+	// staleViews makes the next staleViews DescribeSecret and ListSecretVersionIds answers show no
+	// version, as a run whose checks were answered before another run's first write landed sees.
+	staleViews int
 	// The ARN every Secrets Manager answer gives the secret: secretARN when set (a test that wants
 	// none sets it to " " and the field is left out), otherwise one in secretAccount and
 	// secretRegion, by default awsAccount and awsRegion, whatever account STS answers.
@@ -190,6 +193,11 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			out["ARN"] = arn
 		}
 		stages := map[string][]string{}
+		if f.staleViews > 0 {
+			f.staleViews--
+			f.answer(w, out)
+			return
+		}
 		for _, v := range f.versions {
 			if len(v.stages) > 0 {
 				stages[v.id] = v.stages
@@ -232,6 +240,10 @@ func (f *fakeAWS) secretsManager(w http.ResponseWriter, call string, body []byte
 			}
 		}
 		versions := slices.Clone(f.versions)
+		if f.staleViews > 0 {
+			f.staleViews--
+			versions = nil
+		}
 		if f.written() && f.staleLists > 0 {
 			f.staleLists--
 			versions = slices.DeleteFunc(versions, func(v awsVersion) bool { return v.id == f.tokens[0] })
@@ -414,7 +426,7 @@ func runAWS(t *testing.T, f *fakeAWS, args ...string) (code int, stdout, stderr 
 	f.generating = len(args) > 0 && args[0] == "generate"
 	f.mu.Unlock()
 	code = Command(context.Background(), append(args, "--store", AWSSecretsManager, "--name", awsSecret, "--region", awsRegion),
-		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+		&out, &errs, Stores{AWSSecretsManager: AWS})
 	stdout, stderr = out.String(), errs.String()
 	for _, value := range f.values() {
 		require.NotContains(t, stdout+stderr, value, "a seed reached an output")
@@ -476,7 +488,10 @@ func TestAWSCheck(t *testing.T) {
 	}
 }
 
-func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T) {
+// generate writes the bare seed string as the first version, under one fixed ClientRequestToken: the
+// same for every secret, since a version id is per secret, so that a second run's first-version
+// write with another seed is refused rather than written beside the first.
+func TestAWSGenerateWritesTheBareSeedWithTheFirstVersionTokenAndReadsItBack(t *testing.T) {
 	f := newFakeAWS(t)
 	serve(t, f)
 	code, out, errs := runAWS(t, f, "generate")
@@ -495,7 +510,40 @@ func TestAWSGenerateWritesTheBareSeedWithAFreshTokenAndReadsItBack(t *testing.T)
 	serve(t, again)
 	code, _, errs = runAWS(t, again, "generate")
 	require.Equal(t, 0, code, errs)
-	require.NotEqual(t, f.tokens[0], again.tokens[0], "each generate sends a fresh ClientRequestToken")
+	require.Equal(t, f.tokens[0], again.tokens[0], "every generate sends the one first-version token")
+	require.Equal(t, firstVersionToken, f.tokens[0])
+}
+
+// Two generate runs overlap on one secret. B's checks are answered as they would have been before
+// A's write landed, so B finds the secret empty; A has written and printed its key. B's write carries
+// the same first-version token with another seed, so Secrets Manager refuses it
+// (ResourceExistsException): B writes nothing and exits 2, and A's printed key still verifies.
+func TestAWSOverlappingGenerateRunsLeaveTheFirstSeedServed(t *testing.T) {
+	f := newFakeAWS(t)
+	serve(t, f)
+	code, outA, errs := runAWS(t, f, "generate")
+	require.Equal(t, 0, code, errs)
+	keyA, _, _ := strings.Cut(strings.TrimPrefix(outA, "public key: "), "\n")
+
+	f.mu.Lock()
+	f.calls, f.staleViews = nil, 2
+	f.mu.Unlock()
+	code, outB, errs := runAWS(t, f, "generate")
+	require.Equal(t, 2, code, errs)
+	require.Equal(t, []string{"DescribeSecret", "ListSecretVersionIds", "PutSecretValue"}, f.recorded())
+	keyB, rest, _ := strings.Cut(strings.TrimPrefix(outB, "public key: "), "\n")
+	require.NotEqual(t, keyA, keyB)
+	require.Empty(t, rest, "after B's key, no version id: no version holds it")
+	require.Equal(t, "refused: put-secret-value "+awsSecret+" failed: ResourceExistsException; another generate wrote "+
+		"this secret's first version, with another seed; nothing was written, and the public key above is not stored\n", errs)
+	require.Len(t, f.versions, 1, "B wrote no version")
+
+	f.mu.Lock()
+	f.calls = nil
+	f.mu.Unlock()
+	code, out, errs := runAWS(t, f, "verify", "--public-key", keyA)
+	require.Equal(t, 0, code, errs)
+	require.True(t, strings.HasSuffix(out, " derives "+keyA+": yes\n"), out)
 }
 
 func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
@@ -506,12 +554,19 @@ func TestAWSGenerateRefusesBeforeWriting(t *testing.T) {
 		want  string
 		lists int
 	}{
+		// DescribeSecret names the AWSCURRENT version: generate refuses on it before it lists.
+		{"an AWSCURRENT version", func(f *fakeAWS) *fakeAWS { return f.holding(seedValue) },
+			"already serves version v1 by default (AWSCURRENT)", 0},
+		// The listing counts the versions DescribeSecret does not label, across every page.
 		{"a deprecated version DescribeSecret does not show", func(f *fakeAWS) *fakeAWS {
 			f.versions = []awsVersion{{id: "v1", value: seedValue}}
 			return f
 		}, "already holds 1 version(s)", 1},
-		{"versions on every page", func(f *fakeAWS) *fakeAWS { f.pageSize = 2; return f.holding(seedValue, seedValue, seedValue) },
-			"already holds 3 version(s)", 2},
+		{"deprecated versions on every page", func(f *fakeAWS) *fakeAWS {
+			f.pageSize = 2
+			f.versions = []awsVersion{{id: "v1", value: seedValue}, {id: "v2", value: seedValue}, {id: "v3", value: seedValue}}
+			return f
+		}, "already holds 3 version(s)", 2},
 		{"a listing that repeats its page token", func(f *fakeAWS) *fakeAWS { f.repeatToken = true; return f },
 			"list-secret-version-ids " + awsSecret + " failed: the listing handed out page token page-2 twice", 2},
 		{"absent", func(f *fakeAWS) *fakeAWS { f.exists = false; return f }, awsSecret + " does not exist", 0},
@@ -885,7 +940,7 @@ func TestAWSNoRegionIsRefusedBeforeAnyCall(t *testing.T) {
 	serve(t, f)
 	var out, errs bytes.Buffer
 	code := Command(context.Background(), []string{"check", "--store", AWSSecretsManager, "--name", awsSecret},
-		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+		&out, &errs, Stores{AWSSecretsManager: AWS})
 	require.Equal(t, 2, code)
 	require.Equal(t, "refused: "+awsSecret+": no AWS region: pass --region, or name one in AWS_REGION or the profile\n", errs.String())
 	require.Empty(t, f.recorded())
@@ -946,7 +1001,7 @@ func TestAWSErrorsAreRenderedByCodeOrClassNeverByTheirText(t *testing.T) {
 		{&smithy.OperationError{Err: fmt.Errorf("get identity: %w", errors.New(canary))}, "errorString"},
 	}
 	for _, row := range rows {
-		got := awsFailed("put-secret-value", awsSecret, row.err).Error()
+		got := failed("put-secret-value", awsSecret, row.err).Error()
 		require.Equal(t, "put-secret-value "+awsSecret+" failed: "+row.want, got)
 		require.NotContains(t, got, canary)
 	}

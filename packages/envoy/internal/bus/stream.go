@@ -73,7 +73,7 @@ var streamSubjects = []string{
 	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",
-	"notifications.envoy.exceptions.notifications.agent.>",
+	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
 }
 
 // StreamSubjects reports the durable notification subjects, excluding role lanes.
@@ -97,8 +97,8 @@ var streamCfg = &nats.StreamConfig{
 // roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
 // the stream must never retain them.
 var roleLaneSubjects = []string{
-	"notifications.role.>",
-	"notifications.envoy.exceptions.notifications.role.>",
+	contracts.RoleTopicPrefix + ">",
+	ExceptionTopicPrefix + contracts.RoleTopicPrefix + ">",
 }
 
 // subjectCapturesRoleLanes reports whether some role-lane subject would land in a stream carrying

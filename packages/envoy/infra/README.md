@@ -1,17 +1,22 @@
 # envoy-infra
 
-Pulumi components that deploy Envoy, and a command for the NATS seeds they use. The components
-ship as an executable Pulumi plugin, `pulumi-resource-envoy-infra`, so a program in any Pulumi
-language needs only the Pulumi CLI. The command, `envoy-infra`, writes a NATS user's nkey seed into
-a secret store and checks the seed stored there: see [NATS seeds](#nats-seeds).
+Pulumi components that deploy Envoy, and a command for what they need outside Pulumi. The
+components ship as an executable Pulumi plugin, `pulumi-resource-envoy-infra`, so a program in any
+Pulumi language needs only the Pulumi CLI:
 
-This version has two components:
+| Component | What it deploys |
+| --- | --- |
+| `envoy-infra:host:Listener` | An `envoy-listener` container on a Docker host: see [host:Listener](#hostlistener). |
+| `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
+| `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
+| `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
 
-- `envoy-infra:host:Listener`: an `envoy-listener` container on a Docker host. It does not run
-  NATS. The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when
-  it starts, so it needs only a NATS server with JetStream to reach.
-- `envoy-infra:gcp:NatsHub`: such a server, NATS with JetStream on one Google Cloud VM that joins
-  a tailnet, where its clients reach it. See [What `gcp:NatsHub` deploys](#what-gcpnatshub-deploys).
+The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
+starts, so it needs only a NATS server with JetStream to reach.
+
+The command, `envoy-infra`, writes a NATS user's nkey seed into a secret store and checks the seed
+stored there ([NATS seeds](#nats-seeds)), and prints what the AWS components register for a program
+that needs it outside Pulumi ([`envoy-infra render`](#envoy-infra-render)).
 
 ## Install
 
@@ -63,8 +68,9 @@ packages:
 
 It also generates an SDK for the project's language under `sdks/` and prints how to import it. A
 TypeScript program imports `@sjawhar/envoy-infra`, which `package add` adds to `package.json`. A Go
-program imports each component's package under `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra`:
-`host` or `gcp`.
+program imports `github.com/sjawhar/envoy/infra/sdk/go/envoyinfra/host`, `.../envoyinfra/aws` and
+`.../envoyinfra/gcp`. A Python program imports `sjawhar_envoy_infra`, the generated
+`sjawhar-envoy-infra` package.
 
 ### The command
 
@@ -87,7 +93,7 @@ envoy-infra-linux-amd64/envoy-infra --version
 runner, so an archive attested by any other workflow, branch or runner in the repository fails;
 `--repo` alone checks only the repository (`docs/kubernetes.md`, "Pin by digest, never by tag",
 explains each flag). `--version` prints the release's version, `<version>`. Put the binary on your
-`PATH`; the commands under [NATS seeds](#nats-seeds) call it `envoy-infra`.
+`PATH`; the commands below call it `envoy-infra`.
 
 To install it with mise, give it a tool alias: `github:sjawhar/legion` is also where the `legion`
 command's releases come from, so a second pin of that repository needs a name of its own. Pin the
@@ -112,7 +118,9 @@ above, or GitHub's digest for it, which
 lists. mise strips the archive's one directory, so `envoy-infra` lands at the top of the install
 and on `PATH`.
 
-## What `host:Listener` deploys
+## host:Listener
+
+### What `host:Listener` deploys
 
 A listener named `<name>` registers these resources, each a child of the listener:
 
@@ -152,7 +160,7 @@ no API token and no webhook routes. The listener's other settings are on the doc
 
 The listener's outputs are `containerName` and `port`.
 
-## Inputs
+### Inputs
 
 | Input | Default | What it is |
 | --- | --- | --- |
@@ -204,7 +212,7 @@ root on the host, so a line break in a value could end the heredoc and run what 
 command. That is why no value may hold a control character, even one the program reads from
 another stack.
 
-## Providers
+### Providers
 
 A component creates its resources only with providers you pass it in its `providers` resource
 option. The listener takes a `docker` provider always, and a `command` provider too when
@@ -219,7 +227,7 @@ envoy-infra:host:Listener needs a "docker" provider in its providers option
 envoy-infra:gcp:NatsHub needs a "gcp" provider in its providers option
 ```
 
-## Readiness
+### Readiness
 
 By default the docker provider waits up to 90 seconds for the container's health check to pass,
 and `pulumi up` fails if it does not. The check passes once `/healthz` answers `200`, which it does
@@ -231,7 +239,7 @@ from `starting` on, before the listener has connected to NATS. A listener is con
 listener that cannot reach its NATS server when the stack is applied: Docker restarts the listener
 until it connects.
 
-## The watchdog
+### The watchdog
 
 `watchdog: {host: <address>}` installs a systemd timer on the host that checks the
 `envoy-listener` container 30 seconds after boot and every 60 seconds after that. When the
@@ -265,7 +273,7 @@ come back without its seed.
 The create command's text holds the listener's environment, image, port and name, so changing any
 of them is an update that runs the create command on the host again.
 
-## Moving an existing deployment onto it
+### Moving an existing deployment onto it
 
 `adopt` names resources at the root of the stack that this listener's resources take over:
 
@@ -297,279 +305,15 @@ YAML program, the listener that takes both over reads:
         - ${docker-example-host-a}
 ```
 
-A preview proves the move. Apply it only when the preview:
+[A preview proves the move](#proving-a-move-with-a-preview).
 
-- shows every adopted resource as `same`, and no step for its old root-level name;
-- updates, replaces and deletes nothing;
-- creates only what exists only in Pulumi state: the listener itself, and provider resources
-  (`pulumi:providers:*`) such as the plugin's own default provider,
-  `pulumi:providers:envoy-infra`;
-- changes no stack output.
+### Examples
 
-This lists every step that is not `same`:
+The examples use placeholders: `example-host-a`, `example-project`, the `*.internal.example` hosts
+and each `<...>` stand for your own values. The hub's example is in
+[docs/nats-hub.md](docs/nats-hub.md#a-nats-hub-in-yaml).
 
-```sh
-pulumi preview --json --show-sames | jq -r '.steps[] | select(.op != "same") | "\(.op) \(.urn)"'
-```
-
-It does not show a changed stack output, since that leaves the stack's own step `same`. A plain
-`pulumi preview` lists each changed output under `Outputs:`.
-
-## What `gcp:NatsHub` deploys
-
-A hub whose `hostname` is `<h>` registers these resources, each a child of the hub and named after
-`<h>` rather than after the hub's own name:
-
-| Resource | Type | What it is |
-| --- | --- | --- |
-| `<h>-hub` | `gcp:serviceaccount/account:Account` | The VM's service account, account id `<h>-hub`. |
-| `<h>-tailnet-auth-key` | `gcp:secretmanager/secret:Secret` | The secret `<h>-tailnet-auth-key`, replicated automatically. |
-| `<h>-tailnet-auth-key` | `gcp:secretmanager/secretVersion:SecretVersion` | Its version, holding `tailnetAuthKey`. |
-| `<h>-tailnet-auth-key-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | The service account's one grant: `roles/secretmanager.secretAccessor` on that secret. |
-| `<h>-network` | `gcp:compute/network:Network` | Only without `network`: an auto-mode network, with a subnetwork in every region. |
-| `<h>-health-checks` | `gcp:compute/firewall:Firewall` | The hub's one firewall rule: tcp/8222 from Google's health-check ranges, `130.211.0.0/22` and `35.191.0.0/16`, to the VM's network tag `<h>-hub`. |
-| `<h>-healthz` | `gcp:compute/healthCheck:HealthCheck` | An HTTP check of NATS's `/healthz` on port 8222, every 10 seconds, unhealthy after 6 failures. |
-| `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet, the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
-| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from 300 seconds after the VM is created, and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grant, since its first VM fetches the key when it boots, and `pulumi up` waits until it is `STABLE`. |
-
-Every resource is in the gcp provider's project. The template's name is `<h>-` and a suffix the
-provider adds, and the network, the firewall rule, the health check and the group are named after
-their resource names with a random suffix, such as `<h>-healthz-292ee38`. The account id and the
-secret id are exact, so two hubs in one project need two hostnames.
-
-The hub's outputs are `natsUrl`, `nats://<h>:4222`, where its clients reach it over the tailnet,
-and `instanceGroup`, the group's name.
-
-## The hub's inputs
-
-| Input | Default | What it is |
-| --- | --- | --- |
-| `users` | required | The NATS server's nkey users. See [The hub's users](#the-hubs-users). |
-| `tailnetAuthKey` | required | A secret: the Tailscale auth key the VM joins the tailnet with. The tailnet must let it advertise `tags`. May come from another resource or stack. |
-| `hostname` | required | The VM's name on the tailnet and `natsUrl`'s host: 2 to 26 lowercase letters, digits and hyphens, starting with a letter and not ending with a hyphen (`^[a-z][a-z0-9-]{0,24}[a-z0-9]$`). It also names every child. |
-| `tags` | required | The tailnet tags the VM advertises when it joins, each `tag:<name>`. At least one. |
-| `zone` | required | The zone of the VM and its data disk, such as `us-central1-a`. Changing it makes a new group, with a new data disk: see [Updating a hub](#updating-a-hub). |
-| `machineType` | `e2-small` | The VM's machine type. |
-| `diskSizeGb` | `20` | The size, in GB, of the data disk the group creates for the hub's first VM. |
-| `natsImage` | required | The NATS server image, pinned by digest: `<name>@sha256:<64 lowercase hex digits>`. Its entrypoint takes nats-server's arguments, as the official `nats` image's does. |
-| `tailscaleImage` | required | Tailscale's image, pinned the same way. The unit configures it through containerboot's `TS_*` variables, as Tailscale's own image reads them. |
-| `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one. May come from another resource or stack. |
-| `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
-
-Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
-other input takes a value the program knows when it runs, and the plugin refuses an output there,
-naming the input. So the cloud-config is known at preview.
-
-The hub refuses these before it registers anything, with an error naming the input:
-
-- a `hostname` outside the rule above;
-- no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
-  hyphens, Tailscale's rule for a tag;
-- an empty `zone`;
-- an image that is not `<name>@sha256:<64 lowercase hex digits>`, with only letters, digits and
-  `._/:-` in `<name>`: whitespace, `$` or `%` would split or expand the unit's command;
-- an empty `machineType`, or a `diskSizeGb` below 1;
-- no `tailnetAuthKey`;
-- `subnetwork` without `network`, since the firewall rule needs the network;
-- no `users`, or a user refused as [The hub's users](#the-hubs-users) lists;
-- a missing provider (see [Providers](#providers)).
-
-## The hub's users
-
-`users` is the NATS server's whole authorization. Each user is `name`, `publicKey` and exactly one
-of:
-
-- `machineId`: the user of one host, whose listener and sessions all connect as it, granted
-  `HostPermissions(machineId)` (see [Permission sets](#permission-sets)). Give it the listener's
-  own `machineId`: the set names that machine's durable consumer and queue group.
-- `permissions`: `{publish, subscribe}`, each an `allow` list and an optional `deny` list of
-  subject patterns, for any other client.
-
-`publicKey` is the public key `envoy-infra seed generate` prints, and the seed stays in the secret
-store it wrote (see [NATS seeds](#nats-seeds)): the host's listener reads it from there into its
-`seed`, and its `natsUrls` is the hub's `natsUrl`. In the authorization `core` renders (see
-[NATS authorization](#nats-authorization)), each user is a keyed user with `HasSeed` set, and no
-user stands for a client presenting no credential, so the server refuses every client without
-the seed of one of `users`. The rendered file, headed
-`# Rendered by envoy-infra. Public keys only.`, is `/etc/nats/nats-server.conf` on the VM; the
-VM's metadata holds it in the clear.
-
-A user is refused, named as `users[<index>] "<name>"`, when it names both `machineId` and
-`permissions` or neither, when its `machineId` or `publicKey` is empty, and for each of the
-authorization's own refusals under [NATS authorization](#nats-authorization), such as a name of
-another form or one two users share, a `publicKey` that is not a user public key (a seed
-included), or an empty `allow`.
-
-## What the hub's VM runs
-
-The VM boots Container-Optimized OS (COS), which mounts `/` read-only and keeps `/etc` and
-`/mnt/disks` on a tmpfs that does not outlive a boot
-([COS file system](https://cloud.google.com/container-optimized-os/docs/concepts/disks-and-filesystem)),
-so cloud-init applies the hub's cloud-config at every boot. The whole document, for the hub of
-[A NATS hub, in YAML](#a-nats-hub-in-yaml), is `gcp/testdata/cloud-config.golden` in this
-directory.
-
-`bootcmd` runs first, in this order:
-
-1. It loads the `tun` module unless `/dev/net/tun` exists.
-2. It formats the data disk, `/dev/disk/by-id/google-data`, as ext4 only when `blkid -p` finds
-   nothing on it (exit status 2), so a disk with a filesystem is never formatted again, and one
-   blkid fails to read in any other way is left as it is and fails to mount.
-3. It mounts the disk at `/mnt/disks/data` and makes `nats/` and `tailscale/` on it.
-4. It makes `/run/envoy`, mode 0700, and an empty `/run/envoy/tailnet-auth-key`, mode 0600, so
-   the key's bind mount into the Tailscale container is always of a file.
-
-`write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the key fetcher to
-`/etc/envoy/fetch-tailnet-key` and four systemd units to `/etc/systemd/system/`, and `runcmd`
-reloads systemd and starts the units in this order. They are started and never enabled, since
-`/etc` does not outlive the boot.
-
-| Unit | What it does |
-| --- | --- |
-| `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-tailnet-key /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. |
-| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It wants the fetch and starts after it ends, but does not require it. |
-| `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` to the host's iptables unless the rule is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without it the health check never reaches NATS. |
-| `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
-
-Both container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
-point, so that their state never lands on the tmpfs beneath, and restart 10 seconds after their
-container exits.
-
-The key fetcher runs under `/bin/sh` with curl, jq and base64. It takes the VM's project id and an
-access token for its service account from the metadata server, reads the secret's `latest` version
-through Secret Manager's REST API, and moves the decoded key onto `/run/envoy/tailnet-auth-key`
-from a temporary file readable by root alone, only when the key is not empty. A new grant can take
-a while to reach Secret Manager, so it tries six times, ten seconds apart, and exits 1 after the
-sixth failure. Nothing of the key or the token is printed or passed in a command's arguments.
-`GCE_METADATA_HOST` and `SECRET_MANAGER_ENDPOINT` replace the metadata server's host and Secret
-Manager's base URL, which its tests use.
-
-NATS listens for clients on 4222 and serves its monitoring endpoints on 8222, on every interface.
-The hub's firewall rule and `nats-firewall` admit Google's health checks to 8222, and neither
-opens another port. Tailscale accepts what arrives on its own interface, `tailscale0`, so the
-tailnet's policy decides which peers reach 4222, and 8222's `/varz`, `/connz` and `/jsz` too (on
-COS that rule is still to be proven: see
-[What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
-
-## The hub's data disk
-
-The template's second disk has the device name `data` and outlives its VM (`autoDelete: false`),
-and the group holds it as a stateful disk it never deletes (`deleteRule: NEVER`). Google Cloud
-keeps a stateful disk through autohealing, updates and recreation and reattaches it to the new VM,
-and when the group itself is deleted it detaches the disk and leaves it
-([preserved state](https://cloud.google.com/compute/docs/instance-groups/preserved-state)). The
-disk holds both containers' state:
-
-- `/mnt/disks/data/nats`, the NATS container's `/data`: JetStream's store, the stream and the
-  key-value buckets;
-- `/mnt/disks/data/tailscale`, the Tailscale container's `/var/lib/tailscale` (`TS_STATE_DIR`):
-  the node's keys and its login.
-
-Keeping the tailnet state there is what lets a recreated VM rejoin the tailnet as the same node,
-under the same name, without logging in again. With `TS_AUTH_ONCE=true`, containerboot logs in
-with `TS_AUTHKEY` only when the state holds no login (tailscale v1.104.1
-`cmd/containerboot/main.go:583-682`), so the VM fetches `tailnetAuthKey` at every boot but logs in
-with it only at the first, and a key that is single-use, or has expired since, serves. The same is
-why `tailscaled.service` does not require the fetch: on a later boot the fetch may fail and leave
-the key file empty, and the node comes up from its state anyway.
-
-The group reattaches the same disk to every later VM, so a later `diskSizeGb`, which changes only
-the template, should leave the disk at the size it was created with. Google Cloud's documentation
-implies this without saying it, and a first deployment confirms it (see
-[What a first Google Cloud deployment proves](#what-a-first-google-cloud-deployment-proves)).
-Deleting the hub leaves the disk, detached, in `zone`, as the preserved-state page documents, and
-leaves the hub's node on the tailnet; remove both yourself once you no longer need them.
-
-## Updating a hub
-
-An instance template cannot change once it is created
-([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
-holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskSizeGb`, `network` or
-`subnetwork` makes a new template. The group then replaces its VM at once (`PROACTIVE`, minimal
-action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
-unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
-clients reconnect then. The new VM gets the same data disk, so it keeps the stream and rejoins the
-tailnet as the same node.
-
-Three inputs work otherwise:
-
-- `tags` reach the tailnet only when the node first logs in. containerboot runs `tailscale up`,
-  with `--advertise-tags`, for a node that is not logged in, and otherwise `tailscale set`, which
-  passes `--accept-dns=false` and `--hostname` and never `TS_EXTRA_ARGS` (tailscale v1.104.1
-  `cmd/containerboot/main.go:583-682`, `cmd/containerboot/tailscaled.go:145-146` and `:169-185`).
-  A change to `tags` still replaces the VM; change a joined node's tags on the tailnet itself.
-- `hostname` names every child, so a new one is a new hub: Pulumi creates a new set of children,
-  whose VM gets a new data disk, so a new tailnet node and an empty stream, then deletes the old
-  children, all but the old disk; the old node stays on the tailnet. The new node logs in with
-  `tailnetAuthKey`, which must then be a key the tailnet still accepts.
-- `zone` replaces the group itself, whose zone cannot change (pulumi-gcp v10.1.0's upstream
-  `resource_compute_instance_group_manager.go:120-126`). The group's name is generated, so Pulumi
-  creates the new group, under a new name, before it deletes the old one. The new group's VM gets
-  a new, empty data disk, so the stream starts empty, and logs in with `tailnetAuthKey`, which must
-  then be a key the tailnet still accepts. It asks for `<h>` while the old node still holds it, so
-  Tailscale names it `<h>-1` ([machine names](https://tailscale.com/docs/concepts/machine-names)),
-  and `natsUrl` names the old node, which goes offline when the old group is deleted. The old disk
-  is left detached in the old zone. To move a hub to another zone:
-
-  1. Set `zone`, and a `tailnetAuthKey` the tailnet accepts, and run `pulumi up`. It returns once
-     it has deleted the old group, and with it the old VM.
-  2. Remove the old node from the tailnet
-     ([remove a device](https://tailscale.com/docs/features/access-control/device-management/how-to/remove)).
-     Not before `pulumi up` returns: a removed node whose VM still runs logs in again with the key
-     that VM fetched at boot, if the key is reusable and unexpired and the tailnet does not
-     require device approval, and takes `<h>` back.
-  3. Rename the new node from `<h>-1` to `<h>` (Edit machine name, on the machine names page
-     above), which also renames it in MagicDNS.
-
-  Until the rename, `natsUrl` names the old, offline node, so the hub's clients reconnect only
-  after it, to the new VM's empty stream.
-
-## What a first Google Cloud deployment proves
-
-The unit tests run the hub under Pulumi's mocks, check its cloud-config against the golden, and
-run the key fetcher under `/bin/sh` against fakes of the metadata server and Secret Manager; the
-seed command's Secret Manager store runs against a fake too. None of them runs Google Cloud, COS
-or a tailnet, so the first deployment is where these hold or fail. Watch them on its first
-`pulumi up`:
-
-- `/dev/net/tun` exists on COS without `modprobe`, so the Tailscale container starts.
-- The data disk is at `/dev/disk/by-id/google-data` when `bootcmd` runs, and after
-  `gcloud compute instance-groups managed recreate-instances` the new VM finds its filesystem
-  (`blkid -p` exits 0) rather than formatting it, and keeps the stream and its tailnet node.
-- Two statements this README takes from Google Cloud's documentation: a later `diskSizeGb` leaves
-  the kept data disk at the size it was created with, and deleting the hub leaves that disk
-  behind, detached (see [The hub's data disk](#the-hubs-data-disk)).
-- The health check turns `HEALTHY` through COS's host firewall once `nats-firewall` has run, and
-  `pulumi up`'s wait for `STABLE` ends within the provider's timeout despite autohealing's
-  300-second initial delay. Google Cloud accepts `maxSurgeFixed: 0` with `maxUnavailableFixed: 1`
-  on a zonal group of one, and the template's `namePrefix`.
-- Clients reach 4222 over the tailnet. Tailscale v1.104.1's image writes its accept rule for
-  `tailscale0` with iptables-legacy, and if COS filters with nftables that rule does not override
-  COS's drop policy. `iptables -V` on the VM names the backend; under `nf_tables`, expect 4222
-  unreachable over the tailnet.
-- The key fetcher runs on COS's `/bin/sh`, curl, jq, base64 and mktemp, and the service account's
-  grant reaches Secret Manager within the fetcher's six attempts at the first boot. When every
-  attempt fails, containerboot, finding no key, exits at its 60-second boot timeout
-  (`TS_BOOT_TIMEOUT`), and `tailscaled.service`'s restart runs the fetch again; that loop was
-  measured on systemd 255, not on COS's own.
-- `envoy-infra seed` against Secret Manager itself: that `versions/latest` names a newest version
-  that is `DISABLED` or `DESTROYED`, that `GetSecretVersion` on `latest` answers `NOT_FOUND` for a
-  secret with no version, and that `ListSecretVersions` with no filter lists `DESTROYED` versions.
-  The store's lines under [What `check` and `verify` print](#what-check-and-verify-print) rest on
-  these. Also that, after `generate`'s write, `AccessSecretVersion` on a `latest` that names no
-  version yet answers `NOT_FOUND`, and how often the listing and `latest` show the write within
-  `generate`'s pauses, 7.75 seconds in all. Google documents both as eventually consistent, and
-  such operations as converging typically within minutes; a write they do not show in time ends as
-  an error after writing, and `check` and `verify` then confirm it.
-
-## Examples
-
-The examples use placeholders: `example-host-a`, `example-operator`, `example-hub`,
-`example-project`, the `*.internal.example` hosts, the `example.invalid` images and each `<...>`
-stand for your own values.
-
-### A listener, in YAML
+#### YAML
 
 The whole `Pulumi.yaml` of a project with one listener, reading its seed from a secret config
 value:
@@ -623,7 +367,7 @@ listener `example-host-a`, and the listener's `example-host-a-image` (a `RemoteI
 `example-host-a-container` (a `Container`). Its outputs are `containerName: "envoy-listener"` and
 `port: 9020`. `pulumi up` then applies it.
 
-### A listener, in TypeScript
+#### TypeScript
 
 A listener with a watchdog, taking its NATS URLs from another stack's output. It has no seed,
 since a watchdog cannot have one:
@@ -656,79 +400,539 @@ const listener = new envoyInfra.host.Listener(
 export const containerName = listener.containerName;
 ```
 
-### A NATS hub, in YAML
+## The AWS components
 
-The whole `Pulumi.yaml` of a project with one hub in the project `example-project`, reading the
-tailnet auth key from a secret config value. Its users are `example-host-a`, the host whose
-listener the first example runs, and `example-operator`, a client with permissions of its own.
-Their public keys are the placeholders `core`'s tests use: put in the ones
-`envoy-infra seed generate` printed for your users.
+`aws:NatsService` and `aws:WebhookListener` run Envoy on ECS Fargate in a VPC you already have.
+Your network, ECS cluster, roles, security groups, private DNS namespace, load balancer and alarm
+topic stay in your program; the components take them as inputs. A program usually runs both, the
+listener connecting to the NATS service's `internalUrl`, as the [Python example](#python-example)
+does.
 
-```yaml
-name: envoy-nats
-runtime: yaml
-packages:
-  envoy-infra:
-    source: envoy-infra
-    version: <version>
-    pluginDownloadURL: https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}
-config:
-  tailnetAuthKey:
-    type: string
-    secret: true
-resources:
-  gcp-example-project:
-    type: pulumi:providers:gcp
-    properties:
-      project: example-project
-    options:
-      version: 10.1.0
-  example-hub:
-    type: envoy-infra:gcp:NatsHub
-    properties:
-      hostname: example-hub
-      zone: us-central1-a
-      tags:
-        - tag:example-host
-      tailnetAuthKey: ${tailnetAuthKey}
-      natsImage: example.invalid/nats@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-      tailscaleImage: example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-      users:
-        - name: example-host-a
-          publicKey: UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO
-          machineId: example-host-a
-        - name: example-operator
-          publicKey: UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG
-          permissions:
-            publish:
-              allow: [">"]
-            subscribe:
-              allow: [">"]
-              deny: ["$SYS.>"]
-    options:
-      providers:
-        - ${gcp-example-project}
-outputs:
-  natsUrl: ${example-hub.natsUrl}
-  instanceGroup: ${example-hub.instanceGroup}
+### What `aws:NatsService` deploys
+
+A NATS service named `<N>` registers these resources, each a child of the component:
+
+| Resource | Type | What it is |
+| --- | --- | --- |
+| `<N>-efs` | `aws:efs/fileSystem:FileSystem` | JetStream's store: encrypted, `generalPurpose`, `elastic` throughput. |
+| `<N>-efs-sg` | `aws:ec2/securityGroup:SecurityGroup` | Its mount targets' group, in `vpcId`. |
+| `<N>-efs-ingress`, `<N>-nfs-egress` | `aws:ec2/securityGroupRule:SecurityGroupRule` | NFS (TCP 2049) from `securityGroupId` into that group, and out of `securityGroupId` to it. |
+| `<N>-efs-mt-<i>` | `aws:efs/mountTarget:MountTarget` | One in each subnet of `subnetIds`, `<i>` its index there. |
+| `<N>-efs-ap` | `aws:efs/accessPoint:AccessPoint` | `/nats-data`, owned by uid and gid 1000 (the `nats` image's user), mode 755. |
+| `<N>-log-group` | `aws:cloudwatch/logGroup:LogGroup` | `logGroupName`, kept `logRetentionDays` days. |
+| `<N>-tsnet-efs`, `-tsnet-efs-sg`, `-tsnet-efs-ingress`, `-tsnet-nfs-egress`, `-tsnet-efs-mt-<i>`, `-tsnet-efs-ap` | as above | The sidecar's tailnet state, so its node keeps its identity across tasks: the same shape, with the access point at `/tsnet-state`, owned by root, mode 700. |
+| `<N>-task` | `aws:ecs/taskDefinition:TaskDefinition` | `family`, `cpu` and `memory` on Fargate (`awsvpc`), with the two containers below and both file systems mounted through their access points with transit encryption. |
+| `cloudMapServiceLogicalName` | `aws:servicediscovery/service:Service` | `cloudMapServiceName` in the namespace: an `A` record, TTL 10 s, `MULTIVALUE`. |
+| `<N>-service` | `aws:ecs/service:Service` | One task on Fargate `platformVersion`, in `subnetIds` with `securityGroupId` and no public address, registered in Cloud Map, with ECS Exec on, created after every mount target. It deploys at 0% minimum and 100% maximum, so the old task stops before the new one starts: two tasks would share the JetStream store and the tailnet node. |
+| `<prefix>-route-disconnect-filter`, `-slow-consumer-filter`, `-jetstream-error-filter`, `-auth-error-filter` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | `<prefix>` is `metricFilterLogicalNamePrefix`; see below. |
+
+Each tagged child carries `baseTags` and a `service` tag: `<N>` on the JetStream file system and
+its access point, the log group, the task definition, the Cloud Map service and the ECS service;
+`<N>-efs` on the JetStream group; `<N>-tsnet`, `<N>-tsnet-efs` and `<N>-tsnet-ap` on the
+tailnet-state file system, group and access point. The rules, mount targets and filters carry none.
+
+The task runs two containers, both logging to the log group through `awslogs` in `region`:
+
+- `nats`, `natsImage`: clients on 4222, cluster routes on 6222 and monitoring on 8222, JetStream's
+  store at `/data`, and a health check fetching `http://localhost:8222/healthz`. Without
+  `authorization` the image's entrypoint runs `nats-server` with `serverArgs`. With it, `/bin/sh -c`
+  runs a start script that writes the rendered configuration, public keys only
+  ([NATS authorization](#nats-authorization)), to `configPath` and execs
+  `nats-server --config <configPath>` with `serverArgs`.
+  [`envoy-infra render nats-start-script`](#nats-start-script) prints that script.
+- `tailscale-sidecar`, `tailscaleImage`: serves the NATS client port on the tailnet as
+  `tailnetHostname`, advertising `tailnetTags`, with its state at `/var/lib/tailscale`. Its auth key
+  is the OAuth client secret at `tailnetClientSecretArn`, which ECS injects, with
+  `?ephemeral=<tailnetEphemeral>&preauthorized=true` appended.
+
+The filters count nats-server's own log lines into metrics in `metricNamespace`, 1 for each
+matching line and 0 for a period whose lines all miss:
+
+| Filter | Pattern | Metric |
+| --- | --- | --- |
+| `route-disconnect` | `"Router connection closed"` | `RouteDisconnections` |
+| `slow-consumer` | `"Slow Consumer Detected"` | `SlowConsumers` |
+| `jetstream-error` | `?"JetStream out of" ?"JetStream failed to store" ?"JetStream being DISABLED" ?"NO quorum, stalled"` | `JetStreamErrors` |
+| `auth-error` | `?"authentication error" ?"Subscription Violation" ?"Publish Violation"` | `AuthErrors` |
+
+Its outputs are `serviceArn` (the ECS service's ARN), `serviceName`, `efsId` (JetStream's file
+system), `logGroupName`, `taskDefinitionArn`, `metricNamespace` and `internalUrl`,
+`nats://<cloudMapServiceName>.<cloudMapNamespaceName>:4222`.
+
+### `aws:NatsService`'s inputs
+
+| Input | Default | What it is |
+| --- | --- | --- |
+| `authorization` | unset | The server's nkey authorization, an `aws:Authorization` ([NATS authorization](#nats-authorization)). Unset, NATS runs with no authorization block. |
+| `configHeader` | with `authorization` | The rendered configuration's header lines, each written as a `# ` comment; `[]` for none. Required with `authorization` and refused without it, since only its start script writes a configuration. |
+| `serverArgs` | required | `nats-server`'s arguments: JetStream, its store directory, the ports. With `authorization` they follow `--config <configPath>`. |
+| `configPath` | with `authorization` | Where the start script writes the configuration in the container. Required with `authorization` and refused without it. |
+| `natsImage`, `tailscaleImage` | required | The two containers' images. |
+| `tailnetHostname` | required | The sidecar's node name, `TS_HOSTNAME`. |
+| `tailnetTags` | required | The tags the node advertises, joined with `,` into `--advertise-tags`: at least one, since an auth key made from an OAuth client must advertise one. |
+| `tailnetClientSecretArn` | required | The secret holding the tailnet OAuth client secret. |
+| `tailnetEphemeral` | `false` | Whether the node's auth key is ephemeral. |
+| `region` | required | The containers' `awslogs-region`. |
+| `vpcId` | required | The VPC the file systems' groups are in. |
+| `subnetIds` | required | The task's subnets, at least one. Each file system has a mount target in each, named by its index. |
+| `securityGroupId` | required | The NATS task's group, which you build. |
+| `clusterArn`, `executionRoleArn`, `taskRoleArn` | required | The ECS cluster and the task's two roles. |
+| `cloudMapNamespaceId`, `cloudMapNamespaceName` | required | The private DNS namespace the service registers in. |
+| `cloudMapServiceName` | required | The service's name in it. |
+| `cloudMapServiceLogicalName` | required | The Cloud Map service's logical name. |
+| `family`, `cpu`, `memory`, `platformVersion` | required | The task definition's family and size, and the service's Fargate platform version. |
+| `logGroupName`, `logRetentionDays` | required | The log group. |
+| `baseTags` | required | Tags on every tagged child, beside `service`, which the component sets. |
+| `metricNamespace` | required | The namespace of the filters' metrics. |
+| `metricFilterLogicalNamePrefix` | required | What the filters' logical names start with. |
+| `waitForSteadyState` | unset | The ECS service's `waitForSteadyState`, set only when given. |
+| `adopt` | `false` | See [Moving an existing deployment onto them](#moving-an-existing-deployment-onto-them). |
+
+### What `aws:WebhookListener` deploys
+
+A listener named `<N>` registers these resources, each a child of the component:
+
+| Resource | Type | What it is |
+| --- | --- | --- |
+| `<N>-log-group` | `aws:cloudwatch/logGroup:LogGroup` | `logGroupName`, kept `logRetentionDays` days. |
+| `cloudMapServiceLogicalName` | `aws:servicediscovery/service:Service` | `cloudMapServiceName` in the namespace: an `A` record, TTL 10 s, `MULTIVALUE`. |
+| `<N>-execution-api-token-read` | `aws:iam/rolePolicy:RolePolicy` | On `executionRoleName`: `secretsmanager:GetSecretValue` on `apiTokenSecretArn`. |
+| `<N>-execution-nats-nkey-seed-read` | `aws:iam/rolePolicy:RolePolicy` | The same on `seedSecretArn`, only when it is given. |
+| `<N>-task` | `aws:ecs/taskDefinition:TaskDefinition` | `family`, `cpu` and `memory` on Fargate (`awsvpc`), with the one container below, created after both policies and after `apiTokenSecretVersionId`'s resource. |
+| `<N>-service` | `aws:ecs/service:Service` | One task in `subnetIds` with `securityGroupId` and no public address, its port 9020 in `targetGroupArn`, registered in Cloud Map, with ECS Exec on, created after `natsServiceArn`'s resource. It deploys at 100% minimum and 200% maximum, so a healthy target stays in the target group; the circuit breaker rolls back a replacement that keeps failing to start, the service waits for steady state, ECS ignores load-balancer health for 120 s while a task starts, and create and update time out after 15 minutes. |
+| `<N>-<filter>` | `aws:cloudwatch/logMetricFilter:LogMetricFilter` | Eight, on the log group; `envoy-infra render metric-filters` prints them. |
+| `<N>-<alarm>` | `aws:cloudwatch/metricAlarm:MetricAlarm` | Five, below. |
+
+The log group, the Cloud Map service, the task definition, the service and the alarms carry
+`baseTags` and `service: <N>`; the policies and the filters carry none.
+
+The container, `envoy-listener`, runs `/usr/local/bin/envoy-listener` from `image` on port 9020.
+Its health check fetches `/healthz` on the task's own address, the one the target group probes. Its
+environment, in this order:
+
+| Variable | Value |
+| --- | --- |
+| `PORT` | `9020` |
+| `ENVOY_LISTEN_HOST` | `listenHost` |
+| `ENVOY_MACHINE_ID` | `machineId` |
+| `NATS_URLS` | `natsUrls`, joined with commas |
+| `ENVOY_ALLOW_REMOTE_NATS` | `1` when any URL names a host other than `localhost` or a loopback address |
+| `ENVOY_HOST_BRIDGE` | `hostBridge`, when it is not `""` |
+| `ENVOY_NATS_REPLICAS` | `natsReplicas` |
+| `ENVOY_WEBHOOKS` | `webhooks`, joined with commas, when it lists one |
+| `ENVOY_GITHUB_MENTION_TRIGGER`, `ENVOY_REVIEWER_APP_ID` | `mentionTrigger`, `reviewerAppId`, with `github` |
+
+ECS injects its secrets from their ARNs: `ENVOY_GITHUB_WEBHOOK_SECRET` with `github`,
+`ENVOY_SLACK_SIGNING_SECRET` with `slack`, `ENVOY_API_TOKEN`, and `NATS_NKEY_SEED` with
+`seedSecretArn`.
+
+Each alarm pages `alarmTopicArn` on one matching line in five minutes (`Sum` over 300 s at least 1,
+missing data not breaching) and sends the OK transition there too, so the channel sees the signal
+stop: `<N>-publish-failure` (a JetStream publish that did not complete), `<N>-webhook-refused` (a
+delivery NATS can never take, answered 422), `<N>-stream-subject-dropped` (a start that dropped
+another deployment's overlapping stream subject), `<N>-durable-refused` (a start that refused its
+durable consumer) and `<N>-subscribe-exhausted` (a start that gave up binding its durable
+subscription). Each description names `logGroupName` as the log to read, and assumes the wiring of
+the deployment the alarms were written for: that GitHub deliveries come from Dispatch's GitHub App
+(`legion-envoy`), whose redelivery sweep retries them, and that Slack retries an event three times.
+A listener fed otherwise pages the same way, with descriptions that overstate what is retried.
+
+Its outputs are `serviceArn`, `serviceName`, `logGroupName`, `taskDefinitionArn` and
+`internalUrl`, `http://<cloudMapServiceName>.<cloudMapNamespaceName>:9020`.
+
+### `aws:WebhookListener`'s inputs
+
+| Input | Default | What it is |
+| --- | --- | --- |
+| `machineId` | required | `ENVOY_MACHINE_ID`, the listener's name; its durable consumer is `listener-<machineId>`. |
+| `natsUrls` | required | The NATS servers. May come from another resource as an output of the whole list, such as `nats.internal_url.apply(lambda url: [url])`. |
+| `image` | required | The listener image, such as `ghcr.io/sjawhar/legion/envoy@sha256:<digest>`. |
+| `region` | required | The container's `awslogs-region`. |
+| `apiTokenSecretArn` | required | The secret holding the listener's API token. |
+| `apiTokenSecretVersionId` | required | The token's secret version. The component only orders the task definition after it, so pass your `SecretVersion`'s `versionId` output: a literal orders nothing. |
+| `seedSecretArn` | unset | The secret holding the seed of the NATS user the listener connects as. Unset, it connects with none. |
+| `webhooks` | required | The webhooks the listener serves: `["github", "slack"]`, or `[]` for none. With `[]` the container carries no webhook's setting or secret, and the listener mounts no webhook route. This version takes no other list. |
+| `githubWebhookSecretArn`, `reviewerAppId`, `mentionTrigger` | with `github` | Required while `webhooks` lists `github`, refused while it does not. |
+| `slackSigningSecretArn` | with `slack` | Required while `webhooks` lists `slack`, refused while it does not. |
+| `clusterArn`, `executionRoleArn`, `taskRoleArn` | required | The ECS cluster and the task's two roles. |
+| `executionRoleName` | required | The execution role's name, which the read policies attach to. |
+| `subnetIds` | required | The task's subnets, at least one. |
+| `securityGroupId` | required | The listener task's group, which you build. |
+| `targetGroupArn` | required | Your load balancer's target group. |
+| `cloudMapNamespaceId`, `cloudMapNamespaceName`, `cloudMapServiceName`, `cloudMapServiceLogicalName` | required | As for `aws:NatsService`. |
+| `family`, `cpu`, `memory` | required | The task definition's family and size. |
+| `logGroupName`, `logRetentionDays` | required | The log group, which the filters read and the alarms' descriptions name. |
+| `listenHost` | required | `ENVOY_LISTEN_HOST`. The listener binds `127.0.0.1` when it is blank, where the target group cannot reach it. |
+| `hostBridge` | required | `ENVOY_HOST_BRIDGE`; `""` leaves it unset. |
+| `natsReplicas` | required | `ENVOY_NATS_REPLICAS`, at least 1. |
+| `alarmTopicArn` | required | The SNS topic the alarms page and clear on. |
+| `baseTags`, `metricNamespace` | required | As for `aws:NatsService`. |
+| `natsServiceArn` | required | The NATS service's ARN. The component only orders its ECS service after it, so the listener rolls out after NATS, which by then holds the key the listener presents: pass the `NatsService`'s `serviceArn` output, not a literal. |
+| `adopt` | `false` | See [Moving an existing deployment onto them](#moving-an-existing-deployment-onto-them). |
+
+### What the AWS components refuse
+
+Each component refuses these before it registers anything, with an error naming the component and
+the input:
+
+- `aws:NatsService`: a `configHeader` or `configPath` missing while `authorization` is given (an
+  empty `configPath` counts as missing) or given while it is not, each checked before the
+  authorization; then, as `StartScript` checks them (see
+  [NATS authorization](#nats-authorization)), an `authorization` it refuses, a `serverArgs` entry
+  that sets nats-server's `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`,
+  `-cluster_listen` or `-routes`, and a `configHeader` line holding a line break; an empty
+  `subnetIds`; an empty `tailnetTags`; a `baseTags` holding `service`.
+- `aws:WebhookListener`: a `webhooks` not given at all (give `[]` for a listener with no webhook);
+  a webhook's input missing while `webhooks` lists it (a blank `reviewerAppId` or `mentionTrigger`
+  counts as missing) or given while it does not, each input checked before the list; then a
+  `webhooks` other than `[]` or exactly `["github", "slack"]`; a blank `machineId`; a `machineId`,
+  `hostBridge` or `listenHost` holding a control character; a `hostBridge` with leading or trailing
+  whitespace; a blank `listenHost`; a `natsReplicas` below 1; an empty `subnetIds`; a `baseTags`
+  holding `service`.
+- Either, without an `aws` provider (see [Providers and transformations](#providers-and-transformations)).
+
+`natsUrls` may come from another resource, so the listener checks it when the container's
+definitions are computed, at preview unless it is not known until the update: it refuses an empty
+list, and a URL that is blank, holds a comma or holds a control character. An optional secret ARN
+that is given but resolves to no value is refused the same way.
+
+### Inputs that take an output
+
+The inputs a program takes from its other resources are Pulumi inputs: the IDs, ARNs and names of
+your resources, the optional secret ARNs, `natsUrls`, and each element of `subnetIds`. Every other
+input takes a value the program knows when it runs, and the plugin refuses another resource's
+output there, naming the input, before the component registers anything. The schema marks those
+inputs `plain`, but only partly: pulumi-go-provider's inference marks a list's or a map's elements
+and not the list or map, and nothing in an object type. So a generated SDK takes an output for
+`authorization`, `configHeader`, `serverArgs`, `tailnetTags`, `webhooks` and `baseTags`, and the
+plugin refuses it:
+
+```text
+envoy-infra:aws:NatsService resource 'example-nats' has a problem: failed to copy inputs for example-nats (envoy-infra:aws:NatsService): copying input "configHeader": expected destination type to implement pulumi.Input or pulumi.Output, got []string
 ```
 
-The gcp provider is pinned at 10.1.0, the pulumi-gcp release the hub is built against. In the
-project's directory, with your Pulumi backend selected:
+`subnetIds` is a list of inputs, not an input of a list: each subnet ID may be an output, but the
+list itself must be known when the program runs, since each component counts the subnets to name
+their mount targets and place the service. The generated SDK accepts one output for the whole
+list, such as `subnet_ids=vpc.private_subnet_ids`, and the plugin refuses it:
+
+```text
+copying input "subnetIds": expected destination type to implement pulumi.Input or pulumi.Output, got []pulumi.StringInput
+```
+
+Pass a list with one entry per subnet, each entry a subnet's ID or its output.
+
+### Secrets stay yours
+
+The components take each secret as the ARN of a Secrets Manager secret you declare: the
+listener's API token, the NATS user's seed, the webhook secrets and the tailnet OAuth client. They
+create no secret and no random value, and no secret's value passes through their inputs or Pulumi
+state: ECS injects each into its container from the ARN. The listener's policies let its execution
+role read the token and, with `seedSecretArn`, the seed. The execution roles must already be able to
+read the others: the tailnet OAuth client and the GitHub and Slack secrets.
+
+### Every deployment value is an input
+
+The components hold no deployment's names. Each child's logical name comes from the component's
+name, the Cloud Map services' from `cloudMapServiceLogicalName` and the NATS filters' from
+`metricFilterLogicalNamePrefix`; physical names, tags, metric namespaces and the configuration's
+header lines are inputs. What Envoy fixes stays fixed in the component: the ports, the containers'
+names, commands and health checks, the volumes and mount paths, the sidecar's script, the filters'
+patterns and the alarms' shape and text.
+
+The AWS provider normalises the order and whitespace of a task definition's
+`containerDefinitions`, but compares each string in them byte for byte. The components write the
+container definitions as Python's `json.dumps` writes them, and the start script, the sidecar's
+script and the health checks exactly as the deployment they were written for writes them, so that
+deployment's task definitions preview as `same` once it moves onto them.
+
+### Providers and transformations
+
+Each component creates its resources with the `aws` provider you pass it in its `providers`
+option, at the version and with the configuration you give it, and never falls back to a default
+provider of the plugin's own SDK version. Without one, it fails before it registers anything:
+
+```text
+envoy-infra:aws:NatsService needs a "aws" provider in its providers option
+```
+
+A component's children are registered by the plugin, not by your program. `protect` on the
+component reaches each of them, since a child inherits it, and so does a resource transform
+(`transforms`, or `register_resource_transform` in Python). A stack transformation registered with
+the legacy API (`transformations`, `register_stack_transformation`) runs only on your program's
+own resources, so write an option meant for a child as a transform or on the component.
+
+### Moving an existing deployment onto them
+
+With `adopt: true`, each child gets an alias to the root-level resource of its own name and type,
+with no parent, so Pulumi moves that resource's state onto the child instead of deleting one and
+creating the other. The move changes nothing in AWS only when:
+
+- each child's logical name is the existing resource's: the component's name, and
+  `cloudMapServiceLogicalName` and `metricFilterLogicalNamePrefix`, reproduce the existing names;
+- `subnetIds` lists the subnets in their existing order, since subnet `<i>`'s mount targets are
+  `<N>-efs-mt-<i>` and `<N>-tsnet-efs-mt-<i>`;
+- every input reproduces the existing resources, the container definitions byte for byte;
+- the `aws` provider you pass is configured exactly as the one that manages them now. Moving a
+  resource from the default provider to an explicit one is decided by the explicit provider's diff
+  of its configuration, so give it every setting the default provider has, its region included.
+  The preview then also creates that provider, which exists only in Pulumi state.
+
+[A preview proves the move](#proving-a-move-with-a-preview).
+
+### Moving back
+
+The move is one-way. After an update with `adopt: true`, the stack's state holds only the
+children, so a program that drops the component and declares the old root-level resources again
+plans to create each of them and delete each child, both EFS file systems included. To move back,
+either:
+
+- give each root-level resource an alias to its child: the same name and type, with the component
+  as its parent (in Python, `pulumi.Alias(parent="<the component's URN>")`); or
+- move the children's state out and back with `pulumi state move`: to a scratch stack, where each
+  becomes a root-level resource, then back to the stack. Moving them within one stack
+  (`--source` and `--dest` the same) removes them from its state.
+
+Prove either with a preview, as for the move onto the components. Until you no longer need a way
+back, set `protect` on the component: each child inherits it, so Pulumi refuses to delete one.
+Before the move back, unprotect the component alone (`pulumi state unprotect <its URN>`), so the
+update can delete it from state.
+
+### Python example
+
+A program running both components, with its own API token. The `example-*` values and the
+`*.internal.example` hosts stand for your own; each string standing for one of your network's,
+cluster's, roles' or load balancer's resources would be that resource's output:
+
+```python
+import pulumi
+import pulumi_aws as aws
+import sjawhar_envoy_infra as envoy_infra
+
+config = pulumi.Config()
+region = pulumi.Config("aws").require("region")
+
+# Configure this provider as your default aws provider is configured.
+aws_provider = aws.Provider("envoy-aws", region=region)
+components = pulumi.ResourceOptions(providers=[aws_provider])
+
+arn = f"arn:aws:secretsmanager:{region}:000000000000:secret:example/envoy/"
+cluster_arn = f"arn:aws:ecs:{region}:000000000000:cluster/example-cluster"
+execution_role_arn = "arn:aws:iam::000000000000:role/example-execution"
+task_role_arn = "arn:aws:iam::000000000000:role/example-task"
+subnet_ids = ["subnet-0example0000000a", "subnet-0example0000000b"]
+base_tags = {"project": "example-project", "env": "example-env"}
+
+api_token = aws.secretsmanager.Secret("example-api-token", name="example/envoy/api-token")
+api_token_version = aws.secretsmanager.SecretVersion(
+    "example-api-token-version",
+    secret_id=api_token.id,
+    secret_string=config.require_secret("apiToken"),
+)
+
+nats = envoy_infra.aws.NatsService(
+    "example-nats",
+    authorization=envoy_infra.aws.AuthorizationArgs(
+        users=[
+            envoy_infra.aws.UserArgs(
+                name="example-listener",
+                nkey="UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO",
+                publish=envoy_infra.nats.RulesArgs(allow=[">"]),
+                subscribe=envoy_infra.nats.RulesArgs(allow=[">"]),
+                has_seed=True,
+            ),
+        ],
+    ),
+    config_header=["Rendered by envoy-infra.", "Public keys only."],
+    server_args=["--jetstream", "--store_dir", "/data", "--port", "4222", "--http_port", "8222"],
+    config_path="/tmp/nats-server.conf",
+    nats_image="example.registry/nats:<tag>",
+    tailscale_image="example.registry/tailscale:<tag>",
+    tailnet_hostname="example-bus",
+    tailnet_tags=["tag:example-bus"],
+    tailnet_client_secret_arn=arn + "tailnet-oauth",
+    region=region,
+    vpc_id="example-vpc",
+    subnet_ids=subnet_ids,
+    security_group_id="example-nats-sg",
+    cluster_arn=cluster_arn,
+    execution_role_arn=execution_role_arn,
+    task_role_arn=task_role_arn,
+    cloud_map_namespace_id="example-namespace-id",
+    cloud_map_namespace_name="example-namespace.internal.example",
+    cloud_map_service_name="example-bus",
+    cloud_map_service_logical_name="example-nats-cloudmap",
+    family="example-nats",
+    log_group_name="/ecs/example-nats",
+    log_retention_days=30,
+    cpu="256",
+    memory="1024",
+    platform_version="LATEST",
+    base_tags=base_tags,
+    metric_namespace="example/NATS",
+    metric_filter_logical_name_prefix="example-nats",
+    opts=components,
+)
+
+listener = envoy_infra.aws.WebhookListener(
+    "example-listener",
+    machine_id="example-fargate",
+    nats_urls=nats.internal_url.apply(lambda url: [url]),
+    image="example.registry/envoy@sha256:<digest>",
+    region=region,
+    api_token_secret_arn=api_token.arn,
+    api_token_secret_version_id=api_token_version.version_id,
+    seed_secret_arn=arn + "nats-nkey-seed-example-listener",
+    webhooks=["github", "slack"],
+    github_webhook_secret_arn=arn + "github-webhook",
+    slack_signing_secret_arn=arn + "slack-signing",
+    reviewer_app_id="1234567",
+    mention_trigger="@legion",
+    cluster_arn=cluster_arn,
+    execution_role_arn=execution_role_arn,
+    execution_role_name="example-execution",
+    task_role_arn=task_role_arn,
+    subnet_ids=subnet_ids,
+    security_group_id="example-listener-sg",
+    target_group_arn=f"arn:aws:elasticloadbalancing:{region}:000000000000:targetgroup/example-hooks/0123456789abcdef",
+    cloud_map_namespace_id="example-namespace-id",
+    cloud_map_namespace_name="example-namespace.internal.example",
+    cloud_map_service_name="example-hooks",
+    cloud_map_service_logical_name="example-listener-cloudmap",
+    family="example-listener",
+    log_group_name="/ecs/example-listener",
+    log_retention_days=30,
+    cpu="256",
+    memory="512",
+    listen_host="0.0.0.0",
+    host_bridge="127.0.0.1",
+    nats_replicas=1,
+    alarm_topic_arn=f"arn:aws:sns:{region}:000000000000:example-alarms",
+    base_tags=base_tags,
+    metric_namespace="example/EnvoyListener",
+    nats_service_arn=nats.service_arn,
+    opts=components,
+)
+
+pulumi.export("natsUrl", nats.internal_url)
+pulumi.export("listenerUrl", listener.internal_url)
+```
+
+With `aws:region` and the secret `apiToken` set, `pulumi preview` plans `+ 47 to create`: the stack,
+the explicit provider, the token's secret and version, the two components and their 22 and 19
+children. Its outputs are `natsUrl: "nats://example-bus.example-namespace.internal.example:4222"`
+and `listenerUrl: "http://example-hooks.example-namespace.internal.example:9020"`.
+
+## Proving a move with a preview
+
+A preview proves a move onto a component. Apply it only when the preview:
+
+- shows every adopted resource as `same`, and no step for its old root-level name;
+- updates, replaces and deletes nothing;
+- creates only what exists only in Pulumi state: the components themselves, and provider resources
+  (`pulumi:providers:*`) such as an explicit provider you pass a component and the plugin's own
+  default provider, `pulumi:providers:envoy-infra`;
+- changes no stack output.
+
+This lists every step that is not `same`:
 
 ```sh
-pulumi stack init <stack>
-pulumi config set --secret tailnetAuthKey <tailnet auth key>
-pulumi preview
+pulumi preview --json --show-sames | jq -r '.steps[] | select(.op != "same") | "\(.op) \(.urn)"'
 ```
 
-The preview plans `+ 12 to create`: the stack, the gcp provider `gcp-example-project`, the hub
-`example-hub`, and the hub's nine children as
-[What `gcp:NatsHub` deploys](#what-gcpnatshub-deploys) lists them, the network among them. Its
-outputs are `natsUrl: "nats://example-hub:4222"` and `instanceGroup`, `example-hub-` and a random
-suffix. The template's `user-data` is `gcp/testdata/cloud-config.golden` byte for byte. `pulumi up`
-then applies it. The first example's listener reaches this hub with `natsUrls` set to
-`nats://example-hub:4222` and the seed of `example-host-a`.
+It does not show a changed stack output, since that leaves the stack's own step `same`. A plain
+`pulumi preview` lists each changed output under `Outputs:`.
+
+## `envoy-infra render`
+
+`envoy-infra render` prints what the AWS components register, for a program that needs it outside
+Pulumi, such as a check that runs a real NATS server on the start script or one that tests the
+filters' patterns against log lines. Each subcommand builds its output with the function the
+component builds it with, and a flag sets the component's input its `--help` names. A value the
+component refuses is refused, naming the flag, as `refused: --<flag>: <reason>` with exit 2; a usage
+error prints the usage and exits 2. It reads only its flags and the file `--authorization-file`
+names, and calls no API.
+
+### nats-start-script
+
+```text
+envoy-infra render nats-start-script --authorization-file <json> [--config-header <line>]... [--server-arg <arg>]... --config-path <path>
+```
+
+Prints the script `aws:NatsService`'s `nats` container runs under `/bin/sh -c`, exactly as the
+component registers it, with no newline after it. The file holds the component's `authorization`
+input as JSON, keyed as the schema spells it (`users`, each with `name`, `nkey`, `publish` and
+`subscribe` with `allow` and `deny`, and `hasSeed`; `noAuthUser`); a key it does not have, a key in
+another letter case, or anything after the one JSON value, is refused. Give `--config-header` once
+per line, none for the component's `configHeader: []`, and `--server-arg` once per argument, in
+order. For a file with one user:
+
+```json
+{"users": [{"name": "example-listener", "nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "publish": {"allow": [">"]}, "subscribe": {"allow": [">"]}, "hasSeed": true}]}
+```
+
+```text
+$ envoy-infra render nats-start-script --authorization-file authorization.json --config-header 'Rendered by envoy-infra.' --server-arg --jetstream --server-arg --store_dir --server-arg /data --config-path /tmp/nats-server.conf
+set -eu; printf '%s' '# Rendered by envoy-infra.
+authorization {
+  users: [
+    # example-listener
+    {"nkey": "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO", "permissions": {"publish": {"allow": [">"]}, "subscribe": {"allow": [">"]}}}
+  ]
+}
+' > /tmp/nats-server.conf; exec nats-server --config /tmp/nats-server.conf --jetstream --store_dir /data
+```
+
+### webhook-listener-env
+
+```text
+envoy-infra render webhook-listener-env --machine-id <id> --nats-url <url>... [--webhook <name>]... [--reviewer-app-id <id>] [--mention-trigger <t>] --listen-host <h> --host-bridge <h> --nats-replicas <n>
+```
+
+Prints `aws:WebhookListener`'s container environment, one `KEY=value` line per variable in the
+container's order. The secrets ECS injects are not printed. It refuses what the component refuses of
+these inputs, and a value holding a line break, which no line could carry:
+
+```text
+$ envoy-infra render webhook-listener-env --machine-id example-fargate --nats-url nats://example-bus.example-namespace.internal.example:4222 --webhook github --webhook slack --reviewer-app-id 1234567 --mention-trigger @legion --listen-host 0.0.0.0 --host-bridge 127.0.0.1 --nats-replicas 1
+PORT=9020
+ENVOY_LISTEN_HOST=0.0.0.0
+ENVOY_MACHINE_ID=example-fargate
+NATS_URLS=nats://example-bus.example-namespace.internal.example:4222
+ENVOY_ALLOW_REMOTE_NATS=1
+ENVOY_HOST_BRIDGE=127.0.0.1
+ENVOY_NATS_REPLICAS=1
+ENVOY_WEBHOOKS=github,slack
+ENVOY_GITHUB_MENTION_TRIGGER=@legion
+ENVOY_REVIEWER_APP_ID=1234567
+```
+
+With no `--webhook`, it prints no `ENVOY_WEBHOOKS` line and no GitHub lines, as the component writes
+none for `webhooks: []`, and refuses `--reviewer-app-id` and `--mention-trigger`.
+
+Without `--reviewer-app-id`, it prints
+`refused: --reviewer-app-id: reviewerAppId is required with webhook "github"` and exits 2.
+
+### metric-filters
+
+```text
+envoy-infra render metric-filters --component nats-service|webhook-listener --metric-namespace <ns> --logical-name-prefix <p> --json
+```
+
+Prints a component's log metric filters as a JSON array, in the order the component registers
+them, each with its `logicalName`, `pattern`, `metricName` and `metricNamespace`.
+`--logical-name-prefix` is what their logical names start with: an `aws:NatsService`'s
+`metricFilterLogicalNamePrefix`, an `aws:WebhookListener`'s own name. `--json` is required: JSON is
+the one output format. The listener's first filter, for a listener named `example-listener`:
+
+```json
+{
+  "logicalName": "example-listener-publish-failure-filter",
+  "pattern": "{ $.level = \"ERROR\" && $.msg = \"listener exception publish failed\" }",
+  "metricName": "PublishFailures",
+  "metricNamespace": "example/EnvoyListener"
+}
+```
 
 ## NATS seeds
 
@@ -750,12 +954,14 @@ region it names. Before any call, it refuses a Secrets Manager endpoint you conf
 not `https`, unless it is this machine's loopback address, since a seed would cross the network in
 plain text; and it retrieves your credentials, and with none it can use, it stops with
 `refused: <name>: no usable AWS credentials …`. With `--expect-account`, it then asks STS whose
-credentials they are and refuses, before any other call, unless they are that account's. STS and
-Secrets Manager each resolve their own endpoint, so the secret is checked too: `DescribeSecret`,
-every mode's first call, answers the secret's ARN, and the command refuses a secret in another
-region than the one it sends to, and with `--expect-account` one in another account, before it
-reads or writes a seed. Pass `--expect-account` whenever you name a secret, so that a seed is never
-written to, or read from, a secret of the same name in another account.
+credentials they are and refuses, before any other call, unless they are that account's; an empty
+`--expect-account`, as `--expect-account "$ACCOUNT"` becomes with the variable unset, is a usage
+error, never a skipped check. STS and Secrets Manager each resolve their own endpoint, so the
+secret is checked too: `DescribeSecret`, every mode's first call, answers the secret's ARN, and the
+command refuses a secret in another region than the one it sends to, and with `--expect-account`
+one in another account, before it reads or writes a seed. Pass `--expect-account` whenever you name
+a secret, so that a seed is never written to, or read from, a secret of the same name in another
+account.
 
 With `gcp-secret-manager`, `--name` is the secret's whole name, which names its project, so the
 store refuses `--region` and `--expect-account`, and has no flag of its own to expect a project:
@@ -809,22 +1015,28 @@ client speaks TLS to every endpoint, so a seed is never sent in plain text.
    ```
 
    `generate` makes a new nkey user and writes its seed as the secret's first version. It refuses a
-   secret that is absent, is scheduled for deletion or holds any version, deprecated ones
-   included, so it never replaces a seed a client may already read. It prints the public key just
-   before the write, so the key is on your terminal whatever happens next, and the version id once
-   the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
-   somewhere you can read: `>/dev/null`, or a closed stdout, which a Go program sees as
-   `/dev/null`, discards the key with nothing to tell. After the write it lists the versions again
+   secret that is absent, is scheduled for deletion or holds any version: the version
+   `DescribeSecret` names as `AWSCURRENT`, before it lists any, so even when the versions listing,
+   which Secrets Manager answers eventually consistently, does not show it yet, and otherwise any
+   the listing shows, deprecated ones included, so it never replaces a seed a client may already
+   read. Every write uses one fixed `ClientRequestToken`, so a second run's first-version write with
+   another seed, racing this one, is refused (`ResourceExistsException`, exit 2) rather than written
+   beside it, and the key that run printed is not stored. It prints the public key just before the
+   write, so the key is on your terminal whatever happens next, and the version id once the write
+   answers. If it cannot print the key, it writes nothing and exits 2. With stdout on the null
+   device it refuses before any call, exit 2, since the key would be lost: `>/dev/null`, and a
+   closed stdout, which a Go program sees as `/dev/null`. After the write it lists the versions again
    and reads back the version Secrets Manager serves by default (`AWSCURRENT`), which must be the
    one it wrote and derive the public key it printed. Secrets Manager's reads are eventually
    consistent, so while the listing shows no version yet, or no version is `AWSCURRENT`, it looks
    again after pauses of 0.25, 0.5, 1, 2 and 4 seconds; if the write is still not shown, it stops
    with an error after writing. More than one version, or another version served by default, is
    another writer's race.
-4. Put the public key into the NATS server's authorization: as a user's `publicKey` on a
-   `gcp:NatsHub` (see [The hub's users](#the-hubs-users)), or as a `core.Authorization` user's
-   `NKey`, with `HasSeed` set (see [NATS authorization](#nats-authorization)). It is public, so it
-   may sit in the stack's configuration in plain text.
+4. Put the public key into the NATS server's authorization: as a user's `nkey` on a
+   `gcp:NatsHub` (see [The hub's users](docs/nats-hub.md#the-hubs-users)), or as a
+   `core.Authorization` user's `NKey`, with `HasSeed` set (see
+   [NATS authorization](#nats-authorization)). It is public, so it may sit in the stack's
+   configuration in plain text.
 5. Verify that the secret serves the seed of that key:
 
    ```sh
@@ -857,24 +1069,31 @@ envoy-infra seed verify --store gcp-secret-manager --name projects/example-proje
 ```
 
 ```text
-projects/example-project/secrets/envoy-nats-seed-example-host-a: present, no versions
+projects/example-project/secrets/envoy-nats-seed-example-host-a: present; latest: no
 public key: U<55 more characters>
 version id: 1
 projects/example-project/secrets/envoy-nats-seed-example-host-a latest (version 1) derives <the public key>: yes
 ```
 
-`generate` refuses a secret that holds any version, whatever its state, destroyed ones included.
-Secret Manager's listings and `latest` are eventually consistent with a new version (only an
-access by version number is not:
-[resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)), so it
-reads both before the write: it refuses, naming the version, when `latest` names one, as
-`refused: <name> already holds version <n>, which latest names …`, and otherwise when the listing
-shows any. Secret Manager numbers a secret's versions from 1, so the version it adds must be
-version 1: any other number shows the secret held a version both reads missed, and `generate`
-stops with an error after writing, naming that version. It reads back `versions/latest`, the
-version Secret Manager serves by default, which must be the one it added; while the listing shows
-no version yet, or `latest` names none, it waits as it does on Secrets Manager. A `latest` that
-names a version it will not serve, such as a disabled one, is no wait but an error after writing.
+`generate` refuses a secret set to expire, since Secret Manager deletes it with every version when
+its `expire_time` comes, and a secret that holds any version, whatever its state, destroyed ones
+included. Secret Manager's listings and `latest` are eventually consistent with a new version, and
+only an access by version number is not
+([resource consistency](https://cloud.google.com/secret-manager/docs/access-secret-version)). So
+it refuses, naming the version, when `latest` names one, as
+`refused: <name> already serves version <n> by default (latest) …`, or, for a version that is not
+enabled, `refused: <name> already holds version <n>, which latest names though it is <STATE> …`;
+otherwise when the listing shows any; and, when it shows none, when an access of `versions/1`, the
+number every secret's first version gets, finds a version in any state. Then the version it adds
+must be version 1: any other number is another writer's version that landed after those reads, and
+`generate` stops with an error after writing, naming it. It reads version 1 back by number, which
+must be the value it wrote, then `versions/latest`, the version Secret Manager serves by default,
+which must be the one it added; while the listing shows no version yet, or `latest` names none, it
+waits as it does on Secrets Manager. A `latest` that names a version it will not serve, such as a
+disabled one, is no wait but an error after writing. Once a secret holds a second version,
+`latest` names it and cannot be pointed back at version 1: disabling or destroying version 2
+leaves `latest` naming a version it will not serve. A version 2 is undone only by adding version
+1's seed again, as version 3, or by moving every client to version 2's key.
 
 The client reads the seed from the store when it is deployed, such as into `host:Listener`'s
 `seed` input.
@@ -888,16 +1107,17 @@ The client reads the seed from the store when it is deployed, such as into `host
 | `<name>: absent` | does not exist. |
 | `<name>: present, scheduled for deletion (<date>)` | is deleted and waiting out its recovery window. The date is in this machine's time zone, as `2026-11-01 12:00:00+00:00`, with microseconds after the seconds when it has any. |
 | `<name>: present; AWSCURRENT: no` | exists and serves no version by default. `generate` writes to it unless it holds another version, which `check` does not list. |
-| `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. |
+| `<name>: present; AWSCURRENT: yes (version <id>)` | serves version `<id>` by default. `generate` refuses it. |
 
 On Secret Manager it prints one of:
 
 | Line | The secret |
 | --- | --- |
 | `<name>: absent` | does not exist. |
-| `<name>: present, no versions` | exists and holds no version. `generate` writes to it. |
-| `<name>: present; latest: version <n>` | serves version `<n>`, its newest, by default. |
-| `<name>: present; latest: version <n> is <STATE>` | its newest version, `<n>`, is `DISABLED` or `DESTROYED`. Secret Manager's default, `versions/latest`, names the newest version whatever its state, so the secret serves no value by default, even when an older version is enabled. |
+| `<name>: present, scheduled for deletion (<date>)` | is set to expire at `<date>`, given as on Secrets Manager: Secret Manager deletes it, with every version, then. `generate` and `verify` refuse it. |
+| `<name>: present; latest: no` | exists, and `latest` names no version: it holds none, or `latest` has not caught up with one just added. `generate` writes to it unless a version is listed, or `versions/1` is found. |
+| `<name>: present; latest: yes (version <n>)` | serves version `<n>`, its newest, by default. `generate` refuses it. |
+| `<name>: present; latest: version <n> is <STATE>` | its newest version, `<n>`, is `DISABLED` or `DESTROYED`. Secret Manager's default, `versions/latest`, names the newest version whatever its state, so the secret serves no value by default, even when an older version is enabled. `generate` refuses it. |
 
 `verify` reads the version the store serves by default, whose label `<label>` is `AWSCURRENT` or
 `latest`, and prints one of:
@@ -907,7 +1127,7 @@ On Secret Manager it prints one of:
 | `<name> <label> (version <id>) derives <key>: yes` | 0: the stored seed is the seed of `<key>`. |
 | `<name> <label> (version <id>) derives <key>: no` | 1: it is the seed of another user. |
 | `<name> <label> (version <id>) is not an nkey user seed: <reason>` | 1: the stored value is no user seed, such as a public key, a seed of another kind or a seed with a line break after it. The reason never quotes the value. |
-| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked and the read fails, after it looks again. |
+| `<name>: present; latest: version <n> is <STATE>` | 1, on Secret Manager: the newest version is not enabled, so there is no value to check. `verify` prints this before it reads the value, or, when the version is disabled or destroyed after `verify` looked, once the read is refused for that version's state. |
 
 `verify` refuses a `--public-key` that is not a user public key without printing it, since a seed
 pasted there must not reach the terminal.
@@ -939,13 +1159,14 @@ A secret encrypted with a customer managed KMS key, rather than `aws/secretsmana
 (`generate`), as [Secrets Manager's encryption](https://docs.aws.amazon.com/secretsmanager/latest/userguide/security-encryption.html)
 describes.
 
-On Secret Manager, where each version call names `versions/latest`:
+On Secret Manager, where a version call names `versions/latest` unless the table names
+`versions/1`:
 
 | Mode | Calls | Permissions |
 | --- | --- | --- |
 | `check` | `GetSecret`, `GetSecretVersion` | `secretmanager.secrets.get`, `secretmanager.versions.get` |
-| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` fails, `GetSecret` and `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
-| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AddSecretVersion`, `ListSecretVersions`, `AccessSecretVersion`, the last two again after each pause while Secret Manager has not caught up with the write | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
+| `verify` | `GetSecret`, `GetSecretVersion`, `AccessSecretVersion`; when `AccessSecretVersion` answers `FAILED_PRECONDITION`, `GetSecretVersion` again | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.access` |
+| `generate` | `GetSecret`, `GetSecretVersion`, `ListSecretVersions`, `AccessSecretVersion` on `versions/1`, `AddSecretVersion`, `AccessSecretVersion` on `versions/1`, then `ListSecretVersions` and `AccessSecretVersion`, with `AccessSecretVersion` on `versions/1` between them when the listing shows no version, again after each pause while Secret Manager has not caught up with the write, and `GetSecretVersion` when the last answers `FAILED_PRECONDITION` | `secretmanager.secrets.get`, `secretmanager.versions.get`, `secretmanager.versions.list`, `secretmanager.versions.add`, `secretmanager.versions.access` |
 
 Each permission is the one the API reference names for its call:
 [GetSecret](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/get),
@@ -954,8 +1175,9 @@ Each permission is the one the API reference names for its call:
 [AddSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets/addVersion)
 and [AccessSecretVersion](https://cloud.google.com/secret-manager/docs/reference/rest/v1/projects.secrets.versions/access).
 `verify` stops after `GetSecretVersion` when the newest version is not enabled. When
-`AccessSecretVersion` fails, it looks at the newest version again: one disabled or destroyed since
-gets its `is <STATE>` line, exit 1, and otherwise the read's failure is refused, exit 2. Of the
+`AccessSecretVersion` answers `FAILED_PRECONDITION`, the newest version was disabled or destroyed
+since: one `GetSecretVersion` names it, for its `is <STATE>` line, exit 1. Any other failed read is
+refused, exit 2. Of the
 [predefined roles](https://cloud.google.com/secret-manager/docs/access-control), Secret Manager
 Viewer (`roles/secretmanager.viewer`) holds `check`'s permissions, `verify` also needs Secret
 Manager Secret Accessor (`roles/secretmanager.secretAccessor`), and `generate` needs both and Secret
@@ -965,15 +1187,20 @@ Manager Secret Version Adder (`roles/secretmanager.secretVersionAdder`).
 
 `core.Authorization` is a NATS server's nkey authorization: the users it knows by public key, what
 each may publish and subscribe to, and the user a client presenting no credential becomes. A NATS
-server's configuration is rendered from it, so it holds public keys only. `gcp:NatsHub` renders
-its server's from its `users` (see [The hub's users](#the-hubs-users)); `host:Listener` runs no
+server's configuration is rendered from it, so it holds public keys only. `aws:NatsService` takes
+it as its `authorization` input, an `aws:Authorization` of `aws:User`s, whose properties are these
+fields in camelCase (`users[].name`, `nkey`, `publish`, `subscribe`, `allow`, `deny`, `hasSeed`,
+`noAuthUser`); `envoy-infra render nats-start-script` reads the same from its file. A user's
+`publish` and `subscribe` are each a `nats:Rules`, the one rules type every NATS component takes,
+whatever its cloud: `nats.RulesArgs` in the Python and Go SDKs. `gcp:NatsHub` renders its server's
+from its `users` (see [The hub's users](docs/nats-hub.md#the-hubs-users)); `host:Listener` runs no
 NATS server and takes none.
 
 | Field | What it is |
 | --- | --- |
 | `Users[].Name` | The user's name: lowercase letters, digits and hyphens, 1 to 48 characters, starting and ending with a letter or digit. |
 | `Users[].NKey` | The user's public key, `U` and 55 more characters, as `envoy-infra seed generate` prints it. Empty for a pending user. |
-| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
+| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe allow entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
 | `Users[].HasSeed` | The consumer stores a seed for this user. |
 | `NoAuthUser` | Optional: the name of a keyed user without a seed, whom a client presenting no credential becomes. |
 
@@ -997,6 +1224,10 @@ An authorization is refused, with an error naming the field and, for a user's fi
   tokens, none empty, with `*` and `>` only as whole tokens and `>` only last, and no whitespace
   or control character anywhere;
 - a `<subject> <queue>` entry under `Publish`, since a queue group scopes only subscriptions;
+- a `<subject> <queue>` entry in `Subscribe.Deny`, which nats-server before 2.15 enforces more
+  loosely than it reads: beside a plain deny of the same subject it re-allows every other queue
+  group, and alone it misses a wildcard subscription that covers its subject. Deny the plain
+  subject, or narrow `Subscribe.Allow`;
 - a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line
@@ -1025,10 +1256,14 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
 path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
-argument that sets `-c`, `-config`, `-user`, `-pass` or `-auth` (with one dash or two, and with or
-without `=`), naming its index: nats-server takes the last value of a flag, so a later `-c` would
-load another file in place of the rendered one, and the others would add a credential beside its
-nkey users.
+argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or
+`-routes` (with one dash or two, and with or without `=`), naming its index: nats-server takes the
+last value of a flag, so a later `-c` would load another file in place of the rendered one;
+`-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
+has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
+and a server routed to it would see every message its users publish. Each of its refusals is a
+`core.InputError` naming the input it refuses: `authorization`, `configPath`, `serverArgs` or
+`configHeader`.
 
 ### Permission sets
 
@@ -1067,6 +1302,12 @@ and a session, connected as one user holding it, are checked against real nats-s
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
 a later release.
+
+The listener's set covers a stream it creates, or one a listener of the same names created. A
+stream an older listener created with the role lanes on it is migrated by the listener's start-up
+(`packages/envoy/internal/bus/stream.go`, `migrateRoleLanesOffStream`), which lists the stream's
+consumers, reads and updates every one, and purges the role lanes. The set grants none of those
+calls, so on such a stream, as on a hub given a backup of one, the server refuses the migration.
 
 ## Changing the module
 

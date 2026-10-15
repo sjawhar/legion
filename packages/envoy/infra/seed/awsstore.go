@@ -6,10 +6,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
-	"reflect"
 	"regexp"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -18,15 +16,29 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
-	"github.com/aws/smithy-go"
 	"github.com/aws/smithy-go/logging"
 )
 
 // AWSSecretsManager is the --store value of AWS Secrets Manager.
 const AWSSecretsManager = "aws-secrets-manager"
 
+// AWS is the store type --store aws-secrets-manager names.
+var AWS = StoreType{
+	Open: OpenAWS,
+	Help: "AWS Secrets Manager. --name is the secret's name or ARN; --region overrides the region the AWS " +
+		"configuration names; pass --expect-account whenever you name a secret.",
+}
+
 // awsCurrent is the staging label of the version Secrets Manager serves by default.
 const awsCurrent = "AWSCURRENT"
+
+// firstVersionToken is the ClientRequestToken of every write generate makes, which is only ever a
+// secret's first version. Secrets Manager names the version by the token: for a token it already
+// holds, it writes nothing when the value is the same and refuses with ResourceExistsException when
+// it differs. So an SDK retry of a lost answer writes no second version, and a second run's
+// first-version write with another seed is refused rather than written beside the first. A version
+// id is per secret, so one constant serves every secret.
+const firstVersionToken = "037f74cb-0e19-4a2d-b95f-6fba44b44b4d"
 
 var awsAccountID = regexp.MustCompile(`^[0-9]{12}$`)
 
@@ -128,7 +140,7 @@ func (s *awsStore) Describe(ctx context.Context, name string) (Description, erro
 		return Description{}, nil
 	}
 	if err != nil {
-		return Description{}, awsFailed("describe-secret", name, err)
+		return Description{}, failed("describe-secret", name, err)
 	}
 	if err := s.expected(name, aws.ToString(out.ARN)); err != nil {
 		return Description{}, err
@@ -141,7 +153,7 @@ func (s *awsStore) Describe(ctx context.Context, name string) (Description, erro
 	// every label.
 	for version, stages := range out.VersionIdsToStages {
 		if slices.Contains(stages, awsCurrent) {
-			d.CurrentVersion = version
+			d.Default = &Version{ID: version}
 		}
 	}
 	return d, nil
@@ -166,43 +178,40 @@ func (s *awsStore) expected(name, secretARN string) error {
 // Versions counts every version ListSecretVersionIds lists with IncludeDeprecated, across every
 // page: an unlabelled version is still a seed a client may have read.
 func (s *awsStore) Versions(ctx context.Context, name string) (int, error) {
-	in := &secretsmanager.ListSecretVersionIdsInput{SecretId: aws.String(name), IncludeDeprecated: aws.Bool(true)}
-	handedOut := map[string]bool{}
-	count := 0
-	for {
+	return countVersions("list-secret-version-ids", name, func(token string) (int, string, error) {
+		in := &secretsmanager.ListSecretVersionIdsInput{SecretId: aws.String(name), IncludeDeprecated: aws.Bool(true)}
+		if token != "" {
+			in.NextToken = aws.String(token)
+		}
 		page, err := s.client.ListSecretVersionIds(ctx, in)
 		if err != nil {
-			return 0, awsFailed("list-secret-version-ids", name, err)
+			return 0, "", failed("list-secret-version-ids", name, err)
 		}
+		n := 0
 		for _, v := range page.Versions {
 			if v.VersionId != nil {
-				count++
+				n++
 			}
 		}
-		token := aws.ToString(page.NextToken)
-		if token == "" {
-			return count, nil
-		}
-		// The SDK's paginator stops quietly on a repeated token, which would undercount versions;
-		// following it would never end.
-		if handedOut[token] {
-			return 0, fmt.Errorf("list-secret-version-ids %s failed: the listing handed out page token %s twice", name, token)
-		}
-		handedOut[token] = true
-		in.NextToken = aws.String(token)
-	}
+		return n, aws.ToString(page.NextToken), nil
+	})
 }
 
-// Put writes value as a SecretString. The SDK fills in a fresh ClientRequestToken for each call and
-// its retries resend that token, so a lost answer retried writes no second version. The written
-// version must be AWSCURRENT.
+// Put writes value as a SecretString under firstVersionToken, which the SDK's retries resend. A
+// first version already written with another value is ResourceExistsException, a refusal: nothing
+// was written. The written version must be AWSCURRENT.
 func (s *awsStore) Put(ctx context.Context, name string, value []byte) (string, error) {
 	out, err := s.client.PutSecretValue(ctx, &secretsmanager.PutSecretValueInput{
-		SecretId:     aws.String(name),
-		SecretString: aws.String(string(value)),
+		SecretId:           aws.String(name),
+		SecretString:       aws.String(string(value)),
+		ClientRequestToken: aws.String(firstVersionToken),
 	})
+	var exists *types.ResourceExistsException
+	if errors.As(err, &exists) {
+		return "", refuse("%v; another generate wrote this secret's first version, with another seed", failed("put-secret-value", name, err))
+	}
 	if err != nil {
-		return "", awsFailed("put-secret-value", name, err)
+		return "", failed("put-secret-value", name, err)
 	}
 	version := aws.ToString(out.VersionId)
 	if version == "" {
@@ -220,62 +229,10 @@ func (s *awsStore) Current(ctx context.Context, name string) (string, []byte, er
 	out, err := s.client.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{SecretId: aws.String(name)})
 	var notFound *types.ResourceNotFoundException
 	if errors.As(err, &notFound) {
-		return "", nil, notServed{awsFailed("get-secret-value", name, err)}
+		return "", nil, notServed{failed("get-secret-value", name, err)}
 	}
 	if err != nil {
-		return "", nil, awsFailed("get-secret-value", name, err)
+		return "", nil, failed("get-secret-value", name, err)
 	}
 	return aws.ToString(out.VersionId), []byte(aws.ToString(out.SecretString)), nil
-}
-
-// awsFailed is "<call> <secret> failed: <code>": an AWS error's code, or the SDK error's class.
-func awsFailed(call, name string, err error) error {
-	return fmt.Errorf("%s %s failed: %s", call, name, errorClass(err))
-}
-
-// sdkWrappers are the error types the SDK and fmt wrap a failure in, which name nothing of it: a
-// lost answer is an OperationError around a MaxAttemptsError around a ResponseError (both the AWS
-// and the smithy one are http.ResponseError) around the RequestSendError that says what happened.
-var sdkWrappers = []string{"*smithy.OperationError", "*retry.MaxAttemptsError", "*http.ResponseError", "*fmt.wrapError"}
-
-// errorClass names err without its text: its name when it has one (errorName), otherwise the type
-// of the first error in its chain that is not one of the SDK's wrappers, such as RequestSendError.
-func errorClass(err error) string {
-	if name, ok := errorName(err); ok {
-		return name
-	}
-	for e := err; ; {
-		name := reflect.TypeOf(e).String()
-		next := errors.Unwrap(e)
-		if next == nil || !slices.Contains(sdkWrappers, name) {
-			return name[strings.LastIndex(name, ".")+1:]
-		}
-		e = next
-	}
-}
-
-// errorName names err when it says what happened without its text: an AWS error's code, or a
-// context's end.
-func errorName(err error) (string, bool) {
-	var api smithy.APIError
-	switch {
-	case errors.As(err, &api) && api.ErrorCode() != "":
-		return api.ErrorCode(), true
-	case errors.Is(err, context.Canceled):
-		return "canceled", true
-	case errors.Is(err, context.DeadlineExceeded):
-		return "deadline exceeded", true
-	}
-	return "", false
-}
-
-// pythonDate is t in loc as Python's str prints a datetime: microseconds only when there are some,
-// then the offset as ±hh:mm. check prints a deletion date in this form.
-func pythonDate(t time.Time, loc *time.Location) string {
-	t = t.In(loc)
-	text := t.Format("2006-01-02 15:04:05")
-	if micro := t.Nanosecond() / 1000; micro != 0 {
-		text += fmt.Sprintf(".%06d", micro)
-	}
-	return text + t.Format("-07:00")
 }

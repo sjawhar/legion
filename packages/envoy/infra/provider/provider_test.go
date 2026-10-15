@@ -27,34 +27,55 @@ func schemaJSON(t *testing.T) string {
 	return resp.Schema
 }
 
+// schema is the part of the plugin's schema the tests read.
+type schema struct {
+	PluginDownloadURL string `json:"pluginDownloadURL"`
+	Language          struct {
+		Go struct {
+			ImportBasePath string `json:"importBasePath"`
+		} `json:"go"`
+	} `json:"language"`
+	Resources map[string]struct {
+		IsComponent     bool `json:"isComponent"`
+		InputProperties map[string]struct {
+			Secret bool   `json:"secret"`
+			Ref    string `json:"$ref"`
+		} `json:"inputProperties"`
+		RequiredInputs []string `json:"requiredInputs"`
+	} `json:"resources"`
+	Types map[string]struct {
+		Properties map[string]struct {
+			Ref string `json:"$ref"`
+		} `json:"properties"`
+	} `json:"types"`
+}
+
+// servedSchema is schemaJSON decoded.
+func servedSchema(t *testing.T) schema {
+	t.Helper()
+	var s schema
+	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &s))
+	return s
+}
+
 func TestSchemaNamesTheReleaseDownloadURLAndTheGoImportPath(t *testing.T) {
-	var schema struct {
-		PluginDownloadURL string `json:"pluginDownloadURL"`
-		Language          struct {
-			Go struct {
-				ImportBasePath string `json:"importBasePath"`
-			} `json:"go"`
-		} `json:"language"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
-	require.Equal(t, "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}",
-		schema.PluginDownloadURL)
-	require.Equal(t, "github.com/sjawhar/envoy/infra/sdk/go/envoyinfra", schema.Language.Go.ImportBasePath)
+	s := servedSchema(t)
+	require.Equal(t, "https://github.com/sjawhar/legion/releases/download/envoy-infra-v${VERSION}", s.PluginDownloadURL)
+	require.Equal(t, "github.com/sjawhar/envoy/infra/sdk/go/envoyinfra", s.Language.Go.ImportBasePath)
+}
+
+// The schema's types are exactly the components' own, the rules every NATS component shares under
+// nats, which names no cloud.
+func TestSchemaTypes(t *testing.T) {
+	require.ElementsMatch(t, []string{
+		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
+		"envoy-infra:aws:Authorization", "envoy-infra:aws:User", "envoy-infra:nats:Rules",
+		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions",
+	}, slices.Collect(maps.Keys(servedSchema(t).Types)))
 }
 
 func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
-	var schema struct {
-		Resources map[string]struct {
-			IsComponent     bool `json:"isComponent"`
-			InputProperties map[string]struct {
-				Secret bool   `json:"secret"`
-				Ref    string `json:"$ref"`
-			} `json:"inputProperties"`
-		} `json:"resources"`
-		Types map[string]json.RawMessage `json:"types"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
-	listener, ok := schema.Resources["envoy-infra:host:Listener"]
+	listener, ok := servedSchema(t).Resources["envoy-infra:host:Listener"]
 	require.True(t, ok, "the schema lists envoy-infra:host:Listener")
 	require.True(t, listener.IsComponent)
 	require.True(t, listener.InputProperties["seed"].Secret, "seed is a secret input")
@@ -63,22 +84,9 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 	// WatchdogArgs would reach consumers as WatchdogArgsArgs.
 	require.Equal(t, "#/types/envoy-infra:host:Watchdog", listener.InputProperties["watchdog"].Ref)
 	require.Equal(t, "#/types/envoy-infra:host:Adopt", listener.InputProperties["adopt"].Ref)
-	require.ElementsMatch(t, []string{
-		"envoy-infra:host:Watchdog", "envoy-infra:host:Adopt",
-		"envoy-infra:gcp:NatsUser", "envoy-infra:gcp:Permissions", "envoy-infra:gcp:Rules",
-	}, slices.Collect(maps.Keys(schema.Types)))
 }
 
 func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
-	prov, err := provider.New()
-	require.NoError(t, err)
-	server, err := integration.NewServer(t.Context(), "envoy-infra", semver.MustParse("0.0.1"),
-		integration.WithProvider(prov))
-	require.NoError(t, err)
-
-	resp, err := server.GetSchema(p.GetSchemaRequest{})
-	require.NoError(t, err)
-
 	type property struct {
 		Type   string `json:"type"`
 		Secret bool   `json:"secret"`
@@ -96,9 +104,10 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 		} `json:"resources"`
 		Types map[string]struct {
 			Properties map[string]property `json:"properties"`
+			Required   []string            `json:"required"`
 		} `json:"types"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(resp.Schema), &schema))
+	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
 	hub, ok := schema.Resources["envoy-infra:gcp:NatsHub"]
 	require.True(t, ok, "the schema lists envoy-infra:gcp:NatsHub")
 	require.True(t, hub.IsComponent)
@@ -118,6 +127,61 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	// NATSUserArgs, PermissionsArgs and RulesArgs would reach consumers doubled.
 	user := schema.Types["envoy-infra:gcp:NatsUser"]
 	require.Equal(t, "#/types/envoy-infra:gcp:Permissions", user.Properties["permissions"].Ref)
-	require.Equal(t, "#/types/envoy-infra:gcp:Rules",
-		schema.Types["envoy-infra:gcp:Permissions"].Properties["publish"].Ref)
+	// One Rules type and one key field name for every NATS user input, the AWS components' and the
+	// hub's, so a consumer running both writes them alike.
+	require.Contains(t, user.Properties, "nkey")
+	require.NotContains(t, user.Properties, "publicKey")
+	for _, direction := range []string{"publish", "subscribe"} {
+		require.Equal(t, "#/types/envoy-infra:nats:Rules",
+			schema.Types["envoy-infra:gcp:Permissions"].Properties[direction].Ref)
+	}
+	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
+	require.ElementsMatch(t, []string{"allow"}, schema.Types["envoy-infra:nats:Rules"].Required)
+}
+
+func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
+	s := servedSchema(t)
+	nats, ok := s.Resources["envoy-infra:aws:NatsService"]
+	require.True(t, ok, "the schema lists envoy-infra:aws:NatsService")
+	require.True(t, nats.IsComponent)
+	// A consumer owns its secrets; the component takes references to them.
+	for name, input := range nats.InputProperties {
+		require.False(t, input.Secret, "%s is not a secret input", name)
+	}
+	// Generated SDKs append Args to an object type's name for its input type.
+	require.Equal(t, "#/types/envoy-infra:aws:Authorization", nats.InputProperties["authorization"].Ref)
+	// A user's rules are the shared nats:Rules.
+	for _, direction := range []string{"publish", "subscribe"} {
+		require.Equal(t, "#/types/envoy-infra:nats:Rules", s.Types["envoy-infra:aws:User"].Properties[direction].Ref, "aws:User's %s", direction)
+	}
+	// Every input is required but the authorization and what belongs to it, and the optional
+	// settings.
+	require.ElementsMatch(t, []string{
+		"authorization", "configHeader", "configPath", "tailnetEphemeral", "waitForSteadyState", "adopt",
+	}, optionalInputs(nats.InputProperties, nats.RequiredInputs))
+}
+
+func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) {
+	listener, ok := servedSchema(t).Resources["envoy-infra:aws:WebhookListener"]
+	require.True(t, ok, "the schema lists envoy-infra:aws:WebhookListener")
+	require.True(t, listener.IsComponent)
+	// A consumer owns its secrets; the component takes references to them.
+	for name, input := range listener.InputProperties {
+		require.False(t, input.Secret, "%s is not a secret input", name)
+	}
+	// Every input is required but the seed, each webhook's inputs and adopt.
+	require.ElementsMatch(t, []string{
+		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger", "adopt",
+	}, optionalInputs(listener.InputProperties, listener.RequiredInputs))
+}
+
+// optionalInputs are the names in properties that required does not list.
+func optionalInputs[V any](properties map[string]V, required []string) []string {
+	var optional []string
+	for name := range properties {
+		if !slices.Contains(required, name) {
+			optional = append(optional, name)
+		}
+	}
+	return optional
 }

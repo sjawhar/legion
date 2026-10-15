@@ -51,7 +51,6 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
-      release_tag: ${{ steps.version.outputs.release_tag }}
       skip: ${{ steps.version.outputs.skip }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -78,7 +77,6 @@ jobs:
           if [ -n "$TAGGED" ]; then
             {
               echo "version=${TAGGED#envoy-infra-v}"
-              echo "release_tag=$TAGGED"
               echo "skip=false"
             } >> "$GITHUB_OUTPUT"
             echo "Releasing $TAGGED, already at HEAD"
@@ -92,7 +90,6 @@ jobs:
             VERSION="0.1.0"
             {
               echo "version=$VERSION"
-              echo "release_tag=envoy-infra-v${VERSION}"
               echo "skip=false"
             } >> "$GITHUB_OUTPUT"
             echo "First release: envoy-infra-v${VERSION}"
@@ -166,7 +163,6 @@ jobs:
 
           {
             echo "version=$VERSION"
-            echo "release_tag=envoy-infra-v${VERSION}"
             echo "skip=false"
           } >> "$GITHUB_OUTPUT"
           echo "Bumping $PREV_TAG -> envoy-infra-v${VERSION}"
@@ -195,9 +191,8 @@ jobs:
       # Both binaries carry the version (-X main.version). THIRD_PARTY_NOTICES is the license of
       # every Go module its archive's binary compiles in (scripts/go-third-party-notices.sh, run
       # with the build's own GOOS, GOARCH and CGO_ENABLED), and fails the build when one cannot be
-      # determined. SHA256SUMS, beside the archives, holds each one's SHA-256, for a consumer that
-      # pins an archive by digest. Every go command here runs in the module's own go.work, which
-      # binds it and packages/envoy.
+      # determined. publish writes SHA256SUMS over the archives it accepts. Every go command here
+      # runs in the module's own go.work, which binds it and packages/envoy.
       - name: Build pulumi-resource-envoy-infra and envoy-infra
         if: steps.version.outputs.skip != 'true'
         env:
@@ -227,7 +222,6 @@ jobs:
               ./cmd/envoy-infra)
             tar czf "assets/$cli.tar.gz" -C out "$cli/envoy-infra" "$cli/THIRD_PARTY_NOTICES"
           done
-          (cd assets && sha256sum -- * > SHA256SUMS)
       # The Pulumi CLI the envoy-smoke job's live tests run, checked against its SHA-256 before it
       # is unpacked (.github/actions/install-pulumi).
       - name: Install the Pulumi CLI
@@ -253,7 +247,7 @@ jobs:
           cli_version=$(out/envoy-infra-linux-amd64/envoy-infra --version)
           echo "envoy-infra --version: $cli_version"
           test "$cli_version" = "$VERSION"
-      # The archives and SHA256SUMS, exactly as built and smoke-tested, for publish.
+      # The archives, exactly as built and smoke-tested, for publish.
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: steps.version.outputs.skip != 'true'
         with:
@@ -261,9 +255,10 @@ jobs:
           path: assets/
           if-no-files-found: error
 
-  # Checks what build hands over, attests build's archives, tags the commit and releases them. It
-  # runs no Go, no Pulumi CLI, no plugin and no command, only its own check, release-push.sh and the
-  # pinned actions below, so the scopes and the deploy key it holds never meet the code build runs.
+  # Checks what build hands over, writes SHA256SUMS, tags the commit, attests build's archives and
+  # releases them. It runs no Go, no Pulumi CLI, no plugin and no command, only release-push.sh, jq,
+  # sha256sum and the pinned actions below, so the scopes and the deploy key it holds never meet the
+  # code build runs.
   publish:
     needs: build
     if: needs.build.outputs.skip != 'true'
@@ -286,29 +281,17 @@ jobs:
         with:
           name: envoy-infra-assets
           path: assets
-      # build chooses the archives' bytes, not their names. The version must be X.Y.Z and the tag
-      # envoy-infra-v<version>; assets/ must hold exactly the archives this checkout's target list
-      # names, each a regular file, and SHA256SUMS; and SHA256SUMS must list each archive once, with
-      # its bytes, before anything is attested or uploaded. The step hands the attestation and the
-      # release that explicit list.
-      - name: Check build's version, tag and archives
+      # build chooses the archives' bytes, and hands over only them and the version. publish names
+      # the archives itself, from that version and its own checkout of the target list, one
+      # `archives+=` line per kind of archive; release-push.sh handed refuses a version that is not
+      # X.Y.Z and an artifact that is not exactly those archives, each a regular file, and prints the
+      # tag. publish then writes SHA256SUMS over them, for a consumer that pins an archive by digest,
+      # and hands the tag and the explicit lists to the steps below.
+      - name: Check build's archives and write SHA256SUMS
         id: assets
         env:
-          TAG: ${{ needs.build.outputs.release_tag }}
           VERSION: ${{ needs.build.outputs.version }}
         run: |
-          if ! [[ $VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            printf -v shown '%q' "$VERSION"
-            echo "::error::build's version $shown is not X.Y.Z; refusing it"
-            exit 1
-          fi
-          if [ "$TAG" != "envoy-infra-v$VERSION" ]; then
-            printf -v shown '%q' "$TAG"
-            echo "::error::build's tag $shown is not envoy-infra-v$VERSION; refusing it"
-            exit 1
-          fi
-
-          # The archives the release ships for each target this checkout lists, one line per kind.
           archives=()
           targets=$(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json)
           [ -n "$targets" ] || { echo "::error::.github/envoy-infra-targets.json lists no envoy-infra target"; exit 1; }
@@ -318,69 +301,22 @@ jobs:
             archives+=("pulumi-resource-envoy-infra-v$VERSION-$os-$arch.tar.gz")
             archives+=("envoy-infra-$os-$arch.tar.gz")
           done
-          expected=("${archives[@]}" SHA256SUMS)
-          # is_one_of <name> <list...>: whether <name> is one of <list>.
-          is_one_of() {
-            local name=$1 candidate
-            shift
-            for candidate in "$@"; do [ "$candidate" != "$name" ] || return 0; done
-            return 1
-          }
-
-          missing=()
-          for name in "${expected[@]}"; do
-            { [ -f "assets/$name" ] && [ ! -L "assets/$name" ]; } || missing+=("$name")
-          done
-          extra=()
-          while IFS= read -r -d '' entry; do
-            is_one_of "${entry#assets/}" "${expected[@]}" || extra+=("${entry#assets/}")
-          done < <(find assets -mindepth 1 -print0)
-          if [ ${#missing[@]} -gt 0 ] || [ ${#extra[@]} -gt 0 ]; then
-            [ ${#missing[@]} -eq 0 ] || echo "::error::build's artifact lacks $(printf '%q ' "${missing[@]}")"
-            [ ${#extra[@]} -eq 0 ] || echo "::error::build's artifact holds what the release does not ship: $(printf '%q ' "${extra[@]}")"
-            exit 1
-          fi
-
-          listed=()
-          while IFS= read -r line || [ -n "$line" ]; do
-            if ! [[ $line =~ ^[0-9a-f]{64}\ \ (.+)$ ]] || ! is_one_of "${BASH_REMATCH[1]}" "${archives[@]}"; then
-              printf -v shown '%q' "$line"
-              echo "::error::SHA256SUMS holds a line that is not '<sha256>  <archive>': $shown"
-              exit 1
-            fi
-            listed+=("${BASH_REMATCH[1]}")
-          done < assets/SHA256SUMS
-          for name in "${archives[@]}"; do
-            count=0
-            for entry in "${listed[@]}"; do [ "$entry" != "$name" ] || count=$((count + 1)); done
-            [ "$count" = 1 ] || { echo "::error::SHA256SUMS lists $name $count times, not once"; exit 1; }
-          done
-          if ! (cd assets && sha256sum --check --strict SHA256SUMS); then
-            echo "::error::an archive's bytes do not match SHA256SUMS; refusing build's artifact"
-            exit 1
-          fi
-
+          tag=$(.github/scripts/release-push.sh handed envoy-infra-v "$VERSION" assets "${archives[@]}")
+          (cd assets && sha256sum -- "${archives[@]}" > SHA256SUMS)
           {
+            echo "tag=$tag"
             echo "subjects<<SUBJECTS"
             printf 'assets/%s\n' "${archives[@]}"
             echo "SUBJECTS"
             echo "files<<FILES"
-            printf 'assets/%s\n' "${expected[@]}"
+            printf 'assets/%s\n' "${archives[@]}" SHA256SUMS
             echo "FILES"
           } >> "$GITHUB_OUTPUT"
-      # Build provenance for both kinds of archive the check above lists: the plugin's, which Pulumi
-      # installs, and the command's, which writes seeds under its operator's credentials. The release
-      # below uploads them exactly, with SHA256SUMS. A consumer verifies an archive against this
-      # workflow's signing identity before installing it, with the commands
-      # packages/envoy/infra/README.md ("Install") gives for each.
-      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        with:
-          subject-path: ${{ steps.assets.outputs.subjects }}
       # The only step that holds the deploy key. release-push.sh push-tag writes it to a directory
       # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       - name: Tag release
         env:
-          TAG: ${{ needs.build.outputs.release_tag }}
+          TAG: ${{ steps.assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
         run: |
           if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
@@ -389,10 +325,20 @@ jobs:
           fi
           git tag "$TAG"
           .github/scripts/release-push.sh push-tag "$TAG"
+      # Build provenance for both kinds of archive the check above lists: the plugin's, which Pulumi
+      # installs, and the command's, which writes seeds under its operator's credentials. The release
+      # below uploads them exactly, with SHA256SUMS. A consumer verifies an archive against this
+      # workflow's signing identity before installing it, with the commands
+      # packages/envoy/infra/README.md ("Install") gives for each. It runs after "Tag release", so a
+      # run whose tag step refuses (the tag already names another commit) leaves no attestation for
+      # archives no release carries.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.build.outputs.release_tag }}
+          TAG: ${{ steps.assets.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
           FILES: ${{ steps.assets.outputs.files }}
         # release-push.sh `release`: creates the release, reuses a published one, or publishes a

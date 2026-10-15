@@ -41,7 +41,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		return
 	}
 	if restoreErr != nil {
-		slog.Error("envoy nats resubscribe failed", slog.String("error", restoreErr.Error()))
+		slog.Error("envoy nats resubscribe failed", slog.String("name", c.name), slog.String("error", restoreErr.Error()))
 	}
 	// Drain stops the client before it takes the subscriptions to drain them, so a stop can land
 	// while restoreSubscriptions runs. The drain then owns the subscriptions and the connection, and
@@ -58,10 +58,10 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 		// the hook was reading through. recover reports that case the same way, with the error kept
 		// on the line in case a real failure coincided with the stop.
 		if c.stopped() {
-			slog.Info("envoy nats reconnect hooks cancelled", slog.String("error", hookErr.Error()))
+			slog.Info("envoy nats reconnect hooks cancelled", slog.String("name", c.name), slog.String("error", hookErr.Error()))
 			return
 		}
-		slog.Error("envoy nats reconnect hook failed", slog.String("error", hookErr.Error()))
+		slog.Error("envoy nats reconnect hook failed", slog.String("name", c.name), slog.String("error", hookErr.Error()))
 	}
 	// The recovery binds what the restore left unbound, a registration it left to its bind in flight
 	// should that bind fail, and runs the hooks again after a failed run; until the next connection
@@ -181,14 +181,14 @@ func (c *Client) recoverUntilHealthy() {
 	const maxBackoff = 30 * time.Second
 	for attempt := 1; ; attempt++ {
 		if c.stopped() {
-			slog.Info("envoy nats recovery cancelled")
+			slog.Info("envoy nats recovery cancelled", slog.String("name", c.name))
 			return
 		}
 		if c.subscriptionsHealthy() && !c.hooksDue() {
-			slog.Info("envoy nats recovery: already healthy")
+			slog.Info("envoy nats recovery: already healthy", slog.String("name", c.name))
 			return
 		}
-		slog.Info("envoy nats recovery attempt", slog.Int("attempt", attempt))
+		slog.Info("envoy nats recovery attempt", slog.String("name", c.name), slog.Int("attempt", attempt))
 		failure := "envoy nats recovery reconnect failed"
 		pending := false
 		err := c.ensureConnWithContext(ctx)
@@ -208,24 +208,24 @@ func (c *Client) recoverUntilHealthy() {
 		// error stays on the line in case a real one coincided with the stop.
 		if c.stopped() {
 			if err != nil {
-				slog.Info("envoy nats recovery cancelled", slog.String("error", err.Error()))
+				slog.Info("envoy nats recovery cancelled", slog.String("name", c.name), slog.String("error", err.Error()))
 			} else {
-				slog.Info("envoy nats recovery cancelled")
+				slog.Info("envoy nats recovery cancelled", slog.String("name", c.name))
 			}
 			return
 		}
 		if err == nil && !pending {
-			slog.Info("envoy nats recovery successful", slog.Int("attempt", attempt))
+			slog.Info("envoy nats recovery successful", slog.String("name", c.name), slog.Int("attempt", attempt))
 			return
 		}
 		// A registration left to its bind in flight is no failure: the restore logged it at INFO,
 		// and the next attempt finds it bound or binds it.
 		if err != nil {
-			slog.Error(failure, slog.Int("attempt", attempt), slog.String("error", err.Error()))
+			slog.Error(failure, slog.String("name", c.name), slog.Int("attempt", attempt), slog.String("error", err.Error()))
 		}
 		select {
 		case <-c.stopCh:
-			slog.Info("envoy nats recovery cancelled")
+			slog.Info("envoy nats recovery cancelled", slog.String("name", c.name))
 			return
 		case <-time.After(backoff):
 		}
@@ -293,10 +293,10 @@ func (c *Client) restoreSubscriptions() (pending bool, err error) {
 	}
 	c.subscriptionsMu.Unlock()
 	for _, subject := range pendingSubjects {
-		slog.Info("envoy nats resubscribe left to the bind in flight", slog.String("subject", subject))
+		slog.Info("envoy nats resubscribe left to the bind in flight", slog.String("name", c.name), slog.String("subject", subject))
 	}
 	for index, subscription := range restoring {
-		slog.Info("envoy nats resubscribing", slog.String("subject", registrations[index].subject))
+		slog.Info("envoy nats resubscribing", slog.String("name", c.name), slog.String("subject", registrations[index].subject))
 		sub, err := bind(registrations[index], conn, js)
 		if err := c.endBind(subscription, sub, err); err != nil {
 			errs = append(errs, err)
