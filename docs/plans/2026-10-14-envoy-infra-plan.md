@@ -656,8 +656,11 @@ written here.
   slice 1's `CheckPlain` and `ListenerEnv` with the same refusal texts. Each refusal is a
   `core.InputError` naming its input (`machineId`, `port`, `hostBridge`,
   `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
-  its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
-  3 and 4 build on this API.
+  its refusal table keeps one row for core's refusals, showing where they go. `resolveListener`
+  first refuses a seed in the listener's name and in its own string inputs (`image`,
+  `containerName`, `watchdog.host`, `adopt.*`) with `core.SeedRefusal`, and
+  `construct_test.go` shows every input but `seed` refused through Construct, naming the input.
+  The sibling slices 3 and 4 build on this API.
 - Create: `packages/envoy/infra/internal/pulumitest/mocks.go`, `mocks_test.go`: the mock engine
   and Construct harness every component's tests share. `Mocks` records each registration
   (`One`, `Types`, `Registrations`) and answers with the inputs as state, less any unknown (the
@@ -724,8 +727,11 @@ func IsUserPublicKey(key string) bool
 func UserSeedPublicKey(value []byte) (string, error)
 // HoldsSeed reports whether text holds a user seed UserSeedPublicKey accepts: whole, inside a
 // longer value or percent-encoded. It answers only true or false and never formats the value
-// (nkey.go:78-124).
+// (nkey.go:78-86, its helpers 96-132).
 func HoldsSeed(text string) bool
+// SeedRefusal is the refusal of a value that holds one, naming its path, never the value
+// (nkey.go:88-94).
+func SeedRefusal(field string) error
 
 // Object is a Python dict in a known order; PyJSON writes its keys in that order, or sorted under
 // SortKeys (pyfmt.go:18-26).
@@ -737,12 +743,21 @@ type Object []Field
 ```
 
 These semantics are ported from the reference implementation, and the unit tests pin each one:
-- **What is refused** (`nats_auth.go:44-153, 194-214, 252-293`). Every refusal of a user names it,
-  by index and name, and the field.
+- **What is refused** (`nats_auth.go:50-204, 231-260, 298-346`; `listener_env.go:42-65, 78-115`).
+  Every refusal of a user names it, by index and name, and the field.
+  - First, a value that holds an nkey user seed (`core.HoldsSeed`), refused with
+    `core.SeedRefusal`, which names its path and never the value: a user's name, a rule entry
+    (allow or deny, publish or subscribe, a queue group included) and `noAuthUser` (`seedField`,
+    `nats_auth.go:103-134`, checked before any refusal quotes a name or an entry), a header line
+    (`checkHeader`), `StartScript`'s `configPath` and each server argument (`:312-318`), and the
+    listener's `machineId`, `hostBridge` and each NATS URL (`listener_env.go:46-48, 55-57, 87-89`),
+    as an `InputError` naming that input. Each of these reaches a `%q` refusal, the rendered block,
+    the start script or the environment otherwise. An NKey field needs none: one that is not a
+    user public key is refused without being quoted.
   - No users.
   - Every user pending. That would render a block with no users, which is R7's case.
   - A name that fails the pattern.
-  - A pending user without `HasSeed`: it is never rendered, so it stands for nothing (`:106-108`).
+  - A pending user without `HasSeed`: it is never rendered, so it stands for nothing (`:148-150`).
   - A pending user that declares rules.
   - A keyed user missing either rule.
   - An NKey that is not a user public key: `core.IsUserPublicKey` (`nkey.go:30-35`), which takes
@@ -761,17 +776,17 @@ These semantics are ported from the reference implementation, and the unit tests
     `server/client.go:3044-3051`, `:1199-1203`), and `testnats.Image` is 2.10.29.
   - Duplicate names, or duplicate keys.
   - A `NoAuthUser` that names no user, names a pending user, or names a user with `HasSeed`.
-  - A header line holding `\r` or `\n` (`checkHeader`, `:204-214`), in `Render` and `StartScript`.
-  - In `StartScript`, an empty `configPath` (`:262-264`), and a server argument that sets `-c`,
+  - A header line holding `\r` or `\n` (`checkHeader`, `:246-260`), in `Render` and `StartScript`.
+  - In `StartScript`, an empty `configPath` (`:309-311`), and a server argument that sets `-c`,
     `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or `-routes`, with one dash
-    or two and with or without `=value`, named by index and flag and never by value (`:265-271,
-    279-293`). nats-server parses its arguments with Go's flag package and takes a flag's last
+    or two and with or without `=value`, named by index and flag and never by value (`:315-324,
+    332-346`). nats-server parses its arguments with Go's flag package and takes a flag's last
     value, so a later `-c` would load another file in place of the rendered one, `-user`, `-pass`
     and `-auth` would add a credential beside its nkey users, and the route flags would open or
     solicit a route the block, having no cluster authorization, leaves unauthenticated (nats-server
     v2.10.29 `server/opts.go:5343-5345, 5350-5351, 5368-5370`).
   - `StartScript`'s refusals are `InputError`s naming the input as a component's schema does, in
-    the order it checks them (`:252-277`): `authorization` (Validate's refusal, prefixed
+    the order it checks them (`:298-330`): `authorization` (Validate's refusal, prefixed
     `authorization: `; Validate runs once), `configPath`, `serverArgs`, and `configHeader`
     (prefixed `configHeader: `). A caller passes each on as it is, with no sorting of core's
     errors. `Render`'s refusals are plain errors.
@@ -798,7 +813,7 @@ These semantics are ported from the reference implementation, and the unit tests
   for Task 3.x's container definitions too. `PyJSONOptions` has `SortKeys` and `EnsureASCII`. With
   `EnsureASCII`, every non-ASCII character is written as `\uXXXX`, using surrogate pairs above
   U+FFFF, as Python does. A dict is a `core.Object`, written in its order or sorted under
-  `SortKeys`; `Render` builds each user as one (`nats_auth.go:208-213`). `PyJSON` panics on a Go
+  `SortKeys`; `Render` builds each user as one (`nats_auth.go:273-278`). `PyJSON` panics on a Go
   map, which has no key order, and names `core.Object` as the fix; on a float; on a string that is
   not valid UTF-8; and on an `Object` holding a key twice (`pyfmt.go:28-40, 75-80, 88-95, 119-122`).
 
@@ -921,7 +936,7 @@ behaviour is the reference implementation's, with these additions:
   - an `--expect-account` that is not 12 digits (`:55-57`), or given empty, which `Command`
     refuses as a usage error before the store opens (`seed.go:434-436`);
   - a seed anywhere the AWS configuration carries one into a client, named by where it came from
-    and never quoted (`core.HoldsSeed`, `nkey.go:78-124`, finds one whole, inside a path or any
+    and never quoted (`core.HoldsSeed`, `nkey.go:78-86`, finds one whole, inside a path or any
     part of a URL, or percent-encoded). Before any client is built (`checkedAWSConfig`,
     `awsstore.go:94-133`): `--region`; every `AWS_` environment variable and `_X_AMZN_TRACE_ID`,
     since the SDK reads no other (`:135-155`); the default paths of the shared config and

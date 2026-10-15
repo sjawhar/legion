@@ -85,6 +85,14 @@ func HoldsSeed(text string) bool {
 	return base32Seed(text) || strings.Contains(text, "%") && base32Seed(percentDecoded(text))
 }
 
+// SeedRefusal is the refusal of a value that holds an nkey user seed (HoldsSeed): it names field,
+// the value's path, as "users[0]: name" or "natsUrls[1]", and never the value. A layer that takes a
+// value no seed belongs in refuses one with it, before the value reaches a message, a log or
+// rendered output.
+func SeedRefusal(field string) error {
+	return errors.New(field + " holds an nkey user seed (not echoed)")
+}
+
 // seedTextLength is a user seed's length as nkeys spells it: its seedLength bytes, unpadded base32.
 const seedTextLength = 58
 

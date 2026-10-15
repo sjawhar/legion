@@ -85,7 +85,21 @@ type listenerPlan struct {
 // the inputs alone: all of them but natsUrls and seed, which may be another resource's output. It
 // registers nothing and needs no engine, so NewListener calls it first, and a refusal leaves
 // nothing behind.
+//
+// It refuses first a name or one of its own string inputs that holds an nkey user seed
+// (core.HoldsSeed), naming it and never the value: the name reaches every refusal and every
+// child's name, and each string input a refusal, a resource's inputs or an alias. machineId and
+// hostBridge are core.ListenerConfig.Check's to refuse, natsUrls Env's, and seed is the one input
+// that is a seed.
 func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
+	if core.HoldsSeed(name) {
+		return listenerPlan{}, fmt.Errorf("%s: %w", listenerType, core.SeedRefusal("the listener's name"))
+	}
+	for _, in := range stringInputs(args) {
+		if core.HoldsSeed(in.value) {
+			return listenerPlan{}, fmt.Errorf("%s %s: %w", listenerType, name, core.SeedRefusal(in.input))
+		}
+	}
 	plan := listenerPlan{
 		containerName: defaultContainerName,
 		plain:         core.ListenerConfig{MachineID: args.MachineID, Port: core.DefaultListenerPort},
@@ -138,6 +152,30 @@ func resolveListener(name string, args *ListenerArgs) (listenerPlan, error) {
 	}
 	plan.packages = append(plan.packages, "command")
 	return plan, nil
+}
+
+// namedInput is one input's value and its name in the component's schema.
+type namedInput struct{ input, value string }
+
+// stringInputs are the listener's own string inputs that are given, by their names in the schema.
+// machineId and hostBridge are core's, natsUrls and seed are outputs.
+func stringInputs(args *ListenerArgs) []namedInput {
+	inputs := []namedInput{{"image", args.Image}}
+	add := func(input string, value *string) {
+		if value != nil {
+			inputs = append(inputs, namedInput{input, *value})
+		}
+	}
+	add("containerName", args.ContainerName)
+	if args.Watchdog != nil {
+		inputs = append(inputs, namedInput{"watchdog.host", args.Watchdog.Host})
+	}
+	if args.Adopt != nil {
+		add("adopt.container", args.Adopt.Container)
+		add("adopt.image", args.Adopt.Image)
+		add("adopt.watchdog", args.Adopt.Watchdog)
+	}
+	return inputs
 }
 
 // NewListener registers a listener: the image, the container, and, with watchdog, the systemd

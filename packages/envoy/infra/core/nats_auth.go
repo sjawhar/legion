@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -36,12 +37,20 @@ var userName = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$`)
 // Validate refuses an authorization nats-server would read otherwise than its fields say. Every
 // refusal names the user, by index and name, and the field.
 //
+// First it refuses a user's name, a rule entry (allow or deny, publish or subscribe, a queue group
+// included) or noAuthUser that holds an nkey user seed (HoldsSeed), naming its path and never the
+// value, since a refusal quotes each and the rendered block writes them (seedField). The nkey
+// field needs no such check: one that is not a user public key is refused without being quoted.
+//
 // A pending user (no NKey) stands for a seed the consumer stores before the server knows its key:
 // it must have HasSeed, since without one it stands for nothing, and it is never rendered, so rules
 // on it are refused. An authorization whose users are all pending, or that has none, is refused too:
 // nats-server reads an authorization block with no users as no authentication at all
 // (server/auth.go configureAuthorization).
 func (a Authorization) Validate() error {
+	if field := a.seedField(); field != "" {
+		return SeedRefusal(field)
+	}
 	if len(a.Users) == 0 {
 		return errors.New("users: an authorization needs at least one user")
 	}
@@ -89,6 +98,39 @@ func (a Authorization) user(name string) (User, bool) {
 		}
 	}
 	return User{}, false
+}
+
+// seedField names, by its path, the first name, rule entry or noAuthUser that holds an nkey user
+// seed, or returns "". Every name is checked before any entry, so an entry's path quotes its user's
+// name only once that name is known to hold none.
+func (a Authorization) seedField() string {
+	for i, u := range a.Users {
+		if HoldsSeed(u.Name) {
+			return fmt.Sprintf("users[%d]: name", i)
+		}
+	}
+	for i, u := range a.Users {
+		for _, d := range []struct {
+			field string
+			rules *Rules
+		}{{"publish", u.Publish}, {"subscribe", u.Subscribe}} {
+			if d.rules == nil {
+				continue
+			}
+			for _, list := range []struct {
+				field   string
+				entries []string
+			}{{d.field + ".allow", d.rules.Allow}, {d.field + ".deny", d.rules.Deny}} {
+				if j := slices.IndexFunc(list.entries, HoldsSeed); j >= 0 {
+					return fmt.Sprintf("users[%d] %q: %s[%d]", i, u.Name, list.field, j)
+				}
+			}
+		}
+	}
+	if HoldsSeed(a.NoAuthUser) {
+		return "noAuthUser"
+	}
+	return ""
 }
 
 // validate refuses one user, naming the field: a name the pattern refuses; for a pending user, no
@@ -201,11 +243,15 @@ func (a Authorization) Render(header []string) (string, error) {
 	return a.render(header), nil
 }
 
-// checkHeader refuses a header line holding a line break. nats-server's config lexer ends a comment
-// at \n or \r (conf/lex.go isNL), so a line holding either would carry the rest of it out of the
-// comment and into the configuration.
+// checkHeader refuses a header line holding an nkey user seed (HoldsSeed), which the rendered text
+// would carry, and a line holding a line break. nats-server's config lexer ends a comment at \n or
+// \r (conf/lex.go isNL), so a line holding either would carry the rest of it out of the comment and
+// into the configuration.
 func checkHeader(header []string) error {
 	for i, line := range header {
+		if HoldsSeed(line) {
+			return SeedRefusal(fmt.Sprintf("header[%d]", i))
+		}
 		if strings.ContainsAny(line, "\r\n") {
 			return fmt.Errorf("header[%d] holds a line break; each header line is one comment line", i)
 		}
@@ -250,11 +296,12 @@ func (r *Rules) object() Object {
 }
 
 // StartScript returns the `sh -c` script that writes Render's text to configPath and execs
-// nats-server with --config configPath and serverArgs. It refuses a server argument that would set
-// aside the rendered authorization (authorizationFlags). Each refusal is an InputError naming its
-// input as a component's schema does: authorization (Validate's refusal, run once here),
-// configPath, serverArgs and configHeader, checked in that order, so a caller passes a refusal on
-// as it is.
+// nats-server with --config configPath and serverArgs. It refuses a config path or a server
+// argument that holds an nkey user seed (HoldsSeed), which the script would carry, naming it and
+// never the value, and a server argument that would set aside the rendered authorization
+// (authorizationFlags). Each refusal is an InputError naming its input as a component's schema
+// does: authorization (Validate's refusal, run once here), configPath, serverArgs and
+// configHeader, checked in that order, so a caller passes a refusal on as it is.
 func (a Authorization) StartScript(configHeader, serverArgs []string, configPath string) (string, error) {
 	if err := a.Validate(); err != nil {
 		return "", InputErrorf("authorization", "authorization: %w", err)
@@ -262,7 +309,13 @@ func (a Authorization) StartScript(configHeader, serverArgs []string, configPath
 	if configPath == "" {
 		return "", InputErrorf("configPath", "configPath is required with authorization: the start script writes the configuration there")
 	}
+	if HoldsSeed(configPath) {
+		return "", InputErrorf("configPath", "%w", SeedRefusal("configPath"))
+	}
 	for i, arg := range serverArgs {
+		if HoldsSeed(arg) {
+			return "", InputErrorf("serverArgs", "%w", SeedRefusal(fmt.Sprintf("serverArgs[%d]", i)))
+		}
 		name, _, _ := strings.Cut(strings.TrimPrefix(strings.TrimPrefix(arg, "-"), "-"), "=")
 		if why, ok := authorizationFlags[name]; ok && strings.HasPrefix(arg, "-") {
 			// The value is not quoted: after -pass or -auth it is a credential.

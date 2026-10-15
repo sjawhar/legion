@@ -176,6 +176,11 @@ listener's NATS client then refuses to connect rather than connect without the s
 
 The listener refuses these before it registers anything, with an error naming what is wrong:
 
+- an nkey user seed anywhere in its name or in any input but `seed`: `machineId`, `image`,
+  `containerName`, `hostBridge`, `watchdog.host`, `adopt.container`, `adopt.image` or
+  `adopt.watchdog`. The error names the input and never the value, as `envoy-infra:host:Listener
+  example-host-a: image holds an nkey user seed (not echoed)`, since each would reach a resource's
+  inputs, an alias or another refusal. `seed` is the one input that is a seed;
 - a blank `machineId`;
 - a `machineId` or `hostBridge` holding a control character, such as a line break;
 - a `port` outside 1-65535;
@@ -192,7 +197,8 @@ The listener refuses these before it registers anything, with an error naming wh
 `natsUrls` and `seed` may come from another resource or stack, so the listener checks them only when
 it computes the container's environment. That happens at preview, unless they are not known until
 the update. It refuses an empty `natsUrls`, a URL in it that is blank, contains a comma (commas
-separate the URLs in `NATS_URLS`) or holds a control character, and a blank `seed`.
+separate the URLs in `NATS_URLS`), holds a control character or holds an nkey user seed anywhere,
+as a password in its userinfo would, and a blank `seed`.
 
 The watchdog writes the environment, one variable per line, into a heredoc of a script it runs as
 root on the host, so a line break in a value could end the heredoc and run what follows as a
@@ -594,6 +600,11 @@ rendered.
 An authorization is refused, with an error naming the field and, for a user's field, the user as
 `users[<index>] "<name>"`, when it has:
 
+- a name, an `Allow` or `Deny` entry (a queue group included) or a `NoAuthUser` that holds an nkey
+  user seed. This is checked first, and the error names the field by its path and never the
+  value, as `users[0] "example-listener": publish.allow[1] holds an nkey user seed (not echoed)`,
+  or `users[0]: name holds …` for a name: every other refusal quotes a name or an entry, and the
+  block writes them;
 - no users, or only pending ones: nats-server reads an authorization block with no users as no
   authentication at all;
 - a name that is not of the form above, or a name or a key two users share;
@@ -614,11 +625,11 @@ An authorization is refused, with an error naming the field and, for a user's fi
 - a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line
-break. Then comes the block: a comment naming each keyed user, in order, and the user as one JSON
-object, with keys sorted, non-ASCII characters as they are, and `deny` only when it names an
-entry. With a `NoAuthUser`, `no_auth_user` follows it, naming that user's key. For three keyed
-users, a pending `example-pending` and `NoAuthUser` `example-fallback`, `core`'s tests pin this
-text:
+break or an nkey user seed. Then comes the block: a comment naming each keyed user, in order, and
+the user as one JSON object, with keys sorted, non-ASCII characters as they are, and `deny` only
+when it names an entry. With a `NoAuthUser`, `no_auth_user` follows it, naming that user's key.
+For three keyed users, a pending `example-pending` and `NoAuthUser` `example-fallback`, `core`'s
+tests pin this text:
 
 ```text
 # Rendered by envoy-infra from placeholder inputs.
@@ -638,15 +649,16 @@ no_auth_user: "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 ```
 
 `StartScript` wraps that text in the `sh -c` script a NATS container runs: it writes the text to a
-path and execs `nats-server --config <path>` with the server's own arguments. It refuses an
-argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`, `-cluster_listen` or
-`-routes` (with one dash or two, and with or without `=`), naming its index: nats-server takes the
-last value of a flag, so a later `-c` would load another file in place of the rendered one;
-`-user`, `-pass` and `-auth` would add a credential beside its nkey users; and the rendered block
-has no cluster authorization, so a route the last three open or solicit would be unauthenticated,
-and a server routed to it would see every message its users publish. Each of its refusals is a
-`core.InputError` naming the input it refuses: `authorization`, `configPath`, `serverArgs` or
-`configHeader`.
+path and execs `nats-server --config <path>` with the server's own arguments. It refuses a path or
+an argument that holds an nkey user seed, which the script would carry, naming it and never the
+value, and an argument that sets `-c`, `-config`, `-user`, `-pass`, `-auth`, `-cluster`,
+`-cluster_listen` or `-routes` (with one dash or two, and with or without `=`), naming its index:
+nats-server takes the last value of a flag, so a later `-c` would load another file in place of
+the rendered one; `-user`, `-pass` and `-auth` would add a credential beside its nkey users; and
+the rendered block has no cluster authorization, so a route the last three open or solicit would
+be unauthenticated, and a server routed to it would see every message its users publish. Each of
+its refusals is a `core.InputError` naming the input it refuses: `authorization`, `configPath`,
+`serverArgs` or `configHeader`.
 
 ## Changing the module
 
