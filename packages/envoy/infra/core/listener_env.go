@@ -25,6 +25,7 @@ const EnvNATSSeed = bus.NkeySeedEnvVar
 type ListenerConfig struct {
 	MachineID  string // ENVOY_MACHINE_ID
 	Port       int    // PORT, 1-65535: a component resolves its default, DefaultListenerPort
+	ListenHost string // "" leaves ENVOY_LISTEN_HOST unset, so the listener binds 127.0.0.1
 	HostBridge string // "" leaves ENVOY_HOST_BRIDGE unset
 }
 
@@ -51,6 +52,9 @@ func (c ListenerConfig) Check() error {
 	}
 	if strings.ContainsFunc(c.HostBridge, unicode.IsControl) {
 		return InputErrorf("hostBridge", "hostBridge contains a control character: %q", c.HostBridge)
+	}
+	if strings.ContainsFunc(c.ListenHost, unicode.IsControl) {
+		return InputErrorf("listenHost", "listenHost contains a control character: %q", c.ListenHost)
 	}
 	return nil
 }
@@ -82,11 +86,14 @@ func (c ListenerConfig) Env(natsURLs []string) ([]string, error) {
 			remote = true
 		}
 	}
-	env := []string{
-		"PORT=" + strconv.Itoa(c.Port),
-		"ENVOY_MACHINE_ID=" + c.MachineID,
-		"NATS_URLS=" + strings.Join(natsURLs, ","),
+	env := []string{"PORT=" + strconv.Itoa(c.Port)}
+	if c.ListenHost != "" {
+		env = append(env, "ENVOY_LISTEN_HOST="+c.ListenHost)
 	}
+	env = append(env,
+		"ENVOY_MACHINE_ID="+c.MachineID,
+		"NATS_URLS="+strings.Join(natsURLs, ","),
+	)
 	if remote {
 		env = append(env, bus.AllowRemoteEnvVar+"=1")
 	}

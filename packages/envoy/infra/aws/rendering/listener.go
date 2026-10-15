@@ -93,22 +93,15 @@ func (e ListenerEnv) Check() error {
 }
 
 // Variables returns the container's non-secret environment, as NAME=value in the order the
-// container definitions list it: core.ListenerConfig.Env's, with the listen host after the port
-// where the reference lists it, then the replicas and the webhooks: ENVOY_WEBHOOKS only when one is
-// listed, and the GitHub variables only with github. It refuses NatsUrls as Env does, and expects
-// the rest to have passed Check, which the component and the render command run first; it runs no
-// check of Check's itself, so the container definitions are written for any webhook list.
+// container definitions list it: core.ListenerConfig.Env's, which writes the listen host after the
+// port where the reference lists it, then the replicas and the webhooks: ENVOY_WEBHOOKS only when
+// one is listed, and the GitHub variables only with github. It refuses NatsUrls as Env does, and
+// expects the rest to have passed Check, which the component and the render command run first; it
+// runs no check of Check's itself, so the container definitions are written for any webhook list.
 func (e ListenerEnv) Variables() ([]string, error) {
-	env, err := e.config().Env(e.NatsUrls)
+	variables, err := e.config().Env(e.NatsUrls)
 	if err != nil {
 		return nil, err
-	}
-	var variables []string
-	for _, entry := range env {
-		variables = append(variables, entry)
-		if name, _, _ := strings.Cut(entry, "="); name == "PORT" {
-			variables = append(variables, "ENVOY_LISTEN_HOST="+e.ListenHost)
-		}
 	}
 	variables = append(variables, "ENVOY_NATS_REPLICAS="+strconv.Itoa(e.NatsReplicas))
 	if len(e.Webhooks) > 0 {
@@ -125,7 +118,7 @@ func (e ListenerEnv) Variables() ([]string, error) {
 
 // config is the environment as core.ListenerConfig takes it, on the listener's fixed port.
 func (e ListenerEnv) config() core.ListenerConfig {
-	return core.ListenerConfig{MachineID: e.MachineID, Port: ListenerPort, HostBridge: e.HostBridge}
+	return core.ListenerConfig{MachineID: e.MachineID, Port: ListenerPort, ListenHost: e.ListenHost, HostBridge: e.HostBridge}
 }
 
 // SecretReadPolicy is the execution-role policy that reads the secret at arn into a container, as

@@ -60,22 +60,22 @@ versions. Never add the module to the root `go.work`.
   and one per missing provider, each asserting nothing registered beyond the test's providers. The
   AWS components resolve in `NatsServiceArgs.validate` and `WebhookListenerArgs.validate`.
 - **Refusals.** Every refusal names the input. `core.ListenerConfig.Check` holds the checks of the
-  listener's environment that the resolver can make (`machineId`, `port`, `hostBridge`), run once
-  before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one value that may be
-  another resource's output, and checks only those, inside the `ApplyT` that computes the
-  container's environment. A bad URL, like a blank `seed` in its own `ApplyT`, therefore fails the
-  preview or update when the container's `envs` resolve, after the component and its image have
-  registered, not the constructor. The watchdog's create script runs as root on the host
-  (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc, may hold
-  a control character, and with a watchdog the listener's name, which it echoes in double quotes,
-  may hold no `"`, `$`, backtick, `\` or line break. An input that belongs to another (a webhook's
-  secret, `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and `configPath` to
-  `authorization`) is required while its owner is present and refused while it is not, where the
-  component would drop it: one rule, `rendering.CheckOwnedInputs`, which both AWS components'
-  `validate` and `rendering.ListenerEnv.Check` call. Each table tests its own refusals: core's are
-  in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a component's or a
-  command's table holds its own plus one row for each input whose shared refusal it passes on,
-  showing where that refusal goes.
+  listener's environment that the resolver can make (`machineId`, `port`, `listenHost`,
+  `hostBridge`), run once before anything registers; `ListenerConfig.Env` adds `natsUrls`, the one
+  value that may be another resource's output, and checks only those, inside the `ApplyT` that
+  computes the container's environment. A bad URL, like a blank `seed` in its own `ApplyT`,
+  therefore fails the preview or update when the container's `envs` resolve, after the component
+  and its image have registered, not the constructor. The watchdog's create script runs as root on
+  the host (`host.watchdogCreate`), so no value of the environment, which it writes into a heredoc,
+  may hold a control character, and with a watchdog the listener's name, which it echoes in double
+  quotes, may hold no `"`, `$`, backtick, `\` or line break. An input that belongs to another (a
+  webhook's secret, `reviewerAppId` and `mentionTrigger` to their webhook; `configHeader` and
+  `configPath` to `authorization`) is required while its owner is present and refused while it is
+  not, where the component would drop it: one rule, `rendering.CheckOwnedInputs`, which both AWS
+  components' `validate` and `rendering.ListenerEnv.Check` call. Each table tests its own
+  refusals: core's are in `core` and `rendering.ListenerEnv.Check`'s in `aws/rendering`, and a
+  component's or a command's table holds its own plus one row for each input whose shared refusal
+  it passes on, showing where that refusal goes.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,

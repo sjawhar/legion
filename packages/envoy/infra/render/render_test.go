@@ -657,12 +657,12 @@ func TestWebhookListenerEnvRefusals(t *testing.T) {
 			args: listenerFlags([]string{"nats-replicas"}, "--nats-replicas", "0"),
 			want: "refused: --nats-replicas: natsReplicas 0 is below 1",
 		},
-		// A value no KEY=value line can carry, which the component would write into its JSON.
 		{
-			name: "a line break in --listen-host",
+			name: "a line break in --listen-host, refused by core.ListenerConfig.Check",
 			args: listenerFlags([]string{"listen-host"}, "--listen-host", "0.0.0.0\n"),
-			want: "refused: --listen-host: holds a line break, which a KEY=value line cannot carry",
+			want: `refused: --listen-host: listenHost contains a control character: "0.0.0.0\n"`,
 		},
+		// A value no KEY=value line can carry, which the component would write into its JSON.
 		{
 			name: "a line break in --mention-trigger",
 			args: listenerFlags([]string{"mention-trigger"}, "--mention-trigger", "@leg\nion"),

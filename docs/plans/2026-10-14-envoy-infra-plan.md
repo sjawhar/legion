@@ -1239,7 +1239,8 @@ type WebhookListener struct {
   `pulumi.All(…).ApplyT` over the Input fields, as the reference builds them inside
   `Output.all(...).apply`. Each environment value comes from `core.ListenerConfig` where the
   variables match (its `Check` before any registration, its `Env` in the apply, once the NATS URLs
-  are known), and from the fields above for the rest. `ENVOY_WEBHOOKS` is written only when
+  are known; slice 3 adds its `ListenHost`, which `Env` writes after `PORT` and `host:Listener`
+  leaves unset), and from the fields above for the rest. `ENVOY_WEBHOOKS` is written only when
   `webhooks` is non-empty, `ENVOY_GITHUB_MENTION_TRIGGER` and `ENVOY_REVIEWER_APP_ID` only when
   `github` is listed, and each webhook's secret entry only when its webhook is listed. That is the
   reference's rule once the deployment makes its listener slot-capable; for a deployment that lists

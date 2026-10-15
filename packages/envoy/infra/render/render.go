@@ -238,21 +238,15 @@ func webhookListenerEnv(args []string, stdout, stderr io.Writer) int {
 		return s.refusedInput(err)
 	}
 	// The component writes each value into its JSON, where a line break is escaped; a line of
-	// this output would end there. machineId, natsUrls and hostBridge are refused any control
-	// character above, as the component refuses them (core.ListenerConfig's Check and Env), so
-	// only the values core does not check are checked here.
-	for _, value := range []struct {
-		flag   string
-		values []string
-	}{
-		{"listen-host", []string{listenHost}},
-		{"mention-trigger", []string{mentionTrigger}},
-		{"reviewer-app-id", []string{reviewerAppID}},
+	// this output would end there. machineId, natsUrls, listenHost and hostBridge are refused any
+	// control character above, as the component refuses them (core.ListenerConfig's Check and Env),
+	// so only the values core does not check are checked here.
+	for _, value := range []struct{ flag, value string }{
+		{"mention-trigger", mentionTrigger},
+		{"reviewer-app-id", reviewerAppID},
 	} {
-		for _, v := range value.values {
-			if strings.ContainsAny(v, "\r\n") {
-				return s.refused(value.flag, errors.New("holds a line break, which a KEY=value line cannot carry"))
-			}
+		if strings.ContainsAny(value.value, "\r\n") {
+			return s.refused(value.flag, errors.New("holds a line break, which a KEY=value line cannot carry"))
 		}
 	}
 	for _, variable := range variables {
