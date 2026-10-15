@@ -2,43 +2,39 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-748",
-  "completed": "2026-10-15T17:35:18Z",
+  "completed": "2026-10-15T18:14:56Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1969",
-  "headSha": "4af795269edcf17f770d15788041aa6f28279afb",
-  "ci": "Tests run 38773687824 (lint, typecheck, test success) and PR Title run 38773688018 (pr-title success) at 4af795269edcf17f770d15788041aa6f28279afb; the branch head 08a7a9555ffc is the implement handoff alone (skip-checks), so no run of its own",
+  "headSha": "8b299ab3abb53758cef42eed8120bcbacbd2e40f",
+  "ci": "Tests run 38781143108 (lint, typecheck, test success; `Test the release credential check | Results: 101 passed, 0 failed`, `Test release scripts | Results: 236 passed, 0 failed` with the host-key SKIP) and PR Title run 38781143167 at 8b299ab3abb53758cef42eed8120bcbacbd2e40f; the branch head 4fa40563 is the round-2 implement handoff alone (skip-checks)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surfaces independently rather than re-running the implementer's scripts (its /tmp files were in another container). (1) legion-smoke runs 38758454703 and 38758671814 re-read with `gh run view --log`: `probe` prints `Cache mode: none`, `Cache restore skipped: the effective cache-mode 'none' does not permit reads.`, `Cache save skipped: … does not permit writes.`; `control` prints `Cache mode: write`, `Cache hit for: setup-go-Linux-x64-ubuntu24-go-1.26.8-4b5e994f…`, `Cache restored successfully`; the inline tripwire on the clean runner prints `none`, `absent`, the five variables `unset`, `no credential reachable`; `docker buildx imagetools inspect` works with buildx v0.38.0 and no builder. (2) The version differential rebuilt from the YAML (main's six step bodies at b5761883 versus `release-push.sh version` with the head's exact arguments) in detached worktrees of 8 commits: 43/43 pairs identical, covering tag-at-HEAD re-release (legion at 306982460; listener and infra at b450e3b55), `--package-dir` child-bump re-release (three plugins at 6aeee579d), computed bumps (3f1ed031) and skips. (3) `release-push.test.sh` 235 passed and `check-release-credentials.test.sh` 73 passed in the pod (PyYAML, jq, openssh-client installed under $HOME/.local). (4) The checker's negative control re-applied to copies of the real files: removing `cache-mode: none` from infra's publish exits 1 naming the job at its line. (5) `go version -m` and the stamped-tag check were not re-measured (the planner's measurement stands; the step runs first on the merge-triggered listener run)."
+    "how": "Round 2: the implementer's two mutations re-applied to a copy of the real release.yaml — `run: npm ci` and `run: bash scripts/go-third-party-notices.sh out/x ./cmd/legion` steps before legion_publish's Tag release → exit 1, `step 'Warm tools' runs 'npm ci'` / `step 'Notices' runs 'scripts/go-third-party-notices.sh'`, then the job's three scopes reported as a build job's; its harness totals re-run in the pod (check-release-credentials.test.sh 101 passed, 0 failed; release-push.test.sh 237 passed on the re-run — one run failed only the real-github.com host-key check after a 60 s SSH stall, and a hand-run `push-tag` against sjawhar/release-push-test-nonexistent then answered `Permission denied (publickey)` with TMPDIR empty) and read from CI run 38781143108; its negative control (a build job with no permissions anywhere → `declares no permissions and the workflow declares none … set 'permissions: contents: read' on the job`) re-run on a copy of the real file. Round 1's verification (legion-smoke logs, the 8-commit differential, the bare-origin rig) stands: the workflows and every release-push.sh command but no-credential's ~/.ssh block are byte-identical between 4af79526 and 8b299ab3 (`jj diff --summary`: the two scripts and their tests only)."
   },
-  "failures": [
-    {
-      "criterion": "Done when, bullet 5: the checker fails naming the job and the step when a credentialed job runs dependency code — `npm ci`, `npm install` and `npm exec` (dependency install scripts and arbitrary npm packages, the same code `bun install` and `npx` run) pass it in a credentialed job because `npm` is allowed whole.",
-      "evidence": "Mutation of a copy of the real release.yaml: a `run: npm ci` step (and `npm exec -- some-tool`) added to `legion_publish` → `check-release-credentials: 7 credentialed job(s) … keep credentials out of jobs that run dependency code`, exit 0. Red test: `.github/scripts/check-release-credentials.test.sh` case `npm install, npm ci and npm exec in a credentialed job (npm view and npm publish stay allowed)` — FAIL: exits 1 / names npm ci / names npm install / names npm exec (`npm view` and `npm publish` must stay green: those two checks pass today)."
-    },
-    {
-      "criterion": "Done when, bullet 5: the checker fails when a credentialed job runs a notices script or any `scripts/` program — `bash scripts/go-third-party-notices.sh`, `sh scripts/foo.sh` and `source scripts/lib/helpers.sh` pass it, since only the first word is read and `bash`/`sh`/`source` are not on any list (where `python3 scripts/x.py` and `node scripts/x.js` are caught).",
-      "evidence": "Mutation of a copy of the real release.yaml: `run: bash scripts/go-third-party-notices.sh out/x ./cmd/legion` in `legion_publish` → exit 0. Red test: case `a scripts/ program run through an interpreter in a credentialed job` — FAIL: exits 1 / names the script behind bash / names the script behind sh / names the sourced script."
-    },
-    {
-      "criterion": "Done when, bullet 5: the checker fails when a credentialed job runs dependency code — a step with `shell: python` (GitHub's built-in interpreter shell; `python` is on the checker's own deny-list) runs its body under python and passes, because `shell:` is never read and the body is tokenised as shell.",
-      "evidence": "Mutation of a copy of the real release.yaml: a `shell: python` step whose body is `subprocess.run(['bun', 'install'], check=True)` in `legion_publish` → exit 0. Red test: case `a step whose shell is an interpreter in a credentialed job` — FAIL: exits 1 / names the step and its shell."
-    },
-    {
-      "criterion": "Done when, bullets 3 and 5: the deploy key appears only in the env of the push steps, and a build job holds no `secrets.DEPLOY_KEY` — the index spelling `${{ secrets['DEPLOY_KEY'] }}` (valid GitHub expression syntax for the same secret) is not seen at all: in a build job's job-level env it reaches every step, and on a non-push step of a publish job it passes.",
-      "evidence": "Mutations of a copy of the real release.yaml: `env: KEY: ${{ secrets['DEPLOY_KEY'] }}` at `legion_build`'s job level → exit 0; the same on `legion_publish`'s `Create GitHub release` step → exit 0. Red test: case `the deploy key named by index, secrets['DEPLOY_KEY']` — FAIL: exits 1 / names the build job's text / names the step of the credentialed job."
-    },
-    {
-      "criterion": "Done when, bullet 5: the checker fails naming the job when a build job holds a write scope — with the job's `permissions:` block and the workflow's `permissions: {}` both removed, the checker reads no scopes and passes, while GitHub gives such a job the repository's default token permissions, which the checker cannot read (the read of `actions/permissions/workflow` is refused to the role App), so the shape 'a build job with contents: read' is no longer pinned.",
-      "evidence": "Mutation of a copy of the real release.yaml: `permissions: {}` deleted at the workflow level and `permissions: contents: read` deleted from `legion_build` → exit 0. Red test: case `a build job with no permissions block in a workflow with none` — FAIL: exits 1 / names the job."
-    }
-  ],
-  "failed": 5,
+  "failures": [],
+  "failed": 0,
   "redTests": {
     "commit": "test(ci): red — check-release-credentials.sh passes npm ci/install/exec, bash/sh/source over a scripts/ program, a shell: python step, secrets['DEPLOY_KEY'] and a build job with no permissions block (LEGION-748)",
     "command": ".github/scripts/check-release-credentials.test.sh",
-    "observed": "Results: 75 passed, 15 failed (the five new cases; every pre-existing case passes). A throwaway prototype of the fix in /tmp (npm allow-list {view, publish}; bash/sh/source/. skipped like exec; shell: read as a command; a DEPLOY_KEY regex covering the index form; a build job with no permissions anywhere refused) makes all 90 checks pass and still accepts the three real workflows (7 credentialed, 8 build jobs), so the red cases ask for no change to the workflows."
+    "observed": "Results: 75 passed, 15 failed (the five new cases; every pre-existing case passes). A throwaway prototype of the fix in /tmp (npm allow-list {view, publish}; bash/sh/source/. skipped like exec; shell: read as a command; a DEPLOY_KEY regex covering the index form; a build job with no permissions anywhere refused) makes all 90 checks pass and still accepts the three real workflows (7 credentialed, 8 build jobs), so the red cases ask for no change to the workflows.",
+    "round2": "The five red cases of 8617f1d8 pass at 8b299ab3 (harness 101 passed, 0 failed); the implementer appended three cases (another secret and the whole secrets context in a build job; docker run with imagetools/login/buildx version allowed; Actions/Checkout without persist-credentials)."
   },
   "proof": [
+    {
+      "criterion": "Done when, bullet 5 (round 2): the checker fails naming the job and step for the five red shapes of round 1 and the architect's hardenings, and still accepts the three real workflows.",
+      "surface": "The checker over mutated copies of the real .github/workflows/release.yaml and release-envoy-listener.yaml (/tmp/mut/mutate.sh, 22 round-1 mutations re-run; /tmp/mut/probes2.sh, 16 round-2 probes) and over the real files in the workspace.",
+      "command": "bash /tmp/mut/mutate.sh; bash /tmp/mut/probes2.sh; .github/scripts/check-release-credentials.sh; .github/scripts/check-release-credentials.test.sh",
+      "observed": "Round-1 mutations: 22 of 22 as the shape requires — the nine hunts that passed green last round each exit 1 naming the job and step: `step 'Warm tools' runs 'npm ci'`, `runs 'npm exec'`, `step 'Notices' runs 'scripts/go-third-party-notices.sh'`, `job 'legion_build' holds a credential …` for secrets['DEPLOY_KEY'] at job level (read as the deploy key), `names secrets.DEPLOY_KEY at step 'Create GitHub release' env.KEY` for the index form on a non-push step, `step 'Actions/Checkout@…' must set 'persist-credentials: false'`, `runs its body under shell 'python', not bash or sh`, `declares no permissions and the workflow declares none … set 'permissions: contents: read' on the job`, `runs 'docker run'`; the thirteen others unchanged (every plan-named mutation caught; handed-in-publish and bun-in-comment allowed). Round-2 probes: `sh -c 'bun install'` → `runs 'bun'`; `${{ toJSON(secrets) }}`, `${{ secrets.NPM_TOKEN }}`, `${{ fromJSON(toJSON(secrets)).DEPLOY_KEY }}`, `${{ secrets[format('DEPLOY_{0}', 'KEY')] }}` and `${{ secrets }}` in legion_build's env each → `its text names <that>; a build job holds no secret but GITHUB_TOKEN`; `${{ secrets.github_token }}` lower-case allowed; `shell: bash --noprofile --norc -eo pipefail {0}`, `bash -c 'echo ok && jq --version'` and `Actions/Checkout@` with persist-credentials: false in release_publish allowed; `npm --version` alone refused. Real workflows: `7 credentialed job(s) and 8 build job(s) across 3 release workflows`. Harness: 101 passed, 0 failed, 42 cases.",
+      "headSha": "8b299ab3abb53758cef42eed8120bcbacbd2e40f",
+      "negativeControl": "Shapes that still pass the checker green (the `program not on the list` class its header documents; notes, not failures): `bash -euo pipefail scripts/x.sh` (the `-o` flag's argument `pipefail` is taken as the command), `eval 'bun install'`, `docker container run` (the long form of run), `docker buildx bake`, and a job-level `defaults: run: shell: python` (only the step's own `shell:` is read)."
+    },
+    {
+      "criterion": "Done when, bullet 4 (round 2): no-credential's ~/.ssh check follows a symlinked ~/.ssh and refuses a non-directory there, printing names never a value.",
+      "surface": "`release-push.sh no-credential` under `env -i`, an empty HOME, GIT_CONFIG_NOSYSTEM, a fresh repository; ~/.ssh replaced by each shape in turn with a marker value inside every planted file.",
+      "command": "env -i PATH=… HOME=/tmp/nc2/home GIT_CONFIG_NOSYSTEM=1 bash .github/scripts/release-push.sh no-credential with ~/.ssh as: a symlink to a directory holding id_ed25519; a regular file; a dangling symlink; a symlink to a directory holding known_hosts alone",
+      "observed": "Symlink to a directory with id_ed25519 → the `ls -la` listing names `id_ed25519`, `::error::~/.ssh holds entries other than known_hosts`, exit 1; a regular file → `::error::~/.ssh is not a directory`, exit 1; a dangling symlink → `::error::~/.ssh is not a directory`, exit 1; a symlink to a directory with known_hosts alone → `no credential reachable`, exit 0. `grep -c MARKER-9c1e` over every output: 0. release-push.test.sh's two new cases pass (`a symlinked .ssh directory holding a key: exits 1, following it`).",
+      "headSha": "8b299ab3abb53758cef42eed8120bcbacbd2e40f",
+      "negativeControl": "The regular file at ~/.ssh holding the marker is refused (`is not a directory`) and its content is never printed; round 1's eleven planted git/env shapes are unchanged code and were not re-driven."
+    },
     {
       "criterion": "One version step: every release job's version computation is one `release-push.sh version` call behaving as the six inline sequences did; `tag` pushes nothing; every tag push is `push-tag` (Done when, bullet 6).",
       "surface": "Detached git worktrees of the real repository (a --shared clone of the issue's main repo, 1558 tags up to legion-v13.2.1, legion-envoy-v13.4.0, pi-legion-v10.2.2, pi-envoy-v10.1.1, opencode-legion-envoy-v8.2.2, envoy-infra-v0.2.0) at 8 commits; main's six step bodies and the head's six, each extracted from the workflow YAML with PyYAML rather than retyped; main's release-push.sh/release-bump.sh for the old side, the head's for the new (release-bump.sh byte-identical).",
@@ -81,9 +77,40 @@
     }
   ],
   "notes": [
+    "Round 2 residual checker gaps (notes, not failures — none is a shape a maintainer writes by accident, and the header documents the class): `bash -euo pipefail scripts/x.sh` (an interpreter flag that takes an argument; `bash -e scripts/x.sh` is caught), `eval '<string>'` (the builtin twin of `sh -c`, not looked through), `docker container run` / `docker image build` (long forms of run/build), `docker buildx bake`, and `defaults.run.shell` at job or workflow level (only a step's own `shell:` is read). Each is a one-line list or lookup change if the architect wants them.",
+    "A bash killed by SIGTERM mid-push (a cancelled job) does not run its EXIT trap, so the deploy-key directory would outlive the command on the runner's disk until the ephemeral runner is destroyed; the spec covers exit paths, not signals, and GitHub-hosted runners are ephemeral — noted for completeness.",
+    "`npm --version` and `npm` with a leading flag (`npm --registry … publish`) are refused in a credentialed job (conservative false positive); the real publish jobs spell `npm view` and `npm publish` plainly and pass.",
     "The merge will cut a listener release: at main b5761883 and the head, `release-push.sh version legion-envoy-v …` gives 13.4.1 (6aeee579d's fix(dispatch) touched packages/envoy after legion-envoy-v13.4.0), so the first merge-triggered release-envoy-listener.yaml run is a release-cutting run (release_build stamps 13.4.1, release_publish confirms with --expect, tags, attests, releases) — the production check can record the listener's full path on that run, and `imagetools create` without setup-buildx-action is exercised there.",
     "Hardening, not pinned: `no-credential`'s `find ~/.ssh -mindepth 1` does not descend when `~/.ssh` is a symlink to a directory (prints the listing, reports clean) and `[ -d ~/.ssh ]` reports a regular file as `absent`; both are sandbox-evasion shapes outside the tripwire's stated remit (`find -L` or a trailing slash closes the first). `Actions/Checkout@<sha>` (mis-cased owner/repo) in a build job skips rule 3 (`startswith('actions/checkout@')`); whether GitHub resolves that casing was not provable from this pod (the review App cannot write workflows to legion-smoke), so it is a note. `docker run <image>` in a credentialed job passes the checker (only `docker build`/`buildx build` are denied). `${{ toJSON(secrets) }}` or any `secrets.*` beyond GITHUB_TOKEN in a build job is not read as a credential; the red case covers only the DEPLOY_KEY index form.",
     "Environment: PyYAML (a uv venv), jq 1.7 and openssh-client 10.0 were installed under $HOME/.local for the local runs; the pod image has none of them (the implement handoff recorded the same for its container). The `jq` builtin of the harness shell is jaq; the scripts ran under bash with the real jq first on PATH.",
     "Tests not re-run: lint, typecheck and the unit suites are CI's (cited above); `go version -m` on a cross-built agent-secrets binary and `agent-secrets --version` were not re-measured here (planner's measurement in plan.json specDepartures; first executed on the merge-triggered listener run)."
+  ],
+  "round": 2,
+  "resolvedFailures": [
+    {
+      "round": 1,
+      "criterion": "Done when, bullet 5: the checker fails naming the job and the step when a credentialed job runs dependency code — `npm ci`, `npm install` and `npm exec` (dependency install scripts and arbitrary npm packages, the same code `bun install` and `npx` run) pass it in a credentialed job because `npm` is allowed whole.",
+      "resolution": "Fixed in 8b299ab3; the red case in check-release-credentials.test.sh passes with its assertions untouched (the test-file diff from 8617f1d8 removes nothing) and the mutation re-applied to a copy of the real workflow exits 1 naming the job and step."
+    },
+    {
+      "round": 1,
+      "criterion": "Done when, bullet 5: the checker fails when a credentialed job runs a notices script or any `scripts/` program — `bash scripts/go-third-party-notices.sh`, `sh scripts/foo.sh` and `source scripts/lib/helpers.sh` pass it, since only the first word is read and `bash`/`sh`/`source` are not on any list (where `python3 scripts/x.py` and `node scripts/x.js` are caught).",
+      "resolution": "Fixed in 8b299ab3; the red case in check-release-credentials.test.sh passes with its assertions untouched (the test-file diff from 8617f1d8 removes nothing) and the mutation re-applied to a copy of the real workflow exits 1 naming the job and step."
+    },
+    {
+      "round": 1,
+      "criterion": "Done when, bullet 5: the checker fails when a credentialed job runs dependency code — a step with `shell: python` (GitHub's built-in interpreter shell; `python` is on the checker's own deny-list) runs its body under python and passes, because `shell:` is never read and the body is tokenised as shell.",
+      "resolution": "Fixed in 8b299ab3; the red case in check-release-credentials.test.sh passes with its assertions untouched (the test-file diff from 8617f1d8 removes nothing) and the mutation re-applied to a copy of the real workflow exits 1 naming the job and step."
+    },
+    {
+      "round": 1,
+      "criterion": "Done when, bullets 3 and 5: the deploy key appears only in the env of the push steps, and a build job holds no `secrets.DEPLOY_KEY` — the index spelling `${{ secrets['DEPLOY_KEY'] }}` (valid GitHub expression syntax for the same secret) is not seen at all: in a build job's job-level env it reaches every step, and on a non-push step of a publish job it passes.",
+      "resolution": "Fixed in 8b299ab3; the red case in check-release-credentials.test.sh passes with its assertions untouched (the test-file diff from 8617f1d8 removes nothing) and the mutation re-applied to a copy of the real workflow exits 1 naming the job and step."
+    },
+    {
+      "round": 1,
+      "criterion": "Done when, bullet 5: the checker fails naming the job when a build job holds a write scope — with the job's `permissions:` block and the workflow's `permissions: {}` both removed, the checker reads no scopes and passes, while GitHub gives such a job the repository's default token permissions, which the checker cannot read (the read of `actions/permissions/workflow` is refused to the role App), so the shape 'a build job with contents: read' is no longer pinned.",
+      "resolution": "Fixed in 8b299ab3; the red case in check-release-credentials.test.sh passes with its assertions untouched (the test-file diff from 8617f1d8 removes nothing) and the mutation re-applied to a copy of the real workflow exits 1 naming the job and step."
+    }
   ]
 }
