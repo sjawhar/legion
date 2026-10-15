@@ -44,6 +44,8 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
+      # The Pulumi CLI envoy-smoke's envoy-infra live tests run.
+      - ".github/actions/install-pulumi/**"
       # The envoy-smoke job builds packages/envoy/docker/Dockerfile, so this list owes every
       # file that build reads: the six below before the target list are the ones the entries
       # above do not already cover. .github/scripts/check-image-trigger-paths.sh fails the build
@@ -90,6 +92,7 @@ on:
       - "go.work.sum"
       - ".omp-pin"
       - ".github/actions/install-omp/**"
+      - ".github/actions/install-pulumi/**"
       # Same entries the push list owes, for the same jobs.
       - ".github/workflows/envoy-and-contracts.yaml"
       - ".dockerignore"
@@ -210,6 +213,8 @@ jobs:
               - 'docs/site/package.json'
               - '.dockerignore'
               - '.github/workflows/envoy-and-contracts.yaml'
+              # The Pulumi CLI the job's envoy-infra live tests run.
+              - '.github/actions/install-pulumi/**'
               # The job also COMPILES TestSmoke, in workspace mode, so the workspace files and
               # every module in it belong here too — `envoy` carried go.work and go.work.sum and
               # this filter must not be narrower. packages/daemon requires testcontainers-go,
@@ -849,6 +854,39 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
+  # The envoy-infra Pulumi plugin's module (packages/envoy/infra). It is not in the root go.work:
+  # its own go.work binds it and packages/envoy, so Pulumi's requirements never move the versions
+  # the Envoy binaries and the daemon build with, and every go command below runs in that
+  # workspace. Vet compiles the files behind the live-test tag (pulumilive) too. The per-target
+  # compile runs in pr-and-main.yaml's required lint job.
+  envoy-infra-go:
+    needs: changes
+    if: needs.changes.outputs.envoy == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: packages/envoy/infra/go.mod
+          cache-dependency-path: packages/envoy/infra/go.sum
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
+            echo "$unformatted"
+            exit 1
+          fi
+        working-directory: packages/envoy/infra
+      - name: Vet envoy-infra, its live-test tag included
+        run: go vet -tags pulumilive ./...
+        working-directory: packages/envoy/infra
+      - name: Unit test envoy-infra
+        run: go test ./...
+        working-directory: packages/envoy/infra
+
   # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
   # this package under -race before a PR claimed it), delivery (its intake handler reads the
@@ -940,12 +978,12 @@ jobs:
         run: go test -tags memory -count=1 -timeout 60m -v ./cmd/dispatch
         working-directory: packages/envoy
 
-  # The container smoke test, and the image it runs. Its own job, gated on envoy_image rather
-  # than envoy: the image is built from the Dispatch SPA and the Bun workspace as well as the Go
-  # sources, so a Dispatch-only change changes the image and must smoke it, while widening
-  # `envoy` would run the whole Go suite on every Dispatch pull request instead. Before this
-  # split the smoke lived in envoy-go, so PR #1562 (packages/dispatch only) skipped envoy-go and
-  # never smoked the image it changed (run 36494702052).
+  # The container smoke test, the envoy-infra plugin's live tests, and the image both run. Its own
+  # job, gated on envoy_image rather than envoy: the image is built from the Dispatch SPA and the
+  # Bun workspace as well as the Go sources, so a Dispatch-only change changes the image and must
+  # smoke it, while widening `envoy` would run the whole Go suite on every Dispatch pull request
+  # instead. Before this split the smoke lived in envoy-go, so PR #1562 (packages/dispatch only)
+  # skipped envoy-go and never smoked the image it changed (run 36494702052).
   # .github/scripts/check-image-trigger-paths.sh fails the build when envoy_image misses a file
   # the build reads.
   envoy-smoke:
@@ -956,7 +994,8 @@ jobs:
       # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
       # clean up, and its image would be one more registry pull a test could fail on.
       TESTCONTAINERS_RYUK_DISABLED: "true"
-      # The listener image the smoke test runs against, built by its own step below.
+      # The listener image the smoke test and envoy-infra's live tests run, built by its own step
+      # below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1029,6 +1068,36 @@ jobs:
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
+      # The envoy-infra plugin's live tests (packages/envoy/infra/host/live_test.go) apply Pulumi
+      # YAML programs with the pinned Pulumi CLI (.github/actions/install-pulumi) against this
+      # runner's Docker, on the listener image built above and on the docker provider the plugin's
+      # first consumer pins. Each download is checked against its SHA-256 before it is unpacked or
+      # installed.
+      - name: Install the Pulumi CLI
+        uses: ./.github/actions/install-pulumi
+      # The version is the one the live programs pin, read from pulumitest.DockerPluginVersion, and
+      # the step hands the tarball's path to the live tests through ENVOY_INFRA_DOCKER_PLUGIN. The
+      # release's own checksums file lists SHA-1 digests (this asset's is
+      # 9a7f6014d3ebc330030ec033ddc7222ec13ad116); the SHA-256 is the digest GitHub records for the
+      # release asset, which hashes to that same SHA-1. The live tests install the verified tarball
+      # into a PULUMI_HOME of their own, so the CLI downloads none.
+      - name: Download the docker provider plugin the live tests pin
+        run: |
+          version=$(sed -n 's/^const DockerPluginVersion = "\(.*\)"$/\1/p' internal/pulumitest/pulumitest.go)
+          [ -n "$version" ] || { echo "::error::no const DockerPluginVersion in internal/pulumitest/pulumitest.go"; exit 1; }
+          tarball="$RUNNER_TEMP/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
+          curl -fsSL -o "$tarball" "https://github.com/pulumi/pulumi-docker/releases/download/v$version/pulumi-resource-docker-v$version-linux-amd64.tar.gz"
+          echo "4dbcd9defa0fb03999cdfeab50bd461451b7c65e8566927994f63ee956055ffe  $tarball" | sha256sum -c -
+          echo "ENVOY_INFRA_DOCKER_PLUGIN=$tarball" >> "$GITHUB_ENV"
+        working-directory: packages/envoy/infra
+      - name: Live tests of envoy-infra's host:Listener
+        run: go test -tags pulumilive -v -timeout 15m ./host/
+        working-directory: packages/envoy/infra
+      - name: The envoy-infra plugin's schema carries the version it was built with
+        run: >-
+          go build -ldflags "-X main.version=1.2.3" -o /tmp/pr ./cmd/pulumi-resource-envoy-infra &&
+          pulumi package get-schema /tmp/pr | jq -e '.version == "1.2.3"'
+        working-directory: packages/envoy/infra
 
   # packages/envoy/scripts/e2e-local.sh: signed GitHub fixtures and a direct message through a real
   # listener and NATS, every frame rendered by both inbound renderers (renderInbound and Go's

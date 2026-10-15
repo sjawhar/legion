@@ -112,17 +112,19 @@ jobs:
             ~/go/pkg/mod
             ~/.cache/go-build
             ~/.cache/legion
-          key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'scripts/go-third-party-notices.sh') }}
+          key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'packages/envoy/infra/go.sum', 'scripts/go-third-party-notices.sh') }}
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
       # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
-      # them). Writing them here for each of those builds fails the pull request that brings in a
-      # module whose license cannot be determined, before a release does. The darwin agent-secrets
-      # client is also compiled here, since writing notices loads its packages without type-checking
-      # them and no other pull-request job builds it for darwin: a darwin-only compile error fails
-      # the pull request rather than the release after the merge.
-      - name: Check every Go release archive's third-party notices can be written and the darwin client compiles
+      # them, and release-envoy-infra.yaml, whose targets .github/envoy-infra-targets.json lists).
+      # Writing them here for each of those builds fails the pull request that brings in a module
+      # whose license cannot be determined, before a release does. Writing notices loads packages
+      # without type-checking them, so the darwin agent-secrets client and every command of the
+      # envoy-infra module, which no other pull-request job builds for each of its targets, are also
+      # compiled here, with their release builds' CGO_ENABLED and -buildvcs: a compile error on one
+      # platform only fails the pull request rather than the release after the merge.
+      - name: Check every Go release archive's third-party notices can be written and the cross-built commands compile
         run: |
           notices="$RUNNER_TEMP/notices"
           mkdir -p "$notices"
@@ -143,6 +145,14 @@ jobs:
             (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
               ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
               ./cmd/agent-secrets)
+          done
+          for target in $(jq -r '.["envoy-infra"][]' .github/envoy-infra-targets.json); do
+            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              go build -buildvcs=false -o /dev/null ./cmd/...)
+            (cd packages/envoy/infra && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              ../../../scripts/go-third-party-notices.sh \
+              "$notices/pulumi-resource-envoy-infra-${target%/*}-${target#*/}" \
+              ./cmd/pulumi-resource-envoy-infra)
           done
           wc -l "$notices"/*
 

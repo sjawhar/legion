@@ -8,9 +8,12 @@ on:
     # every root workspace's package.json), the sources it builds the SPA and the Go contracts from,
     # the context's .dockerignore, and this workflow. A commit touching only one of them would
     # otherwise publish no image, so no pin could name it. .github/scripts/check-image-trigger-paths.sh
-    # fails the build when this list misses a file the image build reads.
+    # fails the build when this list misses a file the image build reads. The envoy-infra plugin's
+    # module (packages/envoy/infra) is no input of the image or of this release's binaries, and
+    # release-envoy-infra.yaml releases it.
     paths:
       - "packages/envoy/**"
+      - "!packages/envoy/infra/**"
       - "packages/contracts/**"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
@@ -372,12 +375,14 @@ jobs:
           CURRENT="${LATEST_TAG#legion-envoy-v}"
           # Every notices script changes an artifact this release publishes: the web app in the
           # image, the Go archives, or the image assembly; and the target list decides the
-          # archives. They therefore take a patch release.
+          # archives. They therefore take a patch release. The envoy-infra plugin's module is
+          # excluded: release-envoy-infra.yaml releases it, and nothing published here compiles
+          # it in.
           VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
             --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \
             --patch-path .github/agent-secrets-client-targets.json \
-            -- packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
+            -- ':(exclude)packages/envoy/infra' packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
             scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh \
             .github/go-release-targets.json .github/agent-secrets-client-targets.json)
 
@@ -506,9 +511,14 @@ jobs:
             tar czf "../../agent-secrets-assets/agent-secrets-$os-$arch.tar.gz" -C "$dir" agent-secrets
           done
         working-directory: packages/envoy
-      # Build provenance for the host binaries a mise pin installs, so `gh attestation verify
-      # agent-secrets-<asset>.tar.gz --repo sjawhar/legion` can check a downloaded asset, linux or
-      # darwin, against this workflow run. The release below uploads these exact files.
+      # Build provenance for the host binaries a mise pin installs, linux or darwin, which the
+      # release below uploads exactly. `--repo` alone accepts an archive any workflow of this
+      # repository attested, so the check pins the signer as docs/kubernetes.md ("Pin by digest,
+      # never by tag") does:
+      #   gh attestation verify agent-secrets-<asset>.tar.gz --repo sjawhar/legion \
+      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
+      #     --source-ref refs/heads/main --deny-self-hosted-runners
+      # and adds `--source-digest <the legion-envoy-v<version> tag's commit>` to pin the commit as well.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: steps.publish.outputs.should_release == 'true'
         with:

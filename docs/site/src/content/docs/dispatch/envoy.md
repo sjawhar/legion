@@ -137,6 +137,13 @@ The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image.
 A listener on anything but loopback refuses to start without `ENVOY_API_TOKEN` or the OIDC pair.
 Keep the API private: only `/webhook/...` needs to be reachable from GitHub.
 
+### With Pulumi
+
+The `envoy-infra` Pulumi plugin runs the listener on a Docker host from a Pulumi program in any
+language, as the component `envoy-infra:host:Listener`. Its
+[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
+install it, what it deploys and which settings it sets.
+
 ### Health and readiness
 
 `GET /healthz` needs no credential:

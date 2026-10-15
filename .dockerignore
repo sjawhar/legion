@@ -25,3 +25,8 @@ packages/envoy/**/*_test.go
 packages/envoy/internal/integration/
 packages/envoy/internal/smoke/
 packages/envoy/deploy/
+# The envoy-infra Pulumi plugin's module, which no image builds. Leaving it out of the context lets
+# worker-image.yaml's pull_request paths exclude it, so a pull request that touches only it builds
+# no worker image. On main, release.yaml's `legion` filter still matches it (packages/envoy/**) and
+# starts worker_image.
+packages/envoy/infra/

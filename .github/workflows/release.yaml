@@ -364,10 +364,15 @@ jobs:
           test "$lines" -eq 2
           test "$(printf '%s\n' "$version" | sed -n '1p')" = "legion v$VERSION commit $GITHUB_SHA"
           test "$(printf '%s\n' "$version" | sed -n '2p')" = "plugins @sjawhar/pi-legion $PI_LEGION_VERSION @sjawhar/pi-envoy $PI_ENVOY_VERSION"
-      # Build provenance for the archives a mise pin installs, so `gh attestation verify
-      # legion-<os>-<arch>.tar.gz --repo sjawhar/legion` checks a downloaded asset against this
-      # workflow run rather than against SHA256SUMS, which sits in the same mutable release. The
-      # release below uploads these exact files.
+      # Build provenance for the archives a mise pin installs, which the release below uploads
+      # exactly, so a downloaded asset is checked against a run of this workflow on main rather than
+      # against SHA256SUMS, which sits in the same mutable release. `--repo` alone accepts an
+      # archive any workflow of this repository attested, so the check pins the signer as
+      # docs/kubernetes.md ("Pin by digest, never by tag") does:
+      #   gh attestation verify legion-<os>-<arch>.tar.gz --repo sjawhar/legion \
+      #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release.yaml@refs/heads/main \
+      #     --source-ref refs/heads/main --deny-self-hosted-runners
+      # and adds `--source-digest <the legion-v<version> tag's commit>` to pin the commit as well.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: steps.version.outputs.skip != 'true'
         with:

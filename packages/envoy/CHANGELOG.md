@@ -735,6 +735,19 @@
 
 ### Fixed
 
+- Dispatch's job intake now receives job events (LEGION-690). It shared Dispatch's publisher
+  client with the delivery intake, and a `bus.Client` held one JetStream subscription, so
+  whichever intake bound second unsubscribed the other, whose durable then sat unbound with its
+  messages pending. Each intake now connects on its own, and a `bus.Client` refuses a second
+  subscription on another subject (`bus.ErrSubscriptionHeld`) rather than replacing the first.
+  With the GitHub App configured, Dispatch holds four NATS connections where it held two, named
+  `dispatch`, `dispatch-agent-stream`, `dispatch-intake` and `dispatch-job-intake` on the server,
+  and exits at boot when it cannot open them, so a NATS user or account with a connection limit
+  must allow four; without the App it holds two, as before. Each bus client's lifecycle log lines
+  now carry its name. On its first start the job intake's durable is handed every job event it has
+  not acknowledged, up to the stream's 72-hour retention, and reads at most eight runs' jobs from
+  GitHub at once while it drains, before it settles at nothing pending.
+
 - The `GET /ws/delivery` socket gives itself a read buffer, so a page that stops answering its
   pings loses the socket with no close frame (1006 to the page) under any gorilla/websocket
   (LEGION-690). Without one, a build linking a gorilla that keeps net/http's hijacked reader (every

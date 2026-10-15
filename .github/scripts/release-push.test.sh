@@ -2,8 +2,11 @@
 # Tests for `release-push.sh push-main`: the version-bump push and its
 # same-package race resolution (LEGION-75), and its re-run cases; for
 # `release-push.sh tagged`, which finds the tag an earlier attempt pushed and
-# refuses one whose name is not <prefix>X.Y.Z; and for `release-push.sh
-# release`, which makes a GitHub release carry the run's assets.
+# refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
+# release`, which makes a GitHub release carry the run's assets; for
+# `release-push.sh push-tag`, which pushes a tag with the deploy key; and for
+# `release-push.sh handed`, which checks the version and the files a build job
+# hands a publish job and prints the release tag.
 #
 # Each push-main case builds a bare origin holding one seed commit
 # (packages/pkg at 1.0.0 plus a README) and two clones, a and b. Clone a plays
@@ -16,7 +19,13 @@
 # from several checkouts. The `release` cases run against a stub `gh` first on
 # PATH, which answers `gh release view` for a release that does not exist, is a
 # draft or is published, can fail an upload, an edit or a create, and logs
-# every call it gets.
+# every call it gets. The `push-tag` cases push to a local bare origin through
+# a URL rewrite, and two more reach github.com itself: one with the pinned host
+# keys, one with a copy of the script whose pinned key GitHub does not hold.
+# Those, and a comparison of the pinned keys with `gh api meta`, print a SKIP
+# line and count nothing when the network or a gh sign-in is missing. The
+# `handed` cases fill a directory with the archives a release ships, change one
+# thing as a compromised build job could, and run `handed` on it.
 #
 # Run from anywhere: .github/scripts/release-push.test.sh
 # CI runs it in the Tests workflow (pr-and-main.yaml, job test).
@@ -422,5 +431,224 @@ check "no asset: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 release_run none "" --draft pkg-v1.0.1 "Pkg v1.0.1" a.tgz
 check "an unknown option: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 
-summary "release-push.sh push-main, tagged and release"
+echo
+echo "Case: push-tag pushes a tag with the deploy key and leaves no key behind"
+# The push goes to git@github.com:<repo>.git; GIT_CONFIG_* rewrites that to a local bare origin,
+# so git pushes locally and the key directory is all the script under test makes. A
+# pre-receive hook records what the directory held while the push ran.
+pt="$work/pt"
+mkdir -p "$pt/tmp"
+git init -q --bare "$pt/origin.git"
+git init -q -b main "$pt/a"
+identity "$pt/a"
+git -C "$pt/a" commit -q --allow-empty -m seed
+git -C "$pt/a" tag pkg-v1.0.1
+ssh-keygen -q -t ed25519 -N '' -C release-push-test -f "$pt/deploy"
+cat > "$pt/origin.git/hooks/pre-receive" <<'HOOK'
+#!/usr/bin/env bash
+find "$TMPDIR" -type f -printf '%m %f\n' | sort > "$PUSH_TAG_SEEN"
+[ -z "${PUSH_TAG_REJECT:-}" ]
+HOOK
+chmod +x "$pt/origin.git/hooks/pre-receive"
+# push_tag <tag> [VAR=value...]: runs `release-push.sh push-tag <tag>` in clone a with the deploy
+# key, a fresh TMPDIR and the rewrite to the local origin; leaves its exit code in rc, its output
+# in out, what the hook saw in seen and what TMPDIR holds afterwards in left.
+push_tag() {
+  local tag=$1
+  shift
+  rm -rf "$pt/tmp" && mkdir "$pt/tmp"
+  : > "$pt/seen"
+  set +e
+  out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" PUSH_TAG_SEEN="$pt/seen" GITHUB_REPOSITORY=example/repo \
+    DEPLOY_KEY="$(<"$pt/deploy")" GIT_CONFIG_COUNT=1 \
+    GIT_CONFIG_KEY_0="url.$pt/origin.git.insteadOf" GIT_CONFIG_VALUE_0="git@github.com:example/repo.git" \
+    "$@" "$release_push" push-tag "$tag" 2>&1)
+  rc=$?
+  set -e
+  seen=$(<"$pt/seen")
+  left=$(find "$pt/tmp" -mindepth 1 | wc -l)
+}
+push_tag pkg-v1.0.1
+check "pushes: exits 0" "$(is "$rc" 0)"
+check "pushes: origin holds the tag, at the clone's commit" \
+  "$(is "$(git -C "$pt/origin.git" rev-parse -q --verify refs/tags/pkg-v1.0.1)" "$(git -C "$pt/a" rev-parse pkg-v1.0.1)")"
+check "pushes: the key and the pinned host keys were owner-only while the push ran" \
+  "$(is "$seen" "600 key"$'\n'"600 known_hosts")"
+check "pushes: nothing is left in TMPDIR" "$(is "$left" 0)"
+# A tag origin lacks, so the push reaches the hook (one origin already holds is up to date).
+git -C "$pt/a" tag pkg-v1.0.2
+push_tag pkg-v1.0.2 PUSH_TAG_REJECT=1
+check "a rejected push: exits non-zero" "$([ "$rc" != 0 ] && echo true || echo false)"
+check "a rejected push: the key was written for it" "$(contains "$seen" '^600 key$')"
+check "a rejected push: nothing is left in TMPDIR" "$(is "$left" 0)"
+check "a rejected push: origin has no such tag" \
+  "$(is "$(git -C "$pt/origin.git" tag -l pkg-v1.0.2)" "")"
+push_tag pkg-v1.0.1 DEPLOY_KEY=
+check "no DEPLOY_KEY: exits non-zero, naming it" "$([ "$rc" != 0 ] && contains "$out" 'DEPLOY_KEY' || echo false)"
+check "no DEPLOY_KEY: nothing is made in TMPDIR" "$(is "$left" 0)"
+
+echo
+echo "Case: push-tag holds GitHub's host keys and refuses any other"
+# These reach github.com over SSH with a throwaway key no repository trusts, so each push is
+# refused; what matters is which refusal. Without the network they are skipped, not counted.
+if timeout 10 bash -c '</dev/tcp/github.com/22' 2>/dev/null; then
+  # github_push <script> [VAR=value...]: runs <script> push-tag against a repository that does not
+  # exist, with the throwaway key; leaves rc, out and left as push_tag does.
+  github_push() {
+    local script=$1
+    shift
+    rm -rf "$pt/tmp" && mkdir "$pt/tmp"
+    set +e
+    out=$(cd "$pt/a" && env TMPDIR="$pt/tmp" GITHUB_REPOSITORY=sjawhar/release-push-test-nonexistent \
+      DEPLOY_KEY="$(<"$pt/deploy")" "$@" "$script" push-tag pkg-v1.0.1 2>&1)
+    rc=$?
+    set -e
+    left=$(find "$pt/tmp" -mindepth 1 | wc -l)
+  }
+  github_push "$release_push"
+  check "the pinned keys: GitHub's host key is accepted and the throwaway key refused" \
+    "$([ "$rc" != 0 ] && contains "$out" 'Permission denied (publickey)' || echo false)"
+  check "the pinned keys: nothing is left in TMPDIR" "$(is "$left" 0)"
+  # A copy of the script whose only pinned key is one GitHub does not hold.
+  mkdir -p "$pt/swapped"
+  ssh-keygen -q -t ed25519 -N '' -f "$pt/swapped/other"
+  python3 - "$release_push" "$pt/swapped/release-push.sh" "$(cut -d' ' -f2 "$pt/swapped/other.pub")" <<'PY'
+import re
+import sys
+
+source, target, other = sys.argv[1:]
+text = open(source).read()
+pinned = re.findall(r"(?m)^github\.com \S+ \S+$", text)
+assert len(pinned) == 3, pinned
+text = re.sub(r"(?m)^github\.com ssh-ed25519 \S+$", "github.com ssh-ed25519 " + other, text)
+text = re.sub(r"(?m)^github\.com (ecdsa-sha2-nistp256|ssh-rsa) \S+\n", "", text)
+open(target, "w").write(text)
+PY
+  chmod +x "$pt/swapped/release-push.sh"
+  github_push "$pt/swapped/release-push.sh"
+  check "a swapped host key: exits non-zero, the host key refused before any login" \
+    "$([ "$rc" != 0 ] && contains "$out" 'REMOTE HOST IDENTIFICATION HAS CHANGED\|Host key verification failed' || echo false)"
+  check "a swapped host key: no login was tried" "$(is "$(contains "$out" 'Permission denied (publickey)')" false)"
+  check "a swapped host key: nothing is left in TMPDIR" "$(is "$left" 0)"
+else
+  echo "  SKIP: the host-key cases (github.com:22 is unreachable)"
+fi
+
+echo
+echo "Case: push-tag's pinned host keys are the ones GitHub publishes"
+# A rotation shows up here first. It needs gh signed in and the network, and is skipped without.
+if command -v gh >/dev/null && published=$(gh api meta --jq '.ssh_keys[]' 2>/dev/null) && [ -n "$published" ]; then
+  pinned=$(sed -n 's/^github\.com //p' "$release_push" | sort)
+  check "the pinned keys equal gh api meta's ssh_keys" "$(is "$pinned" "$(sort <<<"$published")")"
+else
+  echo "  SKIP: the published-keys comparison (gh api meta failed: no gh, no sign-in or no network)"
+fi
+
+echo
+echo "Case: handed refuses a version or a hand-over a compromised build could make, and prints the tag"
+# Each case fills a directory with the four archives a release of 0.1.0 ships (dummy bytes: the
+# bytes are the build job's to choose), changes one thing, and runs `handed envoy-infra-v
+# <version> <dir>` with the names publish builds from the version it is given. It runs in $hd, so
+# a version that executed would leave its proof file there.
+hd="$work/handed"
+mkdir -p "$hd"
+handed_targets=(linux-amd64 linux-arm64 darwin-amd64 darwin-arm64)
+# handed_run <case> <version> [<mutation>]: fills $hd/<case> with the 0.1.0 archives, runs the
+# shell text <mutation> in it, then runs handed; leaves rc, out (stdout) and err (stderr).
+handed_run() {
+  local name=$1 version=$2 mutation=${3:-} dir="$hd/$1" target names=()
+  mkdir "$dir"
+  for target in "${handed_targets[@]}"; do
+    printf 'archive %s\n' "$target" > "$dir/pulumi-resource-envoy-infra-v0.1.0-$target.tar.gz"
+  done
+  [ -z "$mutation" ] || (cd "$dir" && eval "$mutation")
+  for target in "${handed_targets[@]}"; do
+    names+=("pulumi-resource-envoy-infra-v$version-$target.tar.gz")
+  done
+  set +e
+  out=$(cd "$hd" && "$release_push" handed envoy-infra-v "$version" "$dir" "${names[@]}" 2>"$hd/$name.err")
+  rc=$?
+  set -e
+  err=$(<"$hd/$name.err")
+}
+# refused <description>: the three things every refusal shares, checked at once.
+refused() {
+  check "$1: exits non-zero, prints no tag" "$([ "$rc" != 0 ] && [ -z "$out" ] && echo true || echo false)"
+}
+a=pulumi-resource-envoy-infra-v0.1.0
+
+handed_run real 0.1.0
+check "the real set: exits 0" "$(is "$rc" 0)"
+check "the real set: prints exactly the tag, the prefix and the version" "$(is "$out" envoy-infra-v0.1.0)"
+check "the real set: says nothing on stderr" "$(is "$err" "")"
+
+# shellcheck disable=SC2016 # the literal text a forged version would carry, never expanded
+handed_run substitution '0.1.0$(id>pwned-version)'
+refused "a version with a command substitution"
+check "a version with a command substitution: is refused as not X.Y.Z" "$(contains "$err" 'is not X.Y.Z')"
+check "a version with a command substitution: never runs" \
+  "$([ ! -e "$hd/pwned-version" ] && [ ! -e "$hd/substitution/pwned-version" ] && echo true || echo false)"
+handed_run leading-zero 0.01.0
+refused "a version with a leading zero"
+check "a version with a leading zero: names it" "$(contains "$err" 'version 0.01.0 is not X.Y.Z')"
+handed_run two-fields 0.1
+refused "a version of two fields"
+check "a version of two fields: names it" "$(contains "$err" 'version 0.1 is not X.Y.Z')"
+handed_run trailing-newline $'0.1.0\n'
+refused "a version with a trailing newline"
+check "a version with a trailing newline: is refused as not X.Y.Z" "$(contains "$err" 'is not X.Y.Z')"
+
+handed_run another-release 99.0.0
+refused "another release's version, over this release's archives"
+check "another release's version: names the archives it expected" \
+  "$(contains "$err" "lacks pulumi-resource-envoy-infra-v99.0.0-linux-amd64.tar.gz")"
+check "another release's version: names the archives it was handed" \
+  "$(contains "$err" "does not ship: .*$a-linux-amd64.tar.gz")"
+handed_run missing 0.1.0 "rm $a-darwin-arm64.tar.gz"
+refused "a missing archive"
+check "a missing archive: names it" "$(contains "$err" "lacks $a-darwin-arm64.tar.gz")"
+handed_run extra-file 0.1.0 "printf 'not legion\n' > legion-linux-amd64.tar.gz"
+refused "an extra file"
+check "an extra file: names it" "$(contains "$err" 'does not ship: legion-linux-amd64.tar.gz')"
+handed_run build-sums 0.1.0 "sha256sum -- *.tar.gz > SHA256SUMS"
+refused "a SHA256SUMS the build wrote (publish writes its own)"
+check "a SHA256SUMS the build wrote: names it" "$(contains "$err" 'does not ship: SHA256SUMS')"
+handed_run extra-dir 0.1.0 "mkdir sub && printf x > sub/x"
+refused "an extra directory"
+check "an extra directory: names it and what it holds" "$(contains "$err" 'does not ship: sub sub/x')"
+handed_run newline-name 0.1.0 "printf x > \$'evil\nname'"
+refused "an extra file whose name holds a newline"
+check "an extra file whose name holds a newline: names it quoted" "$(contains "$err" "\$'evil\\\\nname'")"
+handed_run symlink 0.1.0 "rm $a-linux-arm64.tar.gz && ln -s /etc/hostname $a-linux-arm64.tar.gz"
+refused "an archive swapped for a symlink"
+check "an archive swapped for a symlink: says it is not a regular file" \
+  "$(contains "$err" "$a-linux-arm64.tar.gz in .* is not a regular file")"
+check "an archive swapped for a symlink: does not call it missing" "$(is "$(contains "$err" 'lacks')" false)"
+handed_run directory 0.1.0 "rm $a-linux-amd64.tar.gz && mkdir $a-linux-amd64.tar.gz"
+refused "an archive replaced by a directory"
+check "an archive replaced by a directory: says it is not a regular file" \
+  "$(contains "$err" "$a-linux-amd64.tar.gz in .* is not a regular file")"
+
+set +e
+out=$("$release_push" handed envoy-infra-v 0.1.0 "$hd/no-such-dir" "$a-linux-amd64.tar.gz" 2>"$hd/no-dir.err")
+rc=$?
+set -e
+err=$(<"$hd/no-dir.err")
+refused "a directory that does not exist"
+check "a directory that does not exist: names it" "$(contains "$err" 'no-such-dir is not a directory')"
+mkdir "$hd/nested" && mkdir "$hd/nested/sub" && printf x > "$hd/nested/sub/x"
+set +e
+out=$("$release_push" handed envoy-infra-v 0.1.0 "$hd/nested" sub/x 2>"$hd/nested.err")
+rc=$?
+set -e
+err=$(<"$hd/nested.err")
+refused "a file named with a /"
+check "a file named with a /: says each file is a name in the directory" "$(contains "$err" 'sub/x is not a file name')"
+set +e
+out=$("$release_push" handed envoy-infra-v 0.1.0 "$hd/real" 2>"$hd/no-files.err")
+rc=$?
+set -e
+refused "no file to check"
+
+summary "release-push.sh push-main, tagged, release, push-tag and handed"
 
