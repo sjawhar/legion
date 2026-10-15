@@ -915,7 +915,9 @@ is the reference implementation's, with these additions:
   `<name> AWSCURRENT (version <id>) is not an nkey user seed: <reason>`, exit 1, the reason
   `core.UserSeedPublicKey`'s, never quoting the value.
 - **A result that cannot be printed** is never exit 0: `check`'s or `verify`'s line is a refusal,
-  exit 2 (`seed.go:297-302`), and `--version`'s exit 1 (`main.go:36-39`).
+  exit 2 (`seed.go:297-302`), and `--version`'s exit 1 (`main.go:36-39`). `generate` with stdout on
+  the null device, which a closed stdout is too, since the Go runtime opens a closed fd 0-2 on it,
+  refuses before the store opens, exit 2 (`seed.go:418-421, 430-445`).
 - **Secrecy.** The seed never reaches argv, stdout, stderr, a log or an error message, and the AWS
   SDK's logging is off (`awsstore.go:78-87`).
 

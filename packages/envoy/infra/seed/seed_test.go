@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"strings"
 	"testing"
@@ -609,6 +610,31 @@ func commandWith(store *fakeStore, stdout io.Writer, args ...string) (code int, 
 	code = seed.Command(context.Background(), args, stdout, &errs,
 		seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) { return store, nil }})
 	return code, errs.String()
+}
+
+// generate with stdout on the null device would print its key nowhere, so it refuses before the
+// store opens. check and verify write nothing, so they still run: a script may want only the exit
+// code.
+func TestGenerateRefusesANullStdoutBeforeOpeningTheStore(t *testing.T) {
+	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = null.Close() })
+	store := newStore(t)
+	opened := 0
+	stores := seed.Stores{"fake-store": func(context.Context, string, string) (seed.Store, error) {
+		opened++
+		return store, nil
+	}}
+	var errs bytes.Buffer
+	code := seed.Command(context.Background(), mode("generate"), null, &errs, stores)
+	require.Equal(t, 2, code)
+	require.Equal(t, "refused: "+secretName+": stdout is the null device, where the public key would be lost (a closed "+
+		"stdout is one too: Go opens it on /dev/null); send stdout somewhere you can read. Nothing was written\n", errs.String())
+	require.Zero(t, opened)
+
+	errs.Reset()
+	require.Equal(t, 0, seed.Command(context.Background(), mode("check"), null, &errs, stores), errs.String())
+	require.Equal(t, []string{"describe"}, store.calls)
 }
 
 // generate never writes a seed whose public key it could not print: a print that fails is a

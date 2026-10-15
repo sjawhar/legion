@@ -468,11 +468,11 @@ from, a secret of the same name in another account.
    eventually consistently, does not show it yet, so it never replaces a seed a client may already
    read. Every write uses one fixed `ClientRequestToken`, so a second run's first-version write with
    another seed, racing this one, is refused (`ResourceExistsException`, exit 2) rather than written
-   beside it, and the key that run printed is not stored. It prints the public key just
-   before the write, so the key is on your terminal whatever happens next, and the version id once
-   the write answers. If it cannot print the key, it writes nothing and exits 2. Keep stdout
-   somewhere you can read: `>/dev/null`, or a closed stdout, which a Go program sees as
-   `/dev/null`, discards the key with nothing to tell. After the write it lists the versions again
+   beside it, and the key that run printed is not stored. It prints the public key just before the
+   write, so the key is on your terminal whatever happens next, and the version id once the write
+   answers. If it cannot print the key, it writes nothing and exits 2. With stdout on the null
+   device it refuses before any call, exit 2, since the key would be lost: `>/dev/null`, and a
+   closed stdout, which a Go program sees as `/dev/null`. After the write it lists the versions again
    and reads back the version Secrets Manager serves by default (`AWSCURRENT`), which must be the
    one it wrote and derive the public key it printed. Secrets Manager's reads are eventually
    consistent, so while the listing shows no version yet, or no version is `AWSCURRENT`, it looks

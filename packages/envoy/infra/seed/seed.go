@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"os"
 	"slices"
 	"strings"
 	"time"
@@ -414,12 +415,33 @@ func Command(ctx context.Context, args []string, stdout, stderr io.Writer, store
 		// `--expect-account "$ACCOUNT"` with the variable unset would otherwise skip the check.
 		return usage("--expect-account is given empty; it is a 12-digit AWS account id, or leave the flag out")
 	}
+	if mode == "generate" && nullDevice(stdout) {
+		return exitCode(stderr, refuse("%s: stdout is the null device, where the public key would be lost (a closed stdout "+
+			"is one too: Go opens it on %s); send stdout somewhere you can read. Nothing was written", name, os.DevNull))
+	}
 
 	s, err := stores[store](ctx, region, account)
 	if err != nil {
 		return exitCode(stderr, refuse("%s: %v", name, err))
 	}
 	return exitCode(stderr, run(ctx, s, name, publicKey, stdout))
+}
+
+// nullDevice reports whether w is the null device, comparing its device and inode numbers with
+// os.DevNull's (os.SameFile, on Unix). A closed stdout is the null device too: the Go runtime opens a
+// closed fd 0-2 on it at start (runtime/fds_unix.go checkfds). A writer that is no file, or a file
+// that cannot be stat'd, is not: a write that then fails is caught where generate prints.
+func nullDevice(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	got, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	null, err := os.Stat(os.DevNull)
+	return err == nil && os.SameFile(got, null)
 }
 
 // exitCode writes err on stderr and returns the command's exit code: 0 for none; 1 for ErrMismatch,
