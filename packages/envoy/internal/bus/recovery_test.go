@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
+	"net/http"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -886,4 +888,90 @@ func TestJetStreamPublishRetainsLegionIssueNotices(t *testing.T) {
 	if got.EventID != item.EventID {
 		t.Fatalf("retained notice event = %q, want %q", got.EventID, item.EventID)
 	}
+}
+
+// A closed connection is replaced once, however many callers find it closed at once: the recovery
+// its ClosedCB starts and a publish each dial a replacement, and the one that installs second
+// closes its own and uses the first's. Otherwise the first is orphaned, still connected, and Close
+// leaves it running; with MaxReconnect -1 it then reconnects forever once its server is gone. The
+// server's own count of client connections (its monitoring endpoint, /connz) shows it. The publish
+// that races the recovery arrives once: the connection the second dialler closes carries nothing,
+// since ensureConnWithContext never hands it to its caller. An observer of its own counts it.
+func TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen(t *testing.T) {
+	unsetNkeyEnvironment(t)
+	ctr, uri := testnats.StartImageConfig(t, testnats.Image, "jetstream {}\nhttp_port: 8222\n", []string{"-js"}, true)
+	ctx := context.Background()
+	host, err := ctr.Host(ctx)
+	if err != nil {
+		t.Fatalf("NATS host: %v", err)
+	}
+	port, err := ctr.MappedPort(ctx, "8222/tcp")
+	if err != nil {
+		t.Fatalf("NATS monitoring port: %v", err)
+	}
+	connections := func() int {
+		t.Helper()
+		response, err := http.Get("http://" + net.JoinHostPort(host, port.Port()) + "/connz")
+		if err != nil {
+			t.Fatalf("read /connz: %v", err)
+		}
+		defer response.Body.Close()
+		var connz struct {
+			NumConnections int `json:"num_connections"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&connz); err != nil {
+			t.Fatalf("decode /connz: %v", err)
+		}
+		return connz.NumConnections
+	}
+	// settle waits up to within for the server to hold want client connections, and fails with
+	// the count it last read.
+	settle := func(want int, within time.Duration, when string) {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for open := connections(); open != want; open = connections() {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d connection(s) open %s, want %d", open, when, want)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+
+	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1))
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	observer, err := natsgo.Connect(uri)
+	if err != nil {
+		t.Fatalf("connect the observer: %v", err)
+	}
+	var arrived atomic.Int32
+	if _, err := observer.Subscribe("notifications.github.acme.widgets.push.branch.main", func(msg *natsgo.Msg) {
+		var item contracts.Envelope
+		if json.Unmarshal(msg.Data, &item) == nil && item.DedupeKey == "after-the-close" {
+			arrived.Add(1)
+		}
+	}); err != nil {
+		t.Fatalf("observer subscribe: %v", err)
+	}
+	if err := observer.Flush(); err != nil {
+		t.Fatalf("observer flush: %v", err)
+	}
+	publishOnce(t, client, "before-the-close")
+	client.Conn.Close()
+	publishOnce(t, client, "after-the-close")
+	waitFor(t, 5*time.Second, "the publish after the close to reach the observer", func() bool { return arrived.Load() > 0 })
+	// A second copy would come on the same server's next deliveries: a round trip and a pause
+	// leave it time to.
+	if err := observer.Flush(); err != nil {
+		t.Fatalf("observer flush: %v", err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if got := arrived.Load(); got != 1 {
+		t.Fatalf("the publish after the close arrived %d times, want 1", got)
+	}
+	observer.Close()
+	settle(1, 15*time.Second, "once the publish and the recovery have replaced the closed one")
+	client.Close()
+	settle(0, 5*time.Second, "after Close")
 }
