@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-578",
-  "completed": "2026-10-15T22:48:00Z",
+  "completed": "2026-10-15T23:50:48Z",
   "generation": 3,
-  "head": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
-  "handoffHead": "2900d723f890e13af512fb5d1250fe35f67eb3ae",
+  "head": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+  "handoffHead": "83aec045cf5d9f95199ce79999a8b455ef4a415f",
   "pullRequest": 1866,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Coordinator lane: re-read https://github.com/sjawhar/legion/pull/1866#issuecomment-6203340869 (sjawhar-agent[bot], 2026-10-15T22:11:51Z) and dispatch://LEGION-578/artifact/stage4-proof-13cb9ce7-md against plan v6 §3.5.4's checkpoint map: `stage 4a e2e: PASS` and `stage 4b e2e: PASS`, run.json revision 13cb9ce7110d77bfe46ca3213c5048ea38087dd5 on ghcr.io/sjawhar/legion-worker@sha256:daf3708595c18345ad4ee40d6bbd92fa345cbeeca2c6bbf7a065bc8a486f7037, all 14 named checkpoints present as `CHECK <name>: PASS`; the tag sha-13cb9ce7110d resolved independently at ghcr.io/v2/sjawhar/legion-worker/manifests/ gives the same docker-content-digest; Tests run 38758192010 (attempt 2) jobs lint/typecheck/test success at 13cb9ce7, its test job running scripts/e2e/lib/stage4b-tools.test.ts and stage4b-boot-capabilities.test.ts (337 tests across 27 files, 0 fail) and go test of internal/admit; PR Title run 38817783611 success; Worker Image run 38758193451 success. Production half: re-drove criteria 1, 3, 5 and 6 independently in the tester's own container of pod legion-legion-legion-578 (release 3f1ed031, image sha256:c69e8c5d…) and judged the resulting session excerpt with the branch's own helpers under real jq 1.8.2; read the daemon log (one probe pass line, zero `is open` lines) and read_record (every live claim of this tree: the six rows ok, open []); confirmed the overlay sets retry.modelFallback: true and the agent's environ is 2,737 bytes (one xargs invocation). All 14 proof entries carry six non-empty fields. The pod cannot run Stage 4a/4b (kubectl auth can-i create sandboxes.agents.x-k8s.io -n legion → no), so criterion 2's loading clause and criterion 7's boot/controller halves are verified by the coordinator's record, not re-run."
+    "how": "Coordinator lane: re-read https://github.com/sjawhar/legion/pull/1866#issuecomment-6203340869 (sjawhar-agent[bot], 2026-10-15T22:11:51Z) and dispatch://LEGION-578/artifact/stage4-proof-13cb9ce7-md against plan v6 §3.5.4's checkpoint map: `stage 4a e2e: PASS` and `stage 4b e2e: PASS`, run.json revision 13cb9ce7110d77bfe46ca3213c5048ea38087dd5 on ghcr.io/sjawhar/legion-worker@sha256:daf3708595c18345ad4ee40d6bbd92fa345cbeeca2c6bbf7a065bc8a486f7037, all 14 named checkpoints present as `CHECK <name>: PASS`; the tag sha-13cb9ce7110d resolved independently at ghcr.io/v2/sjawhar/legion-worker/manifests/ gives the same docker-content-digest; Tests run 38758192010 (attempt 2) jobs lint/typecheck/test success at 13cb9ce7, its test job running scripts/e2e/lib/stage4b-tools.test.ts and stage4b-boot-capabilities.test.ts (337 tests across 27 files, 0 fail) and go test of internal/admit; PR Title run 38817783611 success; Worker Image run 38758193451 success. Production half: re-drove criteria 1, 3, 5 and 6 independently in the tester's own container of pod legion-legion-legion-578 (release 3f1ed031, image sha256:c69e8c5d…) and judged the resulting session excerpt with the branch's own helpers under real jq 1.8.2; read the daemon log (one probe pass line, zero `is open` lines) and read_record (every live claim of this tree: the six rows ok, open []); confirmed the overlay sets retry.modelFallback: true and the agent's environ is 2,737 bytes (one xargs invocation). All 14 proof entries carry six non-empty fields. The pod cannot run Stage 4a/4b (kubectl auth can-i create sandboxes.agents.x-k8s.io -n legion → no), so criterion 2's loading clause and criterion 7's boot/controller halves are verified by the coordinator's record, not re-run. Round 2 (d25908b1): re-ran its three checks independently — ticks rendered through the real renderer (renderInbound, packages/envoy-client/src/delivery.ts) and parsed by lib/controller-ticks.jq under jq 1.6/1.7.1/1.8.2/jaq with every arm of ticks_name_open; GET $LEGION_DAEMON_URL/legion/v1/state → HTTP 200, open rows [] (pool-capacity present); the round-2 role-loop assertions lifted from d25908b1 over the two real excerpts and over a composed echo/write excerpt; the prerequisites guard and the 14-case battery at this head. CI Tests run 38824478826 success at d25908b1 (349 tests across 28 files, the four lib suites named in its log). Its three round-2 proof entries carry six non-empty fields."
   },
   "failures": [],
   "failed": 0,
@@ -53,14 +53,30 @@
       "observed": "One probe pass line (2026-10-15T03:42:00Z, sandbox legion-probe-legion-c69e8c5d0ad9), zero `is open` lines, 23 `session reported` lines, and this tree's four live claims (architect /7, planner /5, implementer /12, tester /6) each reporting subagents, web-search, mcp, repository-extensions, dispatch-envoy-tools and github ok with open [] — read_record agrees. The coordinator's record: CHECK image-probe / image-probe-negative / image-probe-capability-negative / boot / controller / full-agent-negative all PASS, boot's open set [\"secrets\"], the controller's 20 ticks naming [\"secrets\"], full-agent-negative's row open then present again. The guard passes under all six jq binaries; the battery answered as documented (an error-only text, the model's words, a pending call, another tool's result → false; a write to xd://bash and eval's tool.bash → bash's; string content → \"\"; empty and partial-tail sessions → no crash; tool_result_answered by arguments; the codegraph control with an error → true and with a leak → false); capabilities_probed: fixture 0, codegraph unchecked 1, capabilities null 5 (until_true keeps waiting), a row absent 0 (the per-row loop then fails naming `absent: no such row`); TOON renders openCapabilities[1]: secrets / [2]: secrets,pool-capacity / : [] and the capture reads [\"secrets\"], [\"secrets\",\"pool-capacity\"], [] — the order reportCapabilities returns (the table's).",
       "headSha": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
       "negativeControl": "call_arguments restored to a def chain (device_arguments) in a copy of the library → jq 1.8.2 exit 134, `src/compile.c:1158: expand_call_arglist: Assertion '0 && \"Unknown function type\"' failed`, where jq 1.7.1 compiles the same copy, which the prerequisites guard turns into a fail naming `jq --version`; the coordinator's image-probe-capability-negative refused the image with a capability removed"
+    },
+    {
+      "criterion": "7 (round 2) — the controller tick assertion compares every tick to the running daemon's open rows (lib/controller-ticks.jq ticks_name_open), not boot's, since each start_daemon re-probes the image and pool-capacity is that probe's verdict (review thread PRRT_kwDORFy7ds6tAG7V)",
+      "surface": "the real delivery renderer (renderInbound of packages/envoy-client/src/delivery.ts, as pi-envoy writes a custom_message envoy-message) producing tick deliveries with one row, two rows and no list beside a held notice, in a synthetic controller session under /tmp/ctrlprof/sessions; the script's tick_open_capabilities and controller_ticked lifted from d25908b1 (scriptFunctions) with notice_needle from lib/workflow.sh; jq 1.6, 1.7.1, 1.8.2 and jaq 3.1.1; the running production daemon's /legion/v1/state from the tester's container",
+      "command": "bun run /tmp/render-ticks.ts; controller_ticked; tick_open_capabilities | jq -s . > controller-ticks.json; jq -e -L scripts/e2e/lib --argjson open <rows> 'include \"controller-ticks\"; ticks_name_open($open)' over controller-ticks.json and over hand-built tick arrays (warm, stale-boot, cold any order, divergent, none, production-empty, no secrets, extra row); curl -sS \"$LEGION_DAEMON_URL/legion/v1/state\" | jq '[.capabilities[] | select(.status == \"open\") | .name]'; awk over the script for start_daemon between `begin controller` and the tick block",
+      "observed": "controller_ticks read [[\"secrets\"],[\"secrets\",\"pool-capacity\"],[],[\"pool-capacity\",\"secrets\"]] identically on all four jqs, the held delivery excluded, string and text-block content alike; ticks_name_open: warm true, stale-boot false, cold-any-order true, divergent false, no-ticks false, production-empty false, no-secrets false, extra-row false; the mixed rendered session → false for both arms (the divergence the assertion must refuse), the one-row ticks alone → true against [\"secrets\"] and false against boot-style [\"secrets\",\"pool-capacity\"]; production: HTTP 200, 47,226 bytes, open [] (17 present, 3 withheld), pool-capacity `present: the image probe pod scheduled at its first attempt`; no start_daemon after :4852 before the tick block at ~:5106, so the controller's ticks are the fourth daemon's, the one daemon_state reads.",
+      "headSha": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+      "negativeControl": "one-row ticks against boot-style [\"secrets\",\"pool-capacity\"] → false (the stale comparand); ticks_name_open([]) over production-shaped ticks → false; a tick list with an extra row → false"
+    },
+    {
+      "criterion": "1, 3, 4 and 5 (round 2) — full-agent-tools binds its assertions to their calls: each toolchain want from the `go version &&` chain's own result, edit and read each required, the App login from the `gh api graphql` call's own result; a toolCall with no string id is no call (threads PRRT_kwDORFy7ds6tAG7h, …7q, …7z)",
+      "surface": "the round-2 helpers lifted from d25908b1 run under jq 1.8.2 over the two real excerpts kept from round 1 ($LEGION_STATE_DIR/test/tester-excerpt.jsonl: this session, review App; implementer-excerpt.jsonl: the implementer's session over Envoy, implement App) and over a composed excerpt (/tmp/composed.jsonl); the library under jq 1.6, 1.7.1, 1.8.0, 1.8.1, 1.8.2",
+      "command": "for each excerpt: tool_result_said eval ×3; tool_result_said web_search https://; tool_result_answered bash 'go version &&' <want> for the five wants; tool_result_said edit 'edited <nonce>'; tool_result_said read 'edited <nonce>'; tool_result_answered bash 'gh api graphql' <App>; tool_result_said task <App>; ! tool_ran notebook; the prerequisites guard per jq; python3 /tmp/adv.py (14 cases × 3 jqs)",
+      "observed": "tester excerpt: role-loop asserts exit 0; implementer excerpt: exit 0 and the other App absent; guard true on all five jqs; battery ALL OK 14/14 on 1.6/1.7.1/1.8.2, the null-id call now dropped ([tool_results(\"bash\")[] | .toolCallId] → [\"b\"], exit 0, where round 1 exited 5).",
+      "headSha": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+      "negativeControl": "the composed excerpt (one bash `echo 'legion-implementer[bot]'; echo 'go version go1.26.8 linux/amd64'`, the page written with write and read back): old tool_result_said bash <App> PASS / new tool_result_answered bash 'gh api graphql' <App> FAIL; old tool_result_said bash 'go version go' PASS / new tool_result_answered bash 'go version &&' … FAIL; old read||edit PASS / new tool_result_said edit FAIL"
     }
   ],
   "outOfReach": [
-    "Stage 4a/4b themselves: a pod's kubectl creates no Sandbox and no pod (kubectl auth can-i create sandboxes.agents.x-k8s.io -n legion → no), so criterion 2's loading clause (repository-configuration, 663's full-agent, repository-tools' skill nonces) and criterion 7's boot/controller/full-agent-negative halves are verified by the coordinator's record at 13cb9ce7, not re-run; a re-run needs the operator's devbox (plan v6 §5)."
+    "Stage 4a/4b themselves: a pod's kubectl creates no Sandbox and no pod (kubectl auth can-i create sandboxes.agents.x-k8s.io -n legion → no), so criterion 2's loading clause (repository-configuration, 663's full-agent, repository-tools' skill nonces) and criterion 7's boot/controller/full-agent-negative halves are verified by the coordinator's record at 13cb9ce7, not re-run; a re-run needs the operator's devbox (plan v6 §5).",
+    "Round 2: the changed assertions have not run in a Stage 4b run (the architect ruled a narrower re-proof, implement.json round 2, Envoy d0540c3d33d7a601f0f1e396158823df and ce88e66ee0396e28d64adeb477f0294e); the controller comparand's live case (a cold pool at boot, warm at a later start) occurred in no run so far — proved here against real-renderer deliveries and the library's arms."
   ],
   "observations": [
-    "full-agent-tools' edit check accepts `edited <nonce>` from a read result: a role that rewrote the page with write instead of edit would pass it; the instruction asks for edit and every role used it in the live run, so this is a laxity of the proof, not a failure.",
-    "A toolCall with id null makes tool_results' from_entries exit 5 (a confusing fail line, never a false pass); 0 such calls across the 1,845 entries of this pod's four sessions.",
+    "Round 2 closed round 1's two observations: the edit result is now required on its own (write cannot satisfy it) and a null-id toolCall is dropped before from_entries.",
     "The `[\"secrets\",\"pool-capacity\"]` open set and its controller comparison did not occur live (the run's pool scheduled the probe at once); the TOON parse and the table order were checked here instead.",
     "main's hold loops now rely on an implementer's `sleep 300` turn; the live run held LEGSMOKE-796 after 3 ended launches, 0 after their task's turn.",
     "CI's test job runs on a jq other than 1.8.2; the def-chain abort is caught only by the prerequisites guard on the host that runs Stage 4b."
@@ -70,5 +86,34 @@
     "$LEGION_STATE_DIR/test/tester-excerpt.jsonl, implementer-excerpt.jsonl (the two judged excerpts)",
     "$LEGION_STATE_DIR/test/fns.sh (the script's helpers as lifted), /tmp/adv.py (the boundary battery), /tmp/libchain (the def-chain control)",
     "$LEGION_STATE_DIR/test/pod.json, daemon.log, ci-test.log"
+  ],
+  "round": 2,
+  "runOfRecordHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5 (round 1's coordinator Stage 4a/4b PASS; round 2 changed only how three checkpoints judge, re-proved on the changed lines per the architect's ruling recorded in implement.json round 2)",
+  "rounds": [
+    {
+      "round": 1,
+      "head": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
+      "handoff": "2830bd512564b5bf91883ed14d88a81de52c7159",
+      "verdict": "pass",
+      "proofEntries": [
+        0,
+        1,
+        2,
+        3,
+        4
+      ]
+    },
+    {
+      "round": 2,
+      "head": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+      "handoff": "83aec045cf5d9f95199ce79999a8b455ef4a415f",
+      "verdict": "pass",
+      "proofEntries": [
+        5,
+        6
+      ],
+      "reviewRound": 1,
+      "threadsResolved": "5 of 5"
+    }
   ]
 }
