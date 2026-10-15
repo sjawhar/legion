@@ -726,7 +726,9 @@ These semantics are ported from the reference implementation, and the unit tests
     of dot-separated non-empty tokens, with `*` and `>` only as whole tokens and `>` only last, and
     with no whitespace, control or surrogate character (Unicode categories Cc and Cs, and
     `unicode.IsSpace` plus U+001C-U+001F).
-  - A queue-scoped entry on the publish side.
+  - A queue-scoped entry on the publish side, or in `subscribe.deny`: nats-server before 2.15
+    enforces a queue-scoped subscribe deny more loosely than it reads (v2.10.29
+    `server/client.go:3044-3051`, `:1199-1203`), and `testnats.Image` is 2.10.29.
   - Duplicate names, or duplicate keys.
   - A `NoAuthUser` that names no user, names a pending user, or names a user with `HasSeed`.
   - In `Render`, a header line holding `\r` or `\n` (`:194-198`).

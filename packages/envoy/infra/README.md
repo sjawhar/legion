@@ -549,7 +549,7 @@ component, `host:Listener`, runs no NATS server and takes none.
 | --- | --- |
 | `Users[].Name` | The user's name: lowercase letters, digits and hyphens, 1 to 48 characters, starting and ending with a letter or digit. |
 | `Users[].NKey` | The user's public key, `U` and 55 more characters, as `envoy-infra seed generate` prints it. Empty for a pending user. |
-| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
+| `Users[].Publish`, `Users[].Subscribe` | Each an `Allow` list and an optional `Deny` list of subject patterns. A subscribe allow entry may instead be `<subject> <queue>`, which scopes it to that queue group. |
 | `Users[].HasSeed` | The consumer stores a seed for this user. |
 | `NoAuthUser` | Optional: the name of a keyed user without a seed, whom a client presenting no credential becomes. |
 
@@ -573,6 +573,10 @@ An authorization is refused, with an error naming the field and, for a user's fi
   tokens, none empty, with `*` and `>` only as whole tokens and `>` only last, and no whitespace
   or control character anywhere;
 - a `<subject> <queue>` entry under `Publish`, since a queue group scopes only subscriptions;
+- a `<subject> <queue>` entry in `Subscribe.Deny`, which nats-server before 2.15 enforces more
+  loosely than it reads: beside a plain deny of the same subject it re-allows every other queue
+  group, and alone it misses a wildcard subscription that covers its subject. Deny the plain
+  subject, or narrow `Subscribe.Allow`;
 - a `NoAuthUser` that names no user, a pending user or a user with `HasSeed`.
 
 `Render` writes the header lines it is given, each as a `# ` comment, which may not hold a line

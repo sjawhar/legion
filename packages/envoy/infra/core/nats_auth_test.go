@@ -178,6 +178,12 @@ func TestValidateRefuses(t *testing.T) {
 		{"an invalid subscribe deny entry", func(a *core.Authorization) { listener(a).Subscribe.Deny = []string{"a..b"} }, `users[0] "example-listener": subscribe.deny[0]`},
 		{"a queue-scoped publish allow", func(a *core.Authorization) { listener(a).Publish.Allow = []string{"envoy.example.>", "a q"} }, `users[0] "example-listener": publish.allow[1]`},
 		{"a queue-scoped publish deny", func(a *core.Authorization) { listener(a).Publish.Deny = []string{"a q"} }, `users[0] "example-listener": publish.deny[0]`},
+		// nats-server before 2.15 enforces a queue-scoped subscribe deny more loosely than it reads:
+		// beside a plain deny it re-allows every other queue group, and alone it misses a wildcard
+		// subscription (v2.10.29 server/client.go:3044-3051 and :1199-1203).
+		{"a queue deny beside a plain deny", func(a *core.Authorization) { listener(a).Subscribe.Deny = []string{"secret.>", "secret.x q1"} },
+			`users[0] "example-listener": subscribe.deny[1] "secret.x q1" names a queue group; nats-server before 2.15 does not enforce a queue-scoped subscribe deny as written`},
+		{"a queue deny alone", func(a *core.Authorization) { listener(a).Subscribe.Deny = []string{"secret.x q1"} }, `users[0] "example-listener": subscribe.deny[0]`},
 		{"two keyed users with one name", func(a *core.Authorization) { a.Users[1].Name = "example-listener" }, `users[1] "example-listener": name repeats users[0]`},
 		{"a pending user with a keyed user's name", func(a *core.Authorization) { pending(a).Name = "example-daemon" }, `users[3] "example-daemon": name repeats users[1]`},
 		{"two users with one key", func(a *core.Authorization) { a.Users[1].NKey = listenerKey }, `users[1] "example-daemon": nkey repeats users[0]`},
@@ -216,7 +222,10 @@ func TestValidateAccepts(t *testing.T) {
 		{"wildcards as whole tokens", func(a *core.Authorization) {
 			a.Users[0].Publish.Allow = []string{"*", ">", "a.*.b", "a.>"}
 		}},
-		{"a wildcard queue", func(a *core.Authorization) { a.Users[0].Subscribe.Deny = []string{"notifications.role.> >"} }},
+		{"a wildcard queue", func(a *core.Authorization) {
+			a.Users[0].Subscribe.Allow = append(a.Users[0].Subscribe.Allow, "notifications.role.> >")
+		}},
+		{"a plain subscribe deny", func(a *core.Authorization) { a.Users[0].Subscribe.Deny = []string{"notifications.role.>"} }},
 		{"no pending user", func(a *core.Authorization) { a.Users = a.Users[:3] }},
 	}
 	for _, r := range rows {

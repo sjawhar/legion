@@ -147,3 +147,59 @@ func TestRenderedAuthorizationOnRealServers(t *testing.T) {
 		})
 	}
 }
+
+// A subscribe deny, on both images: the plain form Validate accepts refuses a queue subscription
+// and a plain one to a subject it covers, and neither receives a message published there, while an
+// allowed subscription does. The queue-scoped form, which nats-server before 2.15 enforces more
+// loosely than it reads, never reaches a server: Render refuses it.
+func TestSubscribeDenyOnRealServers(t *testing.T) {
+	subscriberSeed, subscriber := testnats.User(t)
+	publisherSeed, publisher := testnats.User(t)
+	authorization := func(deny ...string) core.Authorization {
+		return core.Authorization{Users: []core.User{
+			{
+				Name: "example-subscriber", NKey: subscriber, HasSeed: true,
+				Publish:   &core.Rules{Allow: []string{"_INBOX.>"}},
+				Subscribe: &core.Rules{Allow: []string{">"}, Deny: deny},
+			},
+			{
+				Name: "example-publisher", NKey: publisher, HasSeed: true,
+				Publish:   &core.Rules{Allow: []string{">"}},
+				Subscribe: &core.Rules{Allow: []string{"_INBOX.>"}},
+			},
+		}}
+	}
+	_, err := authorization("secret.>", "secret.x q1").Render(header)
+	require.ErrorContains(t, err, `users[0] "example-subscriber": subscribe.deny[1] "secret.x q1" names a queue group`)
+	_, err = authorization("secret.x q1").Render(header)
+	require.ErrorContains(t, err, `users[0] "example-subscriber": subscribe.deny[0] "secret.x q1" names a queue group`)
+
+	config, err := authorization("secret.>").Render(header)
+	require.NoError(t, err)
+	for _, image := range testnats.Images {
+		t.Run(image.Name, func(t *testing.T) {
+			_, uri := testnats.StartImageConfig(t, image.Ref, config, []string{"-js"}, false)
+			conn, errs := connect(t, uri, subscriberSeed)
+			allowed, err := conn.SubscribeSync("public.x")
+			require.NoError(t, err)
+			queued, err := conn.QueueSubscribeSync("secret.x", "q2")
+			require.NoError(t, err)
+			requireViolation(t, conn, errs, `Subscription to "secret.x" using queue "q2"`)
+			plain, err := conn.SubscribeSync("secret.x")
+			require.NoError(t, err)
+			requireViolation(t, conn, errs, `Subscription to "secret.x"`)
+
+			pub, _ := connect(t, uri, publisherSeed)
+			require.NoError(t, pub.Publish("secret.x", []byte("denied")))
+			require.NoError(t, pub.Publish("public.x", []byte("allowed")))
+			require.NoError(t, pub.Flush())
+			msg, err := allowed.NextMsg(5 * time.Second)
+			require.NoError(t, err, "the allowed subscription receives what the publisher sent")
+			require.Equal(t, "allowed", string(msg.Data))
+			for _, sub := range []*natsgo.Subscription{queued, plain} {
+				_, err := sub.NextMsg(500 * time.Millisecond)
+				require.ErrorIs(t, err, natsgo.ErrTimeout, "a denied subscription to %q receives nothing", sub.Subject)
+			}
+		})
+	}
+}

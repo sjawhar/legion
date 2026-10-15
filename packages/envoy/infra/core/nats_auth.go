@@ -132,8 +132,11 @@ func (u User) validate() error {
 // validate refuses rules nats-server would read otherwise than they say: an empty allow list,
 // which it never reads as "nothing" (an empty subscribe allow sets no restriction at all,
 // server/client.go setPermissions); an entry that is neither a subject pattern nor
-// "<subject> <queue>"; and a queue-scoped entry outside subscribe, the one direction queue groups
-// scope.
+// "<subject> <queue>"; a queue-scoped entry outside subscribe, the one direction queue groups
+// scope; and a queue-scoped subscribe deny, which nats-server before 2.15 enforces more loosely
+// than it reads. Beside a plain deny it re-allows every other queue group, and alone it misses a
+// wildcard subscription that covers its subject (v2.10.29 server/client.go:3044-3051, the deny
+// filter at :1199-1203; v2.15.1 fixes both at :3454 and :1398-1402).
 func (r *Rules) validate(direction string) error {
 	if len(r.Allow) == 0 {
 		return fmt.Errorf(`%s.allow must name at least one entry; write [">"] to mean everything`, direction)
@@ -149,6 +152,9 @@ func (r *Rules) validate(direction string) error {
 			}
 			if queued && direction != "subscribe" {
 				return fmt.Errorf(`%s[%d] %q names a queue group, which scopes only subscriptions; a %s rule is a plain subject`, list.field, i, entry, direction)
+			}
+			if queued && list.field == "subscribe.deny" {
+				return fmt.Errorf(`%s[%d] %q names a queue group; nats-server before 2.15 does not enforce a queue-scoped subscribe deny as written: write a plain subject, or narrow subscribe.allow`, list.field, i, entry)
 			}
 		}
 	}
