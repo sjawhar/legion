@@ -55,9 +55,10 @@ The hub refuses these before it registers anything, with an error naming the inp
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in an
   input the hub carries into the user data, a child or a refusal: `hostname`, a tag, `zone`,
-  `machineType`, `diskType`, an image, or a user's `machineId`. The error names the input by its
-  path and never its value, as `users[0].machineId: an nkey user seed, which is never an input of
-  the hub (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another
+  `machineType`, `diskType`, an image, or a user's `machineId` or `dispatchMachineId`. The error
+  names the input by its path and never its value, as `users[0].machineId: an nkey user seed,
+  which is never an input of the hub (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey`
+  may come from another
   resource, so a seed in any of them fails the preview or update once it resolves, with the same
   error, before any child is registered with it: a NATS seed passed as the Tailscale key is refused
   before a Secret Manager version holds it, and the error never carries the secret. A seed in a
@@ -90,6 +91,9 @@ The hub refuses these before it registers anything, with an error naming the inp
 - `machineId`: the user of one host, whose listener and sessions all connect as it, granted
   `HostPermissions(machineId)` (see [Permission sets](../README.md#permission-sets)). Give it the
   listener's own `machineId`: the set names that machine's durable consumer and queue group.
+- `dispatchMachineId`: the user shared by `envoy-dispatch` and the listener beside it, granted
+  `DispatchPermissions(dispatchMachineId)`. Give it that listener's `machineId`, since the set
+  names its durable consumer and queue group.
 - `permissions`: `{publish, subscribe}`, each a `nats:Rules`, an `allow` list and an optional
   `deny` list of subject patterns, for any other client.
 
@@ -105,10 +109,11 @@ refuses every client without the seed of one of `users`. The rendered file, head
 `# Rendered by envoy-infra. Public keys only.`, is `/etc/nats/nats-server.conf` on the VM; the
 VM's metadata holds it in the clear.
 
-A user is refused when it names both `machineId` and `permissions` or neither, or when its
-`machineId` or `nkey` is empty, named by its index alone, as `users[1]: nkey is required`, since
-these come before the authorization has checked the names. It is refused too for each of the
-authorization's own refusals under [NATS authorization](../README.md#nats-authorization), named as
+A user is refused when it names two or more of `machineId`, `dispatchMachineId` and `permissions`,
+or none; when its `machineId`, `dispatchMachineId` or `nkey` is empty; or for each of the
+authorization's own refusals under [NATS authorization](../README.md#nats-authorization). The
+user-specific refusals name its index alone, as `users[1]: dispatchMachineId is empty`, since they
+come before the authorization has checked the names. The authorization's refusals name
 `users[<index>] "<name>"`: a name of another form or one two users share, an `nkey` that is not a
 user public key (a seed included), or an empty `allow`. The authorization refuses a seed in a
 user's name or a rule entry before any of those, naming the path and not the value, as
@@ -464,9 +469,10 @@ its first `pulumi up`:
 The whole `Pulumi.yaml` of a project with one hub in the project `example-project`, reading the
 tailnet auth key from a secret config value. `example-hub`, `example-project`, the
 `example.invalid` images and each `<...>` are placeholders for your own values. Its users are
-`example-host-a`, the host whose listener [the module's YAML example](../README.md#yaml)
-runs, and `example-operator`, a client with permissions of its own. Their public keys are the
-placeholders `core`'s tests use: put in the ones `envoy-infra seed generate` printed for your users.
+`example-host-a`, the host whose listener [the module's YAML example](../README.md#yaml) runs;
+`example-operator`, a client with permissions of its own; and `example-dispatch`, the user
+`envoy-dispatch` shares with its listener. Their public keys are the placeholders `core`'s tests
+use: put in the ones `envoy-infra seed generate` printed for your users.
 
 ```yaml
 name: envoy-nats
@@ -509,6 +515,9 @@ resources:
             subscribe:
               allow: [">"]
               deny: ["$SYS.>"]
+        - name: example-dispatch
+          nkey: UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD
+          dispatchMachineId: example-dispatch
     options:
       providers:
         - ${gcp-example-project}

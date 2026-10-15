@@ -124,14 +124,15 @@ type NatsHubArgs struct {
 	Subnetwork pulumi.StringPtrInput `pulumi:"subnetwork,optional"` // only with network
 }
 
-// NATSUserArgs are one nkey user of the hub: a host's, as a rule, which its listener and its
-// sessions share. Exactly one of machineId and permissions is set. nkey is named as aws:User names
-// it, so a consumer running both clouds spells a user alike.
+// NATSUserArgs are one nkey user of the hub. Exactly one of machineId, dispatchMachineId and
+// permissions is set. nkey is named as aws:User names it, so a consumer running both clouds spells
+// a user alike.
 type NATSUserArgs struct {
-	Name        string           `pulumi:"name"`
-	NKey        string           `pulumi:"nkey"`                 // the user's public key; never its seed
-	MachineID   *string          `pulumi:"machineId,optional"`   // permissions = core.HostPermissions(machineId)
-	Permissions *PermissionsArgs `pulumi:"permissions,optional"` // explicit
+	Name              string           `pulumi:"name"`
+	NKey              string           `pulumi:"nkey"`                       // the user's public key; never its seed
+	MachineID         *string          `pulumi:"machineId,optional"`         // permissions = core.HostPermissions(machineId)
+	DispatchMachineID *string          `pulumi:"dispatchMachineId,optional"` // permissions = core.DispatchPermissions(dispatchMachineId): Dispatch's user, named after the listener beside it
+	Permissions       *PermissionsArgs `pulumi:"permissions,optional"`       // explicit
 }
 
 // Annotate names the type gcp:NatsUser in the schema: generated SDKs append Args to an object
@@ -289,6 +290,9 @@ func seededInput(args *NatsHubArgs) (string, bool) {
 		if u.MachineID != nil {
 			fields = append(fields, field{fmt.Sprintf("users[%d].machineId", i), *u.MachineID})
 		}
+		if u.DispatchMachineID != nil {
+			fields = append(fields, field{fmt.Sprintf("users[%d].dispatchMachineId", i), *u.DispatchMachineID})
+		}
 	}
 	for _, f := range fields {
 		if bus.HoldsSeed(f.value) {
@@ -328,9 +332,10 @@ func refuseSeedInSecret(value pulumi.StringInput, hub, input string) pulumi.Stri
 }
 
 // authorization maps the users onto core's: each a keyed user with a seed, whose permissions are
-// its host's set when it names a machine id and its own when it names permissions. core validates
-// the rest when it renders, a seed in a name or a rule entry first. Its own refusals name a user
-// by its index alone: they come before core has read the names, so quoting one could quote a seed.
+// its host's set when it names a machine id, Dispatch's set when it names a Dispatch machine id,
+// and its own when it names permissions. core validates the rest when it renders, a seed in a name
+// or a rule entry first. Its own refusals name a user by its index alone: they come before core has
+// read the names, so quoting one could quote a seed.
 func authorization(users []NATSUserArgs) (core.Authorization, error) {
 	auth := core.Authorization{Users: make([]core.User, 0, len(users))}
 	for i, u := range users {
@@ -342,18 +347,27 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 		switch {
 		case u.MachineID != nil && u.Permissions != nil:
 			return core.Authorization{}, fmt.Errorf("%s: machineId and permissions are both set; name one", where)
+		case u.MachineID != nil && u.DispatchMachineID != nil:
+			return core.Authorization{}, fmt.Errorf("%s: machineId and dispatchMachineId are both set; name one", where)
+		case u.DispatchMachineID != nil && u.Permissions != nil:
+			return core.Authorization{}, fmt.Errorf("%s: dispatchMachineId and permissions are both set; name one", where)
 		case u.MachineID != nil:
 			if *u.MachineID == "" {
 				return core.Authorization{}, fmt.Errorf("%s: machineId is empty", where)
 			}
 			perms = core.HostPermissions(*u.MachineID)
+		case u.DispatchMachineID != nil:
+			if *u.DispatchMachineID == "" {
+				return core.Authorization{}, fmt.Errorf("%s: dispatchMachineId is empty", where)
+			}
+			perms = core.DispatchPermissions(*u.DispatchMachineID)
 		case u.Permissions != nil:
 			perms = core.Permissions{
 				Publish:   core.Rules{Allow: u.Permissions.Publish.Allow, Deny: u.Permissions.Publish.Deny},
 				Subscribe: core.Rules{Allow: u.Permissions.Subscribe.Allow, Deny: u.Permissions.Subscribe.Deny},
 			}
 		default:
-			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, or permissions", where)
+			return core.Authorization{}, fmt.Errorf("%s: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, or permissions", where)
 		}
 		auth.Users = append(auth.Users, core.User{
 			Name: u.Name, NKey: u.NKey, Publish: &perms.Publish, Subscribe: &perms.Subscribe, HasSeed: true,

@@ -1402,6 +1402,14 @@ the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. This reposi
 and a session, connected as one user holding it, are checked against real nats-server 2.10 and
 2.15.1 servers; `AGENTS.md` in this directory says how.
 
+`DispatchPermissions(machineID)` is the grant of Dispatch's one NATS user, shared by
+`envoy-dispatch` and the listener beside it. It adds to `HostPermissions(machineID)` the info,
+filtered create, delete and acknowledgements of Dispatch's `delivery-events` and `delivery-jobs`
+durables; the key-value calls for `envoy_webhook_redelivery`; publication of every session's
+agent-stream control subject; and subscription to every session's agent-stream frames. A
+`gcp:NatsHub` user with `dispatchMachineId` holds it. The real `envoy-dispatch` runs under that
+grant against nats-server 2.10 and 2.15.1 in `core/dispatch_permissions_live_test.go`.
+
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
 a later release.

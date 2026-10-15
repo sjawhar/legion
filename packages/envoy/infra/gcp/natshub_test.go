@@ -33,9 +33,10 @@ const (
 	templateType    = "gcp:compute/instanceTemplate:InstanceTemplate"
 	groupType       = "gcp:compute/instanceGroupManager:InstanceGroupManager"
 
-	// Two user public keys, the placeholders core's tests use.
+	// Three user public keys, the placeholders core's tests use.
 	keyA = "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO"
 	keyB = "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG"
+	keyC = "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
 
 	authKey        = "tskey-auth-example-0123456789"
 	natsImage      = "example.invalid/nats@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -107,8 +108,8 @@ func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProv
 	return m, err
 }
 
-// exampleArgs are a hub serving one host by its machine id and one user with explicit
-// permissions, on placeholders.
+// exampleArgs are a hub serving a host by its machine id, Dispatch by its listener's machine id,
+// and one user with explicit permissions, on placeholders.
 func exampleArgs() *gcp.NatsHubArgs {
 	return &gcp.NatsHubArgs{
 		Users: []gcp.NATSUserArgs{
@@ -117,6 +118,7 @@ func exampleArgs() *gcp.NatsHubArgs {
 				Publish:   nats.RulesArgs{Allow: []string{">"}},
 				Subscribe: nats.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 			}},
+			{Name: "example-dispatch", NKey: keyC, DispatchMachineID: pulumi.StringRef("example-dispatch")},
 		},
 		TailnetAuthKey: pulumi.String(authKey),
 		Hostname:       "example-hub",
@@ -592,17 +594,38 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
-			err: []string{`users[0]: machineId and permissions are both set`},
+			err: []string{`users[0]`, "machineId", "permissions", "both set"},
+		},
+		{
+			name: "a user naming both machine ids",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Users[0].DispatchMachineID = pulumi.StringRef("example-dispatch")
+			},
+			err: []string{`users[0]`, "machineId", "dispatchMachineId", "both set"},
+		},
+		{
+			name: "a user naming Dispatch and explicit permissions",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Users[2].Permissions = &gcp.PermissionsArgs{
+					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
+				}
+			},
+			err: []string{`users[2]`, "dispatchMachineId", "permissions", "both set"},
 		},
 		{
 			name: "a user naming neither a machine id nor permissions",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions = nil },
-			err:  []string{`users[1]: name machineId, for its host's permission set, or permissions`},
+			err:  []string{`users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, or permissions`},
 		},
 		{
 			name: "a user with an empty machine id",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef("") },
 			err:  []string{`users[0]: machineId is empty`},
+		},
+		{
+			name: "a user with an empty Dispatch machine id",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[2].DispatchMachineID = pulumi.StringRef("") },
+			err:  []string{`users[2]: dispatchMachineId is empty`},
 		},
 		{
 			name: "a user without a public key",
@@ -654,6 +677,30 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 }
 
+func TestNatsHubRefusesConflictingUserPermissionInputsBeforeRegistering(t *testing.T) {
+	permissions := &gcp.PermissionsArgs{
+		Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
+	}
+	for _, tc := range []struct {
+		name string
+		edit func(*gcp.NatsHubArgs)
+	}{
+		{"machineId and permissions", func(a *gcp.NatsHubArgs) { a.Users[0].Permissions = permissions }},
+		{"machineId and dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[0].DispatchMachineID = pulumi.StringRef("example-dispatch")
+		}},
+		{"dispatchMachineId and permissions", func(a *gcp.NatsHubArgs) { a.Users[2].Permissions = permissions }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := exampleArgs()
+			tc.edit(args)
+			m, err := run(t, args, nil, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: users[")
+			require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
+		})
+	}
+}
+
 // A seed in any input the hub itself renders, registers or quotes in a refusal is refused naming
 // the input by its path, never the value: the hostname and the tags, which the hub's own refusals
 // quote and the user data holds; the zone, machine type and disk type, which reach the group and
@@ -684,6 +731,9 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 			a.TailscaleImage = "example.invalid/" + seed + digest
 		}},
 		{"a seed inside a machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(inside) }},
+		{"a seed inside a Dispatch machine id", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[2].DispatchMachineID = pulumi.StringRef(inside)
+		}},
 		// A reader or a decoder takes a seed in lowercase, or split by '.', '-', '_' or whitespace, as
 		// the seed.
 		{"a lowercase seed as the hostname", "hostname", func(a *gcp.NatsHubArgs) { a.Hostname = lower }},
@@ -709,6 +759,12 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a lowercase machine id", "users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(lower) }},
 		{"a machine id split by a space", "users[0].machineId", func(a *gcp.NatsHubArgs) {
 			a.Users[0].MachineID = pulumi.StringRef(splitSeed(seed, " "))
+		}},
+		{"a lowercase Dispatch machine id", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[2].DispatchMachineID = pulumi.StringRef(lower)
+		}},
+		{"a Dispatch machine id split by a space", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
+			a.Users[2].DispatchMachineID = pulumi.StringRef(splitSeed(seed, " "))
 		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -760,7 +816,7 @@ func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
 		}, "users[1]: machineId and permissions are both set; name one"},
 		{"a seed as the name of a user naming neither", func(a *gcp.NatsHubArgs) {
 			a.Users[1].Name, a.Users[1].Permissions = lower, nil
-		}, "users[1]: name machineId, for its host's permission set, or permissions"},
+		}, "users[1]: name machineId, for its host's permission set, dispatchMachineId, for Dispatch's, or permissions"},
 		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
 			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
 		}, "users[0]: machineId is empty"},

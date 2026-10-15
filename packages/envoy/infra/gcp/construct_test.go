@@ -57,6 +57,11 @@ func plainInputs() map[string]property.Value {
 					})),
 				})),
 			})),
+			property.New(property.NewMap(map[string]property.Value{
+				"name":              property.New("example-dispatch"),
+				"nkey":              property.New(keyC),
+				"dispatchMachineId": property.New("example-dispatch"),
+			})),
 		})),
 		"hostname":       property.New("example-hub"),
 		"tags":           property.New(property.NewArray([]property.Value{property.New("tag:example-host")})),

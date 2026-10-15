@@ -126,12 +126,14 @@ func TestCloudConfigOpensTheHostFirewallToTheHealthChecksAndTheTailnet(t *testin
 }
 
 // The configuration file is core's rendering of the users, each a keyed user with a seed: a
-// machine id gives the host's permission set, explicit permissions are taken as they are.
+// machine id gives the host's permission set, a Dispatch machine id gives its set, and explicit
+// permissions are taken as they are.
 func TestCloudConfigNatsConfigurationIsCoresRenderingOfTheUsers(t *testing.T) {
 	doc, _, err := gcp.CloudConfigOf(exampleArgs())
 	require.NoError(t, err)
 
 	host := core.HostPermissions("example-host-a")
+	dispatch := core.DispatchPermissions("example-dispatch")
 	want, err := core.Authorization{Users: []core.User{
 		{Name: "example-host-a", NKey: keyA, Publish: &host.Publish, Subscribe: &host.Subscribe, HasSeed: true},
 		{
@@ -139,6 +141,7 @@ func TestCloudConfigNatsConfigurationIsCoresRenderingOfTheUsers(t *testing.T) {
 			Publish:   &core.Rules{Allow: []string{">"}},
 			Subscribe: &core.Rules{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 		},
+		{Name: "example-dispatch", NKey: keyC, Publish: &dispatch.Publish, Subscribe: &dispatch.Subscribe, HasSeed: true},
 	}}.Render([]string{"Rendered by envoy-infra. Public keys only."})
 	require.NoError(t, err)
 	require.Equal(t, want, fileOf(t, doc, "/etc/nats/nats-server.conf"))
