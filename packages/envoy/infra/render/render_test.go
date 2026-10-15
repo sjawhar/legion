@@ -16,6 +16,7 @@ import (
 
 	envoyaws "github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	envoynats "github.com/sjawhar/envoy/infra/nats"
 	"github.com/sjawhar/envoy/infra/render"
 )
 
@@ -106,22 +107,22 @@ func exampleAuthorization() *envoyaws.AuthorizationArgs {
 			{
 				Name:      "example-listener",
 				NKey:      "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO",
-				Publish:   &envoyaws.RulesArgs{Allow: []string{"envoy.example.>"}, Deny: []string{"envoy.example.private"}},
-				Subscribe: &envoyaws.RulesArgs{Allow: []string{"_INBOX.>", "notifications.café.>"}},
+				Publish:   &envoynats.RulesArgs{Allow: []string{"envoy.example.>"}, Deny: []string{"envoy.example.private"}},
+				Subscribe: &envoynats.RulesArgs{Allow: []string{"_INBOX.>", "notifications.café.>"}},
 				HasSeed:   true,
 			},
 			{
 				Name:      "example-daemon",
 				NKey:      "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG",
-				Publish:   &envoyaws.RulesArgs{Allow: []string{"$JS.API.>"}},
-				Subscribe: &envoyaws.RulesArgs{Allow: []string{"_INBOX.>", "legion.work workers"}},
+				Publish:   &envoynats.RulesArgs{Allow: []string{"$JS.API.>"}},
+				Subscribe: &envoynats.RulesArgs{Allow: []string{"_INBOX.>", "legion.work workers"}},
 				HasSeed:   true,
 			},
 			{
 				Name:      "example-fallback",
 				NKey:      "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD",
-				Publish:   &envoyaws.RulesArgs{Allow: []string{">"}},
-				Subscribe: &envoyaws.RulesArgs{Allow: []string{">"}},
+				Publish:   &envoynats.RulesArgs{Allow: []string{">"}},
+				Subscribe: &envoynats.RulesArgs{Allow: []string{">"}},
 			},
 			{Name: "example-pending", HasSeed: true},
 		},
@@ -253,8 +254,8 @@ func TestNatsStartScriptIsTheScriptNatsServiceLaunches(t *testing.T) {
 			authorization: &envoyaws.AuthorizationArgs{Users: []envoyaws.UserArgs{{
 				Name:      "example-host-a",
 				NKey:      "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO",
-				Publish:   &envoyaws.RulesArgs{Allow: []string{">"}},
-				Subscribe: &envoyaws.RulesArgs{Allow: []string{">"}},
+				Publish:   &envoynats.RulesArgs{Allow: []string{">"}},
+				Subscribe: &envoynats.RulesArgs{Allow: []string{">"}},
 				HasSeed:   true,
 			}}},
 			serverArgs: []string{"--jetstream"},

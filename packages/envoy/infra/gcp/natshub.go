@@ -13,9 +13,9 @@ import (
 	"github.com/pulumi/pulumi-go-provider/infer"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
-	"github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
+	"github.com/sjawhar/envoy/infra/nats"
 )
 
 // natsHubType is the component's token. pulumi-go-provider derives the same one from the NatsHub
@@ -85,11 +85,11 @@ type NATSUserArgs struct {
 // type's name for its input type, so the Go name would reach consumers as NATSUserArgsArgs.
 func (u *NATSUserArgs) Annotate(a infer.Annotator) { a.SetToken("gcp", "NatsUser") }
 
-// PermissionsArgs are a user's explicit publish and subscribe rules, each the plugin's one Rules
-// type, aws:Rules, which the AWS components' users take too.
+// PermissionsArgs are a user's explicit publish and subscribe rules, each nats:Rules, the one rules
+// type every NATS component takes, whatever its cloud.
 type PermissionsArgs struct {
-	Publish   aws.RulesArgs `pulumi:"publish"`
-	Subscribe aws.RulesArgs `pulumi:"subscribe"`
+	Publish   nats.RulesArgs `pulumi:"publish"`
+	Subscribe nats.RulesArgs `pulumi:"subscribe"`
 }
 
 // Annotate names the type gcp:Permissions in the schema, for the reason NATSUserArgs's gives.

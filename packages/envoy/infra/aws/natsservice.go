@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/infra/aws/rendering"
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/internal/providers"
+	"github.com/sjawhar/envoy/infra/nats"
 )
 
 // natsServiceType is the component's token. pulumi-go-provider derives the same one from the
@@ -92,41 +93,26 @@ type AuthorizationArgs struct {
 // type's name for its input type, so the Go name would reach consumers as AuthorizationArgsArgs.
 func (a *AuthorizationArgs) Annotate(an infer.Annotator) { an.SetToken("aws", "Authorization") }
 
-// UserArgs mirror core.User field for field.
+// UserArgs mirror core.User field for field. Its rules are nats:Rules, the type every NATS
+// component shares.
 type UserArgs struct {
-	Name      string     `pulumi:"name"`
-	NKey      string     `pulumi:"nkey,optional"` // the user public key; unset for a pending user, which is never rendered
-	Publish   *RulesArgs `pulumi:"publish,optional"`
-	Subscribe *RulesArgs `pulumi:"subscribe,optional"`
-	HasSeed   bool       `pulumi:"hasSeed,optional"` // the consumer stores a seed for this user
+	Name      string          `pulumi:"name"`
+	NKey      string          `pulumi:"nkey,optional"` // the user public key; unset for a pending user, which is never rendered
+	Publish   *nats.RulesArgs `pulumi:"publish,optional"`
+	Subscribe *nats.RulesArgs `pulumi:"subscribe,optional"`
+	HasSeed   bool            `pulumi:"hasSeed,optional"` // the consumer stores a seed for this user
 }
 
 // Annotate names the type aws:User in the schema, for the reason AuthorizationArgs's Annotate gives.
 func (u *UserArgs) Annotate(an infer.Annotator) { an.SetToken("aws", "User") }
 
-// RulesArgs mirror core.Rules field for field.
-type RulesArgs struct {
-	Allow []string `pulumi:"allow"`
-	Deny  []string `pulumi:"deny,optional"`
-}
-
-// Annotate names the type aws:Rules in the schema, for the reason AuthorizationArgs's Annotate gives.
-func (r *RulesArgs) Annotate(an infer.Annotator) { an.SetToken("aws", "Rules") }
-
 // core returns the authorization as core.Authorization takes it.
 func (a *AuthorizationArgs) core() *core.Authorization {
 	users := make([]core.User, len(a.Users))
 	for i, u := range a.Users {
-		users[i] = core.User{Name: u.Name, NKey: u.NKey, Publish: u.Publish.core(), Subscribe: u.Subscribe.core(), HasSeed: u.HasSeed}
+		users[i] = core.User{Name: u.Name, NKey: u.NKey, Publish: u.Publish.Core(), Subscribe: u.Subscribe.Core(), HasSeed: u.HasSeed}
 	}
 	return &core.Authorization{Users: users, NoAuthUser: a.NoAuthUser}
-}
-
-func (r *RulesArgs) core() *core.Rules {
-	if r == nil {
-		return nil
-	}
-	return &core.Rules{Allow: r.Allow, Deny: r.Deny}
 }
 
 // NatsService is Envoy's NATS server on ECS Fargate: JetStream on one EFS file system, a Tailscale

@@ -14,9 +14,9 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi/internals"
 	"github.com/stretchr/testify/require"
 
-	envoyaws "github.com/sjawhar/envoy/infra/aws"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	"github.com/sjawhar/envoy/infra/nats"
 )
 
 const (
@@ -113,8 +113,8 @@ func exampleArgs() *gcp.NatsHubArgs {
 		Users: []gcp.NATSUserArgs{
 			{Name: "example-host-a", NKey: keyA, MachineID: pulumi.StringRef("example-host-a")},
 			{Name: "example-operator", NKey: keyB, Permissions: &gcp.PermissionsArgs{
-				Publish:   envoyaws.RulesArgs{Allow: []string{">"}},
-				Subscribe: envoyaws.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
+				Publish:   nats.RulesArgs{Allow: []string{">"}},
+				Subscribe: nats.RulesArgs{Allow: []string{">"}, Deny: []string{"$SYS.>"}},
 			}},
 		},
 		TailnetAuthKey: pulumi.String(authKey),
@@ -490,7 +490,7 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			name: "a user naming both a machine id and permissions",
 			edit: func(a *gcp.NatsHubArgs) {
 				a.Users[0].Permissions = &gcp.PermissionsArgs{
-					Publish: envoyaws.RulesArgs{Allow: []string{">"}}, Subscribe: envoyaws.RulesArgs{Allow: []string{">"}},
+					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
 			err: []string{`users[0] "example-host-a"`, "machineId", "permissions"},
