@@ -731,6 +731,16 @@
 
 ### Fixed
 
+- Dispatch's job intake receives job events again (LEGION-690). It no longer loses its NATS
+  subscription to the delivery intake: a `bus.Client` holds one JetStream subscription, and the
+  two intakes shared Dispatch's publisher client, so whichever bound second unsubscribed the
+  other, whose durable then sat unbound with its messages pending. Each intake now connects on
+  its own, named `dispatch-intake` and `dispatch-job-intake` on the server (`bus.WithName`), so
+  Dispatch holds two more NATS connections, four where it held two, and exits at boot when it
+  cannot open them. A NATS user or account with a connection limit must allow four. On its first
+  start the job intake's durable is handed every job event it has not acknowledged, up to the
+  stream's 72-hour retention, before it settles at nothing pending.
+
 - The `GET /ws/delivery` socket gives itself a read buffer, so a page that stops answering its
   pings loses the socket with no close frame (1006 to the page) under any gorilla/websocket
   (LEGION-690). Without one, a build linking a gorilla that keeps net/http's hijacked reader (every
