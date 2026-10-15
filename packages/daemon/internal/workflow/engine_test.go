@@ -554,6 +554,15 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)
+	// The root stayed done through its linger, so its expiry hands the child it left implementing
+	// to Legion, fenced on this linger (admit's finished-root tests follow the write to the child's
+	// own admission); the stale expiry hands nothing over.
+	var handedOver int
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209' and payload->>'status' = 'todo'
+		and payload->>'observedStatus' = 'in_progress' and payload->>'handOver' = 'true' and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '7'`).Scan(&handedOver); err != nil || handedOver != 1 {
+		t.Fatalf("the child's hand-over writes = %d, %v; want one, fenced on LEGION-208's linger 7", handedOver, err)
+	}
+	assertOutboxCount(t, pool, "dispatch_status", 2)
 	var other int
 	if err := pool.QueryRow(ctx, `select count(*) from outbox where (kind = 'workspace_remove' or (kind = 'supervise' and payload->>'op' = 'tree_close'))
 		and payload->>'linger' is distinct from '7'`).Scan(&other); err != nil || other != 0 {

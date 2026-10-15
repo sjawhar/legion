@@ -109,9 +109,10 @@ func TestATurnOfTheAgentsOwnDoesNotClearTheDeathsOfATaskItNeverRan(t *testing.T)
 	h.wantBudgets(Budgets{Deaths: 1})
 }
 
-// A task that ends some other way than its turn's end — the suspension a transition sends, run at
-// the stop timeout when the worker's handoff turn does not end — takes its deaths with it: the
-// claim's next round starts its count afresh.
+// A task that ends some other way than its turn's end — the daemon's suspension a transition or a
+// close sends, held for the turn and run when the process dies first — takes its deaths with it:
+// the claim's next round starts its count afresh. (An operator's forced stop does not end the task:
+// it goes back interrupted for the operator's resume.)
 func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -122,11 +123,14 @@ func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 		h.relaunched()
 		h.must(StreamTurnStart{Claim: testToken})
 	}
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
-	h.advance(testStop)
+	h.observe(runtime.Gone)
 	h.wantState(StateSuspended)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending %+v after the daemon's suspension, want the finished phase's task retired", p)
+	}
 
 	h.must(RequestDeliver{Claim: testToken, Task: "round two", Phase: "implementing", Generation: 6})
 	h.relaunched()
@@ -403,27 +407,79 @@ func TestAMachineRefusesLimitsOrTimeoutsThatCannotWork(t *testing.T) {
 	}
 }
 
-// A failed claim stays failed until someone decides otherwise; the architect's retry of a held
-// phase is that decision. It relaunches the same session with fresh budgets.
+// A failed claim stays failed until someone decides otherwise: the architect's retry of a held
+// phase decides it for a worker, and the operator's retry for an architect, which nothing else
+// relaunches. Each relaunches the same session with fresh budgets.
 func TestRetryRelaunchesAFailedClaimOnItsSessionWithFreshBudgets(t *testing.T) {
-	h := newHarness(t)
-	h.reach(StateReady)
-	for range 3 {
-		h.observe(runtime.Gone)
-	}
-	h.wantState(StateFailed)
-	resumes := len(h.calls("Resume"))
+	for _, tc := range []struct {
+		name  string
+		claim Claim
+		retry Event
+	}{
+		{"the architect's retry of a worker", queuedClaim(), RequestRetry{Claim: testToken}},
+		{"the operator's retry of an architect", rootClaim(), RequestOperatorRetry{Claim: rootToken}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessOf(t, tc.claim)
+			h.reach(StateReady)
+			for range 3 {
+				h.observe(runtime.Gone)
+			}
+			h.wantState(StateFailed)
+			resumes := len(h.calls("Resume"))
 
-	h.must(RequestRetry{Claim: testToken})
+			h.must(tc.retry)
 
-	h.wantState(StateLaunching)
-	h.wantBudgets(Budgets{})
-	calls := h.wantCalls("Resume", resumes+1)
-	if got := calls[len(calls)-1].Spec.ResumeSessionFile; got != sessionFile {
-		t.Errorf("retry resumed session file %q, want the claim's %q", got, sessionFile)
+			h.wantState(StateLaunching)
+			h.wantBudgets(Budgets{})
+			calls := h.wantCalls("Resume", resumes+1)
+			if got := calls[len(calls)-1].Spec.ResumeSessionFile; got != sessionFile {
+				t.Errorf("retry resumed session file %q, want the claim's %q", got, sessionFile)
+			}
+			h.relaunched()
+			h.wantState(StateReady)
+		})
 	}
-	h.relaunched()
-	h.wantState(StateReady)
+}
+
+// The operator's retry is an architect's alone. A failed phase worker is its architect's to retry,
+// and the daemon's controller its keeper's, so the operator's retry of either is refused, naming
+// that retry, and changes nothing.
+func TestTheOperatorsRetryOfAFailedClaimThatIsNotAnArchitectsIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, names string
+		claim       Claim
+	}{
+		{"a phase worker", "its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise", queuedClaim()},
+		{"the controller", "the daemon's controller keeper retries the controller", controllerClaim()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessOf(t, tc.claim)
+			h.reach(StateReady)
+			for range 3 {
+				h.observe(runtime.Gone)
+			}
+			h.wantState(StateFailed)
+			before, calls, puts := h.claim(), len(h.rt.Calls()), len(h.store.history())
+
+			err := h.handle(RequestOperatorRetry{Claim: tc.claim.Token})
+
+			var refused *RefusedError
+			if !errors.As(err, &refused) || !errors.Is(err, ErrRetryArchitectOnly) || refused.State != StateFailed ||
+				!strings.Contains(err.Error(), tc.names) {
+				t.Fatalf("the operator's retry of %s returned %v, want the architect-only refusal naming %q", tc.name, err, tc.names)
+			}
+			if after := h.claim(); after.State != before.State || after.Budgets != before.Budgets || after.Generation != before.Generation {
+				t.Errorf("the refused retry moved the claim: %+v -> %+v", before, after)
+			}
+			if got := h.rt.Calls()[calls:]; len(got) != 0 {
+				t.Errorf("the refused retry asked the runtime %+v", got)
+			}
+			if got := len(h.store.history()); got != puts {
+				t.Errorf("the refused retry wrote the claim %d times", got-puts)
+			}
+		})
+	}
 }
 
 // A retry relaunches the same session, so it hands the runtime the process the claim last ran to

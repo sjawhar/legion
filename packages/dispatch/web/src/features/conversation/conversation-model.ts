@@ -206,6 +206,8 @@ export function activityDescription(
       return "updated user state";
     case "user_agent_state.updated":
       return "updated agent conversation state";
+    case "user_thread_state.updated":
+      return "read a thread";
     case "issue.created":
       return "created the issue";
     case "issue.updated":

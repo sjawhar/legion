@@ -1,10 +1,14 @@
 // Deploy containment (CONTRACT.md "Sources" > "Containment", ported from the delivery-timeline
 // prototype's collector/src/collector/containment.py). A population pull request in the
-// configured deploy repository ships with the first successful production deploy whose head
-// commit timestamp is at or after the PR's merge. Unlike the prototype, which matches a job name
-// against a set of alternate spellings of one job (APPLY_JOBS), this schema configures one exact
-// job name (delivery_settings.production_job_name), so matching is a direct equality check
-// against one job's name within a run rather than set membership.
+// configured deploy repository ships with the earliest-completing successful production deploy
+// whose run GitHub created after the PR's merge (DeliveryRun.Created). Creation, not the head
+// commit's timestamp, decides it: a repository that merges through GitHub's merge queue writes the
+// merge commit before GitHub records the merge, so the run that shipped a pull request can have a
+// head commit timed before its merged_at, while a push run is created only once its push has
+// landed. Unlike the prototype, which matches a job name against a set of alternate spellings of
+// one job (APPLY_JOBS), this schema configures one exact job name
+// (delivery_settings.production_job_name), so matching is a direct equality check against one
+// job's name within a run rather than set membership.
 package delivery
 
 import (
@@ -13,12 +17,13 @@ import (
 	"time"
 )
 
-// Apply is one successful production deploy: the run that shipped it, when it completed, and the
-// run's head commit timestamp (what FirstShippingApply compares a PR's merge time against).
+// Apply is one successful production deploy: the run that shipped it, when it completed, and when
+// GitHub created the run (DeliveryRun.Created: what FirstShippingApply compares a PR's merge time
+// against).
 type Apply struct {
-	RunID        int64
-	CompletedAt  time.Time
-	HeadCommitAt time.Time
+	RunID       int64
+	CompletedAt time.Time
+	CreatedAt   time.Time
 }
 
 // UnmatchedRun is a successfully concluded run that holds no production job and is not shown to
@@ -75,9 +80,9 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 			continue
 		}
 		applies = append(applies, Apply{
-			RunID:        run.RunID,
-			CompletedAt:  *match.CompletedAt,
-			HeadCommitAt: run.HeadCommitAt,
+			RunID:       run.RunID,
+			CompletedAt: *match.CompletedAt,
+			CreatedAt:   run.Created(),
 		})
 	}
 
@@ -115,12 +120,14 @@ func skippedCaller(job DeliveryRunJob, productionJobName string) bool {
 		strings.HasPrefix(productionJobName, job.Name+" / ")
 }
 
-// FirstShippingApply is the earliest-completing apply (by CompletedAt) among applies whose
-// HeadCommitAt is at or after mergedAt (inclusive boundary: >=), or nil if none qualifies.
+// FirstShippingApply is the earliest-completing apply (by CompletedAt) among applies GitHub created
+// strictly after mergedAt, or nil if none qualifies. The boundary is exclusive: GitHub times both
+// to the second, and a run created in the merge's own second can be an earlier push's, whose head
+// does not hold the merge.
 func FirstShippingApply(mergedAt time.Time, applies []Apply) *Apply {
 	var best *Apply
 	for i, apply := range applies {
-		if apply.HeadCommitAt.Before(mergedAt) {
+		if !apply.CreatedAt.After(mergedAt) {
 			continue
 		}
 		if best == nil || apply.CompletedAt.Before(best.CompletedAt) {

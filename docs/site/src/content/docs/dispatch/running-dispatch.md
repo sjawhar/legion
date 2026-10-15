@@ -27,7 +27,8 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 These are the settings most deployments need, not all of them. The full list, generated from the
 server, is in [Configuration](/legion/dispatch/reference/configuration/).
 When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads the NATS address
-from `~/.config/opencode/envoy.json`, the file agents use, so set one of them explicitly.
+from `envoy.natsUrls` in `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, the file agents use,
+whatever that file's `envoy.enabled` says, so set one of them explicitly.
 
 People sign in with Google Workspace through the sign-in pool by default, and Dispatch names each
 person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request
@@ -107,8 +108,9 @@ Sign in, then open **Settings**:
   [Delivery](/legion/dispatch/delivery/) page shows the same form. Every save, of any field,
   starts the delivery import over: what is already stored stays on both pages, the freshness line
   reads "never checked" until the next five-minute pass, that pass lists the last 28 days from
-  GitHub again, and the re-listing of each run's branch and event walks those 28 days a day per
-  pass, about 28 passes in all.
+  GitHub again, and two re-listings walk those 28 days a day per pass, about 28 passes in all:
+  one of each run's branch and event, and one of each deploy run's creation time, which decides
+  the deploy a pull request is credited to.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 
@@ -145,7 +147,9 @@ DATABASE_URL='<your database URL>' envoy-dispatch census
 ```
 
 It reads the database without changing it, and reports each pending migration's tables, their
-sizes, and any long-running transactions in the way.
+sizes, and any long-running transactions in the way. Run before a deploy, it is a gate: a census
+that refuses, such as one counting rows a migration would rewrite, should fail the deploy before
+any server moves. Dispatch repairs rows it already holds in code, at start, for that reason.
 
 ## The HTTP API
 

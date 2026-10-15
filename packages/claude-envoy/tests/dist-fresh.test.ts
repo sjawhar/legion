@@ -71,7 +71,7 @@ async function findExternalDependencySpecifiers(source: string): Promise<string[
   }
 }
 
-test("the committed bundle starts without node_modules and demands ENVOY_NATS_URL", async () => {
+test("the committed bundle starts without node_modules and, with no envoy.json, says Envoy is off and exits 0 once stdin ends", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-dist-"))
   try {
     await cp(distDirectory, join(scratch, "dist"), { recursive: true })
@@ -89,8 +89,10 @@ test("the committed bundle starts without node_modules and demands ENVOY_NATS_UR
     })
     const [exitCode, stderr] = await Promise.all([run.exited, new Response(run.stderr).text()])
 
-    expect(exitCode).toBe(1)
-    expect(stderr).toContain("ENVOY_NATS_URL is required")
+    expect(stderr).toContain(
+      `envoy-channel: no envoy.json at ${join(scratch, ".config", "legion", "envoy.json")}: Dispatch and Envoy are off`,
+    )
+    expect(exitCode).toBe(0)
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }

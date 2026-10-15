@@ -262,6 +262,8 @@ export interface Issue {
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
+  /** Issue keys in the same project this issue waits on, sorted. */
+  readonly blocked_by: string[];
   /** Lowercase email of the person who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
   /** The session or human working this issue, or null when nobody has claimed it. */
@@ -306,18 +308,23 @@ export interface IssueSummary
       | "priority"
       | "rank"
       | "parent"
+      | "blocked_by"
       | "assignee"
       | "claim"
       | "components"
       | "route"
       | "updated_at"
       | "last_seq"
+      | "primary_artifact_id"
     >,
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
   readonly progress: IssueProgress;
 }
+
+/** Maximum entries in an issue's blocked_by input, before duplicate keys are removed. */
+export const MAX_ISSUE_BLOCKERS = 20;
 
 /**
  * The longest issue title, in UTF-16 units, counted after the trim `POST /api/v1/issues` and
@@ -329,6 +336,16 @@ export interface IssueSummary
  * their `maxLength`, so the two agree.
  */
 export const ISSUE_TITLE_MAX = 1000;
+
+/**
+ * The longest project name, in UTF-16 units, counted after the trim `POST /api/v1/projects`
+ * applies; a longer one is `400 CAP_EXCEEDED`. A name shows beside its key in the sidebar's
+ * 20rem rail and in every project picker's `KEY · Name` option, any bearer may write one, and no
+ * route renames a project, so it is held to about two lines of that rail; production's longest name
+ * was 25 characters when this was set. Generated into Go as `contracts.ProjectNameMax`, which the
+ * server enforces, and the Settings name field and `dispatch project` take it as their maximum.
+ */
+export const PROJECT_NAME_MAX = 80;
 
 /**
  * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
@@ -476,7 +493,14 @@ export interface Artifact {
 
 export type ArtifactReviewState = "approved" | "changes_requested";
 
-/** One human review of a document, pinned to the version it was given on. */
+/** One human review of a document, pinned to the version it was given on. A review is given one
+ *  of three ways: by answering an approval request (`ask_id` names the request), from the
+ *  document header (`ask_id` null unless a request was open, which the header answers), or
+ *  carried by Dispatch to the version a human's answer to a decision block writes, when that
+ *  answer is the whole change since the version he approved. A carried review is `approved` in
+ *  his name, its `reason` names the carry (`Carried forward from the approval of version <N>: the
+ *  answer to a decision block was the whole change since it.`), and its `ask_id` is null unless
+ *  a request was open at the carry, which it answers `Approve` in his name. */
 export interface ArtifactReview {
   readonly id: string;
   readonly artifact_id: string;
@@ -527,6 +551,36 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+  /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
+   *  server older than the listing. */
+  readonly table?: BlockTable;
+}
+
+/** A table block's rows in child order, the header row first, each row and cell placed as
+ *  `GET /api/v1/artifacts/{id}/blocks/{block_id}` places it, from the same live tree. */
+export interface BlockTable {
+  readonly rows: readonly BlockTableRow[];
+}
+
+/** One row of a table: its block id ("" for a row the live document has not stamped yet), its
+ *  index among the table's rows (0 is the header row, the index `delete_row` takes) and its cells
+ *  in child order. */
+export interface BlockTableRow {
+  readonly id: string;
+  readonly index: number;
+  readonly cells: readonly BlockTableCell[];
+}
+
+/** One cell of a table row: its block id ("" for a cell the live document has not stamped yet),
+ *  its row index, its column (its index in its row, the index `delete_column` takes, so a cell
+ *  spanning columns counts once), the opening words of the header cell drawn above it ("" where
+ *  none is) and its own opening words. */
+export interface BlockTableCell {
+  readonly id: string;
+  readonly row: number;
+  readonly column: number;
+  readonly header: string;
+  readonly text: string;
 }
 
 /** One node on a block's path from the document's top-level block down to the block: its type,
@@ -620,13 +674,25 @@ export interface Version {
 
 export type AskKind = "question" | "approval";
 
+/** The approval an approval request follows: the version a human approved, when (RFC 3339 UTC,
+ *  the review's `created_at`) and who. */
+export interface AskApprovalApproved {
+  readonly version: number;
+  readonly at: string;
+  readonly by: Actor;
+}
+
 /** The document and version an approval ask names. `requested_version` is the version the agent
- *  last handed to the human; a lower value means the agent is revising the moved request. */
+ *  last handed to the human; a lower value means the agent is revising the moved request.
+ *  `approved` names the document's newest approval when the request was opened, so a request to
+ *  approve again says which approval it follows; it is absent on a request for a document nobody
+ *  has approved. A version move re-encodes the whole approval, so it survives unchanged. */
 export interface AskApproval {
   readonly artifact_id: string;
   readonly name: string;
   readonly version: number;
   readonly requested_version: number;
+  readonly approved?: AskApprovalApproved;
 }
 
 export interface Ask extends AnchorPosition {
@@ -788,6 +854,41 @@ export interface MyAnswerRow {
 
 export interface MyAnswersResponse {
   readonly rows: MyAnswerRow[];
+  readonly total: number;
+  readonly limit: number;
+  readonly offset: number;
+}
+
+/** The newest write someone else made in a thread on `GET /api/v1/me/replies`: a reply (a comment
+ *  or a message), or the ask's answer, whose `id` is the ask's, whose `author` is the person who
+ *  answered and whose `first_line` is the chosen options and the answer's text. */
+export interface MyReplyReply {
+  readonly id: string;
+  readonly kind: "reply" | "answer";
+  readonly author: Actor;
+  /** The reply's or the answer's first non-empty line, at most 160 characters. */
+  readonly first_line: string;
+  readonly created_at: string;
+}
+
+/** One thread the caller wrote in where someone else has written since the caller last read it:
+ *  an ask's thread, a comment thread by its root, or an issue message thread by its root. */
+export interface MyReplyRow {
+  /** The ask's id, or the comment or message thread's root id: what
+   *  `PUT /api/v1/me/threads/{id}/read` marks. */
+  readonly thread_id: string;
+  readonly kind: "ask" | "comment" | "message";
+  /** Relative Dispatch deep link to the thread's root, never to the reply. */
+  readonly ref: string;
+  readonly issue?: Pick<Issue, "key" | "title">;
+  readonly document?: InboxDocument;
+  /** The ask's question, or the root's first line, at most 160 characters. */
+  readonly subject: string;
+  readonly reply: MyReplyReply;
+}
+
+export interface MyRepliesResponse {
+  readonly rows: MyReplyRow[];
   readonly total: number;
   readonly limit: number;
   readonly offset: number;
@@ -1396,6 +1497,7 @@ export interface ArtifactReferences {
 export type GraphEdgeKind =
   | "mentions"
   | "child_of"
+  | "blocked_by"
   | "attached_to"
   | "anchored_to"
   | "owned_by"
@@ -1454,7 +1556,11 @@ export interface ArtifactVersionEventPayload extends ReferenceChangesPayload {
 /** `artifact.approved` and `artifact.changes_requested`: a human review of a document,
  *  pinned to `version`; `reason` is required for changes requested; `ask_id` names the
  *  approval ask the review answered, null when given from the document header with no
- *  approval ask open at that version. */
+ *  approval ask open at that version. A third provenance is the carry: Dispatch records an
+ *  `artifact.approved` in a human's name at the version his answer to a decision block writes,
+ *  when that answer is the whole change since the version he approved; its `reason` names the
+ *  carry and the version it follows, and its `ask_id` is null unless a request was open at the
+ *  carry, which it answers (see `ArtifactReview`). */
 export interface ArtifactReviewEventPayload {
   readonly artifact_id: string;
   readonly name: string;
@@ -1555,6 +1661,13 @@ export interface UserAgentStateUpdatedEventPayload {
   readonly session_id: string;
 }
 
+/** `user_thread_state.updated`: one viewer's read mark on one thread of the Replies page moved.
+ *  It carries no state; the viewer's other tabs and devices refetch their replies. */
+export interface UserThreadStateUpdatedEventPayload {
+  readonly login: string;
+  readonly thread_id: string;
+}
+
 /**
  * `issue.claimed` and `issue.released`: who is working the issue now, whose claim this one
  * replaced or cleared, and why. `previous_claim` is present on a takeover (the holder's
@@ -1615,6 +1728,10 @@ export type DispatchEvent =
   | (DispatchEventBase & {
       readonly type: "user_agent_state.updated";
       readonly payload: UserAgentStateUpdatedEventPayload;
+    })
+  | (DispatchEventBase & {
+      readonly type: "user_thread_state.updated";
+      readonly payload: UserThreadStateUpdatedEventPayload;
     })
   | (DispatchEventBase & { readonly type: "issue.created"; readonly payload: IssueEventPayload })
   | (DispatchEventBase & { readonly type: "issue.updated"; readonly payload: IssueEventPayload })
@@ -1827,6 +1944,8 @@ export interface CreateIssueInput {
   readonly project: string;
   readonly title: string;
   readonly parent?: string;
+  /** Issue keys in the same project this issue waits on. */
+  readonly blocked_by?: string[];
   readonly external?: string;
   readonly spec?: string;
   readonly force?: boolean;
@@ -1859,6 +1978,8 @@ export interface UpdateIssueInput {
   readonly assignee?: string | null;
   /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
   readonly parent?: string | null;
+  /** Replaces every issue key this issue waits on; [] clears it. Omitted leaves it alone. */
+  readonly blocked_by?: string[];
   /** The issue's own component attachment; null (or mode `inherit`) deletes it so the issue
    *  inherits again; omitted leaves it alone. Allowed on a closed issue. */
   readonly components?: IssueComponentsInput | null;
@@ -2501,11 +2622,11 @@ export interface DeliveryPR {
   readonly components: readonly string[];
   readonly sessions: readonly string[];
   /**
-   * `parent_agent` and `session` (this field's `sessions` above) resolve to the same set of
-   * sessions today (LEGION-567: no grouping link exists); `parent_agent` is the
-   * resolved Dispatch session title (or the bare id if none was ever recorded), `session` is the
-   * raw id — kept as two fields for the SPA's existing facet vocabulary and so a real grouping
-   * link, if one is added later, needs no API shape change.
+   * The Parent agent: the session group holding the first of `sessions` (as `group:<id>`; the
+   * response's `session_groups` names it), else that session's latest Dispatch title, or its bare
+   * id if none was ever recorded. A session outside every group whose title is a group's name
+   * carries its id beside the title (`Planner (<id>)`). Null when no session wrote the pull
+   * request. `session` (the `sessions` field) keeps each raw id.
    */
   readonly parent_agent: string | null;
   readonly deploy_run: number | null;
@@ -2614,6 +2735,14 @@ export interface DeliveryTimelineResponse {
     readonly unfetchable_count: number;
   };
   readonly measures: DeliveryMeasuresResponse;
+  /** Every session group, by name. */
+  readonly session_groups: readonly DeliverySessionGroup[];
+  /** For each session that is the first session of a window pull request, its title, or its id
+   *  when it has none. A group member no window pull request names first is absent. */
+  readonly session_titles: Readonly<Record<string, string>>;
+  /** For each such session, how many window pull requests it is the first session of, before the
+   *  search and the facets. */
+  readonly session_pr_counts: Readonly<Record<string, number>>;
 }
 
 /** One job of `GET /api/v1/delivery/runs/{id}`, with its result and timings. */
@@ -2874,6 +3003,137 @@ export interface DeliveryPipelineResponse {
   readonly freshness: DeliveryTimelineResponse["freshness"];
 }
 
+/** A window by preset, whose end stays at the present, or by the exact `from`/`to` of a custom range. */
+export type DeliveryLiveWindow =
+  | { readonly preset: 7 | 14 | 28 | 84 }
+  | { readonly from: string; readonly to: string };
+
+/** One view a page shows. `query` is the query string the page would send to the matching GET route
+ *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. */
+export type DeliveryLiveView =
+  | { readonly kind: "timeline"; readonly window: DeliveryLiveWindow; readonly query: string }
+  | { readonly kind: "measures"; readonly window: DeliveryLiveWindow; readonly query: string }
+  | { readonly kind: "pipeline"; readonly at?: string };
+
+/** The timeline's lists sent item by item, by id. */
+export type DeliveryLiveList = "prs" | "runs" | "session_groups";
+/** The timeline's maps sent entry by entry, by key. */
+export type DeliveryLiveMap =
+  | "issue_titles"
+  | "session_titles"
+  | "session_pr_counts"
+  | "components";
+/** The timeline's two-level count maps, sent count by count: `{facet: {value: count}}`. */
+export type DeliveryLiveCounts = "facet_counts" | "color_counts";
+
+/** What a page holds, as revisions (16 hex digits each) in the frame's own sections. */
+export interface DeliveryLiveRevs {
+  readonly items: Readonly<Partial<Record<DeliveryLiveList, Readonly<Record<string, string>>>>>;
+  readonly maps: Readonly<Partial<Record<DeliveryLiveMap, Readonly<Record<string, string>>>>>;
+  readonly counts: Readonly<
+    Partial<Record<DeliveryLiveCounts, Readonly<Record<string, Readonly<Record<string, string>>>>>>
+  >;
+  /** Every field sent whole, by its name. */
+  readonly fields: Readonly<Record<string, string>>;
+}
+/** A delta's revision changes, in DeliveryLiveRevs' shape; null for a key that left. */
+export interface DeliveryLiveRevChanges {
+  readonly items?: Readonly<
+    Partial<Record<DeliveryLiveList, Readonly<Record<string, string | null>>>>
+  >;
+  readonly maps?: Readonly<
+    Partial<Record<DeliveryLiveMap, Readonly<Record<string, string | null>>>>
+  >;
+  readonly counts?: Readonly<
+    Partial<
+      Record<DeliveryLiveCounts, Readonly<Record<string, Readonly<Record<string, string | null>>>>>
+    >
+  >;
+  readonly fields?: Readonly<Record<string, string>>;
+}
+
+export interface DeliveryLiveSubscribe {
+  readonly type: "subscribe";
+  /** The page's own id for this subscription, echoed on every frame for it. */
+  readonly sub: string;
+  readonly view: DeliveryLiveView;
+  /** A reconnecting page's last applied change and what it holds; Dispatch answers the delta. */
+  readonly resume?: { readonly seq: string; readonly revs: DeliveryLiveRevs };
+}
+export interface DeliveryLiveUnsubscribe {
+  readonly type: "unsubscribe";
+  readonly sub: string;
+}
+export type DeliveryLiveClientFrame = DeliveryLiveSubscribe | DeliveryLiveUnsubscribe;
+
+export type DeliveryLiveBody =
+  | DeliveryTimelineResponse
+  | DeliveryMeasuresResponse
+  | DeliveryPipelineResponse;
+
+export interface DeliveryLiveSnapshot {
+  readonly type: "snapshot";
+  readonly sub: string;
+  /** The change log position this answer reflects; a decimal string, since it is a bigint. */
+  readonly seq: string;
+  /** When the newest change it reflects was recorded; null when the log is empty. */
+  readonly changed_at: string | null;
+  /** Exactly the matching GET route's body for the resolved window. */
+  readonly body: DeliveryLiveBody;
+  readonly revs: DeliveryLiveRevs;
+}
+/** One list's changes: its items that are new or changed, whole, and the ids of those that left. */
+export interface DeliveryLiveItemChanges<L extends DeliveryLiveList> {
+  readonly upsert: DeliveryTimelineResponse[L];
+  readonly remove: readonly string[];
+}
+export interface DeliveryLiveDelta {
+  readonly type: "delta";
+  readonly sub: string;
+  readonly seq: string;
+  readonly changed_at: string | null;
+  /** Fields replaced whole. `window` is here whenever it moved, and never alone. */
+  readonly set: Readonly<Record<string, unknown>>;
+  readonly items: { readonly [L in DeliveryLiveList]?: DeliveryLiveItemChanges<L> };
+  /** A key's new value, or null when it left. */
+  readonly maps: {
+    readonly [M in DeliveryLiveMap]?: Readonly<
+      Record<string, DeliveryTimelineResponse[M][string] | null>
+    >;
+  };
+  /** A count's new value, or null when it left. */
+  readonly counts: Readonly<
+    Partial<
+      Record<DeliveryLiveCounts, Readonly<Record<string, Readonly<Record<string, number | null>>>>>
+    >
+  >;
+  readonly revs: DeliveryLiveRevChanges;
+}
+/** Sent to every subscriber when the freshness row's verdict changes, and never otherwise. */
+export interface DeliveryLiveFreshness {
+  readonly type: "freshness";
+  readonly freshness: DeliveryTimelineResponse["freshness"];
+  /** The sources past their threshold: "prs", "runs", "ci", "events". */
+  readonly stale: readonly string[];
+}
+export interface DeliveryLiveError {
+  readonly type: "error";
+  readonly sub?: string;
+  readonly code: string;
+  readonly message: string;
+}
+/** Sent every heartbeat interval beside the socket's own ping, carrying nothing: a browser never
+ *  shows a ping to the page, so this is how the page tells a quiet socket from a dead one. */
+export interface DeliveryLiveHeartbeat {
+  readonly type: "heartbeat";
+}
+export type DeliveryLiveServerFrame =
+  | DeliveryLiveSnapshot
+  | DeliveryLiveDelta
+  | DeliveryLiveFreshness
+  | DeliveryLiveError
+  | DeliveryLiveHeartbeat;
+
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
  * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
@@ -2918,4 +3178,35 @@ export interface DeliverySettingsInput {
   readonly staging_e2e_job_name?: string | null;
   readonly staging_apply_job_name?: string | null;
   readonly pr_checks_rollup_job_name?: string | null;
+}
+
+/**
+ * One of the Delivery page's session groups: a stable id, a name and the agent sessions it holds.
+ * A pull request whose first session is a member has the group as its Parent agent, under the
+ * value `group:<id>`, so a rename keeps every filter and link that names it. A session is in at
+ * most one group, and a group's name may equal a session title only when the group holds every
+ * session with that title. The timeline lists every group (`DeliveryTimelineResponse.session_groups`).
+ */
+export interface DeliverySessionGroup {
+  readonly id: string;
+  readonly name: string;
+  /** Session ids, sorted. */
+  readonly sessions: readonly string[];
+  readonly created_by: Actor;
+  readonly created_at: string;
+  readonly updated_by: Actor;
+  readonly updated_at: string;
+}
+
+/** `POST /api/v1/delivery/session-groups`'s body. */
+export interface CreateDeliverySessionGroupInput {
+  readonly name: string;
+  readonly sessions: readonly string[];
+}
+
+/** `PATCH /api/v1/delivery/session-groups/{id}`'s body: each field optional. */
+export interface UpdateDeliverySessionGroupInput {
+  readonly name?: string;
+  readonly add?: readonly string[];
+  readonly remove?: readonly string[];
 }

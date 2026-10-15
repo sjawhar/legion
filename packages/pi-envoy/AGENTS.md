@@ -13,11 +13,12 @@ Legion pane loads beside this plugin and which reaches it through the interface 
 This package owns Pi-specific tool registration, direct NATS subscriptions, targeted Dispatch
 delivery, and self-subscription registration for every session. HTTP transport, tool metadata, and
 subject construction come from the Envoy core packages. Its NATS connection (the agent subjects in
-`extensions/envoy.ts`) connects as the nkey user
-`@legion/envoy-client/nats-auth` reads from `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, and without a
-credential when neither is set; an unusable seed fails the connect naming the variable, and a Legion
-daemon strips both from every pane it launches, handing it instead the `legion-pane` seed file it
-holds as `NATS_NKEY_SEED_FILE` when it has one. `@legion/envoy-client/delivery` is the sole inbound
+`extensions/envoy.ts`) connects as the nkey user whose seed `envoySettings` resolves
+(`NATS_NKEY_SEED_FILE`, then `NATS_NKEY_SEED`, then `envoy.natsSeed` for the same file's own
+`envoy.natsUrls`; "Configuration" below), and without a credential when none is set; an unusable
+seed fails the connect naming its source, and a Legion daemon strips both variables from every pane
+it launches, handing it instead the `legion-pane` seed file it holds as `NATS_NKEY_SEED_FILE` when
+it has one. `@legion/envoy-client/delivery` is the sole inbound
 renderer: it produces a tolerant TOON block and never exposes raw envelope bytes. A targeted
 Dispatch **BTW** frame runs the host's side turn (`ctx.runEphemeralTurn`, Oh My Pi 18.3 on) and
 posts its body or error to the correlated delivery attempt; **Aside** and **Steer** call
@@ -25,10 +26,26 @@ posts its body or error to the correlated delivery attempt; **Aside** and **Stee
 (below). A BTW side turn still running when the handler that subscribed the agent subject
 (`session_start`, a session switch, or a Legion handler re-establishing through the claim bridge)
 reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
-A card or a person's turn whose text embeds Dispatch pictures (`RenderInboundResult.pictures`, the
-turn's body) carries them as image blocks after the text (`src/delivery-pictures.ts`, the same
-bounds as `dispatch read`); the host's custom-message and `sendUserMessage` content takes those
-blocks.
+A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carries them as image
+blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
+a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
+takes text alone, gets them from the extension's own `input` handler when the host asks for that
+input's images (`source: "extension"`), as a picture pasted at the terminal reaches it. A typed
+turn's pictures wait under its Dispatch message id (`src/typed-pictures.ts`) until that handler
+hands them to the input with the turn's text (same text: in send order), which releases their
+bytes to the host, and count as shown only once the host's message carrying that id as its `tag`
+starts, a tagged message starting in the live session's transcript. A session change drops the
+turns sent into the session left that were already handed their pictures: a switch, `/new` or
+resume discards that session's queue, and a branch or a session file's move-off keeps it, so such
+a turn that starts under the new id counts nothing shown and the next delivery sends its pictures
+once more. A turn still holding its pictures stays, since its `sendUserInput` has not yet reached
+pi-envoy's `input` handler. Dispatch accepts a message once, so a retry of one whose message went
+without its pictures arrives as a card, which carries them: a prompt the host dropped (an abort as
+it was admitted) leaves them unshown. Their limit: an extension whose `input` handler runs ahead of
+pi-envoy's and rewrites the text leaves that turn without its pictures, since the text is the
+only part of the event naming the turn; they are never marked shown, so a later delivery carries
+them, and the turn's admission goes once `sendUserInput` answers that the input was submitted,
+every handler having run.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
 steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
@@ -38,9 +55,8 @@ other frame keeps its card with no call to Dispatch. For a candidate the extensi
 with its own Dispatch bearer, to accept that attempt
 (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`; its conditions are that route's row in
 `packages/envoy/cmd/dispatch/AGENTS.md`, in short a person's own fresh Send or Aside to this
-session), and only on that 200 sends the stored body the accept answers with
-`pi.sendUserMessage` (`deliverAs: "aside"` for an Aside, nothing for a Send, as the accepted
-attempt says; `turnFromAccept`), never the frame's text. Only the accept's success makes a turn;
+session), and only on that 200 runs the stored body the accept answers with (`turnFromAccept`),
+never the frame's text, in the accepted attempt's mode. Only the accept's success makes a turn;
 the extension's own checks can only keep a card. Besides the candidate filter, it never accepts an
 attempt it already delivered, as a card or as a turn: before either goes out it writes a
 transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every
@@ -48,13 +64,73 @@ entry of the session file (`sessionManager.getEntries()`) on each restore, and a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
 retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing. The stream tags
-the injected user message with the message id (`dispatchMessageId`, passed to
-`AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
-message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
-first user message with the sent text, remembered under its host timestamp, forgotten at the run's
-`agent_end`; a turn the record misses shows twice, and the phase-stall section of
-`packages/pi-legion/AGENTS.md` says which turns those are and what a miss costs a phase worker).
+configuration that no longer resolves included, keeps the card and posts nothing.
+
+On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
+typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`
+and `deliverAs: "aside"` for an Aside: a built-in the host runs headless, an extension or custom
+command, a markdown file command or prompt template (expanded into the user message), `/skill:<name>`
+(the host's `skill-prompt` custom message), and any other text, a slash text no command names
+included, as a prompt. The call is never awaited, since on an idle session the host answers only
+once the run it started ends, and the pump must keep taking the person's next Send. The attempt is
+already accepted, so what the host answers is the session's reply to it on Dispatch
+(`typedInputReply`, posted with `POST /api/v1/messages/{id}/reply`), never a failed delivery: what a
+built-in printed (`/session`'s `Session:`, `Title:` and `CWD:` lines; `/compact`'s
+`Compaction complete. …`; `/force:<tool> <prompt>`'s confirmation, printed before the prompt it
+submits), that a built-in only the terminal runs (`/new`, `/resume`) runs only in the session's own
+terminal and nothing was sent, that a host mode which does not wire the method (an SDK embedder, a
+guest in a shared session) did not run it and nothing was sent, or why the host failed it; a
+prompt, skill or command that printed nothing gets no reply. On a host without `sendUserInput` a
+body that starts with `/` is not sent, since the host would hand it to the model as words, and the
+reply names the host's Oh My Pi version and says nothing was sent; any other body goes through
+`pi.sendUserMessage` as before.
+
+The stream tags the person's message with its Dispatch id (`dispatchMessageId`, passed to
+`AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which
+message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`,
+`@legion/pi-shared/injected-user-turns`). A typed turn is found by the tag the host keeps on every
+message the input submits, a user message or a `skill-prompt` custom message, and by nothing else; it
+stays in the record past the run's `agent_end` until that message arrives, and goes when the host
+answers that the input submitted no message or the instance that sent it moves off its session id
+(`forgetInjectedUserTurns`, guarded by the ids this instance noted turns under: every match asks
+under the live id, and an ACP host's other sessions in the same process keep their own turns). A
+`sendUserMessage`
+turn is found by its text: the first user message that equals it, forgotten at the run's
+`agent_end`, so on such a host a Send or an Aside the host runs as a turn of its own after that run
+matches nothing. A message's identity
+is its host timestamp and, when the host kept one, its tag (two Sends can be stamped in the same
+millisecond): the stream keys it by that, and what the record answers for it is remembered under
+that until the run ends. The phase-stall section of `packages/pi-legion/AGENTS.md` says what a
+miss costs a phase worker. Which turns the page shows
+twice: one the record missed, which the stream carries untagged; and a prompt template or file
+command, whose streamed user message is the expanded text while Dispatch stores what the person
+typed, and the page takes the stored copy away only when the two texts are equal
+(`AgentRuntimeThread.tsx`, a guard against a forged tag on an open bus). A `/skill:` shows once:
+the stream carries no custom message, so the page shows Dispatch's stored copy alone. A typed turn
+the host starts under a new id (queued across a branch or a move-off, or a session change during
+its `sendUserInput`) is untagged by the record there, and shows once: Dispatch stored the Send
+under the id it was sent to, which that page does not read.
+
+The stream also lists the slash commands a viewer can send (`kind: "commands"`, the last frame of
+every replay and published whenever the list changes), in the session's terminal picker's order:
+the host's built-ins (`listUserInputBuiltinCommands`, our fork's export, loaded through a dynamic
+import so a host without the module still loads the extension), each marked `terminalOnly` when only
+the terminal runs it; the extension, custom and skill commands (`pi.getCommands`); then the
+markdown file commands and prompt templates the live session expands, read from the host's own
+`AgentSession` (`slashCommands`, `promptTemplates`) by finding, in `AgentRegistry.global().list()`,
+the ref whose live session id is this session's. At the pin, `createAgentSession` defaults its
+main session to that registry (sdk.ts:2204) and registers it (sdk.ts:4067), so print and `--mode rpc`
+main sessions list file commands and templates too. The ref is looked up whenever commands refresh,
+since the host keeps one `AgentSession` across `/new`, `/resume` and a fork and changes its id; a
+host without the registry export, or one listing no session under this id, lists none of those two
+and publishes the rest. Replay always refreshes commands; attached watch pings refresh at most once
+per ten seconds. Every built-in's name and aliases are reserved before anything else is listed,
+since the host runs a built-in by either before `prompt()`; among the rest a repeated name keeps its
+first source, which is the one the host runs. A name is listed only if a person can type it
+(`isTypableCommandName` in `@legion/contracts`, which a viewer applies too): not empty, no
+whitespace, no control character. The list keeps the host-order prefix whose frame fits the
+replay's byte budget (`historyBytes`, UTF-8 bytes of JSON) on its own, so a replay always carries
+it. A host without `sendUserInput` publishes no list, and its viewer offers no completion.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own
@@ -93,31 +169,84 @@ bridge the Legion entry claims through, the record of the user turns this plugin
 slot for the bootstrapped session's transcript; what the Legion entry does with it, and how it
 refuses to run without it, is "What this plugin needs from pi-envoy" there.
 
+## Configuration
+
+A session reads one envoy.json (`@legion/envoy-client/session-settings` over `envoy-config`),
+chosen at module load by Oh My Pi's rule: with `OMP_PROFILE` naming a profile other than
+`default`, `$PI_CODING_AGENT_DIR/envoy.json`; otherwise the file `ENVOY_CONFIG_FILE` names, else
+`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`. The module sets `ENVOY_CONFIG_FILE` to that
+path beside `PATH` and `DISPATCH_HOST` (below), so the `dispatch` command a shell command runs,
+which reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, reads the same file,
+and so does `@sjawhar/pi-legion` in the same process, by the same Oh My Pi rule. The `dispatch`
+section of a checkout's `<cwd>/.envoy/envoy.json` merges over it: its server is used only with the
+token written beside it, its token only beside its own server, and a `!` value in it is refused. An
+`envoy` section in the checkout's file is not read, which the start notice says, and a checkout's
+file that cannot be read or is not valid refuses Dispatch alone, only while `DISPATCH_URL` is unset.
+The file holds a `dispatch` section (`enabled`, `serverUrl`, `token`) and an `envoy` section
+(`enabled`, `url`, `natsUrls`, `token`, `natsSeed`), each strict and each resolved on its own: a
+chosen file that is not valid turns both sections off, `enabled: false` turns a section off
+whatever the variables say, and a missing file contributes nothing, so each section is then on
+only when its variables name it. A `token` or `natsSeed` starting with `!` is a command
+(`/bin/sh -c` in the envoy.json's directory and its own process group, 10 s, its exit status
+deciding, its trimmed stdout the value), run only when its section uses it; its value is kept for
+the process across every copy of the extension's modules (each `task` subagent loads a fresh one),
+and so is a command that ran out of time, which never runs again in that process (each run blocks
+it for the whole 10 s), while a failure that ended on its own is kept for 60 s, then it runs
+again. `DISPATCH_URL`,
+`DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`,
+`ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field, which is
+how a Legion pane gets the Dispatch and Envoy its daemon names. A file's token goes with
+`DISPATCH_URL` or `ENVOY_URL` only when the variable names the origin of the server written in that
+file, and a file's `natsSeed` with `ENVOY_NATS_URL` only when it names that file's `natsUrls`;
+otherwise the section is off with an error naming the variable to set.
+
+With Envoy off the extension builds no listener client, registers no Envoy tool and no `/whoami`,
+and opens no NATS connection; the Legion claim bridge and every other listener call go through one
+accessor (`requireEnvoy`) that throws `Envoy is off for this session: <why>`, the section's notice
+or error. With Envoy on and no NATS server, or with its NATS seed refused, inbound messages are off
+(`inbound.off` says why) and the tools and `/whoami` still work; `envoy_subscribe` and the Legion
+interface's `claim` and `subscribe` throw `inbound messages are off for this session: <why>` (the
+refusal, or that Envoy has no NATS server) through one accessor (`requireInbound`), before any
+listener call or NATS connection: nats.js handed no server dials `127.0.0.1:4222`, and a claimed
+role's every task and notice reaches its holder only over NATS, so a Legion process with inbound
+off fails its boot at the claim rather than hold a role that delivers nothing.
+Dispatch on at load adds the `dispatch-first` context; a Dispatch call after the file stopped
+configuring Dispatch throws `Dispatch is no longer configured: <notice>`, and one after it broke
+throws `dispatch config: <error>`. A top-level `session_start` shows one notice when a section is
+off for a reason worth saying: the missing file's (`envoy: no envoy.json at <path>: Dispatch and
+Envoy are off`), a section's error, what a checkout's files hold that the session does not read, or
+that inbound messages are off; a file that turns a section off says nothing. A file location that
+cannot be worked out (a relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR`)
+still loads the extension, with both sections off, nothing handed on, and that refusal as the
+notice.
+
+`~/.config/opencode/envoy.json` and a checkout's `.opencode/envoy.json` are not read. While the old
+user file is there and the session's file is missing, the missing file's notice ends with what to
+do: for `~/.config/legion/envoy.json`,
+`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`; for a profile's
+own file, copy or link the old file to it, or write it; under a relocated `XDG_CONFIG_HOME`, only
+that it is not read there. While a checkout has no `.envoy/envoy.json`, the notice names the rename
+of its `.opencode/envoy.json`. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
+
 ## The `dispatch` command
 
 The extension registers no Dispatch tool: agents run the `dispatch` command in their shell
 (`dispatch --help`, `dispatch <command> --help`), one command per spec of `@legion/contracts`'s
 `dispatchToolSpecs`. `bin/dispatch` is a shim that runs the bundled `dist/dispatch.js` with `bun`,
 and exits 2 naming the file when the plugin was not built. At module load `extensions/envoy.ts`
-puts the plugin's `bin/` (one directory above the module in both layouts) first on `PATH` and sets
-`DISPATCH_HOST=omp`; Oh My Pi snapshots `process.env` for its shell when it first runs one, after
-every extension has loaded, so both reach every shell command. `bindDispatchSession` sets
+puts the plugin's `bin/` (one directory above the module in both layouts) first on `PATH`, sets
+`DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`
+("Configuration"); Oh My Pi snapshots `process.env` for its shell when it first runs one, after
+every extension has loaded, so all three reach every shell command. `bindDispatchSession` sets
 `DISPATCH_SESSION_ID` to the session's id at `session_start`, `session_switch`, `session_branch`
 and the heartbeat's drift heal (and deletes it while the session has no id), and the command acts
 as that session; the session's title reaches it through the `title` file in the session's state
 directory (the `dispatch` CLI row under "Where to look"). The command resolves Dispatch's URL and
-bearer token on every call, so a Dispatch that moved (a new `dispatch.serverUrl` in `envoy.json`,
-or a changed `DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`, and a file
-that has since broken fails the call with its own error rather than using the stale endpoint. The
-extension resolves the same configuration once at load, for the `dispatch-first` context below and
-the warning `session_start` shows when it is invalid. Set
-`dispatch.enabled: true`, `dispatch.serverUrl`, and `dispatch.token` in
-`~/.config/opencode/envoy.json` or `<cwd>/.opencode/envoy.json`. A repository
-`dispatch.serverUrl` can use only `dispatch.token` from that same repository
-file; override its endpoint only with `DISPATCH_URL` plus `DISPATCH_TOKEN` or
-`DISPATCH_TOKEN_FILE`. `DISPATCH_TOKEN_FILE` is a path whose trimmed contents
-are the token — how the Legion daemon delivers it to a pane — and never falls
-back when unreadable. A human mints a personal token in Dispatch Settings → Agent
+bearer token on every call, and so do the extension's own Dispatch calls (the open-asks read, a
+delivery's reply) over the same file, so a Dispatch that moved (a new `dispatch.serverUrl` in
+envoy.json, or a changed `DISPATCH_URL`) takes effect in live sessions without `/reload-plugins`,
+and a file that has since broken fails the call with its own error rather than using the stale
+endpoint. A human mints a personal token in Dispatch Settings → Agent
 tokens, then supplies it through `dispatch.token` or `DISPATCH_TOKEN`; the server
 attributes that session's writes to the minting human. `DISPATCH_AGENT_TOKEN` is
 the shared devbox fallback, not a token to configure for an individual agent. No
@@ -155,9 +284,9 @@ with elsewhere (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or `INTERNAL`); the read
 `dispatch doc-edit` may retype an identified paragraph or typed block into any schema-declared typed block with
 the `--ops-json` entry `{ "op": "retype", block, type, attributes }`, delete or move a whole block by id with
 `{ "op": "delete", block }` and `{ "op": "move", block, after | before }`, and delete a table row or column in place
-with `{ "op": "delete_row" | "delete_column", block, index }`. Table `index` is zero-based and its table `block` id
-comes from the artifact-UUID `GET /api/v1/artifacts/{id}/blocks` route; that route returns each block's
-full-state token, including inline marks. `dispatch doc-read` returns the whole-document token. Supply an
+with `{ "op": "delete_row" | "delete_column", block, index }`. Table `index` is zero-based; `dispatch doc-read --blocks`
+lists every block's id and full-state token (including inline marks) and each table's rows and cells by the indexes
+`delete_row` and `delete_column` take, from `GET /api/v1/artifacts/{id}/blocks`. `dispatch doc-read` returns the whole-document token. Supply an
 optional `--precondition-json` with exactly one document token or one-or-more block `{id, token}` entries; a block
 guard must cover every content block the resolved batch changes, while unrelated sections stay independent.
 Insert and move require the document token because their meaning depends on document order. A stale
@@ -278,8 +407,8 @@ state never nudges.
 | OMP extension entry | `extensions/envoy.ts` | The one entry; ships as `dist/envoy.js` in `@sjawhar/pi-envoy` and loads in every installed OMP session. The Legion entry is `../pi-legion/extensions/legion.ts` (`packages/pi-legion/AGENTS.md`) |
 | Legion lifecycle | `../pi-legion/` | The daemon client, the claim and controller sessions, the `legion` tool and the phase stall are `@sjawhar/pi-legion`'s: see `packages/pi-legion/AGENTS.md` |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry publishes (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check (`subagent-session`), the host types, `toolSuccess`/`toolFailure`, and `shell-command`; inlined into `dist/envoy.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
-| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH` and sets `DISPATCH_HOST=omp`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
-| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, and resets the process-wide interface so no Legion suite's record reaches it |
+| The `dispatch` CLI in Oh My Pi | `bin/dispatch` (the shim, mode 755), `dist/dispatch.js` (`../envoy-client/scripts/build-dispatch-cli.sh`, the one build of the CLI bundle, in `build` and `scripts/pi-plugin-prepack.sh`), `extensions/envoy.ts`, `../pi-shared/src/shell-command.ts` | The extension registers no Dispatch tool: at load it puts the plugin's `bin/` first on `PATH`, sets `DISPATCH_HOST=omp` and hands on the session's envoy.json as `ENVOY_CONFIG_FILE`; session events and the heartbeat's drift heal set `DISPATCH_SESSION_ID` (the drift heal also calls `procmgr.refreshShellConfigCache()`); the Legion entry writes the title after naming a pane. |
+| Extension unit tests | `extensions/envoy.test.ts` | Mocked Pi and NATS surface; `beforeEach` points `ENVOY_URL` at an unroutable host and stubs `fetch` with the registration echo, so a test that forgets its own stub never registers a `ses_*` fixture on the devbox's real listener, points `ENVOY_CONFIG_FILE` at a file that holds no section with `OMP_PROFILE`, `PI_CODING_AGENT_DIR` and `XDG_CONFIG_HOME` unset, so no caller's envoy.json reaches a test (each loads the module fresh, `./envoy.ts?<row>`, since the file is chosen at module load), and resets the process-wide interface so no Legion suite's record reaches it |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/prepack.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The four skills this package ships, staged as its prepack stages them, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard` and the `dispatch-first` budget |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-legion` |
 | Shared HTTP/tool behavior | `../envoy-client/src/` | Do not duplicate it here |

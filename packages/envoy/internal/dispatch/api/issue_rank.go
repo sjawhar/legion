@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -100,8 +99,9 @@ func lastProjectRank(ctx context.Context, q queryer, project, issueKey string) (
 	return rank, err
 }
 
-func rankBoundary(ctx context.Context, q queryer, project, issueKey, raw string) (string, error) {
-	key := strings.TrimSpace(raw)
+// rankBoundary reads a rank neighbour the PATCH already locked under this same trimmed key
+// (lockPatchRows), so it takes no lock of its own.
+func rankBoundary(ctx context.Context, q queryer, project, issueKey, key string) (string, error) {
 	if key == "" || key == issueKey {
 		return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor must name another issue")
 	}
@@ -109,7 +109,7 @@ func rankBoundary(ctx context.Context, q queryer, project, issueKey, raw string)
 		neighborProject string
 		neighborRank    string
 	)
-	if err := q.QueryRow(ctx, `select project_key, rank from issues where key = $1 for no key update`, key).Scan(&neighborProject, &neighborRank); err != nil {
+	if err := q.QueryRow(ctx, `select project_key, rank from issues where key = $1`, key).Scan(&neighborProject, &neighborRank); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return "", errorf(http.StatusBadRequest, "RANK_INPUT", "rank neighbor does not exist")
 		}

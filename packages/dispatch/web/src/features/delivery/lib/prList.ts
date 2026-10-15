@@ -1,6 +1,6 @@
 // Row model for the PR list view: display labels and sort keys per PR, computed once per
 // population so the table's cells and sort functions read plain fields. Pure: no React.
-import type { DeliveryPR } from "../../../api/types";
+import type { DeliveryPR, DeliverySessionGroup } from "../../../api/types";
 import {
   DEPLOYED_LABELS,
   NO_ISSUE,
@@ -9,6 +9,7 @@ import {
   PLACEHOLDER_LABELS,
   shortRepoLabel,
 } from "./facets";
+import { parentAgentLabel } from "./parentAgent";
 
 const PRIORITY_RANK: Record<NonNullable<DeliveryPR["priority"]>, number> = {
   P0: 0,
@@ -33,7 +34,8 @@ export interface PRListRow {
   issueLabel: string;
   /** undefined for a PR with no issue, so it sorts last in either direction. */
   issueSort: IssueSortKey | undefined;
-  /** The parent agent's title, or "No session". */
+  /** The Parent agent as the page shows it: a group by its name, a session by its title, or "No
+   *  session". */
   parentAgentLabel: string;
   /** undefined when parentAgentLabel is the placeholder, so it sorts last. */
   parentAgentSort: string | undefined;
@@ -60,30 +62,36 @@ export function formatMinutes(minutes: number): string {
 
 export function buildPRListRows(
   prs: readonly DeliveryPR[],
-  allRepos: readonly string[]
+  allRepos: readonly string[],
+  sessionGroups: readonly DeliverySessionGroup[]
 ): PRListRow[] {
-  return prs.map((pr) => ({
-    pr,
-    mergedMs: pr.merged_at === null ? undefined : Date.parse(pr.merged_at),
-    prLabel: `${shortRepoLabel(allRepos, pr.repo)}#${pr.number}`,
-    issueLabel:
-      pr.issue === null
-        ? PLACEHOLDER_LABELS[NO_ISSUE]
-        : `${pr.issue} \u00b7 ${pr.priority ?? PLACEHOLDER_LABELS[NO_PRIORITY]}`,
-    issueSort:
-      pr.issue === null
-        ? undefined
-        : {
-            priorityRank: pr.priority === null ? NO_PRIORITY_RANK : PRIORITY_RANK[pr.priority],
-            key: pr.issue,
-          },
-    parentAgentLabel: pr.parent_agent ?? PLACEHOLDER_LABELS[NO_SESSION],
-    parentAgentSort: pr.parent_agent ?? undefined,
-    size: pr.additions === null || pr.deletions === null ? undefined : pr.additions + pr.deletions,
-    deployedLabel: DEPLOYED_LABELS[pr.deployed_status],
-    deployedMs: pr.deployed_at === null ? undefined : Date.parse(pr.deployed_at),
-    leadTimeMinutes: leadTimeMinutes(pr),
-  }));
+  return prs.map((pr) => {
+    const parentAgent =
+      pr.parent_agent === null ? undefined : parentAgentLabel(pr.parent_agent, sessionGroups);
+    return {
+      pr,
+      mergedMs: pr.merged_at === null ? undefined : Date.parse(pr.merged_at),
+      prLabel: `${shortRepoLabel(allRepos, pr.repo)}#${pr.number}`,
+      issueLabel:
+        pr.issue === null
+          ? PLACEHOLDER_LABELS[NO_ISSUE]
+          : `${pr.issue} \u00b7 ${pr.priority ?? PLACEHOLDER_LABELS[NO_PRIORITY]}`,
+      issueSort:
+        pr.issue === null
+          ? undefined
+          : {
+              priorityRank: pr.priority === null ? NO_PRIORITY_RANK : PRIORITY_RANK[pr.priority],
+              key: pr.issue,
+            },
+      parentAgentLabel: parentAgent ?? PLACEHOLDER_LABELS[NO_SESSION],
+      parentAgentSort: parentAgent,
+      size:
+        pr.additions === null || pr.deletions === null ? undefined : pr.additions + pr.deletions,
+      deployedLabel: DEPLOYED_LABELS[pr.deployed_status],
+      deployedMs: pr.deployed_at === null ? undefined : Date.parse(pr.deployed_at),
+      leadTimeMinutes: leadTimeMinutes(pr),
+    };
+  });
 }
 
 /** Ascending comparator for IssueSortKey: priority rank, then Dispatch key with numeric runs

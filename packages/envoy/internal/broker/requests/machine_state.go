@@ -1,10 +1,11 @@
 // packages/envoy/internal/broker/requests/machine_state.go
 // Package requests is the broker's state machine for agent_secret credential requests. A request
 // row freezes, at creation, the enrollment, the resource set with each name's decision and the
-// secret it reads, the allowed approver, the policy version and the lifetime. Its only
-// transitions are pending -> granted | denied | cancelled | expired; each is an UPDATE guarded by
-// state='pending' inside one transaction that also writes the audit row, so a duplicate or late
-// decision changes nothing. A request that needs approval also freezes an append-only
+// secret it reads, the allowed approver, the policy version and the lifetime its request object
+// signed, if any: a grant lasts that long, or until its session ends when the request names none.
+// Its only transitions are pending -> granted | denied | cancelled | expired; each is an UPDATE
+// guarded by state='pending' inside one transaction that also writes the audit row, so a duplicate
+// or late decision changes nothing. A request that needs approval also freezes an append-only
 // credential-request record (internal/broker/record): the requester's signed request object plus
 // the broker's decision fields. The record is decided by a Dispatch login, which Dispatch's server
 // sends on the UI routes and the UI bearer vouches for: its approver's, or anyone's for a record
@@ -50,6 +51,9 @@ var (
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
 	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
 	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
+	// ErrRequestPending means this session already has a person deciding one of the requested
+	// names. Its returned error names that pending request.
+	ErrRequestPending = errors.New("a request for one or more of these secrets is already pending")
 	// ErrSessionIDInvalid: the request's own session_id override (requests.session_id — an
 	// unsigned claim any enrolled process may send, never verified against a signature) is too
 	// long or carries a whitespace or control character, refused before it is ever stored or
@@ -95,17 +99,20 @@ type SecretDecision struct {
 // credential-request record names (a person's canonical login, or record.AnyoneApprover), read
 // from the record rather than the current policy, since the record is what the approver's list
 // shows; it is nil when the request has no record, because the policy decided it at once.
+// LifetimeSeconds is the lifetime its signed request object named, the one its grant lasts; nil
+// when it named none, and its grant lasts until its session ends.
 type Request struct {
-	ID        string           `json:"request_id"`
-	State     string           `json:"state"`
-	GrantID   *string          `json:"grant_id"`
-	RecordID  *string          `json:"record_id"`
-	Approver  *string          `json:"approver"`
-	Secrets   []SecretDecision `json:"secrets"`
-	DecidedAt *time.Time       `json:"decided_at"`
-	DecidedBy *string          `json:"decided_by"`
-	Detail    *string          `json:"detail"`
-	Coalesced bool             `json:"coalesced,omitempty"`
+	ID              string           `json:"request_id"`
+	State           string           `json:"state"`
+	GrantID         *string          `json:"grant_id"`
+	RecordID        *string          `json:"record_id"`
+	Approver        *string          `json:"approver"`
+	Secrets         []SecretDecision `json:"secrets"`
+	LifetimeSeconds *int             `json:"lifetime_seconds"`
+	DecidedAt       *time.Time       `json:"decided_at"`
+	DecidedBy       *string          `json:"decided_by"`
+	Detail          *string          `json:"detail"`
+	Coalesced       bool             `json:"coalesced,omitempty"`
 }
 
 // Decision is ApplyDecision's result: the request's new state and, when granted, the new grant's
@@ -120,7 +127,6 @@ type Machine struct {
 	Store      *store.Store
 	Policy     *policy.Current
 	Secrets    secrets.Reader
-	MaxGrant   time.Duration
 	PendingTTL time.Duration
 	// Audience is BROKER_PUBLIC_URL: the aud every request object's signature is checked against.
 	Audience string
@@ -166,7 +172,7 @@ type enrollmentRow struct {
 	ID, Kind, Thumbprint string
 	// Operator is the person the session acts for, nil for a pod; Service is the service of the
 	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's verified
-	// service account, nil for a box or host.
+	// service account, nil for a session.
 	Operator, Service, Subject *string
 	RuntimeID, Slot            string
 }
@@ -200,14 +206,16 @@ func (e enrollmentRow) requester(ctx context.Context, q querier, services map[st
 // name their own approver — that's the policy's job), rereads each name the live policy does not
 // serve (rereadMissing), and hands back a live grant for exactly these names when one may be
 // reused (reuseLiveGrant). Otherwise it decides and writes the request in one
-// transaction: it takes the advisory lock that serializes identical requests from one enrollment
-// (lockIdenticalPending), then locks the enrollment live (lockLiveEnrollment), so no request or
-// grant lands on an enrollment that ended after Create first read it (such an enrollment is
-// pgx.ErrNoRows, as one that had ended before), and no withhold (RevokeByApprover, which takes the
-// same row) lands between the read of what is withheld from the session and the write. It then
-// evaluates the policy for the session (a withheld name is human tier to it) and writes a granted
-// or denied request, with a granted one's grant, or a pending request and its credential-request
-// record, which a pending identical request already waiting coalesces onto instead.
+// reused (reuseLiveGrant). Otherwise it decides and writes the request in one transaction: it
+// takes the advisory locks that serialize pending requests for each requested name in one
+// enrollment (lockPendingNames), then locks the enrollment live (lockLiveEnrollment), so no
+// request or grant lands on an enrollment that ended after Create first read it (such an
+// enrollment is pgx.ErrNoRows, as one that had ended before), and no withhold
+// (RevokeByApprover, which takes the same row) lands between the read of what is withheld from
+// the session and the write. It then evaluates the policy for the session and writes a granted or
+// denied request, with a granted one's grant, or a pending request and its credential-request
+// record. A second pending request that overlaps one of its names is refused, so an untrusted
+// session cannot flood an approver's Inbox by varying --ttl.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
 	if !validSessionID(sessionID) {
 		return Request{}, ErrSessionIDInvalid
@@ -241,11 +249,12 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
+	lifetime := obj.LifetimeSeconds
 	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
 	if err != nil {
 		return Request{}, err
 	}
-	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, set); err != nil {
+	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, lifetime, set); err != nil {
 		return Request{}, err
 	} else if ok {
 		return existing, nil
@@ -256,7 +265,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	}
 	defer tx.Rollback(ctx)
 	sorted := sortedCopy(names)
-	if err := lockIdenticalPending(ctx, tx, enrollmentID, sorted); err != nil {
+	if err := lockPendingNames(ctx, tx, enrollmentID, sorted); err != nil {
 		return Request{}, err
 	}
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
@@ -270,12 +279,29 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err != nil {
 		return Request{}, err
 	}
+	if e.state == "pending" {
+		pending, err := pendingRequest(ctx, tx, enrollmentID, sorted)
+		if err != nil {
+			return Request{}, err
+		}
+		if pending.ID != "" {
+			if slices.Equal(pending.Names, sorted) && pending.joins(lifetime) {
+				if err := tx.Commit(ctx); err != nil {
+					return Request{}, err
+				}
+				existing, err := m.Get(ctx, pending.ID)
+				existing.Coalesced = true
+				return existing, err
+			}
+			return Request{}, fmt.Errorf("%w: request %s is still pending", ErrRequestPending, pending.ID)
+		}
+	}
 	r := newRequest{
 		id: uuid.NewString(), enrollmentID: enrollmentID, reason: obj.Reason, state: e.state,
-		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: m.MaxGrant, decisions: e.decisions,
+		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: lifetime, decisions: e.decisions,
 	}
 	if e.state != "pending" {
-		req := Request{ID: r.id, State: r.state, Secrets: r.decisions}
+		req := Request{ID: r.id, State: r.state, Secrets: r.decisions, LifetimeSeconds: r.lifetime}
 		if err := m.insertRequest(ctx, tx, r); err != nil {
 			return Request{}, err
 		}
@@ -287,19 +313,6 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			req.GrantID = &grantID
 		}
 		return req, tx.Commit(ctx)
-	}
-	existingID, err := matchingRequest(ctx, tx, `select r.id, array_agg(s.name) from requests r join request_secrets s on s.request_id=r.id
-		where r.enrollment_id=$1 and r.state='pending' group by r.id`, enrollmentID, sorted)
-	if err != nil {
-		return Request{}, err
-	}
-	if existingID != "" {
-		if err := tx.Commit(ctx); err != nil {
-			return Request{}, err
-		}
-		existing, err := m.Get(ctx, existingID)
-		existing.Coalesced = true
-		return existing, err
 	}
 	r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
 	req, err := m.createPending(ctx, tx, enr, r, obj)
@@ -379,10 +392,11 @@ func evaluate(set *policy.Set, names []string, requester policy.Requester) (eval
 	return e, nil
 }
 
-// newRequest is one request row as Create writes it.
+// newRequest is one request row as Create writes it. lifetime is the seconds its grant lasts, nil
+// for a grant that lasts until its session ends.
 type newRequest struct {
 	id, enrollmentID, reason, state, approver, rulesVersion, sessionID, recordID string
-	lifetime                                                                     time.Duration
+	lifetime                                                                     *int
 	decisions                                                                    []SecretDecision
 	// pendingExpiresAt is set only when state == "pending"; it is also the credential-request
 	// record's own ExpiresAt, computed once so the two never drift a few microseconds apart.
@@ -411,7 +425,7 @@ func (m *Machine) insertRequest(ctx context.Context, tx pgx.Tx, r newRequest) er
 	}
 	if _, err := tx.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, allowed_approver, rules_version, lifetime_seconds, pending_expires_at, session_id, record_id, decided_at, decision_detail)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $4 in ('granted','denied') then now() end, $11)`,
-		r.id, r.enrollmentID, r.reason, r.state, nullable(r.approver), r.rulesVersion, int(r.lifetime.Seconds()), pendingExpires, nullable(r.sessionID), nullable(r.recordID), nullable(detail)); err != nil {
+		r.id, r.enrollmentID, r.reason, r.state, nullable(r.approver), r.rulesVersion, r.lifetime, pendingExpires, nullable(r.sessionID), nullable(r.recordID), nullable(detail)); err != nil {
 		return err
 	}
 	for _, d := range r.decisions {
@@ -430,7 +444,7 @@ func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRo
 		Request:         obj.Compact,
 		Approver:        r.approver,
 		Enrollment:      record.Enrollment{Kind: enr.Kind, RuntimeID: enr.RuntimeID, Operator: deref(enr.Operator), Slot: enr.Slot},
-		LifetimeSeconds: int(r.lifetime.Seconds()),
+		LifetimeSeconds: r.lifetime,
 		RulesVersion:    r.rulesVersion,
 		ExpiresAt:       r.pendingExpiresAt,
 	}
@@ -443,19 +457,21 @@ func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRo
 	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
-	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID, Approver: &body.Approver}, nil
+	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID, Approver: &body.Approver, LifetimeSeconds: r.lifetime}, nil
 }
 
-// lockIdenticalPending takes the advisory lock Create serializes identical requests from one
-// enrollment on, keyed by the enrollment and its sorted names, until tx ends: a twin of a request
-// that is still pending finds it and coalesces onto it instead of writing a second record.
-func lockIdenticalPending(ctx context.Context, tx pgx.Tx, enrollmentID string, sorted []string) error {
-	key, err := json.Marshal([]any{enrollmentID, sorted})
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(key)); err != nil {
-		return fmt.Errorf("lock identical pending requests: %w", err)
+// lockPendingNames takes one advisory lock for each requested secret in this enrollment, in sorted
+// order, until tx ends. It lets an exact repeat coalesce but refuses any overlapping request that
+// would create a second card for the same approver and secret.
+func lockPendingNames(ctx context.Context, tx pgx.Tx, enrollmentID string, sorted []string) error {
+	for _, name := range sorted {
+		key, err := json.Marshal([]string{enrollmentID, name})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(key)); err != nil {
+			return fmt.Errorf("lock pending requests: %w", err)
+		}
 	}
 	return nil
 }
@@ -550,10 +566,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, err
 	}
 	var requestID, state string
-	var lifetime int
 	var expired bool
-	if err := tx.QueryRow(ctx, `select id, state, lifetime_seconds, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
-		Scan(&requestID, &state, &lifetime, &expired); err != nil {
+	if err := tx.QueryRow(ctx, `select id, state, pending_expires_at <= now() from requests where record_id=$1 for update`, recordID).
+		Scan(&requestID, &state, &expired); err != nil {
 		return Decision{}, err
 	}
 	parsed, err := verifyRecordBody(recordID, body)
@@ -607,7 +622,8 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var grantID string
 	if next == "granted" {
-		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, time.Duration(lifetime)*time.Second); err != nil {
+		// The grant lasts the lifetime the approved record names, the text its approver decided.
+		if grantID, err = insertGrant(ctx, tx, requestID, enrollmentID, login, parsed.LifetimeSeconds); err != nil {
 			return Decision{}, err
 		}
 	}
@@ -810,7 +826,7 @@ func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor str
 			returning name
 		), ended as (
 			update grants g set revoked_at=now(), revoked_by=$3
-			where g.enrollment_id=$1 and g.revoked_at is null and g.expires_at > now()
+			where g.enrollment_id=$1 and g.revoked_at is null and `+grantUnexpired("g")+`
 			and exists (select 1 from request_secrets a where a.request_id=g.request_id and a.decision=$4 and a.name in (select name from withheld))
 			returning g.id, g.request_id
 		), audited as (
@@ -863,102 +879,11 @@ func lockLiveEnrollment(ctx context.Context, tx pgx.Tx, id string) error {
 	return tx.QueryRow(ctx, `select 1 from enrollments where id=$1 and revoked_at is null and lease_expires_at > now() for share`, id).Scan(&one)
 }
 
-// querier is what a read takes to run inside a transaction or straight on the pool.
-type querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-// matchingRequest runs query (whose rows are a request id and that request's secret names, with
-// $1 bound to enrollmentID) and answers the first request whose names are exactly sorted, or ""
-// when none is. Names are compared as sets of whole strings, never as one joined string, so a
-// name containing a separator cannot pass for two names.
-func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, sorted []string) (string, error) {
-	rows, err := q.Query(ctx, query, enrollmentID)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var names []string
-		if err := rows.Scan(&id, &names); err != nil {
-			return "", err
-		}
-		sort.Strings(names)
-		if slices.Equal(names, sorted) {
-			return id, nil
-		}
-	}
-	return "", rows.Err()
-}
-
-// reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
-// name-set match (never a subset or superset — the same matching rule coalescing uses for pending
-// requests) against a still-live grant (not revoked, not expired) under this enrollment is
-// returned as-is, with no new request row and no new record, as long as the policy it was
-// decided under is still current and no granted name is a service's (anyServiceOwned: the
-// policy's version does not cover BROKER_SERVICES' accounts), or the current policy still allows
-// it to the session (stillAllowed, the check Values makes), and its whole approval chain still verifies (VerifyChain,
-// the same check Values makes). A caller that already holds a live grant for these exact names
-// never re-asks a human who already approved it, a policy tightened since then is never bypassed
-// by reuse, and neither is a chain that no longer verifies. No live grant holds a withheld name
-// nobody approved: the withhold ended each one (withhold).
-func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, set *policy.Set) (Request, bool, error) {
-	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
-		join request_secrets s on s.request_id=r.id
-		join grants g on g.request_id=r.id
-		where r.enrollment_id=$1 and r.state='granted' and g.revoked_at is null and g.expires_at > now()
-		group by r.id`, enr.ID, sortedCopy(names))
-	if err != nil || id == "" {
-		return Request{}, false, err
-	}
-	var rulesVersion, decidedBy string
-	if err := m.Store.Pool.QueryRow(ctx, `select rules_version, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&rulesVersion, &decidedBy); err != nil {
-		return Request{}, false, err
-	}
-	granted, err := requestedSecrets(ctx, m.Store.Pool, id)
-	if err != nil {
-		return Request{}, false, err
-	}
-	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
-		if err != nil {
-			return Request{}, false, err
-		}
-		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
-				return Request{}, false, nil
-			} else if err != nil {
-				return Request{}, false, err
-			}
-		}
-	}
-	r, err := m.Get(ctx, id)
-	if err != nil {
-		return Request{}, false, err
-	}
-	if r.GrantID != nil {
-		if err := m.VerifyChain(ctx, *r.GrantID); errors.Is(err, ErrGrantChainInvalid) {
-			return Request{}, false, nil
-		} else if err != nil {
-			return Request{}, false, err
-		}
-	}
-	return r, true, nil
-}
-
 // anyServiceOwned reports whether set serves any of granted as a service's secret, whose grant is
 // re-checked on every use: who is a service's own session rests on BROKER_SERVICES' accounts,
 // which the policy's version does not cover (policy.Set.ServiceOwned).
 func anyServiceOwned(set *policy.Set, granted []requestedSecret) bool {
 	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.ServiceOwned(g.name) })
-}
-
-func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approver string, lifetime time.Duration) (string, error) {
-	id := uuid.NewString()
-	_, err := tx.Exec(ctx, `insert into grants (id, request_id, enrollment_id, approver, expires_at) values ($1,$2,$3,$4, now() + $5::interval)`,
-		id, requestID, enrollmentID, nullable(approver), fmt.Sprintf("%d seconds", int(lifetime.Seconds())))
-	return id, err
 }
 
 // auditDetail is an audit row's non-secret detail object; audit writes it as JSON.

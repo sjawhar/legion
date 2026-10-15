@@ -349,7 +349,7 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	project := strings.TrimSpace(query.Get("project"))
 	if project != "" && !projectKeyPattern.MatchString(project) {
-		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project must be a project key such as CORE")
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, projectKeyProblem("project", project))
 		return
 	}
 

@@ -29,6 +29,7 @@ import type {
   CreateAskInput,
   CreateBroadcastInput,
   CreateCommentInput,
+  CreateDeliverySessionGroupInput,
   CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
@@ -38,12 +39,10 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
-  DeliveryMeasuresResponse,
-  DeliveryPipelineResponse,
   DeliveryRunDetail,
+  DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
-  DeliveryTimelineResponse,
   DispatchUser,
   EditCommentInput,
   Event,
@@ -59,10 +58,12 @@ import type {
   MessageDelivery,
   MessageRead,
   MyAnswersResponse,
+  MyRepliesResponse,
   Project,
   RepoProject,
   SearchResponse,
   Subscriber,
+  UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -219,23 +220,6 @@ export type ArtifactOwner = { issue: string } | { project: string } | { session:
 export interface CreateArtifactReviewInput {
   state: ArtifactReviewState;
   reason?: string;
-}
-
-/** `GET /api/v1/delivery/timeline?from&to&q&<facets>`'s query: the window, the search, plus the
- *  same repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
-export interface DeliveryTimelineOptions {
-  from: string;
-  to: string;
-  q?: string;
-  repo?: readonly string[];
-  parent_agent?: readonly string[];
-  session?: readonly string[];
-  issue?: readonly string[];
-  priority?: readonly string[];
-  component?: readonly string[];
-  author?: readonly string[];
-  rework?: readonly string[];
-  deployed?: readonly string[];
 }
 
 function pathSegment(value: string): string {
@@ -491,6 +475,28 @@ export class DispatchApiClient {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
+  /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
+   *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
+   *  owner. Human-only. */
+  listMyReplies(page: {
+    artifact?: string;
+    issue?: string;
+    limit: number;
+    offset?: number;
+  }): Promise<MyRepliesResponse> {
+    return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", page));
+  }
+
+  /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
+   *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
+   *  moved. */
+  async markThreadRead(threadId: string, readThrough: string): Promise<void> {
+    await this.response(
+      `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+      idempotentWriteInit("PUT", { read_through: readThrough })
+    );
+  }
+
   async removeAskFollower(id: string, sessionId: string): Promise<void> {
     await this.response(`/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`, {
       method: "DELETE",
@@ -704,27 +710,9 @@ export class DispatchApiClient {
     return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
   }
 
-  /** The delivery timeline's one read: merges, deploys, pipeline failures and waiting-to-deploy
-   *  PRs within `[from, to)`, the search and the given facets, all applied server-side. */
-  getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
-    return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
-  }
-
-  /** The delivery measures and their targets for `[from, to)`: the same query the timeline takes,
-   *  so the search and facets narrow the pull-request measures exactly as they narrow its PRs. */
-  getDeliveryMeasures(options: DeliveryTimelineOptions): Promise<DeliveryMeasuresResponse> {
-    return this.json<DeliveryMeasuresResponse>(pathWithQuery("/api/v1/delivery/measures", options));
-  }
-
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
   getDeliveryRun(id: number): Promise<DeliveryRunDetail> {
     return this.json<DeliveryRunDetail>(`/api/v1/delivery/runs/${id}`);
-  }
-
-  /** The Pipeline page's seven UTC days ending today, or ending on `at`'s day when it is given
-   *  (the page's test and screenshot hook). */
-  getDeliveryPipeline(options: { at?: string }): Promise<DeliveryPipelineResponse> {
-    return this.json<DeliveryPipelineResponse>(pathWithQuery("/api/v1/delivery/pipeline", options));
   }
 
   /** The delivery timeline's configuration record, or `null` until someone sets it. */
@@ -736,6 +724,34 @@ export class DispatchApiClient {
    *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
   putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
     return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
+  }
+
+  /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.
+   *  A session another group holds is `409 SESSION_IN_GROUP`; a name another group has, or that is
+   *  the title of a session outside the group, is `409` as well, the message naming which. */
+  createDeliverySessionGroup(
+    input: CreateDeliverySessionGroupInput
+  ): Promise<DeliverySessionGroup> {
+    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input);
+  }
+
+  /** Renames a session group, adds sessions to it or removes sessions from it. */
+  updateDeliverySessionGroup(
+    id: string,
+    input: UpdateDeliverySessionGroupInput
+  ): Promise<DeliverySessionGroup> {
+    return this.send<DeliverySessionGroup>(
+      "PATCH",
+      `/api/v1/delivery/session-groups/${pathSegment(id)}`,
+      input
+    );
+  }
+
+  /** Deletes a session group; its sessions show as themselves again. */
+  async deleteDeliverySessionGroup(id: string): Promise<void> {
+    await this.response(`/api/v1/delivery/session-groups/${pathSegment(id)}`, {
+      method: "DELETE",
+    });
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {

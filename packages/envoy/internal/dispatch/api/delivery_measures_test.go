@@ -54,6 +54,7 @@ type measuresFixture struct {
 		HeadSHA      string                          `json:"head_sha"`
 		HeadCommitAt time.Time                       `json:"head_commit_at"`
 		StartedAt    time.Time                       `json:"started_at"`
+		CreatedAt    time.Time                       `json:"created_at"`
 		CompletedAt  *time.Time                      `json:"completed_at"`
 		Conclusion   *delivery.DeliveryRunConclusion `json:"conclusion"`
 		HeadBranch   *string                         `json:"head_branch"`
@@ -127,9 +128,10 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 	}
 
 	for _, run := range fixture.Runs {
+		createdAt := run.CreatedAt
 		if err := delivery.UpsertRun(ctx, pool, delivery.DeliveryRun{
 			Repo: fixture.Settings.DeployRepo, RunID: run.RunID, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: run.HeadSHA,
-			HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
+			HeadCommitAt: run.HeadCommitAt, StartedAt: run.StartedAt, CreatedAt: &createdAt, CompletedAt: run.CompletedAt, Conclusion: run.Conclusion,
 			HeadBranch: run.HeadBranch, Event: run.Event,
 			URL: "https://github.com/" + fixture.Settings.DeployRepo + "/actions/runs/" + strconv.FormatInt(run.RunID, 10),
 		}); err != nil {
@@ -157,7 +159,7 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 		for _, job := range jobs {
 			list = append(list, job)
 		}
-		if err := delivery.UpsertRunJobs(ctx, pool, fixture.Settings.DeployRepo, run.RunID, list); err != nil {
+		if err := delivery.UpsertRunJobs(ctx, pool, fixture.Settings.DeployRepo, run.RunID, list, true); err != nil {
 			t.Fatalf("seed jobs of run %d: %v", run.RunID, err)
 		}
 	}
@@ -392,7 +394,7 @@ func TestGetDeliveryMeasuresComputesTheFixture(t *testing.T) {
 	if err := delivery.UpsertRunJobs(t.Context(), database.Pool, fixture.Settings.DeployRepo, 509, []delivery.DeliveryRunJob{{
 		Repo: fixture.Settings.DeployRepo, RunID: 509, Name: fixture.Settings.ProductionJobName,
 		CompletedAt: &ninthDone, Conclusion: new(delivery.DeliveryJobConclusionSuccess),
-	}}); err != nil {
+	}}, true); err != nil {
 		t.Fatalf("seed run 509's production job: %v", err)
 	}
 	ninth := getDeliveryMeasures(t, handler, measuresFixtureWindow)

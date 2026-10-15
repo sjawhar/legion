@@ -275,6 +275,9 @@ func (d *blockingDispatch) SetStatus(context.Context, string, string) error {
 	}
 	return fail
 }
+func (d *blockingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("blockingDispatch takes no hand-over")
+}
 func (d *blockingDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *blockingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
@@ -354,9 +357,11 @@ func TestAPermanentlyRefusedStatusWriteDoesNotHoldBackTheIssuesLaterWrites(t *te
 // Only Dispatch's own refusal of the write is permanent. A revoked or expired token is answered
 // 401 or 403 and says nothing about the write — an operator restores it and the same body is
 // taken — and a 4xx carrying no Dispatch error code came from whatever sits in front of Dispatch,
-// not from Dispatch judging the write. Reading either as permanent dropped every later status of
-// that issue for good, which is the one outcome this outbox exists to prevent. Each case names
-// the arm that saves it, so deleting one fails here.
+// not from Dispatch judging the write. A 409 PARENT_CONTENDED says a concurrent reparent moved
+// the issue's parent while the write waited for its locks, so nothing was applied and the same
+// body is taken once the reparents stop. Reading any of them as permanent dropped every later
+// status of that issue for good, which is the one outcome this outbox exists to prevent. Each
+// case names the arm that saves it, so deleting one fails here.
 func TestACredentialOrUncodedRefusalIsRiddenOutRatherThanDroppingTheWrite(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -365,6 +370,7 @@ func TestACredentialOrUncodedRefusalIsRiddenOutRatherThanDroppingTheWrite(t *tes
 		{"a revoked token", &dispatch.Error{Status: 401, Code: "UNAUTHORIZED", Message: "token revoked"}},
 		{"a token without the scope", &dispatch.Error{Status: 403, Code: "FORBIDDEN", Message: "forbidden"}},
 		{"a refusal Dispatch did not make", &dispatch.Error{Status: 422, Message: "<html>gateway</html>"}},
+		{"a parent a concurrent reparent moved at every attempt", &dispatch.Error{Status: 409, Code: dispatch.ParentContended, Message: "LEGION-208's parent changed at each of 2 attempts while this request waited to lock it, so nothing was applied: read the issue and retry"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -419,6 +425,9 @@ func (d *refusingDispatch) SetStatus(_ context.Context, _ string, status string)
 	d.status = status
 	return nil
 }
+func (d *refusingDispatch) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("refusingDispatch takes no hand-over")
+}
 func (d *refusingDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *refusingDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
@@ -446,6 +455,9 @@ func (d *boardDispatch) SetStatus(_ context.Context, _ string, status string) er
 	}
 	d.status = status
 	return nil
+}
+func (d *boardDispatch) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("boardDispatch takes no hand-over")
 }
 func (d *boardDispatch) PostMessage(context.Context, string, string) error { return nil }
 func (d *boardDispatch) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {

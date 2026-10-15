@@ -22,6 +22,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -445,6 +446,203 @@ func (r *liveRig) checkResume() error {
 	if len(own) != 2 || own[0] != old.Incarnation || own[1] != loc.Incarnation {
 		return fmt.Errorf("the marker's %s lines are %v (of %v shared by the issue pod's resident roles), want exactly [%s %s]", worker.role, own, lines, old.Incarnation, loc.Incarnation)
 	}
+	return nil
+}
+
+// stalePluginBlocked reports why stale-plugin-install cannot run: the script packs the two
+// checkout tarballs and names them in these four variables together, so one set or none. Its
+// negative control needs no tarball of its own: it names the published pi-legion@9.6.1 by exact
+// version, which the install script resolves through the registry inside the pod.
+func stalePluginBlocked(r *liveRig) string {
+	if r.env.piLegionTarball != "" && r.env.piEnvoyTarball != "" && r.env.piLegionVersion != "" &&
+		r.env.piEnvoyVersion != "" {
+		return ""
+	}
+	return "LEGION_E2E_PI_LEGION_TARBALL/PI_ENVOY_TARBALL/PI_LEGION_VERSION/PI_ENVOY_VERSION are unset; an older invocation of scripts/e2e/stage4a-sandbox-runtime.sh packs no plugins"
+}
+
+// pluginPackageInfo reads an installed plugin's package.json through node, as the wrapper's own
+// install check does — the worker image has no jq. version is pkg.version; contract is
+// pkg.legion.daemonApiVersion as a string, or "" when the package names none, as pi-envoy's does.
+func (r *liveRig) pluginPackageInfo(c *liveClaim, path string) (version, contract string, err error) {
+	const script = `const pkg = require(process.argv[1]); console.log(pkg.version); console.log(pkg.legion && typeof pkg.legion.daemonApiVersion === 'number' ? pkg.legion.daemonApiVersion : '');`
+	out, err := r.exec(c, "node", "-e", script, path)
+	if err != nil {
+		return "", "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	lines := strings.SplitN(out, "\n", 2)
+	version = strings.TrimSpace(lines[0])
+	if len(lines) > 1 {
+		contract = strings.TrimSpace(lines[1])
+	}
+	return version, contract, nil
+}
+
+// containsConsecutive reports whether needle occurs, in order and contiguously, somewhere in
+// haystack.
+func containsConsecutive(haystack, needle []string) bool {
+	if len(needle) == 0 || len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if slices.Equal(haystack[i:i+len(needle)], needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// stale-plugin-install (LEGION-164): a relaunch the supervisor marks as installing a stale-plugin
+// pair keeps the worker's issue pod and installs the daemon-named pi-legion and pi-envoy under the
+// generation's own directory, rather than replacing the pod or loading the image's copies: the
+// pod's uid and creation time are unchanged, its Sandbox is Running (never suspended for a
+// replacement — the unchanged pod uid already proves that, and with it that nothing was
+// provisioned again), the installed pi-legion declares this run's contract, and the shim that
+// forked the agent — the one process of the launch chain whose own cmdline the agent's own execs
+// (into the install script, then the stub, then `sleep infinity`) never touch — names the two
+// installed --extension roots. Its negative control relaunches again naming the published
+// pi-legion@9.6.1 by exact version — the daemon resolves it to @sjawhar/pi-legion@9.6.1 before
+// `bun add` ever sees it (LEGION-164), and bun fetches it from the registry inside the pod, so
+// a devbox run proves the version→package mapping end to end, not just a tarball install. That
+// release declares another contract: the install still lands (so the earlier generation's own
+// directory is gone, replaced by this one's `rm -rf .../g*`) but the wrapper's own check ends the
+// child before `exec`, which the runtime reports Gone, and the pod is still the one this check
+// started with. kill-launcher, the next check to touch worker, resumes it with ensureRunning on a
+// plain launch, so this check leaves no resume of its own after the negative control.
+func (r *liveRig) checkStalePluginInstall() error {
+	root, worker := r.claim("root"), r.claim("worker")
+	if err := r.ensureSuspended(worker); err != nil {
+		return err
+	}
+	if err := r.ensureRunning(root); err != nil {
+		return err
+	}
+
+	name := SandboxName(worker.token)
+	before, err := r.getPod(name)
+	if err != nil {
+		return err
+	}
+
+	dir := roleStateHome(worker.role) + "/stage4a-plugin-tarballs"
+	if _, err := r.exec(worker, "mkdir", "-p", dir); err != nil {
+		return err
+	}
+	legionTar, envoyTar := dir+"/pi-legion.tgz", dir+"/pi-envoy.tgz"
+	for _, cp := range []struct{ local, remote string }{
+		{r.env.piLegionTarball, legionTar},
+		{r.env.piEnvoyTarball, envoyTar},
+	} {
+		if _, err := r.kubectl("cp", cp.local, r.env.namespace+"/"+name+":"+cp.remote, "-c", string(worker.role)); err != nil {
+			return fmt.Errorf("kubectl cp %s %s: %w", cp.local, cp.remote, err)
+		}
+	}
+	note("operator", "kubectl cp the checkout's packed pi-legion@%s and pi-envoy@%s into %s:%s (-c %s)",
+		r.env.piLegionVersion, r.env.piEnvoyVersion, name, dir, worker.role)
+
+	old := *worker.last
+	since := time.Now()
+	loc, err := r.resumeWithPlugins(worker, worker.marker, &runtime.PluginInstall{PiLegion: legionTar, PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
+	if err != nil {
+		return err
+	}
+	installedGen := worker.gen
+	if _, err := r.awaitRunning(worker, since); err != nil {
+		return err
+	}
+	if loc.Incarnation == old.Incarnation || loc.Sandbox.PodUID != old.Sandbox.PodUID || loc.Sandbox.PodUID != string(before.UID) {
+		return fmt.Errorf("the stale-plugin Resume(%s) returned %+v, want a new process generation in the unchanged issue pod %s", worker.token, loc.Sandbox, before.UID)
+	}
+	after, err := r.getPod(name)
+	if err != nil {
+		return err
+	}
+	if after.UID != before.UID || !after.CreationTimestamp.Time.Equal(before.CreationTimestamp.Time) {
+		return fmt.Errorf("the pod was replaced: uid %s→%s, created %s→%s", before.UID, after.UID, before.CreationTimestamp, after.CreationTimestamp)
+	}
+	s, err := r.getSandbox(name)
+	if err != nil {
+		return err
+	}
+	if s.mode() != modeRunning {
+		return fmt.Errorf("the issue Sandbox is %s after an installing Resume, want Running: the pod's unchanged uid %s already proves it was never suspended for a replacement", s.mode(), after.UID)
+	}
+	note("runtime", "Resume(prev %s, Plugins) returned %s in the unchanged issue pod uid %s (created %s), Sandbox Running",
+		short(old.Incarnation), short(loc.Incarnation), after.UID, after.CreationTimestamp)
+
+	genDir := pluginGenDir(roleStateHome(worker.role), installedGen)
+	envoyRoot, legionRoot := pluginRoots(genDir)
+	legionVersion, legionContract, err := r.pluginPackageInfo(worker, legionRoot+"/package.json")
+	if err != nil {
+		return err
+	}
+	if legionVersion != r.env.piLegionVersion || legionContract != strconv.Itoa(api.DaemonAPIVersion) {
+		return fmt.Errorf("%s/package.json: version %q contract %q, want version %q and contract %d", legionRoot, legionVersion, legionContract, r.env.piLegionVersion, api.DaemonAPIVersion)
+	}
+	envoyVersion, _, err := r.pluginPackageInfo(worker, envoyRoot+"/package.json")
+	if err != nil {
+		return err
+	}
+	if envoyVersion != r.env.piEnvoyVersion {
+		return fmt.Errorf("%s/package.json: version %q, want %q", envoyRoot, envoyVersion, r.env.piEnvoyVersion)
+	}
+	note("operator", "%s/node_modules: @sjawhar/pi-legion@%s (contract %s), @sjawhar/pi-envoy@%s", genDir, legionVersion, legionContract, envoyVersion)
+
+	agent, err := r.agentPid(worker)
+	if err != nil {
+		return err
+	}
+	shim, err := r.shimPid(worker, agent)
+	if err != nil {
+		return err
+	}
+	cmdline, err := r.procCmdline(worker, shim)
+	if err != nil {
+		return err
+	}
+	want := []string{"--extension", envoyRoot, "--extension", legionRoot}
+	if !containsConsecutive(cmdline, want) {
+		return fmt.Errorf("the shim's (pid %s) own cmdline is %q, want it to carry %v: the agent's own argv is lost once it execs through the install script into the stub and then into sleep infinity, but the shim never execs again after the launcher forked it with this generation's start command", shim, cmdline, want)
+	}
+	note("operator", "/proc/%s/cmdline (the shim, never replaced by the agent's own execs): carries %v", shim, want)
+
+	// The negative control: the published pi-legion@9.6.1 by exact version. The daemon's loader
+	// (config.readPluginSource) and the release's linked bare versions admit only an exact
+	// version, an absolute tarball path, or an http(s) URL — never a dist-tag or a range — and
+	// installScript's bunSpec turns that version into @sjawhar/pi-legion@9.6.1 before bun ever
+	// sees it (LEGION-164), so bun fetches it from the registry inside the pod: a devbox run
+	// proves the version→package mapping end to end, not just a tarball install. The install
+	// still lands — so the earlier generation's own directory is gone once this one's own `rm -rf
+	// .../g*` has run — but the wrapper's own check ends the child before `exec`, and the runtime
+	// observes it Gone.
+	mark := r.obs.mark()
+	negLoc, err := r.resumeWithPlugins(worker, worker.marker, &runtime.PluginInstall{PiLegion: "9.6.1", PiEnvoy: envoyTar, Contract: api.DaemonAPIVersion})
+	if err != nil {
+		return err
+	}
+	gone, ok := r.obs.await(mark, liveGoneLimit, func(o runtime.Observation) bool {
+		return o.Locator.Claim == worker.token && o.Locator.Incarnation == negLoc.Incarnation && o.Kind == runtime.Gone
+	})
+	if !ok {
+		return fmt.Errorf("no Gone for the negative control's %s within %s", negLoc.Incarnation, liveGoneLimit)
+	}
+	note("runtime", "negative control: Observe gone for %s (the published pi-legion@9.6.1 declares contract 23, not %d) — %s", short(negLoc.Incarnation), api.DaemonAPIVersion, oneLine(firstLine(gone.Detail)))
+	worker.loc, worker.state = nil, stateDead
+
+	final, err := r.getPod(name)
+	if err != nil {
+		return err
+	}
+	if final.UID != before.UID {
+		return fmt.Errorf("the negative control replaced the pod: uid %s→%s", before.UID, final.UID)
+	}
+	note("operator", "pod %s is still uid %s after the negative control", name, final.UID)
+
+	oldGenDir := pluginGenDir(roleStateHome(worker.role), installedGen)
+	if _, err := r.exec(worker, "sh", "-c", `test ! -e "$1"`, "sh", oldGenDir); err != nil {
+		return fmt.Errorf("%s still exists after the negative control's own install ran rm -rf .../g* first: %w", oldGenDir, err)
+	}
+	note("operator", "the earlier generation's %s is gone", oldGenDir)
 	return nil
 }
 

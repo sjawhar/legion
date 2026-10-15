@@ -223,6 +223,28 @@ func TestPutClaimOverwritesTheClaimItNames(t *testing.T) {
 	sameClaim(t, onlyClaim(t, store), second)
 }
 
+// A claim's plugin contract and the daemon contract its last stale relaunch was made for are
+// their own columns, round-tripping independently of the locator and budgets LEGION-164 adds no
+// relation to.
+func TestAClaimsPluginContractRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-pluginholder")
+	want.PluginContract = 23
+	want.PluginRelaunchFor = 24
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	want.PluginContract = 24
+	want.PluginRelaunchFor = 0
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim again: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+}
+
 // A locator is checked where it is read back: a row nothing could act on is refused by name rather
 // than loaded as a process the daemon believes in.
 func TestClaimsRefusesAStoredLocatorThatDoesNotValidate(t *testing.T) {
@@ -414,6 +436,33 @@ func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
 	}
 }
 
+// Who suspended a claim round-trips with it, and the schema refuses a source it does not know:
+// the daemon's resume by rule reads the column after a restart, and a value it cannot read would
+// be a claim nobody can say whether to resume.
+func TestASuspendedClaimsSourceRoundTripsAndTheSchemaRefusesAnUnknownOne(t *testing.T) {
+	s := migratedStore(t)
+	ctx := context.Background()
+	for _, by := range []supervise.SuspendSource{supervise.SuspendedByOperator, supervise.SuspendedByDaemon, supervise.SuspendedByExit, ""} {
+		c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+			Role: claim.RoleTester, Generation: 2, State: supervise.StateSuspended, Session: "ses_tester", SuspendedBy: by}
+		if err := s.PutClaim(ctx, c); err != nil {
+			t.Fatalf("put a claim suspended by %q: %v", by, err)
+		}
+		claims, err := s.Claims(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claims) != 1 || claims[0].SuspendedBy != by {
+			t.Fatalf("a claim suspended by %q read back as %+v", by, claims)
+		}
+	}
+	c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleTester, State: supervise.StateSuspended, SuspendedBy: "someone"}
+	if err := s.PutClaim(ctx, c); err == nil {
+		t.Fatal("a claim suspended by an unknown source was stored")
+	}
+}
+
 // The project controller's claim, which the daemon launches under `controller: daemon`, is a row
 // like any claim's: on the role `controller`, with no issue and no tree, so its boot token resolves
 // a shim's hello and a registration as any launch's does.
@@ -493,5 +542,71 @@ func TestIssueHasSessionsCountsOnlyTheIssuesOwnClaims(t *testing.T) {
 	}
 	if !has("legion", root.Issue) {
 		t.Errorf("%s's retired architect recorded session %s, yet IssueHasSessions says none", root.Issue, root.SessionFile)
+	}
+}
+
+// IssueRunsElsewhere names a claim of the issue in another tree that may hold a process: one in a
+// state supervise's RunsNothing does not hold, or one that still records a locator. Every claim
+// state is walked against RunsNothing, so the query and the machine read one set; a launch whose
+// outcome is uncertain and a suspended claim that still records a locator are named. A claim of the
+// asking tree or of another issue is not.
+func TestIssueRunsElsewhereNamesOnlyAClaimOfAnotherTreeThatHoldsAProcess(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	elsewhere := func(tree string) string {
+		t.Helper()
+		got, err := store.IssueRunsElsewhere(ctx, "legion", "LEGION-209", tree)
+		if err != nil {
+			t.Fatalf("IssueRunsElsewhere(LEGION-209, %s): %v", tree, err)
+		}
+		return got
+	}
+	implementer := tmuxClaim("legion-LEGION-209-implementer")
+	locator := implementer.Locator
+	put := func(state supervise.ClaimState, withLocator bool) {
+		t.Helper()
+		implementer.State, implementer.Locator = state, nil
+		if withLocator {
+			implementer.Locator = locator
+		}
+		if err := store.PutClaim(ctx, implementer); err != nil {
+			t.Fatalf("put %s %s: %v", implementer.Token, state, err)
+		}
+	}
+	all := []supervise.ClaimState{supervise.StateQueued, supervise.StateLaunchUncertain, supervise.StateLaunching, supervise.StateShimConnected,
+		supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle, supervise.StateSuspended,
+		supervise.StateFailed, supervise.StateRetired}
+	for _, state := range all {
+		put(state, false)
+		named := elsewhere("LEGION-209") == "legion-LEGION-209-implementer:"+string(state)
+		if runs := !(supervise.Claim{State: state}).RunsNothing(); named != runs {
+			t.Errorf("a %s claim of tree LEGION-208 without a locator: named %t, want %t, as RunsNothing says", state, named, runs)
+		}
+	}
+	for _, tc := range []struct {
+		name        string
+		state       supervise.ClaimState
+		withLocator bool
+	}{
+		{"a launch whose outcome is uncertain", supervise.StateLaunchUncertain, false},
+		{"a suspended claim that still records a locator", supervise.StateSuspended, true},
+		{"an idle claim with its locator", supervise.StateIdle, true},
+	} {
+		put(tc.state, tc.withLocator)
+		if got, want := elsewhere("LEGION-209"), "legion-LEGION-209-implementer:"+string(tc.state); got != want {
+			t.Errorf("%s of tree LEGION-208: IssueRunsElsewhere = %q, want %q", tc.name, got, want)
+		}
+		if got := elsewhere("LEGION-208"); got != "" {
+			t.Errorf("%s, asked by the claim's own tree: IssueRunsElsewhere = %q, want none", tc.name, got)
+		}
+	}
+	other := tmuxClaim("legion-LEGION-210-implementer")
+	other.Issue = "LEGION-210"
+	put(supervise.StateSuspended, false)
+	if err := store.PutClaim(ctx, other); err != nil {
+		t.Fatalf("put %s: %v", other.Token, err)
+	}
+	if got := elsewhere("LEGION-209"); got != "" {
+		t.Fatalf("only another issue's claim runs: IssueRunsElsewhere = %q, want none", got)
 	}
 }

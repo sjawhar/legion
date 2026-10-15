@@ -147,7 +147,8 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
 	}
-	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
+	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass",
+		MergeNote: "MANUAL_MERGE_REQUIRED: pull request #1243 matches a by_hand merge rule; do not auto-arm it"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
 	slot := Slot{Issue: issue.Key, Index: 0, AdmittedAt: updatedAt}
 
@@ -645,7 +646,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	st := migratedStore(t)
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
-		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
+		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
@@ -855,6 +856,38 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 		}
 		if !reflect.DeepEqual(kept, want) {
 			t.Fatalf("supervise rows after 0035 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
+		}
+	})
+}
+
+// A queued supervise row that does not decode belongs to one role's run. Reading another role's run
+// of the same issue — what the state route's report does for every candidate — skips it before
+// decoding, so one bad row fails only its own role, never the state of the whole issue.
+func TestRoleRunsSkipsAnotherRolesUndecodableRow(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	start := SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1, Phase: phase.Planning}
+	inTx(t, st, func(tx pgx.Tx) {
+		row, err := NewOutboxRow("LEGION-208", start, time.Now())
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+			values ('supervise', 'LEGION-208', '{"op": "bogus", "tree": "LEGION-208", "role": "tester", "generation": 1}', 0, now(), '')`)
+		must(t, err)
+	})
+	planner := RoleRunKey{Token: "legion-legion-legion-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner, Generation: 1}
+	tester := RoleRunKey{Token: "legion-legion-legion-208-tester", Issue: "LEGION-208", Role: claim.RoleTester, Generation: 1}
+	inTx(t, st, func(tx pgx.Tx) {
+		runs, err := records.RoleRuns(ctx, tx, []RoleRunKey{planner})
+		if err != nil {
+			t.Fatalf("the planner's run beside the tester's undecodable row = %v, want it read", err)
+		}
+		if queued := runs[planner.Token].Queued; len(queued) != 1 || queued[0].Request != start {
+			t.Fatalf("the planner's queued rows = %+v, want its one start", queued)
+		}
+		if _, err := records.RoleRuns(ctx, tx, []RoleRunKey{tester}); err == nil {
+			t.Fatal("the tester's run read its own undecodable row without an error")
 		}
 	})
 }

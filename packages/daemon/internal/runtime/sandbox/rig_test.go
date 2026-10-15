@@ -28,8 +28,10 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/util/flowcontrol"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -110,15 +112,28 @@ func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, er
 }
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
-// unless closed says its cleanup confirmed, and an issue recorded sessions only when sessions says
-// so.
+// unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
+// so, a claim of an issue runs a process only when running names it, in the tree it names, and an
+// issue's Sandbox belongs to a tree only when homes names it (to none otherwise). The store's own
+// rule for a Sandbox's home is held by its tests (store.IssueSandboxHome); here a test sets it.
 type fakeStore struct {
 	mu               sync.Mutex
 	closed, sessions map[string]bool
+	running          map[string]runningClaim
+	homes            map[string]string
 }
 
+// runningClaim is a claim of an issue that runs a process (token:state), in tree.
+type runningClaim struct{ tree, claim string }
+
 func newFakeStore() *fakeStore {
-	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}}
+	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, running: map[string]runningClaim{}, homes: map[string]string{}}
+}
+
+func (s *fakeStore) IssueSandboxHome(_ context.Context, _, issue string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.homes[issue], nil
 }
 
 func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {
@@ -131,6 +146,17 @@ func (s *fakeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return !s.closed[tree], nil
+}
+
+// IssueRunsElsewhere filters as the store's query does: the issue's running claim is named only
+// when its tree is not the tree asked about.
+func (s *fakeStore) IssueRunsElsewhere(_ context.Context, _, issue, tree string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if c, ok := s.running[issue]; ok && c.tree != tree {
+		return c.claim, nil
+	}
+	return "", nil
 }
 
 // close records tree's cleanup as confirmed: what the tree left behind is then an orphan.
@@ -223,6 +249,20 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
+	// limit, when set, is the client-side rate limiter the runtime's requests wait on
+	// (withClientLimiter); secretGetsAsked counts each Secret get the runtime asked for, by name,
+	// whether or not the limiter let it through.
+	limit           flowcontrol.RateLimiter
+	secretGetsAsked map[string]int
+	// clients are the runtime's clients: the fakes themselves for its informers, and for its
+	// requests the fakes behind whatever hooks and limiter the options asked for.
+	clients runtimeClients
+	// prober builds the runtime with newProber, the probe's configuration and the informers alone
+	// (asProber); p is that Prober, whose runtime r also is.
+	prober bool
+	p      *Prober
+	// opts are the Options the runtime was built from, for a second runtime over the same fakes.
+	opts Options
 
 	// commands are what each role's fake launcher was sent, in order; wanted are the roles whose
 	// fake launcher connects again whenever their issue gets a new pod.
@@ -247,18 +287,19 @@ type sandboxHooks struct {
 // withSandboxHooks hands the runtime a dynamic client that runs h around its Sandbox calls.
 func withSandboxHooks(h *sandboxHooks) rigOption { return func(g *rig, _ *Options) { g.hooks = h } }
 
-// hookedDynamic embeds the fake itself, not dynamic.Interface, so the informers still see the
-// fake's IsWatchListSemanticsUnSupported and list and watch rather than stream a watch-list.
+// hookedDynamic is a dynamic client that runs hooks around its Sandbox calls. Only a runtime's
+// requests go through it: its informers list and watch on the fake itself, whose
+// IsWatchListSemanticsUnSupported keeps them from streaming a watch-list.
 type hookedDynamic struct {
-	*dynamicfake.FakeDynamicClient
+	dynamic.Interface
 	hooks *sandboxHooks
 }
 
 func (d hookedDynamic) Resource(gvr schema.GroupVersionResource) dynamic.NamespaceableResourceInterface {
 	if gvr != sandboxGVR {
-		return d.FakeDynamicClient.Resource(gvr)
+		return d.Interface.Resource(gvr)
 	}
-	return hookedResource{d.FakeDynamicClient.Resource(gvr), d.hooks}
+	return hookedResource{d.Interface.Resource(gvr), d.hooks}
 }
 
 type hookedResource struct {
@@ -317,18 +358,32 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		option(g, &opts)
 	}
 	g.store, _ = opts.Store.(*fakeStore)
-	r, err := configure(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	g.opts = opts
 	var dyn dynamic.Interface = g.dyn
+	var kube kubernetes.Interface = g.kube
 	if g.hooks != nil {
-		dyn = hookedDynamic{g.dyn, g.hooks}
+		dyn = hookedDynamic{dyn, g.hooks}
 	}
-	if err := r.start(ctx, dyn, g.kube); err != nil {
-		t.Fatal(err)
+	if g.limit != nil {
+		dyn, kube = limitedDynamic{dyn, g.limit}, limitedKube{kube, g.limit, g.askedSecret}
 	}
-	g.r = r
+	g.clients = runtimeClients{informers: kubeClients{dyn: g.dyn, kube: g.kube}, requests: kubeClients{dyn: dyn, kube: kube}}
+	if g.prober {
+		p, err := newProber(ctx, g.clients, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g.p, g.r = p, p.r
+	} else {
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.start(ctx, g.clients); err != nil {
+			t.Fatal(err)
+		}
+		g.r = r
+	}
 	if !g.noController {
 		go g.control()
 	}
@@ -732,14 +787,15 @@ func (g *rig) sent(token claim.Token) []shimwire.Frame {
 }
 
 // sandboxObject is a Sandbox as the API would hold it, for a test's starting state: one the runtime
-// made, so it owns its volume (the `issue` claim template). A test that needs the tree-volume layout,
-// a Sandbox owning no volume, drops the template itself (withoutVolume).
+// made, so it owns its volume (the `issue` claim template), and carrying a resourceVersion, as every
+// object the API serves does. A test that needs the tree-volume layout, a Sandbox owning no volume,
+// drops the template itself (withoutVolume).
 func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]string, conditions ...metav1.Condition) *unstructured.Unstructured {
 	t.Helper()
 	s := sandbox{
 		TypeMeta: metav1.TypeMeta{APIVersion: "agents.x-k8s.io/v1beta1", Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{
-			Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels, Generation: 2,
+			Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels, Generation: 2, ResourceVersion: "1",
 			CreationTimestamp: metav1.NewTime(time.Date(2026, 9, 23, 11, 0, 0, 0, time.UTC)),
 		},
 		Spec: sandboxSpec{
@@ -796,18 +852,11 @@ func sandboxLocator(token claim.Token, uid string) runtime.Locator {
 	}
 }
 
-// patchOps decodes a JSON patch body. A role's address record (recordAddresses) is the one merge
-// patch the runtime sends a Sandbox, and holds no operations.
-func patchOps(t *testing.T, body string) []map[string]any {
-	t.Helper()
-	if addressRecordPatch(body) {
-		return nil
-	}
-	var ops []map[string]any
-	if err := json.Unmarshal([]byte(body), &ops); err != nil {
-		t.Fatalf("patch %q: %v", body, err)
-	}
-	return ops
+// isMergePatch is whether a Sandbox patch body is a JSON merge patch, an object, rather than a JSON
+// patch, an array of operations: a role's address record (recordAddresses) or the suspension that
+// names a displaced pod (suspendDisplacing).
+func isMergePatch(body string) bool {
+	return strings.HasPrefix(strings.TrimSpace(body), "{")
 }
 
 // addressRecordPatch is whether a Sandbox patch body is a role's address record alone: a merge
@@ -828,9 +877,26 @@ func addressRecordPatch(body string) bool {
 	return false
 }
 
-// modePatched reports whether a patch body sets operatingMode to mode.
+// modePatched reports whether a patch body sets operatingMode to mode: a JSON patch's `add` at
+// /spec/operatingMode, or a merge patch's spec.operatingMode.
 func modePatched(t *testing.T, body, mode string) bool {
-	for _, op := range patchOps(t, body) {
+	t.Helper()
+	if isMergePatch(body) {
+		var patch struct {
+			Spec struct {
+				OperatingMode string `json:"operatingMode"`
+			} `json:"spec"`
+		}
+		if err := json.Unmarshal([]byte(body), &patch); err != nil {
+			t.Fatalf("merge patch %q: %v", body, err)
+		}
+		return patch.Spec.OperatingMode == mode
+	}
+	var ops []map[string]any
+	if err := json.Unmarshal([]byte(body), &ops); err != nil {
+		t.Fatalf("patch %q: %v", body, err)
+	}
+	for _, op := range ops {
 		if op["path"] == "/spec/operatingMode" && op["value"] == mode {
 			return true
 		}

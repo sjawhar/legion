@@ -274,27 +274,8 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	launch := lastLaunch(t, rt, token)
 
 	// State is now a durable issue record joined to live claims; the claim alone does not create an
-	// issue in the projection. The workflow will write this pair in one transaction at admission.
-	stateStore, err := store.Open(context.Background(), cfg.PostgresDSN)
-	if err != nil {
-		t.Fatalf("open state store: %v", err)
-	}
-	t.Cleanup(stateStore.Close)
-	records := recordpkg.NewStore()
-	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
-		issue := recordpkg.Issue{
-			Key: spawn.Issue, Tree: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
-			Generation: 1, Status: "in_progress",
-		}
-		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
-			return err
-		}
-		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{
-			Issue: issue.Key, Role: claim.RoleArchitect, Claim: token,
-		})
-	}); err != nil {
-		t.Fatalf("write state record: %v", err)
-	}
+	// issue in the projection.
+	admitIssue(t, cfg, spawn.Issue, claim.RoleArchitect, token)
 
 	sh := dialShim(t, record.address, launch.BootToken)
 	testwait.Eventually(t, "the hello to reach the machine", func() bool {
@@ -303,7 +284,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register = %d; body %s", status, body)
@@ -371,9 +352,11 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 }
 
 // heldClock is the machines' time held still until the test fires the timers armed for one wait,
-// so a daemon test sees the deadline it fires and nothing else.
+// so a daemon test sees the deadline it fires and nothing else. Its time is the wall clock, or at
+// when set, so a deadline the daemon names as a time is armed as an exact wait from at.
 type heldClock struct {
 	mu     sync.Mutex
+	at     time.Time
 	timers []*heldTimer
 }
 
@@ -384,7 +367,12 @@ type heldTimer struct {
 	done  bool
 }
 
-func (c *heldClock) Now() time.Time { return time.Now() }
+func (c *heldClock) Now() time.Time {
+	if !c.at.IsZero() {
+		return c.at
+	}
+	return time.Now()
+}
 
 func (c *heldClock) AfterFunc(d time.Duration, f func()) supervise.Cancel {
 	c.mu.Lock()
@@ -443,7 +431,7 @@ func TestRunRelaunchesAClaimWhoseAgentRegisteredAndNeverSaidReady(t *testing.T) 
 		t.Helper()
 		status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 			BootToken: bootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-			AgentID: "agent", PluginContract: 1,
+			AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 		}, false)
 		if status != http.StatusOK {
 			t.Fatalf("register = %d; body %s", status, body)
@@ -508,7 +496,7 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	sh := dialShim(t, record.address, launch.BootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register = %d; body %s", status, body)
@@ -682,9 +670,13 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	bootToken := "interrupted-" + randomSuffix(t)
 	oldSecret := "old-secret"
 	oldCapability := sha256.Sum256([]byte(oldSecret))
+	// A launching claim holds no capability in reality (supervise.HoldsCapability); the hash here stands in
+	// for a process at this daemon's own contract, so the register/ready exchange below exercises
+	// the "previous launch" refusal rather than the stale-plugin one.
 	putClaim(t, cfg, supervise.Claim{
 		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken(bootToken), CapabilityHash: oldCapability[:],
+		PluginContract: api.DaemonAPIVersion,
 	})
 	writePrompt(t, cfg, token)
 	rt := fake.NewRuntime()
@@ -703,7 +695,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 	oldShim := dialShim(t, record.address, bootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
-		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: 1,
+		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
 		t.Fatalf("old shim register while the pane is uncertain = %d %s, want a named 409", status, body)
@@ -835,9 +827,11 @@ func TestRunPrunesTheSecretFilesOfClaimsWithNoProcess(t *testing.T) {
 	project, _ := claim.ProjectToken(cfg.Project)
 	live, _ := claim.NewToken(project, "LEGION-1", claim.RoleArchitect)
 	suspended, _ := claim.NewToken(project, "LEGION-2", claim.RoleArchitect)
+	// The live claim's process speaks this daemon's contract: a boot would otherwise relaunch it
+	// onto the current plugin first (refreshStalePlugins), which is not what this test is about.
 	putClaim(t, cfg, supervise.Claim{
 		Token: live, Project: project, Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleArchitect, Generation: 1,
-		State: supervise.StateReady, Session: "ses_live", SessionFile: "/sessions/live.jsonl",
+		State: supervise.StateReady, Session: "ses_live", SessionFile: "/sessions/live.jsonl", PluginContract: api.DaemonAPIVersion,
 		Locator: &runtime.Locator{
 			Runtime: runtime.RuntimeTmux, Claim: live, Incarnation: "4242:1", Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%1"},
 		},
@@ -1021,10 +1015,16 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 // returns the secret the registration issued.
 func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) string {
 	t.Helper()
+	return readyClaimReporting(t, d, rt, token, nil)
+}
+
+// readyClaimReporting is readyClaim with the capability report the ready carries; nil carries none.
+func readyClaimReporting(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token, report *claim.CapabilityReport) string {
+	t.Helper()
 	launch := lastLaunch(t, rt, token)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register %s = %d; body %s", token, status, body)
@@ -1035,10 +1035,36 @@ func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) st
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
 		ClaimToken: token, SessionID: "ses_" + string(token), Secret: registered.Secret, Generation: 1,
+		Capabilities: report,
 	}, false); status != http.StatusNoContent {
 		t.Fatalf("ready %s = %d; body %s", token, status, body)
 	}
 	return registered.Secret
+}
+
+// admitIssue writes the durable issue record the workflow writes at admission, in one transaction:
+// issue, admitted at generation 1, with token holding role's phase. A claim alone creates no issue
+// in the state's projection.
+func admitIssue(t *testing.T, cfg config.Config, issue string, role claim.Role, token claim.Token) {
+	t.Helper()
+	st, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	defer st.Close()
+	records := recordpkg.NewStore()
+	if err := st.Tx(context.Background(), func(tx pgx.Tx) error {
+		record := recordpkg.Issue{
+			Key: issue, Tree: issue, Project: cfg.Project, Title: issue, Phase: phase.Admitted,
+			Generation: 1, Status: "in_progress",
+		}
+		if err := records.PutIssue(context.Background(), tx, record); err != nil {
+			return err
+		}
+		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{Issue: issue, Role: role, Claim: token})
+	}); err != nil {
+		t.Fatalf("write state record: %v", err)
+	}
 }
 
 // The budgets and the waits a machine runs on are the configuration's, not defaults of its own.

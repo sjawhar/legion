@@ -49,6 +49,15 @@ var revision string
 // workflow with `-ldflags "-X main.release=v<version>"`; empty in every other build.
 var release string
 
+// piLegionVersion and piEnvoyVersion are the `@sjawhar/pi-legion` and `@sjawhar/pi-envoy`
+// versions this release published, linked in by the release workflow with
+// `-ldflags "-X main.piLegionVersion=<version> -X main.piEnvoyVersion=<version>"` beside
+// revision and release; both empty in every other build. They are this binary's own plugin
+// pair for a stale-plugin relaunch under Kubernetes (LEGION-164) when `legion.yaml` names none
+// (`runtime.kubernetes.plugins`) — `legion version`'s second line, and start's and
+// --check-config's resolution of the pair to install (applyLinkedPlugins, daemon.ResolvedPlugins).
+var piLegionVersion, piEnvoyVersion string
+
 type command func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
 // commandEntry is one `legion` command: what runs it, and its line in `legion --help`.
@@ -61,7 +70,7 @@ var commands = map[string]commandEntry{
 	"version":        {runVersion, "print the version and the commit the binary was built from"},
 	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
 	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
-	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes (--json for all of it)"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake (--json for all of it)"},
 	"legions":        {runLegions, "list the daemons registered on this machine"},
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
@@ -70,6 +79,7 @@ var commands = map[string]commandEntry{
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
 	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
+	"probe-boot":     {runProbeBoot, "run a Kubernetes daemon's cluster check and worker image probe from legion.yaml, with no workflow, and exit"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
 	"workspace-init": {runWorkspaceInit, "a Sandbox pod's init containers: fetch the repository, provision the issue's workspace, prepare the controller's volume"},
 	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
@@ -153,9 +163,12 @@ func runVersion(_ context.Context, args []string, stdout, stderr io.Writer) int 
 	}
 	if revision != "" {
 		fmt.Fprintf(stdout, "legion %s commit %s\n", version, revision)
-		return 0
+	} else {
+		fmt.Fprintf(stdout, "legion %s\n", version)
 	}
-	fmt.Fprintf(stdout, "legion %s\n", version)
+	if piLegionVersion != "" && piEnvoyVersion != "" {
+		fmt.Fprintf(stdout, "plugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s\n", piLegionVersion, piEnvoyVersion)
+	}
 	return 0
 }
 
@@ -178,6 +191,30 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return start(ctx, *configPath, stderr)
 }
 
+// applyLinkedPlugins fills cfg.Runtime.Kubernetes.Plugins from this binary's linked pair
+// (piLegionVersion, piEnvoyVersion) when the file names none: the file's
+// runtime.kubernetes.plugins wins when it is set, the binary's linked pair otherwise, and neither
+// leaves the daemon knowing no plugin pair at all (LEGION-164). PluginsFromBinary records which,
+// for the boot log and `legion start --check-config` to name. A no-op under tmux, or once the
+// file already named a pair.
+func applyLinkedPlugins(cfg *config.Config) {
+	k := cfg.Runtime.Kubernetes
+	if k == nil || k.Plugins != nil || piLegionVersion == "" || piEnvoyVersion == "" {
+		return
+	}
+	k.Plugins = &config.PluginsConfig{PiLegion: piLegionVersion, PiEnvoy: piEnvoyVersion}
+	k.PluginsFromBinary = true
+}
+
+// pluginsSourceWords is ResolvedPlugins' source (daemon.PluginsFromFile or daemon.PluginsFromBinary)
+// as the `--check-config` line's parenthetical names it.
+func pluginsSourceWords(source string) string {
+	if source == daemon.PluginsFromBinary {
+		return "the binary"
+	}
+	return source
+}
+
 // checkStartConfig is `legion start --check-config`: every refusal the configuration's read at
 // boot makes, through the loader that runs neither GitHub App's private_key_command nor any
 // secretsd read, then every refusal boot makes from the configuration, the environment and the
@@ -187,8 +224,14 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
 // the seed. After it, one line per deployment capability the file alone leaves open, in the words
 // boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
+// Under kubernetes, a last plain line names the plugin pair this daemon would install for a
+// stale-plugin relaunch — the file's or the binary's — or, with neither, the gap; it is its own
+// line rather than a capability row, since it would otherwise be open on every unreleased build.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
+	if err == nil {
+		applyLinkedPlugins(&cfg)
+	}
 	paneNatsUser, daemonNatsUser := "", ""
 	if err == nil {
 		paneNatsUser, daemonNatsUser, err = daemon.CheckStart(cfg, os.LookupEnv)
@@ -208,6 +251,13 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	for _, gap := range daemon.Deployment(cfg).OpenFromConfiguration() {
 		fmt.Fprintln(stdout, gap.OpenLine())
 	}
+	if cfg.Runtime.Name == "kubernetes" {
+		if pair, source := daemon.ResolvedPlugins(cfg); pair != nil {
+			fmt.Fprintf(stdout, "plugins: @sjawhar/pi-legion %s @sjawhar/pi-envoy %s (from %s)\n", pair.PiLegion, pair.PiEnvoy, pluginsSourceWords(source))
+		} else {
+			fmt.Fprintln(stdout, "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract")
+		}
+	}
 	return 0
 }
 
@@ -224,6 +274,7 @@ func start(ctx context.Context, configPath string, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "legion start: %v\n", err)
 		return 1
 	}
+	applyLinkedPlugins(&cfg)
 	absoluteConfig, err := filepath.Abs(configPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "legion start: resolve %s: %v\n", configPath, err)
@@ -370,6 +421,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
+	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -401,6 +453,33 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 	}
 	return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has failed %d attempts, next at %s: %s",
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
+}
+
+// strandedPhrases is how `legion state` names each move that brings a stranded claim back
+// (api.StrandedClaim.Move) before the claims it brings back.
+var strandedPhrases = map[api.StrandedMove]string{
+	api.StrandedResume:           "resume",
+	api.StrandedSuspendedWorkers: "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json)",
+	api.StrandedRetry:            "failed, retry",
+	api.StrandedWorkflowStart:    "failed, needs a workflow start",
+}
+
+// strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
+// and each by issue and role under the move that brings it back (api.StrandedClaim.Move, which the
+// boot's log line groups by too). A suspended phase worker's move is the troubleshooting page's "A
+// tree does not move after a restart" for its suspendedBy, which `legion claims list --json` shows.
+func strandedSummary(stranded []api.StrandedClaim) string {
+	if len(stranded) == 0 {
+		return "claims nothing will wake: none"
+	}
+	grouped := api.StrandedByMove(stranded)
+	var groups []string
+	for _, move := range api.StrandedMoves() {
+		if named := grouped[move]; len(named) > 0 {
+			groups = append(groups, strandedPhrases[move]+" "+strings.Join(named, ", "))
+		}
+	}
+	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

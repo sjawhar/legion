@@ -234,8 +234,8 @@ func TestLoadReadsEveryStage3Key(t *testing.T) {
 dispatch_token_file: tokens/DISPATCH_TOKEN
 projects:
   DEMO: { repo: acme/widgets }
-  OTHER: { repo: acme/other, merge_queue_role: merge-queue, review_workflows: [.github/workflows/review.yml, .github/workflows/bot.yaml] }
-  EMPTY: { repo: acme/empty, review_workflows: [] }
+  OTHER: { repo: acme/other, merge_queue_role: merge-queue }
+  EMPTY: { repo: acme/empty }
 gates:
   design: off
 github_apps:
@@ -262,9 +262,8 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO": {Repo: ghrepo.MustParse("acme/widgets")},
-		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue",
-			ReviewWorkflows: []string{".github/workflows/review.yml", ".github/workflows/bot.yaml"}},
+		"DEMO":  {Repo: ghrepo.MustParse("acme/widgets")},
+		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue"},
 		"EMPTY": {Repo: ghrepo.MustParse("acme/empty")},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
@@ -280,6 +279,19 @@ max_fix_attempts: 4
 	}
 	if cfg.Linger != 96*time.Hour || cfg.ReviewRoundCap != 5 || cfg.MaxFixAttempts != 4 {
 		t.Errorf("Linger=%s ReviewRoundCap=%d MaxFixAttempts=%d, want 96h, 5, 4", cfg.Linger, cfg.ReviewRoundCap, cfg.MaxFixAttempts)
+	}
+}
+
+func TestLoadReadsProjectMergeRules(t *testing.T) {
+	body := strings.Replace(minimalFile, "{ repo: acme/widgets }",
+		"{ repo: ACME/widgets, merge: { by_hand: ['^migrations/versions/'] } }", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project merge rules: %v", err)
+	}
+	rules := cfg.Projects["DEMO"].Merge
+	if !rules.MatchByHand([]string{"migrations/versions/0001.py"}) {
+		t.Error("by_hand rule does not match its migration path")
 	}
 }
 
@@ -404,24 +416,14 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: `projects.DEMO.repo must be "owner/name" (got "undefined")`,
 		},
 		{
-			name: "review_workflows is not a list",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: .github/workflows/review.yml }", 1),
-			want: "projects.DEMO.review_workflows must be an array of non-empty strings",
+			name: "review_workflows is no longer a key",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/review.yml] }", 1),
+			want: `Unknown key "projects.DEMO.review_workflows"`,
 		},
 		{
-			name: "a review workflow outside .github/workflows",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [review.yml] }", 1),
-			want: `projects.DEMO.review_workflows entry "review.yml" must be a workflow file's path, .github/workflows/<name>.yml or .yaml`,
-		},
-		{
-			name: "a review workflow in a subdirectory of .github/workflows",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/bots/review.yml] }", 1),
-			want: `projects.DEMO.review_workflows entry ".github/workflows/bots/review.yml" must be a workflow file's path, .github/workflows/<name>.yml or .yaml`,
-		},
-		{
-			name: "a review workflow named twice",
-			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/review.yml, .github/workflows/review.yml] }", 1),
-			want: `projects.DEMO.review_workflows names ".github/workflows/review.yml" twice`,
+			name: "review_workflows is no longer a key, even empty",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [] }", 1),
+			want: `Unknown key "projects.DEMO.review_workflows"`,
 		},
 		{
 			name: "gates is not a mapping",

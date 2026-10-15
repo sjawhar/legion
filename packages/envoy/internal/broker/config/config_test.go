@@ -58,6 +58,17 @@ func TestLoadRefusesUIOrigin(t *testing.T) {
 	}
 }
 
+// TestLoadRefusesMaxGrantSeconds pins that deployments cannot silently turn their explicit grant
+// cap into a session-length grant after that setting is removed.
+func TestLoadRefusesMaxGrantSeconds(t *testing.T) {
+	e := validEnv()
+	e["BROKER_MAX_GRANT_SECONDS"] = "3600"
+	_, err := Load(env(e))
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_MAX_GRANT_SECONDS is removed; ") {
+		t.Fatalf("Load(BROKER_MAX_GRANT_SECONDS set) = %v, want a refusal naming BROKER_MAX_GRANT_SECONDS", err)
+	}
+}
+
 func TestLoadRequiresUIToken(t *testing.T) {
 	e := validEnv()
 	delete(e, "BROKER_UI_TOKEN")
@@ -82,10 +93,10 @@ func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
 	if cfg.UIToken != "tok-from-file" {
 		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.UIToken), len("tok-from-file"))
 	}
-	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 || cfg.MaxGrantSeconds != 43200 ||
+	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 ||
 		cfg.LauncherCredentialSeconds != 604800 || cfg.SweepSeconds != 5 {
-		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d MaxGrantSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
-			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.MaxGrantSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
+		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
+			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
 	}
 }
 
@@ -172,6 +183,99 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") ||
 		!strings.Contains(err.Error(), "system:serviceaccount:x:y") || !strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
 		t.Errorf("BROKER_SERVICES binding one account to two names: err = %v, want a refusal naming the account and both names", err)
+	}
+
+	// A namespace's default service account proves nothing: every pod in that namespace whose spec
+	// names no account runs as it, and any such pod can mount a projected token for the broker's
+	// audience, so binding a service to it would hand the service's secrets to all of them.
+	for _, entry := range []string{"legion-daemon=system:serviceaccount:legion:default", "x=system:serviceaccount:kube-system:default"} {
+		e = validEnv()
+		e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa " + entry
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") || !strings.Contains(err.Error(), strconv.Quote(entry)) ||
+			!strings.Contains(err.Error(), "default service account") {
+			t.Errorf("BROKER_SERVICES with %q: err = %v, want a refusal naming the entry and that it is a namespace's default service account", entry, err)
+		}
+	}
+	// An account merely named like it is a dedicated account of its own.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "legion-daemon=system:serviceaccount:legion:default-worker other=system:serviceaccount:default:other-sa"
+	if _, err := Load(env(e)); err != nil {
+		t.Errorf("BROKER_SERVICES naming dedicated accounts whose name or namespace contains default: %v", err)
+	}
+}
+
+// TestLoadReadsTheServiceLogins pins BROKER_SERVICE_LOGINS: whitespace-separated
+// <service>=<ServiceAccount subject> entries keyed by subject, none when unset; one service may have
+// several accounts, an account is named once and exactly (no wildcard), and the setting needs a
+// Kubernetes token issuer to trust.
+func TestLoadReadsTheServiceLogins(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServiceLogins != nil {
+		t.Fatalf("ServiceLogins = %v, want nil when BROKER_SERVICE_LOGINS is unset", cfg.ServiceLogins)
+	}
+	withIssuer := func() map[string]string {
+		e := validEnv()
+		e["BROKER_K8S_OIDC_ISSUER"] = "https://oidc.eks.example.invalid/id/EXAMPLE"
+		e["BROKER_K8S_OIDC_AUDIENCE"] = "agent-secrets"
+		return e
+	}
+	e := withIssuer()
+	e["BROKER_SERVICE_LOGINS"] = " legion-daemon=system:serviceaccount:legion-system:legion-daemon-a\nlegion-daemon=system:serviceaccount:legion-system:legion-daemon-b "
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"system:serviceaccount:legion-system:legion-daemon-a": "legion-daemon",
+		"system:serviceaccount:legion-system:legion-daemon-b": "legion-daemon",
+	}
+	if !maps.Equal(cfg.ServiceLogins, want) {
+		t.Fatalf("ServiceLogins = %v, want %v", cfg.ServiceLogins, want)
+	}
+
+	for _, bad := range []string{
+		"legion-daemon", "=system:serviceaccount:a:b", "shared=system:serviceaccount:a:b", "Legion=system:serviceaccount:a:b",
+		"legion-daemon=system:serviceaccount:legion-system:*", "legion-daemon=system:serviceaccount:*:legion-daemon", "legion-daemon=legion-daemon-a",
+	} {
+		e := withIssuer()
+		e["BROKER_SERVICE_LOGINS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICE_LOGINS") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_SERVICE_LOGINS = %q: err = %v, want a refusal naming the setting and the entry", bad, err)
+		}
+	}
+	e = withIssuer()
+	e["BROKER_SERVICE_LOGINS"] = "a=system:serviceaccount:x:y b=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "system:serviceaccount:x:y") {
+		t.Errorf("BROKER_SERVICE_LOGINS naming one account twice: err = %v, want a refusal naming the account", err)
+	}
+	// A namespace's default account proves nothing, as BROKER_SERVICES refuses it, and the account
+	// BROKER_SERVICES binds for a service's pods is one every such pod holds a token for, so neither
+	// logs a service in.
+	e = withIssuer()
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:default"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICE_LOGINS") || !strings.Contains(err.Error(), "default service account") {
+		t.Errorf("BROKER_SERVICE_LOGINS naming a default account: err = %v, want a refusal naming the setting and the default account", err)
+	}
+	e = withIssuer()
+	e["BROKER_SERVICES"] = "legion-daemon=system:serviceaccount:legion:legion-worker"
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a legion-daemon=system:serviceaccount:legion:legion-worker"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICE_LOGINS") || !strings.Contains(err.Error(), `"legion-daemon=system:serviceaccount:legion:legion-worker"`) || !strings.Contains(err.Error(), "BROKER_SERVICES") {
+		t.Errorf("BROKER_SERVICE_LOGINS naming the pods' account: err = %v, want a refusal naming the entry and BROKER_SERVICES", err)
+	}
+	e = withIssuer()
+	e["BROKER_SERVICES"] = "legion-daemon=system:serviceaccount:legion:legion-worker"
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a"
+	if _, err := Load(env(e)); err != nil {
+		t.Errorf("BROKER_SERVICE_LOGINS beside a BROKER_SERVICES binding another account: %v", err)
+	}
+	e = validEnv()
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
+		t.Errorf("BROKER_SERVICE_LOGINS with no token issuer: err = %v, want a refusal naming BROKER_K8S_OIDC_ISSUER", err)
 	}
 }
 

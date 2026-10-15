@@ -25,6 +25,12 @@ type liveTrees struct{}
 
 func (liveTrees) IssueHasSessions(context.Context, string, string) (bool, error) { return false, nil }
 func (liveTrees) TreeLive(context.Context, string, string) (bool, error)         { return true, nil }
+func (liveTrees) IssueRunsElsewhere(context.Context, string, string, string) (string, error) {
+	return "", nil
+}
+func (liveTrees) IssueSandboxHome(context.Context, string, string) (string, error) {
+	return "", nil
+}
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime
 // keeps the controller's Sandbox exactly while a known claim is the controller's. So the

@@ -327,10 +327,11 @@ func (m *Machine) confirm(ctx context.Context) error {
 // one of them: it takes the task whose turn it ended back first (interrupted), so settle finds
 // nothing of it to retire.
 //
-// A suspension ends the claim's phase, so a task queued for a phase is the finished phase's and
-// goes with it; the next resume is handed its new phase's task, never that one. A task of no
-// phase is not the workflow's to end: an operator asked for it and was answered 200, and a phase
-// change they had no part in must not take it. It waits out the suspension and goes on the resume.
+// A daemon suspension ends the claim's phase, so a task queued for a phase is the finished phase's
+// and goes with it; the next resume is handed its new phase's task, never that one. An operator
+// suspension is different: the operator resumes this same claim, so its pending phase task waits
+// through that suspension and is sent after the operator's resume. A task of no phase is likewise
+// not the workflow's to end.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
@@ -342,7 +343,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		}
 	}
 	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking
-	suspended := m.claim.State == StateSuspended && p.Phase != ""
+	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy != SuspendedByOperator
 	if !turnOver && !suspended {
 		return nil
 	}
@@ -369,8 +370,9 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 	"Before repeating anything, check what that turn already did in your workspace and on the " +
 	"issue's branch, then continue the task.\n\n"
 
-// interrupted takes back the pending task whose turn the claim's dead process was running, so the
-// relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
+// interrupted takes back the pending task whose turn the claim's process can no longer finish — it
+// died, or a forced stop is about to end it — so the relaunched agent's ready sends it again: Oh My
+// Pi does not resume the turn itself. why names which, for the line it logs. The turn ran,
 // so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
 // the new process's shim has no record of, marked Interrupted, so it is sent behind
 // interruptedTask. It is neither retired nor its run marked served, since the turn never
@@ -381,12 +383,12 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 // sweep finds it gone again and this takes the task back then — where a task taken back in memory
 // alone would be skipped by that death, relaunched from a store still holding it confirmed, and
 // retired as served by a restart.
-func (m *Machine) interrupted(ctx context.Context) error {
+func (m *Machine) interrupted(ctx context.Context, why string) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
-	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
+	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {

@@ -29,6 +29,7 @@ const (
 	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
+	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -44,6 +45,14 @@ type StatusWrite struct {
 	// writes the status, since Dispatch refuses a message on a closed issue. Empty for a write
 	// with no reason to record.
 	Reason string `json:"reason,omitempty"`
+	// HandOver also puts dispatch.LegionLabel on the issue, in the same Dispatch write: the write
+	// hands the issue to Legion, and the runner writes it while the label is missing even where
+	// Dispatch already shows Status. HandOverTree and HandOverLinger fence it: the runner writes it
+	// only while the issue is still that tree's and the tree's root still lingers at that
+	// generation (Issue.LingersAt), so a root re-admitted since keeps the issue as its child.
+	HandOver       bool   `json:"handOver,omitempty"`
+	HandOverTree   string `json:"handOverTree,omitempty"`
+	HandOverLinger uint64 `json:"handOverLinger,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
@@ -121,22 +130,29 @@ type Notice struct {
 	ResendOf int64 `json:"resend_of,omitempty"`
 	// CatchUp is a catch-up notice's account of the tree, and absent from every other kind.
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
-	// OpenCapabilities names the deployment capabilities with no decision
-	// (capabilities.Deployment.Open) when the daemon reports them; only a tick controller notice
-	// carries it (admit.Admission.ReportCapabilities), and a tick with no gap carries none. The
-	// controller reads each row's detail and the legion.yaml line that records a decision in
-	// `legion state`; a gap is the operator's to close or decide and never stops the walk.
+	// OpenCapabilities names every open row of the deployment's capability report
+	// (capabilities.Deployment.Open) when the daemon reports them: a deployment row with no
+	// decision, or a live row a live session's check failed (LEGION-663). Only a tick controller
+	// notice carries it (admit.Admission.ReportCapabilities), and a tick with no open row carries
+	// none. The controller reads each row's detail in `legion state`, and on a deployment row alone
+	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
+	// live row's the session's environment to fix, and neither stops the walk.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
 // (a catch-up notice), which is the architect's first instruction: admission launches it with no
 // task. It is the tree as the daemon records it then: the root's generation, the launch of the
-// architect's claim it was written for, the design gate policy and the root's gate, and every issue
-// of the tree.
+// architect's claim it was written for, whether a hand-over created the root at this generation
+// with its child's phase and pull request (HandedOver) and whether its old root's gate came with
+// them (Carried), the design gate policy and the root's gate, and every issue of the tree. A
+// handed-over root's workers already run their phases, so its architect decomposes nothing anew;
+// one that carried no gate registers its own spec.
 type CatchUp struct {
 	Generation uint64         `json:"generation"`
 	Launch     uint64         `json:"launch"`
+	HandedOver bool           `json:"handed_over,omitempty"`
+	Carried    bool           `json:"carried,omitempty"`
 	Gate       CatchUpGate    `json:"gate"`
 	Issues     []CatchUpIssue `json:"issues"`
 }
@@ -218,11 +234,17 @@ type SuperviseRequest struct {
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
 	ResumeTask bool `json:"resumeTask,omitempty"`
+	// RuleResume marks the boot's resume-by-rule start. If its resumed claim spends its launch
+	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
+	// budgets: the failed claim stays failed for the boot report to name.
+	RuleResume bool `json:"ruleResume,omitempty"`
 	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
-	// red while it tested, or reviewed a round it had not completed (workflow's TriggerChecksRed). The
-	// start acts only once that role's claim is out of its turn (supervise.Machine.Quiesce), so the
-	// two never write the shared workspace together. It is empty for every other start, which a
-	// completion or a person's move hands the phase, and for every other operation.
+	// red while it tested, reviewed a round it had not completed, or worked toward its READY as the
+	// merger (workflow's TriggerChecksRed). The start acts only once that role's claim is out of its
+	// turn (supervise.Machine.Quiesce), so the two never write the shared workspace together. It is
+	// empty for every other start, which a completion or a person's move hands the phase, for a move
+	// between two phases of one role (retro back to implementing on a red, where the implementer
+	// keeps its turn and is handed the new task once it ends), and for every other operation.
 	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
@@ -297,6 +319,19 @@ type IssueBranch struct {
 }
 
 func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
+
+// AutoMergeDisable turns off whatever would merge the pull request without a person: GitHub's
+// auto-merge, then its place in a merge queue. Arming is legitimate only for the READY head of an
+// issue awaiting its merge, so the workflow queues it on every head move but one landing on that
+// head (a push, or a reopen), on every READY withdrawal, on a child's re-entry and on an issue's
+// leaving the workflow. Its executor decides by the record when it runs, keeping the arm only while
+// the issue awaits its merge at the merger's READY commit, and READY is refused while one is
+// unfinished (Store.DisarmPending).
+type AutoMergeDisable struct {
+	Number int `json:"number"`
+}
+
+func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisable }
 
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
@@ -396,6 +431,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindAutoMergeDisable:
+		value := AutoMergeDisable{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -475,6 +516,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Packet == "" {
 			return fmt.Errorf("merge queue publish requires packet")
 		}
+	case AutoMergeDisable:
+		if value.Number <= 0 {
+			return fmt.Errorf("auto-merge disable requires its pull request number")
+		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)
 	}
@@ -483,7 +528,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "carried-gate-opened", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

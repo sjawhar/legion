@@ -27,7 +27,7 @@ DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 It builds the broker, `agent-secrets` and `agent-secrets-helper`; creates the broker's database
 beside `DATABASE_URL`'s and starts the broker on its development secrets file, which stands in for
 Secrets Manager and tags `DEMO_API_KEY` `owner=alice@example.com`, `tier=human`, with grants
-lasting an hour (`BROKER_MAX_GRANT_SECONDS=3600`); starts the Dispatch e2e harness's three servers
+lasting until their session ends; starts the Dispatch e2e harness's three servers
 on `DATABASE_URL` with the server pointed at the broker (`packages/dispatch/e2e/run-server.sh`'s
 `DISPATCH_E2E_AGENT_SECRETS_URL`), and empties its database; and starts the agent machine,
 `agent-secrets-helper` for `alice@example.com` under the hostname

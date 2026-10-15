@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"net/http"
 	"time"
 
@@ -37,8 +36,8 @@ type deliveryMeasuresResponse struct {
 }
 
 // getDeliveryMeasures answers GET /api/v1/delivery/measures, computed from stored facts on
-// request: the window's population read once (filteredDeliveryPullRequests) and measured by
-// deliveryMeasuresFor.
+// request: the window's population read once (readDeliveryPopulation) and measured by
+// deliveryMeasuresCompute, the two halves the live hub calls too.
 func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
@@ -53,28 +52,22 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	ctx := r.Context()
-	population, err := s.filteredDeliveryPullRequests(ctx, settings, from, to, query, false)
+	population, err := s.readDeliveryPopulation(r.Context(), settings, from, to, query, false)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	response, err := s.deliveryMeasuresFor(ctx, settings, from, to, population)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	WriteJSON(w, http.StatusOK, response)
+	WriteJSON(w, http.StatusOK, deliveryMeasuresCompute(settings, population, from, to, time.Now().UTC()))
 }
 
-// measuresPRs is the population's pull requests that pass its search and facets, as the measures
+// measuresPRs is the derived pull requests that pass the search and facets, as the measures
 // package reads them. A partial row's lead-time fields are not yet knowable, so it is skipped
 // rather than read as zero.
-func (p deliveryPopulation) measuresPRs() []measures.PR {
-	prs := make([]measures.PR, 0, len(p.rows))
-	for _, row := range p.rows {
+func (d deliveryDerived) measuresPRs() []measures.PR {
+	prs := make([]measures.PR, 0, len(d.rows))
+	for _, row := range d.rows {
 		view := row.view
-		if !row.matches(p.selection, "") || view.CreatedAt == nil || view.MergedAt == nil {
+		if !row.matches(d.selection, "") || view.CreatedAt == nil || view.MergedAt == nil {
 			continue
 		}
 		prs = append(prs, measures.PR{
@@ -85,57 +78,45 @@ func (p deliveryPopulation) measuresPRs() []measures.PR {
 	return prs
 }
 
-// deliveryMeasuresFor measures [from, to) over population, the window's pull requests as
-// filteredDeliveryPullRequests read them. Facets narrow the pull-request measures (lead time,
-// rework share, the per-PR failure rate) exactly as they narrow the timeline's prs[]; deploys and
-// runs follow the window alone: every deploy-workflow run on main started in [from, to), each a
-// deploy when its production job succeeded. A deploy's shipped-PR count is every window pull
-// request whose first shipping apply is that run, before the facets (population.shipped), so
-// deploys_with_prs belongs to the deploy, not the filter. The measures route and the timeline both
-// answer through it, so the two never disagree.
-func (s *server) deliveryMeasuresFor(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, population deliveryPopulation) (deliveryMeasuresResponse, error) {
-	pool := s.deps.Store.Pool
-	prs := population.measuresPRs()
+// deliveryMeasuresCompute is GET /api/v1/delivery/measures' body for [from, to) from a population
+// read for that window or narrowed to it. It reads nothing; now is only computed_at.
+func deliveryMeasuresCompute(settings delivery.DeliverySettings, pop deliveryPopulation, from, to, now time.Time) deliveryMeasuresResponse {
+	return deliveryMeasuresOver(settings, pop, pop.derive(settings), from, to, now)
+}
 
-	// Whether a run reached production is decided on the window's own runs and their jobs, never
-	// on the head-commit list containment reads, so every run the window counts is judged.
-	windowRuns, err := delivery.ListRunsStartedIn(ctx, pool, settings.DeployRepo, delivery.DeliveryRunKindDeploy, "main", "", from, to)
-	if err != nil {
-		return deliveryMeasuresResponse{}, err
-	}
-	runIDs := make([]int64, len(windowRuns))
-	for i, run := range windowRuns {
-		runIDs[i] = run.RunID
-	}
-	jobsByRun, err := delivery.ListRunJobsForRuns(ctx, pool, settings.DeployRepo, runIDs)
-	if err != nil {
-		return deliveryMeasuresResponse{}, err
-	}
+// deliveryMeasuresOver measures [from, to) over population and what derive computed from it.
+// Facets narrow the pull-request measures (lead time, rework share, the per-PR failure rate)
+// exactly as they narrow the timeline's prs[]; deploys and runs follow the window alone: every
+// deploy-workflow run on main started in [from, to), each a deploy when its production job
+// succeeded. A deploy's shipped-PR count is every window pull request whose first shipping apply is
+// that run, before the facets (derived.shipped), so deploys_with_prs belongs to the deploy, not the
+// filter. The measures route and the timeline both answer through it, so the two never disagree.
+func deliveryMeasuresOver(settings delivery.DeliverySettings, pop deliveryPopulation, derived deliveryDerived, from, to, now time.Time) deliveryMeasuresResponse {
+	applies, _ := delivery.ProductionApplies(pop.windowRuns, pop.windowJobs, settings.ProductionJobName)
 	reached := map[int64]bool{}
-	for _, apply := range s.productionApplies(windowRuns, jobsByRun, settings.ProductionJobName) {
+	for _, apply := range applies {
 		reached[apply.RunID] = true
 	}
-	runs := make([]measures.Run, len(windowRuns))
-	for i, run := range windowRuns {
+	runs := make([]measures.Run, len(pop.windowRuns))
+	for i, run := range pop.windowRuns {
 		runs[i] = measures.Run{
 			ID: run.RunID, StartedAt: run.StartedAt, Conclusion: run.Conclusion,
-			ReachedProduction: reached[run.RunID], ShippedPRs: len(population.shipped[run.RunID]),
+			ReachedProduction: reached[run.RunID], ShippedPRs: len(derived.shipped[run.RunID]),
 		}
 	}
-
-	result := measures.Compute(prs, runs, nil, measures.Window{From: from, To: to})
-	unowned, err := delivery.ListUnownedP0(ctx, pool)
-	if err != nil {
-		return deliveryMeasuresResponse{}, err
+	unowned := pop.unownedP0
+	if unowned == nil {
+		unowned = []delivery.UnownedIssue{}
 	}
+	result := measures.Compute(derived.measuresPRs(), runs, nil, measures.Window{From: from, To: to})
 	return deliveryMeasuresResponse{
 		Window:      delivery.DeliveryWindowView{From: from, To: to},
-		ComputedAt:  time.Now().UTC(),
+		ComputedAt:  now,
 		Measures:    result,
 		FlagsSource: deliveryFlagsSourceNone,
 		UnownedP0:   unowned,
 		Targets:     measures.DefaultTargets,
 		Status:      measures.KPIStatus(result, len(unowned), measures.DefaultTargets),
-		Freshness:   population.freshness,
-	}, nil
+		Freshness:   derived.freshness,
+	}
 }

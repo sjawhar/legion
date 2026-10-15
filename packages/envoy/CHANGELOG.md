@@ -4,6 +4,133 @@
 
 ### Added
 
+- `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
+  (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
+  `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
+  Envoy on one machine") walks through starting it and pointing a machine's sessions at it.
+- A human's answer to a decision block carries his approval forward (LEGION-573). When the
+  version his answer writes differs from the version he approved only in its ask blocks, every
+  block it holds that is not as the approved version held it is one he answered, and at least one
+  is, Dispatch records an `approved` review in his name pinned to that version and appends
+  `artifact.approved`, in the transaction that writes the version (`docs.carryApproval`, from
+  `writeVersionTx` after the open request's move), rather than leaving his approval stale and
+  asking him to approve again what he just decided. The carried review's `reason` is `Carried
+  forward from the approval of version <N>: the answer to a decision block was the whole change
+  since it.`; an approval request open at the carry is answered `Approve` in his name
+  (`ask.answered`) and the review's `ask_id` names it, null otherwise. The new version is compared
+  with the one he approved alone: a block of it not as that version held it must be his answer,
+  given after that approval, one must differ, and no version between them is read. Who answered
+  what is the document's asks rows, never the blocks' own attributes, which a peer on the document
+  socket writes as it likes: an ask block no row of the document backs (forged, or not yet
+  indexed), a block id the version repeats, a block whose server attributes are not what
+  settlement's own writer leaves from its row (`state`, `answered_by`, `answered_at`, `selected`,
+  `answer`, a copy's `copied_from`, an unreadable block's `invalid`; an answer settlement withheld
+  for room is as the row has it), and the block of an answered or resolved row that asks other
+  wording than the row was decided on (the wording settlement writes back) or that settlement
+  cannot parse refuses the carry; an open row's body is free. The comparison is
+  `docs.CutDecisionBlocks`, the markdown rendered again with every ask block left out wherever it
+  stands, on both sides. An edit outside the blocks, a block he did not answer (open, resolved, or
+  answered by someone else, whether added since his approval or held open by the approved version
+  and answered or resolved since; a block answered before his approval and untouched since is
+  content he approved), a block of the approved version the agent removed, an agent's reword of an
+  answered block or a selection forged on one landing in the version his answer writes, an
+  answered block the agent deleted and inserted again (its row stays answered; nothing of his
+  changed, whether the approved version held the block or not), two people's answers in one
+  version, an approval by someone else only, his own later request for changes or anyone's newer
+  one, a copy's document when its source is answered, and a copy planted in the document since his
+  approval carry nothing, as before; should two people's approvals both pass, nothing is carried.
+  An approval request on a document a human approved earlier names that approval in
+  `ask.approval.approved` (`{version, at, by}`), so the human reads what he is approving since the
+  version he approved; a first request carries no `approved` key.
+- A finished Actions job on the default branch, of a run with no pull request, is published on
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed` (LEGION-690): a completed
+  `check_run` that lists no pull request, from the GitHub Actions App, whose
+  `check_suite.head_branch` is the repository's `default_branch` and whose `details_url` names
+  `/actions/runs/<run_id>/job/<job_id>`. The payload is `kind: "job"`, `repo`, `run_id`, `job_id`,
+  `name`, `status`, `conclusion`, `started_at`, `completed_at`, `head_sha` and `url`, each text
+  capped like every envelope's. A check run that lists a pull request still goes only to the CI
+  store, a merge queue's or another branch's job is published nowhere, and `job` joins
+  `contracts.GithubTopicKinds`, so the listener's subscribe warnings take it as a kind.
+
+- The Delivery and Pipeline pages update themselves live (LEGION-690). `GET /ws/delivery` (any
+  signed-in person or agent token) takes a `subscribe` frame naming a view, the GET route's query
+  string and a preset or custom window, and answers a `snapshot`, the matching GET route's body
+  with a revision per key; after that it sends only `delta` frames carrying what changed (pull
+  requests, runs and session groups by id, map entries by key, counts by facet and value, the
+  other fields whole), a `freshness` frame when the freshness verdict changes, and a `heartbeat`
+  every 15 s, the only frame on a quiet window. Nothing re-reads on a timer, a preset's end stays
+  at the present, and a reconnecting page resumes with its last change and revisions and is sent
+  what changed since. A jobs read marks a run complete only when that same GitHub listing has every
+  job finished, and Dispatch shutdown waits for delivery sockets and the live hub before it closes
+  its database pool. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
+  closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
+  a bearer, one JSON line per frame, and compares what it applied with the GET routes.
+
+- Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
+  comment thread, an issue message thread - where someone else has written since they last read
+  it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact
+  header. A reply, a message, or an answer someone else gives to an ask counts; the row names who
+  wrote it, and an answer reads as `answered` with its chosen options and text. Reading the thread
+  on screen, replying in it, or **Mark read** clears the row, and a later write brings it back; an
+  open ask the Inbox lists stays off the page, and the Inbox is unchanged. Migrations 0095-0099
+  add `user_threads`, kept by triggers on `comments`, `asks` and `messages`, seed it from history
+  with every thread read, so the deploy marks nothing unread, and catch up any write that landed
+  while the seed ran. `GET /api/v1/me/replies` lists the threads and
+  `PUT /api/v1/me/threads/{id}/read` moves one forward, appending `user_thread_state.updated`,
+  which never notifies. Opening a link to a comment (`/issues/<KEY>/comments/<id>`) now opens its
+  thread.
+- A table's entry in `GET /api/v1/artifacts/{id}/blocks` (and the issue- and project-slug forms)
+  lists its rows and cells as `table.rows`: each row's block id and index (the index `delete_row`
+  takes, 0 the header) and each cell's block id, row, column (its index in its row, the index
+  `delete_column` takes, so a cell spanning columns or rows counts once), the opening words of the
+  header drawn above it, and its own. They are placed by the same walk of the same live tree as
+  `GET /api/v1/artifacts/{id}/blocks/{block_id}`, so the two routes agree for every row and cell,
+  and the list still holds one entry per table. The document's tables are laid out in document
+  order on the one budget of span cells a render of it spends, so a cell's header is the one `GET
+  .../text` draws above it, and the block route places a cell under that same header; a table past
+  the budget is listed as its markdown draws it, its spans adding nothing (LEGION-693).
+
+- An agent session creates a Dispatch project (LEGION-684). `POST /api/v1/projects` accepts a
+  bearer as well as a signed-in person, so a session with its token makes the project its work
+  needs, with its `project.created` event naming that session, rather than asking a person to
+  make it in Settings. A key that already exists is still `409 PROJECT_EXISTS` whoever asks, and a
+  key that is not a project key or an empty name `400 INVALID_PROJECT`. `GET /api/v1` lists the
+  route as `any`. A name is at most 80 characters (`contracts.ProjectNameMax`, UTF-16 units after
+  the trim; past it `400 CAP_EXCEEDED`), and is `400 INVALID_PROJECT` when it holds a control
+  character (Unicode Cc) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), or
+  has no visible character (a letter, number, punctuation or symbol other than the blank fillers
+  U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned,
+  such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point
+  ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF);
+  combining marks, format characters, private-use characters and whitespace don't count); every
+  other format character (an emoji's joiner, a flag's tags, a direction mark, a soft hyphen) and
+  every combining mark is allowed beside a visible one. Any bearer
+  writes a name into the project list every dashboard reads and no route renames a project. Every route
+  that refuses a project key that is not one (creating a project or an issue, mapping a repository,
+  search) now says the rule one way, `<field> "x" is not a project key: an uppercase letter, then 1
+  to 9 uppercase letters or digits, such as CORE`, from `contracts.ProjectKeyRule`, and the key
+  pattern itself is generated as `contracts.ProjectKeyPattern`. Creating an issue without a title
+  answers `title is required`.
+- The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
+  (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
+  session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
+  colours, lanes, list and measures all follow the group while the Session facet keeps each
+  session apart. `POST /api/v1/delivery/session-groups` and `PATCH` and `DELETE
+  /api/v1/delivery/session-groups/{id}` write them on the delivery settings' rule (any signed-in
+  person or agent), refusing a session another group holds (`409 SESSION_IN_GROUP`), a name another
+  group has (`409 SESSION_GROUP_NAME_TAKEN`) and a name that is the title of a session outside the
+  group (`409 SESSION_GROUP_NAME_IS_SESSION_TITLE`). A session that takes a group's name as its
+  title afterwards shows as `<title> (<session id>)`. The timeline gains `session_groups`,
+  `session_titles` and `session_pr_counts`. The dashboard edits groups from the Parent agent
+  facet's **Edit groups**, chooses which Parent agents get their own colour and lane (the rest
+  share **Other**), and sets the window from its header: the last 7, 14, 28 or 84 days, rolling,
+  or a custom range of whole UTC days, refused past 84 days. A facet change no longer writes the
+  window into the address as fixed dates.
+
+- Dispatch's **Machine logins** list shows each login's **Credential** id, the broker's
+  `credential_id` that every enrollment the login made names. A login's machine name is what its
+  machine reported, so two logins of one service on one host read alike there; the id tells them
+  apart, and the broker's operate page uses it to find the login behind a token-less renewal.
 - `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
   document, as the selection bar's **Comment** does: it opens the margin's composer on the
   selection and puts the cursor in it. It works in an issue's documents and a project's documents
@@ -22,6 +149,11 @@
   such a document from the list alone (LEGION-481). The dashboard's issue Artifacts tab and project
   Documents tab show each document's latest size beside its kind, and a document's version list
   shows every version's.
+- The conversation view (`/agents/<id>/live`) completes `/` from the session's commands in Send
+  and Aside: built-ins, extension/custom/skill commands, file commands and prompt templates. It
+  ranks prefix matches first, puts terminal-only rows last and never offers a list in BTW or when
+  the session sent none. Picking runs the command as if typed at the session's terminal; output,
+  or why a terminal-only command did not run, is the session's Reply via Dispatch (LEGION-394).
 - A person lists and ends their own machines' logins and their live grants from their own shell.
   `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
   `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
@@ -50,6 +182,18 @@
   `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
   `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
   machine's own login, its id typed in any case.
+- A request for agent secrets can ask for a shorter grant: `agent-secrets request NAME... --ttl 2m`
+  and the exec form's `agent-secrets NAME... --ttl 2m -- cmd` sign the lifetime into the request
+  object (`lifetime_seconds`), the record body carries it (`lifetime_seconds: 120`), and the grant
+  ends that long after it is granted while its session lives on. `--ttl` takes a whole number of
+  seconds from 1s to 2147483647s; `0`, a fraction of a second or anything else exits 2 before any
+  broker call. `POST /v1/requests` and `GET /v1/requests/{id}` answer the `lifetime_seconds` the
+  grant got (null for none), and the CLI checks it: a broker or helper from before `--ttl`, which
+  drops the claim and grants for longer, has the grant or pending request this call made revoked or
+  cancelled at once, and the command exits 1 naming why, running nothing. What an earlier call
+  made is left alone and named: an approved grant such a broker reuses, and a pending request it
+  answers this call joined (`coalesced`). A request with `--ttl` never reuses a live grant of
+  another lifetime.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
@@ -179,6 +323,165 @@
 
 ### Changed
 
+- **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
+  `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
+  `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
+  that holds an `envoy` section refuses startup, naming `envoy` and the user file it belongs in
+  (`envoy: not read from a checkout's envoy.json; put it in <user file>`): a cloned repository
+  does not choose the NATS servers the process connects to. The session clients ignore such a
+  section and say so in their start notice instead. A `.envoy` that is a plain file, as some
+  repositories have, counts as no checkout file. A JSON `null`, at the top level, as a section or
+  as any key's value, is refused naming the key (`dispatch: Expected object`,
+  `envoy.natsUrls: Expected string array`), as the clients refuse it, and JSON that does not parse
+  is refused naming the file, the line and the column, never the text it stopped at, which can be
+  the start of a token or seed. A top-level `natsUrls` is refused: a user file's naming
+  `envoy.natsUrls`, a checkout's saying a checkout's envoy.json holds only a `dispatch` section.
+  `~/.config/opencode/envoy.json` is not read: while it is the only user file and the user file is
+  `~/.config/legion/envoy.json`, startup refuses, naming both paths and the move
+  (`<old file> is not read: mkdir -p <user file's directory> && mv <old file> <user file>`), whatever
+  `DISPATCH_SERVER_URL` and `NATS_URLS` say. A checkout's `.opencode/envoy.json` is not read: while
+  the checkout has no `.envoy/envoy.json`, `envoy-dispatch` logs one WARN at start
+  (`dispatch: a checkout's .opencode/envoy.json is not read`, with the rename as `fix`) and
+  `natstail` prints the rename. Neither gives a `mv` across a mount: where the old file's directory
+  and the nearest existing ancestor of the new file's directory are on different filesystems (as in
+  an agent box that bind-mounts `~/.config/opencode`), the text is `<old file> is not read, and is
+  on another filesystem than <new file> (a mount): create <new file>, and move <old file> on the
+  machine that owns it` (`config.LoadOptions.DeviceOf` answers a directory's device, `stat`'s by
+  default). The `envoy` section takes `enabled`, `url`, `natsUrls`, `token` and
+  `natsSeed` and refuses any other key; the server reads `envoy.natsUrls` whatever
+  `envoy.enabled` says, since `enabled` switches a session's Envoy. `XDG_CONFIG_HOME` is a row of
+  the settings table, and one set to a path that is not absolute refuses startup, naming it.
+  `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files, but not the old-file refusal.
+  No Go process runs `envoy.natsSeed`: `natstail` and `envoy-dispatch redeliver-webhooks` connect
+  as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names, so a run against a NATS that
+  requires a user needs `NATS_NKEY_SEED_FILE`, which the session launchers no longer export.
+  The compose deployment (`deploy/compose/dispatch.compose.yml`) mounts no `envoy.json` and needs
+  no change.
+- **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's
+  `default` service account (`system:serviceaccount:<namespace>:default`), naming the entry: every
+  pod in that namespace whose spec names no account runs as it and can get a token for the broker's
+  audience, so the binding proves nothing about which pods are the service's. Bind each service to
+  a dedicated account its pods set as `serviceAccountName` before taking this release.
+- **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
+  lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
+  the renew route alone answers it, and every other session route still answers a not-live proof
+  `PROOF_INVALID`, the code that stays for retryable proof failures such as iat skew. A pod's
+  renewal carries the pod's current projected token as `pod_token`, and the broker refuses it
+  `403 POD_IDENTITY_MISMATCH` unless the token names the pod UID and service account the enrollment
+  was made for, and `403 POD_TOKEN_EXPIRED` (naming its expiry, and retried by the renewer with the
+  token its file holds next) once it has expired. A machine session's renewal carrying a token is
+  `403 POD_IDENTITY_MISMATCH`. The token is not yet required, and the broker ratchets each pod UID
+  instead: every pod enrollment, new or found by migration 0014, starts unmarked, and the first
+  renewal that carries the pod's token marks it. Once any enrollment naming a pod UID, live or ended, is
+  marked, a renewal without the token from any enrollment naming that pod, whichever machine login
+  made it, is `403 POD_TOKEN_REQUIRED`; until then it is accepted and logged as `broker: pod
+  enrollment renewed without its projected token`. So the copied-token gap closes for every pod UID
+  a current-image pod has renewed under, and stays open for old-image UIDs until the release that
+  requires the token. A current-image pod still leaves one window: a copied token used before the
+  pod's own first renewal with its token. That is seconds while the Legion daemon holds an approved
+  machine login; after a daemon restart its pods enroll only once a person approves its new login,
+  and a pod that ends before it enrolls never renews with its token, so its UID stays open as an
+  old-image pod's does. A pod UID names one pod for ever, so a mark refuses nothing of another pod,
+  and it keeps refusing a copy between the pod's role generations and after the pod is gone. The
+  renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and
+  retries `POD_IDENTITY_MISMATCH`, which the broker also answers for a token it could not verify
+  while its issuer was unreachable; a real mismatch ends with the lease. `agent-secrets renew
+  --pod-token-file FILE` reads the file before every renewal and sends it, and Legion's worker shim
+  passes the projected token file. **Rollout:** any order keeps every pod renewing (an older
+  broker reads no renew body, and this broker accepts a token-less renewal from a pod no
+  enrollment of which has sent one), but it does not bound exposure: a grant lasts until its
+  session ends, so a copy renewing an old-image pod's UID keeps one approval's grant for as long as
+  it renews. Before or right after the broker deploys, replace every old-image issue pod, then
+  revoke the machine login that made each enrollment a remaining token-less WARN line names (the
+  line's own enrollment) on Dispatch's machine-login page, by its **Credential** id once its code
+  shows it is not the daemon's, never by its machine name, which a copy's login can share (the
+  operate page gives the query). The release that requires the token is safe once all three hold:
+  `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
+  answers 0; the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`; and
+  no issue pod runs a worker image older than the one whose renewer sends the token (an old-image
+  issue pod between role generations holds no enrollment, so the count and the log miss it, yet its
+  next phase enrolls an unmarked row).
+- **Breaking:** only the machine login that enrolled a pod may end its enrollment:
+  `DELETE /v1/enrollments/{id}` of a pod enrollment by any other login, another service's or a
+  second login of the same service, is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion
+  daemon that logs in again (after a restart, or when its login reaches its expiry,
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, 7 days by default) cannot end its earlier login's pods;
+  each ends one lease after its pod stops renewing, or at once when someone revokes that earlier
+  login, and the daemon no longer retries that refusal.
+- `agent-secrets renew --pod-token-file FILE` re-reads the projected pod token before each renewal
+  and sends the token as `pod_token`. A blank or unreadable file posts no renewal: the renewer
+  prints `ERROR: enrollment <id> cannot read its pod token (<reason>); nothing was sent, so its
+  lease lapses unless the file becomes readable` and retries rather than exiting 76 (at start it
+  exits 2 and the shim starts it again). The worker shim passes its projected token file. This
+  client works against a broker that predates the renewal body because that handler ignores it.
+  The terminal renewal refusals `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE`, and an older
+  broker's `PROOF_INVALID` saying `not live`, exit 76 (`EX_PROTOCOL`) naming the enrollment, HTTP
+  status and broker code; the shim quotes that terminal line beside its own enrollment and stops.
+  Every other refusal retries, `POD_IDENTITY_MISMATCH` among them, which the broker also answers
+  for a token it could not verify while its issuer was unreachable.
+- `GET /api/v1/references` no longer renders every document that mentions its target to cut each
+  backlink's one-block excerpt (LEGION-531; 24.6% of a week's production CPU). Each document
+  mention's excerpt - the block holding the target's first mention, its `#b-<id>` jump and its
+  markdown cut to 480 characters - is stored on its `refs` row when the mention is indexed, cut
+  from the render the version write already makes, so the route reads one indexed query and loads
+  no document. Migration `0092_refs_excerpts` adds the three nullable columns (`excerpt_block_id`,
+  `excerpt_text`, `excerpt_version`) and the partial index `refs_excerpt_drift`; its census answers
+  `0`. `envoy-dispatch` runs a reconciliation that fills every row indexed before it, one batch of
+  20 documents per tick. Until it reaches a row, the route answers that mention with the
+  document's name, the fallback a mention in no block already got. The excerpts the dashboard
+  shows are unchanged: on the 2026-10-10 production dump, all 7,537 document mentions match the
+  rendered path. In the rolling deploy that ships 0092, a version the outgoing task writes keeps
+  the previous version's excerpt until the reconciliation's next tick, within five minutes.
+- **Breaking:** an agent session on a machine its person logged in is one enrollment kind,
+  `session`, where the broker recorded `host` for a session the helper enrolled for itself and `box`
+  for a key a launcher such as agentbox brought; a pod stays `pod`. Migration
+  `0012_one_session_kind` rewrites every stored `host` and `box` row to `session` and allows only
+  `session` and `pod`. Every place the kind is shown says `session`: `GET /v1/enrollments/self`,
+  the grant and record reads (`agent-secrets self`, `grant list`, Dispatch's credential page and
+  Live grants), and a new record's enrollment line, while a record written before keeps its body,
+  which its id hashes, verbatim. A reader matching `host` or `box` must match `session`. The
+  clients in the field keep working through the rollout in either order: the broker records an
+  older helper's `host` or `box` as `session` and logs `an enrollment named a legacy kind`; this
+  helper asks an older broker, which refuses `session` with `400 INVALID_KIND`, once more as
+  `host` or `box`. The broker is forward-only from this migration: a broker before it inserts
+  `host` and `box`, which the new constraint refuses, so roll forward rather than back.
+- **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
+  lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
+  (default and most 43200, 12 hours) is removed: a deployment that still sets it refuses to start,
+  naming the variable and explaining that a request's `--ttl` now chooses a shorter lifetime. A
+  grant with no lifetime answers `expires_at: null` on every
+  grant read (`GET /v1/enrollments/self`, `GET /v1/grants`, `GET /v1/operator/grants`), and its
+  record reads `lifetime_seconds: null` on `GET /v1/credential-requests/{id}` and
+  `lifetime_seconds: -` in its body. Migration `0013_grant_until_session_ends` drops not null from
+  `requests.lifetime_seconds` and `grants.expires_at`, and every liveness check reads a null expiry
+  as one that has not passed. `agent-secrets self` prints `until this session ends` for such a
+  grant and `grant list` prints `session-end`; an `agent-secrets` from before this release prints
+  `0001-01-01T00:00:00Z` for it, and nothing else changes for that client. Dispatch's credential
+  page shows **Until the session ends** and Live grants **When the session ends**. A broker before
+  this migration cannot read a grant with no expiry, so roll forward rather than back.
+  A running session keeps what it was given across the deploy: a request without a lifetime takes
+  the live grant of a request written before this migration (which recorded the old fixed 43200
+  seconds), keeping its expiry, and joins such a request while it is still pending. Only rows
+  written before migration 13 was applied match, so a later `--ttl 12h` request is never taken for
+  one, and nothing matches a day after the deploy.
+- **Breaking:** a session has at most one pending request for each secret. `POST /v1/requests`
+  answers a request naming a secret one of the session's pending requests names, with another set of
+  names or another lifetime, `409 REQUEST_PENDING`, naming the pending request; `agent-secrets`
+  exits 1 with that message. This holds for requests without `--ttl` too: a request for `A` and `B`
+  while one for `A` waits used to open a second record for the approver, and is now refused. The
+  identical request (the same names and the same lifetime, or none) still joins the pending one,
+  answered with that request and `coalesced: true`. Wait for the named request to be decided, or
+  `agent-secrets cancel` it and ask again.
+- The helper's `enroll-box` and `unenroll-box` ops are `enroll-session-key` and
+  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` needs no `--kind`.
+  Every older client keeps working: the helper still answers `enroll-box` and `unenroll-box`, from
+  an `agent-secrets` before this release, as the new pair, logging `a client asked a legacy op`;
+  this `agent-secrets` asks a helper before this release, which answers
+  `unknown op enroll-session-key`, its `enroll-box` and `unenroll-box` instead, saying so on
+  stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
+  until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
+  naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
+  refused for that first, whatever `--kind` it carries, as before.
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
@@ -372,9 +675,9 @@
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
   session took it, still naming its author, and only when the streamed text is the stored one;
-  one the session took between a run's last queue or aside poll and its `agent_end` reaches the
-  stream untagged and shows twice (`packages/pi-envoy/AGENTS.md`). The Agents page shows an
-  attempt the session accepted as delivered to the session's
+  on a host without `pi.sendUserInput`, one the session took between a run's last queue or aside
+  poll and its `agent_end` reaches the stream untagged and shows twice
+  (`packages/pi-envoy/AGENTS.md`). The Agents page shows an attempt the session accepted as
   conversation, with no retry, even after a later `failed`; every other attempt keeps its states
   (LEGION-394). Every label the dashboard composes for a mode now uses the composer's names (Send,
   Aside, BTW), the card's mode-change buttons included ("Use BTW instead", "Use Send instead",
@@ -431,6 +734,45 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- The `GET /ws/delivery` socket gives itself a read buffer, so a page that stops answering its
+  pings loses the socket with no close frame (1006 to the page) under any gorilla/websocket
+  (LEGION-690). Without one, a build linking a gorilla that keeps net/http's hijacked reader (every
+  workspace build, through `packages/daemon`'s client-go) could close it with 1008, the code for a
+  caller that no longer resolves, depending on a race. The published image, built in module mode
+  with gorilla v1.5.3, never did. The page reconnects with backoff after either close.
+
+- The approval carry holds the version a human approved to the document's asks rows as it holds
+  the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
+  his approval only while the approved version holds a block under the same id whose stored
+  attributes and, for a decided row, wording are what settlement's own writer leaves from that
+  block's row - the whole server-owned set, not `state`, `answered_by` and `answered_at` alone -
+  so an approved version stored inside the settle window, showing a selection, an answer, a copy's
+  provenance or a question other than its row's on a decided block, no longer compares as
+  unchanged against the row-true version his later answer writes: that block is a change, which
+  must be his own answer since his approval, and his answer to another block carries nothing
+  (`stale`, as before the carry existed). The same sequence over an approved version whose block
+  is as its row has it carries, as before. The approved version's blocks are read as the new
+  version's are (`askNodes`); a stored version's read-back repairs a repeated block id before the
+  carry reads it, so a stored version that held an id twice shows a block the new version never
+  had and carried nothing before this change either.
+
+- A picture written into a spec or document as `![name](dispatch://KEY/artifact/<slug>@vN)`, the
+  line a pasted picture is written as, now shows in the document editor and in a past version,
+  drawn from the version's bytes route; before, the editor's `<img>` carried the `dispatch://`
+  address as its source, which no browser fetches, so the line showed nothing. A version the
+  browser cannot draw (a markdown document, another file, a missing version), or a source that
+  pins no version, shows a link to what it names instead, its text the reference's short form
+  (`CORE-1 notes-md`). A picture from another website is drawn as before (LEGION-695).
+
+- A listener's shutdown drain no longer waits out 5 s of its 10 s budget when its NATS connection
+  closes while nats.go drains it. nats.go v1.50.0 marks a connection closed during its drain as
+  draining again and waits 5 s for a reply on the socket it closed, and the drain read the
+  connection's state, so it could miss the close; it now waits for the connection's closed event.
+  The listener's own reconnect callback was one such close: nats.go can run the callback for a
+  reconnect that came before the drain once the drain is under way, and it closed the connection
+  there, cutting off the deliveries still in their handlers. A reconnect callback now closes the
+  connection only for a reconnect that came after the drain began.
 - A person's new comment on a document reaches the agents that wrote it, each once, on its own
   `notifications.agent.<session_id>` topic, whatever the issue's route: a comment on a passage of
   an issue's document or a project document, a comment on a whole project document, a suggestion,
@@ -465,6 +807,40 @@
   successful runs. Such a run still counts as no deploy. Every warning is now logged once per run
   and configured job name for the life of the process rather than on every read: one dev-only run
   had been logging the line twice every three minutes (LEGION-567).
+- A document uploaded or seeded with another document's ask blocks, under their block ids and with
+  the same question, options, `multiple` and urgency, on the same issue (or the same project for a
+  project document) opens no ask for them: each copied block shows the state and answer of the ask
+  it was copied from, read-only, and names it and its document in the server-owned `copied_from`
+  and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
+  copied block, answered and resolved ones included. Of several matching asks the earliest asked
+  is the source, whichever wording it matched on. A block matching only a source's earlier wording
+  is a copy of it while the source is open, or when the source's answer or resolution was given
+  while it asked that wording, ordered by the events' commit order; one answered or resolved after
+  the rewording opens its own ask, so no copy shows a decision on a question it does not ask.
+  Answering or resolving the source reaches its copies a settlement later. Each block settlement
+  takes for a copy, and each change of the state a copy shows, is logged once (`dispatch: settled
+  an ask block as a copy of another document's ask`, naming the copy, its block, the source ask,
+  its document and its state, never the question), since such a block opens no ask and reaches no
+  one's Inbox.
+  `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its
+  document and its state from those attributes. A copy whose text is changed, or an id no ask of
+  the owner indexes, still opens one, and so do a source's copies once its block
+  leaves its document: settlement of the source retracts its ask and settles every copy, the first
+  opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
+  project's documents as on an issue's. Migration `0091_artifacts_project_documents` adds the
+  partial index a project document's lookups read. An answered or resolved ask's wording is fixed:
+  a document edit or an upload that changes its block's question, options, `multiple` or urgency
+  no longer rewords the ask and leaves its answer beside a question nobody answered; settlement
+  writes the decided wording back into the block and logs it, as `PATCH /api/v1/asks/{id}` already
+  refused such an edit (`ASK_NOT_OPEN`). Each ask an earlier release reworded after its decision
+  gets back the wording that decision was given on, in code and not by a migration: every boot
+  restores them all in one statement and logs each ask, its document and its question, and each
+  document's settlement restores its own before it writes the decided wording back into the block,
+  which also undoes a rewording an earlier release's task writes during a rolling deploy. The boot
+  settles each restored ask's own document, whose block still asks the rewording until that
+  settlement writes the decided wording back. Either restoration settles the restored asks' copies
+  again: a copy that settled while its source's row held the rewording showed the decision on the
+  reworded question, and now opens its own ask (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

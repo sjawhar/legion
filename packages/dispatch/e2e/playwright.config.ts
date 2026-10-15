@@ -137,17 +137,19 @@ export default defineConfig({
     // Safari uses; only those rows, since the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
-      testMatch: /(agent-view|phone-conversation)\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name/,
+      testMatch: /(agent-view|phone-conversation|delivery-live)\.e2e\.ts/,
+      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page/,
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // the issue picker's keyboard-step rule rests on the engine's select dispatch, and offline
-    // document recovery owns browser storage. Those specs, and the whole deep-links spec, run in
-    // Firefox too.
+    // the issue picker's keyboard-step rule rests on the engine's select dispatch, offline
+    // document recovery owns browser storage, and a click on a link inside the editor meets the
+    // engine's focus rule (Firefox focuses the editing host, not the link). Those specs, and the
+    // whole deep-links spec, run in Firefox too.
     {
       name: "firefox",
-      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits)\.e2e\.ts/,
+      testMatch:
+        /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits|picture-link-click)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
     {

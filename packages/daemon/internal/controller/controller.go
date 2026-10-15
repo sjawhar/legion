@@ -25,6 +25,9 @@ type Record struct {
 	Session        string
 	SecretHash     []byte
 	RegisteredAt   time.Time
+	// PluginContract is the contract the registered session's plugin declared, 0 when no session
+	// has registered or it declared none.
+	PluginContract int
 }
 
 // Registered says whether a session holds the current capability's registration.

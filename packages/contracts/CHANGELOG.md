@@ -4,6 +4,62 @@
 
 ### Added
 
+- `ArtifactReview` and `ArtifactReviewEventPayload` document a third provenance, the carried
+  review: an `approved` review Dispatch records in a human's name at the version his answer to a
+  decision block writes, when that answer is the whole change since the version he approved, with
+  a `reason` naming the carry and the version it follows and an `ask_id` that is null unless a
+  request was open at the carry, which it answers. Who answered what is the document's asks rows,
+  so an ask block no row of the document backs, a copy, or one settlement could not read carries
+  nothing. `AskApproval.approved`, an object of `version`, `at` and `by`, names the document's
+  newest approval when a request opens; the key is absent on a first request. The
+  `dispatch_request_approval` tool description says the same rule: an edit outside the decision
+  blocks stales the approval and the request after it carries a one-sentence summary of what
+  changed, and the human's own answer carries it when it is the whole change (LEGION-573).
+- The Delivery and Pipeline pages' live frames on `GET /ws/delivery` (LEGION-690):
+  `DeliveryLiveView` and `DeliveryLiveWindow` (a preset, whose end stays at the present, or a
+  custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and
+  Dispatch's `DeliveryLiveSnapshot` (the matching GET route's body and a revision per key),
+  `DeliveryLiveDelta` (list items by id, map entries by key, counts by facet and value, null for a
+  key that left, and the other fields whole), `DeliveryLiveFreshness`, `DeliveryLiveError` and
+  `DeliveryLiveHeartbeat` (sent every heartbeat interval beside the socket's ping, which a browser
+  never shows the page). `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it,
+  an error and a heartbeat frame as the server writes them.
+- `githubJobSubject(owner, repo, runId, "completed")` and its type `GithubJobSubject`,
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
+  default branch, of a run with no pull request, and the generated Go `GithubJobSubject`
+  (LEGION-690).
+
+- `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
+  returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
+  (LEGION-687).
+- `ArtifactBlock.table` (`BlockTable`, `BlockTableRow`, `BlockTableCell`): a table block's rows and
+  cells in `GET /api/v1/artifacts/{id}/blocks`, by the indexes `delete_row` and `delete_column`
+  take; optional, since a Dispatch older than the listing omits it. `dispatch_doc_read` takes
+  `blocks`, which lists the live document's blocks instead of its markdown, and `dispatch_doc_edit`
+  and `dispatch_doc_read` point to it for block ids and tokens (LEGION-693).
+
+- Added the `dispatch_project` spec, `{ key, name }` (strict), behind the `dispatch project`
+  command, and `dispatch_projects`, no arguments, behind `dispatch projects`, which lists every
+  project's key and name: twenty-three Dispatch specs. A project's `name` is at most
+  `PROJECT_NAME_MAX` (80) characters, generated into Go as `contracts.ProjectNameMax`, which the
+  server enforces and the Settings name field takes as its `maxLength` (LEGION-684).
+- Added `PROJECT_KEY_RULE`, the one wording of a project key's rule, generated into Go as
+  `contracts.ProjectKeyRule`, and `PROJECT_KEY_PATTERN` is generated as `contracts.ProjectKeyPattern`.
+  `dispatch search --project` and every owner check refuse a key that is not one with
+  `project is not a project key: <rule>`, as every server route does, where they said
+  `project must be a project key such as CORE` (LEGION-684).
+- `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
+  `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
+  `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
+  `group:<id>` for a pull request whose first session is a member (LEGION-682).
+- Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
+  `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
+  capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may
+  be empty), with the `ready.json` fixture the Go golden test writes. `LegionRegisterResponse`
+  gains `promptAgents`, the sorted task agents the role's prompts dispatch, and the claim view on
+  `GET /legion/v1/state` gains an optional `capabilities` (`measuredAt`, `incarnation`, `ok`,
+  `open[{name, detail}]`), the claim's latest report as the daemon shows it — daemon API contract
+  21 (LEGION-663).
 - Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
   `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
   `previous_answer` names the answer a human changed (LEGION-622).
@@ -14,6 +70,16 @@
   and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
   dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
   `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- Added the agent stream's `commands` frame (`AgentStreamFrame` of `kind: "commands"`, holding
+  `AgentStreamCommand[]`), the slash commands a person can send the session from Dispatch, the
+  whole list each time it changes and the last frame of a replay, with
+  `AGENT_STREAM_LIMITS.commands`, `commandNameChars` and `commandDescriptionChars`, the caps the
+  publisher applies before the frame leaves the session. Each command names its `source`
+  (`builtin`, `extension`, `prompt` for a custom command, MCP prompt, file command or prompt
+  template, `skill`), and a built-in only the session's own terminal runs carries `terminalOnly`
+  (LEGION-394). `isTypableCommandName` is the one command-name rule the publisher lists a command
+  by and a viewer accepts one by: one non-empty token, no whitespace, no control character. A
+  viewer older than the frame ignores it.
 - `Version.size` is documented for document versions too: the bytes of the markdown a version
   stores, which Dispatch now answers on every document version it lists or reads, read from the
   stored row without rendering the document (LEGION-481). It stays optional, absent on a document
@@ -21,6 +87,9 @@
 
 ### Changed
 
+- `live` is removed from the capability row's `status` enum on `GET /legion/v1/state`: a live row
+  is `present`, `open` or `unchecked` from the sessions' reports, and a row no session has reported
+  reads `unchecked` beside an image row no probe has checked — daemon API contract 21 (LEGION-663).
 - Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
   `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
   `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`

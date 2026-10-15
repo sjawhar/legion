@@ -261,6 +261,28 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 	}
 }
 
+// Dispatch can add issue payload fields before a deployed daemon consumes them: the old decoder
+// must keep accepting those events until its matching workflow change rolls out.
+func TestIssueEventIgnoresUnconsumedBlockedByFields(t *testing.T) {
+	original := string(capturedIssueCreatedEnvelope(t))
+	widened := strings.Replace(original, `\"labels\":[]`, `\"blocked_by\":[\"CAPTURE-3\"],\"priority\":1,\"labels\":[]`, 1)
+	if widened == original {
+		t.Fatal("captured issue.created fixture has no empty labels field to widen")
+	}
+	subject := "notifications.dispatch.issue.CAPTURE-4.issue.created"
+	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
+	if err != nil {
+		t.Fatalf("decode captured issue.created: %v", err)
+	}
+	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(widened))
+	if err != nil {
+		t.Fatalf("decode issue.created with additive fields: %v", err)
+	}
+	if !reflect.DeepEqual(got.Fact, want.Fact) {
+		t.Fatalf("widened fact = %#v, want %#v", got.Fact, want.Fact)
+	}
+}
+
 // An issue event's labels say whether it is handed to Legion; decodeDispatchFact resolves that
 // once, into HandedOver, matching the label in any case among any others, never carrying the raw
 // list itself.
@@ -364,6 +386,28 @@ func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
 		if !reflect.DeepEqual(got.Fact, want.Fact) {
 			t.Fatalf("settled_at %s: fact = %#v, want %#v", settledAt, got.Fact, want.Fact)
 		}
+	}
+}
+
+// Envoy publishes a finished GitHub Actions job on the default branch, of a run with no pull
+// request, on `notifications.github.<owner>.<repo>.job.<run_id>.completed`, with `kind: "job"`,
+// inside the repository's filter. It changes no workflow record, so it decodes to no fact even for
+// a configured repository, which consumeMessage acknowledges.
+func TestAJobEnvelopeIsNoFact(t *testing.T) {
+	const subject = "notifications.github.sjawhar.legion.job.38230245571.completed"
+	payload := `{"kind":"job","repo":"sjawhar/legion","run_id":"38230245571","job_id":"114758907253",` +
+		`"name":"release","status":"completed","conclusion":"success","started_at":"2026-10-12T10:01:21Z",` +
+		`"completed_at":"2026-10-12T10:02:02Z","head_sha":"f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b",` +
+		`"url":"https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253"}`
+	if filter := githubFilters(capturedRepositories)[0]; !strings.HasPrefix(subject, strings.TrimSuffix(filter, ">")) {
+		t.Fatalf("the repository's filter %s does not take the job subject %s, so this proves nothing", filter, subject)
+	}
+	decoded, err := decodeMessage(subject, "CAPTURE", capturedRepositories, envelopeJSON(t, "job-1", "github", payload))
+	if err != nil {
+		t.Fatalf("decode a job envelope: %v", err)
+	}
+	if decoded.Fact != nil || len(decoded.Unread) != 0 {
+		t.Fatalf("decoded = %#v, want no fact and no unread field", decoded)
 	}
 }
 
@@ -976,8 +1020,8 @@ func TestDecodeDispatchIssueNamesASessionActor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode the daemon's own write: %v", err)
 	}
-	if issue, ok := daemon.Fact.(DispatchIssue); !ok || issue.ActorSession != "" {
-		t.Fatalf("fact = %#v, want no session actor for the daemon's own write", daemon.Fact)
+	if issue, ok := daemon.Fact.(DispatchIssue); !ok || issue.ActorSession != "" || !issue.DaemonActor {
+		t.Fatalf("fact = %#v, want the daemon's own actor", daemon.Fact)
 	}
 }
 

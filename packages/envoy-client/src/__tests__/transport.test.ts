@@ -1,7 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { createEnvoyClient, EnvoyApiError } from "../transport";
 
 type RecordedFetch = {
@@ -693,102 +690,32 @@ describe("EnvoyClient", () => {
     ).rejects.toThrow("message must not be empty (expected: message)");
     expect(recorded.requests).toHaveLength(1);
   });
-  test("sends ENVOY_TOKEN as a bearer token to the listener", async () => {
-    await withEnvoyToken("listener-token", async () => {
-      const recorded = recordFetch([new Response(null, { status: 200 })]);
-      const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
-
-      await client.unregisterSession("ses_closed");
-
-      expect(recorded.requests[0]?.headers.get("Authorization")).toBe("Bearer listener-token");
+  test("sends the token it is given as a bearer token to the listener", async () => {
+    const recorded = recordFetch([new Response(null, { status: 200 })]);
+    const client = createEnvoyClient({
+      baseUrl: "http://listener",
+      fetch: recorded.fetch,
+      token: "listener-token",
     });
+
+    await client.unregisterSession("ses_closed");
+
+    expect(recorded.requests[0]?.headers.get("Authorization")).toBe("Bearer listener-token");
   });
 
-  test("does not send an Authorization header when ENVOY_TOKEN is unset", async () => {
-    await withEnvoyToken(undefined, async () => {
+  test("sends no Authorization header without a token, whatever ENVOY_TOKEN says", async () => {
+    const previous = process.env.ENVOY_TOKEN;
+    process.env.ENVOY_TOKEN = "environment-token";
+    try {
       const recorded = recordFetch([new Response(null, { status: 200 })]);
       const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
 
       await client.unregisterSession("ses_closed");
 
       expect(recorded.requests[0]?.headers.has("Authorization")).toBe(false);
-    });
-  });
-
-  test("reads ENVOY_TOKEN_FILE (trimmed) as the bearer ahead of ENVOY_TOKEN", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "envoy-token-"));
-    const file = path.join(dir, "envoy-token");
-    writeFileSync(file, "  file-token\n", { mode: 0o600 });
-    try {
-      await withEnvoyToken("plain-token", async () => {
-        await withEnvoyTokenFile(file, async () => {
-          const recorded = recordFetch([new Response(null, { status: 200 })]);
-          const client = createEnvoyClient({ baseUrl: "http://listener", fetch: recorded.fetch });
-          await client.unregisterSession("ses_closed");
-          expect(recorded.requests[0]?.headers.get("Authorization")).toBe("Bearer file-token");
-        });
-      });
     } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  test("fails naming ENVOY_TOKEN_FILE and its path when the file is missing or blank, never falling back to ENVOY_TOKEN", async () => {
-    const dir = mkdtempSync(path.join(os.tmpdir(), "envoy-token-"));
-    const blank = path.join(dir, "blank");
-    writeFileSync(blank, " \n", { mode: 0o600 });
-    const missing = path.join(dir, "missing");
-    try {
-      await withEnvoyToken("plain-token", async () => {
-        await withEnvoyTokenFile(missing, async () => {
-          expect(() =>
-            createEnvoyClient({ baseUrl: "http://listener", fetch: recordFetch([]).fetch })
-          ).toThrow(`ENVOY_TOKEN_FILE names ${missing}, which could not be read: ENOENT`);
-        });
-        await withEnvoyTokenFile(blank, async () => {
-          expect(() =>
-            createEnvoyClient({ baseUrl: "http://listener", fetch: recordFetch([]).fetch })
-          ).toThrow(`ENVOY_TOKEN_FILE names ${blank}, which is empty`);
-        });
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+      if (previous === undefined) delete process.env.ENVOY_TOKEN;
+      else process.env.ENVOY_TOKEN = previous;
     }
   });
 });
-
-async function withEnvoyToken<T>(token: string | undefined, run: () => Promise<T>): Promise<T> {
-  const previous = process.env.ENVOY_TOKEN;
-  if (token === undefined) {
-    delete process.env.ENVOY_TOKEN;
-  } else {
-    process.env.ENVOY_TOKEN = token;
-  }
-  try {
-    return await run();
-  } finally {
-    if (previous === undefined) {
-      delete process.env.ENVOY_TOKEN;
-    } else {
-      process.env.ENVOY_TOKEN = previous;
-    }
-  }
-}
-
-async function withEnvoyTokenFile<T>(file: string | undefined, run: () => Promise<T>): Promise<T> {
-  const previous = process.env.ENVOY_TOKEN_FILE;
-  if (file === undefined) {
-    delete process.env.ENVOY_TOKEN_FILE;
-  } else {
-    process.env.ENVOY_TOKEN_FILE = file;
-  }
-  try {
-    return await run();
-  } finally {
-    if (previous === undefined) {
-      delete process.env.ENVOY_TOKEN_FILE;
-    } else {
-      process.env.ENVOY_TOKEN_FILE = previous;
-    }
-  }
-}

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -35,12 +36,19 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
-	// reviewWorkflows is the project's review_workflows, which a reviewer is told after its
-	// addressing (ReviewWorkflowsFragment).
-	reviewWorkflows []string
+	// mergeRules is the project's merge policy, which a merger is told after its addressing.
+	mergeRules config.MergeRules
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
+	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
+	runtimeName string
+	// plugins is this daemon's resolved plugin pair under Kubernetes — the file's
+	// `runtime.kubernetes.plugins`, or the binary's linked pair when the file names none — with
+	// Contract already set to api.DaemonAPIVersion; nil when the daemon knows none
+	// (LEGION-164's degraded mode). Never read under any other runtime.
+	plugins *runtime.PluginInstall
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -52,11 +60,26 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository; for a claim whose workspace was lost with its
 // session, the issue's branch the recreated workspace is recovered from. The controller's launch
-// (controllerSpawnSpec) is its own.
+// (controllerSpawnSpec) is its own. Plugins carries the plugin pair a stale-plugin relaunch
+// installs (stalePluginInstall), set the same way for both — the controller the daemon launches
+// (`controller: daemon`) is covered like any claim.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
+	var spec runtime.SpawnSpec
+	var err error
 	if c.Role == claim.RoleController {
-		return s.controllerSpawnSpec()
+		spec, err = s.controllerSpawnSpec()
+	} else {
+		spec, err = s.workerSpawnSpec(ctx, c)
 	}
+	if err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	spec.Plugins = s.stalePluginInstall(c)
+	return spec, nil
+}
+
+// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.
+func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
@@ -68,8 +91,8 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
 		addressing += " " + DesignGateFragment(s.designGate)
 	}
-	if c.Role == claim.RoleReviewer {
-		addressing += " " + ReviewWorkflowsFragment(s.reviewWorkflows)
+	if c.Role == claim.RoleMerger {
+		addressing += " " + MergeRulesFragment(s.mergeRules)
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -93,6 +116,20 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}
 	return spec, nil
+}
+
+// stalePluginInstall is spec.Plugins for c's launch (LEGION-164): the daemon's resolved pair,
+// with Contract already api.DaemonAPIVersion, iff the runtime is Kubernetes, c has registered a
+// session, and its recorded contract differs from this daemon's — never for a launch that is not
+// replacing a process on another plugin contract, and never when the daemon knows no pair
+// (s.plugins nil, the degraded mode). A fresh copy, so a caller mutating one launch's spec never
+// reaches another's.
+func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
+	if s.runtimeName != "kubernetes" || c.Session == "" || c.PluginContract == api.DaemonAPIVersion || s.plugins == nil {
+		return nil
+	}
+	install := *s.plugins
+	return &install
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
@@ -140,10 +177,9 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 
 // AddressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
-// the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
-// daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
-// (workflow.Engine.ready, prompts/go/merger.md). It is exported for the rigs under
-// packages/pi-legion/scripts, which tell a worker what a pane is told.
+// the model never hand-encodes one. The daemon posts every READY packet and publishes it to
+// `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready). It is exported for the rigs
+// under packages/pi-legion/scripts, which tell a worker what a pane is told.
 func AddressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
@@ -162,13 +198,17 @@ func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
 }
 
-// ReviewWorkflowsFragment is the sentence a reviewer is told after its addressing: the required
-// workflows this project declares as review workflows (`projects.<KEY>.review_workflows`), the
-// "Review workflows" line its Go role part reads (prompts/go/reviewer.md). A red only they make is
-// the reviewer's round's to adjudicate; any other red required workflow is a failing check.
-func ReviewWorkflowsFragment(workflows []string) string {
-	if len(workflows) == 0 {
-		return "Review workflows: this project declares none (`review_workflows`)."
+// MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.
+func MergeRulesFragment(rules config.MergeRules) string {
+	render := func(patterns []config.PathPattern) string {
+		expressions := make([]string, 0, len(patterns))
+		for _, pattern := range patterns {
+			expressions = append(expressions, "`"+pattern.Expression+"`")
+		}
+		if len(expressions) == 0 {
+			return "none"
+		}
+		return strings.Join(expressions, ", ")
 	}
-	return "Review workflows: this project declares `" + strings.Join(workflows, "`, `") + "` (`review_workflows`)."
+	return "Merge policy: by_hand " + render(rules.ByHand) + "."
 }

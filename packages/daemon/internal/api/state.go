@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // Unrecorded is what this route reads for an issue the workflow does not record, where an
@@ -33,27 +34,32 @@ type State struct {
 	Admission           Admission            `json:"admission"`
 	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
+	// StrandedClaims is every claim nothing will wake (workflow.Stranded), by issue and then
+	// role: the trees that will not move again until someone acts. Never null; empty while every
+	// claim is running or waits on something that will wake it.
+	StrandedClaims []StrandedClaim `json:"strandedClaims"`
 	// ControllerLocator is the project's controller, absent until a session registers as it: with
 	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
 	// token of the daemon's own controller launch.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
-	// AgentSecretsLogin is the daemon's own agent-secrets machine login
+	// AgentSecretsLogin is the daemon's own agent-secrets token login
 	// (runtime.kubernetes.agent_secrets), absent when the deployment configures
 	// no broker.
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
 	// Capabilities is the deployment's capability report (capabilities.Deployment.Report), one row
-	// per capability in the table's order: what the worker image was probed for, what a live check
-	// proves, what a ruling withholds, and what the deployment's own configuration closes, decides
-	// or leaves open — each open row with the legion.yaml line that records a decision. Never
-	// null; a gap is reported here, never refused (contract 16).
+	// per capability in the table's order: what the worker image was probed for, what the live
+	// sessions' reports prove (present), fail (open) or have not reported yet (unchecked), what a
+	// ruling withholds, and what the deployment's own configuration closes, decides or leaves open
+	// — each open deployment row with the legion.yaml line that records a decision. Never null; a
+	// gap is reported here, never refused (contract 16).
 	Capabilities []CapabilityState `json:"capabilities"`
 }
 
 // CapabilityState is one row of that report. Status is "present", "installed" (the image carries
-// the row's tooling, but a pod's agent cannot use it yet; Detail says why), "unchecked", "live",
+// the row's tooling, but a pod's agent cannot use it yet; Detail says why), "unchecked",
 // "withheld", "decided" or "open"; Detail is the row's evidence whatever the status; Decision is
-// the operator's reason on a decided row; ConfigLine is, on an open row, the legion.yaml line
-// that records a decision (`capabilities.decided.<name>: "<reason>"`).
+// the operator's reason on a decided row; ConfigLine is, on an open deployment row, the legion.yaml
+// line that records a decision (`capabilities.decided.<name>: "<reason>"`); an open live row has none.
 type CapabilityState struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
@@ -83,6 +89,9 @@ type ControllerLocator struct {
 	External     bool      `json:"external"`
 	SessionID    string    `json:"sessionId"`
 	RegisteredAt time.Time `json:"registeredAt"`
+	// PluginContract is the contract the registered session's plugin declared, 0 when none
+	// recorded, always emitted.
+	PluginContract int `json:"pluginContract"`
 }
 
 // ControllerLocatorOf is record as the state shows it under the runtime runtimeName names: the
@@ -91,22 +100,20 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 	if !record.Registered() {
 		return nil
 	}
-	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt}
+	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt, PluginContract: record.PluginContract}
 }
 
-// AgentSecretsLoginView is the daemon's own agent-secrets machine login's current status
-// (agentsecrets.Client.LoginStatus): State is one of "none" (no login has ever been started),
-// "pending", "issued", "denied", "expired", or "failed" (the broker never opened the most recent
-// login: it refused it, or did not answer); Code is the confirmation code shown on the Dispatch
-// credential page for a pending login, "" otherwise. Never a key, a launcher credential, or why a
-// login failed — those live only in the daemon's process memory.
+// AgentSecretsLoginView is the daemon's own agent-secrets token login's current status
+// (agentsecrets.Client.LoginStatus): State is one of "none" (no login has finished yet), "issued",
+// or "failed" (the latest login won no credential). Never a key, a token, a launcher credential, or
+// why a login failed — those live only in the daemon's process memory and its log.
 type AgentSecretsLoginView struct {
 	State string `json:"state"`
-	Code  string `json:"code"`
 }
 
-// MarshalJSON keeps `issues` an object and `pendingStatusWrites` and `capabilities` arrays on the
-// wire: a nil Go map or slice is `null`, which the plugin's strict reader refuses.
+// MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `strandedClaims` and
+// `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the plugin's strict
+// reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -115,6 +122,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
+	}
+	if out.StrandedClaims == nil {
+		out.StrandedClaims = []StrandedClaim{}
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
@@ -184,15 +194,58 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 }
 
 // ClaimView is one role claim as the record holds it: the session its agent registered as, where
-// it is in its life (`supervise.ClaimState`), and its locator. The locator is the runtime's own
-// nested shape — `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or
-// the `sandbox` member for a pod — marshalled by the standard library from `runtime.Locator`; the
-// process incarnation lives there and nowhere else in the view, and a socket path never does. A
-// claim with no process (queued, suspended, failed, retired) has no locator.
+// it is in its life (`supervise.ClaimState`), its locator, and the capability report its session
+// sent with its ready (LEGION-663). The locator is the runtime's own nested shape —
+// `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or the `sandbox`
+// member for a pod — marshalled by the standard library from `runtime.Locator`; the process
+// incarnation lives there and in the capability report's `incarnation`, which is the reporting
+// process's: a reader compares it with `locator.incarnation` to tell the running process's report
+// from a predecessor's. A socket path never appears in the view. A claim with no process (queued,
+// suspended, failed, retired) has no locator; a claim whose session has not reported, or whose
+// role never reports (the controller), has no capabilities.
 type ClaimView struct {
-	Session string           `json:"session"`
-	State   string           `json:"state"`
-	Locator *runtime.Locator `json:"locator,omitempty"`
+	Session      string                `json:"session"`
+	State        string                `json:"state"`
+	Locator      *runtime.Locator      `json:"locator,omitempty"`
+	Capabilities *CapabilityReportView `json:"capabilities,omitempty"`
+	// PluginContract is the contract the claim's current registration declared, 0 when none
+	// recorded, always emitted.
+	PluginContract int `json:"pluginContract"`
+}
+
+// CapabilityReportView is one session's capability report as the state shows it: when the session
+// measured, the incarnation of the process that reported, the live rows it proved (OK) and the
+// rows it did not, each with the fact its check found (Open). OK and Open are never null.
+type CapabilityReportView struct {
+	MeasuredAt  time.Time       `json:"measuredAt"`
+	Incarnation string          `json:"incarnation"`
+	OK          []string        `json:"ok"`
+	Open        []CapabilityGap `json:"open"`
+}
+
+// CapabilityGap is one live row a session's check failed, with the fact the check found.
+type CapabilityGap struct {
+	Name   string `json:"name"`
+	Detail string `json:"detail"`
+}
+
+// CapabilityReportViewOf is report as the state shows it: its rows partitioned into the names that
+// passed and the gaps that did not, each side in the report's (Table) order.
+func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
+	view := &CapabilityReportView{
+		MeasuredAt:  report.MeasuredAt,
+		Incarnation: report.Locator.Incarnation,
+		OK:          []string{},
+		Open:        []CapabilityGap{},
+	}
+	for _, row := range report.Rows {
+		if row.OK {
+			view.OK = append(view.OK, string(row.Name))
+		} else {
+			view.Open = append(view.Open, CapabilityGap{Name: string(row.Name), Detail: row.Detail})
+		}
+	}
+	return view
 }
 
 // PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.
@@ -243,6 +296,82 @@ type PendingStatusWrite struct {
 	Attempts  int             `json:"attempts"`
 	NextAt    time.Time       `json:"nextAt"`
 	LastError string          `json:"lastError,omitempty"`
+}
+
+// StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
+// architect, in a tree that runs — named by its issue, its role and its state; the issue's own
+// entry under `issues` carries the rest. Its state and role say the move that brings it back
+// (Move).
+type StrandedClaim struct {
+	Issue string     `json:"issue"`
+	Role  claim.Role `json:"role"`
+	State string     `json:"state"`
+}
+
+// StrandedMove is the move that brings a stranded claim back (StrandedClaim.Move). Its value is the
+// key the boot's `claims nothing will wake` log line lists the claim under.
+type StrandedMove string
+
+const (
+	StrandedResume           StrandedMove = "resume"
+	StrandedSuspendedWorkers StrandedMove = "suspendedWorkers"
+	StrandedRetry            StrandedMove = "retry"
+	StrandedWorkflowStart    StrandedMove = "needsWorkflowStart"
+)
+
+// StrandedMoves is every move, in the order the boot's log line and `legion state` list them.
+func StrandedMoves() []StrandedMove {
+	return []StrandedMove{StrandedResume, StrandedSuspendedWorkers, StrandedRetry, StrandedWorkflowStart}
+}
+
+// Move is the move that brings c back, the one statement of it that the boot's log line and
+// `legion state` both group by:
+//
+//   - StrandedResume, a suspended architect: the operator's resume (`legion claims resume`), which
+//     a catch-up follows.
+//   - StrandedSuspendedWorkers, a suspended phase worker: the move its claim's suspendedBy calls
+//     for (the operator claim view): the boot's start once it is marked the daemon's when it was
+//     suspended before 0038, the operator's resume when an operator suspended it and it kept its
+//     task or its phase start waits, otherwise the operator's delivery of its phase's resume task.
+//   - StrandedRetry, a failed architect: the operator's retry (`legion claims retry`), which
+//     relaunches its session with fresh budgets, and a catch-up follows.
+//   - StrandedWorkflowStart, a failed phase worker: its architect's retry of the held phase, since
+//     a failed claim ignores resume and deliver and the operator's retry relaunches only an
+//     architect.
+func (c StrandedClaim) Move() StrandedMove {
+	failed := c.State == string(supervise.StateFailed)
+	switch {
+	case failed && c.Role == claim.RoleArchitect:
+		return StrandedRetry
+	case failed:
+		return StrandedWorkflowStart
+	case c.Role == claim.RoleArchitect:
+		return StrandedResume
+	default:
+		return StrandedSuspendedWorkers
+	}
+}
+
+// StrandedClaimsOf is stranded as the state shows it, claim for claim.
+func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
+	claims := make([]StrandedClaim, len(stranded))
+	for i, c := range stranded {
+		claims[i] = StrandedClaim{Issue: c.Issue, Role: c.Role, State: string(c.State)}
+	}
+	return claims
+}
+
+// StrandedByMove is each stranded claim named `<issue> <role>`, grouped by its Move, each group in
+// stranded's order; every move has a group, empty when no claim takes it.
+func StrandedByMove(stranded []StrandedClaim) map[StrandedMove][]string {
+	grouped := make(map[StrandedMove][]string, len(StrandedMoves()))
+	for _, move := range StrandedMoves() {
+		grouped[move] = []string{}
+	}
+	for _, c := range stranded {
+		grouped[c.Move()] = append(grouped[c.Move()], c.Issue+" "+string(c.Role))
+	}
+	return grouped
 }
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route

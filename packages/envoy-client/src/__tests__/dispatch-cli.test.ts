@@ -2,6 +2,8 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ArtifactBlock } from "@legion/contracts";
+import { PROJECT_KEY_RULE } from "@legion/contracts";
 import { fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
@@ -31,6 +33,130 @@ const issue = {
   artifacts: [],
 };
 
+/** DSP-2's spec, whose blocks `dispatch doc-read --blocks` lists. "é" is two bytes in UTF-8, so
+ *  every block after the heading starts at a byte offset past its index in the string. */
+const intro = `${"x".repeat(59)}😀 then more words past the cut.`;
+const spec = [
+  "# Café plan",
+  "",
+  intro,
+  "",
+  "- First item",
+  "- Second item",
+  "",
+  "| # | Line | |",
+  "| --- | --- | --- |",
+  "| 1 | Backfill | extra |",
+  "",
+].join("\n");
+
+/** Where `text` first stands in `spec`, in UTF-8 bytes, as Dispatch's /blocks route reports it. */
+function byteRange(text: string): { from: number; to: number } {
+  const at = spec.indexOf(text);
+  if (at < 0) throw new Error(`the spec holds no ${JSON.stringify(text)}`);
+  const from = Buffer.byteLength(spec.slice(0, at));
+  return { from, to: from + Buffer.byteLength(text) };
+}
+
+const unanchored = { comments: 0, asks: 0 };
+const specBlocks: ArtifactBlock[] = [
+  {
+    id: "h-1",
+    type: "heading",
+    ...byteRange("# Café plan"),
+    token: "sha256:h",
+    references: unanchored,
+  },
+  {
+    id: "p-1",
+    type: "paragraph",
+    ...byteRange(intro),
+    token: "sha256:p",
+    references: { comments: 1, asks: 0 },
+  },
+  {
+    id: "l-1",
+    type: "bullet_list",
+    ...byteRange("- First item\n- Second item"),
+    token: "sha256:l",
+    references: unanchored,
+  },
+  {
+    id: "i-1",
+    type: "list_item",
+    ...byteRange("- First item"),
+    token: "sha256:i1",
+    references: unanchored,
+  },
+  {
+    id: "ip-1",
+    type: "paragraph",
+    ...byteRange("First item"),
+    token: "sha256:ip1",
+    references: unanchored,
+  },
+  {
+    id: "i-2",
+    type: "list_item",
+    ...byteRange("- Second item"),
+    token: "sha256:i2",
+    references: unanchored,
+  },
+  {
+    id: "t-1",
+    type: "table",
+    ...byteRange("| # | Line | |\n| --- | --- | --- |\n| 1 | Backfill | extra |"),
+    token: "sha256:t",
+    references: { comments: 0, asks: 1 },
+    table: {
+      rows: [
+        {
+          id: "r-0",
+          index: 0,
+          cells: [
+            { id: "c-0-0", row: 0, column: 0, header: "#", text: "#" },
+            { id: "c-0-1", row: 0, column: 1, header: "Line", text: "Line" },
+            { id: "c-0-2", row: 0, column: 2, header: "", text: "" },
+          ],
+        },
+        {
+          id: "",
+          index: 1,
+          cells: [
+            { id: "c-1-0", row: 1, column: 0, header: "#", text: "1" },
+            { id: "", row: 1, column: 1, header: "Line", text: "Backfill" },
+            { id: "c-1-2", row: 1, column: 2, header: "", text: "extra" },
+          ],
+        },
+      ],
+    },
+  },
+];
+
+const blocksIssue = {
+  ...issue,
+  key: "DSP-2",
+  primary_artifact_id: "doc-2",
+  open_asks: [],
+  artifacts: [
+    { id: "doc-2", slug: "spec", name: "spec.md", kind: "doc", primary: true, versions: [] },
+    {
+      id: "pic-2",
+      slug: "chart-png",
+      name: "chart.png",
+      kind: "image",
+      primary: false,
+      versions: [{ number: 1, mime: "image/png", size: PNG.length }],
+    },
+  ],
+};
+
+/** How the DSP-2 routes answer: a Dispatch older than the table listing omits `table`, and a
+ *  document a browser edits between the CLI's two reads of its text answers the second with other
+ *  text and another token. */
+let blocksServer = { tableRows: true, editedBetweenReads: false };
+let textReads = 0;
+
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
@@ -38,6 +164,23 @@ const server = Bun.serve({
     const text = await request.text();
     const body = text === "" ? undefined : JSON.parse(text);
     requests.push({ method: request.method, path: pathname, body });
+    if (pathname === "/api/v1/issues/DSP-2" && request.method === "GET") {
+      return Response.json(blocksIssue);
+    }
+    if (pathname === "/api/v1/artifacts/doc-2/text") {
+      textReads++;
+      const edited = blocksServer.editedBetweenReads && textReads > 1;
+      return Response.json({
+        markdown: edited ? `${spec}\nTyped in the browser.\n` : spec,
+        version: 3,
+        token: edited ? "sha256:edited" : "sha256:doc",
+      });
+    }
+    if (pathname === "/api/v1/artifacts/doc-2/blocks") {
+      return Response.json(
+        blocksServer.tableRows ? specBlocks : specBlocks.map(({ table: _, ...block }) => block)
+      );
+    }
     if (pathname === "/api/v1/issues/DSP-1/asks" && request.method === "POST") {
       return Response.json({
         id: "ask-a",
@@ -60,6 +203,24 @@ const server = Bun.serve({
     }
     if (pathname === "/api/v1/issues/DSP-1" && request.method === "GET") {
       return Response.json(issue);
+    }
+    if (pathname === "/api/v1/projects" && request.method === "POST") {
+      if (body.key === "TAKEN") {
+        return Response.json(
+          { code: "PROJECT_EXISTS", error: "a project with this key already exists" },
+          { status: 409 }
+        );
+      }
+      return Response.json(
+        { key: body.key, name: body.name, open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+        { status: 201 }
+      );
+    }
+    if (pathname === "/api/v1/projects" && request.method === "GET") {
+      return Response.json([
+        { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-09-01T00:00:00Z" },
+        { key: "SMOKE684", name: "Smoke", open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+      ]);
     }
     if (pathname === "/api/v1/agents/ses-pic/artifacts/shot-png") {
       return Response.json({
@@ -112,6 +273,8 @@ let stateDir = "";
 beforeEach(() => {
   requests.length = 0;
   triage = false;
+  blocksServer = { tableRows: true, editedBetweenReads: false };
+  textReads = 0;
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
@@ -334,6 +497,447 @@ describe("the dispatch CLI", () => {
     expect(stdout).toContain("Picture shot.png");
     expect(stdout).not.toContain("- picture: ");
     expect(stdout).toContain("dispatch: Dispatch took the call, but this session's state");
+  });
+
+  describe("doc-read --blocks", () => {
+    const listing = [
+      "Blocks of spec.md, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.",
+      "h-1 heading (sha256:h; 0 comments, 0 asks): # Café plan",
+      // The 60th character is an emoji, two UTF-16 units: a cut by code unit would split it.
+      `p-1 paragraph (sha256:p; 1 comment, 0 asks): ${"x".repeat(59)}😀…`,
+      "l-1 bullet_list (sha256:l; 0 comments, 0 asks): - First item - Second item",
+      "  i-1 list_item (sha256:i1; 0 comments, 0 asks): - First item",
+      "    ip-1 paragraph (sha256:ip1; 0 comments, 0 asks): First item",
+      "  i-2 list_item (sha256:i2; 0 comments, 0 asks): - Second item",
+      "t-1 table (sha256:t; 0 comments, 1 ask): | # | Line | | | --- | --- | --- | | 1 | Backfill | extra |",
+    ];
+    const reads = [
+      "/api/v1/issues/DSP-2",
+      "/api/v1/artifacts/doc-2/text",
+      "/api/v1/artifacts/doc-2/blocks",
+      "/api/v1/artifacts/doc-2/text",
+    ];
+
+    test("lists every block's id, type, token, anchors and opening words, and each table's rows and cells", async () => {
+      const { code, stdout } = await run(["doc-read", "--issue", "DSP-2", "--blocks"], omp);
+      expect(code).toBe(0);
+      expect(stdout).toBe(
+        [
+          ...listing,
+          "  row 0, id r-0",
+          '    row 0 column 0, id c-0-0, under "#": #',
+          '    row 0 column 1, id c-0-1, under "Line": Line',
+          "    row 0 column 2, id c-0-2: (empty)",
+          "  row 1, no id yet",
+          '    row 1 column 0, id c-1-0, under "#": 1',
+          '    row 1 column 1, no id yet, under "Line": Backfill',
+          "    row 1 column 2, id c-1-2: extra",
+          "",
+          "Document token: sha256:doc",
+          "",
+        ].join("\n")
+      );
+      expect(requests.map((request) => request.path)).toEqual(reads);
+    });
+
+    test("says the Dispatch lists no rows when its table entry carries none, and reads no markdown for them", async () => {
+      blocksServer.tableRows = false;
+      const { code, stdout } = await run(["doc-read", "--issue", "DSP-2", "--blocks"], omp);
+      expect(code).toBe(0);
+      expect(stdout).toBe(
+        [
+          ...listing,
+          "  This Dispatch does not report table rows yet, so no row or column index is listed.",
+          "",
+          "Document token: sha256:doc",
+          "",
+        ].join("\n")
+      );
+      expect(requests.map((request) => request.path)).toEqual(reads);
+    });
+
+    test("refuses an uploaded picture, naming it, and reads none of its bytes", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--issue", "DSP-2", "--artifact", "chart.png", "--blocks"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "chart.png is an uploaded image, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.\n"
+      );
+      expect(requests.map((request) => request.path)).toEqual(["/api/v1/issues/DSP-2"]);
+    });
+
+    test("refuses a conversation's upload, naming it, as it refuses an issue's", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--ref", "dispatch://agent/ses-pic/artifact/shot-png@v1", "--blocks"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "shot.png is an uploaded image, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.\n"
+      );
+      expect(requests.map((request) => request.path)).toEqual([
+        "/api/v1/agents/ses-pic/artifacts/shot-png",
+      ]);
+    });
+
+    test("refuses a version, since only the live document's blocks are what an edit addresses", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--issue", "DSP-2", "--blocks", "--version", "2"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toContain(
+        "- blocks lists the live document, the one dispatch doc-edit changes; name no version"
+      );
+      expect(requests).toEqual([]);
+    });
+
+    test("refuses a document that changed between its reads, listing nothing", async () => {
+      blocksServer.editedBetweenReads = true;
+      const { code, stdout } = await run(["doc-read", "--issue", "DSP-2", "--blocks"], omp);
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "spec.md changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.\n"
+      );
+    });
+  });
+
+  test("dispatch project prints the created project, and a taken key exits 1 naming PROJECT_EXISTS", async () => {
+    const created = await run(["project", "--key", "SMOKE684", "--name", "Smoke"], omp);
+    expect(created.code).toBe(0);
+    expect(created.stdout).toContain("Created project SMOKE684 (Smoke)");
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/projects",
+        body: expect.objectContaining({
+          key: "SMOKE684",
+          name: "Smoke",
+          actor: expect.objectContaining({ kind: "session", id: "ses-1" }),
+        }),
+      },
+    ]);
+
+    const taken = await run(["project", "--key", "TAKEN", "--name", "Smoke"], omp);
+    expect(taken.code).toBe(1);
+    expect(taken.stdout).toContain("PROJECT_EXISTS: a project with this key already exists");
+  });
+
+  test("dispatch search refuses a project that is not a key in the server's wording, sending nothing", async () => {
+    const { code, stdout } = await run(["search", "--query", "ok", "--project", "lower"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toContain(`project is not a project key: ${PROJECT_KEY_RULE}`);
+    expect(requests).toEqual([]);
+  });
+
+  test("dispatch projects prints each project's key and name, keys first", async () => {
+    const { code, stdout } = await run(["projects"], omp);
+    expect(code).toBe(0);
+    expect(stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    expect(requests).toEqual([{ method: "GET", path: "/api/v1/projects", body: undefined }]);
+  });
+});
+
+describe("the dispatch CLI's envoy.json", () => {
+  /** No Dispatch in the environment: the command reads it from a file. */
+  const fromFile = { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined };
+
+  /** Writes an envoy.json naming the test server into `dir`, returning its path. */
+  function serverConfig(dir: string): string {
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "envoy.json");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: "test-token",
+        },
+      })
+    );
+    return file;
+  }
+
+  /** A directory whose envoy.json is not JSON, so a command that reads it exits 2. */
+  function brokenConfigDirectory(): string {
+    const dir = mkdtempSync(join(tmpdir(), "dispatch-cli-broken-"));
+    writeFileSync(join(dir, "envoy.json"), "{not json");
+    return dir;
+  }
+
+  // Each plugin sets DISPATCH_HOST and ENVOY_CONFIG_FILE together in its session's shell: that pair
+  // is the session's own hand-off, read over whatever harness variables the shell also inherited.
+  test("with DISPATCH_HOST set, reads the file ENVOY_CONFIG_FILE names, whatever the harness variables name", async () => {
+    const handed = serverConfig(join(stateDir, "handed"));
+    // An omp session on the default profile started from a named profile's shell: omp leaves the
+    // parent's OMP_PROFILE and PI_CODING_AGENT_DIR in its shell, and its plugin read the neutral file.
+    const nestedDefault = await run(["projects"], {
+      ...fromFile,
+      OMP_PROFILE: "other",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+      ENVOY_CONFIG_FILE: handed,
+    });
+    expect(nestedDefault.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    expect(nestedDefault.code).toBe(0);
+    // A named Claude Code profile whose shell's rc file exported another CLAUDE_CONFIG_DIR over
+    // the profile's: the hook handed the profile's file.
+    const namedClaude = await run(["projects"], {
+      ...fromFile,
+      DISPATCH_HOST: "claude",
+      CLAUDE_CODE_SESSION_ID: "ses-1",
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+      ENVOY_CONFIG_FILE: handed,
+    });
+    expect(namedClaude.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    // OpenCode likewise.
+    const opencode = await run(["projects"], {
+      ...fromFile,
+      DISPATCH_HOST: "opencode",
+      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
+      ENVOY_CONFIG_FILE: handed,
+    });
+    expect(opencode.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+  });
+
+  test("with DISPATCH_HOST set and no ENVOY_CONFIG_FILE, each host takes its own harness's directory and no other's, else the neutral file", async () => {
+    const claude = { DISPATCH_HOST: "claude", CLAUDE_CODE_SESSION_ID: "ses-1" };
+    const opencode = { DISPATCH_HOST: "opencode", DISPATCH_SESSION_ID: "ses-1" };
+    const profile = join(stateDir, "profile");
+    serverConfig(profile);
+    const ompRun = await run(["projects"], {
+      ...fromFile,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: profile,
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(ompRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+
+    const claudeDirectory = join(stateDir, "claude-own");
+    serverConfig(claudeDirectory);
+    const claudeRun = await run(["projects"], {
+      ...fromFile,
+      ...claude,
+      CLAUDE_CONFIG_DIR: claudeDirectory,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+    });
+    expect(claudeRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    // An empty ENVOY_CONFIG_FILE is no hand-off: the host's own rule, not an inherited profile's.
+    const emptyHanded = await run(["projects"], {
+      ...fromFile,
+      ...claude,
+      CLAUDE_CONFIG_DIR: claudeDirectory,
+      ENVOY_CONFIG_FILE: "",
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+    });
+    expect(emptyHanded.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+
+    const own = join(stateDir, "opencode");
+    serverConfig(own);
+    const ownRun = await run(["projects"], {
+      ...fromFile,
+      ...opencode,
+      OPENCODE_CONFIG_DIR: own,
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(ownRun.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+
+    serverConfig(join(stateDir, ".config", "legion"));
+    const neutral = await run(["projects"], {
+      ...fromFile,
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+      OPENCODE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(neutral.stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+  });
+
+  // An omp session started from a Claude Code Bash inherits CLAUDE_CODE_CHILD_SESSION=1, and its
+  // plugin sets DISPATCH_HOST=omp: the command acts as the omp session on omp's file.
+  test("DISPATCH_HOST wins over CLAUDE_CODE_CHILD_SESSION=1", async () => {
+    const profile = join(stateDir, "profile");
+    serverConfig(profile);
+    const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "hello"], {
+      ...fromFile,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: profile,
+      CLAUDE_CODE_CHILD_SESSION: "1",
+      CLAUDE_CODE_SESSION_ID: "claude-ses",
+      CLAUDE_CONFIG_DIR: brokenConfigDirectory(),
+    });
+    expect(stdout).not.toStartWith("dispatch: ");
+    expect(code).toBe(0);
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/messages");
+    expect(posted?.body).toMatchObject({ actor: { id: "ses-1" } });
+  });
+
+  // Claude Code sets CLAUDE_CODE_CHILD_SESSION=1 in every Bash it runs, and a subagent's Bash can
+  // get none of what the bridge's SessionStart hook writes: no DISPATCH_HOST, and whatever
+  // ENVOY_CONFIG_FILE an outer omp session exported.
+  test("a Claude Code shell with no DISPATCH_HOST is host claude, reading CLAUDE_CONFIG_DIR's file ahead of an inherited ENVOY_CONFIG_FILE", async () => {
+    const claude = join(stateDir, "claude");
+    serverConfig(claude);
+    const { code, stdout } = await run(["message", "--issue", "DSP-1", "--body", "hello"], {
+      DISPATCH_URL: undefined,
+      DISPATCH_TOKEN: undefined,
+      CLAUDE_CODE_CHILD_SESSION: "1",
+      CLAUDE_CODE_SESSION_ID: "subagent-1",
+      CLAUDE_CONFIG_DIR: claude,
+      ENVOY_CONFIG_FILE: join(brokenConfigDirectory(), "envoy.json"),
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: brokenConfigDirectory(),
+    });
+    expect(stdout).not.toStartWith("dispatch: ");
+    expect(code).toBe(0);
+    const posted = requests.find((request) => request.path === "/api/v1/issues/DSP-1/messages");
+    expect(posted?.body).toMatchObject({ actor: { id: "subagent-1" } });
+  });
+
+  test("with neither DISPATCH_HOST nor CLAUDE_CODE_CHILD_SESSION=1 it refuses naming DISPATCH_HOST, whatever else Claude Code left", async () => {
+    const claude = join(stateDir, "claude");
+    serverConfig(claude);
+    for (const child of [{}, { CLAUDE_CODE_CHILD_SESSION: "0" }]) {
+      const { code, stdout } = await run(["projects"], {
+        DISPATCH_URL: undefined,
+        DISPATCH_TOKEN: undefined,
+        CLAUDE_CODE_SESSION_ID: "subagent-1",
+        CLAUDE_CONFIG_DIR: claude,
+        ...child,
+      });
+      expect(stdout).toStartWith("dispatch: DISPATCH_HOST is not set.");
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("a file location that cannot be worked out is refused naming it, exit 2, sending nothing", async () => {
+    for (const [variables, refusal] of [
+      [{ XDG_CONFIG_HOME: "rel" }, "XDG_CONFIG_HOME is rel"],
+      [{ ENVOY_CONFIG_FILE: "envoy.json" }, "ENVOY_CONFIG_FILE is envoy.json"],
+    ] as const) {
+      const { code, stdout } = await run(["projects"], { ...fromFile, ...variables });
+      expect(stdout).toBe(`dispatch: ${refusal}, which is not an absolute path\n`);
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  test("a missing file prints the notice and exits 2, sending nothing", async () => {
+    const { code, stdout } = await run(["projects"], fromFile);
+    expect(stdout).toBe(
+      `dispatch: no envoy.json at ${join(stateDir, ".config", "legion", "envoy.json")}: Dispatch is off\n`
+    );
+    expect(code).toBe(2);
+    expect(requests).toEqual([]);
+  });
+
+  test("a missing neutral file beside the OpenCode-era file names the move and exits 2, running and sending nothing", async () => {
+    const marker = join(stateDir, "old-token-ran");
+    const old = join(stateDir, ".config", "opencode", "envoy.json");
+    mkdirSync(join(stateDir, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: `!touch ${marker}; echo old-token`,
+        },
+      })
+    );
+
+    const { code, stdout } = await run(["projects"], fromFile);
+
+    expect(stdout).toBe(
+      `dispatch: no envoy.json at ${join(stateDir, ".config", "legion", "envoy.json")}: Dispatch is off; ${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/\n`
+    );
+    expect(code).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+    expect(requests).toEqual([]);
+  });
+
+  test("a checkout's .opencode/envoy.json is named on every call, and its server is never used", async () => {
+    serverConfig(join(stateDir, ".config", "legion"));
+    const old = join(stateDir, ".opencode", "envoy.json");
+    mkdirSync(join(stateDir, ".opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: "http://127.0.0.1:1", token: "checkout-token" },
+      })
+    );
+
+    const { code, stdout } = await run(["projects"], fromFile);
+
+    expect(stdout).toBe(
+      `dispatch: ${old} is not read: mkdir -p ${join(stateDir, ".envoy")} && mv ${old} ${join(stateDir, ".envoy", "envoy.json")}\nCORE Core\nSMOKE684 Smoke\n`
+    );
+    expect(code).toBe(0);
+  });
+
+  test("a profile's missing file tells dispatch where the old file belongs without running its token", async () => {
+    const profile = join(stateDir, "profile");
+    mkdirSync(profile);
+    const marker = join(stateDir, "old-token-ran");
+    const old = join(stateDir, ".config", "opencode", "envoy.json");
+    mkdirSync(join(stateDir, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: `!touch ${marker}; echo old-token`,
+        },
+      })
+    );
+
+    const { code, stdout } = await run(["projects"], {
+      ...fromFile,
+      OMP_PROFILE: "work",
+      PI_CODING_AGENT_DIR: profile,
+    });
+
+    const chosen = join(profile, "envoy.json");
+    expect(stdout).toBe(
+      `dispatch: no envoy.json at ${chosen}: Dispatch is off; ${old} is not read for this profile; copy or link it to ${chosen}, or write that file\n`
+    );
+    expect(code).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+    expect(requests).toEqual([]);
+  });
+
+  test("a file that turns Dispatch off says so and exits 2, sending nothing", async () => {
+    const dir = join(stateDir, "off");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "envoy.json");
+    writeFileSync(file, JSON.stringify({ dispatch: { enabled: false } }));
+    const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
+    expect(stdout).toBe(`dispatch: ${file} sets dispatch.enabled to false: Dispatch is off\n`);
+    expect(code).toBe(2);
+    expect(requests).toEqual([]);
+  });
+
+  test("a file that names no Dispatch server, and no DISPATCH_URL, names the file and exits 2, sending nothing", async () => {
+    const dir = join(stateDir, "envoy-only");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "envoy.json");
+    for (const contents of [
+      { envoy: { enabled: true, natsUrls: ["nats://nats.internal.example:4222"] } },
+      { dispatch: { token: "file-token" } },
+    ]) {
+      writeFileSync(file, JSON.stringify(contents));
+      const { code, stdout } = await run(["projects"], { ...fromFile, ENVOY_CONFIG_FILE: file });
+      expect(stdout).toBe(
+        `dispatch: ${file} names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off\n`
+      );
+      expect(code).toBe(2);
+    }
+    expect(requests).toEqual([]);
   });
 });
 

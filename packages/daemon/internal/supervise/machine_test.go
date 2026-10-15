@@ -2,8 +2,10 @@ package supervise
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +16,37 @@ import (
 )
 
 var liveStates = []ClaimState{StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle}
+
+// NewMachine refuses to build over a Deps whose bounds are not set: every limit, every timeout's
+// interval count, and the daemon's own plugin contract must be at least 1 — 0 is also a claim's
+// "none recorded" value, and a daemon that compared every claim against it would call every one
+// stale.
+func TestNewMachineRefusesADepsWithAnUnsetBound(t *testing.T) {
+	base := func() Deps {
+		h := newBareHarness(t)
+		return h.deps
+	}
+	for _, field := range []string{"Limits.LaunchFailures", "Limits.PromptFailures", "Limits.PromptRetires", "Timeouts.RegistrationIntervals", "PluginContract"} {
+		t.Run(field, func(t *testing.T) {
+			deps := base()
+			switch field {
+			case "Limits.LaunchFailures":
+				deps.Limits.LaunchFailures = 0
+			case "Limits.PromptFailures":
+				deps.Limits.PromptFailures = 0
+			case "Limits.PromptRetires":
+				deps.Limits.PromptRetires = 0
+			case "Timeouts.RegistrationIntervals":
+				deps.Timeouts.RegistrationIntervals = 0
+			case "PluginContract":
+				deps.PluginContract = 0
+			}
+			if _, err := NewMachine(context.Background(), deps, fixture(StateQueued)); err == nil || !strings.Contains(err.Error(), field) {
+				t.Fatalf("new machine over a zero %s = %v, want a refusal naming it", field, err)
+			}
+		})
+	}
+}
 
 func TestSpawnPersistsTheBootTokenHashBeforeItLaunches(t *testing.T) {
 	h := newHarness(t)
@@ -114,7 +147,7 @@ func TestTheRecordedSessionMayRegisterAgain(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 
-			h.must(RequestRegister{Claim: testToken, Generation: 1, Session: session, SessionFile: sessionFile, CapabilityHash: []byte("second")})
+			h.must(RequestRegister{Claim: testToken, Generation: 1, Session: session, SessionFile: sessionFile, CapabilityHash: []byte("second"), PluginContract: h.deps.PluginContract})
 
 			h.wantState(state)
 			if got := string(h.store.load(testToken).CapabilityHash); got != "second" {
@@ -358,7 +391,7 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			h.reach(state)
 			loc := h.locator()
 
-			request := RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing"}
+			request := RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing", By: SuspendedByDaemon}
 			if state != StateWorking {
 				h.must(request)
 			} else if err := h.handle(request); !errors.Is(err, ErrSuspendHeld) {
@@ -375,11 +408,11 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			}
 			h.wantState(StateSuspended)
 			c := h.claim()
-			if c.Locator != nil || c.SessionFile != sessionFile || c.Session != session {
-				t.Errorf("suspended claim %+v, want no locator and the session kept", c)
+			if c.Locator != nil || c.SessionFile != sessionFile || c.Session != session || c.SuspendedBy != SuspendedByDaemon {
+				t.Errorf("suspended claim %+v, want no locator, the session kept, and the daemon recorded as who suspended it", c)
 			}
-			if stored := h.store.load(testToken); stored.State != StateSuspended || stored.Locator != nil {
-				t.Errorf("stored %+v, want the suspension persisted", stored)
+			if stored := h.store.load(testToken); stored.State != StateSuspended || stored.Locator != nil || stored.SuspendedBy != SuspendedByDaemon {
+				t.Errorf("stored %+v, want the suspension and its source persisted", stored)
 			}
 			if state == StateWorking && c.Pending != nil {
 				t.Errorf("pending %+v, want the turn's delivery retired", c.Pending)
@@ -394,7 +427,7 @@ func TestASuspendThatFailsChangesNothing(t *testing.T) {
 	loc := h.locator()
 	h.rt.FailSuspend(errBoom)
 
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, errBoom) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, errBoom) {
 		t.Fatalf("suspend returned %v, want the runtime's error", err)
 	}
 	h.wantState(StateIdle)
@@ -409,7 +442,7 @@ func TestASuspendThatFailsChangesNothing(t *testing.T) {
 func TestSuspendingASuspendedClaimIsANoOp(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateSuspended)
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 	h.wantCalls("Suspend", 1)
 }
 
@@ -417,7 +450,7 @@ func TestResumeRelaunchesTheSameSessionAfterTheSuspendedIncarnation(t *testing.T
 	h := newHarness(t)
 	h.reach(StateIdle)
 	suspended := h.locator()
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 
 	h.must(RequestResume{Claim: testToken})
 
@@ -574,7 +607,7 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 		end     func(h *harness) Event
 		restart bool
 	}{
-		{"suspend", queuedClaim(), func(h *harness) Event { return RequestSuspend{Claim: testToken} }, false},
+		{"suspend", queuedClaim(), func(h *harness) Event { return RequestSuspend{Claim: testToken, By: SuspendedByDaemon} }, false},
 		{"root exit", rootClaim(), func(h *harness) Event {
 			return RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"}
 		}, false},
@@ -641,7 +674,7 @@ func TestAnExitAfterTheDaemonEndedTheProcessIsAccepted(t *testing.T) {
 		state ClaimState
 		ended func(*harness)
 	}{
-		{StateSuspended, func(h *harness) { h.must(RequestSuspend{Claim: testToken}) }},
+		{StateSuspended, func(h *harness) { h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator}) }},
 		{StateRetired, func(h *harness) { h.must(RequestStop{Claim: testToken}) }},
 		{StateFailed, func(h *harness) {
 			for range 3 {
@@ -705,7 +738,7 @@ func TestAstraSuspensionNotYetComplete(t *testing.T) {
 	suspending := h.locator()
 
 	suspended := make(chan error, 1)
-	go func() { suspended <- h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}) }()
+	go func() { suspended <- h.m.Handle(h.ctx, RequestSuspend{Claim: testToken, By: SuspendedByOperator}) }()
 	select {
 	case <-gated.entered:
 	case <-time.After(5 * time.Second):

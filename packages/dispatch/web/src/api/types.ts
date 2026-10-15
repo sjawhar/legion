@@ -29,6 +29,7 @@ export type {
   Ask,
   AskAnchorArtifact,
   AskAnswer,
+  AskApproval,
   AskBlockArtifact,
   AskEdit,
   AskEditPrevious,
@@ -65,6 +66,7 @@ export type {
   CreateAskInput,
   CreateBroadcastInput,
   CreateCommentInput,
+  CreateDeliverySessionGroupInput,
   CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
@@ -85,6 +87,21 @@ export type {
   DeliveryLeadTimeCell,
   DeliveryLeadTimeDay,
   DeliveryLeadTimeTiming,
+  DeliveryLiveBody,
+  DeliveryLiveClientFrame,
+  DeliveryLiveCounts,
+  DeliveryLiveDelta,
+  DeliveryLiveError,
+  DeliveryLiveFreshness,
+  DeliveryLiveList,
+  DeliveryLiveMap,
+  DeliveryLiveRevChanges,
+  DeliveryLiveRevs,
+  DeliveryLiveServerFrame,
+  DeliveryLiveSnapshot,
+  DeliveryLiveSubscribe,
+  DeliveryLiveView,
+  DeliveryLiveWindow,
   DeliveryMeasures,
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
@@ -94,6 +111,7 @@ export type {
   DeliveryRunJob,
   DeliveryRunJobDetail,
   DeliveryRunProduction,
+  DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
   DeliverySpread,
@@ -141,6 +159,8 @@ export type {
   MessageRead,
   MyAnswerRow,
   MyAnswersResponse,
+  MyRepliesResponse,
+  MyReplyRow,
   OpenAskOwner,
   ProgressCount,
   Project,
@@ -155,6 +175,7 @@ export type {
   SubscriptionRemovedEventPayload,
   Suggestion,
   TargetCandidate,
+  UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -221,7 +242,9 @@ export interface CredentialRecord {
   identifiers: string[];
   service: string | null;
   reason: string;
-  lifetime_seconds: number;
+  /** How many seconds the grant or credential lasts once approved; null for a grant that lasts
+   *  until its session ends. */
+  lifetime_seconds: number | null;
   rules_version: string;
   expires_at: string;
   requested_at: string;
@@ -245,7 +268,8 @@ interface CredentialGrantFields {
   grant_id: string;
   enrollment: CredentialEnrollment;
   names: string[];
-  expires_at: string;
+  /** When it expires; null for a grant that lasts until its session ends. */
+  expires_at: string | null;
   created_at: string;
 }
 /** A grant the policy gave a session the viewer operates without asking: no one approved it, so it
@@ -280,7 +304,12 @@ export interface MachineLogin {
   /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
    *  null for the viewer's own machine. */
   service: string | null;
-  /** The login of the person who approved it. */
+  /** The Kubernetes ServiceAccount a service's token login proved
+   *  (`system:serviceaccount:<namespace>:<name>`); null for every login a person approved, and
+   *  absent from a broker older than token logins. */
+  subject?: string | null;
+  /** The login of the person who approved it; empty for a service's token login, which no person
+   *  approves. */
   approved_by: string;
   issued_at: string;
   expires_at: string;

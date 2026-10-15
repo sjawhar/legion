@@ -1,5 +1,7 @@
 package api
 
+import "github.com/sjawhar/envoy/internal/dispatch/model"
+
 // unreadDirectRepliesCTE is the one definition of "a reply this login has not read in this
 // session": a session's own reply, anywhere under a root this viewer targeted at this session
 // (an issue-less message whose own target is `session:<id>`, a broadcast's copy included), newer
@@ -89,5 +91,5 @@ const unreadDirectRepliesCTE = `
 // canonical login, their raw actor id, and the session to narrow to (nil for every session). A
 // query appending its own parameters starts at $4.
 func unreadDirectRepliesArgs(actorID string, sessionID *string) []any {
-	return []any{canonicalLogin(actorID), actorID, sessionID}
+	return []any{model.CanonicalLogin(actorID), actorID, sessionID}
 }

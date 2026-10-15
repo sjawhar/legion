@@ -24,7 +24,8 @@ var _ supervise.Store = (*Store)(nil)
 const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.tree_epoch, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
-	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation,
+	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
+	c.plugin_contract, c.plugin_relaunch_for,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -59,8 +60,9 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, tree_epoch,
 		session, session_file, locator, state, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
-		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
+		plugin_contract, plugin_relaunch_for)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -73,12 +75,16 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		serving_generation = excluded.serving_generation,
 		agent_secrets_enrollment = excluded.agent_secrets_enrollment,
 		agent_secrets_enrollment_incarnation = excluded.agent_secrets_enrollment_incarnation,
+		suspended_by = excluded.suspended_by,
+		plugin_contract = excluded.plugin_contract,
+		plugin_relaunch_for = excluded.plugin_relaunch_for,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State),
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
-		enrollmentID, enrollmentIncarnation,
+		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
+		c.PluginContract, c.PluginRelaunchFor,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -90,7 +96,22 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 // not validate refuses the whole read, naming the claim: a daemon that loaded it would believe in
 // a process it has no way to act on.
 func (s *Store) Claims(ctx context.Context) ([]supervise.Claim, error) {
-	rows, err := s.pool.Query(ctx, claimSelect+" order by c.token")
+	return readClaims(ctx, s.pool)
+}
+
+// ClaimsTx is Claims through tx's snapshot. State reports use it with their durable issue and
+// outbox reads, so a claim's state and the queued start that might wake it cannot come from two
+// moments.
+func (s *Store) ClaimsTx(ctx context.Context, tx pgx.Tx) ([]supervise.Claim, error) {
+	return readClaims(ctx, tx)
+}
+
+type claimQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func readClaims(ctx context.Context, q claimQuerier) ([]supervise.Claim, error) {
+	rows, err := q.Query(ctx, claimSelect+" order by c.token")
 	if err != nil {
 		return nil, fmt.Errorf("read claims: %w", err)
 	}
@@ -139,6 +160,36 @@ func (s *Store) StoredClaimMayRun(ctx context.Context, token claim.Token, row in
 		return false, fmt.Errorf("read stored claim %s: %w", token, err)
 	}
 	return may, nil
+}
+
+// runsNothingStates is supervise's runs-nothing set (supervise.RunsNothingStates), as the text
+// array a query binds: the store names no state of that set itself.
+func runsNothingStates() []string {
+	states := supervise.RunsNothingStates()
+	names := make([]string, len(states))
+	for i, state := range states {
+		names[i] = string(state)
+	}
+	return names
+}
+
+// IssueRunsElsewhere names, as token:state, a stored claim of issue whose tree is not tree and that
+// does not run nothing: a claim in a state with a process of its own, running or coming up
+// (supervise.RunsNothingStates), or one that still records a locator. It answers "" when none
+// does. A child carried into a tree of its own keeps its Sandbox, labelled with the tree it left,
+// until a launch of its new tree relabels it: while a claim of the old tree runs there, the relabel
+// would end it.
+func (s *Store) IssueRunsElsewhere(ctx context.Context, project, issue, tree string) (string, error) {
+	var running string
+	err := s.pool.QueryRow(ctx, `select token || ':' || state from claims where project = $1 and issue = $2 and tree <> $3
+		and not (state = any($4) and locator is null) order by token limit 1`, project, issue, tree, runsNothingStates()).Scan(&running)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("read the claims of issue %s outside tree %s: %w", issue, tree, err)
+	}
+	return running, nil
 }
 
 // HasLegacySandboxClaims is a raw JSON census used before Claims unmarshals locators. A legacy
@@ -246,7 +297,7 @@ func (s *Store) RetireDelivery(ctx context.Context, c supervise.Claim, deliveryI
 func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	var (
 		c                          supervise.Claim
-		token, role, state         string
+		token, role, state, by     string
 		generation, treeEpoch      int64
 		locator                    []byte
 		deliveryID, task           *string
@@ -262,7 +313,8 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
-		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC,
+		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
+		&c.PluginContract, &c.PluginRelaunchFor,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
@@ -270,7 +322,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	if err != nil {
 		return supervise.Claim{}, fmt.Errorf("read claim: %w", err)
 	}
-	c.Token, c.Role, c.State = claim.Token(token), claim.Role(role), supervise.ClaimState(state)
+	c.Token, c.Role, c.State, c.SuspendedBy = claim.Token(token), claim.Role(role), supervise.ClaimState(state), supervise.SuspendSource(by)
 	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
 	if locator != nil {
 		var loc runtime.Locator

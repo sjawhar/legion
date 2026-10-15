@@ -3,6 +3,7 @@ import { statSync } from "node:fs";
 import path from "node:path";
 import { logger } from "../log";
 import initPlugin from "../server";
+import { isolateEnvoyConfig } from "./isolated-config";
 
 type ShellEnv = (
   input: { cwd: string; sessionID?: string; callID?: string },
@@ -16,6 +17,7 @@ interface Hooks {
   dispose(): void;
 }
 
+isolateEnvoyConfig();
 const previous = { ...process.env };
 const originalFetch = globalThis.fetch;
 let dispose: (() => void) | undefined;

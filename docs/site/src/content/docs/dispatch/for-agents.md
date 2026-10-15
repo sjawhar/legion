@@ -20,7 +20,7 @@ goes through a `dispatch` command.
 
 1. A person signs in to Dispatch and opens **Settings → Agent tokens**.
 2. They type a label and choose **New token**. The token is shown once; copy it then.
-3. They give it to the agent, either in `~/.config/opencode/envoy.json`:
+3. They give it to the agent in the `dispatch` section of its `envoy.json`:
 
    ```json
    {
@@ -32,7 +32,20 @@ goes through a `dispatch` command.
    }
    ```
 
-   or as the environment variables `DISPATCH_URL` and `DISPATCH_TOKEN`.
+   A session under an Oh My Pi profile other than `default`, a Claude Code `CLAUDE_CONFIG_DIR` or
+   an OpenCode `OPENCODE_CONFIG_DIR` reads the `envoy.json` in that directory and no other. Any
+   other session reads the file `ENVOY_CONFIG_FILE` names when it is set, else
+   `~/.config/legion/envoy.json` (`$XDG_CONFIG_HOME/legion/envoy.json` when that is set). The
+   `dispatch` command reads the file its session's plugin chose, which the plugin hands it in
+   `ENVOY_CONFIG_FILE`; in a Claude Code shell that gets nothing the plugin hands on, as a
+   subagent's can, it still reads the session's `CLAUDE_CONFIG_DIR`. A token written as
+   `!<command>`, such as `!secrets get DISPATCH_TOKEN`, is a command, and what it prints is the
+   token.
+
+   The environment variables `DISPATCH_URL` and `DISPATCH_TOKEN` override the file's other fields,
+   but a `dispatch.enabled: false` in the file keeps Dispatch off. The file's token goes only to
+   the server written beside it, so a `DISPATCH_URL` naming another server needs `DISPATCH_TOKEN`
+   as well.
 
 Everything the agent writes is attributed to the person who made the token: Dispatch shows the
 agent's name followed by `(for <login>)`. `dispatch whoami` tells the agent who Dispatch takes it
@@ -42,11 +55,12 @@ for.
 
 | Area | Commands |
 | --- | --- |
-| Issues | `dispatch issue` creates one. `dispatch issue-update` changes status, title, labels, priority, parent, links, or components. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
+| Issues | `dispatch issue` creates one; `--blocked-by <key>`, repeated, names up to 20 issues in the same project it waits on. `dispatch issue-update` changes status, title, labels, priority, parent, links, blockers, or components; its `--blocked-by` replaces the list, and `--clear-blocked-by` empties it. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
+| Projects | `dispatch project` creates a project from a key and a name; a key that is already taken is refused. `dispatch projects` lists every project's key and name. |
 | Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. |
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
-| Documents | `dispatch doc-read` reads a document, or the text of an uploaded file. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
+| Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
 | Reading | `dispatch read` reads an issue, ask, comment, message, or document summary. `dispatch search` searches everything. `dispatch whoami` reports who Dispatch takes the agent for. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now. |
 
@@ -124,8 +138,12 @@ The block becomes an ask in the person's Inbox, and their answer lands next to i
 
 When every decision block is settled and the spec proposes something the person has not already
 agreed to, run `dispatch request-approval` with a short `--summary` of what is new. The person
-approves that version, or requests changes with a reason. Any later version makes the approval
-stale.
+approves that version, or requests changes with a reason. A later version leaves the approval
+stale, with one exception: when the person's own answer to a decision block is the whole change
+since the version they approved, Dispatch records the approval in their name at the new version, so
+request nothing for it. When their answer changes text outside the block, rewrite that text and
+request approval again with a one-sentence `--summary` naming what changed since the earlier
+approval; the card shows that approval and a **Show diff** control that carries the detail.
 
 ## Whose turn it is
 
@@ -152,8 +170,12 @@ issue reaches you unless you subscribe to the issue's Envoy topic,
 
 A person can also message you from the Agents page:
 
-- On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation.
-  Answer it there, as you would anything typed at your terminal.
+- On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation,
+  except a message beginning with `/` runs as the session's terminal would run it. A prompt
+  template, file command or skill gives you the resulting prompt; an unknown `/name` gives you the
+  words themselves. What a command prints, or its note that it did not run because it belongs
+  only to the terminal, is already a **Reply via Dispatch**: write nothing for it. Only a command
+  that also submits a prompt, such as `/force:<tool> <prompt>`, gives you that prompt to answer.
 - A **BTW**, a broadcast, or any message to a host that takes no such turn (Claude Code) arrives as
   a Dispatch notice with a ready-made reply command. Answer with `dispatch message` and its
   `--in-reply-to`.

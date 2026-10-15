@@ -161,7 +161,7 @@ func main() {
 	if boot.NATSDisabled {
 		slog.Info("dispatch: NATS publisher disabled")
 	} else {
-		natsClient, err = bus.ConnectOwningStream(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
+		natsClient, err = bus.ConnectOwningStream(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
 		if err != nil {
 			slog.Error("dispatch: connect NATS", "error", err)
 			os.Exit(1)
@@ -182,7 +182,7 @@ func main() {
 			slog.Info("dispatch: agent conversation relay off: it needs NATS")
 		}
 	} else {
-		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.NatsURLs, env.lookup)
+		streamConn, err := bus.Dial("dispatch-agent-stream", envoyConfig.Envoy.NatsURLs, env.lookup)
 		if err != nil {
 			slog.Error("dispatch: connect the agent conversation relay", "error", err)
 			os.Exit(1)
@@ -264,6 +264,7 @@ func main() {
 		ServerURL: serverURL,
 		Settle:    boot.SettleDelay,
 	})
+	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
 	if err != nil {
@@ -343,6 +344,10 @@ func main() {
 	// are counted again, at start and on an interval, so their progress shows without anyone
 	// editing them (LEGION-542).
 	go documentService.RunTaskProgressReconciliation(ctx)
+	// The references route serves each document mention's stored excerpt; this fills the ones no
+	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
+	// inserts (LEGION-531).
+	go documentService.RunReferenceExcerptReconciliation(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -364,11 +369,15 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
 	if natsClient != nil {
 		go delivery.NewIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
+		// LEGION-690: a deploy run's jobs as each finishes, from Envoy's job events, on a durable
+		// of its own so a run's burst of jobs never queues behind the intake's merges.
+		go delivery.NewJobIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
 
-	handler := dispatchHandler(routes.New(appCtx), database, natsClient, fileStore, buildCommit)
+	routesHandler, waitDelivery := routes.New(appCtx)
+	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
@@ -382,7 +391,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}
@@ -740,6 +749,42 @@ func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	return docs.New(built)
 }
 
+// decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the
+// 2026-10-11 production dump (3,739 asks, 82,153 events) the restoration and its marking of the
+// documents it leaves owed took 0.17-0.77 s.
+const decidedWordingRestoreTimeout = 30 * time.Second
+
+// restoreDecidedWordings is the boot's restoration of the wording each decided ask was decided on,
+// where a task of an earlier release reworded it, and its marking owed of each such block ask's own
+// document and copies (docs.Service.RestoreDecidedWordings), bounded by timeout. Each ask it
+// restored has its own line; this logs their count and the copies' count. A restoration that fails
+// or runs out of time is logged and the start goes on, since each document's next settlement
+// restores its own asks.
+func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: restore decided asks' wordings", "dispatch: restored decided asks' wordings",
+		func(ctx context.Context) ([]any, error) {
+			restored, copies, err := documents.RestoreDecidedWordings(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+// bootTask runs task, a repair the boot makes before it serves, bounded by timeout, and logs what
+// it reports: the counts task returns under done at INFO, or, when task fails or runs out of time,
+// those counts and the error under failed at ERROR. Either way the start goes on.
+func bootTask(ctx context.Context, timeout time.Duration, failed, done string, task func(context.Context) ([]any, error)) {
+	taskCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	counts, err := task(taskCtx)
+	if err != nil {
+		slog.Error(failed, append(counts, "error", err)...)
+		return
+	}
+	slog.Info(done, counts...)
+}
+
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the
 // configuration, with every setting the router takes from boot filled in. The settings tests build
 // the router through it, so dropping any hand-off here fails a case.
@@ -758,10 +803,18 @@ func appContextOptions(boot bootConfig, built routes.AppContextOptions) routes.A
 	return built
 }
 
-// loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, under the
-// DISPATCH_SERVER_URL and NATS_URLS rows of the settings table.
+// loadEnvoyConfig is envoy.json as Dispatch reads it: the files config.Load finds, the user file
+// under the XDG_CONFIG_HOME row, overridden by the DISPATCH_SERVER_URL and NATS_URLS rows of the
+// settings table. Each file config.Load found and did not read is logged at WARN once at start.
 func loadEnvoyConfig(env settingValues, options config.LoadOptions) (*config.EnvoyConfig, error) {
-	return config.Load(env.lookup, options)
+	cfg, err := config.Load(env.lookup, options)
+	if err != nil {
+		return nil, err
+	}
+	for _, warning := range cfg.Warnings {
+		slog.Warn(warning.Message, "path", warning.Path, "fix", warning.Fix)
+	}
+	return cfg, nil
 }
 
 // validateDefaultProject confirms DISPATCH_DEFAULT_PROJECT names a project

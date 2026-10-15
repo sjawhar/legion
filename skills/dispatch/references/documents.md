@@ -148,6 +148,20 @@ artifact by the slug the upload printed or by its filename, and a project docume
 slug also arrives on `artifact.created` events. Dispatch suffixes a slug two documents would share, so one document's
 filename can be another's slug (`plan v2` takes `plan-v2`, then a document named `plan-v2` takes `plan-v2-2`): a bare
 `--artifact` that names both is refused with each one's id, while a `dispatch://` reference's document part is always the slug.
+A document you upload holding a copy of another document's `:::ask` block, under the same `#id` and with the same
+question, options, `multiple` and urgency, on the same issue (or the same project for a project document), opens no
+ask: the copy shows the state and answer of the ask it was copied from, names it and its document in `copied_from` and
+`copied_from_document`, and cannot be answered there. Answer the original: its answer or resolution shows on the copy a
+few seconds later. A copy may hold the original's earlier wording, from before someone reworded it. It stays a copy
+while the original is open, and shows an answer or resolution given while the original still asked that wording; an
+answer or resolution given after the rewording decides a question the copy does not ask, so the copy opens its own ask
+instead. A copy whose text you change opens a new ask. Once the original's block leaves its document, its copies share
+one new ask: the first copy to settle opens it and the others name it.
+
+An answered or resolved ask's question is fixed. Editing its block's question, options, `multiple` or urgency in the
+document, or uploading a version that changes them, does not change the ask: a few seconds later the block is written
+back to the question the answer was given on, beside its answer. To ask something new, write a new ask block with its
+own `#id`. An open ask's block is its text: edit it and the ask changes with it.
 
 A picture meant to be seen inline in a message, comment or ask is not uploaded with `dispatch artifact`: pass its local
 path with that command's `--image`, once per picture (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a
@@ -195,9 +209,10 @@ The command opens an approval ask with the options `Approve` and `Request change
 "Approve spec.md (version N)?" followed by the summary, where N is the document's latest version. It
 is refused, with nothing sent, while that version holds a decision block open, and the refusal
 names each block and its ask. An answer or a `dispatch resolve-ask` closes the ask at once but
-reaches a version only when the document settles, about two seconds later, or with your next
-`dispatch doc-edit`: fold the answer into the text (or, for a waiver, write the human's decision
-in) before you request. A block written in the last few seconds counts as open before Dispatch has
+reaches a version only when the document settles, about two seconds later. An answered block
+already carries its own record, so wait for that version rather than editing just to force one; a
+waiver carries none, so write the human's decision into the text with your next `dispatch doc-edit`
+before you request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask. A document holds one open request. A new version moves it to that version, keeping
 its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
 your own edit made sends you no event, and `dispatch read` and `dispatch doc-read` show it as
@@ -211,7 +226,27 @@ nothing, and a different `--summary` is refused, since it would rewrite the card
 reading. The answer reaches you as `artifact.approved` or `artifact.changes_requested` with the
 pinned `version` and closes the request, so the next call opens a new one; `changes_requested`
 carries the reason, which is your next piece of work. Those reads show the document's approval
-state; `stale` means it was approved and then edited.
+state; `stale` means it was approved and changed since, other than as the next paragraph says.
+
+A human's own answer to a decision block in a document they approved can carry the approval to
+the version it writes. Dispatch compares that version with the version they approved, every
+decision block cut out of both; when the text outside the blocks is the same and every block added or
+answered since has their answer, it records an `approved` review in their name pinned to the new version and
+emits `artifact.approved`, in the transaction that writes the version, and answers an approval
+request open on the document `Approve` in their name. The answer was the whole change since the
+version they approved, so request nothing: `dispatch doc-read` shows `Approval: approved vN` at
+the new version. An edit inside the block before the answer does not stop this. A change
+outside the blocks, whoever wrote it (an upload or a typed edit included), a block added since the
+approval that the human has not answered (open or waived), a block the approved version held that
+someone else answered or that was waived since, a decided block whose question or options were
+changed (its answer decided the question it was given on), a removed block, a request for changes
+newer than the approval, or a document they never approved leaves the approval stale, and the next
+request shows them the diff: a request on a document a human approved earlier carries
+`approved` (`{version, at, by}`) in `ask.approval`, and its Inbox card puts
+`Approved at version N on <date> by <who>.` and a `Show diff` control under the question, which
+shows what changed between the two versions with every decision block cut out. So that request's
+`--summary` is one sentence naming what changed since that approval, and repeats nothing the diff
+shows.
 
 ## A document that is reloading
 

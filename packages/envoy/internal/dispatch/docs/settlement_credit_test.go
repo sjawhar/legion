@@ -423,8 +423,8 @@ func connectBrowser(t *testing.T, serverURL, artifactID, login string) *docstest
 	case <-browser.Answers:
 	case <-browser.Ended:
 		t.Fatalf("%s's connection closed before the room sent the document", login)
-	case <-time.After(untilTestDeadline(t)):
-		t.Fatalf("the room did not send %s the document before the test's deadline", login)
+	case <-time.After(roomWait(t)):
+		t.Fatalf("the room did not send %s the document within roomWait", login)
 	}
 	return browser
 }
@@ -475,19 +475,40 @@ func editAsBrowser(t *testing.T, service *Service, artifactID string, browser *d
 	}
 	select {
 	case <-recorded:
-	case <-time.After(untilTestDeadline(t)):
-		t.Fatal("the room did not record the browser's edit before the test's deadline")
+	case <-time.After(roomWait(t)):
+		t.Fatal("the room did not record the browser's edit within roomWait")
 	}
 }
 
-// untilTestDeadline is how long a wait may run: up to the test binary's deadline, less a margin
-// to fail by name, rather than a fixed bound a loaded machine outruns.
-func untilTestDeadline(t *testing.T) time.Duration {
-	if deadline, bounded := t.Deadline(); bounded {
-		return time.Until(deadline) - 2*time.Second
+// roomWait bounds a wait on a document room's own work - sending a browser the document,
+// recording an edit, landing an append, finishing an eviction - which takes as long as the loaded
+// machine takes. It is the smaller of roomWaitCap and what the test binary's deadline leaves after
+// roomWaitMargin, so a room that never finishes fails the test by name, and leaves the binary's
+// timeout to the package's later tests. A deadline that leaves no more than roomWaitMargin to
+// begin with fails once, by name: that reads like a misconfigured run, not a room that stopped.
+func roomWait(t *testing.T) time.Duration {
+	t.Helper()
+	deadline, bounded := t.Deadline()
+	if !bounded {
+		return roomWaitCap
 	}
-	return time.Minute
+	left := time.Until(deadline)
+	if left <= roomWaitMargin {
+		t.Fatalf("the test binary's deadline leaves %s, not more than roomWaitMargin (%s): this looks like a misconfigured run; raise -timeout", left.Round(time.Millisecond), roomWaitMargin)
+	}
+	return min(left-roomWaitMargin, roomWaitCap)
 }
+
+const (
+	// roomWaitCap is far above the longest run of a test that uses roomWait measured on the
+	// development machine (2.1 s, at load 17), so a loaded runner is not mistaken for a room that
+	// stopped.
+	roomWaitCap = 2 * time.Minute
+	// roomWaitMargin is what roomWait leaves of the test binary's deadline for the failed test's
+	// cleanups, which hold the document service's Shutdown, bounded by ShutdownDrainBudget (9 s):
+	// they took at most 85 ms after a wait that timed out, over every test that uses roomWait.
+	roomWaitMargin = 30 * time.Second
+)
 
 // connectedBrowsers is how many browsers the room has registered (state.connected).
 func connectedBrowsers(service *Service, artifactID string) int {

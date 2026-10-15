@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -187,6 +188,7 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Timeouts: supervise.Timeouts{
 			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second,
 		},
+		PluginContract: 24,
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
@@ -332,7 +334,7 @@ func (d *operatorDaemon) ready(token legionclaim.Token) {
 	var registered legionclaim.RegisterResponse
 	d.post("/legion/v1/claims/register", legionclaim.RegisterRequest{
 		BootToken: bootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, &registered)
 	d.post("/legion/v1/claims/ready", legionclaim.ReadyRequest{
 		ClaimToken: token, SessionID: "ses_" + string(token), Secret: registered.Secret, Generation: registered.Generation,
@@ -396,7 +398,7 @@ func TestClaimsSpawnPostsTheClaimWithTheOperatorBearer(t *testing.T) {
 	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Claim != architectClaim {
 		t.Fatalf("spawns = %+v, want one launch of %s", spawns, architectClaim)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -449,7 +451,7 @@ func TestClaimsDeliverPostsTheTask(t *testing.T) {
 	if answered.Pending == nil || answered.Pending.Task != "Review the plan." {
 		t.Fatalf("the daemon answered pending %+v, want the task queued", answered.Pending)
 	}
-	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1\n"; out != want {
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 1 0\n"; out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
 }
@@ -469,9 +471,9 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 		action, method, want string
 		claim                legionclaim.Token
 	}{
-		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1\n", architectClaim},
-		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2\n", architectClaim},
-		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1\n", workerClaim},
+		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 24\n", architectClaim},
+		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 24\n", architectClaim},
+		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0\n", workerClaim},
 	} {
 		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(step.claim))...)
 
@@ -504,8 +506,41 @@ func TestClaimsClosePostsToTheClaimsCloseRoute(t *testing.T) {
 	}
 }
 
-// list prints one line per claim — token, role, issue, state, generation — in the daemon's token
-// order, and --json prints the daemon's answer byte for byte.
+// retry posts to the claim's retry route, with no body, and prints the claim as the retry left it:
+// a claim whose launches the runtime refused until its budget ran out launches again. A retry of a
+// claim that has not failed is the daemon's refusal, naming its state.
+func TestClaimsRetryPostsToTheClaimsRetryRoute(t *testing.T) {
+	d := newOperatorDaemon(t)
+	refused := fake.SpawnResult{Err: errors.New("the runtime refused the launch")}
+	d.runtime.ScriptSpawn(refused, refused, refused)
+	if code, _, _ := d.claims(d.spawnArgs()...); code != 1 {
+		t.Fatalf("spawn whose every launch the runtime refused exited %d, want 1", code)
+	}
+	retry := append(append([]string{"retry"}, d.reach()...), "--claim", string(architectClaim))
+
+	out := d.succeed(retry...)
+
+	seen := d.lastOperatorRequest()
+	wantOperatorRequest(t, seen, http.MethodPost, "/legion/v1/operator/claims/"+string(architectClaim)+"/retry")
+	if len(seen.body) != 0 {
+		t.Fatalf("retry sent a body %q, want none", seen.body)
+	}
+	if want := "legion-legion-legion-208-architect architect LEGION-208 launching 4 0\n"; out != want {
+		t.Fatalf("retry stdout = %q, want %q", out, want)
+	}
+	if spawns := d.runtime.CallsOf("Spawn"); len(spawns) != 4 {
+		t.Fatalf("the runtime saw %d spawns, want the retry's launch after the three refused", len(spawns))
+	}
+
+	code, out, errb := d.claims(retry...)
+
+	if want := "the daemon answered 409 Conflict: retry refused: the claim is launching (the claim has not failed)"; code != 1 || out != "" || !strings.Contains(errb, want) {
+		t.Fatalf("retry of the launching claim: exit %d, stdout %q, stderr %q; want 1 naming %q", code, out, errb, want)
+	}
+}
+
+// list prints one line per claim — token, role, issue, state, generation, plugin contract — in the
+// daemon's token order, and --json prints the daemon's answer byte for byte.
 func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	d := newOperatorDaemon(t)
 	d.succeed(d.spawnArgs()...)
@@ -517,8 +552,8 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out := d.succeed(append([]string{"list"}, d.reach()...)...)
 
 	wantOperatorRequest(t, d.lastOperatorRequest(), http.MethodGet, "/legion/v1/operator/claims")
-	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1\n" +
-		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1\n"
+	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 24\n" +
+		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0\n"
 	if out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)
 	}
@@ -550,18 +585,20 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 		want string
 	}{
 		{
+			// A suspend of a launching claim is held until the agent is ready, so a resume, which a
+			// claim that is not suspended refuses, is the request its state refuses.
 			name: "a request the claim's state refuses",
 			args: func(d *operatorDaemon) []string {
-				return append(append([]string{"suspend"}, d.reach()...), "--claim", string(architectClaim))
+				return append(append([]string{"resume"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: suspend refused: the claim is launching (the agent has not registered)",
+			want: "the daemon answered 409 Conflict: resume refused: the claim is launching",
 		},
 		{
 			name: "the same refusal under --json",
 			args: func(d *operatorDaemon) []string {
-				return append(append([]string{"suspend", "--json"}, d.reach()...), "--claim", string(architectClaim))
+				return append(append([]string{"resume", "--json"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: suspend refused: the claim is launching",
+			want: "the daemon answered 409 Conflict: resume refused: the claim is launching",
 		},
 		{
 			name: "a claim the daemon does not hold",
@@ -663,6 +700,7 @@ func TestClaimsRefusesAMissingFlagBeforeReachingTheDaemon(t *testing.T) {
 		{"suspend", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"resume", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"stop", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
+		{"retry", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"close", [][2]string{{"operator-token-file", token}, {"claim", string(architectClaim)}}},
 		{"list", [][2]string{{"operator-token-file", token}}},
 	} {
@@ -731,6 +769,7 @@ func TestClaimsRefusesAnOperatorTokenFileItCannotRead(t *testing.T) {
 		{"suspend", "--claim", string(architectClaim)},
 		{"resume", "--claim", string(architectClaim)},
 		{"stop", "--claim", string(architectClaim)},
+		{"retry", "--claim", string(architectClaim)},
 		{"close", "--claim", string(architectClaim)},
 		{"list"},
 	} {

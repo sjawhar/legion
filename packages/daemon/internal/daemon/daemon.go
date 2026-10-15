@@ -6,9 +6,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -46,6 +48,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -125,6 +128,22 @@ type overrides struct {
 	githubAPI string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
+	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
+	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
+	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
+	strandedReported func()
+	// pluginRelaunchable overrides whether a stale-plugin claim can be relaunched onto a plugin
+	// (supervise.Deps.PluginRelaunchable), bypassing the configuration-derived default: nil keeps
+	// that default, which a kubernetes-runtime test without a real cluster has no other way to
+	// drive, since such a test configures no runtime.kubernetes.plugins and links no plugin pair.
+	pluginRelaunchable *bool
+	// checkLaunch stands in for the store's own CheckLaunch (supervise.Store), wrapping the real
+	// store so every launch's recheck refuses first when this does, then asks the real store
+	// (launchGatedStore, internal/daemon/launchgate.go): a test's way to refuse a relaunch the way
+	// a reserved tree cleanup or a transient store error would, without a lifecycle this pod has
+	// none of to reserve. nil, in production, is nothing: every launch reaches the real store's
+	// own check.
+	checkLaunch func(context.Context, supervise.Claim) error
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -158,6 +177,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		logPlugins(log, plan.plugins, plan.pluginsSource)
 	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "prompts")
@@ -391,7 +413,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			if workflow != nil {
 				log.Info("legion workflow boot stage", "stage", "api")
 			}
-			err = serve(ctx, cfg, st, startedAt, listener, s, plan, workflow)
+			err = serve(ctx, cfg, st, startedAt, bootID, listener, s, plan, workflow)
 		default:
 			failed <- err
 			s.halt(err)
@@ -513,13 +535,30 @@ type plan struct {
 	controllerRetry time.Duration
 	// stopBudget is how long the stop waits for the daemon's own work once it begins (stopBudget).
 	stopBudget time.Duration
-	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
+	// secretsEnroller is the daemon's agent-secrets token login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
-	// secretsLogin is the same machine login's client, read-only, for the state route to show its
+	// pluginRelaunchable is supervise.Deps.PluginRelaunchable: whether this daemon can relaunch a
+	// stale-plugin claim onto a plugin at all. True under tmux always; under Kubernetes, true iff
+	// a plugin pair to install is known — plugins below, resolved by ResolvedPlugins from the
+	// file's runtime.kubernetes.plugins or the release's linked pair.
+	pluginRelaunchable bool
+	// plugins is this daemon's resolved Kubernetes plugin pair (ResolvedPlugins), with Contract
+	// already api.DaemonAPIVersion: what specs.SpawnSpec installs for a stale-plugin relaunch, and
+	// what the boot log and `legion start --check-config` name. nil under tmux, and under
+	// Kubernetes when the daemon knows no pair (LEGION-164's degraded mode); pluginsSource is
+	// "legion.yaml" or "binary" with a pair, "" without one.
+	plugins       *runtime.PluginInstall
+	pluginsSource string
+	// secretsLogin is the same login's client, read-only, for the state route to show its
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
 	secretsLogin *agentsecrets.Client
+	// strandedReported is overrides.strandedReported; nil runs nothing.
+	strandedReported func()
+	// checkLaunch is overrides.checkLaunch; nil wraps the store with nothing, so every launch
+	// reaches the real store's own CheckLaunch.
+	checkLaunch func(context.Context, supervise.Claim) error
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -573,11 +612,17 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		stop = stopBudget
 	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
+	plugins, pluginsSource := ResolvedPlugins(cfg)
+	pluginRelaunchable := cfg.Runtime.Name == "tmux" || plugins != nil
+	if o.pluginRelaunchable != nil {
+		pluginRelaunchable = *o.pluginRelaunchable
+	}
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
-		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
+		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
+		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -743,10 +788,17 @@ type supervision struct {
 	// passed (kubernetes), so the image rows of the capability report read present.
 	imageReport bootprobe.ImageReport
 	probed      bool
-	// reportedGaps are the open capabilities the last report logged (reportCapabilities), under
-	// reportMu: the tick's reads and boot's run on different goroutines.
+	// reportMu guards reportedGaps and reports: the tick's reads, the API's readies and boot's run
+	// on different goroutines. reportedGaps are the open capabilities the last report logged
+	// (reportCapabilities). reports is each claim's latest capability report (LEGION-663), as its
+	// session's ready carried it (capabilityReported) or the store held it at boot (openSupervision),
+	// whatever process reported: deployment fences each against its claim's current process.
 	reportMu     sync.Mutex
 	reportedGaps []string
+	reports      map[claim.Token]capabilities.Report
+	// reportStore persists each report as it arrives (store.Store), so a restart renders the
+	// sessions it re-adopts without waiting for them to report again.
+	reportStore capabilityReportStore
 
 	cancel context.CancelFunc
 	// draining is the worker stream's life and what the API's routes run their decisions on
@@ -793,8 +845,15 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 }
 
 // deployment is Deployment with what this boot learned: the broker login's state, whether the
-// image passed its probe, the model-fallback mark the probe or the gate read, and how many of the
-// probe's attempts waited on the pool's capacity before one scheduled, with the scheduler's reason.
+// image passed its probe, the model-fallback mark the probe or the gate read, how many of the
+// probe's attempts waited on the pool's capacity before one scheduled, with the scheduler's
+// reason, and the live sessions' reports of the live rows (LEGION-663). A session is live when its
+// claim is ready, working or idle with a process, and its report is that process's: a report from a
+// claim since relaunched, suspended or retired names a session that no longer runs and contributes
+// nothing, until the new process reports. The claims are read as their machines last published
+// them (supervise.Machine.View), never waiting on a decision in flight, so the tick and the state
+// route read the deployment while a relaunch waits on its pods; the sessions are in claim token
+// order. It reads memory alone: no store, no context.
 func (s *supervision) deployment() capabilities.Deployment {
 	d := Deployment(s.cfg)
 	if s.plan.secretsLogin != nil {
@@ -802,14 +861,100 @@ func (s *supervision) deployment() capabilities.Deployment {
 	}
 	d.Probed, d.ModelFallback = s.probed, s.imageReport.ModelFallback
 	d.ProbeCapacityWaits, d.ProbeCapacityReason = s.imageReport.CapacityWaits, s.imageReport.CapacityReason
+	if s.supervisor == nil {
+		return d
+	}
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	for _, m := range s.supervisor.supervised() {
+		c := m.View().Claim
+		report, ok := s.reports[c.Token]
+		if !ok || c.Locator == nil || report.Locator.Incarnation != c.Locator.Incarnation {
+			continue
+		}
+		if claimTookRole(c.State) {
+			d.Sessions = append(d.Sessions, capabilities.Session{Role: c.Role, Issue: c.Issue, Report: report})
+		}
+	}
+	slices.SortFunc(d.Sessions, func(a, b capabilities.Session) int {
+		return strings.Compare(string(a.Report.Claim), string(b.Report.Claim))
+	})
 	return d
+}
+
+// capabilityReportStore is the store's keeping of each claim's latest capability report
+// (store.Store.PutCapabilityReport), as capabilityReported persists one.
+type capabilityReportStore interface {
+	PutCapabilityReport(ctx context.Context, report capabilities.Report) error
+}
+
+// capabilityReported takes a session's report of the live rows, which its ready carried
+// (api.Options.CapabilityReported): kept as its claim's latest, persisted, and logged — one line
+// naming the session and every row it measured, then one warning per row whose check failed, so
+// an operator reading the log at the ready sees what this session lacks without waiting for the
+// tick's report. A store that refuses the write is logged and the report kept in memory all the
+// same: the daemon runs the session and reports what it lacks, so a lost persistence loses a
+// report at the next boot, never a claim.
+func (s *supervision) capabilityReported(ctx context.Context, c supervise.Claim, report capabilities.Report) {
+	s.reportMu.Lock()
+	if s.reports == nil {
+		s.reports = map[claim.Token]capabilities.Report{}
+	}
+	s.reports[c.Token] = report
+	s.reportMu.Unlock()
+	if err := s.reportStore.PutCapabilityReport(ctx, report); err != nil {
+		s.log.Error("capabilities: the session's report could not be persisted; it is kept until the daemon stops", "claim", c.Token, "error", err)
+	}
+	// A slice of strings and booleans always marshals.
+	encoded, _ := json.Marshal(report.Rows)
+	log := s.log.With("claim", c.Token, "role", c.Role, "issue", c.Issue,
+		"locator", report.Locator.Label(), "incarnation", report.Locator.Incarnation)
+	log.Info("capabilities: session reported", "elapsedMs", report.ElapsedMs, "rows", string(encoded))
+	for _, row := range report.Rows {
+		if !row.OK {
+			log.Warn(capabilities.State{Name: row.Name, Detail: row.Detail}.OpenLine(), "capability", string(row.Name))
+		}
+	}
+}
+
+// capabilityReports is a copy of every claim's latest report, for the state route
+// (source.reports): the projection shows each claim its own, whatever process reported it, with
+// the incarnation a reader compares to the claim's locator.
+func (s *supervision) capabilityReports() map[claim.Token]capabilities.Report {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	return maps.Clone(s.reports)
+}
+
+// reportsOfClaims is the stored reports of claims, by claim: the store is shared across projects,
+// and another legion's sessions are not this deployment's.
+func reportsOfClaims(reports []capabilities.Report, claims []supervise.Claim) map[claim.Token]capabilities.Report {
+	tokens := make(map[claim.Token]bool, len(claims))
+	for _, c := range claims {
+		tokens[c.Token] = true
+	}
+	own := make(map[claim.Token]capabilities.Report, len(reports))
+	for _, report := range reports {
+		if tokens[report.Claim] {
+			own[report.Claim] = report
+		}
+	}
+	return own
+}
+
+// promptAgents is the sorted names of every task agent the role prompts dispatch
+// (prompts.RoleReferences), which the registration answers (api.Options.PromptAgents, whose
+// register writes an empty list for none).
+func promptAgents(references promptrefs.Names) []string {
+	return slices.Sorted(maps.Keys(references[promptrefs.TaskAgents]))
 }
 
 // reportCapabilities names the deployment capabilities with no decision, in the table's order, and
 // logs the report whenever that set differs from the one last logged: once at boot, and again from
 // a controller tick that finds it changed (admit.Admission.ReportCapabilities asks only when the
 // tick queues a wake: a controller is registered and no tick notice is pending) — the broker's
-// login reaching issued is the one change a running daemon sees — so a gap is logged at boot and
+// login reaching issued, and a live session's report of a row its check failed
+// (capabilityReported), are the changes a running daemon sees — so a gap is logged at boot and
 // at the first tick after a change, never on every tick, and never between ticks.
 func (s *supervision) reportCapabilities() []string {
 	d := s.deployment()
@@ -846,16 +991,20 @@ func shimAddress(bound, advertiseHost string) (string, error) {
 	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
 }
 
-// openSupervision reads the claims the store holds, takes the worker stream, and builds the
-// runtime over it, for supervision's lifetime and with the workflow's App tokens (nil without a
-// workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
-// before its boot is recorded.
+// openSupervision reads the claims the store holds and their sessions' capability reports, takes
+// the worker stream, and builds the runtime over it, for supervision's lifetime and with the
+// workflow's App tokens (nil without a workflow): every step of supervision that can refuse, so a
+// daemon that cannot supervise refuses before its boot is recorded.
 func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens) (*supervision, error) {
 	claims, err := st.Claims(boot)
 	if err != nil {
 		return nil, err
 	}
 	claims = ofProject(claims, p.project)
+	reports, err := st.CapabilityReports(boot)
+	if err != nil {
+		return nil, err
+	}
 
 	supervising, cancel := context.WithCancel(context.Background())
 	draining, endDrain := context.WithCancel(context.Background())
@@ -885,10 +1034,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	sup.deps = supervise.Deps{
 		Runtime: rt,
 		Conns:   listener,
-		Store:   pruning(tokens.Recording(st), runtime.SecretsDir(cfg.StateDir), log),
+		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
-			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
+			identity: p.identity, designGate: cfg.Gates.Design,
+			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,
@@ -909,10 +1059,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 		},
+		PluginContract:     api.DaemonAPIVersion,
+		PluginRelaunchable: p.pluginRelaunchable,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
+		reports: reportsOfClaims(reports, claims), reportStore: st,
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,
 	}, nil
@@ -925,9 +1078,13 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
 // leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
 // resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
-// any (relaunchUnfinished). A daemon that leaves the controller to its operator first stops the
-// controller's claim an earlier boot under `controller: daemon` left (stopLaunchedController),
-// which leaves it absent or retired. The only controller claim among the unrecorded launches is a
+// any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted its boot
+// stale-plugin relaunch first (refreshStalePlugins), over every one before any of them is
+// relaunched; a claim a refused attempt leaves stale is retried at the orphan sweep's own cadence
+// from then on (reconcileOrphans), not just at this boot pass. A daemon that leaves the controller
+// to its operator first stops the controller's claim an earlier
+// boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
+// retired. The only controller claim among the unrecorded launches is a
 // launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
 // relaunch it: its ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token
 // is a second guard beside that check, so boot does not report the retired claim as an unrecorded
@@ -980,10 +1137,41 @@ func (s *supervision) start(boot context.Context) error {
 		defer s.wg.Done()
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
+	s.refreshStalePlugins(s.claims, "boot")
 	if len(unfinished) > 0 {
 		s.relaunchUnfinished(unfinished, reconciled)
 	}
 	return nil
+}
+
+// refreshStalePlugins posts StalePlugin to every live claim whose recorded plugin contract is not
+// this daemon's — an earlier daemon's, or none at all, at the first boot on this release, or one a
+// prior relaunch attempt the tree lifecycle or the store refused left stale (launch returns such a
+// refusal before the claim's state, locator, or contract change). Trigger says which pass is
+// posting: "boot", once over the restored claims before any of them is relaunched
+// (relaunchUnfinished runs after this); "sweep", at every orphan sweep's own cadence, over the
+// claims it already reads each tick, so a relaunch the boot pass could not complete is retried
+// without waiting for the next restart. refreshPlugin's own re-check makes a re-post for a claim a
+// prior attempt already moved on — relaunched, or registered current — a no-op. A claim still
+// launching is left to its own registration, which decides the comparison the moment it arrives,
+// so only the four states whose process has registered are read. A daemon that cannot relaunch
+// onto a plugin (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing;
+// it logs one Error line per stale claim at boot only — a sweep's finding would only repeat a line
+// the boot already wrote, since nothing relaunchable has changed in between.
+func (s *supervision) refreshStalePlugins(claims []supervise.Claim, trigger string) {
+	for _, c := range claims {
+		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !supervise.HoldsCapability(c.State) {
+			continue
+		}
+		if !s.plan.pluginRelaunchable {
+			if trigger == "boot" {
+				s.log.Error(supervise.NoPluginSourceMessage,
+					"claim", c.Token, "incarnation", c.Locator.Incarnation, "pluginContract", c.PluginContract, "daemonApiVersion", api.DaemonAPIVersion)
+			}
+			continue
+		}
+		s.supervisor.post(c.Token, supervise.StalePlugin{Claim: c.Token, Trigger: trigger})
+	}
 }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not
@@ -1116,7 +1304,10 @@ func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) 
 }
 
 // reconcileOrphans ends, every sweep interval, whatever the runtime holds that belongs to none of
-// the claims the daemon has not retired, once it has idled past the grace.
+// the claims the daemon has not retired, once it has idled past the grace, and re-posts
+// StalePlugin for every live claim whose contract still differs — the retry a relaunch the boot
+// pass (refreshStalePlugins) could not complete needs, riding the sweep because it is the one
+// periodic pass that already reads every claim, rather than running a timer of its own.
 func (s *supervision) reconcileOrphans(ctx context.Context) {
 	ticker := time.NewTicker(s.plan.orphanSweep)
 	defer ticker.Stop()
@@ -1136,6 +1327,7 @@ func (s *supervision) reconcileOrphans(ctx context.Context) {
 		if err := s.runtime.ReconcileOrphans(ctx, knownClaims(claims), orphanGrace); err != nil && ctx.Err() == nil {
 			s.log.Error("reconcile orphans", "error", err)
 		}
+		s.refreshStalePlugins(claims, "sweep")
 	}
 }
 
@@ -1210,7 +1402,7 @@ func (s *supervision) stop() {
 // anything waits — the workflow's outbox and the controller keeper would otherwise wait on a
 // machine whose relaunch holds it, and the stop on them — and then drains the API until drainBy,
 // letting the decisions its routes asked for finish, and ends them when the drain does (endDrain).
-func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
+func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, bootID int64, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
 	records := record.Store(record.NewStore())
 	var handlers []intake.Handler
 	var client dispatch.Client
@@ -1233,7 +1425,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		State: &source{
 			store:        st,
 			records:      records,
-			supervisor:   s.supervisor,
 			project:      cfg.Project,
 			projectToken: p.project,
 			runtime:      cfg.Runtime.Name,
@@ -1241,6 +1432,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
+			reports:      s.capabilityReports,
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1250,6 +1442,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
+		PluginRelaunchable: p.pluginRelaunchable,
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,
@@ -1262,16 +1455,38 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		GitHubOwner:        githubOwner(cfg),
 		GitHubAPI:          githubAPI,
 		Repository:         projectRepository(cfg),
+		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
 		ClaimReady:         claimReadyHook(keeper, claimReady),
+		PromptAgents:       promptAgents(p.roleReferences),
+		CapabilityReported: s.capabilityReported,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
+	serverStarted := make(chan struct{})
 	group.Go(func() error {
+		close(serverStarted)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve the API on %s: %w", server.Addr, err)
+		}
+		return nil
+	})
+	// The report is advisory: its transaction must never sit in the path from restored claims to a
+	// serving API. Start it only after the server goroutine has begun and bound its store read; a
+	// lock or unavailable connection is a report error, not a failed or unhealthy boot.
+	group.Go(func() error {
+		select {
+		case <-serverStarted:
+		case <-serving.Done():
+			return nil
+		}
+		report, cancel := context.WithTimeout(serving, strandedReportTimeout)
+		defer cancel()
+		reportStranded(report, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, cfg.Project, p.project, s.log)
+		if p.strandedReported != nil {
+			p.strandedReported()
 		}
 		return nil
 	})
@@ -1291,6 +1506,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 	if workflow != nil {
 		group.Go(func() error { return workflow.run(serving) })
+		// The boot fact runs beside the already-started API server, so a slow census of claims
+		// never delays /healthz or repeats LEGION-653's boot-time deadlock. A failure while the
+		// daemon serves is retried (runBooted); only the daemon's stop ends it unapplied.
+		group.Go(func() error {
+			workflow.runBooted(serving, bootID)
+			return nil
+		})
 	}
 	if keeper != nil {
 		group.Go(func() error {
@@ -1305,24 +1527,27 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	return group.Wait()
 }
 
-// source answers the state route out of the daemon's own store: the daemon itself, the cap it
-// admits under, every claim it supervises, filed under the issue it is on, and the project's
-// controller.
+// source answers the state route out of one repeatable-read snapshot: the daemon itself, the cap
+// it admits under, every stored claim filed under the issue it is on, and the project's controller.
+// A machine persists its claim before it publishes it to supervision, so the durable snapshot
+// prevents a claim view and strandedClaims from describing different instants.
 type source struct {
 	store        *store.Store
 	records      record.Store
-	supervisor   *supervisor
 	project      string
 	projectToken string
 	runtime      string
 	admissionCap int
 	startedAt    time.Time
-	// secretsLogin is the daemon's own agent-secrets machine login client (newSecretsLogin), read
+	// secretsLogin is the daemon's own agent-secrets token login client (newSecretsLogin), read
 	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
 	secretsLogin *agentsecrets.Client
 	// deployment is the deployment's capabilities as this boot knows them (supervision.deployment),
 	// whose report the state carries.
 	deployment func() capabilities.Deployment
+	// reports is each claim's latest capability report (supervision.capabilityReports), which the
+	// projection shows on the claim's view whatever process reported it.
+	reports func() map[claim.Token]capabilities.Report
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1359,14 +1584,21 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	claims, err := s.supervisor.Claims(ctx)
+	claims, err := s.store.ClaimsTx(ctx, tx)
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims)
+	claims = ofProject(claims, s.projectToken)
+	records := projectRecords{Store: s.records, project: s.project}
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports())
 	if err != nil {
 		return api.State{}, err
 	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	if err != nil {
+		return api.State{}, err
+	}
+	state.StrandedClaims = api.StrandedClaimsOf(stranded)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,
@@ -1381,8 +1613,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
 	if s.secretsLogin != nil {
-		login := s.secretsLogin.LoginStatus()
-		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: login.State, Code: login.Code}
+		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: s.secretsLogin.LoginStatus().State}
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
 	return state, nil
@@ -1401,5 +1632,13 @@ func projectRepository(cfg config.Config) func(project string) (ghrepo.Repositor
 	return func(project string) (ghrepo.Repository, bool) {
 		configured, ok := cfg.Projects[project]
 		return configured.Repo, ok && !configured.Repo.IsZero()
+	}
+}
+
+// projectMergeRules answers the merge policy an issue's project configures. A project absent from
+// the configuration has no special merge policy.
+func projectMergeRules(cfg config.Config) func(project string) config.MergeRules {
+	return func(project string) config.MergeRules {
+		return cfg.Projects[project].Merge
 	}
 }

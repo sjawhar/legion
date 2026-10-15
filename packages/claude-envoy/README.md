@@ -21,11 +21,24 @@ events and sends them to the current Claude Code session as supported
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
-  resume, clear, compact, fork). It writes `export DISPATCH_HOST=claude` to `CLAUDE_ENV_FILE` once,
-  which Claude Code sources into every later Bash command of the session, records the current
+  resume, clear, compact, fork). Each of its hooks has a 20 s `timeout` (Claude Code's field is in
+  seconds): every hook resolves Dispatch first, and a `!` `dispatch.token` may run for up to 10 s in
+  the hook's own process after Bun starts, so the hook outlasts it and says why rather than being
+  killed silently. It writes `export DISPATCH_HOST=claude` and
+  `export ENVOY_CONFIG_FILE='<path>'` (the session's envoy.json, below) to `CLAUDE_ENV_FILE` once
+  each, which Claude Code sources into every later Bash command of the session, records the current
   session id for the channel server, and puts the session's open Dispatch asks into the model's
   context (`Dispatch authored-ask summary:`; `unavailable: <reason>` when Dispatch cannot be
-  reached; nothing when Dispatch is not configured). With Dispatch configured,
+  reached; nothing when Dispatch is not configured or a file sets `dispatch.enabled` to false,
+  unless the session's missing file is what turns it off while `~/.config/opencode/envoy.json`,
+  which is not read, is there: then `unavailable: <notice>`, the notice naming what to do with
+  it). Before that, whether Dispatch is on or off, a checkout's
+  `.opencode/envoy.json`, which is not read, is one `envoy: <file> is not read: mkdir -p … && mv …`
+  line while the checkout has no `.envoy/envoy.json`. The `dispatch` command reads the file
+  `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the
+  hook writes there (anthropics/claude-code#46696); its `dispatch` command, finding no
+  `DISPATCH_HOST`, then takes host `claude` from the `CLAUDE_CODE_CHILD_SESSION=1` Claude Code sets
+  in every Bash, and reads `CLAUDE_CONFIG_DIR` itself. With Dispatch configured,
   `dist/session-hook.js dispatch-first` puts the `dispatch-first` skill into the context of every
   session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
   its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
@@ -68,7 +81,11 @@ events and sends them to the current Claude Code session as supported
   summary (the same shape as OMP on fork). `ENVOY_SESSION_ID` (QA override) disables the handoff.
 - `envoy_inbox` is local recovery state: the most recent 50 event summaries, with no envelope
   body, ordered newest first.
-- `bin/envoy-send.ts` sends direct messages through Envoy's local listener HTTP API.
+- `bin/envoy-send.ts` sends direct messages through the Envoy listener's HTTP API, to the listener
+  and with the bearer a command resolves: `envoySettings` over the envoy.json
+  `envoyConfigPath("command")` chooses (the `ENVOY_CONFIG_FILE` the `open-asks` hook hands the
+  session's Bash first), with `ENVOY_URL` and `ENVOY_TOKEN_FILE` or `ENVOY_TOKEN` over its `envoy`
+  section. With Envoy off it sends nothing and exits 1, saying why.
 
 ## Channel metadata
 
@@ -101,10 +118,8 @@ command runs as the Claude Code session that called it: the `open-asks` hook nam
 which Claude Code sets fresh in every Bash command and moves to the new id on `/clear`, so a
 `DISPATCH_SESSION_ID` inherited from a parent session is ignored. A write that makes the session
 follow an ask prints `Following ask <id> on <issue>: …` once per ask, after its result; a result
-longer than 25,000 characters is written to a file the output names. The configuration follows
-`@legion/envoy-client/dispatch-config`: set `dispatch.enabled`, `dispatch.serverUrl`, and
-`dispatch.token` in envoy.json, or provide `DISPATCH_URL` and `DISPATCH_TOKEN`; it is read on every
-call.
+longer than 25,000 characters is written to a file the output names. It reads the envoy.json
+below on every call.
 
 Dispatch asks remain on native Dispatch. Channel notifications are one-way ingress, not a remote
 human approval surface.
@@ -136,9 +151,10 @@ root). So the three executables ship as committed single-file Bun bundles, `dist
 `dist/session-hook.js` and `dist/dispatch.js` (the `dispatch` command, built from
 `@legion/envoy-client`'s `bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod` and theirs; the package version
-is inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one
-version). `dist/THIRD_PARTY_NOTICES` beside them carries the license of every third-party package
-they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at the repository root.
+is inlined from `package.json`, so the MCP server reports `package.json`'s version, which
+`.omp-plugin/plugin.json` repeats). `dist/THIRD_PARTY_NOTICES` beside them carries the license of
+every third-party package they inline, written from Bun's metafile by
+`scripts/third-party-notices.ts` at the repository root.
 
 - `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, `minify: false`, no sourcemap), notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
@@ -160,6 +176,22 @@ they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at 
   prepack of both Oh My Pi plugins) for npm; this plugin's distribution channel is
   the git repository, so its bundle lives in-tree. An npm-published plugin and a `dist` release
   branch were considered and rejected as more moving parts for the same result.
+
+## Updates
+
+Neither `.claude-plugin/plugin.json` nor the plugin's entry in the repository's
+`.claude-plugin/marketplace.json` declares a `version`, so Claude Code takes claude-envoy's version
+from the marketplace commit it installs from (the SHA's first 12 characters), and every commit on
+main is a new version, one that changes nothing in the plugin included.
+`claude plugin marketplace update legion-plugins` then
+`claude plugin update claude-envoy@legion-plugins` installs main's current tree, which the next
+Claude Code session loads. Claude Code's background auto-update does the same once it is on for
+`legion-plugins`, which it is not by default: **Enable auto-update** on the marketplace under
+`/plugin` **Marketplaces**, or set `"autoUpdate": true` beside `source` on the marketplace's
+`extraKnownMarketplaces` entry, in whichever settings file declares it. A `version` in either
+file would hold every install at the tree it was first installed from until someone changed the
+string, so a test holds both files to none.
+`package.json`'s version plays no part in an update.
 
 ## Enable the channel
 
@@ -187,15 +219,38 @@ plugin from another marketplace: Claude Code then skips the channel (`Channel no
 skipped: you asked for plugin:…@legion-plugins but the installed claude-envoy plugin is from
 …`).
 
-The plugin needs `ENVOY_NATS_URL` and reaches the listener at `ENVOY_URL`, which defaults to
-`http://127.0.0.1:9020`. A NATS server that requires an nkey user takes the seed from
-`NATS_NKEY_SEED_FILE` (a file, which wins) or `NATS_NKEY_SEED`. All are inherited from the
-environment that launched `claude` — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because
-an unset `${VAR}` in `.mcp.json` is substituted as the literal text, which used to register a
-session as the literal id `${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
-`ENVOY_SESSION_ID` only to use a controlled identity for QA (the smoke does). The `dispatch`
-command and the open-asks hook read `DISPATCH_URL`/`DISPATCH_TOKEN` or `envoy.json` through
-`@legion/envoy-client/dispatch-config`.
+The plugin reads one envoy.json: `$CLAUDE_CONFIG_DIR/envoy.json` when `CLAUDE_CONFIG_DIR` is set,
+else the file `ENVOY_CONFIG_FILE` names, else `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`,
+with the `dispatch` section of a `<cwd>/.envoy/envoy.json` merged over it: its server only with the
+token beside it, and its token only beside its own server. An `envoy` section in that checkout's
+file is not read, which the channel server's notice says, and a checkout's file that is not valid
+refuses Dispatch alone, only while `DISPATCH_URL` is unset. The chosen file's `dispatch` section
+(`enabled`, `serverUrl`, `token`) and `envoy` section (`enabled`, `url`, `natsUrls`, `token`,
+`natsSeed`) are resolved each on its own; `enabled: false` turns one off, a missing file
+contributes nothing (each section is then on only when its variables name it), and a `token` or
+`natsSeed` starting with `!` is a command whose trimmed output is the value. `DISPATCH_URL`,
+`DISPATCH_TOKEN_FILE`, `DISPATCH_TOKEN`, `ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`,
+`ENVOY_TOKEN`, `NATS_NKEY_SEED_FILE` and `NATS_NKEY_SEED` each override their own field; a file's
+token or seed goes with a variable's server only when it is the file's own. The `open-asks` hook
+hands the file on to the session's Bash as `ENVOY_CONFIG_FILE` beside `DISPATCH_HOST=claude`, and
+the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set; a
+Bash with neither, as a subagent's can be, has `CLAUDE_CODE_CHILD_SESSION=1` and takes this plugin's
+rule. With Envoy off the channel server lists no tool, refuses every call with
+`Envoy is off for this session: <why>` (the section's notice or error), subscribes nothing, and
+exits 0 when stdin ends. With Envoy on and no NATS server (`envoy.natsUrls` or `ENVOY_NATS_URL`),
+or with its NATS seed refused, it serves the Envoy tools, which call the listener, and takes no
+inbound messages: it registers nothing with the listener, its inbox stays empty, and
+`envoy_subscribe` is refused with `inbound messages are off for this session: <why>`. Why a section
+is off, and that inbound messages are off, is written once to its stderr
+(`envoy-channel: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
+checkout's file holds that is not read, or `Envoy's inbound messages are off: <why>; the Envoy tools
+still work`, `<why>` being `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)` or the seed's
+refusal). The variables are inherited from the environment that
+launched `claude`
+— `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because an unset `${VAR}` in `.mcp.json`
+is substituted as the literal text, which used to register a session as the literal id
+`${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
+`ENVOY_SESSION_ID` only to use a controlled identity for QA (the smoke does).
 
 `claude -p` can run a channel session, but it disables features that need terminal input, including
 multiple-choice questions and plan approval. Production Legion workers must have MCP and channel

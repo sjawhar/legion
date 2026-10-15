@@ -201,8 +201,8 @@ func TestMigrateAppliesNothingASecondTime(t *testing.T) {
 // Two branches can each take the next migration number, and they land in either order: a database
 // migrated by a daemon with the higher one first has to take the lower one when it arrives. Migrate
 // applies every embedded migration the database has not recorded, not only those above its highest,
-// so a database at 0001-0006 and 0008 and later takes 0007 — here the controllers table — and ends
-// with every version recorded.
+// so a database at 0001-0040 and 0042 and later takes 0041 — here child_release_retries, a table no
+// later migration alters — and ends with every version recorded.
 func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) {
 	ctx := context.Background()
 	store := emptyStore(t)
@@ -210,7 +210,7 @@ func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read the embedded migrations: %v", err)
 	}
-	const skipped = 7
+	const skipped = 41
 	for _, migration := range all {
 		if migration.Version == skipped {
 			continue
@@ -219,16 +219,16 @@ func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) 
 			t.Fatalf("apply %s: %v", migration.Name, err)
 		}
 	}
-	controllers := func() bool {
+	childReleaseRetries := func() bool {
 		t.Helper()
 		var exists bool
-		if err := store.pool.QueryRow(ctx, "select to_regclass('public.controllers') is not null").Scan(&exists); err != nil {
-			t.Fatalf("look for the controllers table: %v", err)
+		if err := store.pool.QueryRow(ctx, "select to_regclass('public.child_release_retries') is not null").Scan(&exists); err != nil {
+			t.Fatalf("look for the child_release_retries table: %v", err)
 		}
 		return exists
 	}
-	if version, err := store.SchemaVersion(ctx); err != nil || version != all[len(all)-1].Version || controllers() {
-		t.Fatalf("before Migrate: schema version %d (%v), controllers table %t; want the latest, and no table", version, err, controllers())
+	if version, err := store.SchemaVersion(ctx); err != nil || version != all[len(all)-1].Version || childReleaseRetries() {
+		t.Fatalf("before Migrate: schema version %d (%v), child_release_retries table %t; want the latest, and no table", version, err, childReleaseRetries())
 	}
 
 	applied, err := store.Migrate(ctx)
@@ -236,8 +236,8 @@ func TestMigrateAppliesALowerMigrationADatabaseAlreadyPastItLacks(t *testing.T) 
 	if err != nil || applied != 1 {
 		t.Fatalf("migrate = %d, %v; want the one missing migration applied", applied, err)
 	}
-	if !controllers() {
-		t.Error("migration 0007 was recorded as applied, but the controllers table does not exist")
+	if !childReleaseRetries() {
+		t.Error("migration 0041 was recorded as applied, but the child_release_retries table does not exist")
 	}
 	var recorded []int
 	rows, err := store.pool.Query(ctx, "select version from schema_version order by version")
@@ -670,8 +670,10 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 // past 0020 applies the lower 0016 late, where a check without controller_notice would refuse the
 // queued row and the upgrade: neither sets the list, 0021 does, after both. In the same way
 // `issue_branch` (0030) and `issue_suspend` (0034) each come with a migration that rewrites the
-// check, and a database that ran 0031 onwards before 0029 and 0030 applies those two last, so a
-// queued close suspension must survive them and both kinds must stand at the end in either order.
+// check, and a database that ran 0031 through 0038 before 0029 and 0030 applies those two last, so
+// a queued close suspension must survive them and both kinds must stand at the end in either
+// order. Migrations from 0039 on ship only in binaries that carry 0030, and Migrate applies in
+// ascending order, so none can run before it: 0039 sets the list after every kind it names.
 func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
 	all, err := migrations.All()
 	if err != nil {
@@ -679,7 +681,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}
 	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
 		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish,
-		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch}
+		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch, record.OutboxKindAutoMergeDisable}
 	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
 	for _, tc := range []struct {
 		name  string
@@ -687,7 +689,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}{
 		{"a fresh database", func(migrations.Migration) bool { return false }},
 		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
-		{"a database that ran 0031 onwards before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || m.Version >= 31 }},
+		{"a database that ran 0031 through 0038 before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || (m.Version >= 31 && m.Version <= 38) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

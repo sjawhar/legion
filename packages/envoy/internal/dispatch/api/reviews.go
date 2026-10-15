@@ -17,20 +17,20 @@ import (
 )
 
 // Document approval: a human review pinned to a document version. Approve, or
-// request changes with a reason; a later version makes an approval stale. A
-// request for approval is an ask of kind "approval" with fixed options, so it
-// reaches the human through the Inbox like any question; answering it, or
-// reviewing from the document header, writes the review and emits
+// request changes with a reason. A later version makes an approval stale, unless
+// it is the version a human's own answer to a decision block writes and that
+// answer is the whole change since the version he approved, in which case
+// Dispatch carries his approval to it (docs writes that carry). A request for
+// approval is an ask of kind "approval" with fixed options, so it reaches the
+// human through the Inbox like any question; one opened on a document with an
+// earlier approval carries that approval's version, time and approver
+// (approval.approved: version, at, by). Answering it, or reviewing from
+// the document header, writes the review (docs.WriteReview) and emits
 // artifact.approved / artifact.changes_requested on the document's owner.
 
-const (
-	approvalOptionApprove        = "Approve"
-	approvalOptionRequestChanges = "Request changes"
-)
-
 var approvalAskOptions = []model.AskOption{
-	{Label: approvalOptionApprove, Description: "Approve this version of the document."},
-	{Label: approvalOptionRequestChanges, Description: "Say what must change before it can be approved."},
+	{Label: docs.ApprovalOptionApprove, Description: "Approve this version of the document."},
+	{Label: docs.ApprovalOptionRequestChanges, Description: "Say what must change before it can be approved."},
 }
 
 // latestVersionNumber is the newest version an artifact has, nil when it has none.
@@ -51,26 +51,12 @@ func settledVersionNumber(ctx context.Context, q queryer, artifactID string) (in
 	return *latest, nil
 }
 
-func scanReview(row pgx.Row) (model.ArtifactReview, error) {
-	var review model.ArtifactReview
-	var actor []byte
-	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &actor, &review.Reason, &review.AskID, &review.CreatedAt); err != nil {
-		return model.ArtifactReview{}, err
-	}
-	if err := json.Unmarshal(actor, &review.Actor); err != nil {
-		return model.ArtifactReview{}, fmt.Errorf("decode review actor: %w", err)
-	}
-	return review, nil
-}
-
-const reviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at`
-
 func (s *server) loadReviews(ctx context.Context, q queryer, artifactID string) ([]model.ArtifactReview, error) {
-	rows, err := q.Query(ctx, `select `+reviewColumns+` from artifact_reviews where artifact_id = $1 order by created_at desc, id desc`, artifactID)
+	rows, err := q.Query(ctx, `select `+docs.ReviewColumns+` from artifact_reviews where artifact_id = $1 order by created_at desc, id desc`, artifactID)
 	if err != nil {
 		return nil, err
 	}
-	reviews, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.ArtifactReview, error) { return scanReview(row) })
+	reviews, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.ArtifactReview, error) { return docs.ScanReview(row) })
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +83,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 	}
 	latestReviews := map[string]model.ArtifactReview{}
 	rows, err := q.Query(ctx, `
-		select distinct on (artifact_id) `+reviewColumns+`
+		select distinct on (artifact_id) `+docs.ReviewColumns+`
 		from artifact_reviews where artifact_id = any($1::uuid[])
 		order by artifact_id, created_at desc, id desc
 	`, ids)
@@ -105,7 +91,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 		return fmt.Errorf("load latest reviews: %w", err)
 	}
 	for rows.Next() {
-		review, err := scanReview(rows)
+		review, err := docs.ScanReview(rows)
 		if err != nil {
 			rows.Close()
 			return err
@@ -192,38 +178,6 @@ func (s *server) attachApproval(ctx context.Context, q queryer, artifact *model.
 	return s.attachApprovals(ctx, q, []*model.Artifact{artifact})
 }
 
-// writeReview records a review pinned to version and appends its event; the
-// caller owns the transaction and publishes the event.
-func (s *server) writeReview(ctx context.Context, tx pgx.Tx, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
-	actorJSON, err := encodeJSON(actor)
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, err
-	}
-	review, err := scanReview(tx.QueryRow(ctx, `
-		insert into artifact_reviews (artifact_id, version, state, actor, reason, ask_id)
-		values ($1, $2, $3, $4, $5, $6)
-		returning `+reviewColumns, artifact.ID, version, state, actorJSON, reason, askID))
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("insert artifact review: %w", err)
-	}
-	eventType := "artifact.approved"
-	if state == "changes_requested" {
-		eventType = "artifact.changes_requested"
-	}
-	event, err := s.appendEvent(ctx, tx, ownerForArtifact(artifact).event(eventType, actor, model.ArtifactReviewEventPayload{
-		ArtifactID: artifact.ID,
-		Name:       artifact.Name,
-		Version:    version,
-		Actor:      actor,
-		Reason:     reason,
-		AskID:      askID,
-	}))
-	if err != nil {
-		return model.ArtifactReview{}, model.Event{}, err
-	}
-	return review, event, nil
-}
-
 // reviewFromAnswer maps an approval ask's answer to a review state and reason.
 func reviewFromAnswer(selected []string, text *string) (string, *string, error) {
 	if len(selected) != 1 {
@@ -235,9 +189,9 @@ func reviewFromAnswer(selected []string, text *string) (string, *string, error) 
 		reason = &trimmed
 	}
 	switch selected[0] {
-	case approvalOptionApprove:
+	case docs.ApprovalOptionApprove:
 		return "approved", reason, nil
-	case approvalOptionRequestChanges:
+	case docs.ApprovalOptionRequestChanges:
 		if reason == nil {
 			return "", nil, errorf(http.StatusBadRequest, "REASON_REQUIRED", "requesting changes requires a reason")
 		}
@@ -331,9 +285,9 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 	events := []model.Event{}
 	var askID *string
 	if open != nil {
-		selected := approvalOptionApprove
+		selected := docs.ApprovalOptionApprove
 		if state == "changes_requested" {
-			selected = approvalOptionRequestChanges
+			selected = docs.ApprovalOptionRequestChanges
 		}
 		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
@@ -343,7 +297,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		events = append(events, answeredEvents...)
 		askID = &answered.ID
 	}
-	review, event, err := s.writeReview(r.Context(), tx, artifact, version, state, actor, reason, askID)
+	review, event, err := docs.WriteReview(r.Context(), tx, s.deps.Events, artifact, version, state, actor, reason, askID)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -469,7 +423,9 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 }
 
 // openApprovalAsk inserts the document's approval request at version, asking question, and appends
-// its ask.opened event; the requester follows it.
+// its ask.opened event; the requester follows it. A document a human approved before carries that
+// approval's version, time and approver on the request (approval.approved), so the human reads
+// what the re-approval follows; a first request carries none.
 func (s *server) openApprovalAsk(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -483,6 +439,16 @@ func (s *server) openApprovalAsk(
 	if err := tx.QueryRow(ctx, `select gen_random_uuid()::text`).Scan(&rowID); err != nil {
 		return nil, model.Event{}, err
 	}
+	approval := &model.AskApproval{
+		ArtifactID: artifact.ID, Name: artifact.Name, Version: version, RequestedVersion: version,
+	}
+	approved, err := docs.LatestApprovedReview(ctx, tx, artifact.ID)
+	if err != nil {
+		return nil, model.Event{}, err
+	}
+	if approved != nil {
+		approval.Approved = &model.AskApprovalApproved{Version: approved.Version, At: timestampValue(approved.CreatedAt), By: approved.Actor}
+	}
 	ask := model.Ask{
 		ID:         rowID,
 		IssueKey:   owner.IssueKey,
@@ -495,9 +461,7 @@ func (s *server) openApprovalAsk(
 		Urgency:    "high",
 		Anchor:     nil,
 		State:      "open",
-		Approval: &model.AskApproval{
-			ArtifactID: artifact.ID, Name: artifact.Name, Version: version, RequestedVersion: version,
-		},
+		Approval:   approval,
 	}
 	options, err := encodeJSON(ask.Options)
 	if err != nil {
@@ -507,7 +471,7 @@ func (s *server) openApprovalAsk(
 	if err != nil {
 		return nil, model.Event{}, err
 	}
-	approval, err := docs.EncodeApproval(ask.Approval)
+	encodedApproval, err := docs.EncodeApproval(ask.Approval)
 	if err != nil {
 		return nil, model.Event{}, err
 	}
@@ -515,7 +479,7 @@ func (s *server) openApprovalAsk(
 		insert into asks (id, issue_key, artifact_id, author, question, options, multiple, urgency, anchor, kind, approval)
 		values ($1, $2, $3, $4, $5, $6, false, 'high', null, 'approval', $7)
 		returning created_at
-	`, ask.ID, owner.IssueKey, owner.ArtifactID, author, ask.Question, options, approval).Scan(&ask.CreatedAt); err != nil {
+	`, ask.ID, owner.IssueKey, owner.ArtifactID, author, ask.Question, options, encodedApproval).Scan(&ask.CreatedAt); err != nil {
 		return nil, model.Event{}, err
 	}
 	if err := asks.FollowAuthor(ctx, tx, ask.ID, actor); err != nil {

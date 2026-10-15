@@ -40,8 +40,9 @@ type Enroller interface {
 	Revoke(ctx context.Context, id string) error
 }
 
-// PermanentError is an Enroll failure a retry with the same identity cannot change (a broker 4xx
-// other than an expired token); the machine drops the identity and waits for the shim's next hello.
+// PermanentError is a broker refusal a retry cannot change (a broker 4xx other than an expired
+// token): an Enroll refusal drops the identity and waits for the shim's next hello; a Revoke
+// refusal is not retried.
 type PermanentError interface{ Permanent() bool }
 
 // ExpiredTokenError is an Enroll failure the broker gave because the pod token presented had
@@ -142,7 +143,7 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 // freshToken reports whether the held token can be presented, first asking the shim to read it
 // again when it cannot. The shim reads its projected token at each hello, the token lives at most
 // an hour from when the kubelet wrote it, and an enrollment can wait much longer after the hello
-// (a machine login awaiting approval, a broker outage); the broker refuses an expired token as
+// (the daemon's token login failing and retrying, a broker outage); the broker refuses an expired token as
 // POD_TOKEN_EXPIRED. So a token that could expire before the broker verifies it (within the
 // Enroll call's RPC bound plus podTokenSkew), or whose expiry cannot be read, is replaced by the
 // one the shim reads from its mount now. That includes a token the broker already refused as
@@ -200,7 +201,11 @@ func podTokenExpiry(token string) (time.Time, bool) {
 // the machine's (counted like a send, so Wait covers it), each later one in a clock callback
 // revokeRetryDelay after the last failure, revokeAttempts in all. No goroutine waits on a broker
 // outage, and a fake clock drives the retries in tests. Past the last attempt the lease ends the
-// enrollment; the give-up line says so.
+// enrollment; the give-up line says so. A permanent refusal (PermanentError) is not retried: the
+// broker ends a pod enrollment only for the launcher credential that made it. A daemon's token
+// login keeps its account's one credential across restarts, so the refusal NOT_ENROLLING_CREDENTIAL
+// reaches only an enrollment another credential made (one a person approved before token logins),
+// which ends one lease after its pod stops renewing.
 func (m *Machine) revoke(e Enrollment) {
 	if m.deps.Secrets == nil {
 		m.log.Warn("supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it", "enrollment", e.ID)
@@ -226,6 +231,11 @@ func (m *Machine) revokeAttempt(e Enrollment, attempt int) {
 	cancel()
 	if err == nil {
 		m.log.Info("supervise: agent-secrets: enrollment revoked", "enrollment", e.ID, "incarnation", e.Incarnation, "attempt", attempt)
+		return
+	}
+	var permanent PermanentError
+	if errors.As(err, &permanent) && permanent.Permanent() {
+		m.log.Warn("supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing", "enrollment", e.ID, "error", err)
 		return
 	}
 	m.log.Warn("supervise: agent-secrets: revocation failed", "enrollment", e.ID, "attempt", attempt, "error", err)

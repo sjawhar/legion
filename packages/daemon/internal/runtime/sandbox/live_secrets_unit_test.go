@@ -32,26 +32,27 @@ func TestShellJoin(t *testing.T) {
 }
 
 func TestAgentSecretsBlockReason(t *testing.T) {
-	const url, operator, sha, bin = "https://secrets.internal.example", "sami", "deadbeef", "/bin/agent-secrets"
+	const url, operator, sha, bin, token = "https://secrets.internal.example", "sami", "deadbeef", "/bin/agent-secrets", "/tmp/agent-secrets-token"
 	for name, tc := range map[string]struct {
-		url, operator, sha, bin string
-		wantBlocked             bool
-		wantNames               []string
+		url, operator, sha, bin, token string
+		wantBlocked                    bool
+		wantNames                      []string
 	}{
-		"everything set": {url, operator, sha, bin, false, nil},
+		"everything set": {url, operator, sha, bin, token, false, nil},
 		"everything unset": {
-			"", "", "", "", true,
-			[]string{"LEGION_E2E_AGENT_SECRETS_URL", "LEGION_E2E_AGENT_SECRETS_OPERATOR", "LEGION_E2E_AGENT_SECRETS_AUTO_SHA256", "LEGION_E2E_AGENT_SECRETS_BIN"},
+			"", "", "", "", "", true,
+			[]string{"LEGION_E2E_AGENT_SECRETS_URL", "LEGION_E2E_AGENT_SECRETS_OPERATOR", "LEGION_E2E_AGENT_SECRETS_AUTO_SHA256", "LEGION_E2E_AGENT_SECRETS_BIN", "LEGION_E2E_AGENT_SECRETS_ACCOUNT"},
 		},
-		"only URL unset":      {"", operator, sha, bin, true, []string{"LEGION_E2E_AGENT_SECRETS_URL"}},
-		"only operator unset": {url, "", sha, bin, true, []string{"LEGION_E2E_AGENT_SECRETS_OPERATOR"}},
-		"only sha unset":      {url, operator, "", bin, true, []string{"LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"}},
-		"only bin unset":      {url, operator, sha, "", true, []string{"LEGION_E2E_AGENT_SECRETS_BIN"}},
+		"only URL unset":      {"", operator, sha, bin, token, true, []string{"LEGION_E2E_AGENT_SECRETS_URL"}},
+		"only operator unset": {url, "", sha, bin, token, true, []string{"LEGION_E2E_AGENT_SECRETS_OPERATOR"}},
+		"only sha unset":      {url, operator, "", bin, token, true, []string{"LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"}},
+		"only bin unset":      {url, operator, sha, "", token, true, []string{"LEGION_E2E_AGENT_SECRETS_BIN"}},
+		"only account unset":  {url, operator, sha, bin, "", true, []string{"LEGION_E2E_AGENT_SECRETS_ACCOUNT"}},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := agentSecretsBlockReason(tc.url, tc.operator, tc.sha, tc.bin)
+			got := agentSecretsBlockReason(tc.url, tc.operator, tc.sha, tc.bin, tc.token)
 			if (got != "") != tc.wantBlocked {
-				t.Fatalf("agentSecretsBlockReason(%q, %q, %q, %q) = %q, want blocked=%t", tc.url, tc.operator, tc.sha, tc.bin, got, tc.wantBlocked)
+				t.Fatalf("agentSecretsBlockReason(%q, %q, %q, %q, %q) = %q, want blocked=%t", tc.url, tc.operator, tc.sha, tc.bin, tc.token, got, tc.wantBlocked)
 			}
 			for _, name := range tc.wantNames {
 				if !strings.Contains(got, name) {

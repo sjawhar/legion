@@ -258,6 +258,19 @@ func (r *liveRig) procEnviron(c *liveClaim, pid string) (map[string]string, erro
 	return env, nil
 }
 
+// procCmdline is a pod process's argv, as the operator reads /proc/<pid>/cmdline: the shim's own
+// (stalePluginInstall, below) carries the launch command the launcher forked it with forever,
+// since the shim never execs again after that fork — only the agent it then forks does, through
+// the install script and into the stub, which is why that process's own cmdline (agentPid) loses
+// every argument it started with.
+func (r *liveRig) procCmdline(c *liveClaim, pid string) ([]string, error) {
+	out, err := r.exec(c, "sh", "-c", `tr '\0' '\n' <"/proc/$1/cmdline"`, "cmdline", pid)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // provider-key: the root's shim hands its agent the providers Secret's key (--provider-env-dir) and
 // never holds it: the agent's environment carries the Secret's value under the variable
 // provider_keys names, and the shim's (the agent's parent) carries no such variable.

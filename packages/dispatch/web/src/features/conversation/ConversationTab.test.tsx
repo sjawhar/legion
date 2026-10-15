@@ -1,8 +1,13 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
+import {
+  type IntersectionControl,
+  installIntersectionObserver,
+  type Placement,
+} from "../../__tests__/intersection-observer";
 import { ApiError, api } from "../../api/client";
 import { prependEventToLog } from "../../api/sse";
 import type {
@@ -15,6 +20,7 @@ import type {
   UserState,
 } from "../../api/types";
 import { stubMatchMedia } from "../margin/margin-fixture";
+import { seedUnread } from "../replies/replies-fixture";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { ConversationTab } from "./ConversationTab";
 import { answeredWithErrorGuidance, safeRetryGuidance } from "./delivery";
@@ -91,13 +97,15 @@ function tab(
   visible: boolean,
   queryClient: QueryClient,
   isClosed = false,
-  issueArtifacts: ReadonlyMap<string, Artifact> = new Map()
+  issueArtifacts: ReadonlyMap<string, Artifact> = new Map(),
+  focusItemId?: string
 ): ReactNode {
   return (
     <MemoryRouter future={{ v7_relativeSplatPath: true, v7_startTransition: true }}>
       <KeymapProvider>
         <QueryClientProvider client={queryClient}>
           <ConversationTab
+            focusItemId={focusItemId}
             issueArtifacts={issueArtifacts}
             isClosed={isClosed}
             issueKey="CORE-1"
@@ -2327,5 +2335,253 @@ test("a comment on the primary document links to the Spec route, not its artifac
     unmount?.();
     api.getIssueEvents = originalGetIssueEvents;
     api.listAgents = originalListAgents;
+  }
+});
+
+afterEach(() => {
+  jest.useRealTimers();
+});
+
+/** `parent`'s reply in its message thread, written by a session. */
+function sessionReply(sequence: number, parent: string, at: string): Event {
+  const reply = message(sequence, `Session reply ${sequence}`, { id: "s1", kind: "session" });
+  if (reply.type !== "message.created") throw new Error("expected a message event");
+  return {
+    ...reply,
+    created_at: at,
+    payload: { ...reply.payload, created_at: at, in_reply_to: parent },
+  };
+}
+
+interface ThreadsPage {
+  readonly cleanup: () => void;
+  readonly mark: Mock<typeof api.markThreadRead>;
+  readonly turn: (id: string) => HTMLElement;
+  readonly viewport: IntersectionControl;
+}
+
+/**
+ * Renders the Conversation on `events` (newest first) with `unread` thread ids unread for alice,
+ * the screen in the test's hands, and every write it can make stubbed. `focusItemId` is the item
+ * a deep link names.
+ */
+function renderThreads(
+  events: Event[],
+  unread: readonly string[],
+  focusItemId?: string
+): ThreadsPage {
+  const viewport = installIntersectionObserver();
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async () => events);
+  const listAgents = spyOn(api, "listAgents").mockImplementation(async () => []);
+  const putIssueState = spyOn(api, "putIssueState").mockImplementation(async () => issueState());
+  const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
+  const scrollIntoView = HTMLElement.prototype.scrollIntoView;
+  HTMLElement.prototype.scrollIntoView = () => {};
+  const queryClient = newQueryClient();
+  seedUnread(queryClient, { issue: "CORE-1" }, unread);
+  queryClient.setQueryData(["events", "CORE-1"], { pageParams: [null], pages: [events] });
+  const view = render(
+    tab({ "CORE-1": issueState() }, true, queryClient, false, new Map(), focusItemId)
+  );
+  return {
+    cleanup: () => {
+      view.unmount();
+      getIssueEvents.mockRestore();
+      listAgents.mockRestore();
+      putIssueState.mockRestore();
+      mark.mockRestore();
+      HTMLElement.prototype.scrollIntoView = scrollIntoView;
+      viewport.restore();
+    },
+    mark,
+    turn: (id) => {
+      const element = view.container.querySelector<HTMLElement>(`[data-turn="${id}"]`);
+      if (element === null) throw new Error(`expected the ${id} turn`);
+      return element;
+    },
+    viewport,
+  };
+}
+
+/** `element` stays on screen as `placement` says for a second, and every write it starts lands. */
+async function dwellOn(viewport: IntersectionControl, element: Element, placement?: Placement) {
+  jest.useFakeTimers();
+  act(() => viewport.show(element, placement));
+  act(() => {
+    jest.advanceTimersByTime(1_000);
+  });
+  for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+}
+
+// A link to a message (`/issues/K/messages/<root>`) shows its thread's replies, which a message
+// thread always renders, and they mark the thread read like any other view of them.
+test("landing on a message thread shows its replies and marks the thread read through the newest", async () => {
+  const root = message(1, "Status?");
+  const reply = sessionReply(2, "message-1", "2026-09-09T00:05:00.25Z");
+  const page = renderThreads([reply, root], ["message-1"], "message-1");
+  try {
+    await screen.findByText("Session reply 2");
+    const newest = page.turn("message:message-2");
+    expect(page.viewport.observed()).toContain(newest);
+    await dwellOn(page.viewport, newest);
+    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:05:00.25Z"]]);
+  } finally {
+    page.cleanup();
+  }
+});
+
+// The root turn wraps every reply, so a long exchange can be taller than the screen and never
+// three-quarters on it; the mark watches the newest reply instead.
+test("a message thread taller than the screen is marked read from its newest reply alone", async () => {
+  const root = message(1, "Status?");
+  const first = sessionReply(2, "message-1", "2026-09-09T00:05:00Z");
+  const second = sessionReply(3, "message-1", "2026-09-09T00:06:00Z");
+  const page = renderThreads([second, first, root], ["message-1"]);
+  try {
+    await screen.findByText("Session reply 3");
+    act(() => page.viewport.show(page.turn("message:1"), { height: 3_000, visible: 300 }));
+    await dwellOn(page.viewport, page.turn("message:message-3"));
+    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:06:00Z"]]);
+    // The older reply is not what the mark watches.
+    expect(page.viewport.observed()).not.toContain(page.turn("message:message-2"));
+  } finally {
+    page.cleanup();
+  }
+});
+
+test("a targeted message's thread is marked read once its newest reply is on screen", async () => {
+  const sent = message(1, "Please rebase");
+  if (sent.type !== "message.created") throw new Error("expected a message event");
+  const root: Event = { ...sent, payload: { ...sent.payload, target: "session:s1" } };
+  const reply = sessionReply(2, "message-1", "2026-09-09T00:07:00Z");
+  const page = renderThreads([reply, root], ["message-1"]);
+  try {
+    await screen.findByText("Session reply 2");
+    await dwellOn(page.viewport, page.turn("message:message-2"));
+    expect(page.mark.mock.calls).toEqual([["message-1", "2026-09-09T00:07:00Z"]]);
+  } finally {
+    page.cleanup();
+  }
+});
+
+test("a message thread the viewer has read is never watched for the Replies mark", async () => {
+  const root = message(1, "Status?");
+  const reply = sessionReply(2, "message-1", "2026-09-09T00:05:00Z");
+  const page = renderThreads([reply, root], []);
+  try {
+    await screen.findByText("Session reply 2");
+    expect(page.viewport.observed()).not.toContain(page.turn("message:message-2"));
+  } finally {
+    page.cleanup();
+  }
+});
+
+// Every comment link opens the comment's thread on landing - a Replies row's, and equally the
+// Inbox's, search's or a copied reference's - so its replies are on screen to read.
+test("at a desktop width, landing on a comment opens its thread inline and reading it marks it", async () => {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
+  const page = renderThreads([reply, root], [root.payload.id], root.payload.id);
+  try {
+    const replyItem = (await screen.findByText("Reply comment")).closest("li");
+    if (replyItem === null) throw new Error("expected the reply's item");
+    expect(
+      page.turn("comment:root-comment").querySelector("article")?.getAttribute("aria-expanded")
+    ).toBe("true");
+    await dwellOn(page.viewport, replyItem);
+    expect(page.mark.mock.calls).toEqual([["root-comment", reply.payload.created_at]]);
+  } finally {
+    page.cleanup();
+  }
+});
+
+test("landing on a comment's reply opens the thread it belongs to", async () => {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
+  const page = renderThreads([reply, root], [], reply.payload.id);
+  try {
+    expect(await screen.findByText("Reply comment")).toBeTruthy();
+  } finally {
+    page.cleanup();
+  }
+});
+
+test("on a phone, landing on a comment opens its thread dialog and reading it marks it", async () => {
+  const restoreViewport = stubMatchMedia(true);
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
+  const page = renderThreads([reply, root], [root.payload.id], root.payload.id);
+  try {
+    const dialog = await screen.findByRole("dialog", { name: "Thread" });
+    const replyItem = within(dialog).getByText("Reply comment").closest("li");
+    if (replyItem === null) throw new Error("expected the reply's item");
+    await dwellOn(page.viewport, replyItem);
+    expect(page.mark.mock.calls).toEqual([["root-comment", reply.payload.created_at]]);
+  } finally {
+    page.cleanup();
+    restoreViewport();
+  }
+});
+
+test("without a link, a comment's thread stays collapsed", async () => {
+  const root = commentEvent(1, "root-comment", "Root comment");
+  const reply = commentEvent(2, "reply-comment", "Reply comment", root.payload.id);
+  const page = renderThreads([reply, root], [root.payload.id]);
+  try {
+    await screen.findByText("Root comment");
+    expect(screen.queryByText("Reply comment")).toBeNull();
+  } finally {
+    page.cleanup();
+  }
+});
+
+// The issue's read mark moved onto `useDwell`; a write the server refuses still re-reads the
+// stored mark and is sent again while the turn stays on screen, and a turn already read sends
+// nothing.
+test("the issue read mark retries a refused write while the turn stays on screen", async () => {
+  const viewport = installIntersectionObserver();
+  const events = [message(2, "Newer"), message(1, "Older")];
+  const getIssueEvents = spyOn(api, "getIssueEvents").mockImplementation(async () => events);
+  const listAgents = spyOn(api, "listAgents").mockImplementation(async () => []);
+  const getMyState = spyOn(api, "getMyState").mockImplementation(async () => ({
+    "CORE-1": issueState([], 1),
+  }));
+  let writes = 0;
+  const putIssueState = spyOn(api, "putIssueState").mockImplementation(async (_key, input) => {
+    writes += 1;
+    if (writes === 1) throw new ApiError(503, { code: "UNAVAILABLE", error: "down" });
+    return issueState([], input.last_read_seq ?? 0);
+  });
+  const queryClient = newQueryClient();
+  queryClient.setQueryData(["events", "CORE-1"], { pageParams: [null], pages: [events] });
+  const view = render(tab({ "CORE-1": issueState([], 1) }, true, queryClient));
+  try {
+    await screen.findByText("Newer");
+    const turn = (sequence: number) => {
+      const element = view.container.querySelector(`[data-event-seq="${sequence}"]`);
+      if (element === null) throw new Error(`expected turn ${sequence}`);
+      return element;
+    };
+    // Turn 1 is read already: nothing to send.
+    await dwellOn(viewport, turn(1));
+    expect(putIssueState).not.toHaveBeenCalled();
+    await dwellOn(viewport, turn(2));
+    expect(putIssueState.mock.calls).toEqual([["CORE-1", { last_read_seq: 2 }]]);
+    expect(getMyState).toHaveBeenCalledTimes(1);
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+    expect(putIssueState.mock.calls).toEqual([
+      ["CORE-1", { last_read_seq: 2 }],
+      ["CORE-1", { last_read_seq: 2 }],
+    ]);
+  } finally {
+    view.unmount();
+    getIssueEvents.mockRestore();
+    listAgents.mockRestore();
+    getMyState.mockRestore();
+    putIssueState.mockRestore();
+    viewport.restore();
   }
 });

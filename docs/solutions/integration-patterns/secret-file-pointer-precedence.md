@@ -56,7 +56,7 @@ The contract below is shared by three packages and every future consumer must fo
 
 | Consumer | Helper | On a bad `X_FILE` |
 | :--- | :--- | :--- |
-| `@legion/envoy-client` `resolveDispatchConfig` | `readSecretFile` (`src/secret-file.ts`) | returns `{enabled: false, error}` — a throw from `envoyExtension(pi)`'s top level would take down every Envoy tool, not just Dispatch; `envoy.ts` surfaces `error` as a session-start warning |
+| `@legion/envoy-client` `dispatchSettings` | `readSecretFile` (`src/secret-file.ts`) | returns `{enabled: false, error}` — a throw from `envoyExtension(pi)`'s top level would take down every Envoy tool, not just Dispatch; `envoy.ts` surfaces `error` as a session-start warning |
 | pi-envoy `requiredSecret` / `requiredControllerCapability` (`src/legion/classify.ts`) | imports `readSecretFile` | throws — the boot handshake fails and the worker exits, which is the documented behaviour for a bad boot token |
 | daemon CLI `resolveControllerSecret` (`src/cli/index.ts`) | local reimplementation | throws `CliError` |
 

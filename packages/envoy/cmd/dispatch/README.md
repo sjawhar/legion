@@ -131,7 +131,9 @@ It reads the same App credentials and NATS configuration as the server, but owns
 bus: unlike the server it neither creates nor updates `ENVOY_NOTIFICATIONS`, and it refuses a
 NATS server that is not the machine it runs on, naming the URL. Run inside the Dispatch
 container it reaches that deployment's NATS with `ENVOY_ALLOW_REMOTE_NATS=1
-envoy-dispatch redeliver-webhooks …`.
+envoy-dispatch redeliver-webhooks …`. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or
+`NATS_NKEY_SEED`) names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against
+a NATS that requires a user needs `NATS_NKEY_SEED_FILE`.
 
 ## Moving uploaded files to the bucket
 
@@ -306,9 +308,14 @@ when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.dow
 `.census.sql` is the migration's census, "Pre-deploy census" below; each needs its `.up.sql`),
 when a census is not one `select` or calls a function it may not (below), when a version
 is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
-embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
-swap file left in the directory fails a local build's tests until it is gone. Versions are applied
-by number, not by file name, and the store's tests require every file on disk to be embedded
+embedded with `all:`, which keeps a name beginning with `_` or `.`, so such a name is refused like
+any other. An editor's swap file therefore stops a locally built `envoy-dispatch` from booting, and
+fails the store's tests, until it is removed, and a binary built while it was there keeps refusing
+to boot until it is rebuilt; Vim writes its swap file beside the file it edits by default. What no
+directive embeds, such as a symlink, a `.git` or a hidden name Go's module paths refuse, never
+reaches the runner, so only the store's tests catch it
+(`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` names each cause). Versions are applied by number,
+not by file name, and the store's tests require every file on disk to be embedded
 (`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
 (`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
 on `main`.
@@ -317,9 +324,10 @@ Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout
 `pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
 migration queued behind a long transaction fails the boot instead of holding every read and write
 of its table behind its request. The failure names the migration, the lock it wanted, the sessions
-it was queued behind, and the `pg_stat_activity` query that lists the holders; end the holder or
-let it finish and start the server again. A migration that needs another bound sets its own
-`SET LOCAL lock_timeout`.
+it was queued behind, and a `pg_stat_activity` query for the sessions holding the lock; end the
+holder or let it finish and start the server again. That query can come back empty: a prepared
+transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432). A
+migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
 Migrations `0056`–`0062` make search indexing linear. Each table has its own migration, so its
 transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and trigger setup;
@@ -363,13 +371,7 @@ Migration `0068_people` creates `people`, everyone who has signed in, holding th
 refresh token for a person who signed in through it, and drops `users`, the GitHub OAuth token pair
 of each GitHub login that signed in, which the GitHub proxy acted with before it read GitHub as the
 App. It locks `users` alone, `ACCESS EXCLUSIVE` for the drop; `people` is new. Its census counts the
-`users` rows the drop deletes, so wherever anyone signed in with GitHub it answers non-zero and the
-pre-deploy census of the release that carries it refuses:
-`REFUSED 0068_people.up.sql: its census counts <n> (0068_people.census.sql)`. That refusal is
-expected for this release: no code reads those rows once it ships. The deployer checks that `<n>`
-is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
-count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
-transaction, a table over the limit) still stops the deploy.
+`users` rows the drop deletes.
 
 No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
 (Identity, above), since a task of that release can write one during the roll, or after a
@@ -429,6 +431,75 @@ cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and wi
 the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
 `0`.
 
+Migration `0091_artifacts_project_documents` adds the partial index
+`artifacts_project_documents`, on `artifacts (project_key)` where `issue_key` and `session_id` are
+null: a project's unlinked documents. Settlement of a project document holding an ask block no ask
+of its own indexes reads its project's other documents through it, for the ask the block may be a
+copy of and for the copies of an ask it retracts, and so do the answer and resolve routes, for the
+copies of the ask they close (LEGION-651). Building it takes `SHARE` on `artifacts`; its census
+answers `0` because it refuses and rewrites no row.
+
+A decided ask that a release before LEGION-651 reworded gets back, in code, the wording its decision
+was given on: the `previous` wording of the first `ask.edited` after its latest `ask.answered` or
+`ask.resolved`, with no `ask.opened` between. No migration rewrites those rows, since the census
+refuses one that does (Pre-deploy census, below). Every boot runs the restoration over every
+decided ask in one statement (`docs.Service.RestoreDecidedWordings`, bounded at 30 s), reading
+`events` through `events_ask_payload_id` and writing only the rows whose wording differs; it logs
+`dispatch: restored a decided ask's wording` for each with the ask, its document and the question
+it asks again. In the same transaction it marks owed, in one upsert, the settlement of each
+restored block ask's own document, whose block still asks the rewording beside the decision, and
+of every other document of each restored ask's owner whose latest version holds the ask's block
+with no ask of its own under that id, a copy that may have matched the rewording and shown the
+decision on it, and arms those settlements once it commits; then it logs `dispatch: restored
+decided asks' wordings` with `restored=<n> copies=<n>`. On the 2026-10-11 production dump (3,739
+asks, 82,153 events) it restores 5 asks, each a block ask on a document of its own, and marks 0
+copies owed, in 0.17-0.77 s: the one other document holding one of those 5 blocks has an ask of
+its own under that id, so it is no copy, and the first boot of the release that carries it logs
+`restored=5 copies=0` and settles those 5 documents; each whose block still asks the rewording gets
+the decided wording written back and logs `dispatch: wrote a decided ask's wording back into its
+block`. Each document's settlement runs the same statement over its own decided asks before it
+reconciles them, and marks the restored asks' copies owed the same way, so a rewording a task of
+the earlier release writes during the roll is undone by that document's next settlement on this
+release, which also writes the decided wording back into the block and settles its copies again.
+
+Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default
+(`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,
+and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null: the
+stored excerpt `GET /api/v1/references` answers a document mention with, which every version write
+fills and the reference-excerpt reconciliation fills for every row stored before it
+(`packages/envoy/AGENTS.md`). On the 2026-10-10 production dump the reconciliation's first pass
+filled 7,498 mentions of 2,150 documents in 248 s at `GOMAXPROCS=2`. Its census answers `0`.
+
+Migration `0094_issue_links` creates `issue_links`, the issues each issue waits on through
+`blocked_by`, and its target index, and re-states the `graph_edges` view with the `blocked_by` arm.
+The table's two foreign keys take `SHARE ROW EXCLUSIVE` on `issues` for the migration's short
+transaction, so an issue write waits behind it while an issue read does not, and re-stating the
+view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too. It touches no row; its
+census answers `0`.
+
+Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the
+table behind the Replies page (`packages/envoy/AGENTS.md`). `0095` creates the table, its partial
+index `user_threads_unread` and its `(thread_id)` index, the functions `user_threads_login`,
+`user_threads_record`, `user_threads_comment` and `user_threads_message`, and the trigger on
+`comments`; `0096` adds the trigger on `asks` (`insert or update of answer`); `0097` attaches
+`user_threads_message` to `messages`. Each trigger is its own migration, so its transaction holds
+that one table's `SHARE ROW EXCLUSIVE` alone: a write to it waits behind the migration and a read
+does not. `0098` seeds a row for every person and thread they wrote in, under `ACCESS SHARE` on
+`comments`, `asks`, `messages`, `issues` and `artifacts`, writing only `user_threads`; every row
+starts read, its read mark moved to the newest reply already stored, so the deploy turns no stored
+reply into an unread one. The triggers are live by then, so a write that lands while it runs on a
+thread whose participant already has a row is caught by the trigger, and the seed merges with it
+by taking the later of each time. A participant the seed is still inserting has no row the
+trigger's update can see, and the seed's snapshot cannot see that write, so `0099` reads the same
+writes under `ACCESS SHARE` on `comments`, `asks` and `messages` and moves each row to any write by
+someone else newer than its `replied_at`, which makes it unread past its read mark; it moves
+nothing backwards, and a write the seed saw stays read. On a copy of the 2026-10-12 production
+dump (11,497 comments, 3,882 asks, 14,289 messages) the seed wrote 3,819 rows for three logins,
+all of them read, in 0.93 s, and `0099` ran in 0.11 s under the server's own runner and moved no
+row, taking `ACCESS SHARE` on the three tables it reads and `ROW EXCLUSIVE` on `user_threads`
+alone. All five censuses answer `0`: `0095`-`0097` create functions and triggers and refuse or
+rewrite no row, and `0098` and `0099` write only the table `0095` creates.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -437,7 +508,9 @@ it backfills each artifact's project and generated `ref_key`.
 ### Pre-deploy census
 
 Before a deployment rolls a new image, it runs `envoy-dispatch census` with the service's
-`DATABASE_URL`, as a one-off task under the service's own database credentials:
+`DATABASE_URL`, as a one-off task under the service's own database credentials, and the census is
+a gate: a census that refuses fails the deploy before the service moves, and nothing accepts a
+refusal and rolls past it.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
@@ -517,6 +590,12 @@ census like every later one. It refuses:
 - a census that fails or answers anything but one integer in one row;
 - a database that records no version yet holds tables, on its first migration: the runner would
   apply every migration from `0001` over them.
+
+So a migration that changes values readers already had, whose census counts the rows it rewrites,
+cannot pass the census wherever such a row exists, and a release that must repair existing rows
+does so in code instead: an idempotent pass at boot, and on the path that reads the rows, so a task
+of the earlier release still running during the roll cannot undo it. The restoration of decided
+asks' wordings (`docs.Service.RestoreDecidedWordings`, Database migrations above) is one.
 
 A migration declares its census in `<version>_<name>.census.sql` beside it: one `select` (or
 `with … select`) answering one integer, how many existing rows the migration would refuse (a
@@ -712,11 +791,15 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. |
 | `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
+| `/api/v1/me/replies?limit=&offset=&issue=\|artifact=` | GET | cookie or trusted header (human only) | List the threads the caller wrote in where someone else has written since the caller last read them, newest reply first, less an open ask the Inbox lists. A row names the thread, its owner, its subject, its root's deep link and the newest reply's author, first line and time. `issue` or `artifact` narrows to one owner (both is `400 INVALID_QUERY`); `limit` is 1–200 (default 50). |
+| `/api/v1/me/threads/{id}/read` | PUT | cookie or trusted header (human only) | Move the caller's read mark on one thread forward to `{read_through}`; it never moves back, a value more than a minute ahead of the server is `400 INVALID_STATE`, and a non-uuid id is `400 THREAD_ID_INPUT`. Answers `204`, writing nothing for a thread the caller never wrote in. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
-| `/api/v1/projects` | POST | cookie or trusted header | Create a project from `key` and `name`; rejects a duplicate key with `409 PROJECT_EXISTS`. |
+| `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned, such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF); combining marks, format characters, private-use characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
+| `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |
+| `/api/v1/delivery/session-groups/{id}` | PATCH, DELETE | cookie, trusted header, or bearer | Rename a session group, add sessions to it or remove them `{name?, add?, remove?}`, with the create route's refusals and `400 SESSION_GROUP_INPUT` for an edit that would leave it empty; or delete it, its sessions showing as themselves again. `400 SESSION_GROUP_ID_INPUT` for an id that is not a UUID, `404 NOT_FOUND` for one no group has. |
 | `/api/v1/me/agent-tokens` | GET, POST | cookie or trusted header (human only) | List personal-token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
@@ -726,7 +809,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
-| `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels`, `route`, `external_links`, `parent`, `rank`, `assignee` or `components`; `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. |
+| `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels` (or `labels_add`, which adds to the labels the issue holds when the write commits; not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee` or `components`; `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
 | `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask with its reply thread, edits, followers and `answers`, every user-authored answer oldest first. |
@@ -750,7 +833,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. A file whose bytes are in the bucket is `502 FILE_STORE_UNAVAILABLE` when the bucket does not answer, `503` on a server with no bucket configured. A file or image version, whoever owns it, is served with `Cache-Control: private, max-age=31536000, immutable` beside its `ETag` (the bytes' sha256), since a version's bytes never change and the route is authenticated; a document version, and every error, carries no cache header. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
 | `/api/v1/artifacts/{id}/edits` | POST | cookie, trusted header, or bearer | Apply document edit operations. `{id}` must be a UUID. An edit is `400 INVALID_ASK_BLOCK` when an ask it writes or changes breaks its content rule (`paragraph+ bullet_list?`) or holds what settlement cannot read; an ask it carries through unchanged is not its to refuse. A change a concurrent browser deletion removes before the version is rendered is `409 EDIT_LOST_TO_CONCURRENT_CHANGE` and writes nothing; one removed after it answers `200` with `lost_ops`. A batch whose markdown (its inserts and replaces together) makes more than 65,536 elements, or that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, or a live state ygo could not decode as one update, is `413 CAP_EXCEEDED` with the refusal itself as the error, and writes nothing. |
-| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the first move since the request was opened or handed back notifies, even when a thread reply had already left it waiting on the agent; a later move, while `requested_version` is already below the version it named, is `quiet: true`, `notify: false`, and reaches no follower. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
+| `/api/v1/artifacts/{id}/approval-requests` | POST | cookie, trusted header, or bearer | Ask a human to approve a document's latest settled version. The question is `Approve <name> (version <N>)?` followed by the optional `summary` (blank is `400 SUMMARY_INPUT`; past the ask cap at the longest version a request can reach, ten digits, is `400 CAP_EXCEEDED` naming `summary`). A request on a document a human approved earlier names that approval in `ask.approval.approved` (`{version, at, by}`); a first request carries no `approved` key. One open approval row follows every document version in place, rewording its question and emitting `ask.edited`; while its `requested_version` is below the new version it waits on the agent. Only the first move since the request was opened or handed back notifies, even when a thread reply had already left it waiting on the agent; a later move, while `requested_version` is already below the version it named, is `quiet: true`, `notify: false`, and reaches no follower. A version a human's answer to a decision block writes, when that answer is the whole change since the version he approved (who answered what is the document's asks rows, and an ask block no row of the document backs, a copy, one settlement could not read, one whose server-owned attributes are not as settlement writes them from its row, or a block id the version repeats carries nothing), carries his approval to it in the same transaction - an `approved` review in his name whose `reason` names the carry, and `artifact.approved` - and answers the open request `Approve` in his name after the move (`ask.answered`, the review's `ask_id`), so nothing is requested again for it. Calling this route again while the row waits on the agent - moved, or a thread reply newer than its last hand-back holds the turn - hands it back to the human: a summary that changes its question rewords it first (`ask.edited`; an omitted summary keeps its prior one), then `requested_version` becomes the latest version and `ask.handed_back` is emitted, leaving `edited_at` as it was. While the row waits on the human, the same summary or none is a repeat that answers `200` with no event, and a different one is `409 APPROVAL_WAITS_ON_HUMAN` and changes nothing, since it would rewrite the card the human is reading. It answers `201` when it wrote anything, with the document's `approval` as the call left it (`waiting_on` while awaiting). |
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
@@ -775,11 +858,13 @@ Dispatch uses cookie identity through the sign-in pool.
 Document events publish retained envelopes on
 `notifications.dispatch.document.<PROJECT>.<slug>.<type>`. Use
 `go run ./cmd/natstail -subject 'notifications.dispatch.document.>' -count 1`
-to print one matching envelope from the `natsUrls` configured in `envoy.json`.
+to print one matching envelope from the `envoy.natsUrls` configured in `envoy.json`.
 `natstail` owns nothing on the bus - it neither creates nor updates
 `ENVOY_NOTIFICATIONS` - and refuses a NATS server that is not this machine's:
 prefix the command with `ENVOY_ALLOW_REMOTE_NATS=1` where `envoy.json` names a
-shared server, as an agent devbox's does.
+shared server, as an agent devbox's does. It connects as the nkey user
+`NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names, never `envoy.natsSeed`, so a
+run against a NATS that requires a user sets `NATS_NKEY_SEED_FILE` too.
 
 ## Document edit operations
 

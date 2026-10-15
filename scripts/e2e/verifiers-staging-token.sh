@@ -160,7 +160,7 @@ shared_listener_token="listener-shared-$RANDOM$RANDOM"
 
 # The environment each binary boots with. HOME is the scratch dir so the signing key and app
 # credentials land there and never in the box's ~/.local/share/dispatch, and the working
-# directory is the scratch dir so no repo .opencode/envoy.json is picked up.
+# directory is the scratch dir so no repo .envoy/envoy.json is picked up.
 dispatch_env=(
   env -i PATH="$PATH" HOME="$work/home"
   DATABASE_URL="$database_url"

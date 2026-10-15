@@ -37,7 +37,7 @@ const sections: Section[] = [
             approver: null,
             created_at: "2026-10-03T12:05:00Z",
             enrollment: {
-              kind: "box",
+              kind: "session",
               operator: "ada@example.com",
               runtime_id: "box-1",
               slot: null,
@@ -78,6 +78,7 @@ const sections: Section[] = [
             host: "devbox.example.com",
             issued_at: "2026-10-03T12:00:00Z",
             service: null,
+            subject: null,
           },
         ],
       });

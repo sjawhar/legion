@@ -3,6 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { connect, nkeys } from "nats";
+import { natsSeedFromEnvironment } from "../envoy-settings";
 import { natsAuthOptions } from "../nats-auth";
 import { type NatsServer, startNatsServer } from "./nats-server";
 
@@ -31,7 +32,7 @@ async function connectWith(url: string, env: NodeJS.ProcessEnv) {
   const connection = await connect({
     servers: [url],
     name: "nats-auth-test",
-    ...natsAuthOptions(env),
+    ...natsAuthOptions(natsSeedFromEnvironment(env)),
     reconnect: false,
   });
   await connection.flush();
@@ -76,7 +77,17 @@ describe("natsAuthOptions", () => {
   const user = createUser();
 
   test("is no option when neither variable is set", () => {
-    expect(natsAuthOptions({})).toEqual({});
+    expect(natsSeedFromEnvironment({})).toBeUndefined();
+    expect(natsAuthOptions(undefined)).toEqual({});
+  });
+
+  test("authenticates with a seed resolved elsewhere, and names its source when it is no user seed", () => {
+    expect(
+      natsAuthOptions({ value: user.seed, source: "envoy.natsSeed in /tmp/envoy.json" })
+    ).toHaveProperty("authenticator");
+    expect(() =>
+      natsAuthOptions({ value: "hunter2", source: "envoy.natsSeed in /tmp/envoy.json" })
+    ).toThrow("envoy.natsSeed in /tmp/envoy.json does not hold a valid nkey seed");
   });
 
   test("refuses an unusable seed naming its variable and path, never falling back", () => {
@@ -106,7 +117,7 @@ describe("natsAuthOptions", () => {
     for (const [env, message] of cases) {
       let thrown: unknown;
       try {
-        natsAuthOptions(env);
+        natsAuthOptions(natsSeedFromEnvironment(env));
       } catch (error) {
         thrown = error;
       }

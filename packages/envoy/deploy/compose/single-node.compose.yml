@@ -1,0 +1,61 @@
+# Envoy on one machine: a NATS server with JetStream of its own and the Envoy listener, both on
+# loopback. The Envoy page of the docs site ("Running Envoy on one machine", from
+# docs/site/src/content/docs/dispatch/envoy.md) covers what it serves and how to run it.
+name: envoy-single-node
+
+services:
+  nats:
+    image: mirror.gcr.io/library/nats:2.10-alpine
+    network_mode: host
+    # No configuration file: the image's default one opens a cluster port this server has no use
+    # for. The monitoring port follows --addr onto loopback.
+    command:
+      - --name=envoy-nats
+      - --addr=127.0.0.1
+      - --port=${NATS_PORT:-4222}
+      - --http_port=${NATS_MONITOR_PORT:-8222}
+      - --jetstream
+      - --store_dir=/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:${NATS_MONITOR_PORT:-8222}/healthz?js-enabled-only=true"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    volumes:
+      # The ENVOY_NOTIFICATIONS stream and Envoy's key-value buckets: a restart keeps the last 72
+      # hours of events, and the subscriptions and role claims of every session still running.
+      - nats-data:/data
+
+  listener:
+    image: ghcr.io/sjawhar/legion/envoy:${ENVOY_IMAGE_TAG:?set ENVOY_IMAGE_TAG (see single-node.env.example)}
+    network_mode: host
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+    # A SIGTERM runs the listener's ordered shutdown: up to 10 s for HTTP, then up to 10 s to drain
+    # NATS. Docker's 10 s default would SIGKILL it before the drain starts.
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:${ENVOY_LISTENER_PORT:-9020}/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    environment:
+      PORT: ${ENVOY_LISTENER_PORT:-9020}
+      ENVOY_LISTEN_HOST: 127.0.0.1
+      ENVOY_MACHINE_ID: ${ENVOY_MACHINE_ID:?set ENVOY_MACHINE_ID (this machine's name)}
+      # This machine's own NATS, above, so the listener needs no ENVOY_ALLOW_REMOTE_NATS.
+      NATS_URLS: nats://127.0.0.1:${NATS_PORT:-4222}
+      # A session that registers a port (OpenCode's serve port) is reached on this machine's
+      # loopback; unset, the listener would dial host.docker.internal, which host networking does
+      # not resolve.
+      ENVOY_HOST_BRIDGE: 127.0.0.1
+      # Optional on loopback: when set, every /v1 caller must send it as a bearer token.
+      ENVOY_API_TOKEN: ${ENVOY_API_TOKEN:-}
+
+volumes:
+  nats-data:

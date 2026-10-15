@@ -149,16 +149,19 @@ func samples(t *testing.T) map[string][]Event {
 		"PromptAcked":          {PromptAcked{}},
 		"PromptRefused":        {PromptRefused{}},
 		"IssueVolumeLost":      {IssueVolumeLost{}},
+		"StalePlugin":          {StalePlugin{}},
 		"RequestSpawn":         {RequestSpawn{}},
 		"RequestRegister":      {RequestRegister{}},
 		"RequestReady":         {RequestReady{}},
 		"RequestSuspend":       {RequestSuspend{}},
 		"RequestResume":        {RequestResume{}},
+		"RequestRuleResume":    {RequestRuleResume{}},
 		"RequestStop":          {RequestStop{}},
 		"RequestTreeClose":     {RequestTreeClose{}},
 		"RequestIssueClose":    {RequestIssueClose{}},
 		"RequestOperatorClose": {RequestOperatorClose{}},
 		"RequestRetry":         {RequestRetry{}},
+		"RequestOperatorRetry": {RequestOperatorRetry{}},
 		"RequestDeliver":       {RequestDeliver{}},
 		"RequestExit":          {RequestExit{}},
 	}
@@ -286,6 +289,8 @@ func fenced(ev Event, c Claim) Event {
 		return Timer{Claim: c.Token, Kind: ev.Kind, Generation: c.Generation, Seq: 7777, DeliveryID: c.Pending.ID}
 	case IssueVolumeLost:
 		return IssueVolumeLost{Claim: c.Token}
+	case StalePlugin:
+		return StalePlugin{Claim: c.Token}
 	case RequestSpawn:
 		return RequestSpawn{Claim: c.Token}
 	case RequestRegister:
@@ -293,13 +298,17 @@ func fenced(ev Event, c Claim) Event {
 	case RequestReady:
 		return RequestReady{Claim: c.Token, Generation: c.Generation, Session: session}
 	case RequestSuspend:
-		return RequestSuspend{Claim: c.Token}
+		return RequestSuspend{Claim: c.Token, By: SuspendedByOperator}
 	case RequestResume:
 		return RequestResume{Claim: c.Token}
+	case RequestRuleResume:
+		return RequestRuleResume{Claim: c.Token, Reason: "it owns its issue's phase"}
 	case RequestStop:
 		return RequestStop{Claim: c.Token}
 	case RequestRetry:
 		return RequestRetry{Claim: c.Token}
+	case RequestOperatorRetry:
+		return RequestOperatorRetry{Claim: c.Token}
 	case RequestDeliver:
 		return RequestDeliver{Claim: c.Token, Task: "another task"}
 	case RequestExit:
@@ -406,7 +415,7 @@ func TestAnEventForAnotherClaimIsAnError(t *testing.T) {
 func wantsRefusal(ev Event) bool {
 	switch ev.(type) {
 	case RequestSpawn, RequestRegister, RequestReady, RequestSuspend, RequestResume, RequestStop,
-		RequestRetry, RequestDeliver, RequestExit:
+		RequestRetry, RequestOperatorRetry, RequestDeliver, RequestExit:
 		return true
 	}
 	return false

@@ -571,7 +571,10 @@ begin unregistered-agent-retired-at-the-deadline
 # asks the load probe for the task agents and skills Legion's prompts name (LEGION_PROMPT_AGENTS,
 # LEGION_PROMPT_SKILLS) and whether each of those agents' models resolves (LEGION_AGENT_MODELS),
 # and the stub answers that they all resolve, as the real Oh My Pi does for this checkout's plugins
-# on the harness's model roles. The deadline is
+# on the harness's model roles. After the gate the daemon reads the host's retry.modelFallback
+# (`omp config get retry.modelFallback --json`), and the stub answers it as the real Oh My Pi does
+# by default: a stub that slept there would hold the boot past its budget, so the daemon would never
+# serve. The deadline is
 # worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals = 10 s.
 cat >"$work/stub/omp" <<EOF
 #!/bin/sh
@@ -584,6 +587,10 @@ if [ "\$1" = models ]; then
   [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
   [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && [ -z "\${LEGION_SKIP_AGENT_MODELS:-}" ] && echo LEGION_AGENT_MODELS=resolved >&2
   [ -n "\${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2
+  exit 0
+fi
+if [ "\$*" = "config get retry.modelFallback --json" ]; then
+  echo '{"key":"retry.modelFallback","value":true,"type":"boolean"}'
   exit 0
 fi
 exec sleep 3600

@@ -73,7 +73,9 @@ Two decisions stay with people:
 
 - **The design gate.** Before implementation starts, a person approves the root issue's spec at a
   specific version in Dispatch. A later version of the spec closes the gate again until someone
-  approves it. The gate is on by default; a deployment can turn it off.
+  approves it, unless that version is the person's own answer to a decision block and the answer is
+  the whole change since the version they approved: then Dispatch records their approval at the new
+  version and the gate reopens. The gate is on by default; a deployment can turn it off.
 - **The merge.** The merger checks that every check and workflow the base branch requires has
   passed, posts `READY` on the Dispatch issue, and submits the pull request for merge. The
   repository's own rules decide when it lands.
@@ -94,10 +96,11 @@ An approval request appears in that person's Dispatch Inbox, labelled as a secre
 machine login, together with the reason the agent gave. The person approves or denies it there, and
 Dispatch relays the decision to the broker under the signed-in person's own identity. The broker
 holds no Dispatch credential: Dispatch reads the pending requests from the broker and sends back
-each decision. A grant is short-lived, and `agent-secrets NAME -- <command>` runs a command with
-the granted value in that command's environment rather than printing it. People create and change
-the secrets themselves, in AWS Secrets Manager under their own AWS sign-in, with
-`agent-secrets secret`, which has the broker serve each change at once.
+each decision. A grant lasts until its session ends, or for the shorter lifetime its request named,
+and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
+environment rather than printing it. People create and change the secrets themselves, in AWS
+Secrets Manager under their own AWS sign-in, with `agent-secrets secret`, which has the broker
+serve each change at once.
 
 ## Envoy: the events between them
 

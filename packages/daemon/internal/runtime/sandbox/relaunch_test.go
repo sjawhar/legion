@@ -208,10 +208,11 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 }
 
 // A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name,
-// and finds the Sandbox its old tree suspended, still labelled with that tree. The Sandbox owns the
+// and finds the Sandbox its old tree left, still labelled with that tree. The Sandbox owns the
 // issue's volume, which holds its clone, workspace and its roles' sessions, so the orphan root's
-// launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One still running
-// roles of the old tree is refused and left as it is.
+// launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One its old tree
+// left Running, none of whose roles runs any more, is suspended in the relabel's patch and kept the
+// same way. One a claim of the old tree still runs in is refused and left as it is.
 func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
@@ -249,13 +250,47 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
 		}
 	})
+	t.Run("left running by its old tree, none of whose roles runs", func(t *testing.T) {
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		// A claim of the orphan root's own tree runs nothing the relabel would end: only a claim of
+		// another tree holds the Sandbox.
+		g.store.running["LEGION-209"] = runningClaim{tree: "LEGION-209", claim: "legion-legion-legion-209-planner:launching"}
+		g.eventually("the old tree's pod", func() bool { return g.pod(name) != nil })
+		old := g.pod(name).UID
+		loc := g.spawn(orphanSpec(t))
+		s := g.sandbox(name)
+		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.mode() != modeRunning {
+			t.Fatalf("the orphan root's Sandbox = %+v, want the old tree's Sandbox kept, relabelled for LEGION-209 and running its launch", s)
+		}
+		relabels := 0
+		for _, w := range g.writes() {
+			if w.resource == "sandboxes" && w.verb == "patch" && modePatched(t, w.patch, modeSuspended) && strings.Contains(w.patch, labelValue("LEGION-209")) {
+				relabels++
+				if !strings.Contains(w.patch, `{"op":"test","path":"/metadata/resourceVersion"`) {
+					t.Errorf("the relabel patch %s tests no resourceVersion, want it fenced to the Sandbox it read", w.patch)
+				}
+			}
+		}
+		if relabels != 1 {
+			t.Fatalf("writes %v; want one patch that relabels the Sandbox for LEGION-209 and suspends it", g.writes())
+		}
+		pod := g.pod(name)
+		if pod == nil || pod.UID == old || string(pod.UID) != loc.Sandbox.PodUID || pod.Labels[labelTree] != labelValue("LEGION-209") {
+			t.Fatalf("pod %+v, locator %+v; want a new pod of tree LEGION-209 in place of the old tree's %s", pod, loc, old)
+		}
+		mounted := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
+		if mounted < 0 || pod.Spec.Volumes[mounted].PersistentVolumeClaim == nil || pod.Spec.Volumes[mounted].PersistentVolumeClaim.ClaimName != IssueClaimName(orphan) {
+			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
+		}
+	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		g.store.running["LEGION-209"] = runningClaim{tree: testTree, claim: "legion-legion-legion-209-implementer:working"}
 		g.launcher(orphan)
-		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles") {
-			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal", err)
+		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles (legion-legion-legion-209-implementer:working)") {
+			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal naming the running claim", err)
 		}
-		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue(testTree) {
+		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue(testTree) || s.mode() != modeRunning {
 			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
 		}
 	})
@@ -324,17 +359,20 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 			}
 		}
 	}
+	plugins := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
 	for name, tc := range map[string]struct {
 		spec     func(*testing.T) runtime.SpawnSpec
 		session  string
 		pinned   string            // the image the restarted daemon is configured with
 		stored   func(*corev1.Pod) // what the stored pod is edited to carry before the restart
+		plugins  *runtime.PluginInstall
 		replaced bool
 	}{
-		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, false},
-		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, true},
-		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, true},
-		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, true},
+		"an issue pod on the configured image":                       {workerSpec, resumeSession, testImage, nil, nil, false},
+		"an issue pod under a release pinning another image":         {workerSpec, resumeSession, nextImage, nil, nil, true},
+		"an issue pod whose init container alone runs another image": {workerSpec, resumeSession, testImage, olderInit, nil, true},
+		"the controller's pod under a release pinning another image": {controllerSpec, controllerSession, nextImage, nil, nil, true},
+		"an installing Resume keeps a drifted pod":                   {workerSpec, resumeSession, nextImage, nil, plugins, false},
 	} {
 		t.Run(name, func(t *testing.T) {
 			g := newRig(t, nil)
@@ -349,7 +387,7 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 				state, connected := r2.launchers.state(spec.Claim, loc.Sandbox.PodUID)
 				return connected && state.Child != nil
 			})
-			spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", tc.session
+			spec.Generation, spec.BootToken, spec.ResumeSessionFile, spec.Plugins = 2, "boot-g2", tc.session, tc.plugins
 			newLoc, err := r2.Resume(g.ctx, &loc, spec)
 			if err != nil {
 				t.Fatalf("Resume: %v", err)
@@ -360,10 +398,58 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 			if newLoc.Sandbox.Generation != 2 {
 				t.Fatalf("resumed at %+v, want generation 2", newLoc.Sandbox)
 			}
-			if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted {
-				t.Fatalf("the pod the role runs in has a container on image %s, want every container on the configured %s", other, tc.pinned)
+			if tc.replaced {
+				if other, drifted := imageDrift(g.pod(loc.Sandbox.Name), tc.pinned); drifted {
+					t.Fatalf("the pod the role runs in has a container on image %s, want every container on the configured %s", other, tc.pinned)
+				}
+			}
+			if tc.plugins != nil && !tc.replaced {
+				var start shimwire.LauncherStart
+				for _, frame := range g.sent(spec.Claim) {
+					if s, ok := frame.(shimwire.LauncherStart); ok {
+						start = s
+					}
+				}
+				i := slices.Index(start.Argv, "--")
+				if i < 0 || i+1 >= len(start.Argv) || start.Argv[i+1] != "/bin/sh" {
+					t.Fatalf("a kept drifted pod's installing Resume argv %q carries no install wrapper", start.Argv)
+				}
 			}
 		})
+	}
+}
+
+// A suspended Sandbox's Resume with Plugins set replaces the pod — it has none to keep — and
+// starts plain: a pod replaced for any reason other than a kept drifted install comes up on the
+// configured image, which the boot gate already holds to the daemon's contract, so nothing here
+// is installed into it.
+func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing.T) {
+	name := SandboxName(workerToken)
+	labels := claimLabels(claim.RoleTester)
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
+	g.launcher(workerToken)
+	spec := workerSpec(t)
+	spec.ResumeSessionFile, spec.Plugins = resumeSession, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
+	loc, err := g.r.Resume(g.ctx, nil, spec)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	expectSteps(t, steps(t, g.writes(), name), "create secret", "run", "record addresses")
+	if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
+		t.Fatalf("locator %+v over sandbox %s", loc, g.sandbox(name).UID)
+	}
+	var start shimwire.LauncherStart
+	for _, frame := range g.sent(workerToken) {
+		if s, ok := frame.(shimwire.LauncherStart); ok {
+			start = s
+		}
+	}
+	i := slices.Index(start.Argv, "--")
+	if i < 0 || i+1 >= len(start.Argv) || start.Argv[i+1] == "/bin/sh" {
+		t.Fatalf("a suspended Sandbox's installing Resume started %q, want a plain agent command", start.Argv)
+	}
+	if !slices.Contains(start.Argv, envoyPlugin) || !slices.Contains(start.Argv, legionPlugin) {
+		t.Fatalf("a replaced pod's Resume argv %q names no image root", start.Argv)
 	}
 }
 
@@ -1104,7 +1190,7 @@ func startSupervisedSandboxRole(
 	}
 	for _, event := range []supervise.Event{
 		supervise.StreamHello{Claim: spec.Claim, Generation: 1},
-		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile},
+		supervise.RequestRegister{Claim: spec.Claim, Generation: 1, Session: "ses-tester", SessionFile: sessionFile, PluginContract: 24},
 		supervise.RequestReady{Claim: spec.Claim, Generation: 1, Session: "ses-tester"},
 	} {
 		if err := machine.Handle(g.ctx, event); err != nil {
@@ -1298,9 +1384,17 @@ func supervisedSandboxMachine(
 	t *testing.T, g *rig, spec runtime.SpawnSpec,
 ) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
 	t.Helper()
-	c := supervise.Claim{
+	return restoredSandboxMachine(t, g, spec, supervise.Claim{
 		Token: spec.Claim, Project: spec.Project, Tree: spec.Tree, Issue: spec.Issue, Role: spec.Role, State: supervise.StateQueued,
-	}
+	})
+}
+
+// restoredSandboxMachine is supervisedSandboxMachine over c, a claim as a daemon reads it back from
+// its store at boot, on the rig's runtime as it is now.
+func restoredSandboxMachine(
+	t *testing.T, g *rig, spec runtime.SpawnSpec, c supervise.Claim,
+) (*supervise.Machine, *supervisedSandboxStore, *sandboxMachineSpecs) {
+	t.Helper()
 	store := &supervisedSandboxStore{claim: c}
 	specs := &sandboxMachineSpecs{spec: spec}
 	machine, err := supervise.NewMachine(g.ctx, supervise.Deps{
@@ -1310,6 +1404,7 @@ func supervisedSandboxMachine(
 		Timeouts: supervise.Timeouts{
 			Boot: time.Hour, RegistrationIntervals: 1, RPC: time.Hour, Probe: time.Hour, Stop: time.Hour,
 		},
+		PluginContract: 24,
 	}, c)
 	if err != nil {
 		t.Fatalf("new Machine: %v", err)

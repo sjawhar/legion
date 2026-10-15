@@ -18,27 +18,34 @@ const backfillWindowsPerPass = 24
 // newest edge and skip its older runs after a rate limit. An hour holds about 30 PR-check runs.
 const backfillWindow = time.Hour
 
-// backfillStep names one workflow kind's backfill progress.
+// backfillStep names one workflow kind's head_branch and event backfill progress.
 func backfillStep(kind DeliveryRunKind) string {
 	return "backfill/runs/" + string(kind)
 }
 
-// backfillRuns re-lists the last BackfillWindow of kind's runs once, so every stored run carries
-// GitHub's head_branch and event (a row stored before those columns has neither, and counts in no
-// measure that filters on them). Its progress row (backfill/runs/<kind>) starts at
-// now - BackfillWindow with began_at now and walks [through, began_at] in one-hour windows,
-// oldest first, at most backfillWindowsPerPass a pass; a window's runs are all stored before
+// createdAtBackfillStep names the deploy runs' created_at backfill progress: a step of its own, so
+// a database whose backfill/runs/deploy finished before created_at was stored walks the window
+// again. Only deploy runs need it, since containment is the one reader of a run's creation.
+const createdAtBackfillStep = "backfill/created_at/" + string(DeliveryRunKindDeploy)
+
+// backfillRuns re-lists the last BackfillWindow of kind's runs once under step, so every stored
+// run carries what only the listing carries: GitHub's head_branch and event (backfillStep; a row
+// stored before those columns has neither, and counts in no measure that filters on them), and
+// created_at (createdAtBackfillStep; a row stored before that column reads its started_at in its
+// place, DeliveryRun.Created). Its progress row (step) starts at now - BackfillWindow with
+// began_at now and walks [through, began_at] in one-hour windows, oldest first, at most
+// backfillWindowsPerPass a pass; a window's runs are all stored before
 // through moves to its end, so a window a rate limit stops is listed again in full on the next
 // pass. It lists jobs only for a concluded run that has none stored and no jobs-unfetchable mark:
-// the regular step already lists every concluded run's jobs, and the backfill exists for the two
+// the regular step already lists every concluded run's jobs, and the backfill exists for the
 // columns, which the listing alone carries. Once through reaches began_at the step is finished
 // and lists nothing again.
 //
 // Every failure is logged and the pass resumes next time, never returned: runOnce's health state
 // (last_reconcile_at, last_error) describes the regular steps, which a backfill rate limit must
 // not make look failed.
-func (r *Reconcile) backfillRuns(ctx context.Context, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, now time.Time) {
-	step, scope := backfillStep(kind), runsProgressScope(repoFull, workflowPath)
+func (r *Reconcile) backfillRuns(ctx context.Context, step, owner, repo, repoFull, workflowPath string, kind DeliveryRunKind, now time.Time) {
+	scope := runsProgressScope(repoFull, workflowPath)
 	warn := func(message string, err error, args ...any) {
 		slog.Warn("dispatch delivery: backfill runs: "+message, append([]any{"step", step, "error", err}, args...)...)
 	}

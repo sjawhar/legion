@@ -321,7 +321,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 	if clearedBefore != nil {
 		// The Clear is keyed on the raw actor id on purpose: user_agent_state is migration 0033's
 		// table and its rows predate the canonical convention 0048 and 0051 follow. This is not
-		// the missing canonicalLogin a grep for one would take it for.
+		// the missing model.CanonicalLogin a grep for one would take it for.
 		if _, err := tx.Exec(r.Context(), `
 			insert into user_agent_state (login, session_id, cleared_before)
 			values ($1, $2, least($3::timestamptz, now()))
@@ -337,7 +337,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			values ($1, $2, least($3::timestamptz, now()))
 			on conflict (login, session_id) do update set
 				read_through = greatest(user_agent_read.read_through, excluded.read_through)
-		`, canonicalLogin(actor.ID), sessionID, *readThrough); err != nil {
+		`, model.CanonicalLogin(actor.ID), sessionID, *readThrough); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -380,7 +380,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			)
 			order by wanted.position
 			on conflict do nothing
-		`, canonicalLogin(actor.ID), sessionID, readReplies)
+		`, model.CanonicalLogin(actor.ID), sessionID, readReplies)
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -402,7 +402,7 @@ func (s *server) putUserAgentState(w http.ResponseWriter, r *http.Request) {
 			  and user_agent_read.login = $1 and user_agent_read.session_id = $2
 			  and messages.id = user_agent_reply_read.reply_id
 			  and messages.created_at <= user_agent_read.read_through
-		`, canonicalLogin(actor.ID), sessionID); err != nil {
+		`, model.CanonicalLogin(actor.ID), sessionID); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}

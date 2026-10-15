@@ -57,7 +57,7 @@ func resolveApproverMe(w http.ResponseWriter, r *http.Request, actor model.Actor
 		writeError(w, "APPROVER_ME_ONLY", http.StatusBadRequest, `approver must be the literal value "me"`)
 		return "", false
 	}
-	return canonicalLogin(actor.ID), true
+	return model.CanonicalLogin(actor.ID), true
 }
 
 // readRelayBody reads a mutation's body verbatim, capped like every other JSON mutation, and
@@ -96,7 +96,7 @@ func (s *server) decisionFor(w http.ResponseWriter, r *http.Request, actor model
 			return agentsecrets.Decision{}, false
 		}
 	}
-	return agentsecrets.Decision{Approver: canonicalLogin(actor.ID), Code: input.Code}, true
+	return agentsecrets.Decision{Approver: model.CanonicalLogin(actor.ID), Code: input.Code}, true
 }
 
 // --- GET /api/v1/credential-requests, GET .../{id} ---
@@ -217,7 +217,7 @@ func (s *server) revokeCredentialGrant(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
+	body, err := client.RevokeByApprover(r.Context(), r.PathValue("id"), model.CanonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }
 
@@ -236,7 +236,7 @@ func (s *server) listMachineLogins(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := client.MachineLogins(r.Context(), canonicalLogin(actor.ID))
+	body, err := client.MachineLogins(r.Context(), model.CanonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }
 
@@ -253,6 +253,6 @@ func (s *server) revokeMachineLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	body, err := client.RevokeMachineLogin(r.Context(), r.PathValue("id"), canonicalLogin(actor.ID))
+	body, err := client.RevokeMachineLogin(r.Context(), r.PathValue("id"), model.CanonicalLogin(actor.ID))
 	relayBrokerResponse(w, body, err)
 }

@@ -82,20 +82,23 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 
 - **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
-- **A settled point records the person's own words and the date**, quoted, so no reader mistakes
-  it for your inference; an answer that is only a chosen option is recorded in the form
-  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch whoami`
-  or the conversation, or "the person" when the token names no owner — never a name you were not
-  given. A point you inferred says so, with the reasoning — a security concern, a restriction, or
-  a cost nobody measured is exactly this, not a settled constraint; during a live brainstorming
-  conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
-  until the human has agreed to it. One carried in from another document keeps its provenance: an
-  agent's inference there is marked one here, or stays out until the human raises it.
+- **An answered decision block is itself the record of the decision.** It already renders the
+  person's chosen option and their own words, with who answered it and when; never add text
+  restating it. A point you inferred says so, with the reasoning — a security concern, a
+  restriction, or a cost nobody measured is exactly this, not a settled constraint; during a live
+  brainstorming conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference
+  out of the spec until the human has agreed to it. One carried in from another document keeps its
+  provenance: an agent's inference there is marked one here, or stays out until the human raises
+  it.
+- **A decision that arrives another way carries no rendered record.** A comment that answers a
+  question, a conversation, or a waiver is written into the text in the person's own words and the
+  date, quoted, naming them from `dispatch whoami` or the conversation, or "the person" when the
+  token names no owner — never a name you were not given.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
-- **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
-  design, rewrite the text it changes and fold the answered decision into it; the document's
-  versions keep the history.
+- **A changed point is rewritten, not appended to.** When an answer or a new fact changes design
+  text outside its decision block, rewrite that text; the block stays where it is as the record of
+  the answer. The document's versions keep the history.
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
   decision block, a technical decision your lane makes where the work happens, outside the spec,
   or, for a contract between two lanes, a question you settle with the other lane over Envoy (see
@@ -154,6 +157,8 @@ Labels are optional: Dispatch trims them, preserves their case, and removes case
 the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 
+When the work needs a project that does not exist yet, create it yourself with `dispatch project --key <KEY> --name '<name>'`; nobody has to make it by hand. Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first with `dispatch projects`. A key that already exists is refused with `PROJECT_EXISTS`.
+
 ## Search first
 
 `skill://dispatch-first`, which every session with Dispatch carries, says how to search before
@@ -208,11 +213,11 @@ field, and choosing your next issue are in [Working an issue](skill://dispatch/r
 ## Asking
 
 Two kinds of question reach a human. A decision about the design a document records is a decision
-block in that document ([Decision blocks](#decision-blocks)), whatever phase the work is in and
-whether or not the document was approved: a block in an approved document makes the approval
-stale, which is right. A Legion phase worker sends such a decision to its architect, which writes
-the block (`skill://legion-worker`). A to-do or permission only a human can give, or a decision
-with no document to live in, is a `dispatch ask`. The gates below apply to both.
+block in that document ([Decision blocks](#decision-blocks)), at every phase, approved or not: a
+block in an approved document leaves the approval stale until the answer, which carries it
+forward when it is the whole change (below). A Legion phase worker sends it to its architect,
+which writes the block (`skill://legion-worker`). A to-do or permission only a human can give, or
+a decision with no document to live in, is a `dispatch ask`. The gates below apply to both.
 
 ### Before you ask
 
@@ -363,29 +368,33 @@ See [Following](#following) for why you receive what happens to asks you open an
 ## Approval of a spec
 
 Approval is a property of a document, not a question you phrase: a human approves a specific
-version, the way a pull-request review approves a commit, and any later version makes that
-approval stale. A later version also moves an open request to that version and leaves it waiting
-on you until you request again, which hands the same request back to the human. Answering a
-decision block writes a new version, so request approval only when all three hold: every decision
-block is settled, which means answered and folded into the text, or waived as the next paragraph
-says; the human has agreed to every point in the spec; and the current version has not been
-approved. A Legion root spec under an armed design gate always goes to approval once all three
-hold (`skill://legion-architect`).
+version, the way a pull-request review approves a commit, and a later version leaves that approval
+stale, unless the human's own answer to a decision block is the whole change since the version
+they approved; then Dispatch records an `approved` review in their name at that version and emits
+`artifact.approved`, so request nothing. When the answer changes text outside its block, rewrite
+that text, run the fresh reader below on it and request again. A later version also moves an open
+request with it, waiting on you until you request again. Request only when all three hold: every
+decision block is settled (answered or waived, below); the human has agreed to every point in the
+spec; and the current version has not been approved. A Legion root spec under an armed design gate
+always goes to approval once all three hold (`skill://legion-architect`).
 
-When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
-the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
-request it and do not hold it silently: name each open block and ask them to answer it or waive
-it. For a waiver, close the block with `dispatch resolve-ask --kind resolved` (their words as
-`--reason`), then write their decision into the text in their words and request.
-`dispatch request-approval` refuses while any block is open.
+Before calling `dispatch request-approval`, have a fresh read-only reader check the current spec
+against the code and the human's words, then resolve every finding. A Legion architect uses
+`plan-gap-analyst`, another session the read-only reader its host supplies. When all three hold,
+request in the pass that finishes the spec: a design waiting with nothing in the human's Inbox
+waits on nobody. When a human asks for approval while a block is open, neither request it nor hold
+it silently: name each open block and ask them to answer or waive it. For a waiver, close it with
+`dispatch resolve-ask --kind resolved` (their words as `--reason`), write their decision into the
+text in their words and request. `dispatch request-approval` refuses while any block is open.
 
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
 block first, with your recommendation, or, when it is a choice you can make yourself
 ([Before you ask](#before-you-ask), gate 1) and the human will not want a say in it, comes out of
 the spec and is made where the work happens; an inference you cannot defend in a decision block
 comes out of the spec. `--summary` says in one to three sentences what the human is approving and
-nothing else: no commentary on itself or on the conversation, and no open question. The Inbox
-shows it after "Approve spec.md (version N)?". Never write "Approve" options into an ordinary
+nothing else: no commentary on itself or on the conversation, and no open question; after an
+earlier approval, one sentence naming what changed since it, since the card shows that approval
+and its `Show diff` control carries the detail. Never write "Approve" options into an ordinary
 `dispatch ask`; only humans approve. The call, its result and its answer:
 [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
@@ -397,7 +406,9 @@ every version that records a decision is named with `dispatch doc-edit --summary
 
 Read the current document before changing it with `dispatch doc-read` (`--issue`, or `--project`
 and `--artifact`, an optional `--version`, or `--ref`).
-It prints live or versioned markdown with open marks. A live read ends with a document token; `--issue` with no
+It prints live or versioned markdown with open marks. A live read ends with a document token; `--blocks` lists the live
+document's block ids, tokens and table rows instead, which `dispatch doc-edit` takes to address a block that is not a typed
+block. `--issue` with no
 `--artifact` reads the issue specification; a project needs `--artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
 `dispatch artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.

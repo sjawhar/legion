@@ -36,6 +36,7 @@ const issue: IssueDetails = {
   open_asks: [],
   progress: { tasks: null, children: null },
   parent: null,
+  blocked_by: [],
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
@@ -53,10 +54,12 @@ const issue: IssueDetails = {
 const originalApi = {
   getInbox: api.getInbox,
   getIssue: api.getIssue,
+  getMyAgentState: api.getMyAgentState,
   getMyState: api.getMyState,
   listComments: api.listComments,
   listIssueAsks: api.listIssueAsks,
   listIssues: api.listIssues,
+  listMyReplies: api.listMyReplies,
   listProjects: api.listProjects,
   whoAmI: api.whoAmI,
 };
@@ -76,9 +79,15 @@ function setViewport(width: number): void {
     }) as MediaQueryList) as typeof window.matchMedia;
 }
 
-function renderShellAt(width: number, inbox: InboxRow[] = []): void {
+function renderShellAt(width: number, inbox: InboxRow[] = [], unreadThreads = 0): void {
   setViewport(width);
   api.whoAmI = async () => ({ kind: "user", login: "alice" });
+  api.listMyReplies = async (query) => ({
+    limit: query.limit,
+    offset: 0,
+    rows: [],
+    total: unreadThreads,
+  });
   api.listIssues = async () => [
     {
       route: null,
@@ -89,6 +98,8 @@ function renderShellAt(width: number, inbox: InboxRow[] = []): void {
       progress: { tasks: null, children: null },
       last_seq: 0,
       parent: issue.parent,
+      blocked_by: issue.blocked_by,
+      primary_artifact_id: issue.primary_artifact_id,
       assignee: issue.assignee,
       claim: null,
       components: issue.components,
@@ -198,4 +209,23 @@ test("compact top bar shows only asks waiting on the viewer", async () => {
   ]);
 
   expect(await screen.findByText("Needs you 1")).not.toBeNull();
+});
+
+test("the compact header links Replies N to the Replies page, beside the Agents replies badge", async () => {
+  api.getMyAgentState = async () => ({ planner: { unread_replies: 1 } });
+  renderShellAt(800, [], 2);
+
+  const replies = await screen.findByRole("link", { name: "Replies 2" });
+  expect(replies.getAttribute("href")).toBe("/replies");
+  const agents = screen.getByRole("link", { name: "New reply 1" });
+  expect(replies.previousElementSibling).toBe(agents);
+});
+
+test("the compact header shows no Replies link while nothing is unread", async () => {
+  renderShellAt(800, [], 0);
+
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Open navigation" })).not.toBeNull()
+  );
+  expect(screen.queryByRole("link", { name: /^Replies/ })).toBeNull();
 });

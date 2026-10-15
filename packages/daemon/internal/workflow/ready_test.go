@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -454,6 +455,108 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 				t.Fatalf("the lingering tree's LEGION-209 = %q, %d worker starts, %d rounds, %d messages and notices (the controller's included), %v; want %s, none, 2, none", got, starts, rounds, told, err, want)
 			}
 		})
+	}
+}
+
+// A handed-over child carries a copy of its old root's gate, and the document it names still
+// belongs to the old root, so every approval of it arrives keyed by the old root. A copy carried
+// closed (a spec version bumped while the old tree lingered) refuses the carried merger's READY,
+// and the approval of that version opens every gate on the document, the old root's and the
+// copy, and releases the READY the copy refused. The old root's architect is told design-approved;
+// the carried root's is told carried-gate-opened, which starts nothing of section 2's design
+// approval, since its tree's design was approved before the carry.
+func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	parent := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "old root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-209", Project: "LEGION", Title: "carried child", Parent: &parent, Phase: phase.Merging, Generation: 2, Status: "retro", Rank: "V"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, ApprovedVersion: new(1)})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-209", ArtifactID: "artifact-208", LatestVersion: 2, ApprovedVersion: new(1)})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := readyEngine("")
+	packet := strings.ReplaceAll(readyPacket, "LEGION-208", "LEGION-209")
+
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 2, Ready: true, Summary: packet, Commit: "head"}, engine, admissionStub{})
+	if err != nil || refusalCode(result) != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("carried READY = %#v, %v; want the closed copy's refusal", result, err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact approval: %v", err)
+	}
+	var got string
+	if err := pool.QueryRow(ctx, "select phase from issues where key = 'LEGION-209'").Scan(&got); err != nil || got != string(phase.AwaitingMerge) {
+		t.Fatalf("carried child after the old document's approval = %q, %v; want awaiting_merge", got, err)
+	}
+	if bodies := messageBodies(t, pool); len(bodies) != 1 || bodies[0] != packet {
+		t.Fatalf("Dispatch messages = %q, want the carried READY once", bodies)
+	}
+	for _, key := range []string{"LEGION-208", "LEGION-209"} {
+		var approved *int
+		if err := pool.QueryRow(ctx, "select approved_version from design_gates where issue = $1", key).Scan(&approved); err != nil || approved == nil || *approved != 2 {
+			t.Fatalf("%s's gate approved version = %v, %v; want 2", key, approved, err)
+		}
+	}
+	var notices []string
+	rows, err := pool.Query(ctx, `select issue || ' ' || (payload->>'kind') from outbox where kind = 'notice'
+		and payload->>'kind' in ('design-approved', 'carried-gate-opened') order by id`)
+	if err != nil {
+		t.Fatalf("read notices: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var notice string
+		if err := rows.Scan(&notice); err != nil {
+			t.Fatalf("scan notice: %v", err)
+		}
+		notices = append(notices, notice)
+	}
+	if want := []string{"LEGION-208 design-approved", "LEGION-209 carried-gate-opened"}; !slices.Equal(notices, want) {
+		t.Fatalf("notices = %v, want %v", notices, want)
+	}
+}
+
+// A carried copy of the old root's gate takes only approvals: its work was approved under the
+// design it carries, and the old document belongs to another tree now. After the carry, a new
+// version of the old document, a changes request on it, or an approval of an older version leaves
+// an open copy open, tells the carried architect nothing, and its merger's READY goes through, while
+// the old root's own gate takes every event as before.
+func TestTheOldRootsDocumentChangingAfterTheCarryLeavesAnOpenCopyOpen(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	parent := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "old root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U"})
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-209", Project: "LEGION", Title: "carried child", Parent: &parent, Phase: phase.Merging, Generation: 2, Status: "retro", Rank: "V"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2, ApprovedVersion: new(2)})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-209", ArtifactID: "artifact-208", LatestVersion: 2, ApprovedVersion: new(2)})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := readyEngine("")
+
+	for _, event := range []intake.DispatchArtifact{
+		{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 3},
+		{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactChangesRequested, Version: 3, Reason: "rework the old design"},
+		{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 1},
+	} {
+		if _, err := intake.ApplyFact(ctx, pool, "dispatch", string(event.Kind), event, engine, admissionStub{}); err != nil {
+			t.Fatalf("ApplyFact %s: %v", event.Kind, err)
+		}
+	}
+	var latest, approved int
+	if err := pool.QueryRow(ctx, "select latest_version, coalesce(approved_version, 0) from design_gates where issue = 'LEGION-208'").Scan(&latest, &approved); err != nil || latest != 3 || approved != 1 {
+		t.Fatalf("old root's gate = latest %d, approved %d, %v; want every event applied (latest 3, approved 1)", latest, approved, err)
+	}
+	var notices int
+	if err := pool.QueryRow(ctx, "select count(*) from outbox where kind = 'notice' and issue = 'LEGION-209'").Scan(&notices); err != nil || notices != 0 {
+		t.Fatalf("notices to the carried root = %d, %v; want none", notices, err)
+	}
+	packet := strings.ReplaceAll(readyPacket, "LEGION-208", "LEGION-209")
+	result, err := intake.ApplyFact(ctx, pool, "api", "ready", intake.HandoffComplete{Issue: "LEGION-209", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 2, Ready: true, Summary: packet, Commit: "head"}, engine, admissionStub{})
+	if err != nil || result.Refusal != nil {
+		t.Fatalf("carried READY after the old document changed = %#v, %v; want it accepted", result, err)
+	}
+	var got string
+	if err := pool.QueryRow(ctx, "select phase from issues where key = 'LEGION-209'").Scan(&got); err != nil || got != string(phase.AwaitingMerge) {
+		t.Fatalf("carried child = %q, %v; want awaiting_merge", got, err)
 	}
 }
 

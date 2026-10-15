@@ -51,7 +51,7 @@ const drainPollInterval = 250 * time.Millisecond
 // serveUntilStopped serves on listener until ctx ends, then stops Dispatch (shutdown). It returns
 // the error that ended serving when serving failed, which cancels ctx.
 func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *http.Server, listener net.Listener,
-	addr string, documentService *docs.Service, pool *store.Pool) error {
+	addr string, documentService *docs.Service, pool *store.Pool, waitDelivery func()) error {
 	serveErr := make(chan error, 1)
 	go func() {
 		slog.Info("dispatch: listening", "addr", addr)
@@ -62,7 +62,7 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 	}()
 	<-ctx.Done()
 	slog.Info("dispatch: shutting down")
-	shutdown(server, documentService, pool)
+	shutdown(server, documentService, pool, waitDelivery)
 	select {
 	case err := <-serveErr:
 		return err
@@ -74,13 +74,14 @@ func serveUntilStopped(ctx context.Context, cancel context.CancelFunc, server *h
 // shutdown stops Dispatch once its process context is cancelled. HTTP drains the requests in flight
 // first, with no deadline of its own. The document service settles the documents owed within
 // documentShutdownTimeout once those requests are done, or httpDrainBeforeDocuments after the
-// signal with some still running. The database pool then closes once every request has answered
-// and no connection of the shared or document-rooms pool is in use. While the database answers,
-// nothing but the runtime's kill bounds that wait, so a write in flight commits and is answered if
-// it finishes before the kill. A database that has stopped answering (silentProbes) holds its
+// signal with some still running. Hijacked delivery sockets and the delivery hub then finish their
+// Lifetime-driven shutdown. The database pool closes once every request has answered and no
+// connection of the shared or document-rooms pool is in use. While the database answers, nothing
+// but the runtime's kill bounds that wait, so a write in flight commits and is answered if it
+// finishes before the kill. A database that has stopped answering (silentProbes) holds its
 // connections forever, so Dispatch exits without them, and the database rolls back whatever they
 // held open.
-func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool) {
+func shutdown(server *http.Server, documentService *docs.Service, pool *store.Pool, waitDelivery func()) {
 	drained := make(chan struct{})
 	go func() {
 		defer close(drained)
@@ -98,6 +99,7 @@ func shutdown(server *http.Server, documentService *docs.Service, pool *store.Po
 	if err := documentService.Shutdown(documentCtx); err != nil {
 		slog.Warn("dispatch: shutdown document service", "error", err)
 	}
+	waitDelivery()
 	if waitUntilIdle(drained, pool) {
 		pool.Close()
 	}

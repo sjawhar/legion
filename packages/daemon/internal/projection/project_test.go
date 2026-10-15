@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -52,7 +53,7 @@ func TestProjectShowsOnlySlotlessTodoIssuesInDispatchRankOrder(t *testing.T) {
 		},
 		slots: []record.Slot{{Issue: "LEGION-214", Index: 0, AdmittedAt: now}},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{})
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -75,7 +76,7 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
 		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
 		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -102,6 +103,27 @@ func TestProjectShowsOperatorSpawnedClaimsWithoutRecordIssue(t *testing.T) {
 	}
 }
 
+// A claim's recorded plugin contract passes through to its view, 0 when nothing was recorded.
+func TestProjectShowsEachClaimsPluginContract(t *testing.T) {
+	const issue = "S2-2"
+	architect := claim.Token("legion-s2-2-architect")
+	implementer := claim.Token("legion-s2-2-implementer")
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
+		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1", PluginContract: 24},
+		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateIdle, Session: "session-2"},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	view := got.Issues[issue]
+	if view.Architect.PluginContract != 24 {
+		t.Fatalf("architect pluginContract = %d, want 24", view.Architect.PluginContract)
+	}
+	if got := view.Workers[claim.RoleImplementer].Claim.PluginContract; got != 0 {
+		t.Fatalf("unregistered implementer pluginContract = %d, want 0", got)
+	}
+}
+
 func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	token := claim.Token("legion-208-architect")
 	store := projectionStore{
@@ -112,7 +134,7 @@ func TestProjectShowsLaunchUncertainClaimsWithoutALocator(t *testing.T) {
 	}
 	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{{
 		Token: token, Issue: "LEGION-208", Role: claim.RoleArchitect, State: supervise.StateLaunchUncertain,
-	}})
+	}}, nil)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -144,7 +166,7 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 			"LEGION-209": {Issue: "LEGION-209", Number: 43, HeadSHA: "head"},
 		},
 	}
-	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{})
+	got, err := Project(context.Background(), nil, store, "LEGION", []supervise.Claim{}, nil)
 	if err != nil {
 		t.Fatalf("Project: %v", err)
 	}
@@ -153,5 +175,43 @@ func TestProjectShowsTheReviewRoundsDecisionOnThePullRequest(t *testing.T) {
 	}
 	if pr := got.Issues["LEGION-209"].PullRequest; pr == nil || pr.ReviewDecision != "" {
 		t.Fatalf("LEGION-209's pull request = %+v, want no decision before one is made", pr)
+	}
+}
+
+// A claim's capability report (LEGION-663) shows on its view, whatever process reported it — the
+// view carries that process's incarnation for the reader to compare — and a claim no session has
+// reported for shows no capabilities rather than an empty report.
+func TestProjectShowsACapabilityReportOnlyOnTheClaimThatSentOne(t *testing.T) {
+	const issue = "LEGION-208"
+	architect := claim.Token("legion-legion-legion-208-architect")
+	implementer := claim.Token("legion-legion-legion-208-implementer")
+	report := capabilities.Report{
+		Claim: implementer, Generation: 2,
+		MeasuredAt: time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC),
+		Rows: []capabilities.Row{
+			{Name: capabilities.Subagents, OK: true, Detail: "6 task agents discovered"},
+			{Name: capabilities.GitHub, Detail: "gh api user: HTTP 401"},
+		},
+	}
+	report.Locator.Incarnation = "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/1"
+	got, err := Project(context.Background(), nil, projectionStore{}, "LEGION", []supervise.Claim{
+		{Token: architect, Issue: issue, Role: claim.RoleArchitect, State: supervise.StateReady, Session: "session-1"},
+		{Token: implementer, Issue: issue, Role: claim.RoleImplementer, State: supervise.StateWorking, Session: "session-2"},
+	}, map[claim.Token]capabilities.Report{implementer: report})
+	if err != nil {
+		t.Fatalf("Project: %v", err)
+	}
+	view := got.Issues[issue]
+	if view.Architect == nil || view.Architect.Capabilities != nil {
+		t.Fatalf("architect = %#v, want its view with no capabilities: no session reported for it", view.Architect)
+	}
+	want := &api.CapabilityReportView{
+		MeasuredAt:  report.MeasuredAt,
+		Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/1",
+		OK:          []string{"subagents"},
+		Open:        []api.CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401"}},
+	}
+	if got := view.Workers[claim.RoleImplementer].Claim.Capabilities; !reflect.DeepEqual(got, want) {
+		t.Fatalf("implementer capabilities = %#v, want %#v", got, want)
 	}
 }

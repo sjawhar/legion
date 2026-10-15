@@ -15,11 +15,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -50,6 +52,9 @@ const (
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
 	// effect behind it.
 	issueBranchTimeout = 30 * time.Second
+	// autoMergeDisableTimeout bounds one auto_merge_disable row's GitHub calls, its token's mint
+	// with them, for the same reason: one unanswered call would stall every effect behind it.
+	autoMergeDisableTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -178,7 +183,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				// finished instead, and the board follows the workflow again from the next one.
 				r.log.Error("outbox status write refused by Dispatch and dropped; the issue's later writes go on",
 					"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", err)
-				if err := r.finish(ctx, row); err != nil {
+				if err := r.finishRefused(ctx, row); err != nil {
 					r.log.Error("outbox row finish not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
 				}
 				continue
@@ -200,6 +205,34 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
 	}); err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
+	}
+	return nil
+}
+
+// finishRefused finishes a status row Dispatch refused permanently. A hand-over's row drops its
+// fence in the same transaction: the write that would hand the child to Legion never lands, so no
+// admission consumes the fence, and one left behind would keep naming the child's own tree as its
+// Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until a person
+// labels it, which admits it as an orphan.
+func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow) error {
+	payload, err := record.DecodeOutboxPayload(row)
+	if err != nil {
+		return fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+	}
+	write, _ := payload.(record.StatusWrite) // permanentStatusRefusal judges status rows alone
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if write.HandOver {
+			if err := r.records.DeleteHandoverAt(ctx, tx, row.Issue, write.HandOverTree, write.HandOverLinger); err != nil {
+				return err
+			}
+		}
+		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
+	}); err != nil {
+		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
+	}
+	if write.HandOver {
+		r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
+			"row", row.ID, "issue", row.Issue, "tree", write.HandOverTree, "linger", write.HandOverLinger)
 	}
 	return nil
 }
@@ -273,6 +306,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.mergeQueue(ctx, row, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
+	case record.AutoMergeDisable:
+		return r.autoMergeDisable(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -287,7 +322,26 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("read Dispatch issue %s before status write: %w", row.Issue, err)
 	}
 	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
+		if payload.HandOver {
+			if err := r.dropHandover(ctx, row.Issue, payload); err != nil {
+				return err
+			}
+		}
 		return nil
+	}
+	if payload.HandOver {
+		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
+			return err
+		}
+		if issue.Status == payload.Status && issue.HandedOver {
+			return r.consumeHandover(ctx, row, payload)
+		}
+		// Every hand-over write is conditional on the sequence just read (dispatch HandOver), the
+		// label added when the child lacks it, so a person's move since that read stands.
+		if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
+			return fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
+		}
+		return r.consumeHandover(ctx, row, payload)
 	}
 	if issue.Status == payload.Status {
 		return nil
@@ -303,6 +357,60 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
 	return nil
+}
+
+// consumeHandover applies the hand-over to the record once Dispatch shows it: the row's hand-over
+// write just set it, or Dispatch already showed the todo and label (which a write would make no
+// event for). It does not wait for the write's event: a restart between the write and that event's
+// publication lets the boot read record the event's sequence, and the live event then stops at the
+// sequence fence. The fact is idempotent (admit's consumeHandover reads the fence it deletes), so
+// the event, or this row's retry after a failure here, changes nothing more.
+func (r *outbox) consumeHandover(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) error {
+	_, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("handover:%s:%d", row.Issue, row.ID),
+		intake.Handover{Issue: row.Issue, Tree: payload.HandOverTree, Generation: payload.HandOverLinger}, r.handlers...)
+	return err
+}
+
+// handOverHolds is an early check only; the durable fence is enforced again by intake when the
+// PATCH's daemon event arrives. The one transaction confirms this row still owns the child and the
+// linger it names, avoiding a needless write once a root reopen already removed that fence.
+func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) (bool, error) {
+	var issue, root *record.Issue
+	var handover *record.Handover
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = r.records.Issue(ctx, tx, row.Issue)
+		if err != nil || issue == nil {
+			return err
+		}
+		handover, err = r.records.Handover(ctx, tx, row.Issue)
+		if err != nil || handover == nil {
+			return err
+		}
+		if handover.Cancelled {
+			return r.records.DeleteHandoverAt(ctx, tx, row.Issue, payload.HandOverTree, payload.HandOverLinger)
+		}
+		root, err = r.records.Issue(ctx, tx, handover.Tree)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read hand-over of %s: %w", row.Issue, err)
+	}
+	if issue != nil && handover != nil && !handover.Cancelled && root != nil && issue.Tree == handover.Tree && handover.Tree == payload.HandOverTree &&
+		handover.Generation == payload.HandOverLinger && root.LingersAt(handover.Generation) {
+		return true, nil
+	}
+	r.log.Info("outbox hand-over no longer holds; finished without writing", "row", row.ID, "issue", row.Issue,
+		"tree", payload.HandOverTree, "linger", payload.HandOverLinger)
+	return false, nil
+}
+
+// dropHandover deletes the fence of a hand-over a person's move superseded, but only this row's
+// own: the tree and linger generation the row names. A newer linger's fence on the same child is
+// its own row's to settle.
+func (r *outbox) dropHandover(ctx context.Context, issue string, payload record.StatusWrite) error {
+	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		return r.records.DeleteHandoverAt(ctx, tx, issue, payload.HandOverTree, payload.HandOverLinger)
+	})
 }
 
 func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload record.MessagePost) error {
@@ -485,6 +593,33 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
 		}
+		// A child carried into a tree of its own — a finished root's hand-over, or a person's label
+		// on a child its tree left mid-run — may still run a role of its old tree: one in a turn when
+		// the old tree's close held its suspension, which that close's row, now of an earlier
+		// generation, finishes without acting on. No role of the new tree starts while one runs.
+		if err := r.stopElsewhere(ctx, issue); err != nil {
+			return err
+		}
+		// A child of a closed tree re-admitted as a root of its own keeps its roles' claims, which
+		// still name the tree it left; each is re-pointed before anything else here, so it binds this
+		// tree's lifecycle and launches in this tree's resources, and so does whatever resumes it
+		// while this start waits (an operator's resume of a claim the operator suspended). The issue
+		// the supervisor keeps beside the machine (volumeLost) never moves with it: a claim's issue is
+		// fixed for its life.
+		if found && machine.Claim().Tree != issue.Tree {
+			if err := machine.Retree(ctx, issue.Tree); err != nil {
+				return err
+			}
+		}
+		// An operator's suspension holds its claim until the operator resumes
+		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
+		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
+		// claim's own decision.
+		if found {
+			if held := machine.Claim(); held.RuleHolds() {
+				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
+			}
+		}
 		// A start that takes the phase over from a role still at work in it (CI settled red before
 		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
 		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
@@ -506,15 +641,6 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("create claim %s: %w", token, err)
 			}
 		}
-		// A child of a closed tree re-admitted as a root of its own keeps its roles' claims, which
-		// still name the tree it left; each is re-pointed before it starts here, so it binds this
-		// tree's lifecycle and launches in this tree's resources. The issue the supervisor keeps
-		// beside the machine (volumeLost) never moves with it: a claim's issue is fixed for its life.
-		if machine.Claim().Tree != issue.Tree {
-			if err := machine.Retree(ctx, issue.Tree); err != nil {
-				return err
-			}
-		}
 		// The claim remembers the newest start run against it, so a stop written before this one
 		// is finished rather than acted on however late it arrives (see "suspend" below). A claim
 		// this row created has no older stop to fence, and recording it here rather than only for
@@ -529,12 +655,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("start claim %s: %w", token, err)
 			}
 		case supervise.StateSuspended:
-			if err := machine.Handle(ctx, supervise.RequestResume{Claim: token}); err != nil {
+			// The role owns the issue's phase this start is for: the rule resumes it, unless an
+			// operator suspended it meanwhile, when the task's delivery below waits instead.
+			if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token,
+				Reason: fmt.Sprintf("start row %d of %s (phase %q)", row.ID, issue.Key, payload.Phase)}); err != nil {
 				return fmt.Errorf("resume claim %s: %w", token, err)
 			}
 		case supervise.StateFailed:
-			// Only the workflow starts a role whose claim failed: the architect retrying the
-			// held phase, or a later transition that needs the role again.
+			// A boot rule-resume that spent its launch budget is terminal for this row: retrying it
+			// with RequestRetry would reset that budget and launch forever. The failure's workflow
+			// fact and boot report name it. Other workflow starts retain their existing retry rule.
+			if payload.RuleResume {
+				r.log.Info("outbox boot rule-resume finished: its claim spent the launch budget", "row", row.ID, "issue", issue.Key, "role", payload.Role)
+				return nil
+			}
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
 			}
@@ -601,7 +735,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason, By: supervise.SuspendedByDaemon}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil
@@ -649,6 +783,72 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// stopElsewhere suspends, as the daemon and keeping its session, every claim of issue that still
+// runs a process in a tree other than the issue's, and is a wait (wait.ErrWaiting) until none
+// does. A claim in a turn holds the suspension for the turn's end and a launching one until its
+// agent is ready (supervise's suspend rows), so the start that asks is what waits, retried on its
+// backoff, charging no claim a launch. No close of the old tree reaches such a claim, since its
+// issue has left that tree, so the suspension names the deadline that close would have had
+// (carriedStopDeadline): a turn still running at the old root's linger expiry is stopped there, and
+// the claim keeps its workspace, the issue's branch and its session, which its next start resumes
+// with its phase's resume task. The hold lives in the claim's memory, so a restart that forgets it
+// is asked again by the start's next attempt, with the same deadline. Once none runs, every claim
+// of the issue may be re-pointed to the issue's tree (supervise.Machine.Retree), and the issue's
+// Sandbox, which no role of the old tree then runs in, is the new tree's to relabel
+// (runtime/sandbox's ensureSandbox). A claim already in the issue's tree is skipped on its view,
+// which only Retree changes, so a start waits on no decision a sibling claim has in flight.
+func (r *outbox) stopElsewhere(ctx context.Context, issue record.Issue) error {
+	var running []string
+	for _, role := range claim.Roles {
+		token, err := claim.NewToken(r.project, issue.Key, role)
+		if err != nil {
+			return fmt.Errorf("derive the %s claim of %s: %w", role, issue.Key, err)
+		}
+		machine, found := r.supervisor.Machine(token)
+		if !found || machine.View().Claim.Tree == issue.Tree {
+			continue
+		}
+		held := machine.Claim()
+		if held.Tree == issue.Tree || held.RunsNothing() {
+			continue
+		}
+		var oldRoot *record.Issue
+		if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+			var err error
+			oldRoot, err = r.records.Issue(ctx, tx, held.Tree)
+			return err
+		}); err != nil {
+			return fmt.Errorf("read the root of tree %s, which claim %s still runs in: %w", held.Tree, token, err)
+		}
+		err = machine.Handle(ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByDaemon,
+			Deadline: carriedStopDeadline(oldRoot, r.now(), r.supervisor.deps.Timeouts.Stop),
+			Reason:   fmt.Sprintf("%s moved from tree %s to tree %s", issue.Key, held.Tree, issue.Tree)})
+		var refused *supervise.RefusedError
+		if err != nil && !errors.Is(err, supervise.ErrSuspendHeld) && !errors.As(err, &refused) {
+			return fmt.Errorf("suspend claim %s, still running in tree %s: %w", token, held.Tree, err)
+		}
+		if held = machine.Claim(); !held.RunsNothing() {
+			running = append(running, fmt.Sprintf("%s:%s in tree %s", token, held.State, held.Tree))
+		}
+	}
+	if len(running) > 0 {
+		return wait.Errorf("start of %s in tree %s waits for %s to stop", issue.Key, issue.Tree, strings.Join(running, ", "))
+	}
+	return nil
+}
+
+// carriedStopDeadline is when a carried child's role still running in its old tree, under oldRoot,
+// is stopped if its turn has not ended: at the old root's linger expiry, where that tree's close
+// would have ended it, so a turn the linger leaves room for ends on its own. A root that no longer
+// lingers (or is not recorded) has no close left to wait for, so the stop is bounded as the
+// operator's is, at stop after now.
+func carriedStopDeadline(oldRoot *record.Issue, now time.Time, stop time.Duration) time.Time {
+	if oldRoot != nil && oldRoot.LingerUntil != nil {
+		return *oldRoot.LingerUntil
+	}
+	return now.Add(stop)
 }
 
 // reservedTreeClose runs a workflow tree close through its tree's durable cleanup reservation, and
@@ -838,6 +1038,60 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
+}
+
+// autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
+// (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
+// while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
+// any other head is disarmed. A row queued by a withdrawal the issue has since come back from so
+// leaves the READY that followed armed. The record is read after GitHub, so a READY recorded while
+// the row runs keeps the arm its merger made.
+func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
+	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
+	defer cancel()
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
+	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
+	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
+	if err != nil {
+		return err
+	}
+	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
+		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
+	return nil
+}
+
+// readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the
+// issue awaits its merge, and none in any other phase, where no arm is legitimate, nor for a READY
+// a person merges (its by-hand note, record.PhaseRow.MergeNote), which covers no arm, nor in a tree
+// that lingers after its root left the workflow, whose members beginLinger disarms.
+func (r *outbox) readyHeadToKeep(ctx context.Context, issue string) (string, error) {
+	var keep string
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		current, err := r.records.Issue(ctx, tx, issue)
+		if err != nil || current == nil || current.Phase != phase.AwaitingMerge {
+			return err
+		}
+		if lingers, err := record.TreeLingers(ctx, r.records, tx, current.Tree); err != nil || lingers {
+			return err
+		}
+		phases, err := r.records.Phases(ctx, tx, issue)
+		if err != nil {
+			return err
+		}
+		for _, row := range phases {
+			if row.Role == claim.RoleMerger && row.MergeNote == "" {
+				keep = row.HandoffCommit
+			}
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("read the READY head %s awaits: %w", issue, err)
+	}
+	return keep, nil
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {

@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject } from "@legion/contracts";
@@ -20,10 +21,25 @@ import {
 } from "@legion/envoy-client/dispatch-session-state";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
-import { LOCAL_ENVOY_NOTICE, resetEnvoyPluginInterfaceForTests } from "@legion/pi-shared/interface";
-import type { MessageRenderer, MessageRendererTheme, PiApi } from "@legion/pi-shared/pi-types";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
+import {
+  envoyPluginInterface,
+  LOCAL_ENVOY_NOTICE,
+  resetEnvoyPluginInterfaceForTests,
+} from "@legion/pi-shared/interface";
+import type {
+  HostSlashCommand,
+  MessageRenderer,
+  MessageRendererTheme,
+  PiApi,
+  UserInputResult,
+} from "@legion/pi-shared/pi-types";
+import {
+  claimEnvoyRole,
+  onEnvoyRoleRegained,
+  subscribeLegionNotice,
+} from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -133,7 +149,11 @@ const natsState = {
   onPublish: undefined as ((subject: string) => void) | undefined,
   failPublishes: 0,
   connectedNames: [] as string[],
+  /** What each connect was given: its servers, and whether it carried an nkey authenticator. */
+  connects: [] as { readonly servers: readonly string[]; readonly authenticated: boolean }[],
   failConnects: 0,
+  /** Hands each connect, once recorded, to nats.js itself, for a row that watches what it dials. */
+  realConnect: false,
   drainHangs: false,
   drainStarted: false,
 };
@@ -148,17 +168,28 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
+// that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
+// before the mock replaces it: a static import's live bindings would read the mock.
+const { connect: realConnect, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   nkeyAuthenticator,
   nkeys,
-  connect: async ({ name }: { readonly name: string }) => {
+  connect: async (options: {
+    readonly name: string;
+    readonly servers: readonly string[];
+    readonly authenticator?: unknown;
+  }) => {
+    const { name, servers, authenticator } = options;
     if (natsState.failConnects > 0) {
       natsState.failConnects -= 1;
       throw new Error("CONNECTION_REFUSED");
     }
     natsState.connectedNames.push(name);
+    natsState.connects.push({ servers, authenticated: authenticator !== undefined });
+    if (natsState.realConnect) {
+      return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
+    }
     return {
       isClosed: () => false,
       drain: async () => {
@@ -253,6 +284,14 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   },
   ...hostAgentRegistryMock,
 }));
+// The host's built-in slash commands, which our fork lists beside `sendUserInput`
+// (`listUserInputBuiltinCommands`): a test fills this list, and `afterEach` empties it. No package
+// in this workspace provides the module, so without this stand-in the extension lists no
+// built-ins, as on a host without the method.
+const hostBuiltins: UserInputBuiltinCommand[] = [];
+mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler", () => ({
+  listUserInputBuiltinCommands: () => hostBuiltins,
+}));
 // Reads the host package, so it loads only after the mock above is in place.
 const { recordBootstrappedSession } = await import("@legion/pi-shared/subagent-session");
 
@@ -273,6 +312,20 @@ const originalTmuxPane = process.env.TMUX_PANE;
 const originalDispatchSessionId = process.env.DISPATCH_SESSION_ID;
 const originalDispatchHost = process.env.DISPATCH_HOST;
 const originalDispatchStateDir = process.env.DISPATCH_STATE_DIR;
+// What picks the envoy.json the extension reads, and the credentials a Legion pane carries beside
+// it: each test starts with none of them but a file that holds no section (`beforeEach`).
+const configVariables = [
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
+  "XDG_CONFIG_HOME",
+  "ENVOY_TOKEN",
+  "ENVOY_TOKEN_FILE",
+  "NATS_NKEY_SEED",
+  "NATS_NKEY_SEED_FILE",
+] as const;
+const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
+let configDirectory = "";
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
@@ -295,6 +348,13 @@ beforeEach(() => {
   delete process.env.TMUX_PANE;
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;
+  // The extension picks its envoy.json when its module loads, and each test loads it fresh: a file
+  // that holds no section, so Dispatch and Envoy come from the variables the test sets and never
+  // from the caller's own envoy.json or Oh My Pi profile.
+  for (const name of configVariables) delete process.env[name];
+  configDirectory = mkdtempSync(join(tmpdir(), "envoy-config-"));
+  process.env.ENVOY_CONFIG_FILE = join(configDirectory, "envoy.json");
+  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
 });
 
 afterEach(async () => {
@@ -328,11 +388,17 @@ afterEach(async () => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+  for (const [name, value] of originalConfigVariables) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  rmSync(configDirectory, { recursive: true, force: true });
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   natsState.connectedNames.length = 0;
+  natsState.connects.length = 0;
   natsState.published.length = 0;
   natsState.onPublish = undefined;
   natsState.failPublishes = 0;
@@ -340,8 +406,10 @@ afterEach(async () => {
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
+  natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
+  hostBuiltins.length = 0;
 });
 
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
@@ -531,6 +599,8 @@ function targetedCommentEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: str
 
 const DIRECT_MESSAGE_ID = "44444444-4444-4444-8444-444444444444";
 const DIRECT_MESSAGE_BODY = "Where is the dashboard?";
+/** Another direct message from the same person: their next Send, not a retry of the first. */
+const NEXT_MESSAGE_ID = "55555555-5555-4555-8555-555555555555";
 
 /**
  * A person's direct message to ses_delivery from Dispatch's Agents page, as the listener hands the
@@ -546,6 +616,7 @@ function directDispatchEnvelope(
     readonly attempt?: number;
     readonly body?: string;
     readonly broadcastID?: string;
+    readonly messageID?: string;
   } = {}
 ): string {
   const actor = frame.actor ?? { id: "alice", kind: "user" };
@@ -564,7 +635,7 @@ function directDispatchEnvelope(
           ...(frame.broadcastID === undefined ? {} : { broadcast_id: frame.broadcastID }),
           created_at: "2026-09-30T00:00:00Z",
           deliveries: [],
-          id: DIRECT_MESSAGE_ID,
+          id: frame.messageID ?? DIRECT_MESSAGE_ID,
           in_reply_to: null,
           issue_key: null,
           target: "session:ses_delivery",
@@ -585,6 +656,7 @@ function directDispatchEnvelope(
 function storedAttempt(
   attempt: number,
   mode: "aside" | "btw" | "steer",
+  messageID = DIRECT_MESSAGE_ID,
   requestedBy: { readonly kind: string; readonly id: string } = { id: "alice", kind: "user" }
 ) {
   return {
@@ -596,7 +668,7 @@ function storedAttempt(
     duplicate: false,
     envelope_id: null,
     error: null,
-    message_id: DIRECT_MESSAGE_ID,
+    message_id: messageID,
     reply_id: null,
     requested_by: requestedBy,
     session_id: "ses_delivery",
@@ -616,13 +688,22 @@ type AcceptAnswer =
   | { readonly status: number; readonly code?: string }
   | { readonly reject: string };
 
-/** Dispatch's own rule for one message: the first accept succeeds and every later one is
- *  refused, since a message is taken at most once. */
-const acceptOnce = (count: number): AcceptAnswer =>
-  count === 1 ? { accepted: true } : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
+/** Dispatch's own rule for one message (`message_delivery.go`): the first accept succeeds, with
+ *  `body` as the stored body when given, and every later one is refused, since a message is taken
+ *  at most once. */
+const acceptOnce =
+  (body?: string) =>
+  (count: number): AcceptAnswer =>
+    count === 1
+      ? { accepted: true, ...(body !== undefined && { body }) }
+      : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
 
 /** The accept route's response for `answer` to an accept of `attempt`. */
-function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
+function acceptResponse(
+  attempt: number,
+  answer: AcceptAnswer,
+  messageID = DIRECT_MESSAGE_ID
+): Response {
   if ("reject" in answer) throw new TypeError(answer.reject);
   if (!("accepted" in answer)) {
     return new Response(JSON.stringify({ code: answer.code, error: "refused" }), {
@@ -631,7 +712,7 @@ function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
     });
   }
   const accepted = {
-    ...storedAttempt(attempt, answer.delivery ?? "steer"),
+    ...storedAttempt(attempt, answer.delivery ?? "steer", messageID),
     accepted_as: "user_turn",
   };
   const body = answer.body === undefined ? DIRECT_MESSAGE_BODY : answer.body;
@@ -653,7 +734,7 @@ function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
 async function bootDirectSession(
   query: string,
   options: {
-    readonly accept?: (count: number) => AcceptAnswer;
+    readonly accept?: (count: number) => AcceptAnswer | Promise<AcceptAnswer>;
     readonly entries?: readonly unknown[];
     readonly branch?: readonly unknown[];
     /** Answers a Dispatch request outside `/api/v1/messages/`, such as the pictures a delivery
@@ -662,6 +743,11 @@ async function bootDirectSession(
     /** Runs as the host is handed each delivery, before it takes it: a throw is the host refusing
      *  the send. */
     readonly beforeSend?: () => void;
+    /** The host's `pi.sendUserInput`, which a host without it lacks; each call is recorded in
+     *  `inputs` and counts as a delivery. */
+    readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
+    /** The host's `pi.getCommands`. */
+    readonly getCommands?: () => readonly HostSlashCommand[];
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -672,6 +758,9 @@ async function bootDirectSession(
     readonly body: unknown;
   }[] = [];
   const posts: string[] = [];
+  // The session's replies to the direct message's attempts, as Dispatch's reply route took them.
+  const replies: { readonly path: string; readonly body: unknown }[] = [];
+  const replyWaiters: { readonly count: number; readonly resolve: () => void }[] = [];
   globalThis.fetch = async (input, init) => {
     const url = new URL(input.toString());
     if (url.pathname.startsWith("/api/v1/messages/")) {
@@ -684,12 +773,21 @@ async function bootDirectSession(
         });
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
-          (options.accept ?? acceptOnce)(accepts.length)
+          await (options.accept ?? acceptOnce())(accepts.length),
+          url.pathname.split("/").at(-4)
         );
       }
-      // The session asks Dispatch nothing else about a direct message: any other call is recorded
-      // and refused, so a read-back would keep the card.
+      // The session asks Dispatch nothing else about a direct message but its reply: any other
+      // call is recorded and refused, so a read-back would keep the card.
       posts.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/reply")) {
+        replies.push({ body: JSON.parse(init?.body?.toString() ?? "null"), path: url.pathname });
+        for (const waiter of replyWaiters.splice(0)) {
+          if (replies.length >= waiter.count) waiter.resolve();
+          else replyWaiters.push(waiter);
+        }
+        return new Response(JSON.stringify({}), { status: 201 });
+      }
       return new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 });
     }
     const answered = options.dispatch?.(url);
@@ -702,13 +800,15 @@ async function bootDirectSession(
   const fixture = createPi();
   const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
   const recordedWhenDelivered: number[] = [];
+  const inputs: { readonly text: string; readonly options: unknown }[] = [];
   const taken = () => {
-    const count = fixture.deliveries.length + fixture.userMessages.length;
+    const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
     for (const waiter of waiters.splice(0)) {
       if (count >= waiter.count) waiter.resolve();
       else waiters.push(waiter);
     }
   };
+  const run = options.sendUserInput;
   envoyExtension({
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
@@ -723,6 +823,16 @@ async function bootDirectSession(
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
+    ...(run !== undefined && {
+      sendUserInput: (text: string, inputOptions: unknown) => {
+        options.beforeSend?.();
+        recordedWhenDelivered.push(fixture.entries.length);
+        inputs.push({ options: inputOptions, text });
+        taken();
+        return run(text, inputOptions);
+      },
+    }),
+    getCommands: options.getCommands ?? (() => []),
   });
   const prior = options.entries ?? [];
   const base = sessionContext("ses_delivery");
@@ -743,7 +853,24 @@ async function bootDirectSession(
     taken();
     return waiter.promise;
   };
-  return { accepts, agent, context, delivered, fixture, posts, recordedWhenDelivered };
+  const replied = (count: number): Promise<void> => {
+    const waiter = Promise.withResolvers<void>();
+    if (replies.length >= count) waiter.resolve();
+    else replyWaiters.push({ count, resolve: waiter.resolve });
+    return waiter.promise;
+  };
+  return {
+    accepts,
+    agent,
+    context,
+    delivered,
+    fixture,
+    inputs,
+    posts,
+    recordedWhenDelivered,
+    replied,
+    replies,
+  };
 }
 
 function response(body: unknown): Response {
@@ -3300,9 +3427,217 @@ describe("envoy OMP extension", () => {
         ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
       }
     );
-    expect(
-      notifications.filter((message) => message.startsWith("envoy: Dispatch disabled — "))
-    ).toEqual(["envoy: Dispatch disabled — dispatch.token must be a non-empty bearer token"]);
+    expect(notifications).toEqual([
+      `envoy: Dispatch is off: DISPATCH_URL is set and no token is: set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or dispatch.token in ${process.env.ENVOY_CONFIG_FILE}`,
+    ]);
+  });
+
+  describe("the session's envoy.json", () => {
+    /** A context for `sessionID` whose notifications land in `notifications`. */
+    const notifying = (sessionID: string, notifications: string[]): SessionContext => ({
+      ...sessionContext(sessionID),
+      ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+    });
+    const userTurn = { messages: [{ role: "user", content: "Fix the bug.", timestamp: 1 }] };
+
+    test("envoy.json: a named profile with none keeps the old user file unread and says where it belongs", async () => {
+      const home = mkdtempSync(join(tmpdir(), "envoy-profile-home-"));
+      const agentDirectory = mkdtempSync(join(tmpdir(), "envoy-profile-"));
+      const marker = join(home, "old-token-ran");
+      const old = join(home, ".config", "opencode", "envoy.json");
+      process.env.HOME = home;
+      process.env.OMP_PROFILE = "work";
+      process.env.PI_CODING_AGENT_DIR = agentDirectory;
+      mkdirSync(dirname(old), { recursive: true });
+      writeFileSync(
+        old,
+        JSON.stringify({
+          dispatch: {
+            enabled: true,
+            serverUrl: "https://old.dispatch.example",
+            token: `!touch ${marker}; echo old-token`,
+          },
+        })
+      );
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const requests: string[] = [];
+      globalThis.fetch = async (input) => {
+        requests.push(input.toString());
+        return new Response("no request belongs here", { status: 500 });
+      };
+      try {
+        const { default: envoyExtension } = await import("./envoy.ts?envoy-json-profile");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const file = join(agentDirectory, "envoy.json");
+        const notifications: string[] = [];
+        const context = notifying("ses_profile", notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+
+        expect(process.env.ENVOY_CONFIG_FILE).toBe(file);
+        expect(fixture.tools).toEqual([]);
+        expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
+        expect(notifications).toEqual([
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
+        ]);
+        expect(existsSync(marker)).toBe(false);
+        // A Legion claim reaches the listener through the one accessor, which refuses it.
+        await expect(
+          claimEnvoyRole("ses_profile", "legion-omp-repo-1-implementer", context)
+        ).rejects.toThrow(
+          `Envoy is off for this session: no envoy.json at ${file}: Envoy is off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`
+        );
+        await fixture.handlers.get("session_shutdown")?.({}, context);
+        expect(requests).toEqual([]);
+        expect(natsState.connectedNames).toEqual([]);
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+        rmSync(agentDirectory, { recursive: true, force: true });
+      }
+    });
+
+    test("envoy.json: an envoy section on and dispatch off registers the Envoy tools and leaves dispatch-first out", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      writeFileSync(
+        process.env.ENVOY_CONFIG_FILE ?? "",
+        JSON.stringify({
+          dispatch: { enabled: false },
+          envoy: {
+            enabled: true,
+            url: "http://envoy-from-file.test",
+            natsUrls: ["nats://nats-under-test:4222"],
+          },
+        })
+      );
+      const hosts: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        hosts.push(new URL(input.toString()).host);
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-envoy-only");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, notifying("ses_envoy_only", notifications));
+
+      expect(fixture.tools.map((tool) => tool.name)).toEqual(
+        envoyToolSpecs.map((spec) => spec.name)
+      );
+      const contextHandler = fixture.handlers.get("context");
+      expect(
+        contextHandler === undefined ? undefined : await contextHandler(userTurn, sessionContext())
+      ).toBeUndefined();
+      expect(notifications).toEqual([]);
+      expect(hosts.length).toBeGreaterThan(0);
+      expect(new Set(hosts)).toEqual(new Set(["envoy-from-file.test"]));
+    });
+
+    // The listener's bearer and the NATS seed are resolved once and handed to the client and the
+    // connection: a plugin that dropped either would leave every pane unregistered or signed out.
+    test("envoy.json: the listener gets the file's envoy.token, and NATS the file's servers and seed", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const user = nkeys.createUser();
+      writeFileSync(
+        process.env.ENVOY_CONFIG_FILE ?? "",
+        JSON.stringify({
+          envoy: {
+            enabled: true,
+            url: "http://envoy-from-file.test",
+            natsUrls: ["nats://nats-from-file:4222"],
+            token: "file-listener-token",
+            natsSeed: new TextDecoder().decode(user.getSeed()),
+          },
+        })
+      );
+      const auth: (string | null)[] = [];
+      globalThis.fetch = async (input, init) => {
+        auth.push(new Headers(init?.headers).get("Authorization"));
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-credentials");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_credentials"));
+
+      expect(auth.length).toBeGreaterThan(0);
+      expect(new Set(auth)).toEqual(new Set(["Bearer file-listener-token"]));
+      expect(natsState.connects).toEqual([
+        { servers: ["nats://nats-from-file:4222"], authenticated: true },
+      ]);
+    });
+
+    test("envoy.json: a pane's ENVOY_TOKEN_FILE and NATS_NKEY_SEED_FILE reach the listener and NATS", async () => {
+      const user = nkeys.createUser();
+      const tokenFile = join(configDirectory, "envoy-token");
+      const seedFile = join(configDirectory, "nats-seed");
+      writeFileSync(tokenFile, "pane-listener-token\n");
+      writeFileSync(seedFile, `${new TextDecoder().decode(user.getSeed())}\n`);
+      process.env.ENVOY_TOKEN_FILE = tokenFile;
+      process.env.NATS_NKEY_SEED_FILE = seedFile;
+      const auth: (string | null)[] = [];
+      globalThis.fetch = async (input, init) => {
+        auth.push(new Headers(init?.headers).get("Authorization"));
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-pane-credentials");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pane_credentials"));
+
+      expect(auth.length).toBeGreaterThan(0);
+      expect(new Set(auth)).toEqual(new Set(["Bearer pane-listener-token"]));
+      expect(natsState.connects).toEqual([
+        { servers: ["nats://nats-under-test:4222"], authenticated: true },
+      ]);
+    });
+
+    test("envoy.json: without a profile, the file ENVOY_CONFIG_FILE names is read and stays the one handed on", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const handed = join(configDirectory, "handed.json");
+      writeFileSync(
+        handed,
+        JSON.stringify({
+          dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "handed-token" },
+        })
+      );
+      process.env.ENVOY_CONFIG_FILE = handed;
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-handed");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      expect(process.env.ENVOY_CONFIG_FILE).toBe(handed);
+      expect(fixture.tools).toEqual([]);
+      const contextHandler = fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("the handed file's Dispatch was not read");
+      expect(JSON.stringify(await contextHandler(userTurn, sessionContext()))).toContain(
+        "<dispatch-first-skill>"
+      );
+    });
+
+    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and the refusal said once", async () => {
+      delete process.env.ENVOY_CONFIG_FILE;
+      process.env.XDG_CONFIG_HOME = "relative/config";
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-relative-xdg");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, notifying("ses_relative", notifications));
+
+      expect(process.env.ENVOY_CONFIG_FILE).toBeUndefined();
+      expect(fixture.tools).toEqual([]);
+      expect(fixture.handlers.has("context")).toBe(false);
+      // What needs no configuration still registers.
+      expect(fixture.handlers.has("resources_discover")).toBe(true);
+      expect(fixture.renderers.has("envoy-message")).toBe(true);
+      expect(notifications).toEqual([
+        "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+      ]);
+      expect(natsState.connectedNames).toEqual([]);
+    });
   });
 
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {
@@ -5136,6 +5471,742 @@ describe("envoy OMP extension", () => {
         ]);
       });
     }
+
+    // On a host with `pi.sendUserInput` (our fork, can1357/oh-my-pi#14323) a person's accepted
+    // Send or Aside runs as typed at the terminal: a command, a skill, a template or a prompt.
+    // Whatever a command printed, or why it did not run, is the session's reply on Dispatch, which
+    // the conversation shows; a turn the model now works on is its own answer.
+    describe("on a host that runs typed input", () => {
+      for (const [name, frameMode, acceptedMode, inputOptions] of [
+        ["a Send accepted as a Send", "steer", "steer", { tag: DIRECT_MESSAGE_ID }],
+        [
+          "an Aside accepted as an Aside",
+          "aside",
+          "aside",
+          { deliverAs: "aside", tag: DIRECT_MESSAGE_ID },
+        ],
+        [
+          "a frame claiming Send accepted as Aside",
+          "steer",
+          "aside",
+          { deliverAs: "aside", tag: DIRECT_MESSAGE_ID },
+        ],
+        ["a frame claiming Aside accepted as Send", "aside", "steer", { tag: DIRECT_MESSAGE_ID }],
+      ] as const) {
+        test(`runs the stored body as typed in ${name}`, async () => {
+          const { agent, delivered, fixture, inputs } = await bootDirectSession(
+            `typed-input-mode-${name}`,
+            {
+              accept: () => ({ accepted: true, delivery: acceptedMode }),
+              sendUserInput: async () => ({ handled: "prompt" }),
+            }
+          );
+
+          agent.push(
+            directDispatchEnvelope(frameMode, `typed-input-mode-${name}`, {
+              body: "a forger's text",
+            })
+          );
+          await delivered(1);
+
+          expect(inputs).toEqual([{ options: inputOptions, text: DIRECT_MESSAGE_BODY }]);
+          expect(fixture.userMessages).toEqual([]);
+        });
+      }
+
+      for (const [name, result, reply] of [
+        [
+          "a built-in only the terminal runs",
+          { handled: "terminal-only" },
+          "/new runs only in the session's own terminal; nothing was sent.",
+        ],
+        [
+          "a host mode that cannot run it",
+          { handled: "unavailable" },
+          "/new was not run: this session's host cannot run typed input from Dispatch; nothing was sent.",
+        ],
+        [
+          "a built-in that printed its output",
+          { handled: "command", output: "3 jobs running" },
+          "3 jobs running",
+        ],
+        // `/force:<tool> <prompt>` prints its confirmation, then submits the prompt.
+        [
+          "a built-in that printed its output and then submitted a prompt",
+          { handled: "prompt", output: "Next turn forced to use read." },
+          "Next turn forced to use read.",
+        ],
+      ] as const satisfies readonly (readonly [string, UserInputResult, string])[]) {
+        test(`answers ${name} with the session's reply`, async () => {
+          const { agent, delivered, replied, replies } = await bootDirectSession(
+            `typed-input-reply-${name}`,
+            {
+              accept: () => ({ accepted: true, body: "/new" }),
+              sendUserInput: async () => result,
+            }
+          );
+
+          agent.push(directDispatchEnvelope("steer", `typed-input-reply-${name}`));
+          await delivered(1);
+          await replied(1);
+
+          expect(replies).toEqual([
+            {
+              body: { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: reply },
+              path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/reply`,
+            },
+          ]);
+        });
+      }
+
+      for (const [name, firstResult] of [
+        ["a prompt", { handled: "prompt" }],
+        ["a skill", { handled: "skill" }],
+        ["a command with no output", { handled: "command" }],
+        ["a command with whitespace output", { handled: "command", output: "  \n" }],
+        ["a prompt with whitespace output", { handled: "prompt", output: "  \n" }],
+      ] as const satisfies readonly (readonly [string, UserInputResult])[]) {
+        test(`posts no reply for ${name}`, async () => {
+          let inputs = 0;
+          const { agent, delivered, replied, replies } = await bootDirectSession(
+            `typed-input-no-reply-${name}`,
+            {
+              accept: (count) => ({
+                accepted: true,
+                body: count === 1 ? DIRECT_MESSAGE_BODY : "/new",
+              }),
+              sendUserInput: async () => {
+                inputs++;
+                return inputs === 1 ? firstResult : { handled: "terminal-only" };
+              },
+            }
+          );
+
+          agent.push(directDispatchEnvelope("steer", `typed-input-no-reply-${name}-1`));
+          await delivered(1);
+          agent.push(
+            directDispatchEnvelope("steer", `typed-input-no-reply-${name}-2`, { attempt: 2 })
+          );
+          await delivered(2);
+          await replied(1);
+
+          expect(replies).toEqual([
+            {
+              body: {
+                actor: { id: "ses_delivery", kind: "session" },
+                attempt: 2,
+                body: "/new runs only in the session's own terminal; nothing was sent.",
+              },
+              path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/reply`,
+            },
+          ]);
+        });
+      }
+
+      for (const [name, first] of [
+        ["a command", async () => ({ handled: "command" as const, output: "done" })],
+        [
+          "a command that invoked the agent",
+          async () => ({ agentInvoked: true, handled: "command" as const, output: "done" }),
+        ],
+        ["a terminal-only command", async () => ({ handled: "terminal-only" as const })],
+        ["an unavailable host", async () => ({ handled: "unavailable" as const })],
+        [
+          "a failed host call",
+          async () => {
+            throw new Error("failed before submission");
+          },
+        ],
+      ] as const) {
+        test(`drops the typed note after ${name} submits no message`, async () => {
+          const { agent, delivered, replied } = await bootDirectSession(`typed-note-drop-${name}`, {
+            sendUserInput: first,
+          });
+
+          agent.push(directDispatchEnvelope("steer", `typed-note-drop-${name}`));
+          await delivered(1);
+          await replied(1);
+
+          expect(
+            envoyPluginInterface()
+              .injectedUserTurns.get("ses_delivery")
+              ?.sent.map((sent) => sent.messageId) ?? []
+          ).not.toContain(DIRECT_MESSAGE_ID);
+        });
+      }
+
+      for (const handled of ["prompt", "skill"] as const) {
+        test(`keeps the typed note for ${handled} until its tagged message arrives`, async () => {
+          const { agent, context, delivered, fixture } = await bootDirectSession(
+            `typed-note-kept-${handled}`,
+            {
+              sendUserInput: async () => ({ handled }),
+            }
+          );
+
+          agent.push(directDispatchEnvelope("steer", `typed-note-kept-${handled}`));
+          await delivered(1);
+          await Promise.resolve();
+          expect(
+            envoyPluginInterface()
+              .injectedUserTurns.get("ses_delivery")
+              ?.sent.map((sent) => sent.messageId)
+          ).toContain(DIRECT_MESSAGE_ID);
+
+          await fixture.handlers.get("message_start")?.(
+            {
+              message: {
+                content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+                role: handled === "skill" ? "custom" : "user",
+                tag: DIRECT_MESSAGE_ID,
+                timestamp: 10,
+              },
+            },
+            context
+          );
+          expect(
+            envoyPluginInterface()
+              .injectedUserTurns.get("ses_delivery")
+              ?.sent.map((sent) => sent.messageId) ?? []
+          ).not.toContain(DIRECT_MESSAGE_ID);
+        });
+      }
+
+      test("a host that fails running it answers with the failure", async () => {
+        const { agent, delivered, replied, replies } = await bootDirectSession(
+          "typed-input-fails",
+          {
+            accept: () => ({ accepted: true, body: "/compact" }),
+            sendUserInput: async () => {
+              throw new Error("compaction is already running");
+            },
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-fails"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies.map((reply) => reply.body)).toEqual([
+          {
+            actor: { id: "ses_delivery", kind: "session" },
+            attempt: 1,
+            body: "/compact was not run: compaction is already running",
+          },
+        ]);
+      });
+
+      test("answers a synchronous typed-input throw and drops its note", async () => {
+        const { agent, delivered, replied, replies } = await bootDirectSession(
+          "typed-input-sync-fails",
+          {
+            accept: () => ({ accepted: true, body: "/compact" }),
+            sendUserInput: (() => {
+              throw new Error("sync failure");
+            }) as unknown as (text: string, options: unknown) => Promise<UserInputResult>,
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-sync-fails"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "/compact was not run: sync failure",
+        });
+        expect(
+          envoyPluginInterface()
+            .injectedUserTurns.get("ses_delivery")
+            ?.sent.map((sent) => sent.messageId) ?? []
+        ).not.toContain(DIRECT_MESSAGE_ID);
+      });
+
+      test("posts a typed command's reply under the session that accepted it after a switch", async () => {
+        const answer = Promise.withResolvers<UserInputResult>();
+        const { agent, delivered, fixture, replied, replies } = await bootDirectSession(
+          "typed-input-reply-session",
+          {
+            accept: () => ({ accepted: true, body: "/new" }),
+            sendUserInput: () => answer.promise,
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-reply-session"));
+        await delivered(1);
+        await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_reply"));
+        answer.resolve({ handled: "terminal-only" });
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "/new runs only in the session's own terminal; nothing was sent.",
+        });
+      });
+
+      test("posts a typed picture command's reply under the session that accepted it after a switch during the picture read", async () => {
+        const slug = "typed-input-picture-reply-session";
+        const body = `Look:\n\n![shot.png](dispatch://LEGION-1/artifact/${slug}@v1)`;
+        const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 1, 2]);
+        const picture = Promise.withResolvers<Response>();
+        const requested = Promise.withResolvers<void>();
+        const { agent, delivered, fixture, replied, replies } = await bootDirectSession(
+          "typed-input-picture-reply-session",
+          {
+            accept: () => ({ accepted: true, body }),
+            dispatch: ((url: URL) => {
+              if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+                return Response.json({
+                  id: `${slug}-id`,
+                  kind: "image",
+                  name: "shot.png",
+                  versions: [{ mime: "image/png", number: 1, size: png.length }],
+                });
+              }
+              if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+                requested.resolve();
+                return picture.promise as unknown as Response;
+              }
+              return undefined;
+            }) as (url: URL) => Response | undefined,
+            sendUserInput: async () => ({ handled: "terminal-only" }),
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-picture-reply-session", { body }));
+        await requested.promise;
+        await fixture.handlers.get("session_switch")?.(
+          {},
+          sessionContext("ses_after_picture_read")
+        );
+        picture.resolve(new Response(png, { headers: { "Content-Type": "image/png" } }));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "This message runs only in the session's own terminal; nothing was sent.",
+        });
+      });
+
+      test("keeps accept and reply under the session that began a deferred accept after a switch", async () => {
+        const accepted = Promise.withResolvers<AcceptAnswer>();
+        const acceptRequested = Promise.withResolvers<void>();
+        const { accepts, agent, delivered, fixture, replied, replies } = await bootDirectSession(
+          "typed-input-accept-reply-session",
+          {
+            accept: () => {
+              acceptRequested.resolve();
+              return accepted.promise;
+            },
+            sendUserInput: async () => ({ handled: "terminal-only" }),
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-accept-reply-session"));
+        await acceptRequested.promise;
+        await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_accept"));
+        accepted.resolve({ accepted: true, body: "/new" });
+        await delivered(1);
+        await replied(1);
+
+        expect(accepts).toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              actor: { id: "ses_delivery", kind: "session" },
+            }),
+          }),
+        ]);
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "/new runs only in the session's own terminal; nothing was sent.",
+        });
+      });
+
+      // On an idle session the host answers only once the run it started ends, which can be
+      // minutes; the person's next message must still be taken meanwhile.
+      test("is never awaited, so the next message arrives while the first still runs", async () => {
+        const running = Promise.withResolvers<UserInputResult>();
+        const { agent, delivered, inputs } = await bootDirectSession("typed-input-not-awaited", {
+          accept: () => ({ accepted: true }),
+          sendUserInput: () => running.promise,
+        });
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-not-awaited-1"));
+        agent.push(directDispatchEnvelope("steer", "typed-input-not-awaited-2", { attempt: 2 }));
+        await delivered(2);
+
+        expect(inputs).toHaveLength(2);
+        running.resolve({ handled: "prompt" });
+      });
+
+      // `sendUserInput` takes text alone; the person's pictures reach the host through its input
+      // handlers, as a picture pasted at the terminal does.
+      test("hands the host the pictures the message embeds when it asks for its input's images", async () => {
+        const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+        const slug = "typed-input-png";
+        const body = `Look:\n\n![shot.png](dispatch://LEGION-1/artifact/${slug}@v1)`;
+        const images: unknown[] = [];
+        const asked = Promise.withResolvers<void>();
+        const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+          {};
+        const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+          accept: () => ({ accepted: true, body }),
+          dispatch: (url) => {
+            if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+              return Response.json({
+                id: `${slug}-id`,
+                kind: "image",
+                name: "shot.png",
+                versions: [{ mime: "image/png", number: 1, size: png.length }],
+              });
+            }
+            if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+              return new Response(png, { headers: { "Content-Type": "image/png" } });
+            }
+            return undefined;
+          },
+          sendUserInput: async (text) => {
+            const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+              | { readonly images?: readonly unknown[] }
+              | undefined;
+            images.push(...(answer?.images ?? []));
+            asked.resolve();
+            return { handled: "prompt" };
+          },
+        });
+        handlers.input = fixture.handlers.get("input");
+
+        agent.push(directDispatchEnvelope("steer", slug, { body }));
+        await delivered(1);
+        await asked.promise;
+
+        expect(images).toEqual([
+          { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+        ]);
+      });
+
+      // A typed note is found only by the tag the host kept. The matching text on an unrelated
+      // untagged user message is the daemon's own assignment, not the person's command.
+      test("does not take an untagged message whose text matches a typed turn", async () => {
+        const { agent, context, delivered, fixture, replied } = await bootDirectSession(
+          "typed-input-tag-only",
+          {
+            accept: () => ({ accepted: true, body: "/compact" }),
+            sendUserInput: async () => ({ handled: "command", output: "Compaction complete." }),
+          }
+        );
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-tag-only"));
+        await delivered(1);
+        await replied(1);
+        const message = {
+          content: [{ text: "/compact", type: "text" }],
+          role: "user",
+          timestamp: 10,
+        };
+        await fixture.handlers.get("message_start")?.({ message }, context);
+
+        const frames = natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
+        expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
+          ["u10", undefined],
+        ]);
+        expect(matchInjectedUserTurn("ses_delivery", message)).toBeUndefined();
+      });
+
+      // A Send that lands after the run's last steer poll is run by the host as a turn of its own,
+      // after that run's `agent_end`. Its streamed user message must still name the Dispatch
+      // message, or the page shows the person's Send twice; a prompt template's expansion is a text
+      // nothing but the tag can tie back to it.
+      test("tags the user message a Send became even when it starts after the run's end", async () => {
+        const { agent, context, delivered, fixture } = await bootDirectSession(
+          "typed-input-after-run-end",
+          {
+            accept: () => ({ accepted: true, body: "/sdd plan" }),
+            sendUserInput: async () => ({ handled: "prompt" }),
+          }
+        );
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-after-run-end"));
+        await delivered(1);
+        await fixture.handlers.get("agent_end")?.({ messages: [] }, context);
+        const message = {
+          content: [{ text: "Run the plan for: plan", type: "text" }],
+          role: "user",
+          tag: DIRECT_MESSAGE_ID,
+          timestamp: 10,
+        };
+        await fixture.handlers.get("message_start")?.({ message }, context);
+
+        const frames = natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
+        expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
+          [`u10:${DIRECT_MESSAGE_ID}`, DIRECT_MESSAGE_ID],
+        ]);
+      });
+    });
+
+    // A host without `pi.sendUserInput` would hand a command to the model as words, so the
+    // session refuses it with a reply naming its own version; any other text is sent as before.
+    test("refuses a slash command on a host that cannot run typed input, naming the host", async () => {
+      const { agent, fixture, replied, replies } = await bootDirectSession("untyped-host-command", {
+        accept: () => ({ accepted: true, body: "/compact" }),
+      });
+
+      agent.push(directDispatchEnvelope("steer", "untyped-host-command"));
+      await replied(1);
+
+      expect(fixture.userMessages).toEqual([]);
+      expect(replies.map((reply) => reply.body)).toEqual([
+        {
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: expect.stringMatching(
+            /^\/compact was not run: this session's Oh My Pi \S+ cannot run commands sent from Dispatch; nothing was sent\.$/
+          ),
+        },
+      ]);
+    });
+
+    // `sendUserMessage` sends into whichever session is live once the pictures load, so the turn's
+    // note and its shown picture belong to that session: the session the message lands in must tie
+    // it to its Dispatch message, or Legion takes it for the daemon's assignment.
+    test("notes a picture Send under the session it is sent into after a switch during the picture read", async () => {
+      const slug = "untyped-host-picture-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+      const picture = Promise.withResolvers<Response>();
+      const requested = Promise.withResolvers<void>();
+      const { agent, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: ((url: URL) => {
+          if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+            return Response.json({
+              id: `${slug}-id`,
+              kind: "image",
+              name: "shot.png",
+              versions: [{ mime: "image/png", number: 1, size: png.length }],
+            });
+          }
+          if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+            requested.resolve();
+            return picture.promise as unknown as Response;
+          }
+          return undefined;
+        }) as (url: URL) => Response | undefined,
+      });
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await requested.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_picture_read"));
+      picture.resolve(new Response(png, { headers: { "Content-Type": "image/png" } }));
+      // The switch's own notice is the first delivery; the Send is the second.
+      await delivered(2);
+      expect(fixture.userMessages).toHaveLength(1);
+      const message = { content: [{ text: body, type: "text" }], role: "user", timestamp: 10 };
+      expect(matchInjectedUserTurn("ses_after_picture_read", message)).toBe(DIRECT_MESSAGE_ID);
+      expect(shownPictures("ses_after_picture_read").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").has(address)).toBe(false);
+    });
+  });
+
+  // The composer on Dispatch's conversation page completes what the session's last `commands` frame
+  // lists, the last frame of every replay. It lists what the session's own terminal picker offers,
+  // in that picker's order (built-ins; extension, custom and skill commands; file commands; prompt
+  // templates), each name once: a name a built-in answers to by name or alias runs the built-in, and
+  // a name an earlier source has runs that source, so offering it again would offer what never runs.
+  describe("the slash commands the session's stream lists", () => {
+    /** The command list the session's stream ends its replay with, read as the Dispatch relay asks
+     *  for it: a watch, then a replay answered on `inbox`. */
+    const replayedCommands = async (inbox: string): Promise<unknown> => {
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      const answered = Promise.withResolvers<void>();
+      natsState.onPublish = (subject) => {
+        if (subject === inbox) answered.resolve();
+      };
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      control.push(JSON.stringify({ type: "replay", v: 1 }), inbox);
+      await answered.promise;
+      const published = natsState.published.findLast((each) => each.subject === inbox);
+      const replay: { readonly frames: readonly { readonly kind: string }[] } = JSON.parse(
+        new TextDecoder().decode(published?.data)
+      );
+      const last = replay.frames.at(-1);
+      return last?.kind === "commands" && "commands" in last ? last.commands : undefined;
+    };
+    const builtins: UserInputBuiltinCommand[] = [
+      { aliases: [], description: "Compact the context", name: "compact", terminalOnly: false },
+      { aliases: ["models"], description: "Pick a model", name: "model", terminalOnly: false },
+      { aliases: [], description: "Start a new session", name: "new", terminalOnly: true },
+    ];
+    const extensionAndSkills: readonly HostSlashCommand[] = [
+      { description: "Review with the extension", name: "review", source: "extension" },
+      { description: "A custom command the model alias hides", name: "models", source: "prompt" },
+      { description: "Dispatch", name: "skill:dispatch", source: "skill" },
+    ];
+
+    test("lists the live session's file commands and prompt templates after its other commands, each name once", async () => {
+      hostBuiltins.push(...builtins);
+      testAgentRoster().push({
+        id: "Main",
+        kind: "main",
+        session: {
+          sessionManager: { getSessionId: () => "ses_delivery" },
+          slashCommands: [
+            { description: "Deploy the branch", name: "deploy" },
+            { description: "A file command the extension's review hides", name: "review" },
+            { description: "A file command the model alias hides", name: "models" },
+          ],
+          promptTemplates: [
+            { description: "Run the plan (user)", name: "sdd" },
+            { description: "A template the deploy file command hides", name: "deploy" },
+            { description: "A template the compact built-in hides", name: "compact" },
+          ],
+        },
+        sessionFile: null,
+      });
+      await bootDirectSession("commands-frame-picker-order", {
+        getCommands: () => extensionAndSkills,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      expect(await replayedCommands("inbox-picker-order")).toEqual([
+        { description: "Compact the context", name: "compact", source: "builtin" },
+        { description: "Pick a model", name: "model", source: "builtin" },
+        { description: "Start a new session", name: "new", source: "builtin", terminalOnly: true },
+        { description: "Review with the extension", name: "review", source: "extension" },
+        { description: "Dispatch", name: "skill:dispatch", source: "skill" },
+        { description: "Deploy the branch", name: "deploy", source: "prompt" },
+        { description: "Run the plan (user)", name: "sdd", source: "prompt" },
+      ]);
+    });
+
+    // The host keeps one `AgentSession` object and changes its id (`/new`, `/resume`, a fork), so
+    // the live session is looked up by its id at every ping rather than kept.
+    test("lists the rest while the host lists no session under this id, and the file commands once it does", async () => {
+      hostBuiltins.push(...builtins);
+      let liveID = "ses_before_the_switch";
+      testAgentRoster().push({
+        id: "Main",
+        kind: "main",
+        session: {
+          sessionManager: { getSessionId: () => liveID },
+          promptTemplates: [{ description: "Run the plan (user)", name: "sdd" }],
+        },
+        sessionFile: null,
+      });
+      await bootDirectSession("commands-frame-no-live-session", {
+        getCommands: () => extensionAndSkills,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+      const others = [
+        { description: "Compact the context", name: "compact", source: "builtin" },
+        { description: "Pick a model", name: "model", source: "builtin" },
+        { description: "Start a new session", name: "new", source: "builtin", terminalOnly: true },
+        { description: "Review with the extension", name: "review", source: "extension" },
+        { description: "Dispatch", name: "skill:dispatch", source: "skill" },
+      ];
+
+      expect(await replayedCommands("inbox-unlisted")).toEqual(others);
+      liveID = "ses_delivery";
+      expect(await replayedCommands("inbox-listed")).toEqual([
+        ...others,
+        { description: "Run the plan (user)", name: "sdd", source: "prompt" },
+      ]);
+    });
+
+    test("publishes no commands frame when the host cannot run typed input", async () => {
+      hostBuiltins.push(...builtins);
+      await bootDirectSession("commands-frame-untyped-host", {
+        getCommands: () => extensionAndSkills,
+      });
+
+      expect(await replayedCommands("inbox-untyped-host")).toBeUndefined();
+    });
+
+    test("refreshes a changed getCommands result once for a burst of bare watches to an attached viewer", async () => {
+      let reads = 0;
+      let commands: readonly HostSlashCommand[] = [
+        { description: "First", name: "first", source: "extension" },
+      ];
+      await bootDirectSession("commands-frame-watch-refresh", {
+        getCommands: () => {
+          reads++;
+          return commands;
+        },
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+      await replayedCommands("inbox-watch-refresh");
+      reads = 0;
+      commands = [{ description: "Second", name: "second", source: "extension" }];
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      for (let index = 0; index < 3; index += 1) {
+        control.push(JSON.stringify({ type: "watch", v: 1 }));
+      }
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+
+      const frame = natsState.published
+        .filter((each) => each.subject === "agentstream.ses_delivery.frames")
+        .map((each) => JSON.parse(new TextDecoder().decode(each.data)))
+        .findLast((each) => each.kind === "commands");
+      expect(reads).toBe(1);
+      expect(frame?.commands).toEqual([
+        { description: "Second", name: "second", source: "extension" },
+      ]);
+    });
+
+    test("still answers replay when listing commands throws", async () => {
+      await bootDirectSession("commands-frame-throws", {
+        getCommands: () => {
+          throw new Error("the host command list failed");
+        },
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      control.push(JSON.stringify({ type: "replay", v: 1 }), "inbox-throws");
+      // The mock subscription yields queued controls on microtasks, not wall-clock time.
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+
+      expect(
+        natsState.published.findLast((published) => published.subject === "inbox-throws")
+      ).toBeDefined();
+    });
+
+    test("omits a non-string command description and still replays the other commands", async () => {
+      await bootDirectSession("commands-frame-numeric-description", {
+        getCommands: () =>
+          [
+            { description: 42, name: "bad-description", source: "extension" },
+            { description: "Good", name: "good-description", source: "extension" },
+          ] as unknown as readonly HostSlashCommand[],
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      expect(await replayedCommands("inbox-numeric-description")).toEqual([
+        { name: "bad-description", source: "extension" },
+        { description: "Good", name: "good-description", source: "extension" },
+      ]);
+    });
   });
 
   // A session is shown each picture once (`shownPictures`). A delivery's pictures count as shown
@@ -5218,6 +6289,392 @@ describe("envoy OMP extension", () => {
         expect(shownPictures("ses_delivery").has(address)).toBe(true);
       });
     }
+
+    // A card goes into whichever session is live once the accept answers, so its pictures count
+    // as shown there; the id the session left was forgotten at the switch and stays forgotten.
+    test("a card refused after a switch during the accept counts its picture shown in the session it went into", async () => {
+      const slug = "card-after-accept-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const answer = Promise.withResolvers<AcceptAnswer>();
+      const acceptRequested = Promise.withResolvers<void>();
+      const { agent, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => {
+          acceptRequested.resolve();
+          return answer.promise;
+        },
+        dispatch: pictureRoutes(slug),
+      });
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await acceptRequested.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_accept"));
+      answer.resolve({ code: "UNAUTHORIZED", status: 401 });
+      // The switch's own notice is the first delivery; the card is the second.
+      await delivered(2);
+
+      const card = fixture.deliveries.at(-1);
+      expect(card?.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+        },
+        image,
+      ]);
+      expect(shownPictures("ses_after_accept").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").size).toBe(0);
+    });
+
+    // The card goes into the session live once its pictures load, which a switch during the
+    // load changes again, so that session's set is the one the card's pictures join.
+    test("a card whose picture load overlaps a switch counts its picture shown in the session it went into", async () => {
+      const slug = "card-load-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const picture = Promise.withResolvers<Response>();
+      const requested = Promise.withResolvers<void>();
+      const routes = pictureRoutes(slug);
+      const { agent, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ code: "UNAUTHORIZED", status: 401 }),
+        dispatch: ((url: URL) => {
+          if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+            requested.resolve();
+            return picture.promise as unknown as Response;
+          }
+          return routes(url);
+        }) as (url: URL) => Response | undefined,
+      });
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await requested.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_load"));
+      picture.resolve(new Response(png, { headers: { "Content-Type": "image/png" } }));
+      // The switch's own notice is the first delivery; the card is the second.
+      await delivered(2);
+
+      expect(fixture.deliveries.at(-1)?.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+        },
+        image,
+      ]);
+      expect(shownPictures("ses_after_load").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").size).toBe(0);
+    });
+
+    // An admission still holding its pictures belongs to a `sendUserInput` the host has not yet
+    // asked pi-envoy's input handler about: a session change (a branch, a move-off) must leave it,
+    // or the accepted turn goes out without its pictures and Dispatch never offers it again.
+    test("a typed turn's pictures not yet handed over survive a session change, and count shown in the live session", async () => {
+      const slug = "typed-handover-across-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const called = Promise.withResolvers<void>();
+      const go = Promise.withResolvers<void>();
+      const images: unknown[] = [];
+      const { agent, context, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: async (text) => {
+          called.resolve();
+          await go.promise;
+          const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+            | { readonly images?: readonly unknown[] }
+            | undefined;
+          images.push(...(answer?.images ?? []));
+          return { handled: "prompt" };
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await called.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_branched"));
+      go.resolve();
+      for (let index = 0; index < 10 && images.length === 0; index += 1) {
+        await Promise.resolve();
+      }
+
+      expect(images).toEqual([image]);
+      await fixture.handlers.get("message_start")?.(
+        {
+          message: {
+            content: [{ text: body, type: "text" }],
+            role: "user",
+            tag: DIRECT_MESSAGE_ID,
+            timestamp: 10,
+          },
+        },
+        context
+      );
+      expect(shownPictures("ses_branched").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").size).toBe(0);
+    });
+
+    // Matching asks under the live session id, so the typed turns noted under the id the session
+    // left can never be found again: a session change forgets them.
+    test("a typed turn's note under the session left is forgotten when the session changes", async () => {
+      const running = Promise.withResolvers<UserInputResult>();
+      const { agent, delivered, fixture } = await bootDirectSession("typed-note-across-switch", {
+        accept: () => ({ accepted: true }),
+        sendUserInput: () => running.promise,
+      });
+
+      agent.push(directDispatchEnvelope("steer", "typed-note-across-switch"));
+      await delivered(1);
+      expect(envoyPluginInterface().injectedUserTurns.get("ses_delivery")?.sent).toEqual([
+        { messageId: DIRECT_MESSAGE_ID, via: "typed" },
+      ]);
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_note"));
+
+      expect(envoyPluginInterface().injectedUserTurns.has("ses_delivery")).toBe(false);
+      running.resolve({ handled: "prompt" });
+    });
+
+    // An ACP host serves several top-level sessions in one process, each with its own pi-envoy,
+    // and its fork opens the source session in a new one before forking it (acp-agent.ts:1290-1310
+    // at the pin). The fork's instance leaving the source id must not forget the turns the source
+    // session's own instance sent in: that instance still serves the id and still asks under it.
+    test("a typed turn's note survives another instance in the process passing through its session", async () => {
+      const running = Promise.withResolvers<UserInputResult>();
+      const { agent, delivered } = await bootDirectSession("typed-note-acp-fork", {
+        accept: () => ({ accepted: true }),
+        sendUserInput: () => running.promise,
+      });
+      agent.push(directDispatchEnvelope("steer", "typed-note-acp-fork"));
+      await delivered(1);
+
+      const forkQuery = "typed-note-acp-fork-instance";
+      const { default: forkExtension } = await import(`./envoy.ts?${forkQuery}`);
+      const fork = createPi();
+      forkExtension(fork.pi);
+      await fork.handlers.get("session_start")?.({}, sessionContext("ses_fork_fresh"));
+      await fork.handlers.get("session_switch")?.({}, sessionContext("ses_delivery"));
+      await fork.handlers.get("session_switch")?.({}, sessionContext("ses_forked"));
+
+      const message = {
+        content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+        role: "user",
+        tag: DIRECT_MESSAGE_ID,
+        timestamp: 10,
+      };
+      expect(matchInjectedUserTurn("ses_delivery", message)).toBe(DIRECT_MESSAGE_ID);
+      running.resolve({ handled: "prompt" });
+    });
+
+    for (const [name, first] of [
+      ["the host's terminal-only answer", async () => ({ handled: "terminal-only" as const })],
+      [
+        "a rejected typed input",
+        async () => {
+          throw new Error("the host rejected it");
+        },
+      ],
+    ] as const) {
+      test(`${name} leaves a typed turn's picture unshown, and the person's next Send with it hands it to the input handler`, async () => {
+        const slug = `typed-retry-${name.replaceAll(/\W+/g, "-")}`;
+        const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+        const body = `Look:\n\n![shot.png](${address})`;
+        const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+          {};
+        const images: unknown[] = [];
+        const asked = Promise.withResolvers<void>();
+        let attempts = 0;
+        const { agent, context, delivered, fixture, replied } = await bootDirectSession(slug, {
+          accept: () => ({ accepted: true, body }),
+          dispatch: pictureRoutes(slug),
+          sendUserInput: async (text) => {
+            attempts++;
+            if (attempts === 1) return first();
+            const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+              | { readonly images?: readonly unknown[] }
+              | undefined;
+            images.push(...(answer?.images ?? []));
+            asked.resolve();
+            return { handled: "prompt" };
+          },
+        });
+        handlers.input = fixture.handlers.get("input");
+
+        agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+        await delivered(1);
+        await replied(1);
+        expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+        // Dispatch accepts each message once, so the picture's next chance is a new Send of it.
+        agent.push(
+          directDispatchEnvelope("steer", `${slug}-2`, { body, messageID: NEXT_MESSAGE_ID })
+        );
+        await delivered(2);
+        await asked.promise;
+        expect(images).toEqual([
+          { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+        ]);
+        expect(shownPictures("ses_delivery").has(address)).toBe(false);
+        await fixture.handlers.get("message_start")?.(
+          {
+            message: {
+              content: [{ text: body, type: "text" }],
+              role: "user",
+              tag: NEXT_MESSAGE_ID,
+              timestamp: 10,
+            },
+          },
+          context
+        );
+        expect(shownPictures("ses_delivery").has(address)).toBe(true);
+      });
+    }
+
+    // Dispatch accepts a message once (`ACCEPT_ALREADY_ACCEPTED` for every later attempt), so the
+    // retry of a typed turn whose message went without its picture arrives as a card: the card
+    // must carry the picture, since it was never marked shown.
+    test("does not mark a picture shown when an earlier input extension rewrites the text, and the retry's card carries it", async () => {
+      const slug = "typed-rewrite-picture";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const asked = Promise.withResolvers<void>();
+      const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+        accept: acceptOnce(body),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: async () => {
+          await handlers.input?.({ source: "extension", text: "rewritten before Envoy" }, context);
+          asked.resolve();
+          return { handled: "prompt" };
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+      await delivered(1);
+      await asked.promise;
+      // The host answered `prompt` after every input handler ran, so this turn will never be
+      // handed its pictures: its admission is released, and a later input with the original text
+      // is handed nothing.
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+      expect(await handlers.input?.({ source: "extension", text: body }, context)).toBeUndefined();
+      await fixture.handlers.get("message_start")?.(
+        {
+          message: {
+            content: [{ text: "rewritten before Envoy", type: "text" }],
+            role: "user",
+            tag: DIRECT_MESSAGE_ID,
+            timestamp: 10,
+          },
+        },
+        context
+      );
+      expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+      await delivered(2);
+      expect(fixture.deliveries.at(-1)?.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+        },
+        image,
+      ]);
+      expect(shownPictures("ses_delivery").has(address)).toBe(true);
+    });
+
+    test("does not mark a picture shown after prompt admission aborts before tagged message_start, and the retry's card carries it", async () => {
+      const slug = "typed-abort-picture";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const asked = Promise.withResolvers<void>();
+      const images: unknown[] = [];
+      const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+        accept: acceptOnce(body),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: async (text) => {
+          const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+            | { readonly images?: readonly unknown[] }
+            | undefined;
+          images.push(...(answer?.images ?? []));
+          asked.resolve();
+          return { handled: "prompt" };
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+      await delivered(1);
+      await asked.promise;
+      // The host took the picture and reported prompt, but dropped the prompt before it emitted a
+      // tagged message_start.
+      expect(images).toEqual([image]);
+      expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+      await delivered(2);
+      expect(fixture.deliveries.at(-1)?.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+        },
+        image,
+      ]);
+      expect(shownPictures("ses_delivery").has(address)).toBe(true);
+    });
+
+    test("hands both identical in-flight typed turns their own pictures", async () => {
+      const slug = "typed-same-body-pictures";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const inputs: unknown[][] = [];
+      const requests: {
+        readonly text: string;
+        readonly answer: PromiseWithResolvers<UserInputResult>;
+      }[] = [];
+      const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: (text) => {
+          const answer = Promise.withResolvers<UserInputResult>();
+          requests.push({ answer, text });
+          return answer.promise;
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(
+        directDispatchEnvelope("steer", `${slug}-1`, {
+          body,
+          messageID: "11111111-1111-4111-8111-111111111111",
+        })
+      );
+      agent.push(
+        directDispatchEnvelope("steer", `${slug}-2`, {
+          body,
+          messageID: "22222222-2222-4222-8222-222222222222",
+        })
+      );
+      await delivered(2);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        const answer = (await handlers.input?.(
+          { source: "extension", text: request.text },
+          context
+        )) as { readonly images?: readonly unknown[] } | undefined;
+        inputs.push([...(answer?.images ?? [])]);
+        request.answer.resolve({ handled: "prompt" });
+      }
+
+      expect(inputs).toEqual([
+        [{ data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" }],
+        [{ data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" }],
+      ]);
+    });
 
     /**
      * A transcript as Oh My Pi keeps it, showing a picture each way a session is shown one: a
@@ -6504,7 +7961,7 @@ describe("envoy OMP extension", () => {
     expect(notifications[0]).toContain("Could not copy");
   });
 
-  test("disables inbound messaging loudly when ENVOY_NATS_URL is unset", async () => {
+  test("an Envoy with no NATS server says once that inbound messages are off, and keeps its tools", async () => {
     delete process.env.ENVOY_NATS_URL;
     const notifications: string[] = [];
     const intervals: (() => void)[] = [];
@@ -6520,11 +7977,170 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, context);
 
-    expect(notifications[0]).toContain("ENVOY_NATS_URL is not set");
+    expect(notifications).toEqual([
+      "envoy: Envoy's inbound messages are off: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL); the Envoy tools still work",
+    ]);
     expect(natsState.connectedNames.length).toBe(0);
     expect(intervals.length).toBe(0);
     expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
   });
+
+  // A seed is for NATS alone: its refusal leaves the listener, its tools and /whoami.
+  test("a refused NATS seed turns off inbound messages alone, saying why once, and keeps the tools and /whoami", async () => {
+    const missing = join(configDirectory, "missing-seed");
+    process.env.NATS_NKEY_SEED_FILE = missing;
+    const notifications: string[] = [];
+    const intervals: (() => void)[] = [];
+    const context: SessionContext = {
+      cwd: "/tmp/envoy-omp-test",
+      sessionManager: { ...topLevelSession, getSessionId: () => "ses_seed_refused" },
+      setInterval: (callback) => intervals.push(callback),
+      ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?seed-refused");
+    const fixture = createPi();
+
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, context);
+
+    expect(notifications).toEqual([
+      `envoy: Envoy's inbound messages are off: NATS_NKEY_SEED_FILE names ${missing}, which could not be read: ENOENT: no such file or directory, open '${missing}'; the Envoy tools still work`,
+    ]);
+    expect(natsState.connectedNames.length).toBe(0);
+    expect(intervals.length).toBe(0);
+    expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
+    expect(fixture.commands.map((command) => command.name)).toContain("whoami");
+  });
+
+  // nats.js dials 127.0.0.1:4222 when handed no server, so a subscription with inbound off must
+  // refuse before any connect: one that reached it would attach to whatever NATS this machine runs.
+  for (const { slug, name, configure, why } of [
+    {
+      slug: "seed-refused",
+      name: "its NATS seed refused (envoy.natsUrls other than ENVOY_NATS_URL's)",
+      configure: (file: string) => {
+        const seed = new TextDecoder().decode(nkeys.createUser().getSeed());
+        writeFileSync(
+          file,
+          JSON.stringify({ envoy: { natsUrls: ["nats://nats-from-file:4222"], natsSeed: seed } })
+        );
+      },
+      why: (file: string) =>
+        `ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+    },
+    {
+      slug: "no-nats",
+      name: "no NATS server",
+      configure: () => {
+        delete process.env.ENVOY_NATS_URL;
+      },
+      why: () => "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+    },
+  ]) {
+    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why, and no NATS is dialed`, async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      configure(file);
+      // A listener of the row's own on 127.0.0.1:4222 counts what dials it. Where something else
+      // already listens there (a local NATS, a CI service), only that count goes unchecked: every
+      // other assertion stands, and the mock records a connect without handing it to that server.
+      let dialed = 0;
+      const loopback = createServer((socket) => {
+        dialed += 1;
+        socket.destroy();
+      });
+      const listening = Promise.withResolvers<boolean>();
+      loopback.once("error", (error: Error & { readonly code?: string }) => {
+        if (error.code === "EADDRINUSE") listening.resolve(false);
+        else listening.reject(error);
+      });
+      loopback.listen(4222, "127.0.0.1", () => listening.resolve(true));
+      const watching = await listening.promise;
+      if (!watching) {
+        console.warn(
+          "127.0.0.1:4222 is already in use: this row leaves unchecked that nothing dialed it"
+        );
+      }
+      natsState.realConnect = watching;
+      try {
+        const { default: envoyExtension } = await import(`./envoy.ts?inbound-off-${slug}`);
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const context = sessionContext("ses_inbound_off");
+        await fixture.handlers.get("session_start")?.({}, context);
+        const refusal = `inbound messages are off for this session: ${why(file)}`;
+
+        const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+        if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+        const result = await subscribeTool.execute("", { topics: ["team.standup"] });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toBe(refusal);
+        await expect(
+          subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
+        ).rejects.toThrow(refusal);
+
+        // Each call above awaited its connect, so a dial would already have reached the listener.
+        if (watching) expect(dialed).toBe(0);
+        expect(natsState.connects).toEqual([]);
+      } finally {
+        if (watching) {
+          const closed = Promise.withResolvers<void>();
+          loopback.close(() => closed.resolve());
+          await closed.promise;
+        }
+      }
+    });
+  }
+
+  // The daemon sends a role's every task and notice to its role topic, which reaches a session only
+  // over NATS: a claim with inbound off would hold the role and report ready while every delivery
+  // to it goes nowhere. It refuses before any listener call, so nothing is registered or claimed.
+  for (const { slug, name, configure } of [
+    {
+      slug: "seed-refused",
+      name: "its NATS seed refused (NATS_NKEY_SEED_FILE names a missing file)",
+      configure: () => {
+        const missing = join(configDirectory, "missing-seed");
+        process.env.NATS_NKEY_SEED_FILE = missing;
+        return `NATS_NKEY_SEED_FILE names ${missing}, which could not be read: ENOENT: no such file or directory, open '${missing}'`;
+      },
+    },
+    {
+      slug: "no-nats",
+      name: "no NATS server",
+      configure: () => {
+        delete process.env.ENVOY_NATS_URL;
+        return "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)";
+      },
+    },
+  ]) {
+    test(`with ${name}, the Legion claim refuses naming why, before any listener call`, async () => {
+      const why = configure();
+      const requests: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        const { pathname } = new URL(input.toString());
+        requests.push(pathname);
+        if (pathname !== "/v1/roles/set") return responseWithRegistration(input, init, {});
+        const body = JSON.parse(init?.body?.toString() ?? "{}") as { readonly role?: string };
+        return response({
+          session_id: "ses_claim_inbound_off",
+          machine_id: "test",
+          dir: "/tmp/envoy-omp-test",
+          topics: [`notifications.role.${body.role ?? ""}`],
+        });
+      };
+      const { default: envoyExtension } = await import(`./envoy.ts?claim-inbound-off-${slug}`);
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const context = sessionContext("ses_claim_inbound_off");
+      await fixture.handlers.get("session_start")?.({}, context);
+
+      await expect(
+        claimEnvoyRole("ses_claim_inbound_off", "legion-omp-repo-1-implementer", context)
+      ).rejects.toThrow(`inbound messages are off for this session: ${why}`);
+      expect(requests).toEqual([]);
+      expect(natsState.connects).toEqual([]);
+    });
+  }
 
   test("retries NATS in the background when the initial connection fails", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});

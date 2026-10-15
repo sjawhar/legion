@@ -7,6 +7,26 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Every root architect's and phase worker's session measures six live capabilities as it boots
+  and reports them with `POST /legion/v1/claims/ready` (`capabilities`, contract 21, LEGION-663),
+  which the daemon renders in `legion state`: `subagents` (`pi.agents` exposed, `task` registered,
+  and `discoverAgents` resolving every agent the registration's `promptAgents` names, none of them
+  in `task.disabledAgents`), `web-search` (`web_search` registered and one real `runSearchQuery`
+  for `jujutsu version control` answered by a provider), `mcp` (every configured MCP server
+  connected — the check connects a second, short-lived client per configured server and
+  disconnects it, since the session's own are the host's), `repository-extensions` (every
+  `.omp/extensions/` module, `.omp/skills/*/SKILL.md` and `.claude/skills/*/SKILL.md` the
+  workspace carries is among what Oh My Pi discovers), `dispatch-envoy-tools` (the ten Envoy tools
+  registered and `dispatch read --issue <issue>` answering) and `github` (the role's App login
+  through `gh api graphql {viewer{login}}`, since an App installation token may not call REST
+  `GET /user`). The six checks run concurrently, each within 8 s and the whole report within 10 s;
+  a check that fails, throws or times out is a failing row with the reason, and never stops the
+  session (the measurer itself throwing costs the report, not the boot). The ready after a regained
+  Envoy role re-sends the same report; the controller's ready carries none.
+  `src/capability-report.ts` reaches Oh My Pi's own modules (`@oh-my-pi/pi-coding-agent` and its
+  subpaths) through string-literal `import()` at measurement time: they exist only inside Oh My
+  Pi's bundle, whose loader resolves them as literals alone, so they load lazily and never under
+  `bun test` or in a session that is no Legion session.
 - A resumed Legion session whose role launcher sets `LEGION_WORKSPACE_RECREATED=true` (its
   workspace was provisioned after the session was last written, LEGION-654) is told so at session
   start: one `legion-workspace-recreated` message, sent as a steer that starts no turn, is saved
@@ -25,6 +45,76 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
+  human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
+  whole change since the version they approved, Dispatch carries their approval to the new version,
+  the daemon reopens the gate and sends `design-approved`, and that notice opens nothing new — the
+  architect requests nothing and releases no wave because of it; when the answer changes the
+  Summary, the Acceptance or the tree's scope, the architect rewrites that text, repeats the
+  fresh-reader check, the approval request and `register_gate` on the new version with a
+  one-sentence `--summary` naming what changed since the earlier approval, and releases no wave on
+  the `design-approved` the answer brought. An approved spec gets nothing but the decision block
+  and its evidence; an in-block edit before the answer closes the gate like any version without
+  stopping the answer carrying the approval.
+- A production check whose deploy the implementer cannot perform goes to the agent or role the
+  deployment instructions name for that deploy, with the merge commit, and waits on the production
+  signal they name (LEGION-447). It opens a `dispatch ask` to a person only when the instructions
+  name nobody, and never asks for approval to deploy. `legion-architect`'s sign-off step,
+  `legion-worker`'s merge-gate reference, `legion-retro`'s `Production check:` line and the
+  daemon's implementer prompt say so in place of a deploy ask to a human.
+
+- `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
+  and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
+  controller locator; a session whose plugin speaks another contract is relaunched onto the
+  current plugin and its calls are refused with `pi-legion speaks daemon API contract <got>; this
+  daemon requires <want>: the daemon is relaunching this process onto the current plugin` (or
+  `pi-legion registered no daemon API contract; this daemon requires <want>: …` when none was
+  recorded), and the operator's controller with `…: run legion controller start from the release
+  built with this daemon`. Install this release with a Go `legion` built from the same commit: a
+  23 plugin's strict reader refuses a state whose views carry `pluginContract`, so the boot gate
+  and `legion probe-image` refuse the mixed pair.
+
+- `register_gate`'s document lookup (LEGION-707) resolves Dispatch as the session's Envoy plugin
+  does, from the pane's own envoy.json: a named Oh My Pi profile's
+  `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, with the `dispatch` section of the workspace's
+  `.envoy/envoy.json` over it. `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which the daemon sets on
+  every pane when Dispatch is configured (`dispatch_url`), still override both.
+  `~/.config/opencode/envoy.json` and a workspace's `.opencode/envoy.json` are not read. A tmux
+  pane's `XDG_CONFIG_HOME` is relocated under the daemon's state directory, so while the old user
+  file is there a default-profile pane's Envoy plugin says it is not read under that
+  `XDG_CONFIG_HOME`, and a named-profile pane's names the profile's file to copy or link it to; a
+  pod carries no old file.
+- `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
+  (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
+  that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an
+  admission slot — each named by its issue, role and state. The list is never absent, so a plugin
+  built before 23 refuses the state; install this release with a Go `legion` and a worker image
+  built from the same commit.
+- `legion.daemonApiVersion` is 22 (LEGION-618). The daemon logs in to the secrets broker with its
+  own Kubernetes ServiceAccount token, which no person approves, so `agentSecretsLogin` on
+  `GET /legion/v1/state` has no `code` any more and its `state` is `none`, `issued` or `failed`.
+  Install this release with a Go `legion` built from the same commit: this release's strict state
+  reader refuses an older daemon's `code`, and an older release's refuses a 22 daemon's state
+  without it, so the boot gate and `legion probe-image` refuse the mixed pair.
+- The implementer no longer disarms a withdrawn READY (LEGION-683): the Go daemon disables the pull
+  request's auto-merge and takes it out of a merge queue itself, so the
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` step is gone from the implementer's prompt and
+  from `legion-worker`'s merge-gate reference, which now says no role runs a disarm.
+- The `legion` tool's description no longer lists READY's refusals, which had fallen behind the
+  daemon's: it points at the merger's role, which names each one, and says an accepted READY whose
+  `note` begins `MANUAL_MERGE_REQUIRED:` is one a person merges, so nothing arms it (LEGION-683).
+- `legion.daemonApiVersion` is 21 (LEGION-663). Contract 21 adds an optional `capabilities`
+  report to `POST /legion/v1/claims/ready` — what a session measured of the six live capability
+  rows at boot — and `promptAgents`, the sorted task agents the role's prompts dispatch, to the
+  `claims/register` answer; on `GET /legion/v1/state` each claim view carries its session's latest
+  report under `capabilities`, and a capability row's `status` is never `live` any more (a live
+  row is `present`, `open` or `unchecked` from the sessions' reports). Install this release with a
+  Go `legion` built from the same commit: a daemon at 20 or earlier refuses the report as an
+  unknown field with 400, which exits the session, and this release's strict state reader is the
+  first to accept a claim view carrying one. The daemon's boot gate and `legion probe-image` refuse
+  any earlier contract (the 8.11.0 release declares 19, the LEGION-631 entry below; the 8.14.0
+  release declares 20, the LEGION-668 entry below).
 - `legion.daemonApiVersion` is 19 (LEGION-631). Each Legion role's GitHub App token is now a file
   the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
   `config.yml`, rendered and refreshed by the daemon) and empties `GH_TOKEN`, `GITHUB_TOKEN` and
@@ -79,6 +169,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   refuses it (the 8.4.x and 8.5.x releases declare 16 and 17, whose `workspace-init` still reads
   the shared disk's variables); install this release with a Go `legion` and a worker image built
   from the same commit.
+- The plugin interface it reads from `@sjawhar/pi-envoy` is at version 2 (LEGION-394). In a phase
+  worker, a person's `/skill:<name>` sent from Dispatch's Agents page counts as an inbound event,
+  as their plain Send does. On a host with `pi.sendUserInput`, so does a Send the host runs as a
+  turn of its own after a run's `agent_end`, where it counted as the daemon's assignment; on a host
+  without that method this remains unchanged. Install this release together with the
+  `@sjawhar/pi-envoy` built from the same commit: this entry refuses a pi-envoy at another interface
+  version, naming both, and so does the daemon's boot gate. `legion.daemonApiVersion` is unchanged.
 - The `legion-controller` skill no longer tells a controller the daemon launched
   (`controller: daemon`) that nobody types into its session or reads its replies, or that text
   left in its session reaches no one (LEGION-306). A plain user turn in that session other than
@@ -177,3 +274,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the role prompts alone say who edits what, and the operation-log rule (`jj undo`, `jj abandon`,
   `jj op restore|revert|abandon|undo` refused in every tree pane and its `task` subagents) stays.
   `legion.daemonApiVersion` is unchanged.
+
+### Fixed
+
+- Session attribution's `jj config path --user` gives up after 10 s and kills its process group.
+  Root bootstrap awaits it, so a `jj` that never answered (a PATH wrapper that loops) held the
+  `session_start` handler past Oh My Pi's 30 s and the claim never reached `ready`; attribution now
+  degrades to no trailer, as it does for any other failure to resolve jj.
+- A `handoff_complete` whose jj fails on a git lock file still on disk — the `index.lock` a git or
+  jj interrupted mid-write leaves, which fails every later jj that snapshots a change into the
+  working copy (LEGION-731) — names each such lock in its error, with how long ago it was last
+  written. It says not to remove the lock while the issue's pod runs, since another role's git,
+  which the role's container cannot see, may hold it, and that replacing the issue's pod removes
+  it; and that under the tmux runtime nothing removes it, so it is removed by hand once no git or
+  jj on the host is using the repository (`src/git-lock.ts`). The lock is left as it is.

@@ -53,7 +53,7 @@ same session instead of starting fresh. You start no worker.
 | Situation | Action |
 | --- | --- |
 | Re-file a genuinely independent child, capacity, or cross-tree conflict | Message the controller with `envoy_publish` to the controller topic your `Legion addressing` line names. |
-| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, and requests approval again once the answer is folded in. A to-do only a human can do uses `dispatch ask`. |
+| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree until the human answers: an answer that is the whole change since the version they approved carries their approval to the new version, so it requests nothing; an answer that changes the spec's text outside the block has it rewrite that text, have the fresh read-only `plan-gap-analyst` check the new version against the code and the human's words, resolve every finding, then request approval again with a one-sentence `--summary` naming what changed since the earlier approval. A to-do only a human can do uses `dispatch ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's
@@ -66,6 +66,10 @@ production report exists. A tester completion that rejects the implementer's pro
 the implementer by the daemon's table; a worker that reports no surface reaches the changed path
 gets a child issue in this tree to build it, and waits, idle and not suspended, until you tell it
 to continue (`envoy_publish` to its role topic) once that child closes.
+
+A merge is never a human to-do: open no `dispatch ask` for it. The merger follows the project's
+merge policy after READY; a by-hand READY tells you that a person merges under the repository's
+rules, while the usual READY arms the pull request itself.
 
 ## Completion
 

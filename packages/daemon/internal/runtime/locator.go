@@ -119,6 +119,20 @@ func (l Locator) Validate() error {
 	return nil
 }
 
+// Label is how a log line or a capability row names the process l addresses: its pod and role
+// container under a sandbox (`pod <name>/<container>`), its pane under tmux
+// (`pane <window>:<pane>`), and the claim alone (`claim <token>`) for a locator naming no process,
+// which Validate refuses and a ready records for a claim whose machine holds none.
+func (l Locator) Label() string {
+	switch {
+	case l.Sandbox != nil:
+		return "pod " + l.Sandbox.Name + "/" + l.Sandbox.Container
+	case l.Tmux != nil:
+		return "pane " + l.Tmux.Window + ":" + l.Tmux.Pane
+	}
+	return "claim " + string(l.Claim)
+}
+
 // SandboxIncarnation is the persisted process address for one role generation inside a pod.
 func SandboxIncarnation(podUID string, generation uint64) string {
 	return podUID + "/" + strconv.FormatUint(generation, 10)

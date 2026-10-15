@@ -98,20 +98,6 @@ func (r remote) remove() error {
 	return nil
 }
 
-// isolatedGitConfig is the configuration Fetch's git reads besides its own: none. Not the system's,
-// not the image user's; and git's `-c`, GIT_CONFIG_PARAMETERS, no process provisioning starts
-// inherits (config.go).
-var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
-
-// FetchRequest is a pod's first init container's: the repository, the provisioning token, the
-// directory its one-shot credential goes under, and the feed directory.
-type FetchRequest struct {
-	Repo          ghrepo.Repository
-	Token         string
-	CredentialDir string
-	Feed          string
-}
-
 // Source is how provisioning reaches the repository for the shared clone's clone and fetch: from a
 // pod's feed with no credential (FromFeed), or from GitHub with the one-shot credential
 // (FromGitHub). Only this package's two constructors make one.
@@ -196,38 +182,6 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
 		},
 		branches: []string{"main", bookmark},
 	}
-}
-
-// Fetch clones the repository from GitHub, bare, into the feed, with the provisioning token and
-// no configuration but the one-shot credential's and the pins: the process of a pod's first init
-// container, the only one that holds the token, whose feed is its own and which mounts nothing a
-// tree agent can write. It reaches GitHub as the tmux runtime's Source does, so the token's two
-// holders share one credential rule. Provision then clones and fetches the shared clone from the
-// feed with no credential. It returns the feed repository.
-func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
-	feed, err := feedRepository(request.Feed, request.Repo)
-	if err != nil {
-		return "", err
-	}
-	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
-	if err := github.check(request.Repo); err != nil {
-		return "", err
-	}
-	credential, err := github.open(request.Repo, "")
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		_ = credential.remove()
-	}()
-	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
-		return "", fmt.Errorf("create feed parent: %w", err)
-	}
-	clone := []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), feed}
-	if _, err := runCheckedTimeout(ctx, run, clone, merge(credential.env, isolatedGitConfig), "", FetchTimeout); err != nil {
-		return "", err
-	}
-	return feed, credential.remove()
 }
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it

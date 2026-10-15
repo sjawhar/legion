@@ -15,7 +15,8 @@
         "promptFailures": 0,
         "promptRetires": 0
       },
-      "uncertainStreak": 0
+      "uncertainStreak": 0,
+      "pluginContract": 0
     },
     {
       "token": "legion-legion-legion-209-implementer",
@@ -50,7 +51,8 @@
         "confirmedAt": "2026-09-22T09:31:04Z",
         "interrupted": true
       },
-      "suspensionHeld": true
+      "suspensionHeld": true,
+      "pluginContract": 0
     }
   ]
 }

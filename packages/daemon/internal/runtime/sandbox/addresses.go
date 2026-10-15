@@ -100,9 +100,7 @@ func (r *Runtime) recordAddresses(ctx context.Context, s *sandbox, role claim.Ro
 	if err != nil {
 		return err
 	}
-	patching, cancel := call(ctx)
-	defer cancel()
-	if _, err := r.sandboxClient().Patch(patching, s.Name, types.MergePatchType, body, metav1.PatchOptions{}); err != nil {
+	if _, err := r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{}); err != nil {
 		return fmt.Errorf("record the addresses of %s generation %d on sandbox %s: %w", role, generation, s.Name, err)
 	}
 	return nil

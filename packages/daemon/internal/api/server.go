@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
@@ -56,6 +57,12 @@ type Options struct {
 	// and a registration registers the controller only from a launch of the controller's claim.
 	// Unset (`controller: operator`), only the operator's capability registers it.
 	ControllerLaunched bool
+	// PluginRelaunchable is supervise.Deps.PluginRelaunchable as the API sees it: whether this
+	// daemon can relaunch a stale process onto a plugin at all. False is Kubernetes's degraded
+	// mode, where a stale registration is recorded and the process is left running: nothing here
+	// refuses it either, since refusing calls with no relaunch under way would stall agents that
+	// work today.
+	PluginRelaunchable bool
 	// Stopping is done once the daemon's stop begins, before the stop closes the worker stream
 	// connections no route holds (RouteDecisions): an operator's request that would change a claim
 	// is refused from then on (stopped), and a route whose decision fails logs it at Info
@@ -90,6 +97,8 @@ type Options struct {
 	// project the configuration has no repository for; the handoff route reads the issue branch
 	// there. Nil answers no project.
 	Repository func(project string) (ghrepo.Repository, bool)
+	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
+	MergeRules func(project string) config.MergeRules
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -101,6 +110,17 @@ type Options struct {
 	// took the role back. A ready the claim refuses tells no one. Nil tells no one. It is called
 	// before the route answers the agent, so it returns at once.
 	ClaimReady func(c supervise.Claim)
+	// PromptAgents is the sorted names of every task agent the role prompts dispatch
+	// (prompts.RoleReferences), which the registration answers so a session's capability report
+	// measures the agents its role is told to run (LEGION-663). Nil or empty answers an empty list.
+	PromptAgents []string
+	// CapabilityReported is told, after a ready the claim took, of the capability report that ready
+	// carried, normalised (capabilities.Normalize), with the claim as the ready left it. A ready that
+	// carries no report — the controller's — tells no one, and so does a ready the claim refuses.
+	// Nil tells no one. It may persist the report before it returns — the daemon's writes the
+	// store — on a context that outlives the agent's connection, and the route answers the agent
+	// once it has returned.
+	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 }
 
 // TreeLifecycles is the store's durable tree barrier (store.Store) as the operator routes use it:
@@ -124,6 +144,8 @@ type server struct {
 	designGate        config.DesignGate
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
+	// pluginRelaunchable is Options.PluginRelaunchable.
+	pluginRelaunchable bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
 	controllerMu sync.Mutex
@@ -131,6 +153,7 @@ type server struct {
 	githubOwner  string
 	githubAPI    string
 	repository   func(project string) (ghrepo.Repository, bool)
+	mergeRules   func(project string) config.MergeRules
 	grants       *credential.Grants
 	releaser     store.TreeReleaser
 	trees        TreeLifecycles
@@ -139,6 +162,9 @@ type server struct {
 	records      record.Store
 	dispatch     dispatch.Client
 	claimReady   func(c supervise.Claim)
+	// promptAgents and capabilityReported are Options.PromptAgents and Options.CapabilityReported.
+	promptAgents       []string
+	capabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
@@ -164,10 +190,12 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
 		controllerLaunched: opts.ControllerLaunched,
+		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,
 		githubOwner:        opts.GitHubOwner,
 		githubAPI:          opts.GitHubAPI,
 		repository:         opts.Repository,
+		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,
@@ -176,6 +204,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		records:            opts.Record,
 		dispatch:           opts.Dispatch,
 		claimReady:         opts.ClaimReady,
+		promptAgents:       opts.PromptAgents,
+		capabilityReported: opts.CapabilityReported,
 		log:                opts.Log,
 		stopping:           opts.Stopping,
 		drained:            opts.Drained,
@@ -225,10 +255,11 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 
 	mux.HandleFunc("POST /legion/v1/operator/claims", s.operator(s.spawn))
 	mux.HandleFunc("GET /legion/v1/operator/claims", s.operator(s.list))
-	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/deliver", s.operator(s.claimRequest("deliver", deliverEvent)))
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/deliver", s.operator(s.claimRequest("deliver", s.deliverEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/suspend", s.operator(s.claimRequest("suspend", suspendEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/resume", s.operator(s.claimRequest("resume", resumeEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/stop", s.operator(s.claimRequest("stop", stopEvent)))
+	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/retry", s.operator(s.claimRequest("retry", retryEvent)))
 	mux.HandleFunc("POST /legion/v1/operator/claims/{token}/close", s.operator(s.closeTree))
 
 	// The catch-all answers every unrouted request, including a known path asked for with the

@@ -7,6 +7,7 @@ import {
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
+  PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
   type SearchResult,
   type TablePosition,
@@ -1476,6 +1477,121 @@ describe("executeDispatchTool", () => {
       commit: "c0ffee",
       error: "api.md: duplicate component id",
     });
+  });
+
+  test("dispatch_project posts the key and name as this session and prints the created project", async () => {
+    const requests: Array<{ readonly route: string; readonly body: unknown }> = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push({
+        route: `${init?.method ?? "GET"} ${target.pathname}`,
+        body: JSON.parse(String(init?.body)),
+      });
+      return response(
+        { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+        201
+      );
+    }) as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_project",
+      args: { key: "CORE", name: "Core" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(requests.map((request) => request.route)).toEqual(["POST /api/v1/projects"]);
+    expect(requests[0]?.body).toMatchObject({
+      key: "CORE",
+      name: "Core",
+      actor: { kind: "session", id: "session-1" },
+    });
+    expect(result.text).toBe(
+      "Created project CORE (Core) at 2026-10-11T00:00:00Z: http://dispatch.test/projects/CORE"
+    );
+    expect(result.details).toEqual({
+      project: "CORE",
+      name: "Core",
+      created_at: "2026-10-11T00:00:00Z",
+    });
+  });
+
+  test("dispatch_project names the server's code when the key is taken", async () => {
+    const fetchImpl = (async (): Promise<Response> =>
+      response(
+        { code: "PROJECT_EXISTS", error: "a project with this key already exists" },
+        409
+      )) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_project",
+        args: { key: "CORE", name: "Core" },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow("PROJECT_EXISTS: a project with this key already exists");
+  });
+
+  test("dispatch_projects lists every project's key and name, one per line, keys first", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(String(url)).pathname}`);
+      return response([
+        { key: "CORE", name: "Core", open_asks: 2, created_at: "2026-09-01T00:00:00Z" },
+        { key: "OPS", name: "Ops", open_asks: 0, created_at: "2026-09-02T00:00:00Z" },
+      ]);
+    }) as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_projects",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(requests).toEqual(["GET /api/v1/projects"]);
+    expect(result.text).toBe("CORE Core\nOPS Ops");
+    expect(result.details).toEqual({
+      projects: [
+        { key: "CORE", name: "Core" },
+        { key: "OPS", name: "Ops" },
+      ],
+    });
+  });
+
+  test("dispatch_projects says there are none when Dispatch has no projects", async () => {
+    const fetchImpl = (async (): Promise<Response> => response([])) as unknown as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_projects",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(result.text).toBe("No projects.");
+    expect(result.details).toEqual({ projects: [] });
   });
 
   test("dispatch_open_asks renders active asks by whose reply is due", async () => {
@@ -3863,8 +3979,6 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
-    expect(result.text).toContain('`task(agent="scout")`');
-    expect(result.text).toContain("Legion plugin's `plan-gap-analyst`");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
@@ -3989,14 +4103,16 @@ describe("executeDispatchTool", () => {
 
   // A request names the latest version, and a new version moves it there and back to its agent: a
   // request made over an open block leaves the human's turn the moment they answer it, and an
-  // answer reaches a version only when the document settles or the agent folds it into the text.
+  // answer reaches a version only when the document settles, or sooner with the agent's next edit.
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
     const requestOver = async (blocks: string[], version4: string[], asks: unknown[]) => {
       const posts: string[] = [];
+      const requests: string[] = [];
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const target = new URL(String(url));
+        requests.push(target.pathname);
         if (target.pathname === "/api/v1/issues/DSP-42") {
           return response({
             key: "DSP-42",
@@ -4047,7 +4163,7 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       });
-      return { outcome, posts };
+      return { outcome, posts, requests };
     };
     const blockAsk = (block: string, state: string) => ({
       id: `ask-${block}`,
@@ -4073,15 +4189,145 @@ describe("executeDispatchTool", () => {
         () => "",
         (error: Error) => error.message
       );
-      expect(refusal.split("\n").slice(0, 5)).toEqual([
+      const lines = refusal.split("\n");
+      expect(lines.slice(0, 4)).toEqual([
         "dispatch request-approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
-        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch doc-edit, which writes a version that carries it',
       ]);
+      // b-4 is answered but the latest version has not caught up yet: it still counts as open,
+      // but its line no longer sends the agent to doc-edit, since an answered block already
+      // carries its own record and needs no restatement.
+      expect(lines[4]).toContain('"Question of b-4?" (block b-4, ask ask-b-4)');
+      expect(lines[4]).toContain("answered but still open in version 4");
+      expect(lines[4]).not.toContain("doc-edit");
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
+      expect(posts).toEqual([]);
+    });
+
+    test("a copied block names the ask settlement says it was copied from, open on its own document", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source" copied_from_document="dispatch://DSP-42/artifact/plan"}\nQuestion of b-1?\n:::',
+        ],
+        []
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on DSP-42 plan: answer it there"
+      );
+      expect(refusal.split("\n")[1].match(/dispatch:\/\//g)).toHaveLength(1);
+      expect(refusal).not.toContain("has not opened yet");
+      expect(posts).toEqual([]);
+    });
+
+    test("three copied blocks are named from their attributes without reading one ask", async () => {
+      const copy = (block: string, state: string) =>
+        `:::ask{#${block} urgency="med" multiple="false" state="${state}" copied_from="ask-${block}-source" copied_from_document="dispatch://DSP-42/spec"}\nQuestion of ${block}?\n:::`;
+      const { outcome, posts, requests } = await requestOver(
+        ["b-1", "b-2", "b-3"],
+        [copy("b-1", "open"), copy("b-2", "answered"), copy("b-3", "open")],
+        []
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-b-1-source, which is open on DSP-42 spec: answer it there",
+        "- block b-3, a copy of ask dispatch://DSP-42/ask/ask-b-3-source, which is open on DSP-42 spec: answer it there",
+      ]);
+      expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
+      expect(posts).toEqual([]);
+    });
+
+    test("an ask on another document under the same block id is not named when settlement names no copy", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [opening("b-1", "open")],
+        [
+          {
+            ...blockAsk("b-1", "open"),
+            id: "ask-unrelated",
+            question: "Totally unrelated question?",
+            created_at: "2026-10-08T10:00:00Z",
+            block_artifact: { id: "artifact-1", slug: "unrelated-doc" },
+          },
+        ]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe("- block b-1, whose ask Dispatch has not opened yet");
+      expect(refusal).not.toContain("ask-unrelated");
+      expect(posts).toEqual([]);
+    });
+
+    test("a copied block of a project document names its source under the project's document", async () => {
+      const posts: string[] = [];
+      const notes = {
+        id: "artifact-notes",
+        issue_key: null,
+        project: "CORE",
+        ref_key: "CORE/notes",
+        slug: "notes",
+        name: "notes.md",
+        kind: "doc",
+        primary: false,
+        approval: { state: "draft", latest_version: 2 },
+        created_by: { kind: "session", id: "session-1" },
+        created_at: "2026-09-18T00:00:00Z",
+        versions: [],
+      };
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+        if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/blocks") {
+          return response([{ id: "b-1", type: "ask", from: 0, to: 90 }]);
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/versions/2") {
+          return response({
+            number: 2,
+            markdown:
+              ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-plan" copied_from_document="dispatch://CORE/artifact/plan"}\nQuestion of b-1?\n:::',
+          });
+        }
+        // A project document's own asks: the copy has none.
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/asks") return response([]);
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/approval-requests") {
+          posts.push(target.pathname);
+          return response({}, 201);
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const refusal = await executeDispatchTool({
+        tool: "dispatch_request_approval",
+        args: { project: "CORE", artifact: "notes", summary: "Proposes a nightly export." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      }).then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on CORE/plan: answer it there"
+      );
+      expect(refusal.split("\n")[1].match(/dispatch:\/\//g)).toHaveLength(1);
       expect(posts).toEqual([]);
     });
 
@@ -4130,6 +4376,22 @@ describe("executeDispatchTool", () => {
       );
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
+    test("a copy whose source was answered after it settled refuses nothing once settlement has shown the answer", async () => {
+      // Answering the source settles its copies again (SettleCopiesOf), so the copy's latest
+      // version carries the answer and the copy is no open block.
+      const { outcome, posts, requests } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-09T09:00:00Z" selected="[]" answer="eu-west-1" copied_from="ask-source" copied_from_document="dispatch://DSP-42/artifact/plan"}\nQuestion of b-1?\n:::',
+        ],
+        []
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
       expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
     });
   });
@@ -4337,7 +4599,7 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe(
-      "# Spec\n\nApproval: approved v2 by sjawhar, edited since (now v4) - request approval again once the human has agreed to every point in this version"
+      "# Spec\n\nApproval: approved v2 by sjawhar, changed since (now v4) - the human's own answer to a decision block carries the approval when that answer is the whole change since v2; for any other change, request approval again once the human has agreed to every point in this version, with a --summary naming what changed since v2"
     );
   });
 
@@ -5426,7 +5688,7 @@ describe("executeDispatchTool", () => {
         args: { project: "not-a-project", artifact: "runbook-md" },
         ...shared,
       })
-    ).rejects.toThrow("project must be a project key");
+    ).rejects.toThrow(`project is not a project key: ${PROJECT_KEY_RULE}`);
   });
   test("uploads a relative artifact path from the Dispatch process cwd", async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));

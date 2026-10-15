@@ -1,0 +1,28 @@
+{
+  "action": "completed",
+  "check_run": {
+    "id": 3102,
+    "name": "deploy / production",
+    "head_sha": "6666666666666666666666666666666666666666",
+    "status": "completed",
+    "conclusion": "success",
+    "started_at": "2026-09-07T03:25:00Z",
+    "completed_at": "2026-09-07T03:27:00Z",
+    "html_url": "https://github.com/example-org/example-repo/actions/runs/3003/job/3102",
+    "details_url": "https://github.com/example-org/example-repo/actions/runs/3003/job/3102",
+    "check_suite": {
+      "id": 1004,
+      "head_branch": "gh-readonly-queue/main/pr-42-6666666666666666666666666666666666666666",
+      "head_sha": "6666666666666666666666666666666666666666"
+    },
+    "app": { "id": 15368, "slug": "github-actions" },
+    "pull_requests": []
+  },
+  "sender": { "login": "github-actions[bot]", "type": "Bot" },
+  "repository": {
+    "name": "example-repo",
+    "full_name": "example-org/example-repo",
+    "default_branch": "main",
+    "owner": { "login": "example-org" }
+  }
+}

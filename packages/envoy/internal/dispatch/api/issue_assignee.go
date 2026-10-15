@@ -12,12 +12,6 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// canonicalLogin is the stored form of a person's email: trimmed and lowercased, the form the
-// identity implementations name a person by and the people table holds.
-func canonicalLogin(login string) string {
-	return strings.ToLower(strings.TrimSpace(login))
-}
-
 // parseIssueAssignee decodes the tri-state `assignee` field of an issue write. Absent →
 // (nil, false): leave it alone. JSON null → (nil, true): clear it. A string → its canonical
 // email, which must name a person who has signed in (400 ASSIGNEE_NOT_ALLOWED otherwise).
@@ -42,7 +36,7 @@ func (s *server) parseIssueAssignee(ctx context.Context, raw json.RawMessage) (a
 
 // allowedLogin canonicalises login and checks that it names a person who has signed in.
 func (s *server) allowedLogin(ctx context.Context, login string) (string, error) {
-	canonical := canonicalLogin(login)
+	canonical := model.CanonicalLogin(login)
 	var known bool
 	if canonical != "" {
 		if err := s.deps.Store.Pool.QueryRow(ctx, `select exists(select 1 from people where email = $1)`, canonical).Scan(&known); err != nil {
@@ -60,10 +54,10 @@ func (s *server) allowedLogin(ctx context.Context, login string) (string, error)
 // The shared token creating a root issue leaves it unassigned.
 func defaultAssignee(actor model.Actor, parent *string) *string {
 	if actor.Kind == "user" {
-		return new(canonicalLogin(actor.ID))
+		return new(model.CanonicalLogin(actor.ID))
 	}
 	if actor.Owner != nil {
-		return new(canonicalLogin(*actor.Owner))
+		return new(model.CanonicalLogin(*actor.Owner))
 	}
 	return parent
 }
@@ -109,7 +103,7 @@ func (s *server) whoami(w http.ResponseWriter, r *http.Request) {
 	}
 	var owner *string
 	if actor.Owner != nil {
-		owner = new(canonicalLogin(*actor.Owner))
+		owner = new(model.CanonicalLogin(*actor.Owner))
 	}
 	WriteJSON(w, http.StatusOK, map[string]any{"kind": "agent", "owner": owner, "service": actor.Service})
 }

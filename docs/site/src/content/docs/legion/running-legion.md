@@ -103,7 +103,7 @@ and the checks that branch requires (its rulesets and its branch protection), th
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
-Node, uv, the AWS CLI).
+Node, uv, the AWS CLI, kubectl).
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
@@ -137,11 +137,11 @@ What each part is for:
   each Dispatch project the daemon runs to its GitHub repository. A project may name a
   `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
   when the head's own CI turns red before the merge, or the head starts conflicting with its base.
-  It may also list `review_workflows`, the paths (`.github/workflows/<name>.yml`, each once) of the
-  workflows its base branch requires that review the code and fail on their own findings, such as a
-  review bot's. A red only they make, in testing or review, goes to the reviewer, who adjudicates
-  their findings and re-runs them, rather than back to the implementer; any other red required
-  workflow sends the work back, as a red required check does. None is declared unless you list it.
+  Its optional `merge.by_hand` mapping holds regular-expression paths, each matched anywhere in a
+  changed path, so anchor one (`^migrations/versions/`) to mean a directory. A pull request whose
+  change touches one is `READY` with a `MANUAL_MERGE_REQUIRED:` note: the merger does not auto-arm
+  it, the packet the daemon tells starts with the note, and a person merges it under the
+  repository's rules.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
@@ -161,8 +161,10 @@ What each part is for:
 - **`nats_nkey_seed_file`** and **`nats_daemon_nkey_seed_file`** (optional) are the NATS nkey user
   seeds for the agents and for the daemon's own connection, each in a file only its owner can read.
 - **`runtime.kubernetes.agent_secrets`** (optional) enrolls every pod with the
-  [Secrets Broker](/legion/broker/): `url` is the broker. The daemon's own machine login is the
-  `legion-daemon` service's, which anyone signed in to Dispatch approves on its credential page.
+  [Secrets Broker](/legion/broker/): `url` is the broker, and `token_file` is where the daemon's own
+  projected ServiceAccount token for the broker's audience is mounted. The daemon logs in with that
+  token at every start and keeps logging in; no person approves it, provided the broker's
+  `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
 - **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).
@@ -351,6 +353,17 @@ Closing the terminal leaves the project without one, and the daemon logs
    `legion` binary and both plugins from it.
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
+
+   **After the first upgrade to a release without `review_workflows`,** a `legion.yaml` that still
+   sets `projects.<KEY>.review_workflows` is refused at load with
+   `Unknown key "projects.<KEY>.review_workflows"`, by `legion start --check-config` and by the
+   daemon's boot alike, so the daemon does not come up on it: delete the key before or with the
+   image pin (an empty list is refused too). A review bot's red is now CI like any other: it sends
+   the work back to the implementer, which answers and resolves the bot's threads and pushes, and
+   the bot runs again; the reviewer adjudicates nothing of it and re-runs nothing. Where the bot's
+   threads must be closed before a merge, make that the repository's own rule (a ruleset's
+   "Require conversation resolution before merging").
+
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
    `legion stop --config legion.yaml`) and start it again. `legion restart <PROJECT>` does both in
    the shell it runs in, from the configuration the stopped daemon recorded. The new daemon probes
@@ -366,8 +379,55 @@ Closing the terminal leaves the project without one, and the daemon logs
    legion claims resume  --config legion.yaml --operator-token-file operator-token --claim <token>
    ```
 
-   A suspension waits for the agent's current turn to land; the resumed agent continues the same
-   conversation in a new pod.
+   An operator's suspension of an agent in a turn waits for that turn to land, at most
+   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches a
+   claim while it is still launching waits until the agent is ready, or until its registration
+   deadline. Until the stop lands the hold lives only in the daemon's memory, so before restarting
+   the daemon wait until `legion claims list` shows the claim `suspended`, not merely
+   `suspensionHeld`. The resumed agent continues the same conversation in a new pod.
+
+   **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
+   suspended claim on its own when its issue's phase moves to the claim's role (a phase start,
+   re-admission, a child's return to `todo`), and keeps its own controller running, unless an
+   operator suspended it; a phase start for a claim an operator suspended waits instead. At boot
+   it also resumes a claim that owns its issue's current phase, but only one the daemon or the
+   agent's own exit suspended. A notice for a suspended architect resumes nothing: it waits until
+   the architect holds its role again, so an operator-suspended architect receives it when the
+   operator resumes it. A drain therefore ends with the operator resuming every claim they
+   suspended, one `legion claims resume` each; `legion claims list --json` names each one's
+   `suspendedBy` (`operator`, `daemon`, `exit`, or `unknown` for one suspended before this
+   release). The daemon's own suspension of a claim in a turn waits for the turn however long it
+   takes, with no stop timeout: a child parked in Dispatch (`backlog` or `icebox`) stops its worker
+   only once the worker's current turn ends, and a lingering tree's claims stay suspended until the
+   tree is re-admitted.
+
+   **After the first upgrade to a release that records `suspendedBy`,** every claim already
+   suspended reads `unknown`. The next phase start, re-admission and the controller keeper resume
+   those as before. The boot's own sweep does not, but a start already queued before the upgrade
+   still resumes one at the first boot, as the earlier release would have. To keep a claim you
+   drained before the upgrade held against every trigger, run `legion claims suspend` on it once
+   the new daemon is up: that records the suspension as yours. Act only on the claims the state
+   names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
+   `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
+   architect, retry a failed one (`legion claims retry`, which relaunches its session with fresh
+   budgets), and bring a suspended phase worker back as
+   [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
+   shows for its `suspendedBy`. Never resume or retry by hand a claim of a lingering tree or of an
+   issue parked out of the workflow: re-admission or the issue's return to `todo` starts it.
+
+   **Rolling back across this release.** The earlier daemon boots on this schema but never writes
+   `suspendedBy`, so a value this release wrote survives the earlier daemon's own suspends and
+   resumes, an operator's included. Before starting this release again, run against the daemon's
+   database, with no daemon of the project running, where `<project>` is your `project` lowercased
+   with every character outside `a-z0-9` dropped (`project: LEGION` gives `legion`). Never run it
+   without the project filter: other projects' daemons may share the database, and their own
+   operator holds would turn `unknown`.
+
+   ```sql
+   update claims set suspended_by = 'unknown' where state = 'suspended' and project = '<project>';
+   ```
+
+   The boot sweep then resumes none of the claims the earlier daemon left suspended.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe
@@ -385,13 +445,15 @@ Closing the terminal leaves the project without one, and the daemon logs
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 active, 1 waiting, cap 4; 9 issues
   pending Dispatch status writes: none
+  claims nothing will wake: none
   ```
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `holdReason`, `architect` and `workers` (each
   claim's `state`), `pullRequest` (`head`, `checksVerdict`, `fixAttempts`) and `designGate`
-  (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`, and
-  `agentSecretsLogin` when the broker is configured:
+  (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`,
+  `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
+  and `agentSecretsLogin` when the broker is configured:
 
   ```sh
   legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'

@@ -4,10 +4,12 @@ import (
 	"context"
 	"maps"
 	"os"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -75,37 +77,35 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 	}
 }
 
-// A reviewer is told after its addressing which required workflows its project declares as review
-// workflows, or that it declares none: the reviewer adjudicates a red only those make, and
-// requests changes on any other red required workflow. No other claim is told them.
-func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
+func TestAMergerIsToldItsProjectsMergeRules(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {
 		t.Fatalf("compose the shipped prompts: %v", err)
 	}
+	rules := config.MergeRules{
+		ByHand: []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}},
+	}
 	for _, tc := range []struct {
-		name     string
-		role     claim.Role
-		declared []string
-		want     string
+		name string
+		role claim.Role
+		want bool
 	}{
-		{"a reviewer, two declared", claim.RoleReviewer, []string{".github/workflows/review.yml", ".github/workflows/bot.yml"},
-			" Review workflows: this project declares `.github/workflows/review.yml`, `.github/workflows/bot.yml` (`review_workflows`)."},
-		{"a reviewer, none declared", claim.RoleReviewer, nil, " Review workflows: this project declares none (`review_workflows`)."},
-		{"a tester", claim.RoleTester, []string{".github/workflows/review.yml"}, ""},
+		{"merger", claim.RoleMerger, true},
+		{"implementer", claim.RoleImplementer, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			token, err := claim.NewToken("s1", "S1-2", tc.role)
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, reviewWorkflows: tc.declared}
+			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, mergeRules: rules}
 			spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: tc.role})
 			if err != nil {
 				t.Fatalf("SpawnSpec: %v", err)
 			}
-			if told := strings.Contains(spec.Prompt.Addressing, "Review workflows:"); told != (tc.want != "") || !strings.HasSuffix(spec.Prompt.Addressing, tc.want) {
-				t.Fatalf("addressing %q; want it to end with %q", spec.Prompt.Addressing, tc.want)
+			told := strings.Contains(spec.Prompt.Addressing, "Merge policy: by_hand `^migrations/versions/`.")
+			if told != tc.want {
+				t.Fatalf("addressing %q; merge policy present = %t, want %t", spec.Prompt.Addressing, told, tc.want)
 			}
 		})
 	}
@@ -152,4 +152,80 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if !maps.Equal(spec.Secrets, s.secrets) {
 		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
 	}
+}
+
+// spec.Plugins is set iff the runtime is Kubernetes, the claim has registered a session, and its
+// recorded contract differs from this daemon's — never for tmux, a claim with no session, a claim
+// already at the daemon's contract, or a daemon that knows no plugin pair (LEGION-164's degraded
+// mode) — and always with Contract already api.DaemonAPIVersion.
+func TestSpawnSpecPluginsIsSetOnlyForAStaleKubernetesClaimWithASession(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	pair := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}
+	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer, Session: "sess-1"}
+	for _, tc := range []struct {
+		name        string
+		runtimeName string
+		plugins     *runtime.PluginInstall
+		claim       supervise.Claim
+		want        bool
+	}{
+		{"kubernetes, session, recorded 0", "kubernetes", pair, base, true},
+		{"kubernetes, session, recorded a stale number", "kubernetes", pair, withContract(base, 23), true},
+		{"kubernetes, no session", "kubernetes", pair, withSession(base, ""), false},
+		{"kubernetes, at the daemon's contract", "kubernetes", pair, withContract(base, api.DaemonAPIVersion), false},
+		{"kubernetes, no known pair", "kubernetes", nil, base, false},
+		{"tmux", "tmux", pair, base, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, runtimeName: tc.runtimeName, plugins: tc.plugins}
+			spec, err := s.SpawnSpec(context.Background(), tc.claim)
+			if err != nil {
+				t.Fatalf("SpawnSpec: %v", err)
+			}
+			if tc.want {
+				if spec.Plugins == nil || *spec.Plugins != *pair {
+					t.Fatalf("Plugins = %+v, want %+v", spec.Plugins, pair)
+				}
+				return
+			}
+			if spec.Plugins != nil {
+				t.Fatalf("Plugins = %+v, want nil", spec.Plugins)
+			}
+		})
+	}
+}
+
+// The daemon's own controller (`controller: daemon`) is covered the same way as any claim.
+func TestSpawnSpecPluginsCoversTheDaemonsControllerToo(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	pair := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, runtimeName: "kubernetes", plugins: pair}
+	c := supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController, Session: "sess-1", PluginContract: 23}
+	spec, err := s.SpawnSpec(context.Background(), c)
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if spec.Plugins == nil || *spec.Plugins != *pair {
+		t.Fatalf("the controller's Plugins = %+v, want %+v", spec.Plugins, pair)
+	}
+}
+
+func withSession(c supervise.Claim, session string) supervise.Claim {
+	c.Session = session
+	return c
+}
+
+func withContract(c supervise.Claim, contract int) supervise.Claim {
+	c.PluginContract = contract
+	return c
 }

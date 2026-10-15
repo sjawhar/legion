@@ -72,7 +72,7 @@ esac
 
 // imageBinaries are the binaries the capability check's image rows look for, each stubbed on the
 // test's PATH: `go version` answers a Go version, `chromium --version` a Chromium one.
-var imageBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "chromium"}
+var imageBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "chromium"}
 
 const imageBinary = `#!/bin/sh
 case "$1" in

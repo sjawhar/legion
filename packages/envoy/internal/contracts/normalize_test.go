@@ -3,11 +3,13 @@ package contracts
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func decodePayload(t *testing.T, raw string) map[string]string {
@@ -647,6 +649,7 @@ func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
 		{GithubResourceSubject("acme", "a.b", "pr", "7"), "notifications.github.acme.a_b.pr.7"},
 		{GithubPushSubject("my-org", "a_b.c", "branch", "legion/X-1"), "notifications.github.my-org.a_b_c.push.branch.legion/X-1"},
 		{GithubWorkflowSubject("acme", "site.io", "ci.yml", "completed"), "notifications.github.acme.site_io.workflow.ci_yml.completed"},
+		{GithubJobSubject("acme", "site.io", "500", "completed"), "notifications.github.acme.site_io.job.500.completed"},
 		{GithubSubject("acme", "widgets", "pr.7.checks"), "notifications.github.acme.widgets.pr.7.checks"},
 	} {
 		if tc.got != tc.want {
@@ -657,14 +660,15 @@ func TestGithubSubjectsWriteADottedOwnerOrNameAsOneSegment(t *testing.T) {
 
 // The listener reads GithubTopicKinds as where a repository name ends in a topic, so every token
 // Envoy publishes right after a repository's owner and name is one: the kind and parent kind of
-// every event the two tables name and of one they don't, the mention, push, workflow and checks
-// topics, and every golden envelope's topic.
+// every event the two tables name and of one they don't, the mention, push, workflow, job and
+// checks topics, and every golden envelope's topic.
 func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
 	const prefix = "notifications.github.example-org.example-repo."
 	topics := []string{
 		GithubSubject("example-org", "example-repo", "mention"),
 		GithubPushSubject("example-org", "example-repo", "branch", "main"),
 		GithubWorkflowSubject("example-org", "example-repo", "ci.yml", "completed"),
+		GithubJobSubject("example-org", "example-repo", "500", "completed"),
 		GithubSubject("example-org", "example-repo", "pr.7.checks"),
 	}
 	events := []string{"merge_group"}
@@ -707,9 +711,9 @@ func TestGithubTopicKindsHoldEveryTokenAfterTheRepository(t *testing.T) {
 	}
 }
 
-// CI events (check_run/check_suite) are not published raw. They fold into
-// envoy_ci_state via the webhook handler's CIRecorder; the summary loop emits
-// one settled checks envelope when the head's CI is complete.
+// A check run or suite of a pull request is not published raw. It folds into envoy_ci_state via the
+// webhook handler's CIRecorder; the summary loop emits one settled checks envelope when the head's
+// CI is complete.
 func TestGithubEnvelopesCheckRunNotPublished(t *testing.T) {
 	items := GithubEnvelopes(GithubEnvelopeInput{
 		Event:    "check_run",
@@ -764,6 +768,202 @@ func TestGithubEnvelopesCheckSuiteNotPublished(t *testing.T) {
 	}, "@legion")
 	if len(items) != 0 {
 		t.Fatalf("check_suite must not be published raw, got %d envelopes", len(items))
+	}
+}
+
+// actionsJob is the check_run webhook GitHub sends when a GitHub Actions job finishes, of a run on
+// the repository's default branch with no pull request: its App is GitHub Actions, its details_url
+// names the run and the job, its check suite's head_branch is the repository's default_branch, and
+// it lists no pull request. change edits the body and its check run before it is returned.
+func actionsJob(change func(body, checkRun map[string]any)) map[string]any {
+	checkRun := map[string]any{
+		"id":            float64(9001),
+		"name":          "widgets-release / widgets-release",
+		"status":        "completed",
+		"conclusion":    "success",
+		"started_at":    "2026-10-12T09:00:00Z",
+		"completed_at":  "2026-10-12T09:04:00Z",
+		"head_sha":      "abcdef1234567890abcdef1234567890abcdef12",
+		"html_url":      "https://github.com/acme/widgets/actions/runs/500/job/9001",
+		"details_url":   "https://github.com/acme/widgets/actions/runs/500/job/9001",
+		"app":           map[string]any{"id": float64(15368), "slug": "github-actions"},
+		"check_suite":   map[string]any{"id": float64(7001), "head_branch": "main", "head_sha": "abcdef1234567890abcdef1234567890abcdef12"},
+		"pull_requests": []any{},
+	}
+	body := map[string]any{
+		"action":     "completed",
+		"check_run":  checkRun,
+		"repository": map[string]any{"full_name": "acme/widgets", "name": "widgets", "owner": map[string]any{"login": "acme"}, "default_branch": "main"},
+		"sender":     map[string]any{"login": "github-actions[bot]", "type": "Bot"},
+	}
+	if change != nil {
+		change(body, checkRun)
+	}
+	return body
+}
+
+func checkRunEnvelopes(body map[string]any) []Envelope {
+	return GithubEnvelopes(GithubEnvelopeInput{Event: "check_run", Delivery: "d-job", EventID: "e-job", TraceID: "t-job", Body: body}, "@legion")
+}
+
+// A finished Actions job of a run on the default branch with no pull request is published as
+// itself, on its run's job topic, so a consumer learns a job ended before its run does (Dispatch's
+// Delivery page shows a deploy once its production job finishes).
+func TestACompletedActionsCheckRunWithNoPullRequestIsAJobEnvelope(t *testing.T) {
+	items := checkRunEnvelopes(actionsJob(nil))
+	if len(items) != 1 {
+		t.Fatalf("envelopes = %d, want 1", len(items))
+	}
+	item := items[0]
+	if err := item.Validate(); err != nil {
+		t.Fatalf("envelope does not validate: %v", err)
+	}
+	if item.Topic != "notifications.github.acme.widgets.job.500.completed" {
+		t.Fatalf("topic = %q", item.Topic)
+	}
+	if item.Source != "github" || item.SourceEventID != "d-job" || item.DedupeKey != "github.d-job" || item.EventID != "e-job" || item.TraceID != "t-job" {
+		t.Fatalf("envelope identity = %+v", item)
+	}
+	if want := "job widgets-release / widgets-release run 500 completed/success"; item.PayloadSummary != want {
+		t.Fatalf("summary = %q, want %q", item.PayloadSummary, want)
+	}
+	want := map[string]string{
+		"kind":         "job",
+		"repo":         "acme/widgets",
+		"run_id":       "500",
+		"job_id":       "9001",
+		"name":         "widgets-release / widgets-release",
+		"status":       "completed",
+		"conclusion":   "success",
+		"started_at":   "2026-10-12T09:00:00Z",
+		"completed_at": "2026-10-12T09:04:00Z",
+		"head_sha":     "abcdef1234567890abcdef1234567890abcdef12",
+		"url":          "https://github.com/acme/widgets/actions/runs/500/job/9001",
+	}
+	if got := decodePayload(t, item.Payload); !maps.Equal(got, want) {
+		t.Fatalf("payload = %v, want %v", got, want)
+	}
+}
+
+func TestACheckRunWithAPullRequestStaysOnTheChecksPath(t *testing.T) {
+	body := actionsJob(func(_, checkRun map[string]any) {
+		checkRun["pull_requests"] = []any{map[string]any{"number": float64(7)}}
+	})
+	if items := checkRunEnvelopes(body); len(items) != 0 {
+		t.Fatalf("a pull request's check run published %d envelopes: %+v", len(items), items)
+	}
+}
+
+func TestACheckRunFromAnotherAppIsNotAJob(t *testing.T) {
+	body := actionsJob(func(_, checkRun map[string]any) {
+		checkRun["app"] = map[string]any{"id": float64(77), "slug": "acme-ci"}
+	})
+	if items := checkRunEnvelopes(body); len(items) != 0 {
+		t.Fatalf("another App's check run published %d envelopes: %+v", len(items), items)
+	}
+}
+
+func TestACheckRunNotYetCompletedIsNotAJob(t *testing.T) {
+	body := actionsJob(func(body, checkRun map[string]any) {
+		body["action"] = "created"
+		checkRun["status"] = "in_progress"
+		delete(checkRun, "conclusion")
+		delete(checkRun, "completed_at")
+	})
+	if items := checkRunEnvelopes(body); len(items) != 0 {
+		t.Fatalf("a check run that has not finished published %d envelopes: %+v", len(items), items)
+	}
+}
+
+func TestACheckRunWhoseDetailsURLNamesNoRunIsNotAJob(t *testing.T) {
+	for _, url := range []string{
+		"",
+		"https://github.com/acme/widgets/runs/9001",
+		"https://github.com/acme/widgets/actions/runs/500",
+		"https://github.com/acme/widgets/actions/runs/500/job/9001/attempts/2",
+		"https://github.com/acme/widgets/actions/runs/run/job/9001",
+		"https://ci.acme.example/acme/widgets/actions/runs/500/job/9001",
+	} {
+		body := actionsJob(func(_, checkRun map[string]any) { checkRun["details_url"] = url })
+		if items := checkRunEnvelopes(body); len(items) != 0 {
+			t.Errorf("details_url %q published %d envelopes", url, len(items))
+		}
+	}
+}
+
+func TestJobIsAGithubTopicKind(t *testing.T) {
+	if !slices.Contains(GithubTopicKinds, "job") {
+		t.Fatalf("GithubTopicKinds = %v, want it to hold job", GithubTopicKinds)
+	}
+}
+
+// The rule is the repository's own default branch, whatever it is called.
+func TestAJobOnADefaultBranchNamedOtherThanMainIsAJob(t *testing.T) {
+	body := actionsJob(func(body, checkRun map[string]any) {
+		body["repository"].(map[string]any)["default_branch"] = "trunk"
+		checkRun["check_suite"].(map[string]any)["head_branch"] = "trunk"
+	})
+	if items := checkRunEnvelopes(body); len(items) != 1 || items[0].Topic != "notifications.github.acme.widgets.job.500.completed" {
+		t.Fatalf("a job on the default branch trunk published %+v, want one job envelope", items)
+	}
+}
+
+// Only the default branch's jobs are published: a merge queue's commit and a branch push run with no
+// pull request too, and would publish most of a busy repository's jobs.
+func TestAJobOfARunOnAnotherBranchIsNotAJob(t *testing.T) {
+	for _, branch := range []string{"gh-readonly-queue/main/pr-1-abcdef1234567890abcdef1234567890abcdef12", "feature/widgets", "Main"} {
+		body := actionsJob(func(_, checkRun map[string]any) {
+			checkRun["check_suite"].(map[string]any)["head_branch"] = branch
+		})
+		if items := checkRunEnvelopes(body); len(items) != 0 {
+			t.Errorf("a job on %q published %d envelopes", branch, len(items))
+		}
+	}
+}
+
+// A payload that does not name both branches cannot show the job is the default branch's, so it is
+// not published.
+func TestAJobWhosePayloadNamesNoBranchIsNotAJob(t *testing.T) {
+	for name, change := range map[string]func(body, checkRun map[string]any){
+		"no check suite branch": func(_, checkRun map[string]any) {
+			delete(checkRun["check_suite"].(map[string]any), "head_branch")
+		},
+		"a null check suite branch": func(_, checkRun map[string]any) {
+			checkRun["check_suite"].(map[string]any)["head_branch"] = nil
+		},
+		"no check suite":    func(_, checkRun map[string]any) { delete(checkRun, "check_suite") },
+		"no default branch": func(body, _ map[string]any) { delete(body["repository"].(map[string]any), "default_branch") },
+		"both empty": func(body, checkRun map[string]any) {
+			body["repository"].(map[string]any)["default_branch"] = ""
+			checkRun["check_suite"].(map[string]any)["head_branch"] = ""
+		},
+	} {
+		if items := checkRunEnvelopes(actionsJob(change)); len(items) != 0 {
+			t.Errorf("%s: published %d envelopes", name, len(items))
+		}
+	}
+}
+
+// A job envelope copies a repository's texts (a job's name above all), so each is capped like every
+// other envelope text, and its summary stays one line of at most 160 runes.
+func TestAJobEnvelopeCapsEveryTextItCopies(t *testing.T) {
+	long := strings.Repeat("界", 3000)
+	body := actionsJob(func(_, checkRun map[string]any) {
+		for _, key := range []string{"name", "status", "conclusion", "started_at", "completed_at", "head_sha", "html_url"} {
+			checkRun[key] = long
+		}
+	})
+	items := checkRunEnvelopes(body)
+	if len(items) != 1 {
+		t.Fatalf("envelopes = %d, want 1", len(items))
+	}
+	for key, value := range decodePayload(t, items[0].Payload) {
+		if runes := utf8.RuneCountInString(value); runes > maxEnvelopeTextRunes+1 {
+			t.Errorf("payload %s is %d runes, past the %d-rune cap and its ellipsis", key, runes, maxEnvelopeTextRunes)
+		}
+	}
+	if summary := items[0].PayloadSummary; utf8.RuneCountInString(summary) > 160 || strings.Contains(summary, "\n") {
+		t.Fatalf("summary = %q, want one line of at most 160 runes", summary)
 	}
 }
 

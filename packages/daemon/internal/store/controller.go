@@ -11,7 +11,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/controller"
 )
 
-const controllerSelect = `select generation, capability_hash, session, secret_hash, registered_at
+const controllerSelect = `select generation, capability_hash, session, secret_hash, registered_at, plugin_contract
 	from controllers where project = $1`
 
 // MintController records a new controller capability for project, by its hash: the generation
@@ -41,11 +41,12 @@ func (s *Store) ControllerTx(ctx context.Context, tx pgx.Tx, project string) (co
 }
 
 // RegisterController records session as the controller registered with generation's capability,
-// with the hash of the secret its grants authenticate with. It is fenced on the generation: when a
-// mint has moved past it, nothing is written and the answer is false.
-func (s *Store) RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time) (bool, error) {
-	tag, err := s.pool.Exec(ctx, `update controllers set session = $3, secret_hash = $4, registered_at = $5
-		where project = $1 and generation = $2`, project, generation, session, secretHash, at)
+// with the hash of the secret its grants authenticate with, and the contract its plugin declared.
+// It is fenced on the generation: when a mint has moved past it, nothing is written and the answer
+// is false.
+func (s *Store) RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time, pluginContract int) (bool, error) {
+	tag, err := s.pool.Exec(ctx, `update controllers set session = $3, secret_hash = $4, registered_at = $5, plugin_contract = $6
+		where project = $1 and generation = $2`, project, generation, session, secretHash, at, pluginContract)
 	if err != nil {
 		return false, fmt.Errorf("record the controller registration for %s: %w", project, err)
 	}
@@ -55,7 +56,7 @@ func (s *Store) RegisterController(ctx context.Context, project string, generati
 func scanController(row pgx.Row, project string) (controller.Record, bool, error) {
 	var record controller.Record
 	var registeredAt *time.Time
-	err := row.Scan(&record.Generation, &record.CapabilityHash, &record.Session, &record.SecretHash, &registeredAt)
+	err := row.Scan(&record.Generation, &record.CapabilityHash, &record.Session, &record.SecretHash, &registeredAt, &record.PluginContract)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return controller.Record{}, false, nil
 	}

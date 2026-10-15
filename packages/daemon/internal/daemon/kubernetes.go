@@ -22,6 +22,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -82,24 +83,60 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 
-// prepareSandbox is the runtime over readSandbox's client and Options, and the image probe. The
-// worker stream listens on tcp://<bind>:<worker_stream_port>; openSupervision hands the factory the
-// address every pod dials (shimAddress).
+// PluginsFromFile and PluginsFromBinary name ResolvedPlugins' source: the file's
+// `runtime.kubernetes.plugins`, or the release binary's linked pair (cmd/legion's
+// piLegionVersion/piEnvoyVersion, applyLinkedPlugins).
+const (
+	PluginsFromFile   = "legion.yaml"
+	PluginsFromBinary = "binary"
+)
+
+// ResolvedPlugins is the plugin pair this Kubernetes daemon installs for a stale-plugin relaunch
+// (LEGION-164), and where it came from: the file's `runtime.kubernetes.plugins` when the file sets
+// one (PluginsFromFile), else the binary's linked pair when main filled cfg.Runtime.Kubernetes.Plugins
+// from it (cmd/legion's piLegionVersion/piEnvoyVersion, PluginsFromBinary field true; PluginsFromBinary
+// source), else nil pair and "" source — the daemon knows no plugin versions, and every stale claim is
+// recorded and reported, never relaunched or refused (supervise.Deps.PluginRelaunchable false). Nil
+// under tmux, whose pane always resumes on the plugin installed on the daemon's host. legion start
+// --check-config and the boot log both read this.
+func ResolvedPlugins(cfg config.Config) (*runtime.PluginInstall, string) {
+	k := cfg.Runtime.Kubernetes
+	if k == nil || k.Plugins == nil {
+		return nil, ""
+	}
+	source := PluginsFromFile
+	if k.PluginsFromBinary {
+		source = PluginsFromBinary
+	}
+	return &runtime.PluginInstall{PiLegion: k.Plugins.PiLegion, PiEnvoy: k.Plugins.PiEnvoy, Contract: api.DaemonAPIVersion}, source
+}
+
+// logPlugins is the boot's one line on what this Kubernetes daemon will install for a
+// stale-plugin relaunch: an Info line naming the pair and where it came from, or, with none, the
+// Warn naming the gap: a stale claim is recorded and reported but never relaunched or refused.
+func logPlugins(log *slog.Logger, plugins *runtime.PluginInstall, source string) {
+	if plugins == nil {
+		log.Warn("daemon: this daemon knows no plugin versions to relaunch a stale process onto; set runtime.kubernetes.plugins or run a release build")
+		return
+	}
+	log.Info("daemon: stale-plugin relaunches install", "piLegion", plugins.PiLegion, "piEnvoy", plugins.PiEnvoy, "source", source)
+}
+
+// prepareSandbox is the runtime over readSandbox's client and Options, and the part of boot its
+// worker pod can refuse (sandboxBootOf). The worker stream listens on tcp://<bind>:<worker_stream_port>;
+// openSupervision hands the factory the address every pod dials (shimAddress).
 func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan) error {
 	p.stream = "tcp://" + net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort))
 	if o.runtime != nil {
 		p.newRuntime, p.probe = o.runtime, o.probe
 		return nil
 	}
-	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
-	p.clusterCheck = func(ctx context.Context) error {
-		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
-		defer cancel()
-		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
-			return err
-		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	boot, err := sandboxBootOf(cfg, reads)
+	if err != nil {
+		return err
 	}
+	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
+	p.clusterCheck = boot.clusterCheck
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
 		if err != nil {
@@ -110,18 +147,44 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		}
 		return nil
 	}
-	probe, err := imageProbe(cfg, p.roleReferences)
-	if err != nil {
-		return err
-	}
 	p.probe = func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error) {
 		sandboxed, ok := rt.(*sandbox.Runtime)
 		if !ok {
 			return bootprobe.ImageReport{}, fmt.Errorf("the image probe needs the Agent Sandbox runtime, not %T", rt)
 		}
-		return sandboxed.ProbeImage(ctx, probe)
+		return sandboxed.ProbeImage(ctx, boot.probe)
 	}
 	return nil
+}
+
+// sandboxBoot is the part of a Kubernetes daemon's boot its worker pod can refuse: the cluster's
+// refusals and the image probe. prepareSandbox hands both to the boot plan, and probe-boot
+// (probeBoot) runs them alone, so the two run one check and one probe by construction.
+type sandboxBoot struct {
+	// clusterCheck is the cluster's half of boot's refusals (plan.clusterCheck), each read-only:
+	// Agent Sandbox is installed, and no Sandbox of a layout before this runtime's remains in the
+	// namespace for the project.
+	clusterCheck func(context.Context) error
+	// probe is the image probe the runtime runs (sandbox.ImageProbe), over the references of the
+	// role prompts every worker pod is handed (prompts.RoleReferences).
+	probe sandbox.ImageProbe
+}
+
+// sandboxBootOf is sandboxBoot for the configuration and boot's reads.
+func sandboxBootOf(cfg config.Config, reads sandboxReads) (sandboxBoot, error) {
+	probe, err := imageProbe(cfg, prompts.RoleReferences())
+	if err != nil {
+		return sandboxBoot{}, err
+	}
+	clusterCheck := func(ctx context.Context) error {
+		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
+		defer cancel()
+		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+			return err
+		}
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	}
+	return sandboxBoot{clusterCheck: clusterCheck, probe: probe}, nil
 }
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
@@ -241,32 +304,22 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 	return nil
 }
 
-// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller:
-// constructs the client from runtime.kubernetes.agent_secrets and starts its
-// machine login on a background context at boot, logging the confirmation code exactly once —
-// pod enrollment is held until a person signed in to Dispatch approves it on the credential page.
-// A boot login that fails, expires or is denied is retried by the client on a later enrollment
-// (agentsecrets.Client.doProof), so no restart is needed. The client
-// itself is returned too, read-only, so the state route can show the login's current status
-// (source.State, agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever
-// handed the daemon's key or its won credential. Nil, nil without the block.
+// newSecretsLogin is the daemon's agent-secrets login as the machines' Enroller: it constructs the
+// client from runtime.kubernetes.agent_secrets and starts it at boot on a background context, so
+// the daemon logs in with its own projected ServiceAccount token (token_file) and keeps logging in
+// before each credential expires; no person approves any of it, a restart included. Every login
+// logs its own outcome (agentsecrets.Client.Login); one that fails is retried by the client, and
+// pod enrollment waits for it. The client itself is returned too, read-only, so the state route can
+// show the login's current status (source.State, agentsecrets.Client.LoginStatus). Never part of
+// launchSecrets, so no pod is ever handed the daemon's key, token or credential. Nil, nil without
+// the block.
 func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *agentsecrets.Client) {
 	k := cfg.Runtime.Kubernetes
 	if k == nil || k.AgentSecrets == nil {
 		return nil, nil
 	}
-	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, HTTP: &http.Client{Timeout: 30 * time.Second}}
-	go func() {
-		code, err := client.Login(context.Background())
-		if err != nil {
-			log.Error("agent-secrets machine login failed; a pod enrollment retries it", "error", err)
-			return
-		}
-		log.Info(fmt.Sprintf(
-			"agent-secrets machine login: enter code %s on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved",
-			code,
-		))
-	}()
+	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, HTTP: &http.Client{Timeout: 30 * time.Second}, TokenFile: k.AgentSecrets.TokenFile, Log: log}
+	go func() { _ = client.Start(context.Background()) }()
 	return brokerEnroller{client: client}, client
 }
 

@@ -108,6 +108,21 @@ type Timer struct {
 // was on that volume, and is gone with it. The daemon sends it to the issue's other claims.
 type IssueVolumeLost struct{ Claim claim.Token }
 
+// StalePlugin is a re-adopted claim found still speaking a plugin contract this daemon does not,
+// posted once at boot for every restored claim in that state (refreshStalePlugins in
+// internal/daemon), before any of them is relaunched, and again at every orphan sweep for a claim
+// still live whose contract still differs: the sweep is the one periodic pass that already reads
+// every claim, so a relaunch the tree lifecycle or the store refuses — which leaves the claim
+// live, its contract unchanged, and nothing else re-tried — rides that same pass rather than a
+// timer of its own; without the sweep's re-post the claim would stay stale for the rest of the
+// daemon's life. Trigger says which pass posted it — "boot" or "sweep" — for the log line the
+// relaunch writes; a claim still launching is left to its own registration, which decides the
+// comparison the moment it arrives.
+type StalePlugin struct {
+	Claim   claim.Token
+	Trigger string
+}
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -120,6 +135,9 @@ type RequestRegister struct {
 	Session        string
 	SessionFile    string
 	CapabilityHash []byte
+	// PluginContract is the contract the registering process's plugin declared, 0 when it
+	// declared none.
+	PluginContract int
 }
 
 // RequestReady is the agent saying it can be prompted.
@@ -130,14 +148,36 @@ type RequestReady struct {
 }
 
 // RequestSuspend stops the claim's process and keeps its session. Reason is why, for the line the
-// suspension logs.
+// suspension logs; By is who asks, which the suspended claim records (Claim.SuspendedBy) and every
+// suspension must name. Deadline, when set, is when a suspension held for a turn stops the process
+// mid-turn if the turn has not ended by then (holdSuspension); a daemon's suspension without one
+// waits for the turn however long it takes. The daemon sets one for a carried child's role still
+// running in its old tree, at the old root's linger expiry, where that tree's close would have
+// ended it (the daemon's outbox, stopElsewhere). The operator's suspension sets none: it is bounded
+// at the stop timeout from its arrival.
 type RequestSuspend struct {
+	Claim    claim.Token
+	Reason   string
+	By       SuspendSource
+	Deadline time.Time
+}
+
+// RequestResume is the operator's resume: it relaunches a suspended claim's session, whoever
+// suspended it.
+type RequestResume struct{ Claim claim.Token }
+
+// RequestRuleResume is the daemon's own resume, by rule: it relaunches a suspended claim's session
+// unless an operator suspended it (Claim.RuleMayResume): that suspension holds until the operator
+// resumes the claim. The daemon asks it of
+// a claim that owns its issue's current phase (the outbox's start of that phase, the boot's
+// included) and of its own controller. It resumes nothing that is not suspended — a failed claim's
+// launch budget is spent, and only the workflow's retry relaunches it — so it is asked again as
+// often as the rule meets the claim without ever relaunching one that is running. Reason is the
+// rule, for the line it logs.
+type RequestRuleResume struct {
 	Claim  claim.Token
 	Reason string
 }
-
-// RequestResume relaunches a suspended claim's session.
-type RequestResume struct{ Claim claim.Token }
 
 // RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
 // its tree, so any other stop of it is refused, and suspending it is how its process is stopped.
@@ -172,6 +212,14 @@ type RequestOperatorClose struct{ Claim claim.Token }
 // decision that the role runs again — the tree's architect retrying a held phase, or a closed tree
 // re-admitted after its linger stopped every claim.
 type RequestRetry struct{ Claim claim.Token }
+
+// RequestOperatorRetry is the operator relaunching a failed architect through the API: the retry
+// RequestRetry makes, fresh budgets and the same session, from failed alone, for the root and
+// sub-architects nothing else relaunches (operatorRetry). A retired claim belongs to its tree's
+// lifecycle, which the workflow decides, so the operator's retry refuses it, as it refuses every
+// claim that has not failed. It is its own event, as the closes are, so the table answers each
+// caller's retry its own way.
+type RequestOperatorRetry struct{ Claim claim.Token }
 
 // RequestDeliver gives the claim a task. ID is a durable outbox delivery id when an outbox row
 // drives the request; an empty ID asks the machine to mint an ordinary operator delivery id.
@@ -208,16 +256,19 @@ func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
 func (IssueVolumeLost) isEvent()      {}
+func (StalePlugin) isEvent()          {}
 func (RequestSpawn) isEvent()         {}
 func (RequestRegister) isEvent()      {}
 func (RequestReady) isEvent()         {}
 func (RequestSuspend) isEvent()       {}
 func (RequestResume) isEvent()        {}
+func (RequestRuleResume) isEvent()    {}
 func (RequestStop) isEvent()          {}
 func (RequestTreeClose) isEvent()     {}
 func (RequestIssueClose) isEvent()    {}
 func (RequestOperatorClose) isEvent() {}
 func (RequestRetry) isEvent()         {}
+func (RequestOperatorRetry) isEvent() {}
 func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
 
@@ -244,15 +295,18 @@ const (
 	onReady         eventKind = "request_ready"
 	onSuspend       eventKind = "request_suspend"
 	onResume        eventKind = "request_resume"
+	onRuleResume    eventKind = "request_rule_resume"
 	onStop          eventKind = "request_stop"
 	onTreeClose     eventKind = "request_tree_close"
 	onIssueClose    eventKind = "request_issue_close"
 	onOperatorClose eventKind = "request_operator_close"
 	onRetry         eventKind = "request_retry"
+	onOperatorRetry eventKind = "request_operator_retry"
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
-	onVolumeLost eventKind = "issue_volume_lost"
+	onVolumeLost  eventKind = "issue_volume_lost"
+	onStalePlugin eventKind = "stale_plugin"
 
 	timerPrefix eventKind = "timer:"
 )
@@ -279,6 +333,8 @@ func kindOf(ev Event) eventKind {
 		return timerPrefix + eventKind(ev.Kind)
 	case IssueVolumeLost:
 		return onVolumeLost
+	case StalePlugin:
+		return onStalePlugin
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -289,6 +345,8 @@ func kindOf(ev Event) eventKind {
 		return onSuspend
 	case RequestResume:
 		return onResume
+	case RequestRuleResume:
+		return onRuleResume
 	case RequestStop:
 		return onStop
 	case RequestTreeClose:
@@ -299,6 +357,8 @@ func kindOf(ev Event) eventKind {
 		return onOperatorClose
 	case RequestRetry:
 		return onRetry
+	case RequestOperatorRetry:
+		return onOperatorRetry
 	case RequestDeliver:
 		return onDeliver
 	case RequestExit:
@@ -318,13 +378,13 @@ func requestName(ev Event) (string, bool) {
 		return "ready", true
 	case RequestSuspend:
 		return "suspend", true
-	case RequestResume:
+	case RequestResume, RequestRuleResume:
 		return "resume", true
 	case RequestStop:
 		return "stop", true
 	case RequestTreeClose, RequestOperatorClose, RequestIssueClose:
 		return "close", true
-	case RequestRetry:
+	case RequestRetry, RequestOperatorRetry:
 		return "retry", true
 	case RequestDeliver:
 		return "deliver", true
@@ -357,12 +417,23 @@ var (
 	processless = []ClaimState{StateQueued, StateLaunchUncertain, StateSuspended, StateFailed, StateRetired}
 	unready     = []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered}
 	gone        = []ClaimState{StateSuspended, StateFailed, StateRetired}
+	// runsNothing is where a claim has no process of its own, running or coming up: queued, for which
+	// nothing was launched, or gone. A launch whose outcome is uncertain may still run, so it is not
+	// here. It is the one statement of the set: Claim.RunsNothing reads it in memory, and the store's
+	// queries take it as a parameter (RunsNothingStates).
+	runsNothing = append([]ClaimState{StateQueued}, gone...)
 )
 
 // LiveStates are the states of a claim whose process is up or coming up: launched, and not
 // suspended, failed or retired. It is a copy, so no caller changes the table's own set.
 func LiveStates() []ClaimState {
 	return slices.Clone(live)
+}
+
+// RunsNothingStates are the states of a claim with no process of its own (runsNothing). It is a
+// copy, so no caller changes the table's own set.
+func RunsNothingStates() []ClaimState {
+	return slices.Clone(runsNothing)
 }
 
 const (
@@ -436,7 +507,7 @@ func fillTable(t *builder) {
 	t.ignore(onBootTimer, "no boot is being watched", processless...)
 
 	t.row(onDeadline, "the registration deadline: the agent never registered, or never said it was ready", registrationDeadline,
-		[]ClaimState{StateLaunching, StateFailed}, StateLaunching, StateShimConnected, StateRegistered)
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateLaunching, StateShimConnected, StateRegistered)
 	t.ignore(onDeadline, "the agent is ready, so the boot watch is over", StateReady, StateWorking, StateIdle)
 	t.ignore(onDeadline, "no boot is being watched", processless...)
 
@@ -448,15 +519,21 @@ func fillTable(t *builder) {
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
 
-	t.row(onSuspendTimer, "the held suspension's timer: its turn has not ended, or its stop failed; stop the process", suspendAtTimeout,
-		[]ClaimState{StateSuspended}, StateWorking, StateIdle)
-	t.ignore(onSuspendTimer, "no suspension is held", slices.Concat(unready, []ClaimState{StateReady}, gone)...)
+	t.row(onSuspendTimer, "the held suspension's deadline stops the turn, or its stop is tried again", suspendAtTimeout,
+		[]ClaimState{StateSuspended}, StateWorking, StateIdle, StateReady, StateLaunching, StateShimConnected, StateRegistered)
+	t.ignore(onSuspendTimer, "no suspension is held", StateQueued, StateLaunchUncertain, StateSuspended, StateRetired, StateFailed)
 
 	// The issue's volume, found lost by another claim of the issue.
 	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,
 		slices.Concat(processless, booting)...)
 	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
 		StateRegistered, StateReady, StateWorking, StateIdle)
+
+	// A re-adopted claim found still speaking another plugin contract, at boot or at a later sweep.
+	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
+		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
+	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateSuspended, StateFailed, StateRetired)
 
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
@@ -466,8 +543,8 @@ func fillTable(t *builder) {
 	t.ignore(onSpawn, failedClaim, StateFailed)
 	t.ignore(onSpawn, retiredClaim, StateRetired)
 
-	t.row(onRegister, "the agent registered", register, []ClaimState{StateRegistered}, booting...)
-	t.row(onRegister, "the recorded session registered again", reregister, nil,
+	t.row(onRegister, "the agent registered", register, []ClaimState{StateRegistered, StateLaunching, StateFailed}, booting...)
+	t.row(onRegister, "the recorded session registered again", reregister, []ClaimState{StateLaunching, StateFailed},
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onRegister, "no launch has minted a boot token", StateQueued)
 	t.ignore(onRegister, "the previous launch's pane is still uncertain", StateLaunchUncertain)
@@ -475,7 +552,7 @@ func fillTable(t *builder) {
 	t.ignore(onRegister, failedClaim, StateFailed)
 	t.ignore(onRegister, retiredClaim, StateRetired)
 
-	t.row(onReady, "the agent is ready", ready, []ClaimState{StateReady, StateWorking}, StateRegistered)
+	t.row(onReady, "the agent is ready", ready, []ClaimState{StateReady, StateWorking, StateSuspended}, StateRegistered)
 	t.row(onReady, "the agent said ready again", reready, []ClaimState{StateWorking}, StateReady, StateIdle, StateWorking)
 	t.ignore(onReady, notRegistered, booting...)
 	t.ignore(onReady, "no launch has minted a boot token", StateQueued)
@@ -488,9 +565,11 @@ func fillTable(t *builder) {
 		StateRegistered, StateReady, StateIdle)
 	t.row(onSuspend, "hold the suspension for the turn's end: stopping the agent now would cut its turn off", holdSuspension,
 		nil, StateWorking)
-	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
+	t.row(onSuspend, "a suspension of a rule-resuming launch is held until the agent is ready", holdSuspendUntilReady,
+		nil, StateLaunching, StateShimConnected)
+	t.row(onSuspend, "already suspended: an operator's suspend takes the suspension over", suspendedAgain, nil, StateSuspended)
 	t.ignore(onSuspend, notRegistered,
-		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+		StateQueued, StateLaunchUncertain)
 	t.ignore(onSuspend, failedClaim, StateFailed)
 	t.ignore(onSuspend, retiredClaim, StateRetired)
 
@@ -500,6 +579,14 @@ func fillTable(t *builder) {
 	t.ignore(onResume, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
+
+	t.row(onRuleResume, "resume the same session by rule, unless the operator suspended it", resumeByRule,
+		[]ClaimState{StateLaunching, StateFailed}, StateSuspended)
+	t.row(onRuleResume, "the claim runs: nothing to resume", nothingToDo, nil, live...)
+	t.row(onRuleResume, "a queued claim is spawned by its start, not resumed", nothingToDo, nil, StateQueued)
+	t.row(onRuleResume, "the previous launch's pane is still uncertain: the boot's reconciliation decides it", nothingToDo, nil, StateLaunchUncertain)
+	t.row(onRuleResume, "a failed claim spent its launch budget: only the workflow's retry relaunches it", nothingToDo, nil, StateFailed)
+	t.row(onRuleResume, "the claim is retired", nothingToDo, nil, StateRetired)
 
 	stoppable := []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed}
@@ -525,6 +612,14 @@ func fillTable(t *builder) {
 	t.ignore(onRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onRetry, "the claim has not failed", live...)
 	t.ignore(onRetry, "a suspended claim is resumed, not retried", StateSuspended)
+
+	t.row(onOperatorRetry, "the operator's retry of an architect: fresh budgets, and the same session relaunched", operatorRetry,
+		[]ClaimState{StateLaunching, StateFailed}, StateFailed)
+	t.ignore(onOperatorRetry, "a queued claim is spawned, not retried", StateQueued)
+	t.ignore(onOperatorRetry, "the previous launch's pane is still uncertain", StateLaunchUncertain)
+	t.ignore(onOperatorRetry, "the claim has not failed", live...)
+	t.ignore(onOperatorRetry, "a suspended claim is resumed, not retried", StateSuspended)
+	t.ignore(onOperatorRetry, "a retired claim runs again only when the workflow starts it", StateRetired)
 
 	t.row(onDeliver, "queue the task; it goes when the claim is next ready or idle", deliverLater, nil,
 		StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateWorking)
@@ -841,11 +936,14 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // registrationDeadline is a process that has had its boot intervals and whose agent never became
-// ready — it never registered, or registered and never said it was ready: alive, it is retired —
-// suspended, since the claim is relaunched — and counted, the third meaning of a missing worker;
-// dead, it is counted. A suspension that fails leaves everything and tries again at the next probe
-// interval.
+// ready — it never registered, or registered and never said it was ready. Without a held
+// suspension, it is retired, counted and relaunched. An operator suspension retained through a
+// rule-resuming launch instead completes here: no ready will arrive to run it, and relaunching
+// would drop the operator's hold.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
+	if m.held != nil && m.held.By == SuspendedByOperator {
+		return m.suspendHeld(ctx)
+	}
 	never := "never registered"
 	if m.claim.State == StateRegistered {
 		never = "registered and never said it was ready"
@@ -887,15 +985,26 @@ func sessionLost(m *Machine, ctx context.Context, _ Event) error {
 // agent now, whose session is on the recreated volume, so the loss is over. The boot intervals end
 // with the registration, but not the deadline: it is armed again at its base bound, and only the
 // agent's ready ends it. A registration whose answer never reached its agent leaves a claim no
-// ready will ever come for, and from here that looks exactly like an agent slow to boot.
+// ready will ever come for, and from here that looks exactly like an agent slow to boot. A
+// registration whose plugin still differs from the daemon's is relaunched at once and refused
+// (staleRegistration): the agent that just registered is not the one that relaunch starts.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
+	m.claim.PluginContract = r.PluginContract
+	if r.PluginContract == m.deps.PluginContract {
+		m.claim.PluginRelaunchFor = 0
+	}
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
 	m.armRegistration()
 	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	// A stale registration's process is let go by its relaunch, so it is never enrolled: the
+	// refusal returns before the enrollment a current registration gets.
+	if err := m.staleRegistration(ctx, r.PluginContract); err != nil {
 		return err
 	}
 	return m.ensureEnrolled(ctx)
@@ -903,18 +1012,29 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 
 // reregister is the recorded session registering again: it is issued a new secret, and the
 // deadline stays where the first registration set it, so an agent that keeps registering and never
-// says it is ready is still relaunched.
+// says it is ready is still relaunched. A registration whose plugin still differs from the
+// daemon's is relaunched at once and refused the same way register's is (staleRegistration).
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.SessionFile = r.SessionFile
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
-	return m.persist(ctx)
+	m.claim.PluginContract = r.PluginContract
+	if r.PluginContract == m.deps.PluginContract {
+		m.claim.PluginRelaunchFor = 0
+	}
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.staleRegistration(ctx, r.PluginContract)
 }
 
 func ready(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateReady
 	m.claim.Budgets.LaunchFailures = 0
 	m.disarm(TimerRegistration)
+	if m.held != nil {
+		return m.suspendHeld(ctx)
+	}
 	return finishReady(m, ctx)
 }
 
@@ -929,11 +1049,33 @@ func finishReady(m *Machine, ctx context.Context) error {
 }
 
 // reready persists the in-memory ready state before answering an agent retry: a prior ready's
-// claim write may have failed after the machine made the transition, and a restart must not restore
-// the older registered row and treat a ready agent as one that never became ready.
-func reready(m *Machine, ctx context.Context, _ Event) error { return finishReady(m, ctx) }
+// claim write may have failed after the machine made the transition. A retained launch-time
+// suspension still wins: the retry completes that suspension instead of publishing ready and
+// releasing notices to a claim the operator or workflow is stopping.
+func reready(m *Machine, ctx context.Context, _ Event) error {
+	if m.held != nil {
+		return m.suspendHeld(ctx)
+	}
+	return finishReady(m, ctx)
+}
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
+
+// resumeByRule is the daemon's own resume of a suspended claim (RequestRuleResume): the same
+// session relaunched, as the operator's resume relaunches it, unless an operator suspended the
+// claim: that suspension holds until
+// the operator resumes the claim. A launch that fails is charged to the claim's launch budget like
+// any other, so a claim the rule resumes that keeps failing fails once the budget is spent, and a
+// failed claim is never resumed by rule.
+func resumeByRule(m *Machine, ctx context.Context, ev Event) error {
+	rule := ev.(RequestRuleResume).Reason
+	if !m.claim.RuleMayResume() {
+		m.log.Info("supervise: not resumed by rule: its suspension holds until the operator resumes it", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
+		return nil
+	}
+	m.log.Info("supervise: resuming by rule", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
+	return m.revive(ctx)
+}
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
@@ -941,6 +1083,24 @@ func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ct
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
 	return m.revive(ctx)
+}
+
+// operatorRetry is the operator's retry of a failed claim: retry, for an architect, whether its
+// tree's root or a sub-architect, which nothing else relaunches. Any other claim has a retry of its
+// own, so it is refused, naming that retry: a phase worker's is its architect's retry_or_escalate
+// while its issue is held and the next start of its role otherwise, and the daemon's controller's is
+// its keeper. A claim's role never changes, so the refusal cannot race the decision it guards.
+func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
+	switch m.claim.Role {
+	case claim.RoleArchitect:
+		return retry(m, ctx, ev)
+	case claim.RoleController:
+		return &RefusedError{State: m.claim.State, Request: "retry",
+			Err: fmt.Errorf("%w; the daemon's controller keeper retries the controller", ErrRetryArchitectOnly)}
+	default:
+		return &RefusedError{State: m.claim.State, Request: "retry",
+			Err: fmt.Errorf("%w; a phase worker is retried by its architect's retry_or_escalate while its issue is held, and by the next start of its role otherwise", ErrRetryArchitectOnly)}
+	}
 }
 
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
@@ -1079,8 +1239,17 @@ func deliverNow(m *Machine, ctx context.Context, ev Event) error {
 	return m.sendPending(ctx)
 }
 
+// deliverResuming queues a task on a suspended claim and resumes it for that task. The workflow's
+// task (an outbox delivery, which carries a durable id) resumes a claim unless an operator
+// suspended it: an operator's suspension answers ErrHeldByOperator, queuing
+// nothing, and its start waits for the operator's resume. The operator's own delivery resumes the
+// claim whoever suspended it.
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
-	if err := m.queue(ctx, ev.(RequestDeliver)); err != nil {
+	d := ev.(RequestDeliver)
+	if d.ID != "" && !m.claim.RuleMayResume() {
+		return fmt.Errorf("deliver %s to %s: %w", d.ID, m.claim.Token, m.current().RuleHoldError())
+	}
+	if err := m.queue(ctx, d); err != nil {
 		return err
 	}
 	return m.revive(ctx)
@@ -1100,7 +1269,7 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
 				"incarnation", incarnation, "error", err)
 		}
-		return m.suspended(ctx)
+		return m.suspended(ctx, SuspendedByExit)
 	}
 	if err := m.release(ctx); err != nil {
 		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)

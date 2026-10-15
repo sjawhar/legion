@@ -33,7 +33,8 @@
             "window": "@4",
             "pane": "%12"
           }
-        }
+        },
+        "pluginContract": 0
       },
       "workers": {
         "implementer": {
@@ -51,7 +52,22 @@
                 "container": "implementer",
                 "generation": 5
               }
-            }
+            },
+            "capabilities": {
+              "measuredAt": "2026-09-22T09:17:03Z",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+              "ok": [
+                "subagents",
+                "dispatch-envoy-tools"
+              ],
+              "open": [
+                {
+                  "name": "github",
+                  "detail": "gh api user: HTTP 401: Bad credentials"
+                }
+              ]
+            },
+            "pluginContract": 0
           },
           "rounds": 2
         },
@@ -70,7 +86,8 @@
                 "container": "planner",
                 "generation": 2
               }
-            }
+            },
+            "pluginContract": 0
           },
           "handoffCommit": "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
           "rounds": 0
@@ -99,25 +116,41 @@
       "phase": "held",
       "status": "in_progress",
       "holdReason": "escalated",
-      "workers": {}
+      "workers": {
+        "implementer": {
+          "claim": {
+            "session": "ses_implementer_210",
+            "state": "failed",
+            "pluginContract": 0
+          },
+          "rounds": 1
+        }
+      }
     }
   },
   "pendingStatusWrites": [],
+  "strandedClaims": [
+    {
+      "issue": "LEGION-210",
+      "role": "implementer",
+      "state": "failed"
+    }
+  ],
   "controllerLocator": {
     "runtime": "kubernetes",
     "external": true,
     "sessionId": "ses_controller",
-    "registeredAt": "2026-09-22T09:16:40Z"
+    "registeredAt": "2026-09-22T09:16:40Z",
+    "pluginContract": 0
   },
   "agentSecretsLogin": {
-    "state": "pending",
-    "code": "WXYZ-1234"
+    "state": "issued"
   },
   "capabilities": [
     {
       "name": "subagents",
-      "status": "live",
-      "detail": "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon: dispatches task subagents, each on the model its role configures"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): dispatches task subagents, each on the model its role configures"
     },
     {
       "name": "eval-js",
@@ -146,8 +179,8 @@
     },
     {
       "name": "web-search",
-      "status": "live",
-      "detail": "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon: searches the web through the web-search tool"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): searches the web through the web-search tool"
     },
     {
       "name": "skills",
@@ -156,23 +189,23 @@
     },
     {
       "name": "mcp",
-      "status": "live",
-      "detail": "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon: reaches the MCP servers the deployment configures"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): reaches the MCP servers the deployment configures"
     },
     {
       "name": "repository-extensions",
-      "status": "live",
-      "detail": "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon (dispatch://LEGION-578): loads the Oh My Pi extensions the repository it works carries"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries"
     },
     {
       "name": "dispatch-envoy-tools",
-      "status": "live",
-      "detail": "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon: reaches Dispatch and Envoy through the pi-envoy tools"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-663): reaches Dispatch through the `dispatch` command and Envoy through the pi-envoy tools"
     },
     {
       "name": "github",
-      "status": "live",
-      "detail": "proved against a running pod by the Stage 4b live proof (scripts/e2e/README.md), never by the daemon (dispatch://LEGION-631): reads and writes GitHub through its plain `gh` and `git` on its role's App token file"
+      "status": "unchecked",
+      "detail": "no session has reported yet (dispatch://LEGION-631): reads and writes GitHub through its plain `gh` and `git` on its role's App token file"
     },
     {
       "name": "secrets",

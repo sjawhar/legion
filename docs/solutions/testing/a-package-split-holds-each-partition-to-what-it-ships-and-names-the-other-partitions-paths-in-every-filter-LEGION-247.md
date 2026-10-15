@@ -18,6 +18,7 @@ applies_when:
   - A guard runs in a CI job whose path filter is narrower than the files that can break it
 related_issues:
   - "LEGION-247"
+  - "LEGION-684"
   - "sjawhar/legion#1831"
 ---
 
@@ -59,6 +60,17 @@ Legion guard, whose `pi_legion` CI filter listed the eight Legion skill director
 `skills/dispatch/**`: a heading rename in the Envoy partition would merge green and fail the next
 unrelated Legion change (round 1, finding 2; fixed in 8962eb69,
 `.github/workflows/envoy-and-contracts.yaml:259-263`). Still open as fast-follow, same shape: no
-check holds the skill lists in `release.yaml` and `envoy-and-contracts.yaml` to the prepack's
-partition, and `promptreferences.go` now collects the gate's required names from the Legion
-partition alone, so `dispatch-brainstorming` left the set the boot gate verifies.
+check holds the skill lists in `release.yaml` to the prepack's partition, and `promptreferences.go`
+now collects the gate's required names from the Legion partition alone, so `dispatch-brainstorming`
+left the set the boot gate verifies.
+
+LEGION-684: the same gap reached main. The Envoy guard's native-tool-name rule scans every `.md`
+under `skills/` and `packages/daemon/internal/prompts`, while the `pi_envoy` filter named its four
+skill directories and no prompt, so #1906 merged a merger prompt naming `dispatch_read` with
+pi-envoy skipped, and the next pull requests that touched pi-envoy failed on main's line. To find
+what a filter owes, run the job's suite under `strace -f -y -e trace=%file` (`-y` resolves a
+script's relative opens) and list every repository path it opened outside the package; add the
+`tsc --listFiles` inputs outside the package for the typecheck. Both plugin filters now name all of
+`skills/`. The run turned up the same miss in six other filters of that workflow (`contracts`,
+`plugin`, `claude_plugin`, `dispatch`, `envoy`, `envoy_e2e_local`), and every Bun job's filter
+lacked the Bun pin and the action that installs it.

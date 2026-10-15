@@ -128,6 +128,23 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		return record
 	}
 	movedDaemon := func(o *Options) { o.DaemonURL = movedDaemonURL }
+	// displacing names uid, on the Sandbox of objects, as the live pod a relaunch replaced
+	// (displacedAnnotation), beside whatever else the Sandbox is annotated with.
+	displacing := func(objects []k8sruntime.Object, uid string) []k8sruntime.Object {
+		s := objects[0].(*unstructured.Unstructured)
+		annotations := s.GetAnnotations()
+		if annotations == nil {
+			annotations = map[string]string{}
+		}
+		annotations[displacedAnnotation] = uid
+		s.SetAnnotations(annotations)
+		return objects
+	}
+	deleting := func(p *corev1.Pod) {
+		now := metav1.NewTime(rigNow)
+		p.DeletionTimestamp, p.Finalizers = &now, []string{"test/hold"}
+	}
+	exited := &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}}
 	pending := corev1.PodStatus{Phase: corev1.PodPending}
 	for _, tc := range []struct {
 		row           string
@@ -137,6 +154,7 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		detail        []string
 		absent        []string
 		workspaceLost bool
+		displaced     bool
 	}{
 		{row: "2 sandbox absent", want: runtime.Gone, detail: []string{"sandbox legion/" + name + " is absent"}},
 		{
@@ -151,6 +169,19 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Gone, detail: []string{"operatingMode Suspended; Suspended=True PodTerminated"},
 		},
 		{
+			row:       "3 no pod while Suspended, after the daemon replaced the recorded pod, is displaced",
+			objects:   displacing([]k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeSuspended, labels)}, recorded),
+			want:      runtime.Gone,
+			displaced: true,
+			detail:    []string{"operatingMode Suspended", "; the daemon replaced pod " + recorded + " to launch another role there"},
+		},
+		{
+			row:     "3 no pod while Suspended, the Sandbox naming an earlier replaced pod, is the pod's own end",
+			objects: displacing([]k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeSuspended, labels)}, "uid-pod-earlier"),
+			want:    runtime.Gone,
+			absent:  []string{"the daemon replaced"},
+		},
+		{
 			row:     "3 a same-named pod the sandbox does not own is no pod of the claim's",
 			objects: withPod(modeRunning, nil, recorded, "uid-sandbox-earlier", running),
 			want:    runtime.Gone, detail: []string{"pod " + name + " (uid " + recorded + ") holds the name but is not controller-owned by the sandbox (uid " + sandboxUID + ")"},
@@ -159,6 +190,13 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			row:     "4 another uid, before its phase is read",
 			objects: withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, failed(terminated(workerContainer, 137, "Error"))),
 			want:    runtime.NotRecordedProcess, detail: []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded},
+		},
+		{
+			row:       "4 another uid, after the daemon replaced the recorded pod, is displaced",
+			objects:   displacing(withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, running), recorded),
+			want:      runtime.NotRecordedProcess,
+			displaced: true,
+			detail:    []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded, "the daemon replaced pod " + recorded},
 		},
 		{
 			row:     "5 the role container ended with the pod",
@@ -172,6 +210,13 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:          runtime.Gone,
 			workspaceLost: true,
 			detail:        []string{"the issue's volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
+		},
+		{
+			row:           "5 a lost workspace is never the daemon's replacement, though its pod is named and deleting",
+			objects:       displacing(withPod(modeSuspended, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error")), deleting), recorded),
+			want:          runtime.Gone,
+			workspaceLost: true,
+			absent:        []string{"the daemon replaced"},
 		},
 		{
 			row:     "5 the agent exited cleanly",
@@ -277,13 +322,25 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:     runtime.Alive, detail: []string{"role container tester runs generation 1"},
 		},
 		{
-			row: "8 a pod being deleted is alive until it is gone",
-			objects: withPod(modeSuspended, nil, recorded, sandboxUID, running, func(p *corev1.Pod) {
-				now := metav1.NewTime(rigNow)
-				p.DeletionTimestamp, p.Finalizers = &now, []string{"test/hold"}
-			}),
+			row:      "8 a pod being deleted is alive until it is gone",
+			objects:  withPod(modeSuspended, nil, recorded, sandboxUID, running, deleting),
 			launcher: alive,
 			want:     runtime.Alive,
+		},
+		{
+			row:       "8 the recorded generation exited in a pod the daemon is replacing, being deleted, is displaced",
+			objects:   displacing(withPod(modeSuspended, nil, recorded, sandboxUID, running, deleting), recorded),
+			launcher:  exited,
+			want:      runtime.Gone,
+			displaced: true,
+			detail:    []string{"reports generation 1 exited", "the daemon replaced pod " + recorded},
+		},
+		{
+			row:      "8 the recorded generation exited in a named pod still running undeleted is the role's own end",
+			objects:  displacing(withPod(modeSuspended, nil, recorded, sandboxUID, running), recorded),
+			launcher: exited,
+			want:     runtime.Gone,
+			absent:   []string{"the daemon replaced"},
 		},
 		{
 			row: "8 a new pod's ADD while the sandbox still holds the old Finished (B5)",
@@ -381,6 +438,9 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			}
 			if obs.WorkspaceLost != tc.workspaceLost {
 				t.Errorf("WorkspaceLost = %t, want %t (detail: %s)", obs.WorkspaceLost, tc.workspaceLost, obs.Detail)
+			}
+			if obs.Displaced != tc.displaced {
+				t.Errorf("Displaced = %t, want %t (detail: %s)", obs.Displaced, tc.displaced, obs.Detail)
 			}
 			for _, want := range tc.detail {
 				if !strings.Contains(obs.Detail, want) {

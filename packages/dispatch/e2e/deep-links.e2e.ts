@@ -945,7 +945,9 @@ test("an unanchored project-document comment is selected in its only discussion 
   }
 });
 
-test("an unanchored comment deep link still focuses its Conversation turn", async ({ browser }) => {
+test("an unanchored comment deep link still focuses its Conversation turn", async ({
+  browser,
+}, testInfo) => {
   const { issue } = await seedIssue();
   const comment = await createComment(issue.key, { body: "No quote, just a note." });
   const context = await asUser(browser, "alice");
@@ -954,6 +956,14 @@ test("an unanchored comment deep link still focuses its Conversation turn", asyn
     const page = await context.newPage();
     await page.goto(`/issues/${issue.key}/comments/${comment.id}`);
     await expect(page).toHaveURL(`/issues/${issue.key}/comments/${comment.id}`);
+    // On a phone the link opens the comment's thread full-screen over the Conversation; Back
+    // leaves it on the focused turn.
+    if (testInfo.project.name === "iphone") {
+      const thread = page.getByRole("dialog", { name: "Thread" });
+      await expect(thread.getByText("No quote, just a note.")).toBeVisible();
+      await thread.getByRole("button", { name: "Back" }).click();
+      await expect(thread).toHaveCount(0);
+    }
     const turn = page.locator(`li[data-turn="comment:${comment.id}"][aria-current="true"]`);
     await expect(turn).toContainText("No quote, just a note.");
     await expect(turn).toBeInViewport();

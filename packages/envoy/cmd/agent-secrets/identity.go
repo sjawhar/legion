@@ -2,7 +2,7 @@
 //
 // Where this process's session identity lives, and `agent-secrets identity`, the one local test
 // of whether it has one. An agent box or pod keeps its key under AGENT_SECRETS_KEY_DIR (file
-// mode); a host session asks agent-secrets-helper over AGENT_SECRETS_HELPER_SOCK (helper mode).
+// mode); a machine session asks agent-secrets-helper over AGENT_SECRETS_HELPER_SOCK (helper mode).
 // A process can be inside its session with neither variable set — omp's eval kernel starts every
 // run with a filtered environment that drops AGENT_SECRETS_* — so each falls back to the path its
 // launcher uses: a box's key dir is $XDG_RUNTIME_DIR/agent-secrets (scripts/agentbox mounts it
@@ -91,7 +91,7 @@ func approveURL() string {
 // own long-lived MCP server keeps the id it was first spawned with. A Claude Code session
 // started from an Oh My Pi shell still names the outer Oh My Pi session: OMP_SESSION_ID is
 // inherited from that shell and wins over CLAUDE_CODE_SESSION_ID in the order above. Empty when
-// none of the three is set — a host session agent-secrets-helper enrolled (kind host) carries no
+// none of the three is set — a session agent-secrets-helper enrolled for itself carries no
 // enrollment session_id of its own, so an unset result here is what the broker's requests.
 // Session answers for both Request and Enrollment, and the credential request names no session
 // at all.

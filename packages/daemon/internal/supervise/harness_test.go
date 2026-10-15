@@ -409,6 +409,10 @@ func newBareHarness(t *testing.T) *harness {
 		Log:      slog.New(slog.NewTextHandler(h.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Limits:   testLimits(),
 		Timeouts: testTimeouts(),
+		// PluginContract matches the real daemon's (api.DaemonAPIVersion), which the register()
+		// helper below records for every claim it brings up: a test exercising plugin staleness
+		// overrides it (or posts a RequestRegister naming a different one) itself.
+		PluginContract: 24,
 	}
 	return h
 }
@@ -531,6 +535,9 @@ func (h *harness) connect() {
 	h.must(StreamHello{Claim: h.token, Generation: h.generation()})
 }
 
+// register posts a registration naming the harness's own plugin contract, so every claim it brings
+// up is current from the start; a test of plugin staleness posts its own RequestRegister naming a
+// different one instead.
 func (h *harness) register() {
 	h.t.Helper()
 	h.must(RequestRegister{
@@ -539,6 +546,7 @@ func (h *harness) register() {
 		Session:        session,
 		SessionFile:    sessionFile,
 		CapabilityHash: []byte("capability"),
+		PluginContract: h.deps.PluginContract,
 	})
 }
 
@@ -564,7 +572,7 @@ func (h *harness) reach(state ClaimState) {
 	steps := []ClaimState{StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle}
 	if state == StateSuspended {
 		h.reach(StateIdle)
-		h.must(RequestSuspend{Claim: h.token})
+		h.must(RequestSuspend{Claim: h.token, By: SuspendedByOperator})
 		h.wantState(StateSuspended)
 		return
 	}
@@ -665,6 +673,7 @@ type fakeEnroller struct {
 	enrollErr   error
 	revokeErr   error
 	revokeFails int // Revoke fails this many times, then succeeds
+	calls       int // every Revoke call, failed or not
 	next        int
 	now         func() time.Time
 }
@@ -690,6 +699,7 @@ func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error
 func (f *fakeEnroller) Revoke(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.revokeFails > 0 {
 		f.revokeFails--
 		return errors.New("broker unreachable")
@@ -711,6 +721,12 @@ func (f *fakeEnroller) revocations() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.revoked)
+}
+
+func (f *fakeEnroller) revokeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 type permanentErr struct{ msg string }

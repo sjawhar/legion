@@ -8,6 +8,7 @@ import type {
   DeliveryPR,
   DeliveryRun,
   DeliveryRunJobDetail,
+  DeliverySessionGroup,
 } from "../../api/types";
 import {
   borderStrong,
@@ -23,6 +24,7 @@ import {
 import { buildIssuePath } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
 import { NO_COMPONENT, NO_ISSUE, NO_PRIORITY, NO_SESSION, PLACEHOLDER_LABELS } from "./lib/facets";
+import { parentAgentLabel } from "./lib/parentAgent";
 import { leadTimeMinutes } from "./lib/prList";
 import type { TimelineSelection } from "./Timeline";
 
@@ -40,9 +42,11 @@ function jobDurationMs(job: DeliveryRunJobDetail): number | null {
 function PRDetail({
   pr,
   components,
+  sessionGroups,
 }: {
   pr: DeliveryPR;
   components: Readonly<Record<string, DeliveryComponent>>;
+  sessionGroups: readonly DeliverySessionGroup[];
 }): ReactNode {
   const leadTime = leadTimeMinutes(pr);
   let componentText = PLACEHOLDER_LABELS[NO_ISSUE];
@@ -90,7 +94,11 @@ function PRDetail({
         <dt className={textMutedOnSurface}>Components</dt>
         <dd>{componentText}</dd>
         <dt className={textMutedOnSurface}>Parent agent(s)</dt>
-        <dd>{pr.parent_agent ?? PLACEHOLDER_LABELS[NO_SESSION]}</dd>
+        <dd>
+          {pr.parent_agent === null
+            ? PLACEHOLDER_LABELS[NO_SESSION]
+            : parentAgentLabel(pr.parent_agent, sessionGroups)}
+        </dd>
         <dt className={textMutedOnSurface}>Sessions</dt>
         <dd className="truncate" title={pr.sessions.join(", ")}>
           {pr.sessions.length === 0 ? "\u2014" : pr.sessions.join(", ")}
@@ -200,12 +208,14 @@ export function DrillDown({
   prs,
   runs,
   components,
+  sessionGroups,
   selection,
   onClose,
 }: {
   prs: readonly DeliveryPR[];
   runs: readonly DeliveryRun[];
   components: Readonly<Record<string, DeliveryComponent>>;
+  sessionGroups: readonly DeliverySessionGroup[];
   selection: TimelineSelection | null;
   onClose: () => void;
 }): ReactNode {
@@ -224,7 +234,7 @@ export function DrillDown({
       pr === undefined ? (
         <div>PR {selection.id} not found.</div>
       ) : (
-        <PRDetail components={components} pr={pr} />
+        <PRDetail components={components} pr={pr} sessionGroups={sessionGroups} />
       );
   } else {
     const run = runs.find((candidate) => candidate.id === selection.id);

@@ -9,6 +9,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import type { DwellRef } from "../shell/useDwell";
 import { duplicateText, failureGuidance, isSafeRetry, MODE_LABELS, withGuidance } from "./delivery";
 import { ReplyButton } from "./ReplyButton";
 
@@ -250,7 +251,7 @@ interface TargetedMessageCardProps {
   readonly onRetry?: (delivery: MessageDeliveryMode) => void;
   /** Holds the Reply button while the composer it would address is busy with a send. */
   readonly replyDisabled?: boolean;
-  readonly register?: (element: HTMLLIElement | null) => void;
+  readonly register?: DwellRef;
   readonly retrying?: boolean;
   readonly targetName: string;
   /** The replies beneath the message - the answer and every follow-up - as a nested list. */

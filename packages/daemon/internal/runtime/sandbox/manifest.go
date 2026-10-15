@@ -20,7 +20,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
-	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
@@ -289,9 +288,12 @@ func sessionOnVolume(file, root string) string {
 	return filepath.Join(root, SessionsSubPath, strings.TrimPrefix(file, ompSessionsDir+"/"))
 }
 
-// agentArgv is the command the shim runs: the agent with the image's Envoy and Legion plugins as
-// its two explicit extensions, the Envoy plugin first, `--resume` on the recorded session when
-// resuming, then RPC mode and the system prompt. Extension discovery stays on: a pod runs the
+// agentArgv is the command the shim runs: the agent with its two explicit extensions, the Envoy
+// plugin first, `--resume` on the recorded session when resuming, then RPC mode and the system
+// prompt. For a plain launch the two roots are the image's own (envoyPlugin, legionPlugin); for
+// an installing launch (l.spec.Plugins set, LEGION-164) they are the pair launcherCommand's
+// install wrapper lands under this generation's own directory (pluginRoots), installed before Oh
+// My Pi starts rather than the image's. Extension discovery stays on either way: a pod runs the
 // repository's .omp/extensions, hooks, TypeScript commands, `extensions:` settings and installed
 // profile plugins exactly as a tmux pane always has (the boot gate's pane lane is built on
 // discovery). Repository code runs in the agent's process, which holds the role's credential grant
@@ -301,7 +303,11 @@ func sessionOnVolume(file, root string) string {
 // image leaves unlinked from its profile: Oh My Pi loads a plugin that is both installed and named
 // by --extension twice, which the boot gate's pod lane refuses an image for.
 func (l launch) agentArgv(agent []string) []string {
-	argv := append(slices.Clone(agent), "--extension", envoyPlugin, "--extension", legionPlugin)
+	envoy, legion := envoyPlugin, legionPlugin
+	if l.spec.Plugins != nil {
+		envoy, legion = pluginRoots(pluginGenDir(roleStateHome(l.spec.Role), l.spec.Generation))
+	}
+	argv := append(slices.Clone(agent), "--extension", envoy, "--extension", legion)
 	if l.resumeFile != "" {
 		argv = append(argv, "--resume="+l.resumeFile)
 	}
@@ -715,11 +721,13 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
-// which is how much longer a launch may run before its agent starts while its pod's init containers
-// run. Provisioning from the feed onto the issue's own volume is local work and waits on no other
-// pod, so it shares the registration deadline's base bound as the agent's own boot does.
+// which is how much longer than the boot timeout a launch may wait for its pod's launcher, counted
+// from when it first sees one of the pod's init containers running (awaitRoleLauncher). The fetch
+// started no later than that, so it ends inside the bound; workspace-init's provisioning from the
+// feed onto the issue's own volume, local work that waits on no other pod, then has at least the
+// boot timeout. A test shortens it (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
-	return workspace.FetchTimeout
+	return r.provisionBound
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells

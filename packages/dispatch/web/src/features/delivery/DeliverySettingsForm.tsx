@@ -3,6 +3,7 @@ import { type FormEvent, type ReactNode, useId, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { deliverySettingsQuery } from "../../api/queries";
+import { isLiveQuery } from "../../api/query-refresh";
 import type { DeliverySettings, DeliverySettingsInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -146,7 +147,12 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: deliverySettingsQuery().queryKey });
-      void queryClient.invalidateQueries({ queryKey: ["delivery"] });
+      // A live view learns of the save from Dispatch, as a delta, or as the snapshot a page that
+      // had none (DELIVERY_NOT_CONFIGURED) is answered once a configuration exists.
+      void queryClient.invalidateQueries({
+        queryKey: ["delivery"],
+        predicate: (query) => !isLiveQuery(query),
+      });
     },
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {

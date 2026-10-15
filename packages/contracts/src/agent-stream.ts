@@ -61,6 +61,12 @@ export const AGENT_STREAM_LIMITS = {
   historyBytes: 512 * 1024,
   /** Shortest gap between two snapshots of the same streaming message. */
   snapshotIntervalMs: 100,
+  /** Slash commands one `commands` frame lists. */
+  commands: 500,
+  /** `AgentStreamCommand.name`, an identifier. */
+  commandNameChars: 100,
+  /** `AgentStreamCommand.description`, one line of help. */
+  commandDescriptionChars: 200,
 } as const;
 
 /** Marks text a cap cut short. */
@@ -109,6 +115,31 @@ export interface AgentStreamToolResult {
 }
 
 /**
+ * One slash command a person can send the session from Dispatch (LEGION-394). The session runs a
+ * Send or Aside that starts with `/name` as typed input, as its own terminal would, and lists what
+ * its terminal picker offers, in that picker's order, each name once: `builtin`, a built-in its
+ * host can run headless, or one only the terminal's own interface runs (`/new`, `/resume`), listed
+ * with `terminalOnly`, which gets the session's reply that it did not run; `extension`, a command
+ * an extension registered; `prompt`, a TypeScript custom command, an MCP prompt, a markdown file
+ * command (`commands/*.md`) or a prompt template (`prompts/*.md`), each expanded into the person's
+ * user message; and `skill`, a skill (`skill:<name>`).
+ */
+export interface AgentStreamCommand {
+  /** The command without its slash: `compact`, `skill:dispatch`; see `isTypableCommandName`. */
+  readonly name: string;
+  readonly description?: string;
+  readonly source: "builtin" | "extension" | "prompt" | "skill";
+  readonly terminalOnly?: true;
+}
+
+/** Whether `name` is a command name a person can type after the slash: one non-empty token, with
+ *  no whitespace and no control character. The session lists only such names, and a viewer
+ *  refuses a list holding any other. */
+export function isTypableCommandName(name: string): boolean {
+  return /^[^\s\p{Cc}]+$/u.test(name);
+}
+
+/**
  * One frame. `seq` is the session's own monotonic counter: frames for one message arrive in any
  * order the host's concurrent handlers produce them, so a viewer applies a frame only when its
  * `seq` beats the one it already holds for that id.
@@ -125,6 +156,18 @@ export type AgentStreamFrame =
       readonly kind: "tool-result";
       readonly seq: number;
       readonly result: AgentStreamToolResult;
+    }
+  /**
+   * The slash commands the session takes from Dispatch, the whole list each time it changes, and
+   * the last frame of a replay. A host without `sendUserInput` sends none, and a viewer then offers
+   * no completion. A host that has the method can still answer `unavailable` in a guest or embedder;
+   * its list remains useful, and that pick gets the session's refusal reply.
+   */
+  | {
+      readonly v: typeof AGENT_STREAM_PROTOCOL;
+      readonly kind: "commands";
+      readonly seq: number;
+      readonly commands: readonly AgentStreamCommand[];
     };
 
 /** What the relay asks a session for, and the ping that keeps it publishing. */

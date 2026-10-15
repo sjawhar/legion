@@ -19,9 +19,9 @@ If an outcome needs a reason, say so in that option's description, and the human
 carries it:
 ```bash
 dispatch ask --issue DSP-42 \
-  --question 'The verified fix remains unavailable in production because deployment is pending. Deploying changes production and could expose a deployment problem. How should we proceed? Recommendation: deploy the verified fix now because it restores the intended behavior.' \
-  --option 'Deploy the verified fix: Restores the fix but can expose a deployment problem.' \
-  --option 'Hold the deploy: Avoids a production change now but leaves production without the fix.'
+  --question 'The fix is merged but cannot run in production: the signing certificate it needs expired, and only its owner can renew it in the registrar console. Renewing replaces the certificate every client checks. How should we proceed? Recommendation: renew it now because the fix cannot run without it.' \
+  --option 'Renew the certificate: Lets the fix run but replaces the certificate every client checks.' \
+  --option 'Leave it expired: Changes nothing now but leaves the fix unable to run.'
 ```
 
 Correct or refine an open ask in place instead of opening a second question, with

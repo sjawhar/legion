@@ -4,6 +4,75 @@
 
 ### Changed
 
+- Every text that says when to request approval again states the carried approval (LEGION-573):
+  a human's own answer to a decision block carries their approval to the version it writes when
+  that answer is the whole change since the version they approved, so nothing is requested for
+  it; a change outside the decision blocks makes the approval stale, and the request that follows
+  carries a `--summary` naming what changed since the earlier approval. A stale approval's line
+  in a document read, `dispatch request-approval`'s refusal while a decision block is open (its
+  answered-block line says to wait for the version, no longer to request again) and its two
+  result texts say so.
+- **Breaking:** Dispatch and Envoy are read from one envoy.json, chosen per harness (LEGION-707):
+  `resolveDispatchConfig`, `activeDispatchConfig` and `DispatchConfigOptions` are gone. A caller
+  reads Dispatch with `sessionDispatchSettings(file, env, { cwd })` over the file
+  `sessionConfigFile(harness, env)` names (`envoyConfigPath`) and the checkout's
+  `.envoy/envoy.json` beside it, and `activeDispatchSettings` over its result. A missing
+  file contributes nothing, so the variables still configure each section. A checkout's file
+  configures Dispatch alone: an `envoy` section there is not read, and the start notice says
+  `<checkout>: envoy is not read from a checkout's envoy.json; put it in <chosen file>`; a checkout's
+  file that cannot be read or is not valid refuses Dispatch only while `DISPATCH_URL` is unset, and
+  never touches Envoy. `DISPATCH_URL` with the chosen file's token at another origin than the server
+  written beside it is refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`. The chosen file's
+  `dispatch.enabled: false` is off whatever the variables say. `DISPATCH_URL` replaces a checkout's
+  file whole: while it is set, the checkout's server, token and `dispatch.enabled: false` are neither
+  used nor refused, so a checkout's token never goes to the server `DISPATCH_URL` names. Otherwise a
+  checkout contributes only its `dispatch.enabled: false`, or its own server with its own token: its
+  `dispatch.enabled: true` alone turns nothing on. A checkout's server without its own token is
+  refused, and so is its token without its own `dispatch.serverUrl` unless `DISPATCH_TOKEN` or
+  `DISPATCH_TOKEN_FILE` replaces it; either refusal turns off Dispatch alone. An empty `DISPATCH_*`
+  variable counts as unset.
+- **Breaking:** one rule for `enabled` in both sections. `enabled: false` turns a section off
+  whatever else is set; otherwise the section's fields apply whether or not it sets `enabled`, and
+  it is on when its address resolves, from the file or a variable (Dispatch: `dispatch.serverUrl` or
+  `DISPATCH_URL`; Envoy: `envoy.url` or `ENVOY_URL`, `envoy.natsUrls` or `ENVOY_NATS_URL`), or at
+  the default address `enabled: true` names. An `envoy` section `{url, token}` with no `enabled` is
+  now on with its bearer, where it lent nothing before, and a `dispatch` section `{serverUrl, token}`
+  with no `enabled` is on too. A section that names no address is off with
+  `<file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off` or
+  `<file> names no Envoy listener or NATS server, and neither ENVOY_URL nor ENVOY_NATS_URL is set: Envoy is off`.
+- **Breaking:** the OpenCode-era files are not read. While `~/.config/opencode/envoy.json` is there
+  and the chosen file is missing, both sections stay off unless a variable names one, and the
+  missing-file notice says the old file is not read and what to do: for
+  `~/.config/legion/envoy.json`, `mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+  for a profile's own file, copy or link the old file to it, or write it; under a relocated
+  `XDG_CONFIG_HOME`, only that it is not read there. A checkout's `.opencode/envoy.json` is not
+  read: while the checkout has no `.envoy/envoy.json`, the start notice and the `dispatch` command
+  name the rename. Neither move is a `mv` across a mount: where the old file's directory and the
+  nearest existing ancestor of the new file's directory are on different filesystems (as in an
+  agent box that bind-mounts `~/.config/opencode`), the notice reads `<old file> is not read, and is
+  on another filesystem than <new file> (a mount): create <new file>, and move <old file> on the
+  machine that owns it` (`readEnvoyConfig`'s `deviceOf` option answers a directory's device). A
+  top-level `natsUrls` is refused, naming `envoy.natsUrls`.
+- `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
+  `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
+- The Envoy resolver's module is `envoy-settings` (`@legion/envoy-client/envoy-settings`), which
+  was `defaults`: `envoySettings`, `natsSeedFromEnvironment`, `DEFAULT_ENVOY_URL` and the settings
+  types.
+- Every command resolves Envoy through `sessionEnvoySettings`, so a location its rule cannot work
+  out (a relative `ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME`) arrives as that
+  caller's Envoy-off refusal: `envoy-send` says `Envoy is off: <refusal>`,
+  `scripts/e2e/lib/operator-nats-seed.ts` says `the NATS seed for <label> …: <refusal>`, and the
+  skill scenarios' `daemon-pane.ts` says `envoy: <refusal>`; those two refuse an Envoy that is on
+  with inbound messages off (`inbound.off`) the same way.
+- The `dispatch` command reads the envoy.json its session's plugin chose: with `DISPATCH_HOST` set,
+  the file `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host plugin's
+  rule (`omp`, `claude` or `opencode`); with `DISPATCH_HOST` unset and
+  `CLAUDE_CODE_CHILD_SESSION=1`, as in a Claude Code subagent's Bash that lacks what the
+  `SessionStart` hook writes, host `claude` and Claude Code's rule. With Dispatch off it prints the
+  resolver's own notice (`dispatch: no envoy.json at <path>: Dispatch is off`,
+  `dispatch: <file> sets dispatch.enabled to false: Dispatch is off`, or
+  `dispatch: <file> names no Dispatch server, and DISPATCH_URL is not set: Dispatch is off`),
+  exiting 2.
 - The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
   Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000
   characters: past it the result text and picture lines are written whole to a file the output
@@ -22,9 +91,65 @@
 ### Removed
 
 - `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
+- `envoyDefaultsFromEnvironment`, replaced by `envoySettings`.
 
 ### Added
 
+- `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
+  else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a script, harness `command`, tries
+  `ENVOY_CONFIG_FILE` and then each harness's directory first, Claude Code's only under
+  `CLAUDE_CODE_CHILD_SESSION=1`, so a `CLAUDE_CONFIG_DIR` a plain terminal exports is not read; a
+  relative `ENVOY_CONFIG_FILE`, harness directory or `XDG_CONFIG_HOME` is refused when the rule
+  uses it), `readEnvoyConfig`, which validates both sections strictly, names where JSON stops
+  parsing by line and column alone,
+  and runs no command, and `fileValue`, which runs a `token` or `natsSeed` starting with `!` as a
+  command (under `/bin/sh -c` in the directory of the envoy.json that names it, never the session's
+  working directory, in its own process group for at most 10 s, its exit status deciding,
+  its value kept for the process and shared across module instances, keyed by the command, its file
+  and its working directory, and so is a run out of time, so a hanging command never runs again in
+  that process, while a failure that ended on its own (a non-zero exit, empty output, more than one
+  line) is kept for 60 s and then run again; never from a checkout's file, a value with
+  whitespace inside refused, its output never in an error) when that section's resolver uses it.
+- `envoySettings(env, config, { nats })`: the Envoy a session uses, `{ enabled: true, url, token,
+  inbound, heartbeatMs }` or a `SectionOff`, `{ enabled: false, notice, error }` with exactly one of
+  the two set, each variable overriding its own field of the chosen file's section; `ENVOY_URL`
+  with the file's token at another origin than the file's listener is refused, as is an empty
+  `envoy.token`, with the same messages as `dispatch.token`'s, and the file's `natsSeed` goes only
+  with the file's `natsUrls`, compared as normalised URLs (scheme and host lower-cased, a trailing
+  `/` dropped, the default port 4222 written), so `ENVOY_NATS_URL` naming other servers needs
+  `NATS_NKEY_SEED_FILE`. `inbound` is `{ natsUrls, natsSeed }` or `{ off }`, `off` saying why the
+  session takes no inbound messages: `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)`;
+  a refused seed (that pairing, a failing `natsSeed` command, or a seed variable that cannot be
+  read), which leaves Envoy on with its listener and bearer; or `this session opens no NATS
+  connection` for `nats: false`, a caller that opens none, which resolves no seed.
+  `sessionSettings`'s start notice says `Envoy's inbound messages are off: <off>; the Envoy tools
+  still work`, except under `nats: false`, where it says nothing of inbound messages.
+- `dispatchSettings(env, config)`, Dispatch from an envoy.json already read, and
+  `activeDispatchSettings(resolution)`, the one adapter that turns a resolution into the
+  configuration a caller uses, null when nothing configures Dispatch, or a `dispatch config:
+  <reason>` throw.
+- `session-settings`: `sessionConfigFile(harness, env)`, the file a harness rule chooses, and
+  `handedConfigFile(env)`, the file `ENVOY_CONFIG_FILE` names, each with a relative path's refusal
+  as an `error` instead of a throw; `sessionSettings(file, env, { cwd, nats })`, both sections and
+  the one start notice a plugin shows; `sessionDispatchSettings(file, env, { cwd })`, Dispatch read
+  now with the read's `warnings` and missing-file record, which every command and plugin resolves
+  Dispatch through; and `sessionEnvoySettings(file, env, { cwd, nats })`, Envoy alone, for a
+  command.
+- `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line
+  each in document order, indented under the block holding it: id, type, token, anchored comments
+  and asks, and opening words sliced from the live markdown by the block's byte range. Under a
+  table it lists each row by the index `delete_row` takes and each cell by its row, the column
+  `delete_column` takes and the header drawn above it, as Dispatch places them; a Dispatch that
+  does not report table rows yet is said to, with no index read from the markdown. It refuses a
+  version and an uploaded file, naming the file, and a document that changed between its two
+  reads of the text (LEGION-693).
+- `dispatch project --key <KEY> --name <name>` creates a Dispatch project as the calling session
+  (`DispatchClient.createProject`, `POST /api/v1/projects`) and prints it with its dashboard link.
+  A taken key exits 1 with `PROJECT_EXISTS: …`, and a bad key or an empty name with
+  `INVALID_PROJECT: …` (LEGION-684).
+- `dispatch projects` lists every Dispatch project, one per line, its key then its name
+  (`DispatchClient.listProjects`, `GET /api/v1/projects`), so an agent checks the keys that exist
+  before `dispatch project` creates one (LEGION-684).
 - A delivered `ask.answered` that changes an earlier answer renders `previous_answer`, an issue
   log names the answer it replaced, and `dispatch_read` of an ask lists its earlier answers
   (LEGION-622).
@@ -58,11 +183,6 @@
 
 ### Changed
 
-- `dispatch_issue` with a spec, and `dispatch_request_approval` when it opens, rewords or hands
-  back a request, add a line to their result asking whether a fresh reader checked the spec, naming
-  a read-only subagent (`plan-gap-analyst` on Oh My Pi) and the `dispatch-first` skill's "Design in
-  the spec" (LEGION-577). It never blocks the write; an issue created without a spec, a repeat
-  request that changed nothing, or a document already approved at its version has no such line.
 - `dispatch_issue` and `dispatch_ask` append LEGION-550's write-time feedback to their result,
   from the new `WriteAdvice.suggestions`: up to three related items found by search (`Possibly
   related, found by search:`, each with its status or owner and a link), and, for an ask, any
@@ -134,9 +254,9 @@
 - `setRole` takes `soft` and `previousSessionID` and returns `{ claimed: true, interest }` or `{ claimed: false, holder }`, so a caller can recover a role without displacing a live holder.
 - `resolveIssueDocumentId` resolves an issue's document reference (`spec`, or its id, slug or
   filename) to the document's id as the Dispatch tools resolve an issue's `artifact` argument.
-- `activeDispatchConfig` is the one "is Dispatch configured" check every host shares: the resolved
-  URL and token, null when none is configured, and a `dispatch config: <reason>` throw on a broken
-  configuration.
+- `activeDispatchSettings` is the one "is Dispatch configured" check every host shares: the
+  resolved URL and token, null when none is configured, and a `dispatch config: <reason>` throw on
+  a broken configuration.
 - `DispatchClient.acceptMessageDelivery(id, attempt, {actor})` calls
   `POST /api/v1/messages/{id}/deliveries/{attempt}/accept` and returns the accepted attempt with
   the message's stored `body` (`AcceptedMessageDelivery`); a refusal throws a

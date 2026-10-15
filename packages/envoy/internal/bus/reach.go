@@ -14,8 +14,9 @@ import (
 // that owns the stream reconfigures a resource several deployments read.
 //
 // Nothing infers the reach, because nothing can tell the deployed Dispatch from the same binary
-// run out of a checkout: both read natsUrls from ~/.config/opencode/envoy.json, which on an
-// agent's machine names production (LEGION-249). Each deployment states its reach instead
+// run out of a checkout: both read envoy.natsUrls from the user envoy.json
+// (${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json), which on an agent's machine names
+// production (LEGION-249). Each deployment states its reach instead
 // (packages/envoy/deploy/compose/*.compose.yml, the production deployment's listener and Dispatch
 // service definitions, and the on-prem fleet's Pulumi), and it must be set there BEFORE a binary that
 // reads it runs on that deployment: without it, this one refuses the shared NATS its deployment

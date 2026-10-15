@@ -24,15 +24,16 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import type { DwellRef } from "../shell/useDwell";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
 export type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
 
 const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
 
-function AskReply({ comment }: { comment: Comment }): ReactNode {
+function AskReply({ comment, markRef }: { comment: Comment; markRef?: DwellRef }): ReactNode {
   return (
-    <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`}>
+    <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`} ref={markRef}>
       <div className={textPrimaryOnSurfaceMuted}>
         <MarkdownBody markdown={comment.body} />
       </div>
@@ -157,6 +158,9 @@ export interface AskThreadProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
+  /** The Replies page's mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the newest
+   *  reply's own element when that reply is the newest write the card shows. */
+  markNewest?: DwellRef;
 }
 
 /**
@@ -173,12 +177,14 @@ export function AskThread({
   showComposer = true,
   embedded = false,
   uploadOwner,
+  markNewest,
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState(false);
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
   const recentReplies = replies.slice(-2).reverse();
+  const newestReply = replies.at(-1);
   const olderReplies = showAllReplies ? replies.slice(0, -2).reverse() : [];
 
   return (
@@ -190,7 +196,11 @@ export function AskThread({
       {recentReplies.length === 0 ? null : (
         <ul className="space-y-2">
           {recentReplies.map((comment) => (
-            <AskReply comment={comment} key={comment.id} />
+            <AskReply
+              comment={comment}
+              key={comment.id}
+              markRef={comment === newestReply ? markNewest : undefined}
+            />
           ))}
         </ul>
       )}

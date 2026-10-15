@@ -41,7 +41,7 @@ const uiToken = "brokertest-ui-token-0123456789ab"
 const podAudience = "legion-broker-pod"
 
 // Rig is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to its
-// store — enough to drive a machine login, a box or host enrollment, and an agent-secret request
+// store — enough to drive a machine login, a session enrollment, and an agent-secret request
 // end to end over genuine HTTP, and to reach into the store directly for what the API itself has
 // no route to do (e.g. forcing a launcher credential's expiry). A human decision is a UI-route
 // call naming Operator as the approver, the body Dispatch's server sends.
@@ -64,6 +64,8 @@ type Rig struct {
 	// under.
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
+	// serviceLogins is the broker's live BROKER_SERVICE_LOGINS: DaemonAccount, as legion-daemon.
+	serviceLogins map[string]string
 }
 
 // Option changes how NewRig wires its broker.
@@ -110,12 +112,12 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		t.Fatalf("oidc.New: %v", err)
 	}
 
-	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}}
+	serviceLogins := map[string]string{DaemonAccount: "legion-daemon"}
+	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
+		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local}, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
@@ -142,6 +144,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		Store:     st,
 		Secrets:   local,
 		podIssuer: issuer, podKey: podKey,
+		serviceLogins: serviceLogins,
 	}
 }
 
@@ -244,4 +247,27 @@ func (r *Rig) MintPodToken(t *testing.T, podUID string) string {
 	}
 	merged["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
 	return r.podIssuer.Mint(t, r.podKey, merged)
+}
+
+// DaemonAccount is the ServiceAccount every Rig's BROKER_SERVICE_LOGINS lets log in as
+// legion-daemon with its token (POST /v1/launcher-credentials/token), as a Legion daemon's own
+// account does.
+const DaemonAccount = "system:serviceaccount:legion-system:legion-daemon-test"
+
+// MintAccountToken mints a projected ServiceAccount token for account, expiring lifetime from now
+// (a negative lifetime mints one already expired), signed by this Rig's own local OIDC issuer for
+// its audience: what a daemon's token file holds. Bound to no pod, as `kubectl create token` mints.
+func (r *Rig) MintAccountToken(t *testing.T, account string, lifetime time.Duration) string {
+	t.Helper()
+	claims := r.podIssuer.Claims(account, podAudience)
+	now := time.Now()
+	claims["iat"] = now.Add(min(lifetime, 0) - 5*time.Second).Unix()
+	claims["exp"] = now.Add(lifetime).Unix()
+	return r.podIssuer.Mint(t, r.podKey, claims)
+}
+
+// DropServiceLogin takes account off this Rig's BROKER_SERVICE_LOGINS, as an operator removing its
+// line and redeploying the broker does.
+func (r *Rig) DropServiceLogin(account string) {
+	delete(r.serviceLogins, account)
 }

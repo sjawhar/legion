@@ -30,7 +30,9 @@ related_issues:
   its own release: the prompts it embeds, composed into each role's system prompt at launch, and
   the plugin installed in the pod, whose `dist/skills/` is what `skill://` serves. Before acting on a
   rule the branch states, read the same rule in your system prompt and in the installed skill
-  (`/opt/legion/pi-legion/dist/skills/…`, version in `/opt/legion/pi-legion/package.json`). When they
+  (`/opt/legion/pi-legion/dist/skills/…`, version in `/opt/legion/pi-legion/package.json` — or, in a
+  pod a stale-plugin relaunch kept, under `$XDG_STATE_HOME/legion-plugins/g<generation>/node_modules/@sjawhar/pi-legion/`
+  instead, docs/kubernetes.md "Contract discipline"). When they
   disagree with the branch, follow the deployed text and tell the architect both texts and which
   role will meet the gap.
 - Nothing in `legion state` names the daemon's release, and `legion version` names the pod's CLI
@@ -69,5 +71,6 @@ pi-legion was 8.3.1, whose `legion-retro/SKILL.md` says retro writes no `.legion
 (`observations[1]`) and the reviewer's (`notProven[2]`) both wrote "the retro after this approval is
 where the removal lands", citing the branch. The third retro left `.legion/LEGION-629/` in place,
 wrote this note, and told the architect both texts and the two outcomes; the fresh-eyes reader of
-that retro reached the same reading independently from `/opt/legion/pi-legion/package.json` and the
-installed skills.
+that retro reached the same reading independently from `/opt/legion/pi-legion/package.json` (or,
+in a pod a stale-plugin relaunch kept, `$XDG_STATE_HOME/legion-plugins/g<generation>/node_modules/@sjawhar/pi-legion/package.json`)
+and the installed skills.

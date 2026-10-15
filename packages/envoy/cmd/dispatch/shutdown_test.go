@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os/exec"
 	"strconv"
@@ -15,12 +16,16 @@ import (
 	"testing"
 	"time"
 
+	gws "github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5"
 	"github.com/reearth/ygo/crdt"
 
 	"github.com/sjawhar/envoy/internal/cmdtest"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
+	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"github.com/sjawhar/envoy/internal/dispatch/routes"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -166,6 +171,79 @@ func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.
 	}
 	if t.Failed() {
 		t.Logf("Dispatch's output:\n%s", process.Output.String())
+	}
+}
+
+// A delivery socket is hijacked from net/http, so HTTP shutdown does not wait for it. Production
+// shutdown must wait for the socket handler and the delivery hub after cancelling Lifetime, before
+// it closes the database pool they use.
+func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	documentService := docs.New(docs.Deps{Store: database, Events: broker})
+	lifetime, stop := context.WithCancel(context.Background())
+	defer stop()
+	appCtx, err := appContextFor(resolveWith(t, nil), routes.AppContextOptions{
+		Store: database, Docs: documentService, Events: broker, Lifetime: lifetime,
+	})
+	if err != nil {
+		t.Fatalf("build the router: %v", err)
+	}
+	handler, waitDelivery := routes.New(appCtx)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	conn, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/delivery", http.Header{
+		"Authorization": {"Bearer agent-token"},
+	})
+	if err != nil {
+		t.Fatalf("open the delivery socket: %v (%v)", err, response)
+	}
+	defer conn.Close()
+	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "sub": "pipeline", "view": map[string]string{"kind": "pipeline"}}); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	var refusal struct {
+		Type, Sub, Code string
+	}
+	for refusal.Type != "error" {
+		if err := conn.ReadJSON(&refusal); err != nil {
+			t.Fatalf("read the delivery hub's answer: %v", err)
+		}
+	}
+	if refusal.Sub != "pipeline" || refusal.Code != "DELIVERY_NOT_CONFIGURED" {
+		t.Fatalf("delivery hub answer = %+v, want DELIVERY_NOT_CONFIGURED for pipeline", refusal)
+	}
+
+	stop()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		shutdown(server.Config, documentService, database.Pool, func() {
+			close(entered)
+			<-release
+			waitDelivery()
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("shutdown never waited for delivery work")
+	}
+	if _, err := database.Pool.Exec(context.Background(), "select 1"); err != nil {
+		t.Fatalf("the pool closed while shutdown waited for delivery work: %v", err)
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(15 * time.Second):
+		t.Fatal("shutdown did not return after delivery work ended")
+	}
+	if _, _, err := conn.ReadMessage(); !gws.IsCloseError(err, gws.CloseServiceRestart) {
+		t.Fatalf("the delivery socket ended with %v, want 1012", err)
+	}
+	if _, err := database.Pool.Exec(context.Background(), "select 1"); err == nil {
+		t.Fatal("shutdown left the pool open")
 	}
 }
 

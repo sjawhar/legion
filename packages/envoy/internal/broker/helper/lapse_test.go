@@ -20,11 +20,13 @@ import (
 )
 
 // lapseRig is a logged-in rig whose one session (this test process) enrolls and then has its
-// first renew refused (the fake's refuseRenewNext: 401 LEASE_EXPIRED, whenever that renew comes).
-// Nothing here races a lease's wall clock. The first enrollment's lease is short (the fake's
-// nextLease) only so that its renew comes soon (at MinRenew, 50 ms), and every later enrollment
-// gets the fake's 900 s default, so the re-enrollment a test waits for can never lapse again
-// underneath it. The fake then answers failRevokes revokes of the lapsed id with a 503.
+// first renew refused (the fake's refuseRenewNext: 401 ENROLLMENT_NOT_LIVE, whenever that renew
+// comes). Nothing here races a lease's wall clock. The first enrollment's lease is short (the
+// fake's nextLease) only so that its renew comes soon (at MinRenew, 50 ms), and every later
+// enrollment gets the fake's 900 s default, so the re-enrollment a test waits for can never lapse
+// again underneath it. The fake holds that renew at its renew gate until the register answer is
+// in, so the lapse cannot reach the session before register reads it, however slow the host is.
+// The fake then answers failRevokes revokes of the lapsed id with a 503.
 //
 // lapseRig returns once the first of those revokes has been answered. It returns the rig, the
 // enrollment id the session had before the lapse, and the state path its records are saved to.
@@ -32,15 +34,18 @@ func lapseRig(t *testing.T, failRevokes int) (*rig, string, string) {
 	t.Helper()
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	r := startRig(t, state)
+	gate, release := testGate(t)
 	r.fake.mu.Lock()
 	r.fake.nextLease = 150 * time.Millisecond
 	r.fake.refuseRenewNext = 1
 	r.fake.revokeFailFirst = failRevokes
+	r.fake.renewGate = gate
 	r.fake.mu.Unlock()
 	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
 	if !reg.OK || reg.State != "enrolled" {
 		t.Fatalf("register: %+v", reg)
 	}
+	release() // the refused renew; the gate stays open for every later one
 	waitFor(t, func() bool {
 		r.fake.mu.Lock()
 		defer r.fake.mu.Unlock()
@@ -102,8 +107,58 @@ func testGate(t *testing.T) (chan struct{}, func()) {
 	return gate, open
 }
 
-// lapseReason is the last error a lapse records for the fake's refused renew (LEASE_EXPIRED).
-const lapseReason = "the broker refused this session's renew (LEASE_EXPIRED); enrolling again"
+// lapseReason is the last error a lapse records for the fake's terminal renew refusal.
+const lapseReason = "the broker refused this session's renew (ENROLLMENT_NOT_LIVE); enrolling again"
+
+// TestAProofInvalidRenewKeepsTheEnrollment: only ENROLLMENT_NOT_LIVE (or an older broker's
+// explicit "not live" message) lapses and re-enrolls a helper session. PROOF_INVALID may be an
+// iat-skew error; its next proof can succeed after the clock is corrected, so the helper retains
+// the enrollment and retries it. The fake holds the refused renew at its renew gate until the test
+// has moved the enrollment's stored expiry a minute out, past every deadline in the test, so the
+// retry is judged on its proof alone and never meets a lease that has passed, however slow the host
+// is. The session is checked at every poll until the retry has renewed, so a lapse fails the test
+// as soon as it shows rather than when the wait runs out.
+func TestAProofInvalidRenewKeepsTheEnrollment(t *testing.T) {
+	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
+	gate, release := testGate(t)
+	r.fake.mu.Lock()
+	r.fake.nextLease = 150 * time.Millisecond // the first renew comes at MinRenew
+	r.fake.refuseRenewNext = 1
+	r.fake.renewRefusalCode = "PROOF_INVALID"
+	r.fake.renewGate = gate
+	r.fake.mu.Unlock()
+	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
+	if !reg.OK || reg.State != "enrolled" {
+		t.Fatalf("register: %+v", reg)
+	}
+	id := reg.EnrollmentID
+	waitFor(t, func() bool { // the renew to be refused is waiting at the gate
+		r.fake.mu.Lock()
+		defer r.fake.mu.Unlock()
+		return r.fake.renewAttempts == 1
+	})
+	r.fake.mu.Lock()
+	r.fake.leaseExpiry[id] = time.Now().Add(time.Minute)
+	r.fake.mu.Unlock()
+	release() // answered 401 PROOF_INVALID; the gate stays open for the retry
+
+	sess := r.srv.Registry.Get(os.Getpid())
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		posts, deletes, renews := r.fake.snapshot()
+		if st := sess.snapshot(); st.State != "enrolled" || st.EnrollmentID != id || sess.lapsed() != "" || len(deletes) != 0 || len(posts) != 1 {
+			t.Fatalf("after a PROOF_INVALID renew: session %s under %q (lapsed id %q), revokes %q, %d enrolls; want enrolled under %q, no revoke, one enroll",
+				st.State, st.EnrollmentID, sess.lapsed(), deletes, len(posts), id)
+		}
+		if renews == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the session never renewed again after a PROOF_INVALID renew")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
 
 // TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries: once the broker refuses a renew, the
 // enrollment is dead, so the session must stop signing with it at once rather than when its

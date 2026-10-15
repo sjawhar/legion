@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
+  profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
+  `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
+  the session's file is missing, the start notice says so and names the move
+  (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for a
+  profile's own file, the file to copy or link it to; under a relocated `XDG_CONFIG_HOME` it says
+  only that the old file is not read there. A top-level `natsUrls` is refused, naming
+  `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
+- The extension hands the file it read to every shell command as `ENVOY_CONFIG_FILE`, so the `dispatch` command reads the same one.
+- Each section turns on and off on its own; a missing file contributes nothing, so a section is then on only when its variables name it, and with Envoy off the session has no Envoy tools, no `/whoami` and no NATS connection, and a listener call is refused with `Envoy is off for this session: <why>`.
+- A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
+  `.envoy/envoy.json` configures Dispatch alone and cannot run one; its `.opencode/envoy.json` is
+  not read, and while `.envoy/envoy.json` is absent the start notice names the rename. A checkout's
+  file that is not valid refuses Dispatch only while `DISPATCH_URL` is unset. A checkout's
+  `dispatch.token` needs its own `dispatch.serverUrl` beside it.
+- `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server; another server needs its own token or seed variable.
+- One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- A refused NATS seed (one that pairs with other servers than the file's, compared as normalised URLs, a failing `natsSeed` command, or a seed variable that cannot be read) turns off inbound messages alone: the tools and `/whoami` stay, and the start notice says `Envoy's inbound messages are off: <refusal>; the Envoy tools still work`. It turned all of Envoy off.
+- With inbound messages off (no NATS server, or a refused seed), `envoy_subscribe` and the Legion interface's `subscribe` refuse with `inbound messages are off for this session: <why>` and connect to nothing. They connected to `127.0.0.1:4222`, nats.js's default for an empty server list, and so attached the session to whatever NATS ran on that machine.
+- With inbound messages off, the Legion role claim refuses with the same `inbound messages are off for this session: <why>` before any listener call, so a Legion process fails its boot instead of holding a role whose every task and notice, sent to the role's topic over NATS, reaches nobody. With no NATS server it registered the session and took the role.
+- One start notice replaces the `Dispatch disabled` and `ENVOY_NATS_URL is not set` warnings: the missing file, a section's error, what a checkout's files hold that is not read, or that inbound messages are off.
+- A relative `XDG_CONFIG_HOME`, `ENVOY_CONFIG_FILE` or `PI_CODING_AGENT_DIR` no longer stops the extension loading: both sections are off and the notice says why.
+
 ### Added
 
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
@@ -24,6 +50,27 @@
   `/resume`, a restart) counts the pictures that transcript already shows: those a `dispatch read`
   or `dispatch doc-read` result or a card names as shown, and a person's own turn whose every
   picture was shown beside it. The session id the extension leaves or shuts down is forgotten.
+- A person's Send or Aside from Dispatch's Agents page runs as if typed at the session's terminal
+  (LEGION-394), on an Oh My Pi with `pi.sendUserInput` (our fork): `/compact`, `/session` and the
+  other built-ins the host runs headless, extension and custom commands, file commands and prompt
+  templates, and `/skill:<name>` run as they would there, and any other text, an unknown `/foo`
+  included, reaches the model as the person's message, carrying its Dispatch id as the host's
+  `tag`. What a command printed, or why it did not run (a built-in only the terminal runs, such as
+  `/new`, or a host mode that cannot run typed input), is the session's reply to that message on
+  Dispatch, including what a built-in prints before the prompt it submits
+  (`/force:<tool> <prompt>`). On a host without the method a message starting with `/` is not
+  sent, and the reply names the host's Oh My Pi version; other text arrives as before. The pictures
+  a message embeds reach the host through the extension's `input` handler, and count as shown only
+  once the host's message carrying that Dispatch id starts, so a prompt the host dropped leaves
+  them for the next delivery that names them.
+- The live agent conversation stream lists the slash commands a person can send the session (a
+  `commands` frame, the last of every replay): the host's built-ins, `/new` and the others only the
+  terminal runs marked as such; extension, custom and skill commands; and the file commands and
+  prompt templates the live session expands. Each name is listed once, in the terminal picker's
+  order, so a name a built-in answers to by name or alias, or an earlier source already takes, is
+  not offered again (LEGION-394); a name holding whitespace or a control character is not offered,
+  and the list keeps the commands that fit the replay's byte budget. A host without
+  `pi.sendUserInput` lists none.
 - The live agent conversation stream names the `provider/model` that produced each assistant turn
   (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
   the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
@@ -47,6 +94,28 @@
   reference (`references/brainstorming.md`) is gone; its process is in the new skill.
 
 ### Changed
+
+- The `dispatch` skill and its documents reference say what follows a human's answer to a decision
+  block in a document they approved (LEGION-573): when the answer is the whole change since the
+  version they approved, Dispatch records an `approved` review in their name at the new version
+  and emits `artifact.approved`, so the agent requests nothing; when the answer changes text
+  outside the block, the agent rewrites that text, runs the fresh reader on the new version and
+  requests approval again with a one-sentence `--summary` naming what changed since the earlier
+  approval, which the request names in `ask.approval.approved` (`{version, at, by}`) and the card
+  shows with its `Show diff` control. The reference lists what still
+  leaves an approval stale: a change outside the blocks, a block added or answered since the approval
+  without the human's own answer, a decided block whose wording was changed, a removed block, a newer request for changes, or a document they never approved.
+
+- The `dispatch` skill's example of a to-do handed to a human is a certificate only its owner can
+  renew, no longer an ask for approval to deploy (LEGION-447): a deploy goes to the agent the
+  deployment names, never to a person for approval.
+
+- `@legion/pi-shared`'s plugin interface is at version 2 (LEGION-394): a turn sent as typed input
+  is found by its tag alone, a `/skill:`'s tagged `skill-prompt` message counts as the person's
+  turn in a Legion phase worker, and such a turn is still found after the run's `agent_end` (the
+  Send the host runs as a turn of its own no longer shows twice or counts as the daemon's
+  assignment). Install this release together with the `@sjawhar/pi-legion` built from the same
+  commit: the daemon's boot gate and the Legion entry refuse a pair at different versions.
 
 - `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
   native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which

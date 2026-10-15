@@ -299,7 +299,8 @@ func TestIntakeDiscardsAnEnvelopeItDoesNotWantWithoutCallingGitHub(t *testing.T)
 // the running intake with no rebind: the durable's filter subject never changes, so the only way
 // a new deploy workflow path takes effect is the poll publishing the new settings to the handler.
 // After the change, an envelope for the new path is handled and one for the old path is discarded
-// with no GitHub call.
+// with no GitHub call. The run it stores carries GitHub's created_at beside run_started_at, which
+// the served run, a re-run, moves past it.
 func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	shrinkIntakeFlowControl(t)
 	pool, ctx := deliveryTestPool(t)
@@ -308,6 +309,8 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 
 	var mu sync.Mutex
 	fetched := map[int64]bool{}
+	created := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
+	rerun := created.Add(30 * time.Minute)
 	fake := newFakeGitHub(t)
 	fake.handle("GET /repos/acme/widgets/actions/runs/{run_id}", func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(r.PathValue("run_id"), 10, 64)
@@ -317,7 +320,9 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 		mu.Lock()
 		fetched[id] = true
 		mu.Unlock()
-		mustEncode(t, w, smallRun(id, time.Now().UTC()))
+		served := smallRun(id, created)
+		served["run_started_at"] = rerun.Format(time.RFC3339)
+		mustEncode(t, w, served)
 	})
 
 	natsClient := intakeTestClient(t)
@@ -355,5 +360,9 @@ func TestIntakeRoutesByTheSettingsInForceWhenAnEnvelopeArrives(t *testing.T) {
 	}
 	if stored := countRuns(t, ctx, pool); stored != 1 {
 		t.Fatalf("delivery_runs rows = %d, want 1 (only the new path's run)", stored)
+	}
+	run, err := ScanRun(pool.QueryRow(ctx, `select `+RunColumns+` from delivery_runs where repo = 'acme/widgets' and run_id = $1`, onNewPath))
+	if err != nil || run.CreatedAt == nil || !run.CreatedAt.Equal(created) || !run.StartedAt.Equal(rerun) {
+		t.Fatalf("stored run = %+v, %v: want created_at %v beside started_at %v", run, err, created, rerun)
 	}
 }

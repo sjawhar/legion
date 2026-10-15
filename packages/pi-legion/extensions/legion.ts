@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import path from "node:path";
-import { activeDispatchConfig } from "@legion/envoy-client/dispatch-config";
+import { activeDispatchSettings } from "@legion/envoy-client/dispatch-config";
 import { resolveIssueDocumentId } from "@legion/envoy-client/dispatch-execute";
 import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import {
@@ -8,6 +8,7 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { messageFor } from "@legion/envoy-client/errors";
+import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -18,6 +19,11 @@ import {
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { subagentSessionCheck } from "@legion/pi-shared/subagent-session";
 import { logger } from "@oh-my-pi/pi-utils";
+import {
+  type CapabilityHost,
+  measureCapabilities,
+  ompCapabilityHost,
+} from "../src/capability-report";
 import { createClaimSession } from "../src/claim-session";
 import { classifySession, requiredEnvironment } from "../src/classify";
 import { createControllerSession } from "../src/controller-session";
@@ -48,6 +54,14 @@ import {
 let exitProcess: (code: number) => never = (code) => process.exit(code) as never;
 export function setLegionBootstrapExitForTests(hook: (code: number) => never): void {
   exitProcess = hook;
+}
+
+// The host the claim session's capability report measures through: Oh My Pi's own modules and
+// the pane's `dispatch` and `gh`. A test substitutes a fake, since the production host reaches
+// modules that exist only inside Oh My Pi's bundle and runs the pane's commands.
+let capabilityHost: () => CapabilityHost = ompCapabilityHost;
+export function setLegionCapabilityHostForTests(host: () => CapabilityHost): void {
+  capabilityHost = host;
 }
 
 async function persistedTranscript(
@@ -137,6 +151,18 @@ export default function legionExtension(pi: PiApi): void {
   const claimSession = createClaimSession({
     daemon: roleDaemon,
     persistedTranscript,
+    // The six live rows, measured against this session's tool surface as session_start sees it
+    // (`pi.getActiveTools()` answers only from a handler), the host's `pi.agents`, and the task
+    // agents the registration says the role's prompts dispatch.
+    measureCapabilities: (context, input) =>
+      measureCapabilities(capabilityHost(), {
+        cwd: context.cwd,
+        sessionId: context.sessionManager.getSessionId(),
+        issue: input.issue,
+        promptAgents: input.promptAgents,
+        activeTools: pi.getActiveTools(),
+        agentsExposed: pi.agents !== undefined,
+      }),
     exitProcess: (code) => exitProcess(code),
   });
   const controllerSession = createControllerSession({
@@ -261,12 +287,12 @@ export default function legionExtension(pi: PiApi): void {
 
   // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
   // that already had its follow-up or a WAITING reply. A person's direct message that envoy.ts
-  // sent in as the user's own turn is a user message too, but it is an inbound event, as its Envoy
-  // card was: the record envoy.ts keeps of the turns it sent in says which user message that is,
-  // whichever of the two extensions asks first. A turn that record misses falls through to
-  // `inboundKind` and counts as an assignment; `packages/pi-envoy/AGENTS.md` (the phase-worker
-  // section) says which turns it misses. The `legion` tool's successful `handoff_complete` closes
-  // the phase (`onPhaseCompleted`, below).
+  // sent in as the user's own turn is a user message too (a `skill-prompt` custom message for a
+  // `/skill:`), but it is an inbound event, as its Envoy card was: the record envoy.ts keeps of the
+  // turns it sent in says which message that is, whichever of the two extensions asks first. A turn
+  // that record misses falls through to `inboundKind` and counts as an assignment; the phase-stall
+  // section of `packages/pi-legion/AGENTS.md` says which turns it misses. The `legion` tool's
+  // successful `handoff_complete` closes the phase (`onPhaseCompleted`, below).
   pi.on("message_start", async (event, context) => {
     if (!phaseWorkerSession(context)) return;
     const injected =
@@ -331,7 +357,12 @@ export default function legionExtension(pi: PiApi): void {
         // on it; PATH's jj, the one its shell runs.
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
         resolveDocument: async (issue, reference) => {
-          const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+          // The file pi-envoy's session reads: Oh My Pi's rule, in the same process.
+          const config = activeDispatchSettings(
+            sessionDispatchSettings(sessionConfigFile("omp", process.env), process.env, {
+              cwd: process.cwd(),
+            }).dispatch
+          );
           if (config === null) {
             throw new Error(
               `register_gate cannot look up document "${reference}" on ${issue}: this pane has no Dispatch configured; pass the document's id`

@@ -20,6 +20,7 @@ import { actorLabel, describeAskResolutionActor } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import type { DwellRef } from "../shell/useDwell";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
 import { AskOptionList } from "./AskOptionList";
@@ -131,6 +132,7 @@ function AnsweredAsk({
   documentLink,
   edits,
   frame,
+  markRef,
   onChangeAnswer,
 }: {
   answers: AskAnswer[];
@@ -139,6 +141,7 @@ function AnsweredAsk({
   documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
+  markRef?: DwellRef;
   onChangeAnswer?: () => void;
 }): ReactNode {
   const { answer } = ask;
@@ -152,6 +155,7 @@ function AnsweredAsk({
     <article
       className={`rounded-xl p-4 text-sm ${frame === "block" ? "mt-3" : ""} ${calloutSuccessBorder} ${calloutSuccessBg} ${calloutSuccessText}`}
       data-testid={`ask-${ask.id}`}
+      ref={markRef}
     >
       <AskAnchorHeader ask={ask} inBlock={frame === "block"} tone="success" />
       <OrphanedAnchorNotice artifactSlug={artifactSlug} ask={ask} />
@@ -262,6 +266,9 @@ interface AskCompletionCardProps {
   documentLink?: boolean;
   edits: AskEdit[];
   frame?: AskFrame;
+  /** The Replies page's mark for the ask (`AskCard`), placed on an answered record when its answer
+   *  is the newest write the card shows. */
+  markRef?: DwellRef;
   /** Shown only to the person who gave the current, non-approval answer. */
   onChangeAnswer?: () => void;
 }
@@ -273,6 +280,7 @@ export function AskCompletionCard({
   documentLink = true,
   edits,
   frame = "card",
+  markRef,
   onChangeAnswer,
 }: AskCompletionCardProps): ReactNode {
   if (ask.state === "resolved") {
@@ -296,6 +304,7 @@ export function AskCompletionCard({
       documentLink={documentLink}
       edits={edits}
       frame={frame}
+      markRef={markRef}
       onChangeAnswer={onChangeAnswer}
     />
   );

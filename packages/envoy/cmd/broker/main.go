@@ -114,6 +114,8 @@ func main() {
 	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
 	fatal(err)
 	if verifier != nil {
+		// One verifier for both: a pod's enrollment token and a service's login token are the same
+		// cluster's projected tokens, for the same audience.
 		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
 
@@ -146,7 +148,7 @@ func main() {
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
 
-	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
+	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, reader, enr.Replay)
 	mach := &machine.Service{
@@ -243,12 +245,12 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
-// its configuration: the grant lifetime, the audience and skew every request object is checked
-// against, and the service accounts that prove a pod is a registered service's.
+// its configuration: the audience and skew every request object is checked against, and the
+// service accounts that prove a pod is a registered service's. A grant lasts the lifetime its
+// request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, reader secrets.Reader, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
-		Store: st, Policy: current, Secrets: reader,
-		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
+		Store: st, Policy: current, Secrets: reader, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServiceAccounts: cfg.ServiceAccounts,
 	}

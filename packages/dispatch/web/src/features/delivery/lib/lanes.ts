@@ -1,8 +1,9 @@
 // The timeline's columns with swimlanes on, and the brush window a drag sets. Pure: no React, no
 // ECharts.
-import type { DeliveryComponent, DeliveryPR } from "../../../api/types";
+import type { DeliveryComponent, DeliveryPR, DeliverySessionGroup } from "../../../api/types";
 import { type ColorFacet, colorKeyFor } from "./colorScale";
 import { type Filters, PLACEHOLDER_LABELS, shortRepoLabel } from "./facets";
+import { parentAgentLabel } from "./parentAgent";
 
 // Layout constants shared between the echarts grid and the plain-HTML lane header row above it,
 // so lane columns line up exactly between the two. Wide enough for hour-level axis labels
@@ -34,15 +35,21 @@ export interface LaneOptions {
   /** The chart's width in pixels, which sets how many lanes fit. */
   width: number;
   components: Readonly<Record<string, DeliveryComponent>>;
+  /** The response's session groups, which label a group's Parent agent lane. */
+  sessionGroups: readonly DeliverySessionGroup[];
+  /** Laned by Parent agent: the values chosen to have their own lane, in the order chosen. */
+  chosen?: readonly string[];
 }
 
 /** The merges' columns: one "Merges" column with swimlanes off; with them on, one per value of
  *  `colorBy` (priority in P0-P3 order, every other facet busiest first), as many as fit `width`
  *  beside the global Deploys/fails column, the rest folded into "Other", then one per placeholder
  *  value ("No issue" and the like), always shown and always last. A facet with values selected in
- *  its own filter shows exactly those, never folded. */
+ *  its own filter shows exactly those, never folded. Laned by Parent agent with values `chosen`,
+ *  each chosen value the window holds has its lane, in the order chosen, and every other value
+ *  shares "Other", whatever the width. */
 export function foldLanes(prs: readonly DeliveryPR[], options: LaneOptions): Lane[] {
-  const { colorBy, lanes, filters, width, components } = options;
+  const { colorBy, lanes, filters, width, components, sessionGroups, chosen = [] } = options;
   if (!lanes) return [{ key: MERGES_LANE, label: "Merges", count: prs.length }];
   const counts = new Map<string, number>();
   for (const pr of prs) {
@@ -55,6 +62,7 @@ export function foldLanes(prs: readonly DeliveryPR[], options: LaneOptions): Lan
     if (placeholder !== undefined) return placeholder;
     if (colorBy === "component") return components[key]?.title ?? key;
     if (colorBy === "repo") return shortRepoLabel(allKeys, key);
+    if (colorBy === "parentAgent") return parentAgentLabel(key, sessionGroups);
     return key;
   };
   const byPriorityThenCount = (a: [string, number], b: [string, number]) =>
@@ -74,9 +82,17 @@ export function foldLanes(prs: readonly DeliveryPR[], options: LaneOptions): Lan
   const totalBudget = Math.max(1, Math.floor(available / MIN_LANE_WIDTH_PX));
   const budgetForReal = Math.max(1, totalBudget - placeholderEntries.length);
 
+  const chosenKeys = [...new Set(chosen)];
   let shownReal = realEntries;
   let otherCount: number | null = null;
-  if (!skipFold && realEntries.length > budgetForReal) {
+  if (colorBy === "parentAgent" && chosenKeys.length > 0) {
+    shownReal = chosenKeys.flatMap((key) => {
+      const count = counts.get(key);
+      return count === undefined || key in PLACEHOLDER_LABELS ? [] : [[key, count] as const];
+    });
+    const rest = realEntries.filter(([key]) => !chosenKeys.includes(key));
+    if (rest.length > 0) otherCount = rest.reduce((sum, [, count]) => sum + count, 0);
+  } else if (!skipFold && realEntries.length > budgetForReal) {
     // "Other" takes one of the budget's lanes, so one fewer real value shows beside it: none at
     // all when the budget is a single lane.
     shownReal = realEntries.slice(0, budgetForReal - 1);

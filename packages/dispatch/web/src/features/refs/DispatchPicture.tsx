@@ -16,8 +16,10 @@ export interface PictureAnchor {
 }
 
 /** A picture scaled to the column it sits in and never taller than 24rem; `not-prose` keeps
- *  Markdown's figure margins off it, so it sits in its line as a pasted picture is written. */
-const pictureClassName = `not-prose inline-block max-h-96 w-auto max-w-full rounded border object-contain align-bottom ${borderDefault}`;
+ *  Markdown's figure margins off it, so it sits in its line as a pasted picture is written. The
+ *  document editor's picture node view (`features/doc/picture-view.ts`) draws with the same
+ *  string, so a picture in a spec and one in a comment are one shape. */
+export const pictureClassName = `not-prose inline-block max-h-96 w-auto max-w-full rounded border object-contain align-bottom ${borderDefault}`;
 
 /** Every picture placeholder the engine's serializer wrote into root (`markdown-engine.ts`), with
  *  the caption and the reference its `DispatchPicture` renders. */

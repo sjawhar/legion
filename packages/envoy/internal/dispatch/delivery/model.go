@@ -105,7 +105,9 @@ const (
 // deploy repository, identified by (Repo, RunID). CompletedAt and Conclusion are nil while the
 // run is still in progress. HeadBranch and Event are GitHub's head_branch and event; both are nil
 // on a row stored before they were (the reconcile's backfill step fills them), and a nil counts in
-// no measure that filters on it.
+// no measure that filters on it. StartedAt is GitHub's run_started_at, which moves to a re-run's
+// start; CreatedAt is GitHub's created_at, which a re-run keeps, nil on a row stored before it was
+// (Created says what stands in for it).
 type DeliveryRun struct {
 	Repo         string                 `json:"repo"`
 	RunID        int64                  `json:"run_id"`
@@ -114,11 +116,24 @@ type DeliveryRun struct {
 	HeadSHA      string                 `json:"head_sha"`
 	HeadCommitAt time.Time              `json:"head_commit_at"`
 	StartedAt    time.Time              `json:"started_at"`
+	CreatedAt    *time.Time             `json:"created_at"`
 	CompletedAt  *time.Time             `json:"completed_at"`
 	Conclusion   *DeliveryRunConclusion `json:"conclusion"`
 	URL          string                 `json:"url"`
 	HeadBranch   *string                `json:"head_branch"`
 	Event        *string                `json:"event"`
+}
+
+// Created is when GitHub created the run, which decides the pull requests it can ship
+// (FirstShippingApply). A row the reconcile's created_at backfill has not reached (CreatedAt nil:
+// stored before the column, and older than the backfill's 28 days or not filled yet) reads
+// StartedAt instead, which equals the creation time except on a re-run, whose start is the
+// re-run's. runCreatedAt (store.go) is the same rule in SQL.
+func (run DeliveryRun) Created() time.Time {
+	if run.CreatedAt != nil {
+		return *run.CreatedAt
+	}
+	return run.StartedAt
 }
 
 // DeliveryRunJob is one job of a DeliveryRun, identified within it by Name (GitHub does not
@@ -157,9 +172,9 @@ type DeliveryRunJobView struct {
 // facts plus what the server derives at read time from the stored facts: DeployedStatus, the
 // linked issue's title, priority and effective components (the nearest ancestor's attachment, as
 // the issue read resolves it), and (on DeliveryRunView) RootFailingJob. Mirrors
-// packages/contracts/src/dispatch-api.ts's DeliveryPR exactly; ParentAgent and Sessions resolve to
-// the same set of sessions today (LEGION-567: no grouping link exists between sessions) -- see
-// agents.go's comment on the pair for why both still exist.
+// packages/contracts/src/dispatch-api.ts's DeliveryPR exactly. ParentAgent is the Parent agent of
+// the first of Sessions: its session group's `group:<id>`, else that session's title or id
+// (ParentAgents, parent_agent.go).
 type DeliveryPRView struct {
 	ID                string         `json:"id"`
 	Repo              string         `json:"repo"`
@@ -262,17 +277,23 @@ type DeliveryWaitingPRView struct {
 // the window's pull requests by each colour-by facet's value with no facet applied, so a value
 // keeps its colour while facets change. Components names every component of the projects the
 // window's issues belong to, and IssueTitles every issue the window's pull requests name, so a
-// facet value a selection filtered out of PRs still has its label.
+// facet value a selection filtered out of PRs still has its label. SessionGroups is every session
+// group; SessionTitles and SessionPRCounts are, for each session first on a window pull request,
+// its title (its id when it has none) and how many window pull requests it is first on, before
+// the facets: what the page's session-groups editor lists.
 type DeliveryTimelineResponse struct {
-	Window      DeliveryWindowView               `json:"window"`
-	PRs         []DeliveryPRView                 `json:"prs"`
-	Waiting     []DeliveryWaitingPRView          `json:"waiting"`
-	Runs        []DeliveryRunView                `json:"runs"`
-	FacetCounts map[string]map[string]int        `json:"facet_counts"`
-	ColorCounts map[string]map[string]int        `json:"color_counts"`
-	Components  map[string]DeliveryComponentView `json:"components"`
-	IssueTitles map[string]string                `json:"issue_titles"`
-	Freshness   DeliveryFreshnessView            `json:"freshness"`
+	Window          DeliveryWindowView               `json:"window"`
+	PRs             []DeliveryPRView                 `json:"prs"`
+	Waiting         []DeliveryWaitingPRView          `json:"waiting"`
+	Runs            []DeliveryRunView                `json:"runs"`
+	FacetCounts     map[string]map[string]int        `json:"facet_counts"`
+	ColorCounts     map[string]map[string]int        `json:"color_counts"`
+	Components      map[string]DeliveryComponentView `json:"components"`
+	IssueTitles     map[string]string                `json:"issue_titles"`
+	Freshness       DeliveryFreshnessView            `json:"freshness"`
+	SessionGroups   []SessionGroup                   `json:"session_groups"`
+	SessionTitles   map[string]string                `json:"session_titles"`
+	SessionPRCounts map[string]int                   `json:"session_pr_counts"`
 }
 
 // DeliveryRunJobDetailView is one job of `GET /api/v1/delivery/runs/{id}`: the drill-down's job

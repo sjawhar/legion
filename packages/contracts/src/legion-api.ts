@@ -106,12 +106,32 @@ const legionLocator = z.discriminatedUnion("runtime", [
   }),
 ]);
 
-/** `api.ClaimView` — `session` is empty until the claim's agent registers one, and `locator` is
- * absent while no process runs (queued, suspended, failed, retired). */
+/** `api.CapabilityReportView` — one session's capability report as the state shows it: when the
+ * session measured, the live rows its checks proved (`ok`) and the rows they did not, each with
+ * the fact the check found (`open`). `incarnation` is the reporting process's: the daemon keeps a
+ * claim's latest report whatever its incarnation, so a reader compares it with
+ * `locator.incarnation` to tell a report of the running process from one a relaunch has outlived
+ * (contract 21). It is empty for a report the API recorded from a claim whose machine held no
+ * process (`runtime.Locator{Claim}`), which no reader compares with a locator. `ok` and `open`
+ * are never null; the daemon floors an open row's detail (`capabilities.Normalize`), and the
+ * schema stays the guard. */
+const legionCapabilityReportView = z.strictObject({
+  measuredAt: timestamp,
+  incarnation: z.string(),
+  ok: z.array(nonEmptyString),
+  open: z.array(z.strictObject({ name: nonEmptyString, detail: nonEmptyString })),
+});
+
+/** `api.ClaimView` — `session` is empty until the claim's agent registers one, `locator` is
+ * absent while no process runs (queued, suspended, failed, retired), and `capabilities` is absent
+ * until a session of the claim reports on `claims/ready` (the controller's never does). */
 const legionClaimView = z.strictObject({
   session: z.string(),
   state: z.enum(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
+  capabilities: legionCapabilityReportView.optional(),
+  /** 0 = no contract recorded. */
+  pluginContract: z.number().int().nonnegative(),
 });
 
 /** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
@@ -164,6 +184,16 @@ const legionPendingStatusWrite = z.strictObject({
   lastError: z.string().optional(),
 });
 
+/** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
+ * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
+ * the issue's entry under `issues` carries the rest. Its state and role say the move that brings it
+ * back (`api.StrandedClaim.Move`). */
+const legionStrandedClaim = z.strictObject({
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  state: z.enum(["suspended", "failed"]),
+});
+
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
  * (Zod's plain `record` over an enum demands every key). */
 const legionIssue = z.strictObject({
@@ -208,29 +238,31 @@ const legionControllerLocator = z.strictObject({
   external: z.literal(true),
   sessionId: nonEmptyString,
   registeredAt: timestamp,
+  /** 0 = no contract recorded. */
+  pluginContract: z.number().int().nonnegative(),
 });
 
-/** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
- * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has
- * ever been started), "pending", "issued", "denied", "expired", or "failed" (the broker never
- * opened the most recent login: it refused it, or did not answer); `code` is the confirmation
- * code shown on the Dispatch credential page for a pending login, "" otherwise. */
+/** `api.AgentSecretsLoginView` — the daemon's own agent-secrets token login's current status
+ * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has finished yet),
+ * "issued", or "failed" (the latest login won no credential). The daemon logs in with its own
+ * ServiceAccount token, which no person approves, so there is no confirmation code (contract 22). */
 const legionAgentSecretsLoginView = z.strictObject({
   state: z.string(),
-  code: z.string(),
 });
 
 /** `api.CapabilityState` — one row of the deployment's capability report
  * (`capabilities.Deployment.Report`), in the table's order: `present`, `installed` (the image
  * carries the row's tooling, but a pod's agent cannot use it yet; `detail` says why), `unchecked`
- * (no probe has checked the image row), `live` (the Stage 4b live proof proves it against a running
- * pod, never the daemon; `detail` names it), `withheld` (a ruling,
- * cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open row
- * carrying `configLine`, the `legion.yaml` line that records a decision. A gap is reported here,
- * never refused (contract 16). */
+ * (no probe has checked an image row, or no session has reported a live row), `withheld` (a
+ * ruling, cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open
+ * deployment row carrying `configLine`, the `legion.yaml` line that records a decision. A live row
+ * (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) is
+ * `present` or `open` from the sessions' reports (`legionCapabilityReportView`), and carries no
+ * `configLine`; `live` is no status since contract 21. A gap is reported here, never refused
+ * (contract 16). */
 const legionCapabilityState = z.strictObject({
   name: nonEmptyString,
-  status: z.enum(["present", "installed", "unchecked", "live", "withheld", "decided", "open"]),
+  status: z.enum(["present", "installed", "unchecked", "withheld", "decided", "open"]),
   detail: nonEmptyString,
   decision: nonEmptyString.optional(),
   configLine: nonEmptyString.optional(),
@@ -240,12 +272,14 @@ const legionCapabilityState = z.strictObject({
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
- * `capabilities` is the deployment's report, never null (contract 16). */
+ * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
+ * claim nothing will wake, by issue and then role, never null (contract 23). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
   issues: z.record(z.string(), legionIssue),
   pendingStatusWrites: z.array(legionPendingStatusWrite),
+  strandedClaims: z.array(legionStrandedClaim),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),
@@ -255,7 +289,9 @@ export type LegionState = z.output<typeof LegionStateResponse>;
 export type LegionIssue = LegionState["issues"][string];
 
 /** `claim.RegisterResponse`, the body of `POST /legion/v1/claims/register`: the claim the agent
- * holds, and the secret its ready and exit authenticate with. */
+ * holds, the secret its ready and exit authenticate with, and `promptAgents`, the sorted names of
+ * the task agents the role's prompts dispatch — what the session's subagents check measures its
+ * discovered agents against (contract 21). Never null: a role whose prompts name none gets `[]`. */
 export const LegionRegisterResponse = z.strictObject({
   claimToken: nonEmptyString,
   tree: nonEmptyString,
@@ -263,9 +299,38 @@ export const LegionRegisterResponse = z.strictObject({
   role: z.enum(LEGION_ROLES),
   generation: z.number().int().positive(),
   secret: nonEmptyString,
+  promptAgents: z.array(nonEmptyString),
 });
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
+
+/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+ * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
+ * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
+ * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
+ * open, details cut) and never refuses a report (contract 21). */
+export const LegionCapabilityReport = z.strictObject({
+  measuredAt: timestamp,
+  elapsedMs: z.number().int().nonnegative(),
+  rows: z.array(z.strictObject({ name: nonEmptyString, ok: z.boolean(), detail: z.string() })),
+});
+
+export type LegionCapabilityReportBody = z.output<typeof LegionCapabilityReport>;
+export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
+
+/** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
+ * agent has booted and can be prompted, authenticated by the registration's secret and naming the
+ * launch generation it answers for. `capabilities` is the session's report of the live rows; a
+ * ready without one (the controller's) reports nothing and changes no row. */
+export const LegionReadyRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  capabilities: LegionCapabilityReport.optional(),
+});
+
+export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
 
 /** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
@@ -323,7 +388,7 @@ const legionDeliveryView = z.strictObject({
 });
 
 /** `api.OperatorClaim`, the body of the operator routes that act on one claim (`POST
- * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|close`): the claim as its
+ * /legion/v1/operator/claims`, `…/{token}/deliver|suspend|resume|stop|retry|close`): the claim as its
  * supervisor holds it, but its hashes. */
 export const LegionOperatorClaimResponse = z.strictObject({
   token: nonEmptyString,
@@ -343,8 +408,13 @@ export const LegionOperatorClaimResponse = z.strictObject({
   }),
   uncertainStreak: z.number().int().nonnegative(),
   pending: legionDeliveryView.optional(),
+  /** Who suspended the claim while it is suspended; absent otherwise. `unknown` is a suspension
+   * recorded before migration 0038; only an `operator` one holds against the daemon's rules. */
+  suspendedBy: z.enum(["unknown", "operator", "daemon", "exit"]).optional(),
   /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
   suspensionHeld: z.literal(true).optional(),
+  /** 0 = no contract recorded. */
+  pluginContract: z.number().int().nonnegative(),
 });
 
 export type LegionOperatorClaim = z.output<typeof LegionOperatorClaimResponse>;

@@ -31,7 +31,7 @@ legion start --config legion.yaml --check-config
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
-| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -222,13 +222,26 @@ legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, holdRe
 `phase` is `held` and the failed claim's `state` is `failed`. A held phase worker is its
 architect's to retry or escalate; `holdReason: "escalated"` means it went to the controller. An
 architect that failed (`architect.state` is `failed`) leaves its tree with nobody to act inside it,
-so the controller is woken to re-admit it. To do that by hand, park the root and admit it again,
-which starts a new generation from its architect:
+and the controller is woken to re-admit the tree. What brings the architect back depends on where
+its tree stands:
 
-```sh
-legion status <KEY> backlog --config legion.yaml --operator-token-file operator-token
-legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
-```
+- **Its root holds its admission slot and does not linger:** `legion state`'s `claims nothing will
+  wake` line names the architect under `failed, retry`. Retry it, as
+  [A tree does not move after a restart](#a-tree-does-not-move-after-a-restart) shows: the daemon
+  relaunches it on the session it kept, with fresh budgets, and the tree carries on at the
+  generation and phase it stands at.
+- **Its root is parked or lingers,** the controller's park for a re-admission included: leave the
+  claim as it is. The tree's re-admission retries it at a new generation; a retry by hand would run
+  it outside the admission cap, and it would be sent no catch-up. To re-admit the tree by hand, park
+  the root and admit it again:
+
+  ```sh
+  legion status <KEY> backlog --config legion.yaml --operator-token-file operator-token
+  legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
+  ```
+
+`legion claims retry` relaunches only a failed architect. It refuses a claim in any other state,
+naming the state, and a failed phase worker or controller, naming who retries it.
 
 To see why the launches failed, read the failed role's container log in the issue's pod:
 
@@ -237,6 +250,104 @@ kubectl -n legion get pods -l legion.dev/issue=<KEY>
 kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
+
+## A tree does not move after a restart
+
+A restart re-adopts every process still running, but a claim with no process runs again only when
+something starts it. A worker is started by the workflow when its phase begins, and a tree's
+architect by its admission; a notice to an architect with no process waits for it rather than
+starting it. A suspended worker of its issue's current phase that the daemon suspended is resumed
+by the daemon at boot. One an operator suspended (`legion claims suspend`, one claim at a time or a
+whole fleet before a restart), or whose suspension predates the release that records who suspended
+it (`suspendedBy: unknown`), is not; neither is a tree's architect, whoever suspended it, nor a
+claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
+state shows the tree active, but the tree stops for good at the worker's phase, or at the first
+decision that needs its architect. Once a boot has re-adopted its claims, the daemon names every
+such claim in one error line, under the move that brings it back:
+
+```text
+{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":4,"resume":["WIDGETS-12 architect"],"suspendedWorkers":["WIDGETS-12 implementer"],"retry":["WIDGETS-14 architect"],"needsWorkflowStart":["WIDGETS-15 reviewer"]}
+```
+
+The state names the same claims on every read, after a restart or not, each with its `state`, and
+`legion state` prints them on its `claims nothing will wake` line:
+
+```sh
+legion state --config legion.yaml --json | jq '.strandedClaims'
+```
+
+Act only on the claims this list names, and leave out any you suspended on purpose. A claim's token
+is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
+
+- **`resume`** (a suspended architect): resume it. Once it is ready the daemon sends it a catch-up
+  of what changed while it was away:
+
+  ```sh
+  legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-architect
+  ```
+
+- **`suspendedWorkers`** (a suspended phase worker): the move depends on who suspended it, which
+  `legion claims list --json` shows as `suspendedBy`, and `legion state` points there too.
+  Only an architect is sent a catch-up, so a worker resumed with no task relaunches with nothing to
+  do, and once it runs the list stops naming it.
+
+  - **`suspendedBy: unknown`** (suspended before this release recorded who did): let the
+    workflow start it. Stop the project's daemon, mark the claim as the daemon's, and start the
+    daemon again; at boot it queues the workflow's own start for the worker's phase, with the
+    right run, phase and, for a merger, approved head:
+
+    ```sql
+    update claims set suspended_by = 'daemon' where token = 'legion-widgets-widgets-12-implementer' and state = 'suspended';
+    ```
+
+    A task you deliver yourself belongs to no run of the workflow, so such a worker's completion
+    can be refused (`HANDOFF_NO_RUN`, or a stale generation) when it never confirmed a task of the
+    current run. The boot starts the worker only while its issue is in that phase: when
+    `legion state` shows the issue `held`, leave the claim as it is, and its architect's retry of
+    the phase starts it ([An issue is held](#an-issue-is-held)).
+  - **`suspendedBy: operator`, with a task or a waiting start:** resume it. A worker suspended
+    mid-task keeps that task (`legion claims list --json` shows it as the claim's `pending`, and
+    the daemon refuses a second delivery), and its task is sent again once it is ready. A worker
+    whose phase start reached it while it was suspended has that start waiting for your resume
+    (the daemon logged `outbox row waits` for `start <role> of <issue>`, naming the operator's
+    suspension); the start gives it the phase's task once it runs, so a delivery would hand it the
+    phase twice.
+  - **`suspendedBy: operator`, otherwise:** deliver its phase's resume task. An operator's
+    delivery resumes the claim and hands it the task. The task is the one the workflow gives a
+    worker resuming its phase, with the issue's title, key and phase as `legion state` shows them
+    (a merger told no approved head sends the round back for review):
+
+    ```sh
+    legion claims deliver --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer \
+      --task "Continue <title>. Issue: WIDGETS-12. Phase: implementing. Resume the existing phase work."
+    ```
+
+- **`retry`** (a failed architect): retry it. The daemon relaunches it on the session it kept,
+  with fresh budgets, and sends it a catch-up of its tree once it is ready, so the tree carries on
+  at the generation and phase it stands at:
+
+  ```sh
+  legion claims retry --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-14-architect
+  ```
+
+  When a tree's architect and its workers failed together, retry the architect first: the held
+  workers are its to retry once it runs.
+
+- **`needsWorkflowStart`** (a failed phase worker): its issue is held
+  ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or escalates
+  it to the controller. A failed claim ignores `legion claims resume` and `legion claims deliver`,
+  and `legion claims retry` refuses a phase worker's.
+
+The list names only claims of trees that hold an admission slot, and leaves out claims that
+something will still start: a worker whose phase is not its own is started again when its phase
+comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees. Never resume or retry by
+hand a claim of a lingering tree or of an issue parked out of the workflow, nor that waiting
+architect: it would run outside the admission cap, and re-admission or the issue's return to `todo`
+starts it.
+A claim an operator suspended is listed even when a workflow start is queued for it: that start
+waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
+is queued for it, since the next phase start or re-admission resumes it as before.
 
 ## A pod does not come up
 
@@ -295,9 +406,9 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
   stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
   counted head and every head pushed on top of it until a push lands on a head CI judged green) no
-  longer sends the work back by itself, so the issue waits in testing or review for the architect,
-  or for a worker's own decision such as a reviewer's request for changes. A `READY` is still
-  withdrawn on red CI.
+  longer sends the work back by itself, so the issue waits in testing, review, retro or merging for
+  the architect, or for a worker's own decision such as a reviewer's request for changes. A `READY`
+  is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -337,19 +448,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
   for a pull request that deletes it.
 
-An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
-or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no
-merge ref for a conflicting head and runs no checks on it at all): the daemon sent it back to the
-implementer, told the architect which checks or that the head conflicts, and posted on the issue,
-and told the project's `merge_queue_role` when one is set, that the `READY` is withdrawn; the work
-comes back through testing, review and a new `READY`.
-
-An issue that stays in `needs_review` while a review workflow the project declares
-(`projects.<KEY>.review_workflows`) is red: only declared review workflows are red, so the reviewer
-is adjudicating their findings, resolving the threads it accepted and re-running the failed run. If
-the re-run stays red after that, the architect asks you to decide, naming the pull request, the
-head and the workflow. A red required workflow the project does not declare sends the issue back to
-the implementer instead, as a red required check does.
+An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
+on the head: the daemon sent it back to the implementer and told the architect which checks. From
+`retro` the implementer kept its turn and was handed the implementing task once that turn ended;
+from `merging` the merger's turn was interrupted. One back in `in_progress` after its `READY`,
+while it awaited its merge, had a required check or workflow turn red on the head itself, or its
+head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
+checks on it at all): the daemon sent it back to the implementer, told the architect which checks
+or that the head conflicts, and posted on the issue, and told the project's `merge_queue_role` when
+one is set, that the `READY` is withdrawn; the work comes back through testing, review and a new
+`READY`.
 
 The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
 workflows the base branch requires:
@@ -387,29 +495,28 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
-- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page, where
-  anyone signed in may approve it; pod enrollment is held until approved`.** With
-  `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
-  at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
-  pods are not enrolled until then. Denying the code does not stop new ones: while a pod needs
-  enrolling or revoking, the daemon asks again after its wait (30 s after the first denial,
-  doubling to a cap of one code every 5 minutes). To stop the codes, stop the daemon, or remove its
-  `agent_secrets` block and restart it: the daemon reads `legion.yaml` only at start.
+- **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
+  With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
+  [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at
+  every start and again before each credential expires; pods wait to be enrolled until a login
+  succeeds. The answer says why: `ACCOUNT_NOT_LISTED` (the broker's `BROKER_SERVICE_LOGINS` does not
+  name the daemon's ServiceAccount for `legion-daemon`: add it and redeploy the broker),
+  `TOKEN_EXPIRED` or `TOKEN_INVALID` (the token file is stale, or not a token for the broker's
+  issuer and audience: check the daemon's projected-token volume), `TOKEN_TOO_LONG_LIVED` (the
+  token lives longer than an hour from its issue: set the projected token's `expirationSeconds`,
+  or `kubectl create token`'s `--duration`, to at most an hour), `TOKEN_LOGIN_OFF` (the broker
+  trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
+  `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
+  reads `"state": "failed"` until a login succeeds. Nothing needs restarting: the daemon retries
+  30 s after a failed login, doubling to at most 5 minutes, and no person is ever asked.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
   ```
-- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login is
-  the `legion-daemon` service's, which anyone signed in to Dispatch approves, so the block names no
-  approver. Delete the key.
-- **`agent-secrets machine login failed; a pod enrollment retries it`.** The broker refused the
-  daemon's boot login or could not be reached: a broker too old to accept a service's login with no
-  named approver, a `429` from the bucket every service's login shares, or a network fault.
-  `.agentSecretsLogin` reads `"state": "failed"` until the next login opens. Nothing needs
-  restarting. Fix the broker, and the next pod enrollment starts a fresh login whose code is on
-  `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
-  observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
-  most 5 minutes.
+- **`runtime.kubernetes.agent_secrets.token_file is required`.** The daemon logs in with its own
+  ServiceAccount token, so the block names where it is mounted.
+- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** No person approves the
+  daemon's login, so the block names no approver. Delete the key.
 - **`supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh
   token`** (`403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at
   <time>)`). The token the daemon presented for the pod expired before the broker checked it. The

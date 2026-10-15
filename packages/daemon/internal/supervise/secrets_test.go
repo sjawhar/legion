@@ -69,7 +69,7 @@ func TestAResumedClaimEnrollsOnItsHello(t *testing.T) {
 	h.register()
 	h.ready()
 	first := h.claim().Enrollment.ID
-	h.must(RequestSuspend{Claim: h.token})
+	h.must(RequestSuspend{Claim: h.token, By: SuspendedByOperator})
 	h.wantState(StateSuspended)
 	if got := broker.revocations(); len(got) != 1 || got[0] != first {
 		t.Fatalf("the suspension revoked %v, want [%s]", got, first)
@@ -94,7 +94,7 @@ func TestEveryEndOfAProcessRevokesItsEnrollment(t *testing.T) {
 	for name, end := range map[string]func(h *harness){
 		"found gone":           func(h *harness) { h.observe(runtime.Gone) },
 		"not the recorded pod": func(h *harness) { h.observe(runtime.NotRecordedProcess) },
-		"suspended":            func(h *harness) { h.must(RequestSuspend{Claim: h.token}) },
+		"suspended":            func(h *harness) { h.must(RequestSuspend{Claim: h.token, By: SuspendedByOperator}) },
 		"stopped":              func(h *harness) { h.must(RequestStop{Claim: h.token}) },
 		"the agent exited":     func(h *harness) { h.exit() },
 	} {
@@ -172,6 +172,32 @@ func TestAFailedRevocationIsRetriedThenLeftToTheLease(t *testing.T) {
 	}
 }
 
+// TestARevocationTheBrokerRefusesIsNotRetried: a daemon cannot end an enrollment another launcher
+// credential made (the broker answers 403 NOT_ENROLLING_CREDENTIAL, a refusal no retry changes), so
+// the machine makes one attempt, retries nothing, and logs that the enrollment's lease ends it once
+// the pod stops renewing.
+func TestARevocationTheBrokerRefusesIsNotRetried(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	broker.revokeErr = permanentErr{"broker answered 403 NOT_ENROLLING_CREDENTIAL: only the launcher credential that enrolled a pod may end its enrollment"}
+	h.launch()
+	h.helloWithIdentity()
+	h.register()
+	h.observe(runtime.Gone)
+	for range revokeAttempts {
+		h.advance(revokeRetryDelay)
+	}
+	if broker.revokeCalls() != 1 {
+		t.Fatalf("%d revocation attempts for a refusal no retry changes, want 1", broker.revokeCalls())
+	}
+	if lines := h.logs.lines("agent-secrets: enrollment revocation refused", "NOT_ENROLLING_CREDENTIAL", "its lease ends it"); len(lines) != 1 {
+		t.Fatalf("log %q, want the refusal line once", h.logs.lines("agent-secrets"))
+	}
+	if lines := h.logs.lines("agent-secrets: enrollment not revoked after every attempt"); len(lines) != 0 {
+		t.Fatalf("log %q: a refusal is not a run of failed attempts", lines)
+	}
+}
+
 func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
@@ -194,13 +220,13 @@ func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testin
 }
 
 // A projected token is valid for an hour at most, and the shim reads it once per hello. An
-// enrollment held up past the hello token's expiry (the daemon's machine login waiting for a
-// person to approve it) presents a token the shim reads again then, never the expired one, which
-// the broker refuses as POD_TOKEN_EXPIRED.
+// enrollment held up past the hello token's expiry (the daemon's token login failing and retrying)
+// presents a token the shim reads again then, never the expired one, which the broker refuses as
+// POD_TOKEN_EXPIRED.
 func TestAnEnrollmentHeldPastTheHelloTokensExpiryPresentsAFreshToken(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
-	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: machine login pending; code ABCD-1234")
+	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: token login failed: broker answered 503 DATABASE: down")
 	h.launch()
 	h.helloWithToken(podToken(h.clock.Now().Add(time.Hour)))
 	h.register()

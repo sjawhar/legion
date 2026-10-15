@@ -76,7 +76,10 @@ func (s *Store) CheckLaunch(ctx context.Context, c supervise.Claim) error {
 // unconfirmed reservation resumes regardless of a subsequent re-admission; a retry after the
 // cleanup confirmed reserves nothing; a fresh reservation first proves the root is still lingering
 // at the close's generation, so a close naming a generation the root never had, or no generation,
-// reserves nothing either, and the outbox's ordinary fences finish it.
+// reserves nothing either, and the outbox's ordinary fences finish it. So does a close of a tree
+// that never had a lifecycle: a root that left admission's waiting line before a slot opened its
+// tree lingers like any root, but its tree holds nothing a cleanup releases (a carried child's
+// Sandbox its old tree handed over is the orphan sweep's once that linger ends, IssueSandboxHome).
 func (s *Store) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error) {
 	var lifecycle treelifecycle.Lifecycle
 	var reserved bool
@@ -87,15 +90,18 @@ func (s *Store) ReserveWorkflowTreeCleanup(ctx context.Context, project, tree st
 		var started, confirmed bool
 		err := tx.QueryRow(ctx, `select cleanup_started, cleanup_confirmed_at is not null from tree_lifecycles
 			where project = $1 and tree = $2 for update`, project, tree).Scan(&started, &confirmed)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
 			return err
 		}
-		if err == nil && started && !confirmed {
+		if started && !confirmed {
 			lifecycle, err = treelifecycle.ReserveCleanup(ctx, tx, project, tree, treelifecycle.AuthorityWorkflow)
 			reserved = true
 			return err
 		}
-		if err == nil && started && confirmed {
+		if started && confirmed {
 			return nil
 		}
 		if rootGeneration == 0 || rootGeneration > math.MaxInt64 {
@@ -151,12 +157,11 @@ func (s *Store) ReserveOperatorTreeCleanup(ctx context.Context, project, tree st
 // since moved to another tree (a child re-admitted as a root of its own) and that runs nothing is
 // not the tree's: its new tree re-points it before it starts again (supervise.Machine.Retree), and
 // waiting on it would hold this tree's cleanup for as long as the new tree leaves it idle. "Runs
-// nothing" is Retree's own set (supervise's retreeable: queued and the gone states), retired
-// already excluded.
+// nothing" is Retree's own set (supervise.RunsNothingStates), retired already excluded.
 func pendingTreeClaims(ctx context.Context, tx pgx.Tx, project, tree string) ([]string, error) {
 	rows, err := tx.Query(ctx, `select c.token, c.state from claims c where c.project = $1 and c.tree = $2 and c.state <> 'retired'
-		and not (c.state in ('queued', 'suspended', 'failed') and exists (select 1 from issues i where i.key = c.issue and i.tree <> $2))
-		order by c.token`, project, tree)
+		and not (c.state = any($3) and exists (select 1 from issues i where i.key = c.issue and i.tree <> $2))
+		order by c.token`, project, tree, runsNothingStates())
 	if err != nil {
 		return nil, fmt.Errorf("census claims of tree %s: %w", tree, err)
 	}
@@ -224,4 +229,35 @@ func (s *Store) TreeLive(ctx context.Context, project, tree string) (bool, error
 		return false, fmt.Errorf("read the lifecycle of tree %s: %w", tree, err)
 	}
 	return live, nil
+}
+
+// IssueSandboxHome is the tree an issue's Sandbox belongs to now, or "" when it belongs to none and
+// is anybody's to delete. It belongs to a tree only while the issue is in that tree or can still be
+// admitted into it:
+//   - a live hand-over fence (not cancelled, naming the tree the issue's record still names, which
+//     every consumer of a hand-over requires): the issue's own key, the tree the hand-over makes;
+//   - otherwise the tree its record names, while that tree's lifecycle is open or releasing (its
+//     cleanup not confirmed), or, for a tree that has never had a lifecycle, while the issue waits
+//     in admission's line (todo, handed over, its own root: record.Waiting) or lingers after its own
+//     close (linger_until ahead), the point at which a root's own close would release it.
+//
+// So a carried child that leaves the line before admission opens its tree — set to backlog,
+// icebox or done, or its label taken off — keeps its Sandbox for its own linger at most, and a
+// tree whose cleanup confirmed holds none. The tree cleanup hands a Sandbox whose home is another
+// tree over to it (sandbox.Runtime.CleanupTree), and the orphan sweep keeps one whose home is the
+// tree it is labelled with.
+func (s *Store) IssueSandboxHome(ctx context.Context, project, issue string) (string, error) {
+	var home string
+	err := s.pool.QueryRow(ctx, `select coalesce((select case
+			when exists (select 1 from handovers h where h.issue = i.key and not h.cancelled and h.tree = i.tree) then i.key
+			when exists (select 1 from tree_lifecycles l where l.project = $1 and l.tree = i.tree) then
+				case when exists (select 1 from tree_lifecycles l where l.project = $1 and l.tree = i.tree and l.cleanup_confirmed_at is null)
+					then i.tree else '' end
+			when (i.status = 'todo' and i.handed_over and i.key = i.tree) or i.linger_until > now() then i.tree
+			else '' end
+		from issues i where i.key = $2), '')`, project, issue).Scan(&home)
+	if err != nil {
+		return "", fmt.Errorf("read the tree issue %s's Sandbox belongs to: %w", issue, err)
+	}
+	return home, nil
 }

@@ -384,8 +384,12 @@ func askAttributeRank(name string) int {
 		return 5
 	case "answer":
 		return 6
-	default:
+	case "copied_from":
 		return 7
+	case "copied_from_document":
+		return 8
+	default:
+		return 9
 	}
 }
 func cloneSchemaValue(value any) any {

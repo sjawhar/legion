@@ -15,7 +15,7 @@ in the environment: a person's own session gets no tool, no title and no daemon 
 The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
 through the interface the Envoy entry publishes: one process-wide object on `globalThis` under
 `Symbol.for("legion.pi-shared.envoy-plugin-interface")`, at `ENVOY_PLUGIN_INTERFACE_VERSION`
-(currently 1), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
+(currently 2), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
 sets its own load marker, `Symbol.for("legion.pi-legion.loaded")`, to
 `{ from: import.meta.url, envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION }`, which the daemon's load
 probe reads.
@@ -87,12 +87,20 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 20 for contract 20's controller credential (LEGION-668: the controller holds the review
-App's GitHub token like every role — `POST /legion/v1/controller/github-credential` answers the
-operator-launched controller's `legion controller start` the review App's gh files for the current
-controller capability, and the daemon-launched controller's pod gets the GitHub variables above
-like any role's container), after contract 19's token file (LEGION-631: the three routes that
-redeemed a grant for a GitHub or git credential and the grant request's `push` are gone, the pane
+number is 23 for contract 23's `strandedClaims` list on `GET /legion/v1/state` (LEGION-670: every
+claim nothing will wake, by issue, role and state), after contract 22's token login (LEGION-618: the
+daemon logs in to the secrets broker with its own ServiceAccount token, so `agentSecretsLogin` on
+`GET /legion/v1/state` loses `code` and its `state` is `none`, `issued` or `failed`), after contract
+21's capability report (LEGION-663:
+`claims/register` answers `promptAgents`, `claims/ready` takes an optional `capabilities` report,
+each claim view on `GET /legion/v1/state` carries its session's latest report as `capabilities`,
+and `live` is gone from the capability status enum), after contract 20's controller credential (LEGION-668: the
+controller holds the review App's GitHub token like every role — `POST
+/legion/v1/controller/github-credential` answers the operator-launched controller's `legion
+controller start` the review App's gh files for the current controller capability, and the
+daemon-launched controller's pod gets the GitHub variables above like any role's container),
+contract 19's token file (LEGION-631: the three routes that redeemed a grant for a GitHub or git
+credential and the grant request's `push` are gone, the pane
 gains the GitHub variables above and loses the absolute-path pins of its gh, git and jj, the
 credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no
 `commit` and answers `note`; `POST /legion/v1/threads/resolve` is deleted), contract 18's
@@ -109,6 +117,11 @@ The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless t
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
 under the environment a pane will get, and the plugin a pane's Oh My Pi actually loads, which must
 be that same package — and `legion probe-image` holds a worker image's plugin to it the same way.
+Both hold a fresh process's plugin to the daemon's contract; a process already running keeps the
+plugin it started with, so since contract 24 (LEGION-164) the daemon records the contract each
+session registers with and relaunches a session on another one onto the current plugin — under
+Kubernetes by installing the release's pair from npm under the role's generation directory in the
+pod it already runs in, in place of the image's copies (docs/kubernetes.md "Contract discipline").
 Notes on earlier contracts that still describe behaviour:
 Contract 4 adds the operator-launched controller: `POST /legion/v1/controller/secret` (the CLI's
 call, never this extension's), a controller registration on `claims/register` answered with the
@@ -159,11 +172,29 @@ worker — the daemon registers both on one route, a root being the claim whose 
 the persisted transcript; `claims/register` with the pane's boot token and this build's
 `daemonApiVersion` (`pluginContract`), where any 4xx exits the process with one log line naming
 the route, status, and daemon sentence (`exitOnRegistrationRefusal`) and a 5xx or transport
-failure propagates without exiting; jj session attribution; the Envoy role, which is the claim
+failure propagates without exiting — a 409 naming a stale `pluginContract` is one such 4xx, so a
+pane that registers on an old contract exits and its daemon-side claim is already being relaunched
+onto the current plugin, under Kubernetes through a kept-pod install (docs/kubernetes.md "Contract
+discipline"), never a new pod; the capability measurement, started once the registration has
+answered and run beside the next two steps (`measureCapabilities` in `src/capability-report.ts`:
+the six live rows of the daemon's capability table — `subagents`, `web-search`, `mcp`,
+`repository-extensions`, `dispatch-envoy-tools`, `github` — each check within 8 s and the report
+within 10 s, measured against the registration's `promptAgents`, the session's active tools and
+the host's `pi.agents`; a failing or timed-out check is a failing row, and a measurer that throws
+costs the report, never the boot); jj session attribution; the Envoy role, which is the claim
 token and the topic the daemon sends an architect every notice on (no claim subscribes to an
 issue's notice topic, so no phase worker is woken by an architect's notice); and `claims/ready`,
-retried three times a second apart on a 5xx or transport failure only, and run again whenever the
-Envoy heartbeat regains the role. A session with no Legion environment boots nothing and gets no
+awaited on the measurement and carrying its report as `capabilities`, retried three times a second
+apart on a 5xx or transport failure only, and run again with the same report whenever the Envoy
+heartbeat regains the role. The controller measures nothing: its ready carries no report. The
+production measurer (`ompCapabilityHost`) reaches Oh My Pi's own modules through string-literal
+`import()` of `@oh-my-pi/pi-coding-agent` and its subpaths `config/settings`,
+`extensibility/settings`, `extensibility/extensions/loader`, `mcp/config` and `task/settings`,
+declared in `packages/pi-shared/src/omp-host.d.ts`: the modules exist only inside Oh My Pi's
+bundle, whose loader resolves a bare specifier of them only as a literal, so they load lazily at
+measurement time and never under `bun test` or in a session that is no Legion session; a test
+substitutes its host through `setLegionCapabilityHostForTests` in `extensions/legion.ts`. A session
+with no Legion environment boots nothing and gets no
 tool. There is no tool-call hook: nothing a pane runs is refused or minted for. The boot registers
 the `legion` tool: architects register gates, release children, request a backward move, choose
 retry or escalation, sign off, close an admitted root tree (a root architect only), and read
@@ -203,7 +234,10 @@ plugin root, a symlinked state directory) moves the check with it. That call,
 both, before it mints anything. The mint revokes the incumbent controller, so neither a plugin that
 would refuse the new session nor a CLI built for another daemon (a binary replaced before its
 daemon restarted) cuts the running controller off. And the daemon refuses a controller registration
-whose `pluginContract` is not its `DaemonAPIVersion` with 409, naming both. That session goes
+whose `pluginContract` is not its `DaemonAPIVersion` with 409, naming both — under Kubernetes a
+daemon-launched controller's own pod is a Sandbox pod like any role's, so a stale registration
+keeps that pod and installs the current pair under its generation directory the same way
+(docs/kubernetes.md "Contract discipline"), never a replaced pod. That session goes
 through the controller session (`src/controller-session.ts`), not the claim session, and gets the
 `legion` tool's controller operations once its claim registers: `read_state`, the whole
 `GET /legion/v1/state` (unauthenticated, as the route is), and `set_status`, which mints a
@@ -279,9 +313,11 @@ or is not yet on `legion/<issue>@origin` (push the issue branch, then complete a
 other phase the commit the workspace stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's three refusals on
-the pull request's head (`READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN`); a refusal changed
-nothing, and the answer's `note` is what READY's checks said when they read no head. The
+reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
+pull request's head, each refusal named in the merger's role prompt
+(`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
+`note` is what READY's checks said when they read no head, or the by-hand note
+(`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
 plain `gh` and `git`, which read the role's App token from the gh files under `GH_CONFIG_DIR`; no
@@ -302,14 +338,24 @@ In a phase-worker session (planner, implementer, tester, reviewer, merger: never
 controller, a session with no Legion environment, or a `task` subagent), `src/phase-stall.ts`
 tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
 `handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
-own turn is a user message too, and counts as an Envoy delivery rather than an assignment: the
-Envoy extension records each body it sends in, process-wide, on the shared interface
-(`injectedUserTurns`, `@legion/pi-shared/injected-user-turns`), and legion.ts asks that record at
-`message_start` (`matchInjectedUserTurn`). The record is forgotten at the run's `agent_end`, so a
-Send or an Aside sent in after the run's last queue or aside poll and before that `agent_end`,
-which the host then runs as a turn of its own, matches nothing: it counts as an assignment, which
-opens even a closed phase, and the dashboard shows it twice. One sent in after that `agent_end`
-starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
+own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
+counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
+sends in, process-wide, on the shared interface (`injectedUserTurns`,
+`@legion/pi-shared/injected-user-turns`), and legion.ts asks that record at `message_start`
+(`matchInjectedUserTurn`). A turn sent as typed input (`pi.sendUserInput`) is found by the Dispatch
+id the host keeps as the message's `tag`, and only by it, so a command that submitted nothing
+(`/compact`, `/session`) leaves nothing the daemon's next assignment could match; it stays in the
+record past the run's `agent_end` until its message arrives, the host answers that the input
+submitted none, or the session changes, so a Send the host runs as a turn of its own after that
+run still counts as the person's. legion.ts asks under the live session id, so a typed turn the
+host starts under a new id (queued across a branch or a session file's move-off, or a session
+change during its `sendUserInput`) carries no note there and counts as an assignment, or, for a
+`/skill:`, whose `skill-prompt` custom message `inboundKind` reads as neither, wakes no stall. On a
+host without `sendUserInput` a turn is found by its text and forgotten at the run's
+`agent_end`, so a Send or an Aside sent in after the run's last queue or aside poll and before that
+`agent_end`, which the host then runs as a turn of its own, matches nothing: it counts as an
+assignment, which opens even a closed phase, and the dashboard shows it twice. One sent in after
+that `agent_end` starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
 message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a
@@ -327,10 +373,11 @@ which hands both plugin entries to the Oh My Pi child by path.
 | Legion lifecycle modules | `src/` | Classification (`classify.ts`), the daemon client (`daemon-client.ts`) and the claim session (`claim-session.ts`; see Daemon contract), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), the phase stall (`phase-stall.ts`) |
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
 | Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`; inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
-| Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals and that `/legion-claim-controller` answers the sentence without exiting |
+| Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
 | Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
+| Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
 | Skills partition and its guard | `src/skills-guard.test.ts`, `scripts/pi-plugin-prepack.sh` (repository root) | The partition this package ships, staged as its prepack stages it, held to the size, name and link rules in `@legion/pi-shared/test/skills-guard`, with the daemon's prompts as linking roots and every `legion-worker` reference linked from somewhere |
 | No import of the sibling | `src/no-cross-import.test.ts` | Fails on a shipped source under `extensions/` or `src/` whose relative import resolves into `packages/pi-envoy` |
 | Rigs | `scripts/skill-scenarios/` | The skill-scenario rig replays skill scenarios on real agents (`../pi-envoy/scripts/README.md`, its last section); its tester-proof scenario boots a real phase worker through this extension against a stand-in daemon (`daemon-standin.ts`), with the pane built by the daemon's own functions (`daemon-pane.go`, `daemon-pane.test.ts`: no inherited key, no grant file reaches the pane). The grant rig that proved the per-command grant mint went with the mint (LEGION-631) |

@@ -16,8 +16,9 @@ import (
 // function (Options.GitHubCredential) holds each App's lease and re-mints it as the lease nears its
 // expiry, so most ticks render the hosts.yml the Secret already holds and write nothing; a minute
 // keeps the time a role's gh runs on a token the daemon has already replaced short against an
-// installation token's hour, at one Secret read per live role.
-const gitHubRefreshInterval = time.Minute
+// installation token's hour, at one Secret read per live role. A runtime reads it once, as it starts
+// (start); a test that must see a tick inside its run shortens it before starting one.
+var gitHubRefreshInterval = time.Minute
 
 // refreshGitHubCredentialsEvery runs refreshGitHubCredentials every interval until ctx ends: the
 // informers' lifetime (start), so the walk never reads a pod store nothing feeds.
@@ -75,9 +76,7 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 		r.log.Warn("sandbox runtime: github credential refresh failed", "sandbox", sandbox, "role", role, "err", err)
 	}
 	read := func() (*corev1.Secret, error) {
-		reading, cancel := call(ctx)
-		defer cancel()
-		return secrets.Get(reading, name, metav1.GetOptions{})
+		return secrets.Get(ctx, name, metav1.GetOptions{})
 	}
 	secret, err := read()
 	if err != nil {
@@ -102,9 +101,7 @@ func (r *Runtime) refreshGitHubCredential(ctx context.Context, sandbox string, u
 			secret.Data = map[string][]byte{}
 		}
 		secret.Data[GitHubHostsKey], secret.Data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
-		updating, cancel := call(ctx)
-		_, err = secrets.Update(updating, secret, metav1.UpdateOptions{})
-		cancel()
+		_, err = secrets.Update(ctx, secret, metav1.UpdateOptions{})
 		if err == nil {
 			break
 		}

@@ -3,6 +3,7 @@ import {
   type ThreadMessageLike,
   useExternalStoreRuntime,
 } from "@assistant-ui/react";
+import type { AgentStreamCommand } from "@legion/contracts";
 import { type ReactNode, useMemo } from "react";
 
 import type { Message, MessageRead } from "../../api/types";
@@ -29,6 +30,7 @@ function otherAuthor(message: Message, viewer: string | undefined): string | und
  * component does catch it, and the page's own render never touches a frame.
  */
 export function AgentRuntimeThread({
+  commands,
   conversation,
   empty,
   onNew,
@@ -38,6 +40,8 @@ export function AgentRuntimeThread({
   stored,
   viewer,
 }: {
+  /** The slash commands the composer completes, or undefined to offer none. */
+  commands: readonly AgentStreamCommand[] | undefined;
   conversation: AgentConversation;
   empty: string;
   onNew: (message: { content: readonly { type: string; text?: string }[] }) => Promise<void>;
@@ -118,7 +122,12 @@ export function AgentRuntimeThread({
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <AgentThread empty={empty} placeholder={placeholder} resetKey={resetKey} />
+      <AgentThread
+        commands={commands}
+        empty={empty}
+        placeholder={placeholder}
+        resetKey={resetKey}
+      />
     </AssistantRuntimeProvider>
   );
 }

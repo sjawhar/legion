@@ -1,11 +1,13 @@
-// Package githubrest is READY's and the daemon's client for one repository's GitHub REST API,
-// called with an installation token. appauth mints those tokens with its own client.
+// Package githubrest is READY's and the daemon's client for GitHub's API with an installation
+// token: one repository's REST API, and GitHub's GraphQL route. appauth mints those tokens with
+// its own client.
 package githubrest
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -26,22 +28,22 @@ func RepositoryAPI(endpoint string, repository ghrepo.Repository) string {
 	return strings.TrimRight(endpoint, "/") + "/repos/" + repository.String()
 }
 
-// Client calls one repository's REST API: API is its REST base (RepositoryAPI, whose empty
-// endpoint is api.github.com).
+// Client calls GitHub with an installation token. Its API is either a repository's REST base
+// (RepositoryAPI), which Get, Post, GetPages and GetListPages take paths under, or GitHub's GraphQL
+// route (GraphQLAPI), which GraphQL posts to; an empty endpoint is api.github.com for both.
 type Client struct {
 	Token string
 	API   string
 }
 
-// Get reads path under the repository's REST base into into. An answer other than 2xx is an
-// *Answer.
+// Get reads path under the client's REST base into into. An answer other than 2xx is an *Answer.
 func (c Client) Get(ctx context.Context, path string, into any) error {
 	_, err := c.call(ctx, http.MethodGet, c.API+path, nil, into)
 	return err
 }
 
-// Post sends body, as JSON, to path under the repository's REST base, and reads GitHub's answer
-// into into when into is not nil. An answer other than 2xx is an *Answer.
+// Post sends body, as JSON, to path under the client's API, and reads GitHub's answer into into
+// when into is not nil. An answer other than 2xx is an *Answer.
 func (c Client) Post(ctx context.Context, path string, body, into any) error {
 	encoded, err := json.Marshal(body)
 	if err != nil {
@@ -49,6 +51,79 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 	}
 	_, err = c.call(ctx, http.MethodPost, c.API+path, encoded, into)
 	return err
+}
+
+// GraphQLAPI is GitHub's GraphQL route under endpoint, GitHub's API root; empty is
+// https://api.github.com. A Client whose API is it sends GraphQL.
+func GraphQLAPI(endpoint string) string {
+	if endpoint == "" {
+		endpoint = "https://api.github.com"
+	}
+	return strings.TrimRight(endpoint, "/") + "/graphql"
+}
+
+// GraphQLFailure is one error a GraphQL answer carries: its type, such as NOT_FOUND, its message,
+// and the path of the field it is about, field names and list indexes as GitHub sends them.
+type GraphQLFailure struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+	Path    []any  `json:"path"`
+}
+
+// GraphQLError is a GraphQL answer that carries errors, which GitHub sends with HTTP status 200.
+type GraphQLError struct {
+	Failures []GraphQLFailure
+}
+
+func (e *GraphQLError) Error() string {
+	messages := make([]string, 0, len(e.Failures))
+	for _, failure := range e.Failures {
+		messages = append(messages, failure.Message)
+	}
+	return "GitHub GraphQL: " + strings.Join(messages, "; ")
+}
+
+// NotFoundAt says whether every error is NOT_FOUND at the field path names, such as
+// ("repository", "pullRequest") for a pull request number the repository does not have. A
+// NOT_FOUND at another field, such as a repository the token cannot see, is not.
+func (e *GraphQLError) NotFoundAt(path ...string) bool {
+	for _, failure := range e.Failures {
+		if failure.Type != "NOT_FOUND" || len(failure.Path) != len(path) {
+			return false
+		}
+		for i, field := range path {
+			if failure.Path[i] != field {
+				return false
+			}
+		}
+	}
+	return len(e.Failures) != 0
+}
+
+// GraphQL sends query and variables to the client's API, a GraphQL route (GraphQLAPI), and reads
+// the answer's data into into when into is not nil. An answer that carries errors is a
+// *GraphQLError, and one other than 2xx an *Answer.
+func (c Client) GraphQL(ctx context.Context, query string, variables map[string]any, into any) error {
+	var response struct {
+		Data   json.RawMessage  `json:"data"`
+		Errors []GraphQLFailure `json:"errors"`
+	}
+	if err := c.Post(ctx, "", map[string]any{"query": query, "variables": variables}, &response); err != nil {
+		return err
+	}
+	if len(response.Errors) != 0 {
+		return &GraphQLError{Failures: response.Errors}
+	}
+	if len(response.Data) == 0 || string(response.Data) == "null" {
+		return errors.New("GitHub GraphQL answered without data")
+	}
+	if into == nil {
+		return nil
+	}
+	if err := json.Unmarshal(response.Data, into); err != nil {
+		return fmt.Errorf("decode GitHub GraphQL data: %w", err)
+	}
+	return nil
 }
 
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,
@@ -146,11 +221,11 @@ func (c Client) call(ctx context.Context, method, target string, body []byte, in
 }
 
 // answerPath is the path an Answer names for target, its query left out: the path under the
-// repository's REST base, or GitHub's whole path for a URL outside it, such as a later page GitHub
-// names under /repositories/<id>/.
+// client's API, or GitHub's whole path for a URL outside it, such as a later page GitHub names
+// under /repositories/<id>/, or for a call to the API itself, as GraphQL's post is.
 func (c Client) answerPath(target *url.URL) string {
 	if base, err := url.Parse(c.API); err == nil {
-		if rest, found := strings.CutPrefix(target.Path, base.Path); found && (rest == "" || strings.HasPrefix(rest, "/")) {
+		if rest, found := strings.CutPrefix(target.Path, base.Path); found && strings.HasPrefix(rest, "/") {
 			return rest
 		}
 	}

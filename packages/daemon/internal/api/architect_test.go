@@ -96,6 +96,10 @@ func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) erro
 	return nil
 }
 
+func (r *statusRecorder) HandOver(context.Context, dispatch.Issue, string) error {
+	return errors.New("the architect routes hand nothing over")
+}
+
 func (r *statusRecorder) PostMessage(context.Context, string, string) error { return nil }
 func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) ([]string, error) {
 	return nil, nil
@@ -558,7 +562,7 @@ func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *t
 // no retry could ever finish the wave.
 func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing.T) {
 	h, _, statuses := newArchitectHarness(t, nil, nil)
-	seedTree(t, h, "LEGION-208")
+	seedTree(t, h, "LEGION-208", "LEGION-209") // the first attempt's todo event recorded LEGION-209
 	root := "LEGION-208"
 	statuses.issues = map[string]dispatch.Issue{
 		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},

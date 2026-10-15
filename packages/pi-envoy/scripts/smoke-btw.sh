@@ -4,7 +4,6 @@
 set -euo pipefail
 
 readonly envoy_url="${ENVOY_URL:-http://127.0.0.1:9020}"
-readonly dispatch_url="${DISPATCH_URL:-http://127.0.0.1:8766}"
 readonly dispatch_issue="${DISPATCH_SMOKE_ISSUE:?set DISPATCH_SMOKE_ISSUE to an open issue key}"
 readonly mode="${MODE:-btw}"
 readonly omp_bin="${OMP_BIN:-omp}"
@@ -12,33 +11,15 @@ readonly session_timeout=60
 readonly answer_timeout=90
 readonly teardown_timeout=15
 readonly plugin_pkg="${HOME}/.omp/plugins/node_modules/@sjawhar/pi-envoy/package.json"
-readonly envoy_config="${HOME}/.config/opencode/envoy.json"
 
 fail() {
   printf 'FAIL: %s\n' "$*" >&2
   exit 1
 }
 
-# The bearer the installed plugin resolves: DISPATCH_TOKEN_FILE, then DISPATCH_TOKEN, then
-# dispatch.token in ~/.config/opencode/envoy.json.
-resolve_dispatch_bearer() {
-  if [[ -n "${DISPATCH_TOKEN_FILE:-}" ]]; then
-    local token
-    token="$(tr -d '[:space:]' <"$DISPATCH_TOKEN_FILE" 2>/dev/null)" ||
-      fail "DISPATCH_TOKEN_FILE names ${DISPATCH_TOKEN_FILE}, which could not be read"
-    [[ -n "$token" ]] || fail "DISPATCH_TOKEN_FILE names ${DISPATCH_TOKEN_FILE}, which is empty"
-    printf '%s' "$token"
-    return
-  fi
-  if [[ -n "${DISPATCH_TOKEN:-}" ]]; then
-    printf '%s' "$DISPATCH_TOKEN"
-    return
-  fi
-  [[ -f "$envoy_config" ]] ||
-    fail "no Dispatch credential: set DISPATCH_AUTH_HEADER, DISPATCH_TOKEN(_FILE), or dispatch.token in ${envoy_config}"
-  jq -er '.dispatch.token // empty' "$envoy_config" 2>/dev/null ||
-    fail "${envoy_config} has no dispatch.token; set DISPATCH_AUTH_HEADER or DISPATCH_TOKEN(_FILE)"
-}
+# operator_dispatch: the Dispatch and bearer a command run from this shell resolves.
+# shellcheck source-path=SCRIPTDIR source=../../../scripts/e2e/lib/operator-dispatch.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/e2e/lib/operator-dispatch.sh"
 
 write_dispatch_header_file() {
   local output="$1"
@@ -77,10 +58,16 @@ readonly hex
 bearer=""
 actor_session=""
 if [[ -n "${DISPATCH_AUTH_HEADER:-}" ]]; then
+  readonly dispatch_url="${DISPATCH_URL:-http://127.0.0.1:8766}"
   readonly dispatch_auth_header="$DISPATCH_AUTH_HEADER"
   readonly asker="human (${dispatch_auth_header%%:*} header)"
 else
-  bearer="$(resolve_dispatch_bearer)"
+  command -v bun >/dev/null 2>&1 || fail "bun is required to resolve the Dispatch bearer; or set DISPATCH_AUTH_HEADER"
+  operator_dispatch
+  [[ -n "$operator_dispatch_url" ]] ||
+    fail "no Dispatch to ask: ${operator_dispatch_notice}; set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, enable dispatch in ${operator_dispatch_file}, or set DISPATCH_AUTH_HEADER"
+  readonly dispatch_url="$operator_dispatch_url"
+  bearer="$operator_dispatch_token"
   readonly dispatch_auth_header="Authorization: Bearer ${bearer}"
   actor_session="${SMOKE_ACTOR_SESSION:-smoke-btw-${hex}}"
   readonly asker="agent session ${actor_session} (bearer)"
@@ -178,8 +165,9 @@ printf 'starting isolated OMP session %s in %s; watch it with: tmux -S %s attach
 # The target must answer on the same Dispatch this script asks. The new tmux server takes this
 # shell's exported environment, which does not hold these coordinates, so they go in with -e: the
 # URL as is, the bearer through a 0600 file (never as argv, which /proc exposes). Human-header
-# mode has no bearer to forward; the spawned session then relies on its own configured
-# dispatch.token.
+# mode has no bearer to forward; the spawned session then uses the dispatch.token of the envoy.json
+# its plugin reads, which goes with DISPATCH_URL only when that file's dispatch.serverUrl names the
+# same server.
 launch_env=(-e "DISPATCH_URL=${dispatch_url}")
 if [[ -n "$bearer" ]]; then
   token_file="${workdir}/dispatch-token"

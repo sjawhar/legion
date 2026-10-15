@@ -2,9 +2,11 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { existsSync } from "node:fs";
 import { logger } from "../log";
 import initPlugin from "../server";
+import { isolateEnvoyConfig } from "./isolated-config";
 
 type ConfigHook = (cfg: { instructions?: string[] } & Record<string, unknown>) => void;
 
+isolateEnvoyConfig();
 const previous = { ...process.env };
 afterEach(() => {
   process.env = { ...previous };
@@ -38,7 +40,6 @@ test("with Dispatch configured, every session gets the dispatch-first skill as a
 test("without Dispatch, sessions get no dispatch-first instruction", async () => {
   delete process.env.DISPATCH_URL;
   delete process.env.DISPATCH_TOKEN;
-  process.env.HOME = "/nonexistent-home-for-envoy-plugin-test";
   delete process.env.DISPATCH_TOKEN_FILE;
 
   const { instructions } = await configure();

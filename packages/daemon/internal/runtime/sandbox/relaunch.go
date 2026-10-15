@@ -24,11 +24,14 @@ import (
 // (decision 3a): a relaunch before the agent's first registration — the registration deadline, a
 // death before registration, a retried launch, boot finishing a launch a crash interrupted — is a
 // Spawn over an existing Sandbox. A spec with a ResumeSessionFile is refused: continuing a
-// recorded agent is Resume's.
+// recorded agent is Resume's. spec.Plugins travels with a claim that has registered a session
+// (specs.SpawnSpec), which a Spawn's claim never has yet, and is cleared here anyway, so Spawn
+// always installs nothing and a fresh pod always loads the image's copies.
 func (r *Runtime) Spawn(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if spec.ResumeSessionFile != "" {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: a ResumeSessionFile is Resume's to set", spec.Claim)
 	}
+	spec.Plugins = nil
 	return r.relaunch(ctx, nil, spec)
 }
 
@@ -53,17 +56,31 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // now is not handed (movedInPod, the rule evaluate reads such a role StaleAddress by): its
 // launchers dial a stream other than the one a pod created now is handed, and they never redial, or
 // it lacks the agent-secrets volumes a role that enrolls now is started against; or a container of
-// it runs an image other than the one this runtime launches every container with (imageDrift), so
-// its agents call this daemon as the release that launched them. The first role relaunched after
-// any of these replaces it, and its siblings resume into the new pod. Before each start the Sandbox
-// records the addresses the generation is handed (recordAddresses). A new pod is provisioned by its
-// kind (podKind.provision), under nothing but the pod's own launch turn: an issue pod has its
-// workspace's provisioning token minted, the controller's pod needs nothing. A workflow claim
-// passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
-// cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
+// it runs an image other than the one this runtime launches every container with (imageDrift) —
+// unless the launch is installing a stale-plugin pair into this pod (spec.Plugins set,
+// LEGION-164): then drift alone is not a reason to replace it, since the install, not a fresh pod on the
+// configured image, is what brings this launch's agent onto the current plugin, and a pod replaced
+// for some other reason in the same sweep still is. The first role relaunched after any of these
+// replaces it, and its siblings resume into the new pod. Replacing a live pod — its Sandbox
+// Running, the pod its own, not ended, its init containers passed — ends the process of every role
+// still running in it, wherever its turn stood, so the Suspended patch that replaces it names it
+// on the Sandbox in the same write (suspendDisplacing): evaluate then reports each of those roles
+// ended by the daemon's replacement (Displaced), which the supervisor resumes uncharged
+// (LEGION-729). A pod already ended, or never the Sandbox's, is named nothing. Before each start
+// the Sandbox records the addresses the generation is handed (recordAddresses). A new pod is
+// provisioned by its kind (podKind.provision), under nothing but the pod's own launch turn: an
+// issue pod has its workspace's provisioning token minted, the controller's pod needs nothing. A
+// workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so
+// the tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox
+// this creates.
 // On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
 // relaunch stops only the child it may itself have started: a Start the launcher received but did
-// not answer in time (stopIssuedChild).
+// not answer in time (stopIssuedChild). A launch installs its plugin pair (launcherCommand) only
+// when spec.Plugins is set and the pod was kept rather than replaced: a pod replaced for any other
+// reason — a suspended Sandbox, a lost launcher binding, a failed init, a moved address — comes up
+// on the configured image, which the boot gate holds to the daemon's contract, so its copies are
+// already right; carrying the install onto a fresh pod would be installing over a pair already
+// current. l.spec.Plugins is cleared in that case before launcherCommand builds its argv.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -84,8 +101,10 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	}
 	pod := r.storedPod(s.Name)
 	_, initExit := failedInit(pod)
+	live := s.mode() != modeSuspended && ownedBy(pod, s.UID) && !terminal(pod) && initExit == nil
 	_, drifted := imageDrift(pod, r.image)
-	replace := s.mode() == modeSuspended || !ownedBy(pod, s.UID) || terminal(pod) || initExit != nil || drifted ||
+	installing := l.spec.Plugins != nil
+	replace := !live || (drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
 		bound, err := r.launcherBound(ctx, s, pod, l.roles)
@@ -94,8 +113,18 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		}
 		replace = !bound
 	}
+	if installing && replace {
+		// Replaced for some other reason: the fresh pod's image is already current, so nothing is
+		// installed into it.
+		l.spec.Plugins = nil
+	}
 	if replace {
-		if s.mode() != modeSuspended {
+		switch {
+		case live:
+			if err := r.suspendDisplacing(ctx, s, pod.UID); err != nil {
+				return fail("suspend its sandbox", err)
+			}
+		case s.mode() != modeSuspended:
 			if err := r.setMode(ctx, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
 			}
@@ -130,12 +159,12 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		}
 	}
 	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
-	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
-	defer cancel()
-	ended, err := r.awaitRoleLauncher(starting, loc)
+	ended, deadline, err := r.awaitRoleLauncher(ctx, loc)
 	if err != nil {
 		return fail("wait for its role launcher", err)
 	}
+	starting, cancel := context.WithDeadline(ctx, deadline.Add(r.terminationGrace))
+	defer cancel()
 	if ended {
 		// A real failed init proves no role could start. Return its recorded pod so supervision
 		// observes Gone (and WorkspaceLost), rather than charging an unrelated launcher timeout.
@@ -180,9 +209,27 @@ func (r *Runtime) stopIssuedChild(ctx context.Context, token claim.Token, podUID
 	return nil
 }
 
-func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, error) {
+// awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
+// has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
+// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
+// clone and its retries may take up to ProvisionBound from the fetch's own start. So until the
+// wait first sees the pod provisioning (an init container running, provisioning) it gives the pod
+// the boot timeout, the image pull's; from then on, the boot timeout from the last moment it saw
+// the pod provisioning, never past the boot timeout plus ProvisionBound from the first
+// (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
+func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
+	what := "role launcher " + string(loc.Claim)
+	start := time.Now()
+	deadline := start.Add(r.bootTimeout)
+	var first time.Time
 	ended := false
-	err := r.await(ctx, r.bootTimeout, "role launcher "+string(loc.Claim), func() (bool, error) {
+	// await's own budget is only a backstop. The check below runs at every informer event and at
+	// least every recheckInterval, and it ends the wait before it extends the deadline, so the pod
+	// is first seen provisioning within the boot timeout of the start or never, and no deadline lies
+	// past twice the boot timeout plus ProvisionBound from the start. Two recheck intervals more let
+	// that check end the wait first.
+	backstop := 2*r.bootTimeout + r.ProvisionBound() + 2*recheckInterval
+	err := r.await(ctx, backstop, what, func() (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
 		if err != nil {
 			return false, err
@@ -192,10 +239,44 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 			ended = true
 			return true, nil
 		}
-		_, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
-		return ready, nil
+		if _, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID); ready {
+			return true, nil
+		}
+		now := time.Now()
+		if !now.Before(deadline) {
+			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+		}
+		if provisioning(view.pod) {
+			if first.IsZero() {
+				first = now
+			}
+			deadline = launcherDeadline(first, now, r.bootTimeout, r.ProvisionBound())
+		}
+		return false, nil
 	})
-	return ended, err
+	return ended, deadline, err
+}
+
+// launcherDeadline is when a wait for a role launcher gives up, having first seen its pod
+// provisioning at first and last at last: the boot timeout after last, but no later than the boot
+// timeout plus bound after first.
+func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Time {
+	deadline := last.Add(boot)
+	if limit := first.Add(boot + bound); deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
+
+// provisioning is whether pod is running one of its init containers, workspace-fetch or
+// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
+func provisioning(pod *corev1.Pod) bool {
+	if phaseOf(pod) != corev1.PodPending {
+		return false
+	}
+	return slices.ContainsFunc(pod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
+		return status.State.Running != nil
+	})
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent
@@ -216,29 +297,28 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // A Sandbox fits a launch when it carries the tree label the launch's pod carries, none for the
 // controller's pod. It is made for an issue, whose key, so its Sandbox's name, outlives a move to
 // another tree: a child of a closed tree re-admitted as a root of its own finds the Sandbox its old
-// tree suspended, labelled with that tree and owning the volume that holds the issue's clone,
-// workspace and its roles' sessions. Such a Sandbox, once Suspended, is relabelled for this
-// launch's tree and kept, volume and sessions with it; the Running patch rewrites its pod template,
-// labels included, before any pod runs. One that still runs roles of the old tree is a refusal,
-// since replacing it would end them. Nothing here deletes a Sandbox, and none without a volume of
-// its own reaches here: every Sandbox this runtime makes carries the issue claim template
-// (sandboxManifest), and the boot census refuses one of the tree-volume layout before any launch
-// (treeVolumeLayout).
+// tree left, labelled with that tree and owning the volume that holds the issue's clone, workspace
+// and its roles' sessions. Such a Sandbox is relabelled for this launch's tree and kept, volume and
+// sessions with it, once no stored claim of the issue in another tree may still run a process
+// there (Store.IssueRunsElsewhere); the Running patch rewrites its pod template, labels included,
+// before any pod runs. One its old tree left Running — the old tree's close suspended every role
+// of it, but the issue's suspension never ran, since the issue had moved — is suspended in the
+// same patch, so the relaunch waits its pod out. One a claim of the old tree may still run in is a
+// refusal, since replacing it would end that claim. Nothing here deletes a Sandbox, and none
+// without a volume of its own reaches here: every Sandbox this runtime makes carries the issue
+// claim template (sandboxManifest), and the boot census refuses one of the tree-volume layout
+// before any launch (treeVolumeLayout).
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
 	for {
-		getting, cancel := call(ctx)
-		u, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
-		cancel()
+		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			manifest, err := encodeSandbox(r.sandboxManifest(l))
 			if err != nil {
 				return nil, err
 			}
-			creating, cancel := call(ctx)
-			createdObject, err := r.sandboxClient().Create(creating, manifest, metav1.CreateOptions{})
-			cancel()
+			createdObject, err := r.sandboxClient().Create(ctx, manifest, metav1.CreateOptions{})
 			if apierrors.IsAlreadyExists(err) && time.Now().Before(deadline) {
 				continue
 			}
@@ -261,13 +341,26 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
-			if s.mode() != modeSuspended {
-				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is relabelled once they stop",
-					l.name, s.Labels[labelTree], tree)
+			// Fenced to the resourceVersion read, beside the uid patch tests: a delete, a relabel or a
+			// mode change since that read conflicts, and the next launch reads the Sandbox again.
+			ops := []jsonPatchOp{
+				{Op: "test", Path: "/metadata/resourceVersion", Value: s.ResourceVersion},
+				{Op: "add", Path: labelPatchPath(labelTree), Value: tree},
 			}
-			r.log.Info("sandbox runtime: relabelling a suspended sandbox for its issue's new tree, keeping its volume",
-				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree)
-			relabelled, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: tree})
+			if s.mode() != modeSuspended {
+				running, err := r.store.IssueRunsElsewhere(ctx, r.project, l.spec.Issue, l.spec.Tree)
+				if err != nil {
+					return nil, fmt.Errorf("sandbox %s, made for tree %s: %w", l.name, s.Labels[labelTree], err)
+				}
+				if running != "" {
+					return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles (%s); it is relabelled once they stop",
+						l.name, s.Labels[labelTree], tree, running)
+				}
+				ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeSuspended})
+			}
+			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping its volume",
+				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree, "operatingMode", s.mode())
+			relabelled, err := r.patch(ctx, s, ops...)
 			if err != nil {
 				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
 			}
@@ -275,9 +368,7 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {
-			getting, cancel := call(ctx)
-			defer cancel()
-			current, err := r.sandboxClient().Get(getting, l.name, metav1.GetOptions{})
+			current, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return true, nil
 			}
@@ -300,9 +391,7 @@ func (r *Runtime) awaitPodGone(ctx context.Context, s *sandbox) (map[types.UID]b
 			old[pod.UID] = true
 			return false, nil
 		}
-		getting, cancel := call(ctx)
-		defer cancel()
-		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(getting, s.Name, metav1.GetOptions{})
+		pod, err := r.kube.CoreV1().Pods(r.namespace).Get(ctx, s.Name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
@@ -418,8 +507,6 @@ func (r *Runtime) secretMeta(s *sandbox, l launch, name string) metav1.ObjectMet
 }
 
 func (r *Runtime) upsertSecret(ctx context.Context, want corev1.Secret) error {
-	ctx, cancel := call(ctx)
-	defer cancel()
 	secrets := r.kube.CoreV1().Secrets(r.namespace)
 	existing, err := secrets.Get(ctx, want.Name, metav1.GetOptions{})
 	switch {
@@ -508,6 +595,29 @@ func labelPatchPath(key string) string {
 	return "/metadata/labels/" + labelPatchEscape.Replace(key)
 }
 
+// displacedAnnotation names, on a Sandbox, the uid of the last live pod of it the daemon replaced
+// (relaunch). A process recorded in that pod ended by the daemon's own act once the pod is going
+// (evaluate's displaced). It lives with the Sandbox, so a restarted daemon reads it as well.
+const displacedAnnotation = "legion.dev/displaced-pod"
+
+// suspendDisplacing sets the Sandbox read as s Suspended and names uid on it as the live pod that
+// suspension replaces (displacedAnnotation), in one JSON merge patch: the API server applies both
+// or neither, so a refused suspension names no pod, and a merge patch sets the one annotation key
+// whatever other annotations the Sandbox carries, or none. It carries s's uid, which the API server
+// refuses to change on a live object, so a Sandbox deleted and recreated in between is never
+// written: the fence recordAddresses keeps.
+func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) error {
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"uid": string(s.UID), "annotations": map[string]string{displacedAnnotation: string(uid)}},
+		"spec":     map[string]any{"operatingMode": modeSuspended},
+	})
+	if err != nil {
+		return err
+	}
+	_, err = r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
+	return err
+}
+
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's
 // uid, so a Sandbox deleted and recreated in between is never written. A JSON patch, not a merge
 // patch: `add` replaces the pod template whole, where a merge patch would keep every key of the
@@ -517,9 +627,7 @@ func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) (*s
 	if err != nil {
 		return nil, err
 	}
-	patching, cancel := call(ctx)
-	defer cancel()
-	u, err := r.sandboxClient().Patch(patching, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
+	u, err := r.sandboxClient().Patch(ctx, s.Name, types.JSONPatchType, body, metav1.PatchOptions{})
 	if err != nil {
 		return nil, err
 	}

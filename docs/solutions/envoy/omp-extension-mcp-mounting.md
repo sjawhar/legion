@@ -77,8 +77,8 @@ Key mechanics (from `@oh-my-pi/pi-coding-agent` `src/discovery/omp-plugins.ts` a
   `hooks/`, and `tools/` — a package can ship those the same way.
 
 Per-user gating lives in whatever the package mounts or registers: the dispatch tool, for
-example, is registered only when `resolveDispatchConfig`
-(`packages/envoy-client/src/dispatch-config.ts`) yields a service URL from `envoy.json`
+example, is registered only when `sessionDispatchSettings`
+(`packages/envoy-client/src/session-settings.ts`) resolves Dispatch from `envoy.json`
 (`dispatch.enabled` / `dispatch.serverUrl`) or `DISPATCH_URL`. Which GitHub repo a thread
 lands in is not config either: the tool derives it from the session's cwd at call time.
 

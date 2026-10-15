@@ -33,9 +33,9 @@ func (m *Machine) checkLaunch(ctx context.Context) error {
 	return m.deps.Store.CheckLaunch(ctx, m.claim)
 }
 
-// retreeable is where a claim runs nothing and may move to another tree: queued, or one of the
-// states its process is gone in. A launch whose outcome is uncertain may still run, so it waits.
-var retreeable = append([]ClaimState{StateQueued}, gone...)
+// RunsNothing is whether the claim is in a state with no process of its own (RunsNothingStates):
+// only such a claim may move to another tree.
+func (c Claim) RunsNothing() bool { return slices.Contains(runsNothing, c.State) }
 
 // Retree re-points a claim to tree, the tree its issue belongs to now: a child of a closed tree
 // re-admitted as a root of its own keeps its roles' claims, which still name the tree it left. The
@@ -48,15 +48,16 @@ var retreeable = append([]ClaimState{StateQueued}, gone...)
 // nothing of Sandboxes, and a check here would race that cleanup, so it is left to the launch, which
 // expects the volume to hold what it left and, finding it does not, logs the volume lost once and
 // starts a fresh session (runtime.WorkspaceLost). Only a claim that runs nothing is re-pointed; one
-// whose process still runs in the old tree is a wait (wait.ErrWaiting) until its old tree's stop
-// lands.
+// whose process still runs in the old tree is a wait (wait.ErrWaiting): the new tree's start
+// suspends it first, keeping its session, and waits for that suspension to land (the daemon's
+// outbox, stopElsewhere).
 func (m *Machine) Retree(ctx context.Context, tree string) error {
 	m.mu.Lock()
 	defer m.unlock()
 	if m.claim.Tree == tree {
 		return nil
 	}
-	if !slices.Contains(retreeable, m.claim.State) {
+	if !m.claim.RunsNothing() {
 		return wait.Errorf("re-point claim %s from tree %s to %s: it is %s there", m.claim.Token, m.claim.Tree, tree, m.claim.State)
 	}
 	m.log.Info("supervise: the claim's issue moved to another tree", "claim", m.claim.Token, "from", m.claim.Tree, "to", tree)

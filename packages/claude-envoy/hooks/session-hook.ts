@@ -3,14 +3,22 @@
 // characters, so a long open-asks summary sharing a command with the skill could push it out.
 //
 // open-asks (every SessionStart: startup, resume, clear, compact, fork). Three jobs:
-// 1. Name Claude Code as the `dispatch` command's host: append `export DISPATCH_HOST=claude` to
+// 1. Name Claude Code as the `dispatch` command's host and hand on the session's envoy.json:
+//    append `export DISPATCH_HOST=claude` and `export ENVOY_CONFIG_FILE='<path>'` (the file
+//    Claude Code's rule picks, `$CLAUDE_CONFIG_DIR/envoy.json` when that is set) to
 //    `CLAUDE_ENV_FILE`, which Claude Code sources into every later Bash command of the session,
-//    unless an earlier SessionStart already wrote that line there.
-//    The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which Claude Code sets fresh
-//    in each Bash command, so a `/clear` needs nothing more here.
+//    each unless an earlier SessionStart already wrote that line there. The `dispatch` command
+//    reads the file ENVOY_CONFIG_FILE names whenever DISPATCH_HOST is set. A subagent's Bash can
+//    lack what that file holds (anthropics/claude-code#46696); the `dispatch` command it runs then
+//    takes host `claude` from `CLAUDE_CODE_CHILD_SESSION=1` and reads `CLAUDE_CONFIG_DIR` itself.
+//    The path is single-quoted, the one form Claude Code's PowerShell
+//    bridge also reads. The command reads the session id from `CLAUDE_CODE_SESSION_ID`, which
+//    Claude Code sets fresh in each Bash command, so a `/clear` needs nothing more here.
 // 2. Record the CURRENT session id for this Claude process so the channel
 //    server, which keeps the id it was spawned with, can follow a `/clear`.
-// 3. Put the session's open Dispatch asks into the model's context.
+// 3. Put the session's open Dispatch asks into the model's context, after one `envoy: <warning>`
+//    line for each file the read found and did not read (a checkout's `.opencode/envoy.json`,
+//    naming its rename), as the other plugins' start notices and the `dispatch` command name it.
 // Plain stdout becomes context; it always exits 0 so a Dispatch outage never
 // blocks a session from starting.
 //
@@ -25,14 +33,14 @@
 
 import { appendFileSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { formatOpenAsksSummary } from "@legion/envoy-client/dispatch-execute"
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
 } from "@legion/envoy-client/dispatch-first"
 import { DispatchClient } from "@legion/envoy-client/dispatch-http"
-import { messageFor } from "@legion/envoy-client/errors"
+import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
+import { sessionConfigFile, sessionDispatchSettings } from "@legion/envoy-client/session-settings"
 import { z } from "zod"
 import { claudeProjectDirectory, configuredValue } from "../src/claude-session"
 import { sessionHandoffFile, writeSessionHandoff } from "../src/session-identity"
@@ -46,23 +54,31 @@ const DispatchFirstInput = z.object({
 
 const DISPATCH_HOST_LINE = "export DISPATCH_HOST=claude"
 
-/** Appends the host line to the env file, once: every SessionStart of the session runs this. */
-function nameDispatchHost(envFile: string): void {
+/** Appends `line` to the env file, once: every SessionStart of the session runs this. */
+function appendOnce(envFile: string, line: string): void {
   let written = ""
   try {
     written = readFileSync(envFile, "utf8")
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    if (!hasErrnoCode(error, "ENOENT")) throw error
   }
-  if (written.split("\n").includes(DISPATCH_HOST_LINE)) return
+  if (written.split("\n").includes(line)) return
   const separator = written === "" || written.endsWith("\n") ? "" : "\n"
-  appendFileSync(envFile, `${separator}${DISPATCH_HOST_LINE}\n`)
+  appendFileSync(envFile, `${separator}${line}\n`)
 }
 
 async function openAsks(raw: unknown): Promise<void> {
   const input = OpenAsksInput.parse(raw)
   const envFile = process.env["CLAUDE_ENV_FILE"]
-  if (envFile) nameDispatchHost(envFile)
+  // A file location that cannot be worked out hands nothing on: the open-asks summary below says
+  // why Dispatch is unavailable.
+  const chosen = sessionConfigFile("claude", process.env)
+  if (envFile) {
+    appendOnce(envFile, DISPATCH_HOST_LINE)
+    if (chosen.path !== null) {
+      appendOnce(envFile, `export ENVOY_CONFIG_FILE='${chosen.path.replaceAll("'", "'\\''")}'`)
+    }
+  }
   const pluginData = process.env["CLAUDE_PLUGIN_DATA"]
   if (pluginData !== undefined && pluginData.trim().length > 0) {
     try {
@@ -76,23 +92,33 @@ async function openAsks(raw: unknown): Promise<void> {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  const config = resolveDispatchConfig(process.env, { cwd: directory })
-  if (config.enabled && config.url !== null && config.token !== null) {
+  const { dispatch, warnings, missing } = sessionDispatchSettings(chosen, process.env, {
+    cwd: directory,
+  })
+  for (const warning of warnings) process.stdout.write(`envoy: ${warning}\n`)
+  if (dispatch.enabled) {
     try {
       const snapshot = await new DispatchClient(
-        config.url,
-        config.token,
+        dispatch.url,
+        dispatch.token,
         fetch,
         AbortSignal.timeout(OPEN_ASKS_TIMEOUT_MS),
       ).openAsks(input.session_id)
       process.stdout.write(
-        `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, config.url)}\n`,
+        `Dispatch authored-ask summary:\n${formatOpenAsksSummary(snapshot, dispatch.url)}\n`,
       )
     } catch (error) {
       process.stdout.write(`Dispatch authored-ask summary unavailable: ${messageFor(error)}\n`)
     }
-  } else if (config.error !== null) {
-    process.stdout.write(`Dispatch authored-ask summary unavailable: ${config.error}\n`)
+  } else if (dispatch.error !== null) {
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.error}\n`)
+  } else if (
+    missing?.oldUserFileNotice !== undefined &&
+    dispatch.notice.endsWith(missing.oldUserFileNotice)
+  ) {
+    // The missing file is why Dispatch is off, and that notice names the OpenCode-era file this
+    // machine still holds: say so and what to do. Off for any other reason says nothing.
+    process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.notice}\n`)
   }
 }
 
@@ -102,7 +128,8 @@ function dispatchFirst(raw: unknown): void {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  if (!resolveDispatchConfig(process.env, { cwd: directory }).enabled) return
+  const chosen = sessionConfigFile("claude", process.env)
+  if (!sessionDispatchSettings(chosen, process.env, { cwd: directory }).dispatch.enabled) return
   const pluginRoot = configuredValue(process.env["CLAUDE_PLUGIN_ROOT"])
   if (pluginRoot === undefined) {
     throw new Error("CLAUDE_PLUGIN_ROOT is unset; Claude Code sets it for every plugin hook")
