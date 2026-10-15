@@ -205,7 +205,11 @@ than close it with a claim (an etag-guarded `UpdateSecret` before the add), whic
 clear. The store also gets a `seed.StoreType`, with its opener, its `CheckName` when its names have
 a form (`Command` applies it before it opens the store, since the refusal of an open prints
 `--name`, where a seed may have been pasted) and its line of help, and that type joins the
-`seed.Stores` map in `cmd/envoy-infra/main.go`.
+`seed.Stores` map in `cmd/envoy-infra/main.go`. A program may call `Check`, `Generate`, `Verify`
+or a store's methods with a name the command's flag rule never saw, and every line, refusal and
+error after a write quotes the name, so each of them first refuses a name holding a seed
+(`seededName`, naming no part of it); a new store's methods call it first too, with a row in
+`TestBothStoresRefuseASeedInTheName` (`seed/seededname_test.go`).
 
 Each mode's calls are the grant an operator gives it, listed per store under "The calls each mode
 makes" in `packages/envoy/infra/README.md`, so a change to the calls changes that table in the

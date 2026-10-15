@@ -1501,7 +1501,10 @@ deployment; the live test below re-proves it against this branch's listener.)
     `ErrNotServed`, which `generate`'s read-back waits out; `FAILED_PRECONDITION` is an `*Unserved`,
     named by one `GetSecretVersion`.
 
-  `--name` takes `projects/<p>/secrets/<s>`, checked before the store opens without echoing it.
+  `--name` takes `projects/<p>/secrets/<s>`, checked before the store opens without echoing it,
+  and each of the store's methods checks it again, as `Check`, `Generate` and `Verify` and the AWS
+  store's methods do, refusing a name that holds a seed before any call (`seededName`), since a
+  program calls them with names the command's flag rule never saw.
   `--region` and `--expect-account` are refused. It authenticates with Application Default
   Credentials or `GOOGLE_OAUTH_ACCESS_TOKEN`, takes `SECRET_MANAGER_ENDPOINT` as `https` only, and
   logs nothing whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says. Before any call it refuses, naming the
