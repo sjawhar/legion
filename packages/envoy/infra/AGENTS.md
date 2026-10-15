@@ -36,7 +36,7 @@ versions. Never add the module to the root `go.work`.
 | `seed/` | `envoy-infra seed`: `Check`, `Generate`, `Verify` and the command over a `Store` (`Describe`, `Versions`, `Put`, `Current`), and the AWS Secrets Manager store (`awsstore.go`). |
 | `host/` | `host:Listener` (`listener.go`) and its watchdog's texts (`watchdog.go`, golden-tested in `testdata/`). |
 | `internal/providers/` | `Require`, the providers check. |
-| `internal/pulumitest/` | The live tests' harness. |
+| `internal/pulumitest/` | The tests' harness: the mock engine a component's unit tests run on (`Mocks`, `Construct`, `mocks.go`), and the live tests' plugin build and pulumi CLI. |
 
 ## Rules for a component
 
@@ -152,6 +152,11 @@ go test -tags natslive ./core/ ./seed/
 The release job runs vet and the unit tests again before it builds. The required `lint` job of
 `.github/workflows/pr-and-main.yaml` compiles the module's commands for every release target. Run
 those steps from those jobs after changing what they cover.
+
+A component's tests run on `pulumitest.Mocks`, which records every registration and answers with
+its known inputs as state, plus what the package's `Computed` adds for its provider's outputs, and
+construct through the plugin with `pulumitest.Construct`. A package keeps only its `Computed` and
+its example inputs.
 
 The live tests (`host/live_test.go`, build tag `pulumilive`) apply Pulumi YAML programs with the
 `pulumi` CLI against this machine's Docker: a listener reaches `"status":"healthy"` on the explicit

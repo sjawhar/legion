@@ -655,6 +655,13 @@ written here.
   `natsUrls`). `host:Listener` calls `Check` in `resolveListener` and `Env` in its `ApplyT`, and
   its refusal table keeps one row for core's refusals, showing where they go. The sibling slices
   3 and 4 build on this API.
+- Create: `packages/envoy/infra/internal/pulumitest/mocks.go`, `mocks_test.go`: the mock engine
+  and Construct harness every component's tests share. `Mocks` records each registration
+  (`One`, `Types`, `Registrations`) and answers with the inputs as state, less any unknown (the
+  SDK fails to unmarshal a secret-wrapped unknown in a mock's state), plus what its `Computed`
+  adds; `Construct` serves the plugin in process and constructs a component; `Plain` unwraps a
+  secret. host's tests run on it and keep only their `Computed` (an image's `imageId`); the gcp
+  and aws layers move onto it.
 - Modify: `packages/envoy/internal/testnats/nats.go`:
   - add `const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"`
     on one line beside `Image` (`nats.go:41-46`), and `var Images`, the two with each one's short
