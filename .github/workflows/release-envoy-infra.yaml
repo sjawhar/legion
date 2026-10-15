@@ -129,6 +129,17 @@ jobs:
           cache-dependency-path: |
             packages/envoy/infra/go.sum
             packages/envoy/go.sum
+      # The module's vet, its live-test tag included, and its unit tests, before anything is built:
+      # envoy-and-contracts.yaml's envoy-infra-go job, which runs them on a pull request, is not a
+      # required check, so the release checks the behaviour it publishes itself, as
+      # release-envoy-listener.yaml runs its container smoke test inside its release job before it
+      # publishes.
+      - name: Vet envoy-infra, its live-test tag included
+        if: steps.version.outputs.skip != 'true'
+        run: go -C packages/envoy/infra vet -tags pulumilive ./...
+      - name: Unit test envoy-infra
+        if: steps.version.outputs.skip != 'true'
+        run: go -C packages/envoy/infra test ./...
       # CGO_ENABLED=0: a static binary, so a linux archive runs on any distribution. One archive per
       # target .github/envoy-infra-targets.json lists (the pull request's notices check reads the
       # same list), under the name Pulumi requests from the schema's download URL,
