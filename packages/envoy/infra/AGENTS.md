@@ -83,6 +83,12 @@ versions. Never add the module to the root `go.work`.
   and `go.sum`, the `go.work` files, the notices script and the target list. A commit to the
   module's README, AGENTS.md or live-test harness cuts none. The workflow's push paths take all of
   `packages/envoy/**`, so a package the plugin starts compiling in needs no list edited.
+- **Release jobs.** The workflow's `build` job (`contents: read`, no secret) runs everything that
+  runs the module's code or its dependencies: the version step's `go list`, vet, the unit tests,
+  the build and the smoke test. It hands `publish` the archives as an artifact and the version as
+  job outputs. `publish` holds the write scopes, the OIDC token and the deploy key, and runs only
+  the pinned actions and `release-push.sh`. A step that runs Go, the Pulumi CLI or the plugin goes
+  in `build`, never in `publish`.
 - **Byte-exact texts.** The watchdog's create and delete texts reproduce an existing deployment's
   byte for byte, since a `remote:Command` compares them as strings and any change reruns create on
   every host. Change them only with the goldens.
