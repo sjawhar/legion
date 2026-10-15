@@ -547,42 +547,52 @@ func TestGCPRefusesAMalformedNameBeforeOpeningTheStore(t *testing.T) {
 // fake found GOOGLE_APPLICATION_CREDENTIALS quoted on stderr ("open <seed>: no such file or
 // directory"), GOOGLE_OAUTH_ACCESS_TOKEN and GOOGLE_CLOUD_QUOTA_PROJECT in request headers (the
 // bearer token, x-goog-user-project), and GOOGLE_CLOUD_UNIVERSE_DOMAIN, GCE_METADATA_HOST and an
-// https endpoint's host dialed. An http endpoint is refused by the endpoint's form, which quotes
-// nothing.
+// https endpoint's host dialed. A seed is found as core.HoldsSeed finds one: the whole value, inside
+// a longer one (a path, a token, a host, a project), or percent-encoded, as in an endpoint's path or
+// query, which the endpoint's form would refuse but only after the seed check names the variable.
 func TestGCPRefusesASeedInItsConfiguration(t *testing.T) {
-	httpEndpoint := "refused: " + gcpSecret + ": SECRET_MANAGER_ENDPOINT is https://<host>[:<port>], as https://secretmanager.googleapis.com\n"
 	for _, row := range []struct {
-		variable, prefix, source string
-		want                     string // the refusal, when it is not the configuration-seed one
+		name, variable string
+		value          func(seed string) string
 	}{
-		{"GOOGLE_OAUTH_ACCESS_TOKEN", "", "GOOGLE_OAUTH_ACCESS_TOKEN", ""},
-		{"GOOGLE_APPLICATION_CREDENTIALS", "", "GOOGLE_APPLICATION_CREDENTIALS", ""},
-		{"GOOGLE_CLOUD_QUOTA_PROJECT", "", "GOOGLE_CLOUD_QUOTA_PROJECT", ""},
-		{"GOOGLE_CLOUD_UNIVERSE_DOMAIN", "", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", ""},
-		{"GCE_METADATA_HOST", "", "GCE_METADATA_HOST", ""},
-		{"SECRET_MANAGER_ENDPOINT", "", "SECRET_MANAGER_ENDPOINT", ""},
-		{"SECRET_MANAGER_ENDPOINT", "https://", "the host of SECRET_MANAGER_ENDPOINT", ""},
-		{"SECRET_MANAGER_ENDPOINT", "http://", "SECRET_MANAGER_ENDPOINT over http", httpEndpoint},
+		{"a whole access token", "GOOGLE_OAUTH_ACCESS_TOKEN", whole},
+		{"a seed inside an access token", "GOOGLE_OAUTH_ACCESS_TOKEN", func(s string) string { return "ya29." + s + ".x" }},
+		{"a whole credentials path", "GOOGLE_APPLICATION_CREDENTIALS", whole},
+		{"a seed inside a credentials path", "GOOGLE_APPLICATION_CREDENTIALS",
+			func(s string) string { return "/home/example/.config/" + s + ".json" }},
+		{"a whole quota project", "GOOGLE_CLOUD_QUOTA_PROJECT", whole},
+		{"a seed inside a quota project", "GOOGLE_CLOUD_QUOTA_PROJECT", func(s string) string { return "example-" + s }},
+		{"a whole universe domain", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", whole},
+		{"a seed inside a universe domain", "GOOGLE_CLOUD_UNIVERSE_DOMAIN", func(s string) string { return s + ".example.com" }},
+		{"a whole metadata host", "GCE_METADATA_HOST", whole},
+		{"a seed inside a metadata host", "GCE_METADATA_HOST", func(s string) string { return "metadata-" + s + ":80" }},
+		{"a whole endpoint", "SECRET_MANAGER_ENDPOINT", whole},
+		{"an endpoint whose host is a seed", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "https://" + s }},
+		{"a seed inside an endpoint's host", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "https://" + s + ".example.com" }},
+		{"an http endpoint whose host is a seed", "SECRET_MANAGER_ENDPOINT", func(s string) string { return "http://" + s }},
+		{"a seed percent-encoded in an endpoint's path", "SECRET_MANAGER_ENDPOINT",
+			func(s string) string { return "https://secretmanager.googleapis.com/" + percentEncoded(s) }},
+		{"a seed percent-encoded in an endpoint's query", "SECRET_MANAGER_ENDPOINT",
+			func(s string) string { return "https://secretmanager.googleapis.com/?k=" + percentEncoded(s) }},
 	} {
-		t.Run(row.source, func(t *testing.T) {
+		t.Run(row.name, func(t *testing.T) {
 			seedValue, _ := testnats.User(t)
 			f := newFakeGCP(t)
 			serveGCP(t, f)
-			t.Setenv(row.variable, row.prefix+seedValue)
+			t.Setenv(row.variable, row.value(seedValue))
 			code, out, errs := runGCP(t, f, "check")
 			require.Equal(t, 2, code, errs)
 			require.Empty(t, out)
-			want := row.want
-			if want == "" {
-				want = "refused: " + gcpSecret + ": " + row.source + ": an nkey user seed, which is never Google Cloud " +
-					"configuration (not echoed)\n"
-			}
-			require.Equal(t, want, errs)
+			require.Equal(t, "refused: "+gcpSecret+": "+row.variable+": an nkey user seed, which is never Google Cloud "+
+				"configuration (not echoed)\n", errs)
 			require.Empty(t, f.recorded(), "no call was made")
 			require.NotContains(t, strings.Join(f.headers, "\n"), seedValue)
 		})
 	}
 }
+
+// whole is a configuration value that is the seed itself.
+func whole(seed string) string { return seed }
 
 // serviceAccount writes a service account key, as Application Default Credentials find one through
 // GOOGLE_APPLICATION_CREDENTIALS, and returns it with a check that a bearer token is a JWT that key

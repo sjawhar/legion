@@ -117,6 +117,9 @@ type settings struct {
 // newSettings validates args and renders the NATS configuration and the VM's user data. Every
 // refusal names the input.
 func newSettings(args *NatsHubArgs) (settings, error) {
+	if input, ok := seededInput(args); ok {
+		return settings{}, seedRefused(input)
+	}
 	if !hostnameRule.MatchString(args.Hostname) {
 		return settings{}, fmt.Errorf("hostname %q must match %s", args.Hostname, hostnameRule)
 	}
@@ -178,6 +181,71 @@ func newSettings(args *NatsHubArgs) (settings, error) {
 		return settings{}, fmt.Errorf("render the cloud-config: %w", err)
 	}
 	return s, nil
+}
+
+// seededInput names the first plain input of args that holds an nkey user seed (core.HoldsSeed:
+// whole, inside a longer value, or percent-encoded), by its path and never its value. Every one
+// reaches a refusal that quotes it, the user data, or a child's inputs, which a preview prints:
+// the hostname and the tags, quoted by the hub's own refusals and written into the user data; the
+// zone and the machine type, the group's and the template's inputs; the images, written into the
+// user data; and each user's name, which core's refusals quote, and its machine id and rules,
+// which the rendered authorization holds. A user's nkey is not checked here: core refuses any nkey
+// that is not a user public key, a seed included, without quoting it, and a public key holds no
+// seed. tailnetAuthKey is a secret, which reaches the secret version alone; network and subnetwork
+// are Inputs, checked when they resolve (refuseSeed).
+func seededInput(args *NatsHubArgs) (string, bool) {
+	type field struct{ path, value string }
+	fields := []field{{"hostname", args.Hostname}, {"zone", args.Zone}, {"natsImage", args.NatsImage},
+		{"tailscaleImage", args.TailscaleImage}}
+	for i, tag := range args.Tags {
+		fields = append(fields, field{fmt.Sprintf("tags[%d]", i), tag})
+	}
+	if args.MachineType != nil {
+		fields = append(fields, field{"machineType", *args.MachineType})
+	}
+	for i, u := range args.Users {
+		user := fmt.Sprintf("users[%d]", i)
+		fields = append(fields, field{user + ".name", u.Name})
+		if u.MachineID != nil {
+			fields = append(fields, field{user + ".machineId", *u.MachineID})
+		}
+		if u.Permissions == nil {
+			continue
+		}
+		for _, rules := range []struct {
+			path    string
+			entries []string
+		}{
+			{"publish.allow", u.Permissions.Publish.Allow}, {"publish.deny", u.Permissions.Publish.Deny},
+			{"subscribe.allow", u.Permissions.Subscribe.Allow}, {"subscribe.deny", u.Permissions.Subscribe.Deny},
+		} {
+			for j, entry := range rules.entries {
+				fields = append(fields, field{fmt.Sprintf("%s.permissions.%s[%d]", user, rules.path, j), entry})
+			}
+		}
+	}
+	for _, f := range fields {
+		if core.HoldsSeed(f.value) {
+			return f.path, true
+		}
+	}
+	return "", false
+}
+
+// seedRefused refuses input, which holds an nkey user seed, naming it and not its value.
+func seedRefused(input string) error {
+	return fmt.Errorf("%s: an nkey user seed, which is never an input of the hub (not echoed)", input)
+}
+
+// refuseSeed is value, an Input of the hub that may come from another resource, with a seed in it
+// refused once it resolves: the output fails naming input, so no child is registered with it.
+func refuseSeed(value pulumi.StringPtrInput, hub, input string) pulumi.StringPtrOutput {
+	return value.ToStringPtrOutput().ApplyT(func(v *string) (*string, error) {
+		if v != nil && core.HoldsSeed(*v) {
+			return nil, fmt.Errorf("%s: %w", hub, seedRefused(input))
+		}
+		return v, nil
+	}).(pulumi.StringPtrOutput)
 }
 
 // authorization maps the users onto core's: each a keyed user with a seed, whose permissions are
@@ -280,7 +348,11 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		}
 		network = created.SelfLink
 	} else {
-		network = args.Network.ToStringPtrOutput().Elem()
+		network = refuseSeed(args.Network, natsHubType+" "+name, "network").Elem()
+	}
+	var subnetwork pulumi.StringPtrInput
+	if args.Subnetwork != nil {
+		subnetwork = refuseSeed(args.Subnetwork, natsHubType+" "+name, "subnetwork")
 	}
 
 	if _, err := compute.NewFirewall(ctx, hostname+"-health-checks", &compute.FirewallArgs{
@@ -321,7 +393,7 @@ func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pul
 		},
 		NetworkInterfaces: compute.InstanceTemplateNetworkInterfaceArray{compute.InstanceTemplateNetworkInterfaceArgs{
 			Network:    network,
-			Subnetwork: args.Subnetwork,
+			Subnetwork: subnetwork,
 			// An external address, the VM's way out to the image registries and the tailnet.
 			AccessConfigs: compute.InstanceTemplateNetworkInterfaceAccessConfigArray{
 				compute.InstanceTemplateNetworkInterfaceAccessConfigArgs{},

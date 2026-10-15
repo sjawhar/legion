@@ -17,6 +17,8 @@ import (
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/sjawhar/envoy/infra/core"
 )
 
 // GCPSecretManager is the --store value of Google Cloud Secret Manager.
@@ -55,8 +57,11 @@ var gcpConfigEnv = []string{
 // set. It refuses --region and --expect-account, which are Secrets Manager's: a Secret Manager
 // secret is global, and its name names its project.
 //
-// A variable of gcpConfigEnv whose value is an nkey user seed is refused first, naming the variable
-// and never the value, as the AWS store refuses a seed in its configuration.
+// A variable of gcpConfigEnv whose value holds an nkey user seed (core.HoldsSeed: whole, inside a
+// longer value such as a path, a token or a host, or percent-encoded) is refused first, naming the
+// variable and never the value, as the AWS store refuses a seed in its configuration. The check
+// covers SECRET_MANAGER_ENDPOINT's whole value, its host, path and query included, so it comes
+// before the endpoint's form, whose refusal quotes nothing either.
 func OpenGCP(ctx context.Context, region, account string) (Store, error) {
 	if account != "" {
 		return nil, refuse("--expect-account is not accepted with --store %s: it checks an AWS account, and the secret's name names its project", GCPSecretManager)
@@ -65,7 +70,7 @@ func OpenGCP(ctx context.Context, region, account string) (Store, error) {
 		return nil, refuse("--region is not accepted with --store %s: its secrets are global, named projects/<project>/secrets/<secret>", GCPSecretManager)
 	}
 	for _, name := range gcpConfigEnv {
-		if isSeed(os.Getenv(name)) {
+		if core.HoldsSeed(os.Getenv(name)) {
 			return nil, gcpConfigSeed(name)
 		}
 	}
@@ -113,9 +118,6 @@ func gcpEndpoint(raw string) (string, error) {
 		u.RawQuery != "" || u.Fragment != "" {
 		return "", refuse("SECRET_MANAGER_ENDPOINT is https://<host>[:<port>], as https://secretmanager.googleapis.com")
 	}
-	if isSeed(u.Hostname()) {
-		return "", gcpConfigSeed("the host of SECRET_MANAGER_ENDPOINT")
-	}
 	port := u.Port()
 	if port == "" {
 		port = "443"
@@ -123,8 +125,8 @@ func gcpEndpoint(raw string) (string, error) {
 	return net.JoinHostPort(u.Hostname(), port), nil
 }
 
-// gcpConfigSeed refuses a value of the Google Cloud configuration that is an nkey user seed, naming
-// source, where it came from.
+// gcpConfigSeed refuses a value of the Google Cloud configuration that holds an nkey user seed,
+// naming source, where it came from.
 func gcpConfigSeed(source string) error {
 	return refuse("%s: an nkey user seed, which is never Google Cloud configuration (not echoed)", source)
 }

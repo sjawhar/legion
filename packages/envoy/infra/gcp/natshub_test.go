@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
 	"github.com/sjawhar/envoy/infra/nats"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const (
@@ -553,6 +554,89 @@ func TestNatsHubRefusesAnInvalidInputBeforeRegistering(t *testing.T) {
 	m, err := run(t, args, nil, true)
 	require.ErrorContains(t, err, `envoy-infra:gcp:NatsHub example-hub: hostname "ab-"`)
 	require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
+}
+
+// A seed in any plain input the hub renders, registers or quotes in a refusal is refused naming
+// the input by its path, never the value: the hostname and the tags, which the hub's own refusals
+// quote and the user data holds; the zone and machine type, which reach the group and the
+// template; the images and each user's name, machine id and rules, which reach the user data or
+// core's refusals. The seed is found as core.HoldsSeed finds it: whole, inside a longer value, or
+// percent-encoded. A seed as a user's nkey is core's to refuse, unquoted (the resolver table's
+// "a user whose public key is a seed"), and tailnetAuthKey, a secret that reaches the secret
+// version alone, is not checked.
+func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
+	seed, _ := testnats.User(t)
+	inside := "example-" + seed
+	digest := "@sha256:" + strings.Repeat("0", 64)
+	for _, row := range []struct {
+		input string
+		edit  func(*gcp.NatsHubArgs)
+	}{
+		{"hostname", func(a *gcp.NatsHubArgs) { a.Hostname = seed }},
+		{"tags[0]", func(a *gcp.NatsHubArgs) { a.Tags = []string{"tag:" + seed} }},
+		{"zone", func(a *gcp.NatsHubArgs) { a.Zone = inside }},
+		{"machineType", func(a *gcp.NatsHubArgs) { a.MachineType = pulumi.StringRef(inside) }},
+		{"natsImage", func(a *gcp.NatsHubArgs) { a.NatsImage = "example.invalid/" + seed + digest }},
+		{"tailscaleImage", func(a *gcp.NatsHubArgs) { a.TailscaleImage = "example.invalid/" + seed + digest }},
+		{"users[1].name", func(a *gcp.NatsHubArgs) { a.Users[1].Name = seed }},
+		{"users[0].machineId", func(a *gcp.NatsHubArgs) { a.Users[0].MachineID = pulumi.StringRef(inside) }},
+		{"users[1].permissions.publish.allow[0]", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions.Publish.Allow = []string{"notifications." + seed}
+		}},
+		{"users[1].permissions.subscribe.deny[0]", func(a *gcp.NatsHubArgs) {
+			a.Users[1].Permissions.Subscribe.Deny = []string{percentEncoded(seed)}
+		}},
+	} {
+		t.Run(row.input, func(t *testing.T) {
+			args := exampleArgs()
+			row.edit(args)
+			err := gcp.ResolveNatsHub(args)
+			require.EqualError(t, err, row.input+": an nkey user seed, which is never an input of the hub (not echoed)")
+			require.NotContains(t, err.Error(), seed)
+		})
+	}
+}
+
+// network and subnetwork may come from another resource, so the hub checks them when they are
+// known, as the firewall's and the template's inputs resolve: a seed in either fails the run
+// naming it, and no registration holds it.
+func TestNatsHubRefusesASeedInItsNetworkWhenItResolves(t *testing.T) {
+	seed, _ := testnats.User(t)
+	for _, row := range []struct {
+		input string
+		edit  func(*gcp.NatsHubArgs)
+	}{
+		{"network", func(a *gcp.NatsHubArgs) {
+			a.Network = pulumi.String("projects/example-project/global/networks/" + seed)
+		}},
+		{"subnetwork", func(a *gcp.NatsHubArgs) {
+			a.Network = pulumi.String("example-network")
+			a.Subnetwork = pulumi.String("example-" + seed)
+		}},
+	} {
+		t.Run(row.input, func(t *testing.T) {
+			args := exampleArgs()
+			row.edit(args)
+			m, err := run(t, args, nil, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub example-hub: "+row.input+
+				": an nkey user seed, which is never an input of the hub (not echoed)")
+			require.NotContains(t, err.Error(), seed)
+			for _, r := range m.Registrations() {
+				for _, s := range plainStrings(resource.NewProperty(r.Inputs)) {
+					require.NotContains(t, s, seed, "%s %s holds the seed", r.Type, r.Name)
+				}
+			}
+		})
+	}
+}
+
+// percentEncoded spells every byte of text as %XX.
+func percentEncoded(text string) string {
+	var b strings.Builder
+	for i := range len(text) {
+		fmt.Fprintf(&b, "%%%02X", text[i])
+	}
+	return b.String()
 }
 
 // The names GCP gets from the hostname, for the shortest and longest hostname the rule admits:

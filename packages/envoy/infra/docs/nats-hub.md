@@ -51,6 +51,14 @@ naming the input. So the cloud-config is known at preview.
 
 The hub refuses these before it registers anything, with an error naming the input:
 
+- an nkey user seed, found as `envoy-infra seed` finds one (`core.HoldsSeed`: whole, inside a
+  longer value, or percent-encoded), in any plain input the user data, a child or a refusal would
+  carry: `hostname`, a tag, `zone`, `machineType`, an image, or a user's `name`, `machineId` or
+  rule entry. The error names the input by its path and never its value, as
+  `users[1].name: an nkey user seed, which is never an input of the hub (not echoed)`. `network`
+  and `subnetwork` may come from another resource, so a seed in either fails the preview or update
+  once it resolves, with the same error, before any child is registered with it. A seed as a user's
+  `nkey` is refused as an `nkey` that is no public key, without quoting it;
 - a `hostname` outside the rule above;
 - no `tags`, or a tag that is not `tag:` followed by a letter and then letters, digits and
   hyphens, Tailscale's rule for a tag;

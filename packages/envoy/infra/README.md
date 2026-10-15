@@ -1204,8 +1204,10 @@ library it calls, sends in a request, dials as a host or quotes in an error:
 `GOOGLE_OAUTH_ACCESS_TOKEN` (the bearer token), `GOOGLE_APPLICATION_CREDENTIALS` (quoted when the
 file cannot be opened), `GOOGLE_CLOUD_QUOTA_PROJECT` (sent as `x-goog-user-project`),
 `GOOGLE_CLOUD_UNIVERSE_DOMAIN` and `GCE_METADATA_HOST` (hosts it dials), and
-`SECRET_MANAGER_ENDPOINT` or its host, as `refused: <name>: GOOGLE_APPLICATION_CREDENTIALS: an
-nkey user seed, which is never Google Cloud configuration (not echoed)`.
+`SECRET_MANAGER_ENDPOINT`. As for the AWS store, a seed is found anywhere in the value: whole,
+inside a path, a token, a host or a project, or percent-encoded, as in an endpoint's path or query.
+The refusal names the variable, as `refused: <name>: GOOGLE_APPLICATION_CREDENTIALS: an nkey user
+seed, which is never Google Cloud configuration (not echoed)`.
 
 ### Exit codes
 

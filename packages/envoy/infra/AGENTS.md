@@ -86,8 +86,13 @@ versions. Never add the module to the root `go.work`.
   that each is the `core.InputError` naming its input. host passes on `Check`'s refusals of
   `machineId`, `port` and `hostBridge` through one call, so it has one row. A store's tests assert
   the store's own answers, and `seed_test.go` the modes' messages over them.
-  The hub reads none of its Inputs by value: its resolver checks only that `tailnetAuthKey` is set
-  and that `subnetwork` comes with `network`.
+  The hub reads none of its Inputs by value at construct: its resolver checks only that
+  `tailnetAuthKey` is set and that `subnetwork` comes with `network`, and `network` and
+  `subnetwork` are checked for a seed once they resolve (`gcp.refuseSeed`). Its resolver refuses a
+  seed (`core.HoldsSeed`) in every plain string input first, naming the input's path and never its
+  value (`gcp.seededInput`), since every one reaches the user data, a child's inputs or a refusal
+  that quotes it; a string input added to the hub joins that list, with a row in
+  `TestNatsHubRefusesASeedInAnyPlainInput`.
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,

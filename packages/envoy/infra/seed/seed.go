@@ -107,13 +107,6 @@ func refuse(format string, args ...any) error {
 	return &refusal{msg: fmt.Sprintf(format, args...)}
 }
 
-// isSeed reports whether value is an nkey user seed, as core.UserSeedPublicKey reads one. Each
-// store refuses a seed in its configuration with it.
-func isSeed(value string) bool {
-	_, err := core.UserSeedPublicKey([]byte(value))
-	return err == nil
-}
-
 // afterWrite is an error once Put has returned. It wraps nothing, so no store error it quotes can
 // make it a refusal.
 type afterWrite struct{ msg string }

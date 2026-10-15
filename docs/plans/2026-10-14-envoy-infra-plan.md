@@ -1472,11 +1472,12 @@ deployment; the live test below re-proves it against this branch's listener.)
   `--region` and `--expect-account` are refused. It authenticates with Application Default
   Credentials or `GOOGLE_OAUTH_ACCESS_TOKEN`, takes `SECRET_MANAGER_ENDPOINT` as `https` only, and
   logs nothing whatever `GOOGLE_SDK_GO_LOGGING_LEVEL` says. Before any call it refuses, naming the
-  variable and not the value, a seed in `GOOGLE_OAUTH_ACCESS_TOKEN`,
-  `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_CLOUD_QUOTA_PROJECT`, `GOOGLE_CLOUD_UNIVERSE_DOMAIN`,
-  `GCE_METADATA_HOST` or `SECRET_MANAGER_ENDPOINT` (or as its host): the variables a probe of every
-  environment variable the store and its libraries read, each set to a seed, found quoted on
-  stderr, sent in a request header or dialed as a host.
+  variable and not the value, a seed (`core.HoldsSeed`: whole, inside a longer value, or
+  percent-encoded) in `GOOGLE_OAUTH_ACCESS_TOKEN`, `GOOGLE_APPLICATION_CREDENTIALS`,
+  `GOOGLE_CLOUD_QUOTA_PROJECT`, `GOOGLE_CLOUD_UNIVERSE_DOMAIN`, `GCE_METADATA_HOST` or
+  `SECRET_MANAGER_ENDPOINT`: the variables a probe of every environment variable the store and its
+  libraries read, each set to a seed, found quoted on stderr, sent in a request header or dialed as
+  a host.
 - [x] Its unit test runs against a gRPC fake over TLS (`gcpfake_test.go`, whose certificate the
   package's one `TestMain` in `main_test.go` trusts) that implements those RPCs, with lags for
   the listing and `latest`, and repeats Task 2.2's refusal, read-back and canary cases through this
@@ -1535,10 +1536,11 @@ the cloud-neutral type `aws:NatsService`'s users take too, whose `allow` is requ
 refuses an empty one, and the key field is `nkey`, as `aws:User` names it: one shape for a NATS
 user in both clouds, and the `gcp` package imports no `aws` package. The schema names the hub's
 own input types `gcp:NatsUser` and `gcp:Permissions`. The constructor also refuses, naming the
-input: a hostname outside its rule, no tags or a tag outside
-`^tag:[A-Za-z][A-Za-z0-9-]*$`, an empty zone or `machineType`, a `diskSizeGb` below 1, no
-`tailnetAuthKey`, and `subnetwork` without `network`. Only `tailnetAuthKey`, `network` and
-`subnetwork` take another resource's output.
+input: a seed (`core.HoldsSeed`: whole, inside a longer value, or percent-encoded) in any plain
+string input, by the input's path and never its value, and in `network` or `subnetwork` once they
+resolve; a hostname outside its rule, no tags or a tag outside `^tag:[A-Za-z][A-Za-z0-9-]*$`, an
+empty zone or `machineType`, a `diskSizeGb` below 1, no `tailnetAuthKey`, and `subnetwork` without
+`network`. Only `tailnetAuthKey`, `network` and `subnetwork` take another resource's output.
 
 Resources (pulumi-gcp v10.1.0), all children, each named after the hostname rather than the
 component, after `providers.Require(..., "gcp")`:
