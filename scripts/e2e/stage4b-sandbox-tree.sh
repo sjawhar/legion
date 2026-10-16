@@ -3084,8 +3084,9 @@ note "image probe: $(jq -c '{image, model, sandbox}' <<<"$probe")"
 # fixture's overlay turns retry.modelFallback on and its pod gives every role a reservation.
 # pool-capacity is the pool's to decide, not the configuration's: the row is open when the image
 # probe pod was Unschedulable before a node came up for it, which a run that starts on an empty pool
-# meets, so it is recorded either way and the open set the controller's tick must name follows it. A
-# gap is reported, never refused: the daemon that reports secrets open is the one that runs the rest.
+# meets, so it is recorded either way, and the controller checkpoint holds every tick to the same two
+# lists, each tick on its own. A gap is reported, never refused: the daemon that reports secrets open
+# is the one that runs the rest.
 capabilities_probed() { daemon_state | jq -e '[.capabilities[] | select(.name | IN("eval-js", "eval-python", "browser", "lsp", "codegraph", "skills", "toolchain")) | select(.status == "unchecked")] | length == 0' >/dev/null; }
 until_true 60 "the capability report to carry the probe's verdict on every image row" capabilities_probed
 daemon_state | jq '.capabilities' >"$evidence/capabilities-at-boot.json"
@@ -5090,10 +5091,10 @@ note "the controller's session is under $profile_agent/sessions; $HOME/.omp/prof
 # of one reads `openCapabilities[1]: secrets` and a list of two `openCapabilities[2]: a,b`, so the
 # list is read from that line, and a tick without it names no gap (lib/controller-ticks.jq). This
 # window is before full-agent-negative, the first checkpoint that opens a live row (web-search on
-# tree 3's planner), so every tick the controller has received so far names exactly the open rows
-# of the daemon running when it was sent: secrets, and pool-capacity when that daemon's probe found
-# the pool cold; model-fallback and resource-limits are present, so the daemon names neither. The
-# daemon that reported the gap keeps running: every checkpoint after this one is that evidence.
+# tree 3's planner), so every tick the controller has received so far names secrets, and
+# pool-capacity when the sending daemon's probe found the pool cold, and nothing else;
+# model-fallback and resource-limits are present, so the daemon names neither. The daemon that
+# reported the gap keeps running: every checkpoint after this one is that evidence.
 # tick_open_capabilities prints one object per tick delivery in the controller's sessions: the
 # list, and the delivery trimmed.
 tick_open_capabilities() {
@@ -5107,16 +5108,20 @@ tick_open_capabilities() {
 controller_ticked() { tick_open_capabilities | jq -s -e 'length > 0' >/dev/null; }
 until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_ticked
 tick_open_capabilities | jq -s . >"$evidence/controller-ticks.json"
-# The tick names the running daemon's open rows, no more and no less, and those still name secrets.
-# Not boot's set: restart-mid-tree, address-moved-env-same-pod and address-moved-stream-new-pod each
-# ran a new `legion start`, every start re-probes the image, pool-capacity is that probe's own verdict
-# (packages/daemon/internal/capabilities/deployment.go), and a tick carries the running daemon's
-# Open() (packages/daemon/internal/admit/admit.go), so a run that scaled the pool at boot and found it
-# warm at the restarts would carry ["secrets"] against boot's two rows. Boot's set is kept for the note.
-daemon_open_rows=$(daemon_state | jq -c '[.capabilities[] | select(.status == "open") | .name]')
-jq -e -L "$root/scripts/e2e/lib" --argjson open "$daemon_open_rows" 'include "controller-ticks"; ticks_name_open($open)' "$evidence/controller-ticks.json" >/dev/null ||
-  fail "the tick deliveries in the controller session do not each carry openCapabilities $daemon_open_rows, the running daemon's open rows (boot's were $open_rows), or those rows no longer name secrets: $(jq -c . "$evidence/controller-ticks.json")"
-note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities $(jq -c '[.[].open] | unique | .[]' "$evidence/controller-ticks.json"), the running daemon's open rows $daemon_open_rows (boot's: $open_rows)"
+# Each tick's list is judged alone, as a set, against the two lists the deployment can open:
+# ["secrets"] and ["secrets","pool-capacity"]. Each tick alone, not all against one set:
+# restart-mid-tree, address-moved-env-same-pod and address-moved-stream-new-pod each ran a new
+# `legion start`, every start re-probes the image, pool-capacity is that probe's own verdict
+# (packages/daemon/internal/capabilities/deployment.go), and a tick carries the sending daemon's
+# Open() (packages/daemon/internal/admit/admit.go), so the ticks of one session may carry either arm:
+# a run that scaled the pool at boot and found it warm at the restarts carries both. No snapshot: a
+# read of the running daemon's open rows at the assertion would hold only while nothing restarts the
+# daemon or opens a live row inside the window, which the assertion cannot know. A live row in a
+# tick here is an anomaly the proof fails on, with the tick quoted. Boot's set stays in the note for
+# context.
+jq -e -L "$root/scripts/e2e/lib" 'include "controller-ticks"; ticks_name_deployment_open' "$evidence/controller-ticks.json" >/dev/null ||
+  fail "a tick delivery in the controller session carries openCapabilities that are not [\"secrets\"] or [\"secrets\",\"pool-capacity\"] as a set, or no tick reached it: $(jq -c . "$evidence/controller-ticks.json")"
+note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities among $(jq -c '[.[].open] | unique' "$evidence/controller-ticks.json"), each [\"secrets\"] or [\"secrets\",\"pool-capacity\"] as a set (boot's: $open_rows)"
 pass
 
 begin full-agent-negative
