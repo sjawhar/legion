@@ -116,9 +116,6 @@ type overrides struct {
 	// controllerRetry is the first wait before a failed daemon-launched controller is retried; zero
 	// is controllerRetryFirst.
 	controllerRetry time.Duration
-	// launchBackoff is the machines' first wait before a launch is tried again after a charged
-	// launch failure; zero is launchBackoffFirst.
-	launchBackoff time.Duration
 	// stopBudget is how long the daemon's stop waits for its own work once it begins; zero is
 	// stopBudget.
 	stopBudget time.Duration
@@ -543,9 +540,6 @@ type plan struct {
 	orphanSweep   time.Duration
 	// controllerRetry is the controller keeper's first wait before it retries a failed controller.
 	controllerRetry time.Duration
-	// launchBackoff is the machines' first wait before a launch is tried again after a charged
-	// launch failure (supervise.Timeouts.LaunchBackoff).
-	launchBackoff time.Duration
 	// stopBudget is how long the stop waits for the daemon's own work once it begins (stopBudget).
 	stopBudget time.Duration
 	// secretsEnroller is the daemon's agent-secrets token login as the machines' Enroller
@@ -620,10 +614,6 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	if controllerRetry == 0 {
 		controllerRetry = controllerRetryFirst
 	}
-	launchBackoff := o.launchBackoff
-	if launchBackoff == 0 {
-		launchBackoff = launchBackoffFirst
-	}
 	stop := o.stopBudget
 	if stop == 0 {
 		stop = stopBudget
@@ -637,7 +627,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
-		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, launchBackoff: launchBackoff, stopBudget: stop,
+		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
 		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource, checkLaunch: o.checkLaunch,
 	}
@@ -929,7 +919,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
-			LaunchBackoff:         p.launchBackoff,
+			LaunchBackoff:         launchBackoffFirst,
 		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,

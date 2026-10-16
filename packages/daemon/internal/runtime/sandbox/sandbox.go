@@ -441,10 +441,11 @@ func (f *feed) check() error {
 		f.resource, f.since.UTC().Format(time.RFC3339), f.failed)
 }
 
-// call is ctx bounded for one call no client of the runtime bounds whole: a GitHub App token mint,
-// and a pod log Stream, which client-go bounds by the client's timeout per attempt and not across
-// its Retry-After retries (rest/request.go, Request.Stream), so a log read fails fast rather than
-// hold its caller.
+// call is ctx bounded for one call no client of the runtime bounds whole: a GitHub App token mint;
+// a pod log Stream, which client-go bounds by the client's timeout per attempt and not across its
+// Retry-After retries (rest/request.go, Request.Stream), so a log read fails fast rather than hold
+// its caller; and a failed launch's suspension of its Sandbox (suspendFailedLaunch), which waits an
+// overloaded server out for no longer than this.
 func call(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, apiTimeout)
 }

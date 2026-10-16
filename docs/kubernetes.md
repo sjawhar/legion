@@ -2293,7 +2293,7 @@ server answers it. Each request waits so for up to a boot timeout from its first
 answer, or until the launch step it belongs to ends when that comes first, so a try under a long
 throttle can take several boot timeouts, one per request it sends. Two of a launch's waits send a
 request of their own, and that request ends with the wait's budget: the wait for a Sandbox being
-deleted, and awaitPodGone's read confirming the old pod is gone. A failed launch's suspension of
+deleted, and the read confirming the old pod is gone. A failed launch's suspension of
 its Sandbox waits the server out for at most 30 s. Each throttled request logs `sandbox runtime:
 the API server answered a launch's request overloaded; sending it again after a backoff` once,
 naming it, and `… it had answered overloaded` once the server answers, with how many overloaded
@@ -2312,7 +2312,7 @@ the API server refuses the informers' own lists or watches as overloaded, a laun
 role launcher waits on, within its deadline, until the informers list and watch again. Only a
 launch's requests wait the server out; a sweep, a claim's suspension or a hello's credential read
 fails on the answer and is tried again by its own caller. A charged launch failure is followed by
-the supervisor's launch backoff ([Supervision](/legion/legion/concepts/#supervision)).
+the supervisor's launch backoff ([Supervision](site/src/content/docs/legion/concepts.md#supervision)).
 
 A role's launcher credential is read once however often its launcher says hello. The read is
 single-flight per Secret of a Sandbox and outlives the hello that began it: the hello waits for it

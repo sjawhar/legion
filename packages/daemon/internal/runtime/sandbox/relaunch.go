@@ -296,7 +296,7 @@ func provisioning(pod *corev1.Pod) bool {
 // stop never waits a boot timeout on it. A suspension that still fails is logged; the next
 // relaunch suspends the Sandbox in any case.
 func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s *sandbox) {
-	suspending, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiTimeout)
+	suspending, cancel := call(context.WithoutCancel(ctx))
 	defer cancel()
 	if err := r.setMode(suspending, s, modeSuspended); err != nil {
 		r.log.Error("sandbox runtime: could not suspend the sandbox of a failed launch", "claim", token, "err", err)
@@ -364,7 +364,8 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, refused)
 			}
 			// Fenced to the resourceVersion read, beside the uid patch tests: a delete, a relabel or a
-			// mode change since that read conflicts, and the next launch reads the Sandbox again.
+			// mode change since that read fails the test, the server refuses the patch as invalid, and
+			// this launch reads the Sandbox again within its deadline.
 			ops := []jsonPatchOp{
 				{Op: "test", Path: "/metadata/resourceVersion", Value: s.ResourceVersion},
 				{Op: "add", Path: labelPatchPath(labelTree), Value: tree},
