@@ -256,11 +256,11 @@ func TestGCPListReadsAnnotationsKeyStateAndExpiry(t *testing.T) {
 	if ls := byID[fakePrefix+"no-version"]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("no-version = %+v; want on the key (its replication policy's) with no current value", ls)
 	}
-	if ls := byID[fakePrefix+"expiring"]; ls.Deleted || !onKey(ls) || !ls.HasCurrentValue {
-		t.Fatalf("expiring = %+v; want served until its expire_time, which is ahead", ls)
+	if ls := byID[fakePrefix+"expiring"]; !ls.Deleted || !onKey(ls) || !ls.HasCurrentValue {
+		t.Fatalf("expiring = %+v; want Deleted from the moment it has an expire_time, as delete sets one", ls)
 	}
 	if ls := byID[fakePrefix+"expired"]; !ls.Deleted {
-		t.Fatalf("expired = %+v; want Deleted once its expire_time has passed", ls)
+		t.Fatalf("expired = %+v; want Deleted", ls)
 	}
 	if ls := byID[fakePrefix+"no-tags"]; len(ls.Tags) != 0 || ls.Tags == nil {
 		t.Fatalf("no-tags = %+v; want an empty, non-nil tag map", ls)

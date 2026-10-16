@@ -20,8 +20,8 @@ import (
 // Credentials, the way the broker runs on GKE, and asserts what the fake asserts: a secret on the
 // agent-secrets key with annotations is listed, described and read; one on Google's default key is
 // not OnKey; one with no version has no value; a disabled one has no value and is not readable; one
-// whose expire_time is an hour ahead is not Deleted and reads. Every secret it makes is under a
-// random prefix of its own and deleted at the end, so the broker's namespace is untouched.
+// with an expire_time an hour ahead is Deleted. Every secret it makes is under a random prefix of
+// its own and deleted at the end, so the broker's namespace is untouched.
 //
 //	BROKER_GCP_LIVE_PROJECT=<project number> BROKER_GCP_LIVE_KMS_KEY=<key name> \
 //	  go test -tags gcplive ./internal/broker/secrets/ -run Live -count=1 -v
@@ -138,11 +138,8 @@ func TestGCPLive(t *testing.T) {
 	if ls := byID[disabled]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("disabled = %+v; want on the key with no value", ls)
 	}
-	if ls := byID[expiring]; ls.Deleted || !onKey(ls) || !ls.HasCurrentValue {
-		t.Fatalf("expiring = %+v; want served until its expire_time, an hour ahead", ls)
-	}
-	if v, err := store.Read(ctx, expiring); err != nil || v != "v" {
-		t.Fatalf("Read(expiring) = %d bytes, %v; want its value until its expire_time", len(v), err)
+	if ls := byID[expiring]; !ls.Deleted {
+		t.Fatalf("expiring = %+v; want Deleted", ls)
 	}
 
 	if ls, err := store.Describe(ctx, served); err != nil || !onKey(ls) || !ls.HasCurrentValue {

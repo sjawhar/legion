@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
@@ -129,9 +128,10 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 }
 
 // Describe reads one secret with GetSecret, then its latest version with GetSecretVersion:
-// ErrNotFound for one Secret Manager does not hold, and Deleted for one whose expire_time has
-// passed (Secret Manager deletes it, with every version, once that time comes, and reads it until
-// then).
+// ErrNotFound for one Secret Manager does not hold, and Deleted for one with an expire_time:
+// `agent-secrets secret delete` schedules a deletion by setting one (Secret Manager deletes the
+// secret, with every version, when that time comes), so a secret with one is the counterpart of a
+// Secrets Manager secret in its recovery window, which the policy stops serving at once.
 func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: id})
 	if status.Code(err) == codes.NotFound {
@@ -146,8 +146,7 @@ func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 // listing is the Listing of one Secret the API answered, with its latest version read.
 func (g GCP) listing(ctx context.Context, secret *secretmanagerpb.Secret) (Listing, error) {
 	name := secret.GetName()
-	expire := secret.GetExpireTime()
-	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations(), Deleted: expire != nil && !expire.AsTime().After(time.Now())}
+	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations(), Deleted: secret.GetExpireTime() != nil}
 	if ls.Tags == nil {
 		ls.Tags = map[string]string{}
 	}

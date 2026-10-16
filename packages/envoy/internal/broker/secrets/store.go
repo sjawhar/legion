@@ -58,8 +58,7 @@ type Listing struct {
 	// HasCurrentValue is whether a read would answer a value: a version labelled AWSCURRENT, or a
 	// Secret Manager versions/latest that is ENABLED.
 	HasCurrentValue bool
-	// Deleted is a secret scheduled for deletion: Secrets Manager's DeletedDate, or a Secret
-	// Manager expire_time that has passed (a secret whose expire_time is still ahead stays
-	// readable until then, so it is served until then).
+	// Deleted is a secret scheduled for deletion: Secrets Manager's DeletedDate, or Secret
+	// Manager's expire_time, which `agent-secrets secret delete` sets to the recovery window's end.
 	Deleted bool
 }
