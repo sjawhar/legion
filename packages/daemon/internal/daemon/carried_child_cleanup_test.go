@@ -15,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/rest"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -143,9 +144,9 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 	records := record.NewStore()
 	expired := time.Now().Add(-time.Minute)
 	parent := rootKey
-	root := record.Issue{Key: rootKey, Project: "LEGION", Tree: rootKey, Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A",
+	root := record.Issue{Key: rootKey, Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: rootKey, Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A",
 		LingerUntil: &expired, LastDispatchSeq: 1}
-	child := record.Issue{Key: childKey, Project: "LEGION", Tree: childKey, Parent: &parent, Title: "child", Phase: phase.Implementing, Generation: 2,
+	child := record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: childKey, Parent: &parent, Title: "child", Phase: phase.Implementing, Generation: 2,
 		Status: "todo", DispatchStatus: "todo", HandedOver: true, Rank: "B", LastDispatchSeq: 2}
 	for _, issue := range []record.Issue{root, child} {
 		putOutboxIssue(t, pool, records, issue)
@@ -179,7 +180,7 @@ func newCarriedCleanup(t *testing.T, opened bool) *carriedCleanup {
 			StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 			Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
 			BootTimeout: 300 * time.Millisecond, BusyBackoff: time.Millisecond, TerminationGrace: 100 * time.Millisecond, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
-			Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: logger,
+			Tokens: issueProvisionTokens{}, GitHubCredential: appauth.GitHubCredential(outboxTokens{}, legionOwner), Conns: fake.NewConns(), Log: logger,
 			RepositoryCache: defaultRepositoryCache(t), Mapped: noRepositories,
 		})
 		if err != nil {

@@ -15,15 +15,16 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// daemonTools are the binaries Legion itself runs on the host: the git and jj of workspace
-// provisioning and removal (internal/workspace). Boot resolves each once, so no Legion-owned child
-// is a PATH lookup that whatever wrapper heads the operator's PATH could answer. No gh is among
-// them, and no pane is told any of them: a pane's gh, git and jj are whatever its PATH, the
-// daemon's, gives, with its gh reading the role's App token from its GH_CONFIG_DIR.
-var daemonTools = []string{"git", "jj"}
+// daemonTools are the binaries Legion itself runs on the host, or hands a pane: the git and jj of
+// workspace provisioning and removal (internal/workspace), and the real gh every pane's `legion gh`
+// runs, which a pane is told as LEGION_GH_PATH. Boot resolves each once, so no Legion-owned child is
+// a PATH lookup that whatever wrapper heads the operator's PATH could answer. A pane's git and jj
+// are whatever its PATH, the daemon's, gives, and its gh is the launcher directory's `legion gh`.
+var daemonTools = []string{"git", "jj", "gh"}
 
-// toolEnv is the daemon's own override for a tool at boot, LEGION_<TOOL>_PATH; it is never a
-// pane's variable.
+// toolEnv is the daemon's own override for a tool at boot, LEGION_<TOOL>_PATH. A pane is told
+// LEGION_GH_PATH, the gh boot resolved, so a daemon started from a pane's shell resolves that
+// pane's real gh rather than the `legion gh` first on the pane's PATH.
 func toolEnv(tool string) string { return "LEGION_" + strings.ToUpper(tool) + "_PATH" }
 
 // resolveTools resolves each daemon tool by its LEGION_<TOOL>_PATH override, which must be an

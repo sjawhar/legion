@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -134,6 +135,12 @@ func (roleTokens) Token(_ context.Context, role appauth.AppRole, owner string) (
 	return appauth.Lease{Token: string(role) + "-app-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
+func (t roleTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // branchAdmission is an outbox over a fresh database whose admission admits LEGION-208 when the
 // test applies its todo, with GitHub answered by github, whose default branch is release/v7.1, and
 // the runner's clock the test's own.
@@ -151,7 +158,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	github := newBranchGitHub(t, rt, answer)
 	github.defaultBranch = "release/v7.1"
-	engine := workflow.New(records, workflow.Config{Project: "legion"}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now()
 	var logs bytes.Buffer
@@ -169,7 +176,7 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 		},
 	}
 	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "todo", intake.DispatchIssue{
-		Key: "LEGION-208", Seq: 1, Type: "issue.created", Status: "todo", Title: "Workflow", Rank: "U", HandedOver: true,
+		Key: "LEGION-208", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.created", Status: "todo", Title: "Workflow", Rank: "U", HandedOver: true,
 	}, engine, admission); err != nil {
 		t.Fatalf("admit LEGION-208: %v", err)
 	}
@@ -282,12 +289,12 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
 		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url}
 	until := time.Now().Add(time.Hour)
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
 		Generation: 2, Status: "in_progress", Rank: "U"})
 	parent := "LEGION-210"
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Title: "Closed", Phase: phase.Done,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-210", Title: "Closed", Phase: phase.Done,
 		Generation: 1, Status: "backlog", Rank: "V", LingerUntil: &until})
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-211", Project: "LEGION", Tree: "LEGION-210", Parent: &parent, Title: "Child",
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-210", Parent: &parent, Title: "Child",
 		Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
 
 	for _, row := range []record.OutboxRow{
@@ -300,5 +307,32 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	}
 	if got := github.created(); len(got) != 0 {
 		t.Fatalf("GitHub creates = %+v, want none", got)
+	}
+}
+
+// refusingOwnerTokens refuses every mint, naming nothing, so a test reads what the caller names.
+type refusingOwnerTokens struct{}
+
+func (refusingOwnerTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	return appauth.Lease{}, errors.New("GitHub is down")
+}
+
+func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	return appauth.Lease{}, errors.New("GitHub is down")
+}
+
+// Branch creation and the disarm mint the implement App's token for the owner of the repository
+// they act on, and a mint that fails names that owner, so the outbox's failure line says whose
+// installation refused.
+func TestBranchCreationAndTheDisarmNameTheOwnerTheyMintFor(t *testing.T) {
+	runner := &outbox{log: quietLogger(), tokens: refusingOwnerTokens{}, repo: ghrepo.MustParse("acme/widgets"),
+		defaultBranch: func(context.Context, ghrepo.Repository) (string, error) { return "main", nil }}
+	want := "mint the implement App token for acme: GitHub is down"
+	if err := runner.createBranch(context.Background(), "LEGION-208"); err == nil || err.Error() != want {
+		t.Errorf("createBranch with a refused mint = %v, want %q", err, want)
+	}
+	row := mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 7}, time.Now())
+	if err := runner.autoMergeDisable(context.Background(), row, record.AutoMergeDisable{Number: 7}); err == nil || err.Error() != want {
+		t.Errorf("autoMergeDisable with a refused mint = %v, want %q", err, want)
 	}
 }

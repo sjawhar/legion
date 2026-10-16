@@ -51,20 +51,41 @@ func refPath(branch string) string {
 	return strings.ReplaceAll(url.PathEscape(branch), "%2F", "/")
 }
 
-// DefaultBranch is repo's default branch as GitHub names it (`default_branch` of `GET
-// /repos/{owner}/{repo}`), read through github, the repository's REST API. An answer naming no
-// branch is refused by name, as is every answer other than 2xx.
+// DefaultBranch is repo's default branch as GitHub names it (Read's DefaultBranch).
 func DefaultBranch(ctx context.Context, github githubrest.Client, repo ghrepo.Repository) (string, error) {
+	info, err := Read(ctx, github, repo)
+	if err != nil {
+		return "", err
+	}
+	return info.DefaultBranch, nil
+}
+
+// Repository is a repository as GitHub names it: its own spelling of owner and name, which its
+// events and the subjects Envoy publishes them on carry, and its default branch.
+type Repository struct {
+	Name          ghrepo.Repository
+	DefaultBranch string
+}
+
+// Read is repo as GitHub names it (`full_name` and `default_branch` of `GET /repos/{owner}/{repo}`),
+// read through github, the repository's REST API. An answer naming no default branch, or a
+// full_name that is not owner/name, is refused by name, as is every answer other than 2xx.
+func Read(ctx context.Context, github githubrest.Client, repo ghrepo.Repository) (Repository, error) {
 	var info struct {
+		FullName      string `json:"full_name"`
 		DefaultBranch string `json:"default_branch"`
 	}
 	if err := github.Get(ctx, "", &info); err != nil {
-		return "", fmt.Errorf("read the default branch of %s: %w", repo, err)
+		return Repository{}, fmt.Errorf("read the default branch of %s: %w", repo, err)
 	}
 	if info.DefaultBranch == "" {
-		return "", fmt.Errorf("read the default branch of %s: GitHub named no default branch", repo)
+		return Repository{}, fmt.Errorf("read the default branch of %s: GitHub named no default branch", repo)
 	}
-	return info.DefaultBranch, nil
+	name, err := ghrepo.Parse("GitHub's full_name of "+repo.String(), info.FullName)
+	if err != nil {
+		return Repository{}, err
+	}
+	return Repository{Name: name, DefaultBranch: info.DefaultBranch}, nil
 }
 
 // alreadyExists says whether a 422's body is GitHub's answer to a ref it already has. GitHub answers

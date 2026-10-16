@@ -35,6 +35,16 @@ type Client interface {
 	PostMessage(ctx context.Context, key, body string) error
 	MessageBodiesSince(ctx context.Context, key string, since time.Time) ([]string, error)
 	Approval(ctx context.Context, artifactID string) (Approval, error)
+	ListRepoProjects(ctx context.Context) ([]RepoProject, error)
+}
+
+// RepoProject is one mapping of a GitHub repository (owner/name) to a Dispatch project, and
+// whether it is that project's default: the repository an issue resolves to when neither it nor
+// any ancestor names one.
+type RepoProject struct {
+	Repo    string
+	Project string
+	Default bool
 }
 
 // LegionLabel is the Dispatch label that hands an issue to Legion. A human sets it from the issue
@@ -69,6 +79,9 @@ type IssueSummary struct {
 	// sequence is behind it has events still to come on the stream, which carry the actor this
 	// snapshot does not.
 	LastSeq int64
+	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to: its own, else its
+	// nearest ancestor's, else its project's default; empty when it resolves to none.
+	ResolvedRepo string
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
@@ -85,6 +98,8 @@ type Issue struct {
 	HandedOver        bool
 	PrimaryArtifactID string
 	LastSeq           int64
+	// ResolvedRepo is IssueSummary.ResolvedRepo.
+	ResolvedRepo string
 }
 
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying

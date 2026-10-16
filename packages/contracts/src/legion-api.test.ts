@@ -269,6 +269,30 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
 });
 
+// Contract 29: every recorded issue carries the repository it targets and its default branch, its
+// pull request the repository it is in, and the state the project's repository mapping as the
+// daemon serves it, each left-out repository named with the App it lacks. A state without the
+// mapping is refused.
+test("the state golden carries each issue's repository and the project's mapping", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+
+  expect(state.issues["LEGION-208"]?.repo).toBe("acme/widgets");
+  expect(state.issues["LEGION-208"]?.pullRequest?.repo).toBe("acme/widgets");
+  expect(state.issues["LEGION-210"]?.defaultBranch).toBe("release/v7.1");
+  expect(state.repositories.owners).toEqual(["acme", "zeta"]);
+  expect(state.repositories.mapped).toEqual([
+    { repo: "acme/widgets", default: true },
+    { repo: "zeta/tools", default: false },
+  ]);
+  expect(state.repositories.refused[0]?.reason).toBe(
+    "the review App is not installed on acme/gadgets"
+  );
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.repositories;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
 // The state's capability report (contract 16): the golden carries a decided row with the operator's
 // reason and an open row with the legion.yaml line that records a decision, beside the present
 // (codegraph among them: the image carries the tooling and a pod's launch loads it with extension

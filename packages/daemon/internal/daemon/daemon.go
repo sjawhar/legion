@@ -231,9 +231,10 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "store")
 	}
-	// The App mint waits out GitHub's transient failures, which the boot budget does not bound, as
-	// it does not bound the plugin gate or the image probe: the work after it has a budget of its own.
-	workflow, err := openWorkflow(ctx, cfg, st, plan.project, log, o.workflowTokens, o.githubAPI)
+	// The mapping read and the App mint wait out GitHub's and Dispatch's transient failures, which the
+	// boot budget does not bound, as it does not bound the plugin gate or the image probe: the work
+	// after them has a budget of its own.
+	workflow, err := openWorkflow(ctx, cfg, st, plan.project, plan.dispatchToken, log, o.workflowTokens, o.githubAPI)
 	if err != nil {
 		st.Close()
 		if ctx.Err() != nil {
@@ -274,11 +275,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
-	if workflow != nil {
-		workflow.bind(cfg.DispatchURL, plan.dispatchToken)
-		log.Info("legion workflow boot stage", "stage", "dispatch")
-	}
-
 	address := net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.Port))
 	listen := net.Listen
 	if o.listen != nil {
@@ -490,8 +486,9 @@ func closeStore(st *store.Store, log *slog.Logger) {
 
 // plan is what the daemon resolved from its configuration before touching anything.
 type plan struct {
-	// identity is the role's App bot identity, from the workflow's token source; nil without one.
-	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// identity is the role's App bot identity for the owner of the repository it works, from the
+	// workflow's token source; nil without one.
+	identity func(ctx context.Context, role claim.Role, owner string) (runtime.GitIdentity, error)
 	// defaultBranch is a repository's default branch as GitHub names it, read with the workflow's
 	// token source (defaultBranches.Of); nil without one.
 	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
@@ -694,7 +691,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools["gh"], log)
 	}
 	return nil
 }
@@ -702,15 +699,16 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
-// Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
-// scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+// the daemon has them, are every tree pane's gh bundle (gitHubCredential), with gh, the real gh boot
+// resolved (daemonTools), the one each pane's `legion gh` runs; a daemon with no GitHub Apps hands
+// the runtime none, and its panes hold no gh files. The private server's environment is scrubbed
+// before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
-			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
+			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, projectOwners(cfg)), gh
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -748,36 +746,41 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 	}
 }
 
-// reconfigureCloneCredential brings the shared clone an earlier daemon provisioned under the state
-// directory to the helper every clone gets now (workspace.ConfigureRepositoryCredential): a clone
-// provisioned before each pane read GitHub from its own gh files names that daemon's `legion
-// credential` by the pane launcher's path, which answers no pane now, so its first push would
-// fail. It runs the git boot resolved (tools), as the outbox's provisioning does, and logs the one
-// clone it rewrote. A configuration with no repository, or a state directory with no clone yet, is
-// nothing to do: provisioning writes the helper into a clone it makes.
+// reconfigureCloneCredential brings every shared clone an earlier daemon provisioned under the state
+// directory, one per repository, to the helper every clone gets now
+// (workspace.ConfigureRepositoryCredential): a clone provisioned before each pane read GitHub from
+// its own gh files names that daemon's `legion credential` by the pane launcher's path, which
+// answers no pane now, so its first push would fail. It runs the git boot resolved (tools), as the
+// outbox's provisioning does, and logs each clone it rewrote. A state directory with no clone yet
+// is nothing to do: provisioning writes the helper into a clone it makes.
 func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools map[string]string, log *slog.Logger) error {
-	repo := cfg.Projects[cfg.Project].Repo
-	if repo.IsZero() || tools == nil {
+	if tools == nil {
 		return nil
 	}
-	// Location derives the clone from the repository alone; the issue names only the workspace
-	// beside it, which nothing here reads.
-	located, err := workspace.Location(cfg.StateDir, repo, cfg.Project)
+	// Location lays every repository's clone out as <root>/<owner>/<name>; a probe repository
+	// names the root without restating that layout here.
+	probe, err := workspace.Location(cfg.StateDir, ghrepo.MustParse("owner/name"), cfg.Project)
 	if err != nil {
 		return err
 	}
-	if _, err := os.Stat(filepath.Join(located.Clone, ".git")); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return fmt.Errorf("read the shared clone %s: %w", located.Clone, err)
-	}
-	changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone)
+	clones, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(probe.Clone)), "*", "*"))
 	if err != nil {
-		return fmt.Errorf("set the shared clone's git credential helper: %w", err)
+		return fmt.Errorf("list the shared clones: %w", err)
 	}
-	if changed {
-		log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	for _, clone := range clones {
+		if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("read the shared clone %s: %w", clone, err)
+		}
+		changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), clone)
+		if err != nil {
+			return fmt.Errorf("set the shared clone %s's git credential helper: %w", clone, err)
+		}
+		if changed {
+			log.Info("legion daemon set the shared clone's git credential helper", "clone", clone, "helper", workspace.GitHubCredentialHelper)
+		}
 	}
 	return nil
 }
@@ -905,7 +908,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			identity: p.identity, defaultBranch: p.defaultBranch, designGate: cfg.Gates.Design,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
-		Identity:     p.identity,
+		Identity:     adoptIdentity(p.identity, githubOwner(cfg)),
 		Secrets:      p.secretsEnroller,
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
@@ -1275,11 +1278,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
+	var prepare func(context.Context, intake.DispatchIssue) error
 	var githubAPI string
+	var repos *repositories
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
-		claimReady = workflow.claimReady
-		githubAPI = workflow.githubAPI
+		claimReady, prepare = workflow.claimReady, workflow.prepareRepository
+		githubAPI, repos = workflow.githubAPI, workflow.repositories
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1299,6 +1304,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
+			repositories: repos,
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1315,10 +1321,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Log:                s.log,
 		Pool:               st.Pool(),
 		Handlers:           handlers,
+		PrepareRepository:  prepare,
 		Record:             records,
 		Dispatch:           client,
 		Tokens:             tokens,
-		GitHubOwner:        githubOwner(cfg),
+		GitHubOwners:       projectOwners(cfg),
 		GitHubAPI:          githubAPI,
 		Repository:         projectRepository(cfg),
 		MergeRules:         projectMergeRules(cfg),
@@ -1414,6 +1421,9 @@ type source struct {
 	// reports is each claim's latest capability report (supervision.capabilityReports), which the
 	// projection shows on the claim's view whatever process reported it.
 	reports func() map[claim.Token]capabilities.Report
+	// repositories is the project's repository mapping as the workflow serves it; nil without a
+	// workflow, whose state serves no repository.
+	repositories *repositories
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1482,6 +1492,9 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: s.secretsLogin.LoginStatus().State}
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
+	if s.repositories != nil {
+		state.Repositories = s.repositories.view()
+	}
 	return state, nil
 }
 
@@ -1489,6 +1502,26 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
 	return cfg.Projects[cfg.Project].Repo.Owner()
+}
+
+// projectOwners is the GitHub owners of the project's repositories, every one of which a role's gh
+// bundle holds a directory for (gitHubCredential): the configured repository's owner.
+func projectOwners(cfg config.Config) func() []string {
+	owner := githubOwner(cfg)
+	return func() []string { return []string{owner} }
+}
+
+// adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
+// over identity, minted for owner, the project's repository's owner: an App's bot identity is the
+// same on every owner it is installed on, so the owner only names the installation that mints the
+// lease it is read with. nil without a workflow.
+func adoptIdentity(identity func(context.Context, claim.Role, string) (runtime.GitIdentity, error), owner string) func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+	if identity == nil {
+		return nil
+	}
+	return func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error) {
+		return identity(ctx, role, owner)
+	}
 }
 
 // projectRepository answers the repository a project works in (`projects.<KEY>.repo`), as the

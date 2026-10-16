@@ -149,6 +149,8 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     project: "CORE",
     referenced_by_count: 0,
     route: null,
+    repo: null,
+    resolved_repo: null,
     status: "testing",
     priority: null,
     rank: "U",

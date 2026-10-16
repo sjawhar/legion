@@ -97,6 +97,7 @@ var liveChecks = []liveCheck{
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
 	{"independent-provision", (*liveRig).checkIndependentProvision, nil},
+	{"second-owner", (*liveRig).checkSecondOwner, nil},
 	{"repository-cache", (*liveRig).checkRepositoryCache, nil},
 	{"cache-second-pod", (*liveRig).checkCacheSecondPod, nil},
 	{"cache-lost-volume", (*liveRig).checkCacheLostVolume, nil},
@@ -231,9 +232,12 @@ type liveEnv struct {
 	runtimeKubeconfig, runtimeContext, operatorContext string
 	namespace, project, claimProject, image            string
 	repo                                               ghrepo.Repository
-	streamHost, streamPort                             string
-	appID, appKeyName                                  string
-	record, work, from                                 string
+	// repoSecondOwner is LEGION_E2E_REPO_SECOND_OWNER: a repository under another owner than
+	// repo's, both Apps installed on it, where second-owner provisions an issue.
+	repoSecondOwner        ghrepo.Repository
+	streamHost, streamPort string
+	appID, appKeyName      string
+	record, work, from     string
 	// operatorPodFile is the run's copy of deploy/kubernetes/operator-route/pod.yml, its token
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
@@ -302,6 +306,14 @@ func readLiveEnv(t *testing.T) liveEnv {
 		t.FailNow()
 	}
 	env.repo = repo
+	if env.repoSecondOwner, err = ghrepo.Parse("LEGION_E2E_REPO_SECOND_OWNER", get("LEGION_E2E_REPO_SECOND_OWNER")); err != nil {
+		fmt.Printf("CHECK identity: FAIL: %v\n", err)
+		t.FailNow()
+	}
+	if strings.EqualFold(env.repoSecondOwner.Owner(), repo.Owner()) {
+		fmt.Printf("CHECK identity: FAIL: LEGION_E2E_REPO_SECOND_OWNER %s is under %s, LEGION_E2E_REPO's owner\n", env.repoSecondOwner, repo.Owner())
+		t.FailNow()
+	}
 	if !strings.HasPrefix(env.project, "s4a-") {
 		fmt.Printf("CHECK identity: FAIL: the run project %q lacks the reserved prefix s4a-\n", env.project)
 		t.FailNow()
@@ -352,10 +364,12 @@ type liveClaim struct {
 	token             claim.Token
 	tree, issue, name string
 	role              claim.Role
-	marker            string
-	state             claimState
-	gen               uint64
-	bootToken         string
+	// repo is the claim's repository when it is not LEGION_E2E_REPO (second-owner's).
+	repo      ghrepo.Repository
+	marker    string
+	state     claimState
+	gen       uint64
+	bootToken string
 	// loc is the running process; last is the latest locator, kept as Resume's hint once the
 	// process stopped.
 	loc, last *runtime.Locator
@@ -607,9 +621,10 @@ type liveRig struct {
 	tokens   implementTokens
 	identity runtime.GitIdentity
 	// defaultBranch is LEGION_E2E_REPO's default branch as GitHub names it (resolveApp), which
-	// every launch names and independent-provision holds each workspace to.
-	defaultBranch string
-	prompt        string
+	// every launch names and independent-provision holds each workspace to; secondDefaultBranch is
+	// LEGION_E2E_REPO_SECOND_OWNER's, which second-owner's launch names.
+	defaultBranch, secondDefaultBranch string
+	prompt                             string
 	// pod is the operator's pod every launch carries: the fixture, as the daemon reads it.
 	pod  Pod
 	reg  *registry
@@ -783,6 +798,8 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// (cache-second-pod) and again after its volume is lost (cache-lost-volume).
 		{"cache-a", "S4A-8", "S4A-8", claim.RoleArchitect},
 		{"cache-b", "S4A-9", "S4A-9", claim.RoleArchitect},
+		// second-owner is an issue pod on the repository of the run's other owner (second-owner).
+		{"second-owner", "S4A-7", "S4A-7", claim.RoleImplementer},
 	} {
 		token, err := claim.NewToken(env.claimProject, c.issue, c.role)
 		if err != nil {
@@ -793,6 +810,7 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 			marker: ompSessionsDir + "/" + SandboxName(token) + ".marker",
 		})
 	}
+	r.claim("second-owner").repo = env.repoSecondOwner
 	return r
 }
 
@@ -1034,11 +1052,17 @@ func (r *liveRig) poll(limit time.Duration, what string, cond func() (bool, erro
 
 // ---- launching, as the machine does -----------------------------------------------------------
 
+// spec is the claim's launch: on LEGION_E2E_REPO at its default branch, or, for a claim on another
+// repository (liveClaim.repo), on LEGION_E2E_REPO_SECOND_OWNER at its own.
 func (r *liveRig) spec(c *liveClaim, resume string) runtime.SpawnSpec {
+	repo, branch := r.env.repo, r.defaultBranch
+	if !c.repo.IsZero() {
+		repo, branch = c.repo, r.secondDefaultBranch
+	}
 	return runtime.SpawnSpec{
 		Claim: c.token, Project: r.env.claimProject, Tree: c.tree, Issue: c.issue, Role: c.role,
 		Generation: c.gen, BootToken: c.bootToken, Env: map[string]string{"LEGION_E2E_MARKER": c.marker},
-		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: r.env.repo, DefaultBranch: r.defaultBranch,
+		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: repo, DefaultBranch: branch,
 		ResumeSessionFile: resume,
 	}
 }

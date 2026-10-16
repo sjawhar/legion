@@ -48,8 +48,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - Daemon API contract 30 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
   repository gets a repository cache pod running the image's `legion workspace-init cache`, and
   an issue pod's `workspace-init fetch` fills its feed from that cache while it is ready and
-  fetches only the delta from GitHub; an image built before it is refused by the daemon's image
-  probe. Install this release with a `legion` built from the same commit.
+  fetches only the delta from GitHub; `legion state`'s `repositories` carries each mapped
+  repository's `cache` and the `caches` of repositories no longer mapped. An image built before it
+  is refused by the daemon's image probe. Install this release with a `legion` built from the same
+  commit.
+- Daemon API contract 28 (sjawhar/legion#1986): every pane and pod holds the role's GitHub App
+  tokens as a gh bundle, one directory per owner of the project under `LEGION_GH_OWNERS_DIR`, its
+  issue's owner's (`GH_CONFIG_DIR`) with write access and every other owner's read-only; the `gh`
+  first on PATH is `legion gh`, which runs the real gh (`LEGION_GH_PATH`) with the directory of the
+  owner a command names, and git answers from that owner's directory through `legion git-credential`.
+  The controller's credential answer is per owner. An image built before it is refused by the
+  daemon's image probe. Install this release with a `legion` built from the same commit.
 - Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
   names the repository's default branch (`--default-branch <name>`), which every branch and
   workspace now starts at, whatever its name (`develop`, `release/v7.1`); an image built before it

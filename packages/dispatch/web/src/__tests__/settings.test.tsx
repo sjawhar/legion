@@ -24,14 +24,16 @@ test("human users manage repository project mappings from the settings route", a
   const mapping: RepoProject = {
     created_at: "2026-09-10T00:00:00Z",
     created_by: { id: "alice", kind: "user" },
+    default: false,
     project: "CORE",
     repo: "owner/repo",
   };
+  const other: RepoProject = { ...mapping, default: true, repo: "owner/other" };
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([mapping]);
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue([mapping, other]);
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
@@ -39,10 +41,12 @@ test("human users manage repository project mappings from the settings route", a
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
-  const putRepoProject = spyOn(api, "putRepoProject").mockResolvedValue({
+  const putRepoProject = spyOn(api, "putRepoProject").mockImplementation(async (repo, input) => ({
     ...mapping,
-    repo: "owner/repo",
-  });
+    repo,
+    project: input.project,
+    default: input.default ?? false,
+  }));
   const deleteRepoProject = spyOn(api, "deleteRepoProject").mockResolvedValue();
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -58,6 +62,23 @@ test("human users manage repository project mappings from the settings route", a
     expect(await screen.findByRole("heading", { name: "Repositories → Projects" })).toBeDefined();
     expect(screen.getByRole("link", { name: "Settings" }).getAttribute("href")).toBe("/settings");
     expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
+    expect(screen.getByRole("columnheader", { name: "Default" })).toBeDefined();
+    const radio = (repo: string) =>
+      screen.getByRole("radio", {
+        name: `Default repository of CORE: ${repo}`,
+      }) as HTMLInputElement;
+    expect(radio("owner/other").checked).toBe(true);
+    expect(radio("owner/repo").checked).toBe(false);
+    fireEvent.click(radio("owner/repo"));
+    await waitFor(() =>
+      expect(putRepoProject).toHaveBeenLastCalledWith("owner/repo", {
+        project: "CORE",
+        default: true,
+      })
+    );
+    // The pick moves the project's default at once: one default per project.
+    expect(radio("owner/repo").checked).toBe(true);
+    expect(radio("owner/other").checked).toBe(false);
 
     fireEvent.change(screen.getByLabelText("Repository"), { target: { value: "Owner/Repo.git" } });
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "CORE" } });
@@ -67,6 +88,22 @@ test("human users manage repository project mappings from the settings route", a
     );
     expect(screen.getAllByRole("cell", { name: "owner/repo" })).toHaveLength(1);
     expect(screen.queryByRole("cell", { name: "Owner/Repo.git" })).toBeNull();
+
+    // A mapping issues name is refused by the server, which says how many: the row comes back
+    // and the refusal shows.
+    deleteRepoProject.mockRejectedValueOnce(
+      new ApiError(409, {
+        code: "REPO_PROJECT_IN_USE",
+        error: "1 issue(s) of CORE name owner/repo as their repository; change their repo first",
+      })
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete mapping for owner/repo" }));
+    expect(
+      await screen.findByText(
+        "1 issue(s) of CORE name owner/repo as their repository; change their repo first"
+      )
+    ).toBeDefined();
+    expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete mapping for owner/repo" }));
     await waitFor(() => expect(deleteRepoProject).toHaveBeenLastCalledWith("owner/repo"));

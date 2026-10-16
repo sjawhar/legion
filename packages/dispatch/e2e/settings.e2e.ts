@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "@playwright/test";
 
-import { createIssue, createProject } from "./api";
+import { createIssue, createProject, getIssue, putRepoProject } from "./api";
 import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -44,6 +44,65 @@ test("a repository mapping added in Settings assigns a new external issue to its
     await page.screenshot({
       path: testInfo.outputPath("repository-project-settings.png"),
       fullPage: true,
+    });
+  } finally {
+    await context.close();
+  }
+});
+
+test("a project's default repository moves with its Default radio, and a mapping an issue names stays", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  const pinned = await createIssue({ project: "CORE", repo: "acme/widgets", title: "Pinned" });
+  const inheriting = await createIssue({ force: true, project: "CORE", title: "Inheriting" });
+  expect(inheriting.resolved_repo).toBe("acme/widgets");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  const radio = (repo: string) =>
+    page.getByRole("radio", { name: `Default repository of CORE: ${repo}` });
+
+  try {
+    await page.goto("/settings");
+    await expect(page.getByRole("columnheader", { name: "Default" })).toBeVisible();
+    await expect(radio("acme/widgets")).toBeChecked();
+    await expect(radio("acme/gadgets")).not.toBeChecked();
+
+    const saved = page.waitForRequest(
+      (request) =>
+        request.method() === "PUT" &&
+        new URL(request.url()).pathname === "/api/v1/settings/repo-projects/acme/gadgets"
+    );
+    await radio("acme/gadgets").click();
+    expect((await saved).postDataJSON()).toEqual({ default: true, project: "CORE" });
+    await expect(radio("acme/gadgets")).toBeChecked();
+    await expect(radio("acme/widgets")).not.toBeChecked();
+    // An issue with no repository of its own resolves to the new default; one with its own keeps it.
+    await expect
+      .poll(() => getIssue(inheriting.key))
+      .toMatchObject({ resolved_repo: "acme/gadgets" });
+    expect(await getIssue(pinned.key)).toMatchObject({
+      repo: "acme/widgets",
+      resolved_repo: "acme/widgets",
+    });
+    await page.reload();
+    await expect(radio("acme/gadgets")).toBeChecked();
+
+    // The pinned issue names acme/widgets, so its mapping is not deleted, and the page says why.
+    await page.getByRole("button", { name: "Delete mapping for acme/widgets" }).click();
+    await expect(
+      page.getByText(
+        "1 issue(s) of CORE name acme/widgets as their repository; change their repo first"
+      )
+    ).toBeVisible();
+    await expect(page.getByRole("cell", { exact: true, name: "acme/widgets" })).toBeVisible();
+    const shot = testInfo.outputPath(`repository-default-${testInfo.project.name}.png`);
+    await page.screenshot({ fullPage: true, path: shot });
+    await testInfo.attach(`repository default (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
     });
   } finally {
     await context.close();

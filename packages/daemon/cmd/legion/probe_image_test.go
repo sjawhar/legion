@@ -233,9 +233,30 @@ func TestProbeImageRefusesAnImageWhoseWorkspaceInitTakesNoDefaultBranch(t *testi
 	}
 }
 
+// lastContractWithoutGhBundles is the last daemon API contract whose image carries no `gh`
+// wrapper at /opt/legion/bin/gh and whose `legion` has no `gh` or `git-credential` command: a role
+// container of an image built at it runs the real gh on one owner's files, and its clone's
+// `legion git-credential` helper exits 2.
+const lastContractWithoutGhBundles = 27
+
+// An image built before per-owner gh bundles carries a pi-legion declaring that older contract, so
+// the daemon's probe Sandbox, asking for this binary's own, refuses it by both numbers before any
+// issue pod runs that image's git.
+func TestProbeImageRefusesAnImageWithoutTheGhWrapper(t *testing.T) {
+	if api.DaemonAPIVersion <= lastContractWithoutGhBundles {
+		t.Fatalf("DaemonAPIVersion is %d: per-owner gh bundles need a contract above %d, or an image without legion gh and legion git-credential passes the probe",
+			api.DaemonAPIVersion, lastContractWithoutGhBundles)
+	}
+	old := strconv.Itoa(lastContractWithoutGhBundles)
+	img := inImage(t, old, imageOmp(t))
+	code, stdout, stderr := probeImage(img.flags("--daemon-api-version", thisBinarysContract)...)
+	if want := "speaks daemon API contract " + old + "; this daemon requires " + thisBinarysContract; code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+		t.Fatalf("probe-image --daemon-api-version %s over an image at %s = %d %q %q, want exit 1 with %q and no OK line", thisBinarysContract, old, code, stdout, stderr, want)
+	}
+}
+
 // lastContractWithoutRepositoryCache is the last daemon API contract whose image's `legion` has no
-// `workspace-init cache`, which every repository cache pod runs: 28 and 29 are sibling pull
-// requests of sjawhar/legion#1986 that carry none.
+// `workspace-init cache`, which every repository cache pod runs: 29, the issue repository's.
 const lastContractWithoutRepositoryCache = 29
 
 // An image built before the repository cache carries a pi-legion declaring that older contract, so

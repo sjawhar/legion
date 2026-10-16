@@ -121,7 +121,132 @@ func issueFixture(key string) Issue {
 		HandedOver:          true,
 		LastDispatchSeq:     41,
 		ReadyPendingVersion: &ready,
+		Repo:                "acme/widgets",
+		DefaultBranch:       "release/v7.1",
 	}
+}
+
+// An issue's repository and its default branch are taken when the daemon first records the issue
+// and never change after: the store refuses a record without either, and a write that would move a
+// recorded issue to another repository or default branch, so no path that forgot them or rebuilt
+// the record from a later observation writes over what was recorded.
+func TestPutIssueRefusesAMissingOrChangedRepository(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	for _, tc := range []struct {
+		name   string
+		change func(*Issue)
+		want   string
+	}{
+		{"no repository", func(issue *Issue) { issue.Repo = "" }, "record issue LEGION-301: repository is required"},
+		{"no default branch", func(issue *Issue) { issue.DefaultBranch = "" }, "record issue LEGION-301: default branch is required"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issue := issueFixture("LEGION-301")
+			tc.change(&issue)
+			err := st.Tx(ctx, func(tx pgx.Tx) error { return records.PutIssue(ctx, tx, issue) })
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("PutIssue = %v, want %q", err, tc.want)
+			}
+		})
+	}
+
+	recorded := issueFixture("LEGION-302")
+	inTx(t, st, func(tx pgx.Tx) { must(t, records.PutIssue(ctx, tx, recorded)) })
+	for _, tc := range []struct {
+		name   string
+		change func(*Issue)
+	}{
+		{"another repository", func(issue *Issue) { issue.Repo = "acme/gadgets" }},
+		{"another default branch", func(issue *Issue) { issue.DefaultBranch = "main" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			moved := recorded
+			tc.change(&moved)
+			err := st.Tx(ctx, func(tx pgx.Tx) error { return records.PutIssue(ctx, tx, moved) })
+			want := "record issue LEGION-302: it is recorded on acme/widgets@release/v7.1, and an issue's repository and default branch never change"
+			if err == nil || err.Error() != want {
+				t.Fatalf("PutIssue = %v, want %q", err, want)
+			}
+		})
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.Issue(ctx, tx, recorded.Key)
+		must(t, err)
+		if !reflect.DeepEqual(got, &recorded) {
+			t.Fatalf("issue after refused moves = %#v, want %#v", got, recorded)
+		}
+	})
+}
+
+// A record written before the schema carried the issue's repository has none, and the boot fills
+// it (daemon's backfillRepositories): UnfilledIssues lists one project's unfilled records, and
+// FillIssueRepository fills one, once.
+func TestUnfilledIssuesAndFillIssueRepository(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.PutIssue(ctx, tx, issueFixture("LEGION-401")))
+		for _, key := range []string{"LEGION-402", "LEGION-403", "OTHER-404"} {
+			if _, err := tx.Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq)
+				values ($1, $1, split_part($1, '-', 1), $1, 'planning', 1, 'in_progress', 'A', 1)`, key); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		unfilled, err := records.UnfilledIssues(ctx, tx, "LEGION")
+		must(t, err)
+		var keys []string
+		for _, issue := range unfilled {
+			keys = append(keys, issue.Key)
+		}
+		if !reflect.DeepEqual(keys, []string{"LEGION-402", "LEGION-403"}) {
+			t.Fatalf("UnfilledIssues(LEGION) = %v, want LEGION-402 and LEGION-403", keys)
+		}
+		must(t, records.FillIssueRepository(ctx, tx, "LEGION-402", "acme/widgets", "release/v7.1"))
+		got, err := records.Issue(ctx, tx, "LEGION-402")
+		must(t, err)
+		if got.Repo != "acme/widgets" || got.DefaultBranch != "release/v7.1" {
+			t.Fatalf("filled issue = %s@%s, want acme/widgets@release/v7.1", got.Repo, got.DefaultBranch)
+		}
+		if err := records.FillIssueRepository(ctx, tx, "LEGION-402", "acme/gadgets", "main"); err == nil ||
+			err.Error() != "fill the repository of LEGION-402: it has no unfilled record" {
+			t.Fatalf("a second fill = %v, want it refused", err)
+		}
+		unfilled, err = records.UnfilledIssues(ctx, tx, "LEGION")
+		must(t, err)
+		if len(unfilled) != 1 || unfilled[0].Key != "LEGION-403" {
+			t.Fatalf("UnfilledIssues after one fill = %#v, want LEGION-403 alone", unfilled)
+		}
+	})
+}
+
+// What the daemon last said on a Dispatch issue about its repository is kept per issue, so a
+// repeated event says nothing again.
+func TestRepoNoteRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	posted := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.RepoNote(ctx, tx, "LEGION-501")
+		must(t, err)
+		if got != nil {
+			t.Fatalf("RepoNote before any = %#v, want none", got)
+		}
+		first := RepoNote{Issue: "LEGION-501", ResolvedRepo: "", Note: "no repository", PostedAt: posted}
+		must(t, records.PutRepoNote(ctx, tx, first))
+		second := RepoNote{Issue: "LEGION-501", ResolvedRepo: "acme/gadgets", Note: "the review App is not installed", PostedAt: posted.Add(time.Minute)}
+		must(t, records.PutRepoNote(ctx, tx, second))
+		got, err = records.RepoNote(ctx, tx, "LEGION-501")
+		must(t, err)
+		if got == nil || got.Issue != second.Issue || got.ResolvedRepo != second.ResolvedRepo || got.Note != second.Note || !got.PostedAt.Equal(second.PostedAt) {
+			t.Fatalf("RepoNote = %#v, want %#v", got, second)
+		}
+	})
 }
 
 func TestStoreRoundTripsEveryRecord(t *testing.T) {
@@ -585,12 +710,12 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 // in todo without the label waits for nothing, however high it ranks.
 func TestWaitingIncludesOnlySlotlessHandedOverTodoRootsAndOrphansInRankOrder(t *testing.T) {
 	issues := []Issue{
-		{Key: "LEGION-210", Tree: "LEGION-210", Status: "done", Rank: "00000", HandedOver: true},
-		{Key: "LEGION-211", Tree: "LEGION-211", Status: "backlog", Rank: "00001", HandedOver: true},
-		{Key: "LEGION-212", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
-		{Key: "LEGION-213", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
-		{Key: "LEGION-214", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
-		{Key: "LEGION-215", Tree: "LEGION-215", Status: "todo", Rank: "00000"},
+		{Key: "LEGION-210", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-210", Status: "done", Rank: "00000", HandedOver: true},
+		{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-211", Status: "backlog", Rank: "00001", HandedOver: true},
+		{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-212", Status: "todo", Rank: "00004", LastDispatchSeq: 1, HandedOver: true},
+		{Key: "LEGION-213", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-213", Status: "todo", Rank: "00003", LastDispatchSeq: 10, HandedOver: true},
+		{Key: "LEGION-214", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-212", Status: "todo", Rank: "00002"},
+		{Key: "LEGION-215", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-215", Status: "todo", Rank: "00000"},
 	}
 	got := Waiting(issues, nil)
 	want := []Issue{issues[3], issues[2]}
@@ -645,7 +770,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
+		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},

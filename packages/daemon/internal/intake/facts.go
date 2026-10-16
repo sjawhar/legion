@@ -39,6 +39,10 @@ type DispatchIssue struct {
 	// by its daemon-authored todo event.
 	ActorSession string
 	DaemonActor  bool
+	// ResolvedRepo is the repository (owner/name) Dispatch resolves the issue to at the event: its
+	// own, else its nearest ancestor's, else its project's default; empty when it resolves to none.
+	// The workflow takes it when it first records the issue, and never after.
+	ResolvedRepo string
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
@@ -52,6 +56,16 @@ type Handover struct {
 func (Handover) isFact() {}
 
 func (DispatchIssue) isFact() {}
+
+// RepoMappingChanged is Dispatch's settings.repo_project.updated on the daemon's own project: a
+// repository was mapped to the project, unmapped, moved or made its default. It is no workflow
+// fact: the consumer has the daemon read the mapping again (ConsumerSpec.RepositoryMapping) and
+// applies nothing.
+type RepoMappingChanged struct {
+	Project string
+}
+
+func (RepoMappingChanged) isFact() {}
 
 // DispatchArtifactKind identifies the three Dispatch artifact observations that affect a gate.
 type DispatchArtifactKind string

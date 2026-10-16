@@ -14,7 +14,7 @@ Do not request `isolated` subagent work or create another workspace: `LEGION_WOR
 
 ## GitHub operations
 
-Use plain `gh` for GitHub operations. `GH_CONFIG_DIR` names a read-only directory holding your role's GitHub App credential, which `gh` reads itself and `git` reads through `gh auth git-credential`; the daemon refreshes it in place, so it never expires under you. Never obtain, export, or expose a token, and never run `gh auth login` or `gh auth setup-git`: there is no login state to create. Legion's issues live on Dispatch, never on GitHub issues: no `gh issue` write; a `dispatch message` or `dispatch comment` instead.
+Use plain `gh` for GitHub operations. `GH_CONFIG_DIR` names your issue's owner's gh directory, with write access there; `LEGION_GH_OWNERS_DIR` holds one directory per owner of the project, read-only for every owner but yours. `gh` and `git` pick the directory by the owner of the repository a command names — for `gh`, `-R owner/repo`, `repos/owner/repo` in `gh api`, a `https://github.com/owner/…` URL, or `gh repo <command> owner/repo`; for `git`, the remote URL's owner — and use your issue's owner's when it names none, so name the repository whenever it is not your issue's. The daemon refreshes every directory in place, so no token expires under you. Never obtain, export, or expose a token, never set `GH_TOKEN`, and never run `gh auth login`, `gh auth switch` or `gh auth setup-git`: there is no login state to create. Legion's issues live on Dispatch, never on GitHub issues: no `gh issue` write; a `dispatch message` or `dispatch comment` instead.
 
 ## Completion
 

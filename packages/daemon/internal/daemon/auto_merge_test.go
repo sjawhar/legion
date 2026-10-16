@@ -70,10 +70,10 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 			t.Cleanup(server.Close)
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
-			child := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
+			child := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
 			if tc.lingers {
 				until, parent := time.Now().Add(time.Hour), "LEGION-207"
-				putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
+				putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
 					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
 				child.Tree, child.Parent = "LEGION-207", &parent
 			}
@@ -110,7 +110,7 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Merging,
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Merging,
 		Generation: 1, Status: "retro", Rank: "U"})
 	var mu sync.Mutex
 	disables := 0

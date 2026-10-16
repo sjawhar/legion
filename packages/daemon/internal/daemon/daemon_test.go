@@ -765,6 +765,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 			runtime:        fakeRuntime(fake.NewRuntime(), &built{}).runtime,
 			clock:          stillClock{},
 			workflowTokens: tokens,
+			githubAPI:      repositoriesGitHub(t),
 		})
 	}()
 	t.Cleanup(func() {
@@ -794,10 +795,12 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	if got := tokens.Roles(); len(got) != 2 || got[0] != appauth.Implement || got[1] != appauth.Review {
-		t.Fatalf("App token roles = %v, want implement then review", got)
+	// The boot mints the implement then the review App's token, then reads each served repository
+	// as the implement App.
+	if got := tokens.Roles(); len(got) != 3 || got[0] != appauth.Implement || got[1] != appauth.Review || got[2] != appauth.Implement {
+		t.Fatalf("App token roles = %v, want implement then review, then implement for the repository read", got)
 	}
-	want := []string{"prompts", "store", "config", "appauth", "launcher", "dispatch", "intake", "admission", "outbox", "api"}
+	want := []string{"prompts", "store", "config", "dispatch", "appauth", "repositories", "launcher", "intake", "admission", "outbox", "api"}
 	var got []string
 	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
 		var entry struct {
@@ -833,9 +836,13 @@ func TestAnIssueMovedWhileBootListsIsStillAdmitted(t *testing.T) {
 	// is handed to Legion.
 	moved := strings.ReplaceAll(strings.ReplaceAll(string(captured), "CAPTURE", cfg.Project), `"dispatch-15"`, `"dispatch-`+cfg.Project+`"`)
 	moved = strings.Replace(moved, `\"labels\":[]`, `\"labels\":[\"legion\"]`, 1)
+	moved = strings.Replace(moved, `\"resolved_repo\":\"sjawhar/legion\"`, `\"resolved_repo\":\"acme/widgets\"`, 1)
 	key := cfg.Project + "-3"
 	var once sync.Once
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if servedMapping(t, w, r, cfg.Project) {
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
 			// Once the move is admitted, the outbox reads and writes this project's issue; those
 			// calls are not what this test is about. Another project's issue is never this daemon's.
@@ -935,6 +942,7 @@ func TestRunRefusesToBootWithoutTheNotificationStream(t *testing.T) {
 		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+			githubAPI: repositoriesGitHub(t),
 		})
 	}()
 	select {
@@ -959,6 +967,7 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 		done <- run(ctx, cfg, quietLogger(), overrides{
 			listen:  heldListen,
 			runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{}, workflowTokens: &workflowTokenRecorder{},
+			githubAPI: repositoriesGitHub(t),
 		})
 	}()
 	stream, err := workflowJetStream(t, natsURL).Stream(context.Background(), "ENVOY_NOTIFICATIONS")
@@ -995,8 +1004,12 @@ func TestRunStopsWithTheErrorWhenItsIntakeEnds(t *testing.T) {
 func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	fastReadiness(t, bootprobe.Retry{Initial: time.Millisecond, Max: 4 * time.Millisecond})
 	natsURL := workflowNATS(t)
+	cfg := workflowConfig(t, natsURL)
 	var requests atomic.Int64
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if servedMapping(t, w, r, cfg.Project) {
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/issues" {
 			t.Errorf("Dispatch request = %s %s", r.Method, r.URL.Path)
 			return
@@ -1012,7 +1025,6 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 	}))
 	t.Cleanup(dispatchServer.Close)
 
-	cfg := workflowConfig(t, natsURL)
 	cfg.DispatchURL = dispatchServer.URL
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.workflowTokens = &workflowTokenRecorder{}
@@ -1026,8 +1038,10 @@ func TestRunWaitsThroughADispatch503BeforeServing(t *testing.T) {
 // workflowConfig is a Stage 3 configuration over natsURL and a Dispatch that lists no issues.
 func workflowConfig(t *testing.T, natsURL string) config.Config {
 	t.Helper()
+	cfg := testConfig(t)
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case servedMapping(t, w, r, cfg.Project):
 		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/issues":
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode([]any{}); err != nil {
@@ -1038,7 +1052,6 @@ func workflowConfig(t *testing.T, natsURL string) config.Config {
 		}
 	}))
 	t.Cleanup(dispatchServer.Close)
-	cfg := testConfig(t)
 	cfg.DispatchURL = dispatchServer.URL
 	cfg.DispatchTokenFile = filepath.Join(t.TempDir(), "dispatch-token")
 	if err := os.WriteFile(cfg.DispatchTokenFile, []byte("dispatch-test-token\n"), 0o600); err != nil {
@@ -1074,6 +1087,31 @@ func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _
 	r.roles = append(r.roles, role)
 	// Each App has its own bot login, as a real token manager's leases do.
 	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-" + string(role) + "[bot]"}}, nil
+}
+
+// InstalledOn answers both Apps installed on every repository.
+func (r *workflowTokenRecorder) InstalledOn(context.Context, appauth.AppRole, ghrepo.Repository) (bool, error) {
+	return true, nil
+}
+
+// servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and
+// reports whether r asked for it.
+func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project string) bool {
+	t.Helper()
+	if r.Method != http.MethodGet || r.URL.Path != "/api/v1/settings/repo-projects" {
+		return false
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode([]map[string]any{{"repo": "acme/widgets", "project": project, "default": true}}); err != nil {
+		t.Errorf("write the repository mapping: %v", err)
+	}
+	return true
+}
+
+func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := r.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
 }
 
 func (r *workflowTokenRecorder) Roles() []appauth.AppRole {

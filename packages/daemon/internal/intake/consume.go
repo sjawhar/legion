@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,7 +25,8 @@ const (
 )
 
 // ConsumerSpec is the caller-supplied durable-consumer configuration. The daemon owns its project
-// and configured repositories; intake owns only the fixed stream and consumer identities.
+// and the repositories GitHub intake hears at boot (SetRepositories changes them at runtime);
+// intake owns only the fixed stream and consumer identities.
 type ConsumerSpec struct {
 	Project      string
 	Repositories []ghrepo.Repository
@@ -51,6 +53,17 @@ type ConsumerSpec struct {
 	// a failed ReviewPermission read is. No resolver (a test, or a daemon without one) leaves every
 	// truncated review's body capped.
 	ReviewBody func(ctx context.Context, review PullRequestReview) (string, error)
+	// RepositoryMapping reads the project's repository mapping again, for Dispatch's
+	// settings.repo_project.updated on the project (RepoMappingChanged): it runs before the event
+	// is acknowledged, within AckWait and in no transaction, and a failed read is retried after
+	// NakDelay. No reader (a test) acknowledges the event.
+	RepositoryMapping func(ctx context.Context) error
+	// PrepareRepository readies what the workflow reads in memory of the repository a Dispatch
+	// issue event resolves to (DispatchIssue.ResolvedRepo), before the fact is applied, within
+	// AckWait: the workflow performs no I/O, and takes the repository and its default branch when it
+	// first records an issue. A failed preparation is retried after NakDelay rather than applied
+	// without it. No preparer (a test) applies the fact as decoded.
+	PrepareRepository func(ctx context.Context, issue DispatchIssue) error
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -65,12 +78,16 @@ func (r *RetryLater) Error() string { return r.Err.Error() }
 func (r *RetryLater) Unwrap() error { return r.Err }
 
 // Consumers are this project's two durable JetStream consumers, created before intake runs so a
-// daemon whose stream is missing refuses to boot instead of booting with no intake.
+// daemon whose stream is missing refuses to boot instead of booting with no intake. repos is the
+// set GitHub intake hears and decodes, which SetRepositories replaces under mu.
 type Consumers struct {
 	spec     ConsumerSpec
 	stream   jetstream.Stream
 	dispatch jetstream.Consumer
 	github   jetstream.Consumer
+
+	mu    sync.Mutex
+	repos []ghrepo.Repository
 }
 
 // OpenConsumers creates or updates this project's Dispatch and GitHub durable consumers. A consumer
@@ -90,24 +107,55 @@ func OpenConsumers(ctx context.Context, js jetstream.JetStream, spec ConsumerSpe
 	}
 
 	dispatch, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
-		Durable:       dispatchConsumerName(spec.Project),
-		FilterSubject: "notifications.dispatch.issue.>",
-		AckPolicy:     jetstream.AckExplicitPolicy,
-		AckWait:       spec.AckWait,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
-	}
-	github, err := openConsumer(ctx, stream, jetstream.ConsumerConfig{
-		Durable:        githubConsumerName(spec.Project),
-		FilterSubjects: githubFilters(spec.Repositories),
+		Durable:        dispatchConsumerName(spec.Project),
+		FilterSubjects: []string{"notifications.dispatch.issue.>", mappingSubject(spec.Project)},
 		AckPolicy:      jetstream.AckExplicitPolicy,
 		AckWait:        spec.AckWait,
 	})
 	if err != nil {
+		return nil, fmt.Errorf("open the Dispatch durable consumer: %w", err)
+	}
+	github, err := openConsumer(ctx, stream, githubConsumerConfig(spec, spec.Repositories))
+	if err != nil {
 		return nil, fmt.Errorf("open the GitHub durable consumer: %w", err)
 	}
-	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, github: github}, nil
+	return &Consumers{spec: spec, stream: stream, dispatch: dispatch, github: github, repos: slices.Clone(spec.Repositories)}, nil
+}
+
+func githubConsumerConfig(spec ConsumerSpec, repositories []ghrepo.Repository) jetstream.ConsumerConfig {
+	return jetstream.ConsumerConfig{
+		Durable:        githubConsumerName(spec.Project),
+		FilterSubjects: githubFilters(repositories),
+		AckPolicy:      jetstream.AckExplicitPolicy,
+		AckWait:        spec.AckWait,
+	}
+}
+
+// SetRepositories replaces the repositories GitHub intake hears: the set the decoder accepts an
+// event's repository from, then the GitHub consumer's filters, so an event of a repository added
+// here is decoded from the moment the consumer delivers it. An event of a repository taken out is
+// acknowledged untouched once the set changes. An empty or zero repository is refused, since a
+// consumer with no filter would hear every subject.
+func (c *Consumers) SetRepositories(ctx context.Context, repositories []ghrepo.Repository) error {
+	if len(repositories) == 0 || slices.ContainsFunc(repositories, ghrepo.Repository.IsZero) {
+		return fmt.Errorf("GitHub intake needs at least one repository to hear")
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.repos = slices.Clone(repositories)
+	github, err := openConsumer(ctx, c.stream, githubConsumerConfig(c.spec, repositories))
+	if err != nil {
+		return fmt.Errorf("update the GitHub durable consumer's repositories: %w", err)
+	}
+	c.github = github
+	return nil
+}
+
+// repositories is the set GitHub intake hears now.
+func (c *Consumers) repositories() []ghrepo.Repository {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.repos
 }
 
 // openConsumer updates the durable consumer config names, keeping the start position it was created
@@ -165,17 +213,20 @@ func positionOf(info *jetstream.ConsumerInfo) DispatchConsumerPosition {
 // the daemon's boot-owned concern (workflowRuntime.pollHoldRelease), not intake's: this loop knows
 // nothing about either.
 func (c *Consumers) Run(ctx context.Context, pool *pgxpool.Pool, handlers ...Handler) error {
+	c.mu.Lock()
+	dispatch, github := c.dispatch, c.github
+	c.mu.Unlock()
 	group, consumeContext := errgroup.WithContext(ctx)
 	group.Go(func() error {
-		return consumeConsumer(consumeContext, c.dispatch, c.spec, pool, handlers)
+		return consumeConsumer(consumeContext, dispatch, c.spec, c.repositories, pool, handlers)
 	})
-	group.Go(func() error { return consumeConsumer(consumeContext, c.github, c.spec, pool, handlers) })
+	group.Go(func() error { return consumeConsumer(consumeContext, github, c.spec, c.repositories, pool, handlers) })
 	return group.Wait()
 }
 
-func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) error {
+func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec ConsumerSpec, repositories func() []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) error {
 	consuming, err := consumer.Consume(func(message jetstream.Msg) {
-		consumeMessage(ctx, message, spec, pool, handlers)
+		consumeMessage(ctx, message, spec, repositories(), pool, handlers)
 	})
 	if err != nil {
 		return err
@@ -193,8 +244,8 @@ func consumeConsumer(ctx context.Context, consumer jetstream.Consumer, spec Cons
 	}
 }
 
-func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, pool *pgxpool.Pool, handlers []Handler) {
-	decoded, err := decodeMessage(message.Subject(), spec.Project, spec.Repositories, message.Data())
+func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpec, repositories []ghrepo.Repository, pool *pgxpool.Pool, handlers []Handler) {
+	decoded, err := decodeMessage(message.Subject(), spec.Project, repositories, message.Data())
 	if err != nil {
 		logMessage(spec.Logger, slog.LevelError, "poison JetStream message", message, "error", err)
 		if termErr := message.Term(); termErr != nil {
@@ -207,6 +258,18 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	}
 	if decoded.Fact == nil {
 		ackMessage(spec.Logger, message)
+		return
+	}
+	if _, ok := decoded.Fact.(RepoMappingChanged); ok {
+		if err := readMapping(ctx, spec); err != nil {
+			nakResolve(spec, message, decoded.EventID, "read the project's repository mapping again", "nak the mapping read", err)
+			return
+		}
+		ackMessage(spec.Logger, message)
+		return
+	}
+	if err := prepareRepository(ctx, spec, decoded.Fact); err != nil {
+		nakResolve(spec, message, decoded.EventID, "prepare the issue's repository", "nak the repository preparation", err)
 		return
 	}
 	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
@@ -238,6 +301,28 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		)
 	}
 	ackMessage(spec.Logger, message)
+}
+
+// readMapping runs ConsumerSpec.RepositoryMapping within AckWait; no reader reads nothing.
+func readMapping(ctx context.Context, spec ConsumerSpec) error {
+	if spec.RepositoryMapping == nil {
+		return nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	return spec.RepositoryMapping(read)
+}
+
+// prepareRepository runs ConsumerSpec.PrepareRepository for a Dispatch issue fact, within AckWait.
+// Every other fact passes through untouched.
+func prepareRepository(ctx context.Context, spec ConsumerSpec, fact Fact) error {
+	issue, ok := fact.(DispatchIssue)
+	if !ok || spec.PrepareRepository == nil {
+		return nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	return spec.PrepareRepository(read, issue)
 }
 
 // resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission

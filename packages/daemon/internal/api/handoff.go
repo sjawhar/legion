@@ -179,8 +179,8 @@ func byHandShare(mergeNote string) string {
 //     READY_FILES_TRUNCATED, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
-// The reads are made as the implement App, whose token never leaves the daemon; a runtime that
-// boots without Apps publishes no READY (leaseForGrant).
+// The reads are made as the implement App, minted for the repository's owner, whose token never
+// leaves the daemon; a runtime that boots without Apps publishes no READY (leaseForGrant).
 func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
 	var repository ghrepo.Repository
 	if s.repository != nil {
@@ -190,7 +190,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		writeFailure(w, http.StatusConflict, "NO_REPOSITORY", fmt.Sprintf("the project %s of %s has no repository configured, so its pull request cannot be read", issue.Project, issue.Key))
 		return readyAnswer{}, false
 	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
+	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement, repository.Owner())
 	if !ok {
 		return readyAnswer{}, false
 	}

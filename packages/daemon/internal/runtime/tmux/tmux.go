@@ -75,15 +75,21 @@ type Options struct {
 	// dispatch_url is set.
 	DispatchURL       string
 	DispatchTokenFile string
-	// GitHubCredential is the daemon's function for a role's gh files (runtime.GitHubCredential):
-	// hosts.yml and config.yml rendered from the role's App token. A launch calls it for the pane's
-	// claim and writes the two files under the claim's directory (runtime.GHConfigDir), the pane's
-	// GH_CONFIG_DIR, and the refresher started by Observe (refreshGitHubCredentials) calls it again
-	// for every tracked pane and rewrites hosts.yml when the render changed; the controller's pane
-	// is one like any other's, since it acts as the review App (appauth.AppRoleFor). Nil is a
-	// daemon with no GitHub Apps (Stage 2's, which configures no workflow): its panes are told no
-	// GH_CONFIG_DIR, hold no gh files, and the refresher does nothing.
+	// GitHubCredential is the daemon's function for a role's gh bundle (runtime.GitHubCredential):
+	// one directory of gh files per GitHub owner of the project. A launch calls it for the pane's
+	// role and its repository's owner and writes the bundle under the claim's root
+	// (runtime.GHConfigDir), the pane's LEGION_GH_OWNERS_DIR, whose default owner's directory is the
+	// pane's GH_CONFIG_DIR, and the refresher started by Observe (refreshGitHubCredentials) calls it
+	// again for every tracked pane's default and rewrites each owner's hosts.yml when its render
+	// changed; the controller's pane is one like any other's, since it acts as the review App
+	// (appauth.AppRoleFor). Nil is a daemon with no GitHub Apps (Stage 2's, which configures no
+	// workflow): its panes are told no gh variable, hold no gh files, and the refresher does
+	// nothing.
 	GitHubCredential runtime.GitHubCredential
+	// GH is the real gh's absolute path, which the daemon resolves at boot and every pane is told
+	// as LEGION_GH_PATH: the `legion gh` wrapper first on the pane's PATH runs it with the gh
+	// directory of the owner a command names. Required with GitHubCredential.
+	GH string
 	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
 	OmpInvocation   string
@@ -128,6 +134,7 @@ type Runtime struct {
 	dispatchURL      string
 	dispatchToken    string
 	gitHubCredential runtime.GitHubCredential
+	gh               string
 	ompInvocation    string
 	ompPrefix        []string
 	stopGrace        time.Duration
@@ -162,11 +169,14 @@ type Runtime struct {
 	tracked map[string]*trackedProcess
 }
 
-// trackedProcess is one watched process: its locator, and the issue it works on when the runtime
-// opened it (empty for one it adopted, whose window is then not offered to later panes).
+// trackedProcess is one watched process: its locator, the issue it works on when the runtime
+// opened it (empty for one it adopted, whose window is then not offered to later panes), and the
+// default owner of the gh bundle its launch wrote (empty for one it adopted, whose bundle root
+// records it: ghconfig.ReadDefault).
 type trackedProcess struct {
-	locator runtime.Locator
-	issue   string
+	locator   runtime.Locator
+	issue     string
+	ghDefault string
 }
 
 // New builds a runtime from opts, resolving the tmux and legion binaries now so a daemon that
@@ -193,6 +203,8 @@ func New(opts Options) (*Runtime, error) {
 		return nil, errors.New("tmux runtime: the Dispatch URL and token file must be configured together")
 	case opts.DispatchTokenFile != "" && !filepath.IsAbs(opts.DispatchTokenFile):
 		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
+	case opts.GitHubCredential != nil && !filepath.IsAbs(opts.GH):
+		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
 	}
 	environ := opts.Environ
 	if environ == nil {
@@ -227,6 +239,7 @@ func New(opts Options) (*Runtime, error) {
 		dispatchURL:      opts.DispatchURL,
 		dispatchToken:    opts.DispatchTokenFile,
 		gitHubCredential: opts.GitHubCredential,
+		gh:               opts.GH,
 		ompInvocation:    opts.OmpInvocation,
 		ompPrefix:        opts.OmpLaunchPrefix,
 		stopGrace:        opts.StopGrace,
@@ -373,13 +386,13 @@ func paneOf(loc runtime.Locator) (string, incarnation, error) {
 	return loc.Tmux.Pane, inc, nil
 }
 
-func (r *Runtime) track(loc runtime.Locator, issue string) {
+func (r *Runtime) track(loc runtime.Locator, issue, ghDefault string) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
 	if existing, ok := r.tracked[loc.Incarnation]; ok && existing.issue != "" {
-		issue = existing.issue
+		issue, ghDefault = existing.issue, existing.ghDefault
 	}
-	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue}
+	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghDefault: ghDefault}
 }
 
 func (r *Runtime) untrack(loc runtime.Locator) {
@@ -407,11 +420,11 @@ func (r *Runtime) adoptExactly(located []runtime.Locator) {
 		}
 	}
 	for _, loc := range located {
-		issue := ""
+		entry := &trackedProcess{locator: loc}
 		if existing, ok := r.tracked[loc.Incarnation]; ok {
-			issue = existing.issue
+			entry.issue, entry.ghDefault = existing.issue, existing.ghDefault
 		}
-		r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue}
+		r.tracked[loc.Incarnation] = entry
 	}
 }
 

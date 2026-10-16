@@ -17,6 +17,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -110,7 +111,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	replace := !live || (drifted && !installing) ||
 		slices.ContainsFunc(l.roles, func(role claim.Role) bool { return len(r.movedInPod(pod, role)) > 0 })
 	if !replace {
-		bound, err := r.launcherBound(ctx, s, pod, l.roles)
+		bound, err := r.launcherBound(ctx, s, pod, &l)
 		if err != nil {
 			return fail("read its pod's launcher bindings", err)
 		}
@@ -139,7 +140,7 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err := l.kind.provision(ctx, r, &l, s); err != nil {
 			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, err)
 		}
-		if err := r.writeLauncherSecrets(ctx, s, l); err != nil {
+		if err := r.writeLauncherSecrets(ctx, s, &l); err != nil {
 			return fail("write its launcher secrets", err)
 		}
 		template := r.podTemplate(l)
@@ -496,34 +497,68 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
 // launcher's start command instead (launcherCommand). The Secret also carries the role's GitHub
-// credential, its gh hosts.yml and config.yml rendered from the role's App token
-// (Options.GitHubCredential), which its container projects at GHConfigDir; a mint that fails fails
-// the launch naming the role, as a provisioning-token mint does, since a pod whose gh holds no
-// token would start every role unable to reach GitHub.
-func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch) error {
+// credential, its gh bundle (gitHubBundles): each owner's hosts.yml and config.yml (GitHubHostsKey,
+// GitHubConfigKey) and the default owner (GitHubDefaultKey), which its container projects at
+// GHConfigDir.
+func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launch) error {
+	bundles, err := r.gitHubBundles(ctx, l)
+	if err != nil {
+		return err
+	}
 	for _, role := range l.roles {
 		token, err := launcherToken()
 		if err != nil {
 			return err
 		}
-		data := map[string][]byte{LauncherTokenFile: []byte(token)}
-		minting, cancel := call(ctx)
-		rendered, err := r.gitHubCredential(minting, role)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("write the github credential for %s: %w", role, err)
+		bundle := bundles[role]
+		data := map[string][]byte{LauncherTokenFile: []byte(token), GitHubDefaultKey: []byte(bundle.Default)}
+		for _, owner := range l.gitHubOwners {
+			rendered := bundle.Owners[owner]
+			data[GitHubHostsKey(owner)], data[GitHubConfigKey(owner)] = []byte(rendered.Hosts), []byte(rendered.Config)
 		}
-		data[GitHubHostsKey], data[GitHubConfigKey] = []byte(rendered.Hosts), []byte(rendered.Config)
 		if err := r.upsertSecret(ctx, corev1.Secret{
-			ObjectMeta: r.secretMeta(s, l, roleSecretName(s.Name, role)),
+			ObjectMeta: r.secretMeta(s, *l, roleSecretName(s.Name, role)),
 			Type:       corev1.SecretTypeOpaque,
 			Data:       data,
 		}); err != nil {
 			return err
 		}
-		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
+		written := bundle.Owners[bundle.Default]
+		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", written.App,
+			"expiresAt", written.ExpiresAt, "owners", l.gitHubOwners)
 	}
 	return nil
+}
+
+// gitHubBundles mints each launcher role's gh bundle for the issue's repository's owner
+// (Options.GitHubCredential) and records the bundle's owners and default on l, which the pod's gh
+// volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the same owners
+// and default, and one that does not fails the launch, as a mint that fails or a bundle Validate
+// refuses does, naming the role, since a pod whose gh holds no token would start every role unable
+// to reach GitHub.
+func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
+	l.gitHubOwners, l.gitHubDefault = nil, ""
+	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
+	for _, role := range l.roles {
+		minting, cancel := call(ctx)
+		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository.Owner())
+		cancel()
+		if err == nil {
+			err = bundle.Validate()
+		}
+		if err != nil {
+			return nil, fmt.Errorf("write the github credential for %s: %w", role, err)
+		}
+		owners := bundle.OwnerNames()
+		if l.gitHubOwners == nil {
+			l.gitHubOwners, l.gitHubDefault = owners, bundle.Default
+		} else if !slices.Equal(owners, l.gitHubOwners) || bundle.Default != l.gitHubDefault {
+			return nil, fmt.Errorf("write the github credential for %s: its owners %v (default %s) are not the pod's %v (default %s)",
+				role, owners, bundle.Default, l.gitHubOwners, l.gitHubDefault)
+		}
+		bundles[role] = bundle
+	}
+	return bundles, nil
 }
 
 // secretMeta is a pod's Secret's metadata: the pod's labels, the Sandbox as owner, and the
