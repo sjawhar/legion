@@ -335,6 +335,15 @@
 
 ### Changed
 
+- **Breaking:** every listener `/v1` request with a body must set `Content-Type: application/json`;
+  parameters such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is
+  answered 415 with a JSON error before authentication or the handler runs, whether the body's
+  length is known or not (a chunked body is checked too). A cross-site browser request can no longer
+  publish a `text/plain` body through an unauthenticated loopback listener. A request with no body,
+  such as a `GET` or `DELETE`, is unaffected, and webhook routes keep their own signature and
+  content handling. Every Legion client already sends the header; an operator's own script that
+  posts to `/v1` without it now gets the 415 and must set the header.
+
 - **Breaking:** `GET` and `PUT /api/v1/settings/delivery` replace
   `production_job_name` with `production_job_names` (a string array) and
   `production_apply_step_name`. `PUT` trims each name and refuses an empty list, a blank name or a
@@ -766,14 +775,6 @@
 
 ### Fixed
 
-- Every listener `/v1` request with a body must set `Content-Type: application/json`; parameters
-  such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is answered 415
-  with a JSON error before authentication or the handler runs, whether the body's length is known
-  or not (a chunked body is checked too). A cross-site browser request can no longer publish a
-  `text/plain` body through an unauthenticated loopback listener. A request with no body, such as
-  a `GET` or `DELETE`, is unaffected, and webhook routes keep their own signature and content
-  handling. Every Legion client already sends the header; an operator's own script that posts to
-  `/v1` without it now gets the 415 and must set the header.
 - A closed issue can give up an external link (a write whose links are a subset of what it already
   holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
   still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
