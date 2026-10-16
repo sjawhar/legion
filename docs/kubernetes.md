@@ -1686,7 +1686,7 @@ Every pod runs:
     time](#image-size-and-pull-time));
   - a pod carrying it is refused outright under the `cloud.google.com/gke-spot` node selector or
     toleration (GKE offers no extended duration to a Spot Pod requested any other way, such as the
-    `autopilot-spot` compute class); the boot probe (below) carries neither annotation, so it does
+    `autopilot-spot` compute class); the boot probe (below) carries only Karpenter's, so it does
     not catch a `gke-spot` scheduling config before every issue and controller launch is refused;
   - the image probe pod (below) carries only the first: a dedicated node per boot would cost more
     than the eviction window buys a probe that is already short-lived and retried on failure.
