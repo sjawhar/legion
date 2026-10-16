@@ -23,6 +23,7 @@ type seedEnvRun struct {
 	stdout, stderr string
 	exitCode       int
 	dir, envFile   string
+	rendered       string
 }
 
 // seedEnv runs the golden's listener-seed-env, with the golden's fetch-secret beside it, against f.
@@ -55,6 +56,75 @@ func seedEnv(t *testing.T, f *fakeGCP) seedEnvRun {
 		require.NotEqual(t, -1, run.exitCode, "the script ran: %v", err)
 	}
 	return run
+}
+
+func githubWebhookEnv(t *testing.T, f *fakeGCP) seedEnvRun {
+	t.Helper()
+	args := exampleArgs()
+	withGitHubWebhooks(args)
+	doc, text, err := gcp.CloudConfigOf(args)
+	require.NoError(t, err)
+	scriptDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "fetch-secret"),
+		[]byte(fileOf(t, doc, "/etc/envoy/fetch-secret")), 0o700))
+	script := filepath.Join(scriptDir, "github-webhook-env")
+	require.NoError(t, os.WriteFile(script,
+		[]byte(fileOf(t, doc, "/etc/envoy/github-webhook-env")), 0o700))
+	binDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "sleep"), []byte(sleepStub), 0o700))
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "github-webhook.env")
+
+	cmd := shellCommand(t, script, envFile, fetchSecret)
+	cmd.Env = []string{
+		"PATH=" + binDir + string(os.PathListSeparator) + os.Getenv("PATH"),
+		"SLEEP_LOG=" + filepath.Join(scriptDir, "sleeps"),
+		"GCE_METADATA_HOST=" + f.metadata.Listener.Addr().String(),
+		"SECRET_MANAGER_ENDPOINT=" + f.secrets.URL,
+	}
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err = cmd.Run()
+	run := seedEnvRun{stdout: stdout.String(), stderr: stderr.String(), dir: dir, envFile: envFile, rendered: text}
+	if err != nil {
+		run.exitCode = cmd.ProcessState.ExitCode()
+		require.NotEqual(t, -1, run.exitCode, "the script ran: %v", err)
+	}
+	return run
+}
+
+func TestGitHubWebhookEnvWritesTheSecretWithoutRenderingIt(t *testing.T) {
+	t.Parallel()
+	const secret = "github-webhook-secret-value"
+	f := newFakeGCP(t, func(w http.ResponseWriter, _ int32) { fmt.Fprint(w, accessResponse(secret)) })
+	run := githubWebhookEnv(t, f)
+
+	require.Equal(t, 0, run.exitCode, "stderr: %s", run.stderr)
+	require.Empty(t, run.stdout)
+	require.Empty(t, run.stderr)
+	got, err := os.ReadFile(run.envFile)
+	require.NoError(t, err)
+	require.Equal(t, "ENVOY_GITHUB_WEBHOOK_SECRET="+secret+"\n", string(got))
+	require.NotContains(t, run.rendered, secret)
+	info, err := os.Stat(run.envFile)
+	require.NoError(t, err)
+	require.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+func TestGitHubWebhookEnvRefusesASecretWithMoreThanOneLine(t *testing.T) {
+	t.Parallel()
+	const secret = "github-webhook-secret-value"
+	f := newFakeGCP(t, func(w http.ResponseWriter, _ int32) {
+		fmt.Fprint(w, accessResponse(secret+"\nENVOY_API_TOKEN=x"))
+	})
+	run := githubWebhookEnv(t, f)
+
+	require.NotEqual(t, 0, run.exitCode)
+	require.Contains(t, run.stderr, "holds more than one line")
+	require.NotContains(t, run.stderr, secret)
+	entries, err := os.ReadDir(run.dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the secret never reaches an environment file")
 }
 
 // The env file holds the seed as the one variable NATS_NKEY_SEED, readable by root alone, and the

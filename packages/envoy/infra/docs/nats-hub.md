@@ -16,11 +16,12 @@ A hub whose `hostname` is `<h>` registers these resources, each a child of the h
 | `<h>-tailnet-auth-key` | `gcp:secretmanager/secretVersion:SecretVersion` | Its version, holding `tailnetAuthKey`. |
 | `<h>-tailnet-auth-key-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | The service account's grant of `roles/secretmanager.secretAccessor` on that secret. |
 | `<h>-listener-seed-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | Only with `listener`: the same grant on `listener.seedSecret`, a secret the consumer declares and writes. |
+| `<h>-github-webhook-secret-accessor` | `gcp:secretmanager/secretIamMember:SecretIamMember` | Only with `listener.webhooks`: the same grant on `listener.webhooks.githubWebhookSecret`, which the consumer declares and writes. |
 | `<h>-network` | `gcp:compute/network:Network` | Only without `network`: an auto-mode network, with a subnetwork in every region. |
 | `<h>-health-checks` | `gcp:compute/firewall:Firewall` | The hub's one firewall rule: tcp/8222 from Google's health-check ranges, `130.211.0.0/22` and `35.191.0.0/16`, to the VM's network tag `<h>-hub`. |
 | `<h>-healthz` | `gcp:compute/healthCheck:HealthCheck` | An HTTP check of NATS's `/healthz` on port 8222, every 10 seconds, unhealthy after 6 failures. |
 | `<h>` | `gcp:compute/instanceTemplate:InstanceTemplate` | The VM: `machineType`, a boot disk from Container-Optimized OS's `cos-stable` image family, the data disk, an external address for its way out to the image registries and the tailnet (see [The VM's external address](#the-vms-external-address)), the service account with the `cloud-platform` scope, the tag `<h>-hub`, and the cloud-config as its `user-data` (see [What the hub's VM runs](#what-the-hubs-vm-runs)). |
-| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from an initial delay after the VM is created that covers the first boot's read of the data disk (see [The first boot's read](#the-first-boots-read)), and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grants, since its first VM fetches the key when it boots and its listener fetches its seed when it starts, and `pulumi up` waits until it is `STABLE`. |
+| `<h>` | `gcp:compute/instanceGroupManager:InstanceGroupManager` | The zonal group of that one VM, in `zone`. It keeps the data disk (see [The hub's data disk](#the-hubs-data-disk)), recreates the VM once the health check finds it unhealthy, from an initial delay after the VM is created that covers the first boot's read of the data disk (see [The first boot's read](#the-first-boots-read)), and replaces it when the template changes (see [Updating a hub](#updating-a-hub)). It is created after the key's version and the account's grants, since its first VM fetches the key when it boots and its listener fetches its seed and, with webhooks, its signing secret when it starts, and `pulumi up` waits until it is `STABLE`. |
 
 Every resource is in the gcp provider's project. The template's name is `<h>-` and a suffix the
 provider adds, and the network, the firewall rule, the health check and the group are named after
@@ -47,6 +48,7 @@ and `instanceGroup`, the group's name.
 | `network` | created | The name or self link of the VPC network the VM and the firewall rule are in. Unset, the hub creates one, which has no firewall rule but the hub's. The VM has an external address and takes the network's rules for all its instances, so on a network whose firewall admits SSH from anywhere, as the default network's `default-allow-ssh` does, its sshd is reachable from the internet: see [The VM's external address](#the-vms-external-address). May come from another resource or stack. |
 | `subnetwork` | unset | The VM's subnetwork, for a network with custom subnetworks: one in `zone`'s region. Only with `network`. May come from another resource or stack. |
 | `listener` | unset | The hub's own Envoy listener: `image`, the listener's image pinned as the images above are; `seedSecret`, the id of a Secret Manager secret in the hub's project holding its NATS user's seed; and `nkey`, that seed's public key. See [The hub's listener](#the-hubs-listener). |
+| `listener.webhooks` | unset | The listener's optional public webhook ingress: `providers` is exactly `["github"]`; `githubWebhookSecret` is the existing Secret Manager secret holding the signing secret; `reviewerAppId` is the GitHub App's positive decimal id; and `funnelPort` is 443, 8443 or 10000. See [GitHub webhooks through Funnel](#github-webhooks-through-funnel). |
 | `sessionUser` | unset | `name` and `nkey`, the NATS user a client presenting no credential becomes, granted `SessionPermissions`. See [The hub's users](#the-hubs-users). |
 
 Only `tailnetAuthKey`, `network` and `subnetwork` may come from another resource's output. Every
@@ -58,14 +60,14 @@ The hub refuses these before it registers anything, with an error naming the inp
 - an nkey seed, found as `envoy-infra seed` finds one (`bus.HoldsSeed`: any type, either case,
   whole, inside a longer value, split by `.`, `-`, `_` or whitespace, or percent-encoded), in an
   input the hub carries into the user data, a child or a refusal: `hostname`, a tag, `zone`,
-  `machineType`, `diskType`, an image, a user's `machineId`, or the listener's `image` or
-  `seedSecret`. The error names the input by its
-  path and never its value, as `users[0].machineId: an nkey user seed, which is never an input of
-  the hub (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come from another
-  resource, so a seed in any of them fails the preview or update once it resolves, with the same
-  error, before any child is registered with it: a NATS seed passed as the Tailscale key is refused
-  before a Secret Manager version holds it, and the error never carries the secret. A seed in a
-  user's `name` or a rule entry is refused by the authorization, as
+  `machineType`, `diskType`, an image, a user's `machineId`, the listener's `image` or
+  `seedSecret`, or a `listener.webhooks` provider, signing-secret id or reviewer App id. The error
+  names the input by its path and never its value, as `users[0].machineId: an nkey user seed, which
+  is never an input of the hub (not echoed)`. `network`, `subnetwork` and `tailnetAuthKey` may come
+  from another resource, so a seed in any of them fails the preview or update once it resolves,
+  with the same error, before any child is registered with it: a NATS seed passed as the Tailscale
+  key is refused before a Secret Manager version holds it, and the error never carries the secret.
+  A seed in a user's `name` or a rule entry is refused by the authorization, as
   [The hub's users](#the-hubs-users) says, and a seed as a user's `nkey` is refused as an `nkey`
   that is no public key, without quoting it;
 - a `hostname` outside the rule above;
@@ -89,6 +91,9 @@ The hub refuses these before it registers anything, with an error naming the inp
   (`^[A-Za-z0-9_-]{1,255}$`, Secret Manager's rule, so a resource path such as
   `projects/<p>/secrets/<s>` is refused) or is the hub's own `<h>-tailnet-auth-key`, or whose
   `nkey` is empty;
+- `listener.webhooks` with any provider other than `github`, a provider list other than exactly
+  `["github"]`, a missing or non-secret-id `githubWebhookSecret`, a missing or non-decimal-positive
+  `reviewerAppId`, or a `funnelPort` other than 443, 8443 or 10000;
 - a missing provider (see [Providers](../README.md#providers)).
 
 ## The hub's users
@@ -156,6 +161,36 @@ secret and writes the seed with `envoy-infra seed generate`, whose printed key i
 `NATS_NKEY_SEED` through `docker run --env-file`, which Docker reads as root, since the listener's
 image runs as an unprivileged user.
 
+### GitHub webhooks through Funnel
+
+Set `listener.webhooks` only when this hub must receive GitHub webhooks from the public internet.
+This version takes `providers: ["github"]`, the existing Secret Manager id in
+`githubWebhookSecret`, the GitHub App's `reviewerAppId`, and `funnelPort` 443, 8443 or 10000.
+The VM's service account receives `roles/secretmanager.secretAccessor` for that signing-secret
+resource. Before every listener start, the VM fetches its latest value into a root-only env file
+that Docker reads as `ENVOY_GITHUB_WEBHOOK_SECRET`; the value is not Pulumi state, cloud-config,
+a unit argument or the journal.
+
+Funnel makes exactly `https://${TS_CERT_DOMAIN}:<funnelPort>/webhook/github` public. Its Serve
+configuration has no public handler for `/`, `/v1`, `/healthz`, or any other path; port 9020 stays
+the tailnet TCP forward above. The listener verifies every GitHub delivery's signature before it
+uses it (`packages/envoy/internal/webhook/github.go:98-107`).
+
+Before applying this input, turn HTTPS certificates on for the tailnet and give the hub's advertised
+tag the `funnel` node attribute in its policy file. For a hub that advertises `tag:example-host`,
+the required policy entry is:
+
+```json
+{
+  "nodeAttrs": [
+    {"target": ["tag:example-host"], "attr": ["funnel"]}
+  ]
+}
+```
+
+The policy entry permits Funnel for nodes with that tag; it does not make the listener's tailnet
+ports public.
+
 ## What the hub's VM runs
 
 The VM boots Container-Optimized OS (COS), which mounts `/` read-only and keeps `/etc` and
@@ -193,18 +228,19 @@ so cloud-init applies the hub's cloud-config at every boot. The whole document, 
 `write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the secret fetcher to
 `/etc/envoy/fetch-secret`, the joined script to `/etc/envoy/tailnet-joined`, with a `listener` the
 seed script to `/etc/envoy/listener-seed-env` and Tailscale Serve's configuration to
-`/etc/tailscale-serve/serve.json`, and the systemd units to `/etc/systemd/system/`, and `runcmd`
-reloads systemd and starts the units in this order. They are started and never enabled, since
-`/etc` does not outlive the boot.
+`/etc/tailscale-serve/serve.json`, and with `listener.webhooks` the signing-secret script to
+`/etc/envoy/github-webhook-env`. It writes the systemd units to `/etc/systemd/system/`, and
+`runcmd` reloads systemd and starts the units in this order. They are started and never enabled,
+since `/etc` does not outlive the boot.
 
 | Unit | What it does |
 | --- | --- |
 | `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-secret /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
-| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. With a `listener` it also mounts `/etc/tailscale-serve` read-only and sets `TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json`: containerboot applies that configuration once the node is up, and again whenever the file changes, watching its directory (tailscale v1.104.1 `cmd/containerboot/serve.go`), which is why the file has a directory of its own. It wants the fetch and starts after it ends, but does not require it. |
+| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. With a `listener` it also mounts `/etc/tailscale-serve` read-only and sets `TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json`: containerboot applies that configuration once the node is up, and again whenever the file changes, watching its directory (tailscale v1.104.1 `cmd/containerboot/serve.go`), which is why the file has a directory of its own. With `listener.webhooks`, the same file also has an HTTPS handler and one Funnel permission for the configured public port. |
 | `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it empties the key file, which stays for the container's bind mount, and only once that has succeeded writes the marker. A simple service, so its start returns at once; a run that fails, as one whose key drop fails does, is run again 10 seconds later. |
 | `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
-| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
+| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the NATS seed to that env file. With `listener.webhooks`, `/etc/envoy/github-webhook-env /run/envoy/github-webhook.env <githubWebhookSecret>` writes the GitHub signing secret to a second root-only env file. `docker run --name envoy-listener` then reads those files and sets `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`, plus `ENVOY_WEBHOOKS=github` and `ENVOY_REVIEWER_APP_ID=<reviewerAppId>` with webhooks. A secret that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
 
 The container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
 point, so that their state never lands on the tmpfs beneath, and restart 10 seconds after their
@@ -220,7 +256,9 @@ arguments. `GCE_METADATA_HOST` and `SECRET_MANAGER_ENDPOINT` replace the metadat
 and Secret Manager's base URL, which its tests use. The seed script fetches the listener's seed
 with it into a temporary file, refuses a seed of more than one line, which would add a variable of
 the secret's choosing to the listener's environment, and writes `NATS_NKEY_SEED=<seed>` to
-`/run/envoy/listener.env`, readable by root alone, removing the fetched file.
+`/run/envoy/listener.env`, readable by root alone, removing the fetched file. The GitHub script
+applies the same one-line rule and writes `ENVOY_GITHUB_WEBHOOK_SECRET=<secret>` to
+`/run/envoy/github-webhook.env`.
 
 NATS listens for clients on 4222 and serves its monitoring endpoints on 8222, on every interface.
 The hub's VPC firewall rule and `nats-firewall` admit Google's health checks to 8222, and
@@ -416,13 +454,14 @@ e2fsck's repair, on a real disk, leaves what JetStream needs are for a first dep
 An instance template cannot change once it is created
 ([instance templates](https://cloud.google.com/compute/docs/instance-templates)), and the hub's
 holds the cloud-config, so a change to anything the cloud-config is rendered from (`users`,
-`listener`, `sessionUser`, `tags`, `natsImage`, `tailscaleImage`) or to `machineType`, `diskType`, `diskSizeGb`, `network` or
-`subnetwork` makes a new template. The group then replaces its VM at once (`PROACTIVE`, minimal
-action `REPLACE`), deleting it before it creates the next (`RECREATE`, no surge, at most one
-unavailable). NATS is down from the old VM's stop until the new one's `nats` unit starts, and its
-clients reconnect then. The new VM gets the same data disk, so it keeps the stream and rejoins the
-tailnet as the same node. Its boot disk comes from the `cos-stable` family as it is then, so a new
-template also brings whichever COS release the family names at that moment.
+`listener`, `listener.webhooks`, `sessionUser`, `tags`, `natsImage`, `tailscaleImage`) or to
+`machineType`, `diskType`, `diskSizeGb`, `network` or `subnetwork` makes a new template. The group
+then replaces its VM at once (`PROACTIVE`, minimal action `REPLACE`), deleting it before it creates
+the next (`RECREATE`, no surge, at most one unavailable). NATS is down from the old VM's stop until
+the new one's `nats` unit starts, and its clients reconnect then. The new VM gets the same data
+disk, so it keeps the stream and rejoins the tailnet as the same node. Its boot disk comes from the
+`cos-stable` family as it is then, so a new template also brings whichever COS release the family
+names at that moment.
 
 Three inputs work otherwise:
 
@@ -457,13 +496,11 @@ Three inputs work otherwise:
 ## What a first Google Cloud deployment proves
 
 The unit tests run the hub under Pulumi's mocks, check its cloud-config against the golden, and
-run the secret fetcher, the listener's seed script, the joined script and the data disk's entry
-under `/bin/sh` against fakes and stubs; the seed command's Secret Manager store runs against a
-fake too. The live tests run the listener as the listener's user and a session with no credential
-as the session user on real NATS servers. None of them runs
-Google Cloud, COS or a tailnet, so the first deployment is where these hold or fail. Watch them on
-its first `pulumi up`:
-
+run the secret fetcher, the listener's seed and GitHub-signing scripts, the joined script and the
+data disk's entry under `/bin/sh` against fakes and stubs; the seed command's Secret Manager store
+runs against a fake too. The live tests run the listener as the listener's user and a session with
+no credential as the session user on real NATS servers. None of them runs Google Cloud, COS or a
+tailnet, so the first deployment is where these hold or fail. Watch them on its first `pulumi up`:
 - `/dev/net/tun` exists on COS without `modprobe`, so the Tailscale container starts.
 - `docker exec tailscaled tailscale --socket=/tmp/tailscaled.sock status --json` answers on COS
   with Tailscale v1.104.1's image, and reports `"BackendState": "Running"` once the node has
@@ -501,8 +538,11 @@ its first `pulumi up`:
 - containerboot applies `/etc/tailscale-serve/serve.json` once the node is up, so
   `tailscale serve status --json` on the VM's Tailscale container shows the forward of 9020, and
   `http://<h>.<tailnet>:9020/healthz` answers over the tailnet from a device the policy lets reach
-  port 9020. That containerboot watches the file's directory was read in its source, not run.
-- `envoy-listener.service`'s `ExecStartPre` failing, as it does until the seed's grant reaches
+  port 9020. With `listener.webhooks`, also send a signed delivery to
+  `https://${TS_CERT_DOMAIN}:<funnelPort>/webhook/github`: it must reach the listener, and a
+  request to another path on that public port must not. That containerboot watches the file's
+  directory was read in its source, not run.
+- `envoy-listener.service`'s `ExecStartPre` failing, as it does until either secret's grant reaches
   Secret Manager, is restarted by `Restart=always` 10 seconds later. That was measured on systemd
   255, not on COS's own.
 - `envoy-infra seed` against Secret Manager itself: that `versions/latest` names a newest version
@@ -607,4 +647,15 @@ outputs are `natsUrl: "nats://example-hub:4222"` and `instanceGroup`, `example-h
 suffix. The template's `user-data` is `gcp/testdata/cloud-config.golden` byte for byte. `pulumi up`
 then applies it. The listener of the module's first example reaches this hub with `natsUrls` set
 to `nats://example-hub:4222` and the seed of `example-host-a`.
+
+To publish GitHub webhooks on this hub, add this to its `listener` after the signing-secret resource
+exists in `example-project`:
+
+```yaml
+        webhooks:
+          providers: [github]
+          githubWebhookSecret: example-hub-github-webhook-secret
+          reviewerAppId: "1234567"
+          funnelPort: 443
+```
 

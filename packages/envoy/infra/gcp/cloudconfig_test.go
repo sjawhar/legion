@@ -2,12 +2,12 @@ package gcp_test
 
 import (
 	"bytes"
+	"encoding/json"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 
 	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/gcp"
@@ -210,6 +210,65 @@ func TestCloudConfigRunsTheListenerBehindTailscaleServe(t *testing.T) {
 	tailscaled := fileOf(t, doc, "/etc/systemd/system/tailscaled.service")
 	require.Contains(t, tailscaled, " -v /etc/tailscale-serve:/etc/tailscale-serve:ro ")
 	require.Contains(t, tailscaled, " -e TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json ")
+}
+
+// A Funnel exposes the webhook path only. Tailscale's ServeConfig also has an HTTPS TCP handler
+// for the public port; the listener's existing tailnet TCP forward stays separate.
+func TestCloudConfigFunnelsOnlyTheWebhookPath(t *testing.T) {
+	for _, port := range []struct {
+		number int
+		text   string
+	}{
+		{443, "443"},
+		{8443, "8443"},
+		{10000, "10000"},
+	} {
+		t.Run(port.text, func(t *testing.T) {
+			args := exampleArgs()
+			withGitHubWebhooks(args)
+			args.Listener.Webhooks.FunnelPort = port.number
+			doc, _, err := gcp.CloudConfigOf(args)
+			require.NoError(t, err)
+
+			var serve struct {
+				TCP map[string]struct {
+					TCPForward string
+					HTTPS      bool
+				}
+				Web map[string]struct {
+					Handlers map[string]struct{ Proxy string }
+				}
+				AllowFunnel map[string]bool
+			}
+			require.NoError(t, json.Unmarshal([]byte(fileOf(t, doc, "/etc/tailscale-serve/serve.json")), &serve))
+
+			funnel := "${TS_CERT_DOMAIN}:" + port.text
+			require.Equal(t, map[string]bool{funnel: true}, serve.AllowFunnel)
+			require.Equal(t, "127.0.0.1:9020", serve.TCP["9020"].TCPForward)
+			require.True(t, serve.TCP[port.text].HTTPS)
+			require.Len(t, serve.Web, 1)
+			require.Contains(t, serve.Web, funnel)
+			require.Equal(t, map[string]struct{ Proxy string }{
+				"/webhook/github": {Proxy: "http://127.0.0.1:9020"},
+			}, serve.Web[funnel].Handlers)
+		})
+	}
+}
+
+func TestCloudConfigConfiguresGitHubWebhookEnvironmentWithoutItsSecret(t *testing.T) {
+	args := exampleArgs()
+	withGitHubWebhooks(args)
+	doc, text, err := gcp.CloudConfigOf(args)
+	require.NoError(t, err)
+
+	listener := fileOf(t, doc, "/etc/systemd/system/envoy-listener.service")
+	require.Contains(t, listener, " --env-file /run/envoy/github-webhook.env ")
+	require.Contains(t, listener, " -e ENVOY_WEBHOOKS=github ")
+	require.Contains(t, listener, " -e ENVOY_REVIEWER_APP_ID=1234567 ")
+	require.NotContains(t, listener, "ENVOY_GITHUB_WEBHOOK_SECRET=")
+	require.Contains(t, listener, "\nExecStartPre=/etc/envoy/github-webhook-env /run/envoy/github-webhook.env example-hub-github-webhook-secret\n")
+	require.Contains(t, fileOf(t, doc, "/etc/envoy/github-webhook-env"), "ENVOY_GITHUB_WEBHOOK_SECRET")
+	require.NotContains(t, text, "github-webhook-secret-value")
 }
 
 // A hub without a listener runs none, writes neither the seed script nor Serve's configuration,
