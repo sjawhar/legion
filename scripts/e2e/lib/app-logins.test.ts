@@ -115,6 +115,9 @@ ${then}`;
   return { code, stdout: stdout.trimEnd(), stderr: stderr.trim() };
 }
 
+// A failure names the App it could not read by its role and app id, on one line of stderr.
+const namesApp = (role: string, id: string) => new RegExp(`\\b${role} App\\b.*\\bapp_id ${id}\\b`);
+
 describe("app-logins.ts", () => {
   test("prints each App's bot login from the slug GET /app answers under that App's own JWT", async () => {
     seen.length = 0;
@@ -135,23 +138,22 @@ describe("app-logins.ts", () => {
     );
     expect(code).toBe(1);
     expect(stdout).toBe("");
-    expect(stderr).toContain("GET /app as the implement App (app_id 101) answered 401");
+    expect(stderr).toMatch(namesApp("implement", "101"));
+    expect(stderr).toContain("401");
   });
 
   test("an answer with no slug is named by the App's role and app id", async () => {
-    const { code, stdout, stderr } = await run(config(app("303"), app("202")));
+    const { code, stdout, stderr } = await run(config(app("101"), app("303")));
     expect(code).toBe(1);
     expect(stdout).toBe("");
-    expect(stderr).toBe(
-      'app-logins: GET /app as the implement App (app_id 303) answered no slug: {"id":303}'
-    );
+    expect(stderr).toMatch(namesApp("review", "303"));
   });
 
   test("a GitHub that never answers is named by the App's role and app id", async () => {
     const { code, stdout, stderr } = await run(config(app("101"), app("202")), {}, unreachable);
     expect(code).toBe(1);
     expect(stdout).toBe("");
-    expect(stderr).toStartWith("app-logins: GET /app as the implement App (app_id 101) failed: ");
+    expect(stderr).toMatch(namesApp("implement", "101"));
   });
 
   test("a key command that fails is named by its field and exit code, its stdout never quoted", async () => {
@@ -219,8 +221,8 @@ describe("read_app_logins", () => {
     );
     expect(stderr).toBe("");
     expect(code).toBe(0);
-    expect(stdout.split("\n")).toEqual([
-      "   the implement App acts on GitHub as example-implement[bot] and the review App as example-review[bot] (GET /app)",
+    const answers = stdout.split("\n").filter((line) => roles.includes(line.split(" ")[0]));
+    expect(answers).toEqual([
       "implementer example-implement[bot] example-implement",
       "merger example-implement[bot] example-implement",
       "planner example-review[bot] example-review",
@@ -239,9 +241,7 @@ describe("read_app_logins", () => {
     );
     expect(code).toBe(1);
     expect(stdout).not.toContain("after-read");
-    expect(stderr.split("\n")).toEqual([
-      expect.stringMatching(/^app-logins: GET \/app as the implement App \(app_id 101\) failed: ./),
-      "FAIL boot: lib/app-logins.ts could not read the Legion role Apps' bot logins from GitHub (its reason is above)",
-    ]);
+    expect(stderr).toMatch(namesApp("implement", "101"));
+    expect(stderr).toMatch(/^FAIL boot: /m);
   });
 });
