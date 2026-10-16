@@ -78,9 +78,9 @@ func runGitCredential(_ context.Context, args []string, stdout, stderr io.Writer
 		return 1
 	}
 	segment, _, _ := strings.Cut(strings.TrimPrefix(request["path"], "/"), "/")
-	owner, _, err := checkedOwner(segment, "the path "+request["path"])
-	if err != nil {
-		fmt.Fprintf(stderr, "legion git-credential: %v; answering nothing\n", err)
+	owner := strings.ToLower(segment)
+	if !ghconfig.IsOwner(owner) {
+		fmt.Fprintf(stderr, "legion git-credential: the path %s names the owner %q, which is no GitHub login; answering nothing\n", request["path"], segment)
 		return 1
 	}
 	dir, err := ownerGHConfigDir(ownersDir, owner)

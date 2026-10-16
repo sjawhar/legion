@@ -231,11 +231,12 @@ func realGHForCapture(t *testing.T) string {
 
 // Through the real gh and the real git, against a capture proxy standing in for GitHub: every
 // request `legion gh` and `legion git-credential` let through carries the token of the owner of
-// the repository it targets — gh's own resolution of the command, including GH_REPO under an
-// explicit endpoint, -R under GH_REPO, a pull request URL over -R, and an option's value read as
-// that option's rather than as a repository — the issue owner's write token only for the issue
-// owner's repository and for a command naming none, another owner's read-only token for that
-// owner's. A command naming an owner the bundle does not hold sends nothing.
+// the repository it targets — -R before the command, a selector after `--`, an option's value read
+// as that option's from the leaf command's own help, GH_REPO under an explicit endpoint, -R under
+// GH_REPO — the issue owner's write token only for the issue owner's repository and for a command
+// naming none, another owner's read-only token for that owner's. A command the wrapper cannot read
+// for certain, one naming two owners, and one naming an owner the bundle does not hold are refused
+// with exit 2 and send nothing.
 func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 	gh := realGHForCapture(t)
 	git, err := exec.LookPath("git")
@@ -309,32 +310,56 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		t.Skipf("%s sent %+v for acme's directory: it does not read GH_CONFIG_DIR; set LEGION_GH_PATH to the real gh", gh, control)
 	}
 
+	// Every command of both reviews' reproductions, and controls: each either sends GitHub the
+	// token of the owner it targets, and only that token, or is refused with exit 2 and sends
+	// nothing. Each asks for a field only the server answers (title, nameWithOwner), so no gh
+	// version answers it locally without a request. deploy-key add reads its key file from the
+	// working directory.
+	if err := os.WriteFile(filepath.Join(home, "key.pub"), []byte("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl legion-test\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ghEnv := []string{testMainEnv + "=1"}
 	for _, tc := range []struct {
-		env   []string
-		args  []string
-		owner string
+		env    []string
+		args   []string
+		owner  string // the owner whose token every request carries; "" when refused
+		refuse string // the refusal's text, exit 2 and no request
 	}{
-		{[]string{"GH_REPO=acme/widgets"}, []string{"api", "repos/sjawhar/legion"}, "sjawhar"},
-		{[]string{"GH_REPO=acme/widgets"}, []string{"pr", "view", "1", "-R", "sjawhar/legion", "--json", "number"}, "sjawhar"},
-		{nil, []string{"pr", "view", "https://github.com/sjawhar/legion/pull/1", "-R", "acme/widgets", "--json", "number"}, "sjawhar"},
-		{nil, []string{"repo", "view", "--json", "nameWithOwner", "sjawhar/legion"}, "sjawhar"},
-		{nil, []string{"pr", "view", "--json", "url", "https://github.com/sjawhar/legion/pull/2"}, "sjawhar"},
-		{nil, []string{"api", "repos/acme/widgets"}, "acme"},
-		{nil, []string{"api", "graphql", "-f", "query={viewer{login}}"}, "acme"},
+		// The re-review's reproductions.
+		{nil, []string{"-R", "sjawhar/legion", "pr", "view", "1", "--json", "title"}, "sjawhar", ""},
+		{nil, []string{"--repo=sjawhar/legion", "pr", "view", "1", "--json", "title"}, "sjawhar", ""},
+		{nil, []string{"api", "--", "repos/sjawhar/legion"}, "sjawhar", ""},
+		{nil, []string{"pr", "view", "--json", "title", "--", "https://github.com/sjawhar/legion/pull/1"}, "sjawhar", ""},
+		{nil, []string{"repo", "deploy-key", "add", "key.pub", "-R", "sjawhar/legion", "--title", "-Racme/widgets"}, "sjawhar", ""},
+		{nil, []string{"pr", "--json", "title", "view", "https://github.com/sjawhar/legion/pull/1"}, "", `"--json" comes before the command's name`},
+		// The first review's reproductions.
+		{[]string{"GH_REPO=acme/widgets"}, []string{"api", "repos/sjawhar/legion"}, "sjawhar", ""},
+		{[]string{"GH_REPO=acme/widgets"}, []string{"pr", "view", "1", "-R", "sjawhar/legion", "--json", "title"}, "sjawhar", ""},
+		{nil, []string{"pr", "view", "https://github.com/sjawhar/legion/pull/1", "-R", "acme/widgets", "--json", "title"}, "", "more than one owner"},
+		{nil, []string{"repo", "view", "--json", "nameWithOwner", "sjawhar/legion"}, "sjawhar", ""},
+		// Controls: the issue owner's repository, a command naming none, an owner outside the
+		// bundle, and an option the leaf's help does not list.
+		{nil, []string{"pr", "view", "--json", "title", "https://github.com/sjawhar/legion/pull/2"}, "sjawhar", ""},
+		{nil, []string{"api", "repos/acme/widgets"}, "acme", ""},
+		{nil, []string{"api", "graphql", "-f", "query={viewer{login}}"}, "acme", ""},
+		{nil, []string{"api", "repos/other/thing"}, "", `"other" is not an owner of this project`},
+		{nil, []string{"pr", "view", "1", "-R", "sjawhar/legion", "--bogus"}, "", `"--bogus" is no option`},
 	} {
+		what := "legion gh " + strings.Join(tc.args, " ")
 		code, out := run(append(ghEnv, tc.env...), os.Args[0], append([]string{"gh"}, tc.args...)...)
-		if code == 0 {
-			t.Errorf("legion gh %q exit 0 against the capture proxy, which answers nothing: %s", tc.args, out)
+		if tc.refuse != "" {
+			if code != 2 || !strings.Contains(out, tc.refuse) {
+				t.Errorf("%s = exit %d, %q; want exit 2 containing %q", what, code, out, tc.refuse)
+			}
+			if sent := proxy.take(); len(sent) != 0 {
+				t.Errorf("%s sent %+v, want nothing", what, sent)
+			}
+			continue
 		}
-		wantSent("legion gh "+strings.Join(tc.args, " "), tc.owner, false)
-	}
-	code, out := run(ghEnv, os.Args[0], "gh", "api", "repos/other/thing")
-	if code != 2 || !strings.Contains(out, `"other" is not an owner of this project`) {
-		t.Errorf("legion gh api repos/other/thing = exit %d, %q; want exit 2 refusing other", code, out)
-	}
-	if sent := proxy.take(); len(sent) != 0 {
-		t.Errorf("legion gh api repos/other/thing sent %+v, want nothing", sent)
+		if code == 0 {
+			t.Errorf("%s exit 0 against the capture proxy, which answers nothing: %s", what, out)
+		}
+		wantSent(what, tc.owner, false)
 	}
 
 	helper := []string{"-c", "credential.helper=", "-c", "credential.helper=!legion git-credential", "-c", "credential.useHttpPath=true", "-c", "credential.interactive=false"}
@@ -342,7 +367,7 @@ func TestRealGhAndGitSendTheTargetOwnersToken(t *testing.T) {
 		run(nil, git, append(helper, "ls-remote", "https://github.com/"+repo)...)
 		wantSent("git ls-remote "+repo, owner, true)
 	}
-	code, out = run(nil, git, append(helper, "ls-remote", "https://github.com/other/thing")...)
+	code, out := run(nil, git, append(helper, "ls-remote", "https://github.com/other/thing")...)
 	if code == 0 {
 		t.Errorf("git ls-remote of an owner the bundle does not hold exit 0: %s", out)
 	}
