@@ -2,9 +2,13 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-780",
-  "completed": "2026-10-16T02:23:30Z",
+  "completed": "2026-10-16T02:51:44Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1982",
-  "codeHead": "33edf7b85885770a4cb3136b1398517074f1251a",
+  "codeHead": "a7c656749fd20f82156aaef1f40178eff1c5dedc",
+  "rounds": [
+    "Round 0: code head 33edf7b85885770a4cb3136b1398517074f1251a, the plan's eight tasks and the simplify pass; every proof below ran at that head.",
+    "Round 1 (the tester's failures[0]): included_jq_modules read only `[a-z0-9-]*`, so an include name with an underscore, a capital, a dot or a slash never reached jq_modules_compile; the class is now `[A-Za-z0-9_./-]*`, self-excluding against the function's own grep and sed text; the tester's red test (0214cf3fc004) passes unmodified; code head a7c656749fd20f82156aaef1f40178eff1c5dedc. The item 2 proof below was re-run at this head; the other proofs' surfaces are unchanged by the one-line fix."
+  ],
   "proof": [
     {
       "criterion": "Item 4: a bash call is bound on its command alone (.arguments | fromjson | .command); the two real full-agent-tools excerpts #1866's tester kept still pass under the new binding, and an intent-only call fails.",
@@ -23,12 +27,12 @@
       "negativeControl": "The third tick rendered with no openCapabilities list (payload {kind: \"tick\"}) is read as [] and turns the session's verdict false; and the unit cases [[\"secrets\",\"model-fallback\"]] and [[\"secrets\",\"web-search\"]] fail against a def that drops the arms (the worker ran them once with `length > 0 and all(.[]; (.open | index(\"secrets\")) != null)`: `Expected: false Received: true`)."
     },
     {
-      "criterion": "Item 2: prerequisites compiles every jq module the script includes on the host's jq, and a module with a syntax error is refused.",
-      "surface": "The lifted included_jq_modules and jq_modules_compile run from scripts/e2e over the real lib directory and over a copy with a syntax error appended to controller-ticks.jq, with fail and note stubbed, under jq 1.6, 1.7.1 and 1.8.2.",
-      "command": "cd scripts/e2e && bash -c \"set -euo pipefail; $(fn included_jq_modules)$(fn jq_modules_compile) fail(){ echo FAIL \\\"\\$@\\\"; exit 3; }; note(){ echo NOTE \\\"\\$@\\\"; }; jq_modules_compile lib \\$(included_jq_modules stage4b-sandbox-tree.sh)\"",
-      "observed": "`NOTE jq-<v> compiles lib/controller-ticks.jq lib/design-gate-approval-requests.jq lib/omp-tool-calls.jq lib/stage4b-pods.jq lib/stage4b-room.jq lib/stage4b-tools.jq`, exit 0, for jq-1.6, jq-1.7.1 and jq-1.8.2; included_jq_modules lists exactly those six, the script's own include strings.",
-      "headSha": "33edf7b85885770a4cb3136b1398517074f1251a",
-      "negativeControl": "cp -r lib /tmp/proof/lib-broken && printf 'def broken: (;\\n' >> /tmp/proof/lib-broken/controller-ticks.jq, then the same call with /tmp/proof/lib-broken as LIBDIR → `FAIL the host's jq-<v> cannot compile lib/controller-ticks.jq: jq: error: syntax error, unexpected ';' … at /tmp/proof/lib-broken/controller-ticks.jq, line 41: def broken: (; jq: 1 compile error`, exit 3, under each jq."
+      "criterion": "Item 2: prerequisites compiles every jq module the script includes on the host's jq, whatever the module is named, and a module with a syntax error is refused.",
+      "surface": "The lifted included_jq_modules and jq_modules_compile run from scripts/e2e over the real lib directory, over a copy with a syntax error appended to controller-ticks.jq, and over the tester's four-name script (include \"stage4b-tools\", \"with_underscore\", \"Dotted.v2\", \"nested/module\"), with fail and note stubbed, under jq 1.6, 1.7.1 and 1.8.2; bun test over lib/stage4b-jq-modules.test.ts with the tester's red test unmodified.",
+      "command": "cd scripts/e2e && bash -c \"set -euo pipefail; $(fn included_jq_modules)$(fn jq_modules_compile) fail(){ echo FAIL \\\"\\$@\\\"; exit 3; }; note(){ echo NOTE \\\"\\$@\\\"; }; jq_modules_compile lib \\$(included_jq_modules stage4b-sandbox-tree.sh)\"; bash -c \"$(fn included_jq_modules) included_jq_modules /tmp/proof/names.sh\"; for v in 1.6 1.7.1 1.8.2; do PATH=/tmp/jqs/$v:$PATH bun test scripts/e2e/lib/stage4b-jq-modules.test.ts; done; jj diff --from 0214cf3fc004 -- scripts/e2e/lib/stage4b-jq-modules.test.ts",
+      "observed": "`NOTE jq-<v> compiles lib/controller-ticks.jq lib/design-gate-approval-requests.jq lib/omp-tool-calls.jq lib/stage4b-pods.jq lib/stage4b-room.jq lib/stage4b-tools.jq`, exit 0, for jq-1.6, jq-1.7.1 and jq-1.8.2 at a7c656749fd2 (the same six names as at 33edf7b85885: the wider class picks up nothing of the helper's own text); over the four-name script `Dotted.v2 nested/module stage4b-tools with_underscore`; the test file: 6 pass, 0 fail under each jq, and its diff from the tester's commit is empty.",
+      "headSha": "a7c656749fd20f82156aaef1f40178eff1c5dedc",
+      "negativeControl": "The round-0 function (lifted from 33edf7b85885, class `[a-z0-9-]*`) over the same four-name script prints `stage4b-tools` alone, the tester's finding; cp -r lib /tmp/proof/lib-broken && printf 'def broken: (;\\n' >> /tmp/proof/lib-broken/controller-ticks.jq, then jq_modules_compile with /tmp/proof/lib-broken as LIBDIR → `FAIL the host's jq-<v> cannot compile lib/controller-ticks.jq: jq: error: syntax error, unexpected ';' … at /tmp/proof/lib-broken/controller-ticks.jq, line 41 … jq: 1 compile error`, exit 3, under each jq."
     },
     {
       "criterion": "Item 3: the merger block and the role loop share one function for their four common assertions, with the fail-line prefix and order kept; the controller scans share controller_deliveries.",
