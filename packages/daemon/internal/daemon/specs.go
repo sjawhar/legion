@@ -25,7 +25,8 @@ var _ supervise.Specs = specs{}
 // specs builds the part of every launch the claim does not carry. An operator may retain a
 // one-off prompt under the state directory for the Stage 2 proof; otherwise the Go daemon
 // composes the shipped role parts plus its own role-specific instructions. The repository is the
-// configured project's; the runtime locates the issue's workspace from it.
+// configured project's, with its default branch as GitHub names it; the runtime locates the
+// issue's workspace from the repository and provisions it at the default branch.
 type specs struct {
 	stateDir     string
 	project      string
@@ -41,6 +42,9 @@ type specs struct {
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of); nil
+	// for a daemon with no GitHub Apps, which can launch no claim on a repository.
+	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
 	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
 	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
 	runtimeName string
@@ -58,11 +62,11 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
-// deployment instructions — and its repository; for a claim whose workspace was lost with its
-// session, the issue's branch the recreated workspace is recovered from. The controller's launch
-// (controllerSpawnSpec) is its own. Plugins carries the plugin pair a stale-plugin relaunch
-// installs (stalePluginInstall), set the same way for both — the controller the daemon launches
-// (`controller: daemon`) is covered like any claim.
+// deployment instructions — and its repository with that repository's default branch; for a claim
+// whose workspace was lost with its session, the issue's branch the recreated workspace is
+// recovered from. The controller's launch (controllerSpawnSpec) is its own. Plugins carries the
+// plugin pair a stale-plugin relaunch installs (stalePluginInstall), set the same way for both —
+// the controller the daemon launches (`controller: daemon`) is covered like any claim.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	var spec runtime.SpawnSpec
 	var err error
@@ -111,6 +115,14 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 			DeploymentInstructionsPath: s.instructions,
 		},
 		Repository: s.repo,
+	}
+	if !s.repo.IsZero() {
+		if s.defaultBranch == nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the default branch of %s for %s: the daemon reads it from GitHub, and has no GitHub Apps", s.repo, c.Token)
+		}
+		if spec.DefaultBranch, err = s.defaultBranch(ctx, s.repo); err != nil {
+			return runtime.SpawnSpec{}, fmt.Errorf("the default branch of %s for %s: %w", s.repo, c.Token, err)
+		}
 	}
 	if c.WorkspaceLost {
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)

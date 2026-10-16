@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { machineID } from "../machine";
 import { createEnvoyClient, EnvoyApiError } from "../transport";
 
 type RecordedFetch = {
@@ -64,6 +65,7 @@ describe("EnvoyClient", () => {
       port: 13381,
       title: "Envoy QA",
       driving: true,
+      host: machineID(),
     });
   });
 

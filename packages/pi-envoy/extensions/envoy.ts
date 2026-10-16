@@ -2432,7 +2432,7 @@ export default function envoyExtension(pi: PiApi): void {
           const result =
             machine === undefined
               ? sessions
-              : sessions.filter((session) => session.machine_id === machine);
+              : sessions.filter((session) => (session.host ?? session.machine_id) === machine);
           return toolSuccess(JSON.stringify(result, null, 2), {
             count: result.length,
             machine,

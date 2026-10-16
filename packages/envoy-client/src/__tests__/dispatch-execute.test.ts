@@ -2846,6 +2846,79 @@ describe("executeDispatchTool", () => {
     ]);
   });
 
+  test("dispatch_issue_update clears external links instead of re-sending the existing set", async () => {
+    const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
+    const existingLink = { url: "https://ci.example/run/1", kind: "url" };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const pathname = new URL(String(url)).pathname;
+      const method = init?.method ?? "GET";
+      requests.push({
+        method,
+        pathname,
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      if (pathname !== "/api/v1/issues/ACME-176") {
+        throw new Error(`unexpected request: ${method} ${pathname}`);
+      }
+      if (method === "GET") {
+        return response({
+          key: "ACME-176",
+          title: "Issue update tool",
+          status: "in_progress",
+          labels: [],
+          route: null,
+          external_links: [existingLink],
+        });
+      }
+      return response({
+        key: "ACME-176",
+        title: "Issue update tool",
+        status: "in_progress",
+        labels: [],
+        route: null,
+        external_links: [],
+      });
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_issue_update",
+      args: { issue: "ACME-176", external_links: [] },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result).toEqual({
+      text:
+        "ACME-176: external links cleared " +
+        "(not subscribed to ACME-176; envoy_subscribe notifications.dispatch.issue.ACME-176.> for every event on it)",
+      details: {
+        issue: "ACME-176",
+        status: "in_progress",
+        external_links: [],
+      },
+    });
+    expect(requests).toEqual([
+      { method: "GET", pathname: "/api/v1/issues/ACME-176" },
+      {
+        method: "PATCH",
+        pathname: "/api/v1/issues/ACME-176",
+        body: {
+          external_links: [],
+          actor: {
+            kind: "session",
+            id: "session-42",
+            origin: expect.objectContaining({ host: "omp", cwd: "/workspace" }),
+          },
+        },
+      },
+    ]);
+  });
+
   test("dispatch_issue_update surfaces the server's error code in the thrown message", async () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"

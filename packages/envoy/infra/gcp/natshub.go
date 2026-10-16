@@ -371,6 +371,9 @@ func authorization(users []NATSUserArgs) (core.Authorization, error) {
 // the network, firewall rule, health check and group after it, with a random suffix, and the
 // hostname rule keeps those names valid there.
 func NewNatsHub(ctx *pulumi.Context, name string, args *NatsHubArgs, opts ...pulumi.ResourceOption) (*NatsHub, error) {
+	if bus.HoldsSeed(name) {
+		return nil, fmt.Errorf("%s: %w", natsHubType, core.SeedRefusal("the component's name"))
+	}
 	s, err := newSettings(args)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", natsHubType, name, err)

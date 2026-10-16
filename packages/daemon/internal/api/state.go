@@ -55,24 +55,27 @@ type State struct {
 	Capabilities []CapabilityState `json:"capabilities"`
 }
 
-// CapabilityState is one row of that report. Status is "present", "installed" (the image carries
-// the row's tooling, but a pod's agent cannot use it yet; Detail says why), "unchecked",
-// "withheld", "decided" or "open"; Detail is the row's evidence whatever the status; Decision is
-// the operator's reason on a decided row; ConfigLine is, on an open deployment row, the legion.yaml
-// line that records a decision (`capabilities.decided.<name>: "<reason>"`); an open live row has none.
+// CapabilityState is one row of that report. Status is "present", "unchecked", "withheld",
+// "decided" or "open" (the probe's own table also prints "missing" and "reported", which never
+// reach the state); Detail is the row's evidence whatever the status; Decision is the operator's
+// reason on a decided row; ConfigLine is, on an open deployment row, the legion.yaml line that
+// records a decision (`capabilities.decided.<name>: "<reason>"`); an open live row has none.
+// Source is, on a deployment row, "configuration" (what legion.yaml alone decides) or "boot"
+// (what boot measured); absent on every other row.
 type CapabilityState struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Detail     string `json:"detail"`
 	Decision   string `json:"decision,omitempty"`
 	ConfigLine string `json:"configLine,omitempty"`
+	Source     string `json:"source,omitempty"`
 }
 
 // CapabilityStatesOf is report as the state shows it, row for row.
 func CapabilityStatesOf(report []capabilities.State) []CapabilityState {
 	states := make([]CapabilityState, len(report))
 	for i, row := range report {
-		states[i] = CapabilityState{Name: string(row.Name), Status: row.Status, Detail: row.Detail, Decision: row.Decision, ConfigLine: row.ConfigLine}
+		states[i] = CapabilityState{Name: string(row.Name), Status: row.Status, Detail: row.Detail, Decision: row.Decision, ConfigLine: row.ConfigLine, Source: string(row.Source)}
 	}
 	return states
 }

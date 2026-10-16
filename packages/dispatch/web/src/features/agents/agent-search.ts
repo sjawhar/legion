@@ -31,7 +31,7 @@ export function searchWords(search: string): readonly string[] {
  *  closed since drops out of this list with the ask (the inbox read this comes from is open asks
  *  only), so a search by that issue's key stops finding the session. */
 function searchHaystack(agent: Agent, issueKeys: readonly string[]): string {
-  return [agent.title, agent.dir, agent.machine_id, agent.session_id, ...issueKeys]
+  return [agent.title, agent.dir, agent.host, agent.session_id, ...issueKeys]
     .join(" ")
     .toLowerCase();
 }
@@ -46,7 +46,7 @@ export function matchesFilters(
   words: readonly string[],
   issueKeys: readonly string[]
 ): boolean {
-  if (filters.machine !== "" && agent.machine_id !== filters.machine) return false;
+  if (filters.machine !== "" && agent.host !== filters.machine) return false;
   if (filters.role !== "" && !agent.roles.includes(filters.role)) return false;
   if (words.length === 0) return true;
   const haystack = searchHaystack(agent, issueKeys);
@@ -62,7 +62,7 @@ export function filterOptions(agents: readonly Agent[]): {
   const machines = new Set<string>();
   const roles = new Set<string>();
   for (const agent of agents) {
-    if (agent.machine_id !== "") machines.add(agent.machine_id);
+    if (agent.host !== "") machines.add(agent.host);
     for (const role of agent.roles) roles.add(role);
   }
   return { machines: [...machines].sort(), roles: [...roles].sort() };

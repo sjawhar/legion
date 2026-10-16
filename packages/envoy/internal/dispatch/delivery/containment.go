@@ -10,8 +10,8 @@
 package delivery
 
 import (
+	"cmp"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 )
@@ -35,8 +35,8 @@ type UnmatchedRun struct {
 	JobNames []string
 }
 
-// ProductionRuns is ProductionApplies' verdict on a listing of runs: every deploy, sorted by
-// CompletedAt; every successfully concluded run that holds no production job and is not shown to have
+// ProductionRuns is ProductionApplies' verdict on a listing of runs: every deploy, in compareApplies'
+// order; every successfully concluded run that holds no production job and is not shown to have
 // skipped it; and every run whose production job succeeded, read for the configured apply step, while
 // listing no step of that name (a misnamed step would otherwise count no deploy, silently).
 type ProductionRuns struct {
@@ -48,10 +48,11 @@ type ProductionRuns struct {
 // ProductionApplies judges runs by production (Production.Job, Production.Conclusion). A run is a
 // deploy when its production job's conclusion as Production.Conclusion reads it is success and the
 // job has a CompletedAt. A successful run holding no listed job is unmatched unless it skipped the
-// caller of a listed name (skippedCaller) that some run of runs holds exactly: without that, a typo
-// whose first part names a job a run skipped would read as a skipped call in every run and never be
-// named. The cost is that a listing in which no run holds a listed job, such as a stretch with no
-// production deploy, sets apart each of its successful runs. Unmatched runs keep runs' order.
+// caller of a listed name (skippedCaller) that `real` records: every selected listed name and every
+// listed name a successful job holds in any run. Without that, a typo whose first part names a job a
+// run skipped would read as a skipped call in every run and never be named. The cost is that a
+// listing in which no run holds a listed job, such as a stretch with no production deploy, sets
+// apart each of its successful runs. Unmatched runs keep runs' order.
 func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, production Production) ProductionRuns {
 	var judged ProductionRuns
 	type missing struct {
@@ -62,6 +63,12 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 	real := map[string]bool{}
 	for _, run := range runs {
 		jobs := jobsByRun[run.RunID]
+		for _, job := range jobs {
+			if job.Conclusion != nil && *job.Conclusion == DeliveryJobConclusionSuccess &&
+				slices.Contains(production.JobNames, job.Name) {
+				real[job.Name] = true
+			}
+		}
 		match := production.Job(jobs)
 		if match == nil {
 			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
@@ -77,6 +84,7 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 			}
 			continue
 		}
+		// The selected fallback can be unsuccessful but still proves this listed name is not a typo.
 		real[match.Name] = true
 		if production.ApplyStep != nil && match.Conclusion != nil && *match.Conclusion == DeliveryJobConclusionSuccess &&
 			match.ApplyStep != nil && *match.ApplyStep == *production.ApplyStep && match.ApplyStepConclusion == nil {
@@ -98,8 +106,16 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 		}
 		judged.Unmatched = append(judged.Unmatched, UnmatchedRun{Run: m.run, JobNames: names})
 	}
-	sort.Slice(judged.Applies, func(i, j int) bool { return judged.Applies[i].CompletedAt.Before(judged.Applies[j].CompletedAt) })
+	slices.SortFunc(judged.Applies, compareApplies)
 	return judged
+}
+
+// compareApplies orders applies by when each completed, then by run id. GitHub times a job's
+// completion to the second, so two production deploys can complete together; the run id tells them
+// apart, so neither the order nor FirstShippingApply rests on the order the runs were listed in,
+// which changes as the live hub narrows a window it read (narrowedTo) with no stored row changed.
+func compareApplies(a, b Apply) int {
+	return cmp.Or(a.CompletedAt.Compare(b.CompletedAt), cmp.Compare(a.RunID, b.RunID))
 }
 
 // skippedCaller reports whether job could be a skipped call of a reusable workflow that holds a
@@ -115,17 +131,18 @@ func skippedCaller(job DeliveryRunJob, productionJobName string) bool {
 		strings.HasPrefix(productionJobName, job.Name+" / ")
 }
 
-// FirstShippingApply is the earliest-completing apply (by CompletedAt) among applies GitHub created
-// strictly after mergedAt, or nil if none qualifies. The boundary is exclusive: GitHub times both
-// to the second, and a run created in the merge's own second can be an earlier push's, whose head
-// does not hold the merge.
+// FirstShippingApply is the earliest-completing apply (by CompletedAt, the lower run id among
+// applies completing together: compareApplies) among applies GitHub created strictly after
+// mergedAt, or nil if none qualifies. The boundary is exclusive: GitHub times both to the second,
+// and a run created in the merge's own second can be an earlier push's, whose head does not hold
+// the merge.
 func FirstShippingApply(mergedAt time.Time, applies []Apply) *Apply {
 	var best *Apply
 	for i, apply := range applies {
 		if !apply.CreatedAt.After(mergedAt) {
 			continue
 		}
-		if best == nil || apply.CompletedAt.Before(best.CompletedAt) {
+		if best == nil || compareApplies(apply, *best) < 0 {
 			best = &applies[i]
 		}
 	}

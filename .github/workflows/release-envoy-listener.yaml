@@ -37,10 +37,32 @@ on:
       - ".github/agent-secrets-client-targets.json"
   workflow_dispatch:
 
-# Every job declares its own permissions (build, docker, release below); nothing runs under this
-# workflow-level default, so it stays empty rather than becoming an unreviewed grant to a job
-# added later with no block of its own.
+# Every job declares its own permissions (targets, build, docker, release_build, release_publish
+# below); nothing runs under this workflow-level default, so it stays empty rather than becoming an
+# unreviewed grant to a job added later with no block of its own.
+#
+# The release is split into build jobs and a publish job. build, docker and release_build run the
+# module's code and every third-party module it links, so they hold no secret and no write scope
+# beyond docker's package push, and each ends in a tripwire (`release-push.sh no-credential`) that
+# fails when a credential is reachable from it anyway. release_publish holds the credentials and
+# runs no dependency code: only release-push.sh, git, gh, jq, sha256sum, `docker buildx imagetools`
+# and the pinned actions below, with no cache restored (`cache-mode: none`) and the deploy key in
+# the env of the one step that pushes the tag.
 permissions: {}
+
+env:
+  # The arguments of the one version computation, shared by release_build (which decides the
+  # version) and release_publish (which confirms it, --expect, inside the concurrency group):
+  # every notices script changes an artifact this release publishes, and the target lists decide
+  # the archives, so they take a patch release; packages/envoy/infra is excluded, since
+  # release-envoy-infra.yaml releases it and nothing published here compiles it in.
+  LEGION_ENVOY_VERSION_ARGS: >-
+    --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh
+    --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json
+    --patch-path .github/agent-secrets-client-targets.json
+    -- :(exclude)packages/envoy/infra packages/envoy/ packages/contracts/ scripts/third-party-notices.ts
+    scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh
+    .github/go-release-targets.json .github/agent-secrets-client-targets.json
 
 
 jobs:
@@ -58,6 +80,8 @@ jobs:
       envoy: ${{ steps.read.outputs.envoy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: read
         run: echo "envoy=$(jq -c .envoy .github/go-release-targets.json)" >> "$GITHUB_OUTPUT"
 
@@ -97,6 +121,8 @@ jobs:
         with:
           name: legion-envoy-${{ matrix.arch }}
           path: packages/envoy/legion-envoy-${{ matrix.arch }}.tar.gz
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
 
   docker:
     needs: build
@@ -207,43 +233,167 @@ jobs:
             LEGION_COMMIT=${{ github.sha }}
           tags: |
             ghcr.io/sjawhar/legion/envoy:${{ github.sha }}
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
 
-  release:
-    # Docker publishes immutable SHA tags in parallel; this job serializes only moving tags and releases.
-    # Only main moves `latest` or cuts a `legion-envoy-v*` tag and release: a workflow_dispatch from any
-    # other branch publishes its `envoy:<sha>` image above and stops there.
-    needs: [build, docker]
+  # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
+  # (packages/envoy/cmd/agent-secrets-helper): the same legion-envoy-v* release also ships these
+  # for a host to install with mise's github backend, in the layout its installer expects —
+  # bin/agent-secrets, bin/agent-secrets-helper. A linux archive, agent-secrets-<arch>.tar.gz for
+  # each architecture the envoy key of .github/go-release-targets.json names, holds both; a darwin
+  # archive, agent-secrets-darwin-<arch>.tar.gz for each target
+  # .github/agent-secrets-client-targets.json names, holds bin/agent-secrets alone, since the
+  # helper's build constraints admit linux only: a laptop runs the CLI, never the helper.
+  #
+  # This job decides the release's version first and stamps the tag into each binary: `--version`
+  # prints it and the helper's startup line carries it, which is how a restart onto a release is
+  # checked. It runs outside release_publish's concurrency group, so two runs can decide the same
+  # version; release_publish confirms the version against the tags inside that group before it
+  # tags, and fails when another run took it. Like build and docker, this job runs the module's
+  # code and holds no write scope and no secret: whatever that code does to this VM never meets the
+  # deploy key, the write token or the OIDC token, which release_publish holds on a VM of its own.
+  # Only main releases: a workflow_dispatch from any other branch publishes its `envoy:<sha>` image
+  # above and stops there.
+  release_build:
     if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      skip: ${{ steps.version.outputs.skip }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # First, before setup-go: no dependency code has run and no cache has been restored when the
+      # tags are read. release-push.sh version releases again a tag an earlier attempt pushed for
+      # this commit (`tagged`, which refuses a tag that is not legion-envoy-vX.Y.Z) and otherwise
+      # bumps from the newest legion-envoy-v* tag. $LEGION_ENVOY_VERSION_ARGS is expanded unquoted
+      # on purpose: it is the argument list, split on its spaces.
+      - name: Determine next version
+        id: version
+        run: |
+          # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
+          .github/scripts/release-push.sh version legion-envoy-v $LEGION_ENVOY_VERSION_ARGS >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: steps.version.outputs.skip != 'true'
+        with:
+          go-version-file: packages/envoy/go.mod
+      # CGO_ENABLED=0 matches the existing agent-secrets builds
+      # (packages/envoy/docker/Dockerfile, packages/daemon/docker/worker.Dockerfile):
+      # without it, a same-arch build (amd64 here) links dynamically against the
+      # runner's glibc instead of producing a static binary. Each archive is wrapped
+      # in one top-level "agent-secrets" directory (agent-secrets/bin/...) rather
+      # than bin/... directly: mise's github backend auto-strips exactly one leading
+      # directory from an asset shaped like that, so the installed tree still ends
+      # up bin/agent-secrets (and bin/agent-secrets-helper on linux); a bare bin/... top level
+      # would itself be the one directory mise strips, flattening the binaries to
+      # the install root instead. agent-secrets/THIRD_PARTY_NOTICES, beside bin/, is
+      # the license of every Go module the archive's binaries compile in
+      # (scripts/go-third-party-notices.sh, run with the build's own environment),
+      # and fails the build when one cannot be determined.
+      - name: Build agent-secrets binaries
+        if: steps.version.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          test -n "$TAG"
+          mkdir -p ../../agent-secrets-assets
+          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
+            mkdir -p "out/$arch/agent-secrets/bin"
+            for cmd in agent-secrets agent-secrets-helper; do
+              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -buildvcs=false \
+                -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
+                -o "out/$arch/agent-secrets/bin/$cmd" "./cmd/$cmd"
+            done
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
+              "out/$arch/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets ./cmd/agent-secrets-helper
+            tar czf "../../agent-secrets-assets/agent-secrets-$arch.tar.gz" -C "out/$arch" agent-secrets
+          done
+          for target in $(jq -r '.["agent-secrets-client"][]' ../../.github/agent-secrets-client-targets.json); do
+            os=${target%/*}
+            arch=${target#*/}
+            dir="out/$os-$arch"
+            mkdir -p "$dir/agent-secrets/bin"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -buildvcs=false \
+              -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
+              -o "$dir/agent-secrets/bin/agent-secrets" ./cmd/agent-secrets
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
+              "$dir/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets
+            tar czf "../../agent-secrets-assets/agent-secrets-$os-$arch.tar.gz" -C "$dir" agent-secrets
+          done
+        working-directory: packages/envoy
+      # Only the linux/amd64 binary runs on this runner; `go version -m` reads the -ldflags recorded
+      # in all six, so every archive is checked to carry the tag release_publish will push.
+      - name: Check the stamped tag
+        if: steps.version.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          test "$(out/amd64/agent-secrets/bin/agent-secrets --version)" = "agent-secrets $TAG"
+          for bin in out/*/agent-secrets/bin/*; do
+            go version -m "$bin" | grep -F -- "buildversion.tag=$TAG" >/dev/null \
+              || { echo "::error::$bin was not built with buildversion.tag=$TAG"; exit 1; }
+          done
+        working-directory: packages/envoy
+      # The archives, exactly as built, for release_publish.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: steps.version.outputs.skip != 'true'
+        with:
+          name: agent-secrets-assets
+          path: agent-secrets-assets/
+          if-no-files-found: error
+      - name: Check this job holds no credential (tripwire)
+        run: .github/scripts/release-push.sh no-credential
+
+  # Moves `latest` and, when release_build decided a release, publishes it: confirms the version
+  # against the tags inside the concurrency group, checks what build and release_build handed over,
+  # writes SHA256SUMS, tags the commit, attests the host binaries and creates the GitHub release.
+  # It runs no Go, no bun and no built binary, only release-push.sh, git, gh, jq, sha256sum,
+  # `docker buildx imagetools` and the pinned actions below, so the scopes and the deploy key it
+  # holds never meet the code the build jobs run.
+  release_publish:
+    # Docker publishes immutable SHA tags in parallel; this job serializes only moving tags and
+    # releases. Only main moves `latest` or cuts a `legion-envoy-v*` tag and release: a
+    # workflow_dispatch from any other branch publishes its `envoy:<sha>` image above and stops
+    # there. `latest` moves whatever release_build did; the release steps run only on its success.
+    needs: [build, docker, release_build]
+    if: >-
+      always() && github.ref == 'refs/heads/main' &&
+      needs.build.result == 'success' && needs.docker.result == 'success'
     concurrency:
       # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
-      # loses nothing: "Determine publication" below walks forward through already-published
-      # commits for `latest` and bumps the version from the last tag to HEAD, not this commit alone.
+      # loses nothing: "Determine latest" below walks forward through already-published commits
+      # for `latest`, and release_build bumps the version from the last tag to HEAD, not this
+      # commit alone.
       group: release-envoy-listener
       cancel-in-progress: false
     runs-on: ubuntu-24.04
     # packages: write moves the `latest` tag to the newest already-published image (`docker
     # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
     # (`release-push.sh release`); id-token and attestations: write are for the agent-secrets
-    # provenance attestation. The git tag push uses the deploy key, not any of these scopes.
+    # provenance attestation. The git tag push uses the deploy key, held only by the "Tag release"
+    # step's env, not any of these scopes.
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
+    # No cache is restored in a job that holds a credential.
+    cache-mode: none
     steps:
+      # For release-push.sh and the tag, with every tag. No credential is left in the checkout: the
+      # deploy key reaches the "Tag release" step alone.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          ssh-key: ${{ secrets.DEPLOY_KEY }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        with:
-          driver-opts: |
-            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
-
-      - name: Determine publication
-        id: publish
+      - name: Determine latest
+        id: latest
         env:
           IMAGE: ghcr.io/sjawhar/legion/envoy
           OWN_DIGEST: ${{ needs.docker.outputs.digest }}
@@ -310,7 +460,8 @@ jobs:
               fi
             fi
 
-            # Prefer the newest already-published descendant, even if its release job was cancelled.
+            # Prefer the newest already-published descendant, even if its release_publish job was
+            # cancelled.
             promote_sha="$GITHUB_SHA"
             promote_digest="$OWN_DIGEST"
             if ! candidate_shas=$(git rev-list --first-parent "$GITHUB_SHA..origin/main"); then
@@ -347,78 +498,21 @@ jobs:
             fi
           fi
 
-          # A re-run after "Tag release" pushed the tag finds it at HEAD and releases it again
-          # (release-push.sh, `tagged`, which refuses a tag that is not legion-envoy-vX.Y.Z).
-          EXISTING_TAG=$(.github/scripts/release-push.sh tagged legion-envoy-v)
-          if [ -n "$EXISTING_TAG" ]; then
-            {
-              echo "tag=$EXISTING_TAG"
-              echo "should_release=true"
-            } >> "$GITHUB_OUTPUT"
-            echo "Ensuring release for existing tag $EXISTING_TAG"
-            exit 0
-          fi
-
-          LATEST_TAG=$(git tag -l 'legion-envoy-v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST_TAG" ]; then
-            VERSION="0.1.0"
-            TAG="legion-envoy-v${VERSION}"
-            {
-              echo "version=$VERSION"
-              echo "tag=$TAG"
-              echo "should_release=true"
-            } >> "$GITHUB_OUTPUT"
-            echo "First release: $TAG"
-            exit 0
-          fi
-
-          CURRENT="${LATEST_TAG#legion-envoy-v}"
-          # Every notices script changes an artifact this release publishes: the web app in the
-          # image, the Go archives, or the image assembly; and the target list decides the
-          # archives. They therefore take a patch release. The envoy-infra plugin's module is
-          # excluded: release-envoy-infra.yaml releases it, and nothing published here compiles
-          # it in.
-          VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
-            --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
-            --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \
-            --patch-path .github/agent-secrets-client-targets.json \
-            -- ':(exclude)packages/envoy/infra' packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
-            scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh \
-            .github/go-release-targets.json .github/agent-secrets-client-targets.json)
-
-          if [ "$VERSION" = "empty" ]; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "No envoy/contracts commits since $LATEST_TAG"
-            exit 0
-          fi
-          if [ "$VERSION" = "none" ]; then
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            echo "::notice title=No release published::No version-bumping commits since $LATEST_TAG"
-            echo "**No release published** — No version-bumping commits since $LATEST_TAG" >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          TAG="legion-envoy-v${VERSION}"
-          {
-            echo "version=$VERSION"
-            echo "tag=$TAG"
-            echo "should_release=true"
-          } >> "$GITHUB_OUTPUT"
-          echo "Bumping $CURRENT → $VERSION"
-
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        if: steps.publish.outputs.should_tag_latest == 'true'
+        if: steps.latest.outputs.should_tag_latest == 'true'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # The runner's own docker buildx runs imagetools, here and in "Determine latest" above, so
+      # this job sets up no BuildKit builder: one serves only a build, which docker above runs.
       - name: Advance latest image
-        if: steps.publish.outputs.should_tag_latest == 'true'
+        if: steps.latest.outputs.should_tag_latest == 'true'
         env:
           IMAGE: ghcr.io/sjawhar/legion/envoy
-          SHA: ${{ steps.publish.outputs.latest_sha }}
-          DIGEST: ${{ steps.publish.outputs.latest_digest }}
+          SHA: ${{ steps.latest.outputs.latest_sha }}
+          DIGEST: ${{ steps.latest.outputs.latest_digest }}
         run: |
           test -n "$DIGEST"
           docker buildx imagetools create \
@@ -426,91 +520,92 @@ jobs:
             --tag "$IMAGE:latest" \
             "$IMAGE@$DIGEST"
 
-      - name: Tag release
-        if: steps.publish.outputs.should_release == 'true'
+      # release_build decided the version outside this concurrency group, from the tags as they
+      # were then. Inside it, with the tags "Determine latest" fetched, the same computation must
+      # give the same version (or the tag an earlier attempt pushed for this commit): when another
+      # run took the tag first, release-push.sh version --expect fails naming both versions and
+      # says to re-run the whole run, since re-running only the failed jobs would re-read the stale
+      # handed version. $LEGION_ENVOY_VERSION_ARGS is expanded unquoted on purpose, as in
+      # release_build.
+      - name: Confirm the version
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         env:
-          TAG: ${{ steps.publish.outputs.tag }}
+          VERSION: ${{ needs.release_build.outputs.version }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
-            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
-            exit 0
-          fi
-          git tag "$TAG"
-          git push origin "$TAG"
+          # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
+          .github/scripts/release-push.sh version legion-envoy-v --expect "$VERSION" $LEGION_ENVOY_VERSION_ARGS >/dev/null
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: steps.publish.outputs.should_release == 'true'
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         with:
           # Skip the *.dockerbuild attestation artifact uploaded automatically
           # by docker/build-push-action. It's not used by the release and has
           # been hanging in Azure blob download (failed both #607 and #608
           # releases). The release only needs the envoy-listener artifacts; the
-          # agent-secrets binaries are built below.
+          # agent-secrets binaries come from release_build, below.
           pattern: legion-envoy-*
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        if: steps.publish.outputs.should_release == 'true'
+          merge-multiple: true
+          path: assets
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         with:
-          go-version-file: packages/envoy/go.mod
-      # agent-secrets (packages/envoy/cmd/agent-secrets) and the host helper
-      # (packages/envoy/cmd/agent-secrets-helper): the same
-      # legion-envoy-v* release also ships these for a host to install with mise's
-      # github backend, in the layout its installer expects — bin/agent-secrets,
-      # bin/agent-secrets-helper. A linux archive, agent-secrets-<arch>.tar.gz for each
-      # architecture the envoy key of .github/go-release-targets.json names, holds both; a
-      # darwin archive, agent-secrets-darwin-<arch>.tar.gz for each target
-      # .github/agent-secrets-client-targets.json names, holds bin/agent-secrets alone, since the helper's
-      # build constraints admit linux only: a laptop runs the CLI, never the helper.
-      # They are built here, after the release tag is decided
-      # above, so the tag is stamped into each binary: `--version` prints it and the helper's
-      # startup line carries it, which is how a restart onto a release is checked. The
-      # build job runs before the tag exists, and deciding it earlier would move it out of
-      # this job's concurrency group, which is what keeps two runs from taking one tag.
-      # CGO_ENABLED=0 matches the existing agent-secrets builds
-      # (packages/envoy/docker/Dockerfile, packages/daemon/docker/worker.Dockerfile):
-      # without it, a same-arch build (amd64 here) links dynamically against the
-      # runner's glibc instead of producing a static binary. Each archive is wrapped
-      # in one top-level "agent-secrets" directory (agent-secrets/bin/...) rather
-      # than bin/... directly: mise's github backend auto-strips exactly one leading
-      # directory from an asset shaped like that, so the installed tree still ends
-      # up bin/agent-secrets (and bin/agent-secrets-helper on linux); a bare bin/... top level
-      # would itself be the one directory mise strips, flattening the binaries to
-      # the install root instead. agent-secrets/THIRD_PARTY_NOTICES, beside bin/, is
-      # the license of every Go module the archive's binaries compile in
-      # (scripts/go-third-party-notices.sh, run with the build's own environment),
-      # and fails the build when one cannot be determined.
-      - name: Build agent-secrets binaries
-        if: steps.publish.outputs.should_release == 'true'
+          name: agent-secrets-assets
+          path: assets
+      # build and release_build choose the archives' bytes, and hand over only them and the version.
+      # This job names the archives itself, from that version and its own checkout of the target
+      # lists; release-push.sh handed refuses a version that is not X.Y.Z and an artifact that is
+      # not exactly those archives, each a regular file, and prints the tag. SHA256SUMS is then
+      # written over them, and the tag and the explicit lists go to the steps below: the host
+      # binaries' archives are the attestation's subjects, every archive and SHA256SUMS the
+      # release's files.
+      - name: Check the hand-over and write SHA256SUMS
+        id: assets
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         env:
-          TAG: ${{ steps.publish.outputs.tag }}
+          VERSION: ${{ needs.release_build.outputs.version }}
         run: |
-          test -n "$TAG"
-          mkdir -p ../../agent-secrets-assets
-          for arch in $(jq -r '.envoy[]' ../../.github/go-release-targets.json); do
-            mkdir -p "out/$arch/agent-secrets/bin"
-            for cmd in agent-secrets agent-secrets-helper; do
-              CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -buildvcs=false \
-                -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
-                -o "out/$arch/agent-secrets/bin/$cmd" "./cmd/$cmd"
-            done
-            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
-              "out/$arch/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets ./cmd/agent-secrets-helper
-            tar czf "../../agent-secrets-assets/agent-secrets-$arch.tar.gz" -C "out/$arch" agent-secrets
+          archives=()
+          subjects=()
+          envoy=$(jq -r '.envoy[]' .github/go-release-targets.json)
+          [ -n "$envoy" ] || { echo "::error::.github/go-release-targets.json lists no envoy target"; exit 1; }
+          for arch in $envoy; do
+            archives+=("legion-envoy-$arch.tar.gz")
+            subjects+=("agent-secrets-$arch.tar.gz")
           done
-          for target in $(jq -r '.["agent-secrets-client"][]' ../../.github/agent-secrets-client-targets.json); do
+          clients=$(jq -r '.["agent-secrets-client"][]' .github/agent-secrets-client-targets.json)
+          [ -n "$clients" ] || { echo "::error::.github/agent-secrets-client-targets.json lists no agent-secrets-client target"; exit 1; }
+          for target in $clients; do
             os=${target%/*}
             arch=${target#*/}
-            dir="out/$os-$arch"
-            mkdir -p "$dir/agent-secrets/bin"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -buildvcs=false \
-              -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
-              -o "$dir/agent-secrets/bin/agent-secrets" ./cmd/agent-secrets
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
-              "$dir/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets
-            tar czf "../../agent-secrets-assets/agent-secrets-$os-$arch.tar.gz" -C "$dir" agent-secrets
+            subjects+=("agent-secrets-$os-$arch.tar.gz")
           done
-        working-directory: packages/envoy
+          archives+=("${subjects[@]}")
+          tag=$(.github/scripts/release-push.sh handed legion-envoy-v "$VERSION" assets "${archives[@]}")
+          (cd assets && sha256sum -- "${archives[@]}" > SHA256SUMS)
+          {
+            echo "tag=$tag"
+            echo "subjects<<SUBJECTS"
+            printf 'assets/%s\n' "${subjects[@]}"
+            echo "SUBJECTS"
+            echo "files<<FILES"
+            printf 'assets/%s\n' "${archives[@]}" SHA256SUMS
+            echo "FILES"
+          } >> "$GITHUB_OUTPUT"
+      # The only step that holds the deploy key. release-push.sh push-tag writes it to a directory
+      # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
+      # A lightweight tag has no tagger, so no git user is configured.
+      - name: Tag release
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        env:
+          TAG: ${{ steps.assets.outputs.tag }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            test "$(git rev-list -n 1 "$TAG")" = "$GITHUB_SHA"
+            exit 0
+          fi
+          git tag "$TAG"
+          .github/scripts/release-push.sh push-tag "$TAG"
       # Build provenance for the host binaries a mise pin installs, linux or darwin, which the
       # release below uploads exactly. `--repo` alone accepts an archive any workflow of this
       # repository attested, so the check pins the signer as docs/kubernetes.md ("Pin by digest,
@@ -519,24 +614,25 @@ jobs:
       #     --cert-identity https://github.com/sjawhar/legion/.github/workflows/release-envoy-listener.yaml@refs/heads/main \
       #     --source-ref refs/heads/main --deny-self-hosted-runners
       # and adds `--source-digest <the legion-envoy-v<version> tag's commit>` to pin the commit as well.
+      # It runs after "Tag release", so a run whose tag step refuses (the tag already names another
+      # commit) leaves no attestation for archives no release carries.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        if: steps.publish.outputs.should_release == 'true'
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         with:
-          subject-path: agent-secrets-assets/agent-secrets-*.tar.gz
-      - name: Generate checksums
-        if: steps.publish.outputs.should_release == 'true'
-        run: |
-          for dir in legion-envoy-* agent-secrets-assets; do
-            (cd "$dir" && sha256sum -- * >> ../SHA256SUMS)
-          done
+          subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create or update GitHub release
-        if: steps.publish.outputs.should_release == 'true'
+        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.publish.outputs.tag }}
+          TAG: ${{ steps.assets.outputs.tag }}
+          FILES: ${{ steps.assets.outputs.files }}
         # release-push.sh `release`, as in release.yaml. --upload-to-published: a re-run puts this
         # run's assets over a published release's own, which release.yaml's jobs leave as they are.
         run: |
+          assets=()
+          while IFS= read -r file; do
+            [ -z "$file" ] || assets+=("$file")
+          done <<< "$FILES"
           .github/scripts/release-push.sh release --upload-to-published \
             --notes "Envoy listener release — Go binary + Docker image, plus agent-secrets and agent-secrets-helper host binaries." \
-            "$TAG" "$TAG" ./legion-envoy-*/* ./agent-secrets-assets/* SHA256SUMS
+            "$TAG" "$TAG" "${assets[@]}"

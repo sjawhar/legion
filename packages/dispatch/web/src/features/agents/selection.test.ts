@@ -7,6 +7,7 @@ function agent(sessionID: string): Agent {
   return {
     capabilities: ["btw"],
     dir: `/workspaces/${sessionID}`,
+    host: "build-host",
     last_activity: null,
     last_seen: 0,
     machine_id: "build-host",

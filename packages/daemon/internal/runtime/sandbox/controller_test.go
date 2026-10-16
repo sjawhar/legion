@@ -38,7 +38,7 @@ const controllerSession = ompSessionsDir + "/--legion--/2026-10-06T12-00-00-000Z
 func controllerSpec(t *testing.T) runtime.SpawnSpec {
 	t.Helper()
 	spec := testSpec(t, controllerToken, claim.RoleController, "")
-	spec.Tree, spec.Env, spec.Repository = "", map[string]string{}, ghrepo.Repository{}
+	spec.Tree, spec.Env, spec.Repository, spec.DefaultBranch = "", map[string]string{}, ghrepo.Repository{}, ""
 	return spec
 }
 

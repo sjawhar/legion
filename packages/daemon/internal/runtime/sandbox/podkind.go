@@ -110,8 +110,9 @@ func (issuePod) secretAnnotations(l launch) map[string]string {
 // process with anything an agent of the issue can write (Stage 4b Task 4b.6b): workspace-fetch
 // mounts the provisioning Secret, its own TMPDIR, and the feed, and clones the repository from
 // GitHub into the feed; workspace-init mounts the issue's volume, the feed read-only, and the
-// config home, and does all the volume's work from the feed, with no credential. Each takes the
-// resources of the role whose launch creates the pod.
+// config home, and does all the volume's work from the feed, with no credential, starting an issue
+// with no branch at the repository's default branch the spec names. Each takes the resources of
+// the role whose launch creates the pod.
 func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 	legion, resources := r.tools.Legion, r.resources[l.spec.Role]
 	return []corev1.Container{{
@@ -131,7 +132,8 @@ func (issuePod) initContainers(r *Runtime, l launch) []corev1.Container {
 		Name:  initContainer,
 		Image: r.image,
 		Command: []string{
-			legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(), "--root", TreeRoot,
+			legion, "workspace-init", "provision", "--issue", l.spec.Issue, "--repo", l.spec.Repository.String(),
+			"--default-branch", l.spec.DefaultBranch, "--root", TreeRoot,
 			"--credential-helper", workspace.GitHubCredentialHelper, "--feed", FeedDir,
 		},
 		Env:        r.initEnvironment(l),
