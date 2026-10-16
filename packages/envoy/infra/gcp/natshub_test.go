@@ -33,14 +33,19 @@ const (
 	templateType    = "gcp:compute/instanceTemplate:InstanceTemplate"
 	groupType       = "gcp:compute/instanceGroupManager:InstanceGroupManager"
 
-	// Three user public keys, the placeholders core's tests use.
-	keyA = "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO"
-	keyB = "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG"
-	keyC = "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
+	// Three user public keys, the placeholders core's tests use, and the keys of the listener's
+	// user and the session user, whose seeds nobody kept.
+	keyA        = "UBERXOSHFHFLL7YEXXH7RYEJLK455TF4BOZLIHD5R6NF5FFISNHEXIZO"
+	keyB        = "UCYF4CJJNU55NFRALQXGPOAZRM5R5JBXI6OAZB2BHWJ4QTTB5XHFENDG"
+	keyC        = "UDCQRANOFSHHJXENVBTXNFSRUDIUXGXPNWC5ABJFJ7GBPO27F7UIBVXD"
+	keyListener = "UBZEZDPQNFYMZ4J4XOLTB2IN5PBPZ6FZEGY55R623A4GPBPZLTQFKDYV"
+	keySessions = "UCNPQVMRWOOJWCD7XDVLH6MEOVFBMTV4LAQSKZYROSETYJVFAWDMNKVA"
 
 	authKey        = "tskey-auth-example-0123456789"
 	natsImage      = "example.invalid/nats@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	tailscaleImage = "example.invalid/tailscale@sha256:fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	listenerImage  = "example.invalid/envoy@sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+	listenerSeed   = "example-hub-listener-seed"
 
 	// hubURN is the URN of the hub run constructs, the parent of every child; constructURN is the
 	// one the plugin's Construct gives it under integration.NewServer's mocks.
@@ -130,7 +135,8 @@ func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProv
 }
 
 // exampleArgs are a hub serving a host by its machine id, Dispatch by its listener's machine id,
-// and one user with explicit permissions, on placeholders.
+// and one user with explicit permissions, running a listener of its own and admitting a client
+// with no credential as the session user, on placeholders.
 func exampleArgs() *gcp.NatsHubArgs {
 	return &gcp.NatsHubArgs{
 		Users: []gcp.NATSUserArgs{
@@ -147,6 +153,8 @@ func exampleArgs() *gcp.NatsHubArgs {
 		Zone:           "us-central1-a",
 		NatsImage:      natsImage,
 		TailscaleImage: tailscaleImage,
+		Listener:       &gcp.HubListenerArgs{Image: listenerImage, SeedSecret: listenerSeed, NKey: keyListener},
+		SessionUser:    &gcp.SessionUserArgs{Name: "example-sessions", NKey: keySessions},
 	}
 }
 
@@ -194,6 +202,11 @@ func wantChildren(t *testing.T, network, subnetwork string) []child {
 		{versionType, "example-hub-tailnet-auth-key", map[string]any{"secret": "example-hub-tailnet-auth-key-id"}},
 		{accessorType, "example-hub-tailnet-auth-key-accessor", map[string]any{
 			"secretId": "example-hub-tailnet-auth-key-id",
+			"role":     "roles/secretmanager.secretAccessor",
+			"member":   "serviceAccount:" + email,
+		}},
+		{accessorType, "example-hub-listener-seed-accessor", map[string]any{
+			"secretId": listenerSeed,
 			"role":     "roles/secretmanager.secretAccessor",
 			"member":   "serviceAccount:" + email,
 		}},
@@ -268,7 +281,7 @@ func requireChildren(t *testing.T, m *pulumitest.Mocks, parent string, want []ch
 	}
 	require.ElementsMatch(t, wantNames, gotNames, "the hub's children")
 	for _, c := range want {
-		r := m.One(t, c.typ)
+		r := named(t, m, c.typ, c.name)
 		in := inputsOf(r)
 		for _, field := range unknown[c.typ] {
 			require.True(t, r.Inputs[resource.PropertyKey(field)].ContainsUnknowns(),
@@ -298,6 +311,19 @@ func requireAuthKeyOnlyInTheSecretVersion(t *testing.T, m *pulumitest.Mocks) {
 			require.NotContains(t, s, authKey, "a plain input of %s %s holds the auth key", r.Type, r.Name)
 		}
 	}
+}
+
+// named returns the single registration of type typ and name name.
+func named(t *testing.T, m *pulumitest.Mocks, typ, name string) pulumitest.Registration {
+	t.Helper()
+	var found []pulumitest.Registration
+	for _, r := range m.Registrations() {
+		if r.Type == typ && r.Name == name {
+			found = append(found, r)
+		}
+	}
+	require.Len(t, found, 1, "registrations of %s %s", typ, name)
+	return found[0]
 }
 
 // plainStrings returns every string v holds outside a secret.
@@ -406,6 +432,27 @@ func TestNatsHubGroupWaitsForTheKeyAndItsGrant(t *testing.T) {
 		"the VM is created after the key it fetches at boot")
 	require.Contains(t, deps, child+accessorType+"::example-hub-tailnet-auth-key-accessor",
 		"the VM is created after the grant that lets it read the key")
+	require.Contains(t, deps, child+accessorType+"::example-hub-listener-seed-accessor",
+		"the VM is created after the grant that lets its listener read its seed")
+}
+
+// A hub without a listener registers no grant on a seed secret, and its group waits for the key's
+// grant alone.
+func TestNatsHubWithoutAListenerGrantsNoSeedSecret(t *testing.T) {
+	args := exampleArgs()
+	args.Listener = nil
+	m, err := run(t, args, nil, true)
+	require.NoError(t, err)
+
+	var accessors []string
+	for _, r := range m.Registrations() {
+		if r.Type == accessorType {
+			accessors = append(accessors, r.Name)
+		}
+	}
+	require.Equal(t, []string{"example-hub-tailnet-auth-key-accessor"}, accessors)
+	deps := m.One(t, groupType).RPC.GetDependencies()
+	require.NotContains(t, strings.Join(deps, "\n"), "listener-seed-accessor")
 }
 
 func TestNatsHubMachineTypeAndDiskReachTheTemplate(t *testing.T) {
@@ -604,9 +651,9 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			err:  []string{"subnetwork", "network"},
 		},
 		{
-			name: "no users",
-			edit: func(a *gcp.NatsHubArgs) { a.Users = nil },
-			err:  []string{"users", "at least one user"},
+			name: "no users and no listener",
+			edit: func(a *gcp.NatsHubArgs) { a.Users, a.Listener = nil, nil },
+			err:  []string{"users: at least one user is required, or a listener"},
 		},
 		{
 			name: "a user naming both a machine id and permissions",
@@ -672,6 +719,73 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 			name: "explicit permissions with an empty allow list",
 			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Permissions.Subscribe.Allow = nil },
 			err:  []string{`users[1] "example-operator"`, "subscribe.allow"},
+		},
+		{
+			name: "a listener image without a digest",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.Image = "example.invalid/envoy:latest" },
+			err:  []string{`listener.image "example.invalid/envoy:latest"`, "@sha256:"},
+		},
+		{
+			name: "a listener image with a space",
+			edit: func(a *gcp.NatsHubArgs) {
+				a.Listener.Image = "example.invalid/envoy --privileged x" + listenerImage[len("example.invalid/envoy"):]
+			},
+			err: []string{"listener.image"},
+		},
+		{
+			name: "a listener seed secret that is a path",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = "projects/example-project/secrets/seed" },
+			err:  []string{`listener.seedSecret "projects/example-project/secrets/seed"`, "secret id"},
+		},
+		{
+			name: "an empty listener seed secret",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = "" },
+			err:  []string{`listener.seedSecret ""`},
+		},
+		{
+			name: "the tailnet auth key's secret as the listener's seed secret",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = "example-hub-tailnet-auth-key" },
+			err:  []string{`listener.seedSecret "example-hub-tailnet-auth-key"`, "tailnet auth key"},
+		},
+		{
+			name: "a listener without a public key",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.NKey = "" },
+			err:  []string{"listener.nkey is required"},
+		},
+		{
+			name: "a listener whose public key is a seed",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.NKey = string(seed) },
+			err:  []string{`listener "example-hub"`, "never a seed"},
+		},
+		{
+			name: "a listener whose key a user holds",
+			edit: func(a *gcp.NatsHubArgs) { a.Listener.NKey = keyA },
+			err:  []string{`listener "example-hub"`, `nkey repeats users[0] "example-host-a"`},
+		},
+		{
+			name: "a user named after the hub, which the listener's user is",
+			edit: func(a *gcp.NatsHubArgs) { a.Users[1].Name = "example-hub" },
+			err:  []string{`listener "example-hub"`, "name repeats users[1]"},
+		},
+		{
+			name: "a session user without a public key",
+			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = "" },
+			err:  []string{"sessionUser.nkey is required"},
+		},
+		{
+			name: "a session user whose public key is a seed",
+			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = string(seed) },
+			err:  []string{`sessionUser "example-sessions"`, "never a seed"},
+		},
+		{
+			name: "a session user with an invalid name",
+			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.Name = "Example Sessions" },
+			err:  []string{`sessionUser "Example Sessions"`, "name"},
+		},
+		{
+			name: "a session user whose key the listener holds",
+			edit: func(a *gcp.NatsHubArgs) { a.SessionUser.NKey = keyListener },
+			err:  []string{`sessionUser "example-sessions"`, `nkey repeats listener "example-hub"`},
 		},
 	}
 	for _, c := range cases {
@@ -787,6 +901,13 @@ func TestNatsHubRefusesASeedInAnyPlainInput(t *testing.T) {
 		{"a Dispatch machine id split by a space", "users[2].dispatchMachineId", func(a *gcp.NatsHubArgs) {
 			a.Users[2].DispatchMachineID = pulumi.StringRef(splitSeed(seed, " "))
 		}},
+		{"a seed in the listener's image", "listener.image", func(a *gcp.NatsHubArgs) {
+			a.Listener.Image = "example.invalid/" + lower + digest
+		}},
+		{"a seed as the listener's seed secret", "listener.seedSecret", func(a *gcp.NatsHubArgs) { a.Listener.SeedSecret = seed }},
+		{"a listener seed secret split by a hyphen", "listener.seedSecret", func(a *gcp.NatsHubArgs) {
+			a.Listener.SeedSecret = splitSeed(lower, "-")
+		}},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := exampleArgs()
@@ -841,6 +962,8 @@ func TestNatsHubPassesOnCoresSeedRefusalOfUsers(t *testing.T) {
 		{"a seed as the name of a user with an empty machine id", func(a *gcp.NatsHubArgs) {
 			a.Users[0].Name, a.Users[0].MachineID = seed, pulumi.StringRef("")
 		}, "users[0]: machineId is empty"},
+		{"a seed as the session user's name", func(a *gcp.NatsHubArgs) { a.SessionUser.Name = lower },
+			"sessionUser: name holds an nkey seed (not echoed)"},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			args := exampleArgs()
