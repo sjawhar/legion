@@ -63,10 +63,12 @@ const app = (id: string, command = `cat ${join(dir, `key-${id}.pem`)}`) =>
   `    app_id: "${id}"\n    private_key_command: ${JSON.stringify(command)}`;
 
 // The run is asynchronous: the stand-in GitHub answers from this test's own event loop. `env` is
-// added to this test's own environment.
+// added to this test's own environment. The helper is given stdin, so a key command that inherited
+// it would read `stdin-leak` where the closed-stdin case expects nothing.
 async function run(path: string, env: Record<string, string> = {}) {
   const child = Bun.spawn(["bun", script, path, `http://127.0.0.1:${github.port}/`], {
     env: { ...process.env, ...env },
+    stdin: new Blob(["stdin-leak"]),
     stdout: "pipe",
     stderr: "pipe",
   });
