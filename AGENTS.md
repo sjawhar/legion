@@ -211,10 +211,13 @@ until GitHub reports the pull request mergeable and then merges it. The reposito
 and checks decide when it merges; Legion bypasses none, and a review only a person can give is waited
 for. READY accepts a head whose required checks are still running, and refuses one whose required
 check failed or never reported. The row reads GitHub, then the record, and submits nothing once the
-issue has left that READY or the head moved past it; a refusal GitHub would repeat on a retry ends
-the row and is told to the architect once (`merge-refused`). GitHub checks the expected head only when
-auto-merge is enabled, and arming is right only for an awaiting issue's READY head, so the daemon
-queues an `auto_merge_disable` outbox row on every other push or reopen, when a child is set back to
+record shows the issue has left that READY or applied a close; while the record still awaits it, a
+pull request GitHub shows closed or at another head waits for the two to agree, and a disagreement
+that outlasts the row's retries ends it and tells the architect once (`merge-stalled`). A refusal
+GitHub would repeat on a retry ends the row and is told to the architect once (`merge-refused`).
+GitHub checks the expected head only when auto-merge is enabled, and arming is right only for an
+awaiting issue's READY head, so the daemon queues an `auto_merge_disable` outbox row on every other
+push or reopen, when a child is set back to
 `todo`, and when an issue leaves the workflow. The row reads GitHub, then the record: it keeps the arm
 only while the issue awaits its merge, its READY is not by hand, and the pull request's head is the
 merger's READY commit, and otherwise disables auto-merge and removes the merge-queue entry, as the

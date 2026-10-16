@@ -57,8 +57,8 @@ func TestAByHandREADYIsToldWithItsNoteAndNoSubmitLine(t *testing.T) {
 			if !strings.HasPrefix(packet, byHandNote+"\n\n") || !strings.Contains(packet, armedPacketL1) || !strings.Contains(packet, "A docs/solutions/legion/retro-LEGION-208.md") {
 				t.Fatalf("told READY %q, want the by-hand note first, then the merger's packet", packet)
 			}
-			if strings.Contains(packet, "the daemon submits") {
-				t.Fatalf("told READY %q still asks for the merge to be submitted", packet)
+			if !strings.Contains(packet, "\nMerge: by hand.") {
+				t.Fatalf("told READY %q, want its Merge line saying a person merges it", packet)
 			}
 			if published := mergeQueuePublishes(t, pool); len(published) != 1 || published[0].Packet != packet {
 				t.Fatalf("merge queue publishes = %v, want the same packet the issue was told", published)

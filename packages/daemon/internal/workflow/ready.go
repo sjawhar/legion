@@ -14,21 +14,28 @@ import (
 )
 
 // ready tells the human the pull request is ready to merge (tellReadyAudience) and queues the
-// merge of READY's head (record.ReadyMerge). The packet is the merger's READY completion's summary
+// merge of READY's head (queueReadyMerge). The packet is the merger's READY completion's summary
 // — its first line `READY #<n> at <sha> (approved at <sha>) for <KEY> (<url>)`, then the diff
 // summary and the gate facts (the shared merger prompt's step 3) — told as record.ReadyPacket gives
 // it: verbatim, or for a READY a person merges with its by-hand note at its head and its `Merge:`
-// line replaced, so nobody arms it. A READY a person merges queues no merge. The daemon does both,
-// not the merger, so they happen exactly when the issue reaches awaiting_merge: on the completion
-// itself, or on the approval that opens a gate that refused it.
+// line replaced, so nobody arms it. The daemon does both, not the merger, so they happen exactly
+// when the issue reaches awaiting_merge: on the completion itself, or on the approval that opens a
+// gate that refused it.
 func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, merger record.PhaseRow, pr *record.PullRequest) error {
 	if err := e.tellReadyAudience(ctx, tx, issue, record.ReadyPacket(merger.Summary, merger.MergeNote)); err != nil {
 		return err
 	}
+	return e.queueReadyMerge(ctx, tx, issue.Key, merger, pr)
+}
+
+// queueReadyMerge queues the merge of merger's READY head on issue's open pull request
+// (record.ReadyMerge). A READY a person merges (its by-hand note) queues none. The row decides by
+// GitHub and the record when it runs, so a READY the issue has left by then submits nothing.
+func (e *Engine) queueReadyMerge(ctx context.Context, tx pgx.Tx, issue string, merger record.PhaseRow, pr *record.PullRequest) error {
 	if merger.MergeNote != "" || pr == nil || pr.State != record.PullRequestOpen {
 		return nil
 	}
-	return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
+	return e.enqueue(ctx, tx, issue, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
 }
 
 // holdReadyToItsHead holds a merger's READY to the pull request's head before anything of it is
@@ -149,28 +156,25 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 // implementing with its implementer started and the architect told, and the new head comes back
 // through testing, review and a new READY. A tree that lingers takes no transition, as merged
 // leaves it, so its pull request is only disarmed. A push landing on the READY head changes
-// nothing. A reopen landing there queues READY's merge again (record.ReadyMerge): the close ended
-// the READY's merge row, which found the pull request closed, and the READY still stands, unless a
-// person merges it or the tree lingers, either of which submits nothing.
+// nothing. A reopen landing there queues READY's merge again (queueReadyMerge): a row that saw the
+// close in the record has ended, and one still waiting absorbs the new one, since the outbox holds
+// one ready_merge row per issue and head.
 func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reopened bool) error {
 	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 	if err != nil {
 		return err
 	}
-	atReady := merger.HandoffCommit != "" && merger.HandoffCommit == pr.HeadSHA
-	if atReady && (!reopened || merger.MergeNote != "") {
+	if merger.HandoffCommit != "" && merger.HandoffCommit == pr.HeadSHA {
+		if reopened {
+			return e.queueReadyMerge(ctx, tx, issue.Key, merger, pr)
+		}
 		return nil
 	}
 	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return err
 	}
-	switch {
-	case atReady && lingers:
-		return nil
-	case atReady:
-		return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
-	case lingers:
+	if lingers {
 		return e.disarm(ctx, tx, issue.Key, pr)
 	}
 	reason := fmt.Sprintf("its head moved from %s, the head READY named, to %s, which no review approved", merger.HandoffCommit, pr.HeadSHA)

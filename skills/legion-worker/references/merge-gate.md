@@ -136,7 +136,10 @@ reviewing until you finish.
   a required check finishing, a required review a person gives — and then merges it. GitHub's
   rules decide each answer: the daemon bypasses none, and a person may merge it first. A refusal a
   retry would meet again (squash merges disabled, a permission the App lacks) ends the row and is
-  told to the architect once (`merge-refused`), with GitHub's message; any other failure retries.
+  told to the architect once (`merge-refused`), with GitHub's message. While the record still
+  awaits READY's head, GitHub showing the pull request closed or at another head is a webhook not
+  yet applied, so the row waits for the two to agree, and one that outlasts the row's retries ends
+  it and is told to the architect once (`merge-stalled`). Any other failure retries.
   No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull
   request touches a path the project's `merge.by_hand` names), READY stands but the daemon submits
   nothing: the merger tells the architect the note and the head, and a person merges under the
@@ -156,9 +159,10 @@ reviewing until you finish.
   reopen but one landing on an awaiting READY's head, when READY is withdrawn (a push or reopen
   moved the head past it, its CI turned red, or it conflicts with its base, each of which sends the
   issue back to `implementing`), when a child is set back to `todo`, and when the issue leaves the
-  workflow. A by-hand READY covers no arm, so whoever arms it is undone. A `ready_merge` row the
-  issue has left since, or whose head moved, submits nothing; a pull request reopened at an
-  awaiting READY's head gets that head's merge submitted again. No role runs a disarm.
+  workflow. A by-hand READY covers no arm, so whoever arms it is undone. A `ready_merge` row whose
+  READY the record has left, or whose pull request the record holds closed, submits nothing; a pull
+  request reopened at an awaiting READY's head gets that head's merge submitted again. No role runs
+  a disarm.
 
 ## After the merge
 

@@ -853,8 +853,8 @@ func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
 	if len(told) != 1 {
 		t.Fatalf("messages told on LEGION-209 = %q, want the READY once", told)
 	}
-	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || strings.Contains(told[0], "the daemon submits") {
-		t.Fatalf("told READY %q, want the by-hand note first and no submitted merge", told[0])
+	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || !strings.Contains(told[0], "\nMerge: by hand.") {
+		t.Fatalf("told READY %q, want the by-hand note first and its Merge line saying a person merges it", told[0])
 	}
 }
 

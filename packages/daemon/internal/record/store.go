@@ -518,7 +518,9 @@ const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, 
 
 // readyMergeConflict makes a ready_merge enqueue one durable submission per issue and READY head:
 // the unique partial index 0044 turns the race between a reopen and a retry into one row, and a
-// duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included.
+// duplicate enqueue keeps the existing row's next_at, a GitHub rate-limit deadline included. Its
+// target is that partial index, which holds ready_merge rows alone, so no other kind's insert
+// conflicts on it.
 const readyMergeConflict = `
 	on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do nothing`
 
@@ -526,18 +528,14 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	if !json.Valid(row.Payload) {
 		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
 	}
-	conflict := ""
-	if row.Kind == OutboxKindReadyMerge {
-		conflict = readyMergeConflict
-	}
 	var err error
 	if row.CreatedAt.IsZero() {
 		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
-			values ($1, $2, $3, $4, $5, $6, $7, $8)`+conflict,
+			values ($1, $2, $3, $4, $5, $6, $7, $8)`+readyMergeConflict,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
 	} else {
 		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until)
-			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`+conflict,
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`+readyMergeConflict,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.CreatedAt, row.LeaseToken, row.LeaseUntil)
 	}
 	if err != nil {

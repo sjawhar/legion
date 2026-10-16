@@ -55,7 +55,7 @@ esac
 // The stage scripts' shell options, ERR trap and check helpers, then the lib, then the call and
 // its record.
 const prelude = `set -Eeuo pipefail
-check=ordinary-human-squash-merge
+check=daemon-merge
 note() { printf '   %s\\n' "$*"; }
 fail() { printf 'FAIL %s: %s\\n' "$check" "$*" >&2; exit 1; }
 trap 'printf "FAIL %s: line %s exited %s: %s\\n" "$check" "$LINENO" "$?" "$BASH_COMMAND" >&2' ERR
@@ -264,7 +264,7 @@ describe("merge_when_clean", () => {
     const r = run([clean, blocked], "--squash --delete-branch", { mergeFail: "gh: HTTP 405" });
     expect(r.status).toBe(1);
     expect(r.stderr).toContain(
-      "FAIL ordinary-human-squash-merge: sjawhar/legion-smoke#7 is not merged: it reads OPEN, mergeStateStatus BLOCKED, merge commit none"
+      "FAIL daemon-merge: sjawhar/legion-smoke#7 is not merged: it reads OPEN, mergeStateStatus BLOCKED, merge commit none"
     );
     expect(r.by).toBeUndefined();
   });
@@ -275,7 +275,7 @@ describe("merge_when_clean", () => {
     expect(r.merges).toHaveLength(0);
     expect(r.deletes).toHaveLength(0);
     expect(r.stderr).toMatch(
-      /^FAIL ordinary-human-squash-merge: timed out after \ds \(\d+ polls\) waiting for sjawhar\/legion-smoke#7 to merge: it reads OPEN, mergeStateStatus BLOCKED, nothing armed; unsettled checks: \[\{"name":"gate"/
+      /^FAIL daemon-merge: timed out after \ds \(\d+ polls\) waiting for sjawhar\/legion-smoke#7 to merge: it reads OPEN, mergeStateStatus BLOCKED, nothing armed; unsettled checks: \[\{"name":"gate"/
     );
     expect(r.stderr.trimEnd().split("\n")).toHaveLength(1);
   });
@@ -303,9 +303,7 @@ describe("merge_when_clean", () => {
     const r = run([{ state: "CLOSED", mergeStateStatus: "UNKNOWN" }]);
     expect(r.status).toBe(1);
     expect(r.reads).toHaveLength(1);
-    expect(r.stderr).toBe(
-      "FAIL ordinary-human-squash-merge: sjawhar/legion-smoke#7 was closed without a merge\n"
-    );
+    expect(r.stderr).toBe("FAIL daemon-merge: sjawhar/legion-smoke#7 was closed without a merge\n");
   });
 });
 
@@ -342,8 +340,6 @@ describe("await_ready_merge", () => {
     const r = run([{ state: "CLOSED", mergeStateStatus: "UNKNOWN" }], "--delete-branch", { fn });
     expect(r.status).toBe(1);
     expect(r.reads).toHaveLength(1);
-    expect(r.stderr).toBe(
-      "FAIL ordinary-human-squash-merge: sjawhar/legion-smoke#7 was closed without a merge\n"
-    );
+    expect(r.stderr).toBe("FAIL daemon-merge: sjawhar/legion-smoke#7 was closed without a merge\n");
   });
 });

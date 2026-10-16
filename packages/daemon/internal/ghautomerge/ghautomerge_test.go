@@ -232,8 +232,9 @@ func TestDisarmFailsWhenGitHubCannotFindTheRepository(t *testing.T) {
 // head. A merge queue gets the pull request enqueued and a repository that allows auto-merge gets it
 // armed, each with GitHub's expected-head check; a pull request GitHub reports mergeable now is
 // merged at that head. A repository that allows neither waits, without a mutation, until GitHub
-// reports the pull request mergeable. A pull request already merged, closed, armed, queued, moved
-// past the READY head, or no longer covered by the record's READY is left alone.
+// reports the pull request mergeable. A pull request already merged, armed or queued is left alone.
+// Only the record ends a submission as stale: while it still awaits READY's head, a pull request
+// GitHub shows closed or at another head waits for the webhook that moves the record (Lagging).
 func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 	for _, tc := range []struct {
 		name                          string
@@ -241,38 +242,42 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 		queueRequired, autoMergeOK    bool
 		armed, queued                 bool
 		want                          []string
-		wantSubmitted                 Submitted
-		waits                         bool
+		outcome                       Outcome
+		waitsOn                       string
+		lagging                       bool
 	}{
 		{name: "a merge queue enqueues it", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true,
-			want: []string{"enable PR_42 head SQUASH"}, wantSubmitted: Submitted{AutoMerge: true}},
+			want: []string{"enable PR_42 head SQUASH"}, outcome: Armed},
 		{name: "auto-merge allowed arms it", head: "head", keep: "head", mergeState: "BLOCKED", autoMergeOK: true,
-			want: []string{"enable PR_42 head SQUASH"}, wantSubmitted: Submitted{AutoMerge: true}},
+			want: []string{"enable PR_42 head SQUASH"}, outcome: Armed},
 		{name: "a clean pull request merges at once", head: "head", keep: "head", mergeState: "CLEAN",
-			want: []string{"merge PR_42 head SQUASH"}, wantSubmitted: Submitted{Merged: true}},
+			want: []string{"merge PR_42 head SQUASH"}, outcome: Merged},
 		{name: "an unstable pull request merges at once", head: "head", keep: "head", mergeState: "UNSTABLE",
-			want: []string{"merge PR_42 head SQUASH"}, wantSubmitted: Submitted{Merged: true}},
-		{name: "auto-merge disallowed waits while blocked", head: "head", keep: "head", mergeState: "BLOCKED", waits: true},
-		{name: "auto-merge disallowed waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", waits: true},
-		{name: "auto-merge disallowed waits while behind", head: "head", keep: "head", mergeState: "BEHIND", waits: true},
-		{name: "already armed", head: "head", keep: "head", mergeState: "BLOCKED", autoMergeOK: true, armed: true, wantSubmitted: Submitted{Already: true}},
-		{name: "already queued", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true, queued: true, wantSubmitted: Submitted{Already: true}},
-		{name: "already merged", state: "MERGED", head: "head", keep: "head", mergeState: "MERGED", wantSubmitted: Submitted{Already: true}},
-		{name: "closed", state: "CLOSED", head: "head", keep: "head", mergeState: "CLEAN", wantSubmitted: Submitted{Stale: true}},
-		{name: "the head moved past READY", head: "moved", keep: "head", mergeState: "CLEAN", wantSubmitted: Submitted{Stale: true}},
-		{name: "the record no longer covers READY", head: "head", keep: "", mergeState: "CLEAN", wantSubmitted: Submitted{Stale: true}},
+			want: []string{"merge PR_42 head SQUASH"}, outcome: Merged},
+		{name: "auto-merge disallowed waits while blocked", head: "head", keep: "head", mergeState: "BLOCKED", waitsOn: "BLOCKED"},
+		{name: "auto-merge disallowed waits while GitHub computes", head: "head", keep: "head", mergeState: "UNKNOWN", waitsOn: "UNKNOWN"},
+		{name: "auto-merge disallowed waits while behind", head: "head", keep: "head", mergeState: "BEHIND", waitsOn: "BEHIND"},
+		{name: "already armed", head: "head", keep: "head", mergeState: "BLOCKED", autoMergeOK: true, armed: true, outcome: Already},
+		{name: "already queued", head: "head", keep: "head", mergeState: "BLOCKED", queueRequired: true, queued: true, outcome: Already},
+		{name: "already merged", state: "MERGED", head: "head", keep: "head", mergeState: "MERGED", outcome: Already},
+		{name: "closed while the record awaits READY", state: "CLOSED", head: "head", keep: "head", mergeState: "CLEAN", waitsOn: "CLOSED", lagging: true},
+		{name: "closed once the record left READY", state: "CLOSED", head: "head", keep: "", mergeState: "CLEAN", outcome: Stale},
+		{name: "moved past READY while the record awaits it", head: "moved", keep: "head", mergeState: "CLEAN", waitsOn: "moved", lagging: true},
+		{name: "moved past READY once the record left it", head: "moved", keep: "", mergeState: "CLEAN", outcome: Stale},
+		{name: "the record no longer covers READY", head: "head", keep: "", mergeState: "CLEAN", outcome: Stale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			g := &github{state: tc.state, head: tc.head, mergeState: tc.mergeState, queueRequired: tc.queueRequired,
 				autoMergeOK: tc.autoMergeOK, armed: tc.armed, queued: tc.queued}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
 			got, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping(tc.keep))
-			if tc.waits {
-				if !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), tc.mergeState) {
-					t.Fatalf("Submit = %+v, %v; want a wait naming %s", got, err, tc.mergeState)
+			var lagging *Lagging
+			if tc.waitsOn != "" {
+				if !errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), tc.waitsOn) || errors.As(err, &lagging) != tc.lagging {
+					t.Fatalf("Submit = %q, %v; want a wait naming %s, lagging %t", got, err, tc.waitsOn, tc.lagging)
 				}
-			} else if err != nil || got != tc.wantSubmitted {
-				t.Fatalf("Submit = %+v, %v; want %+v", got, err, tc.wantSubmitted)
+			} else if err != nil || got != tc.outcome {
+				t.Fatalf("Submit = %q, %v; want %q", got, err, tc.outcome)
 			}
 			g.mu.Lock()
 			defer g.mu.Unlock()
@@ -280,6 +285,22 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 				t.Fatalf("mutations %v, want %v", g.mutations, tc.want)
 			}
 		})
+	}
+}
+
+// A wait on GitHub's merge state is routine only while the repository's own rules end it without
+// anyone acting for Legion: a required check still running or a required review (BLOCKED), or
+// GitHub still computing the state (UNKNOWN). A branch to update (BEHIND), a draft, or a conflict
+// (DIRTY) waits on someone, so it is not.
+func TestOnlyABlockedOrComputingMergeStateIsARoutineWait(t *testing.T) {
+	for state, routine := range map[string]bool{"BLOCKED": true, "UNKNOWN": true, "BEHIND": false, "DRAFT": false, "DIRTY": false} {
+		g := &github{head: "head", mergeState: state}
+		client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+		_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+		var unmergeable *Unmergeable
+		if !errors.As(err, &unmergeable) || !errors.Is(err, wait.ErrWaiting) || unmergeable.Routine() != routine {
+			t.Fatalf("Submit while %s = %v; want an Unmergeable wait, routine %t", state, err, routine)
+		}
 	}
 }
 

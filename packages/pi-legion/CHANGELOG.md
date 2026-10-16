@@ -55,7 +55,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new
   `merge-refused` row says what to do when GitHub refuses that submission in a way a retry would
   meet again: the daemon stops submitting it, and a person fixes the repository setting or App
-  permission and merges the pull request.
+  permission and merges the pull request. Its new `merge-stalled` row covers a submission that
+  ended because GitHub kept showing the pull request closed, or at another head, while the record
+  still awaited READY's head.
 - Daemon API contract 25 (LEGION-636): a deployment row of `legion state`'s `capabilities` carries
   `source`, `configuration` (what legion.yaml alone decides) or `boot` (what boot measured);
   `installed` leaves the status set (nothing has emitted it since LEGION-629); the probe's OK line

@@ -38,7 +38,7 @@ type Client struct {
 
 // Get reads path under the client's REST base into into. An answer other than 2xx is an *Answer.
 func (c Client) Get(ctx context.Context, path string, into any) error {
-	_, err := c.call(ctx, http.MethodGet, c.API+path, nil, into)
+	_, _, err := c.call(ctx, http.MethodGet, c.API+path, nil, BudgetCore, into)
 	return err
 }
 
@@ -49,7 +49,7 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 	if err != nil {
 		return fmt.Errorf("encode POST %s: %w", path, err)
 	}
-	_, err = c.call(ctx, http.MethodPost, c.API+path, encoded, into)
+	_, _, err = c.call(ctx, http.MethodPost, c.API+path, encoded, BudgetCore, into)
 	return err
 }
 
@@ -71,12 +71,12 @@ type GraphQLFailure struct {
 }
 
 // GraphQLError is a GraphQL answer that carries errors, which GitHub sends with HTTP status 200.
-// RateLimited and RetryAfter carry GitHub's GraphQL rate-limit answer and its requested retry
-// delay, when one of its failures has type RATE_LIMITED.
+// When one of them is GitHub's RATE_LIMITED, RetryAfter is how long GitHub asks the caller to wait
+// and Budget the budget the limit spent (RetryAfter, the function, reads both).
 type GraphQLError struct {
-	Failures    []GraphQLFailure
-	RateLimited bool
-	RetryAfter  time.Duration
+	Failures   []GraphQLFailure
+	RetryAfter time.Duration
+	Budget     Budget
 }
 
 func (e *GraphQLError) Error() string {
@@ -106,8 +106,8 @@ func (e *GraphQLError) NotFoundAt(path ...string) bool {
 
 // GraphQL sends query and variables to the client's API, and reads the answer's data into into when
 // into is not nil. An answer that carries errors is a *GraphQLError, and one other than 2xx an
-// *Answer. A GraphQL RATE_LIMITED answer is HTTP 200, so its retry headers are preserved on the
-// error rather than lost with the successful transport status.
+// *Answer. GitHub answers its RATE_LIMITED with 200, so the *GraphQLError carries the limit its
+// headers name.
 func (c Client) GraphQL(ctx context.Context, query string, variables map[string]any, into any) error {
 	var response struct {
 		Data   json.RawMessage  `json:"data"`
@@ -117,7 +117,7 @@ func (c Client) GraphQL(ctx context.Context, query string, variables map[string]
 	if err != nil {
 		return fmt.Errorf("encode GraphQL request: %w", err)
 	}
-	_, headers, err := c.callHeaders(ctx, http.MethodPost, c.API, encoded, &response)
+	_, headers, err := c.call(ctx, http.MethodPost, c.API, encoded, BudgetGraphQL, &response)
 	if err != nil {
 		return err
 	}
@@ -125,8 +125,8 @@ func (c Client) GraphQL(ctx context.Context, query string, variables map[string]
 		failed := &GraphQLError{Failures: response.Errors}
 		for _, failure := range failed.Failures {
 			if failure.Type == "RATE_LIMITED" {
-				failed.RateLimited = true
 				failed.RetryAfter = rateLimitRetryAfter(headers, time.Now())
+				failed.Budget = spent(headers, true, BudgetGraphQL)
 				break
 			}
 		}
@@ -142,6 +142,44 @@ func (c Client) GraphQL(ctx context.Context, query string, variables map[string]
 		return fmt.Errorf("decode GitHub GraphQL data: %w", err)
 	}
 	return nil
+}
+
+// Budget is the GitHub rate-limit budget a call spends: the REST API's core budget, GraphQL's, or
+// GitHub's secondary limit, which every call of the token meets whichever API it calls.
+type Budget string
+
+const (
+	BudgetCore      Budget = "core"
+	BudgetGraphQL   Budget = "graphql"
+	BudgetSecondary Budget = "secondary"
+)
+
+// RetryAfter is how long GitHub asks the caller to wait, and the budget its limit spent, when err
+// carries GitHub's rate limit: an *Answer that is one, or a *GraphQLError GitHub sent with its
+// RATE_LIMITED. Any other error is no limit: zero, and no budget.
+func RetryAfter(err error) (time.Duration, Budget) {
+	var answer *Answer
+	if errors.As(err, &answer) && answer.RateLimited {
+		return answer.RetryAfter, answer.Budget
+	}
+	var failed *GraphQLError
+	if errors.As(err, &failed) {
+		return failed.RetryAfter, failed.Budget
+	}
+	return 0, ""
+}
+
+// spent is the budget a rate limit whose answer carries headers spent: GitHub's secondary limit when
+// it asks for a Retry-After or reports no primary budget spent (primary false), and otherwise the
+// primary budget x-ratelimit-resource names, or route, the called API's own, when it names none.
+func spent(headers http.Header, primary bool, route Budget) Budget {
+	if headers.Get("Retry-After") != "" || !primary {
+		return BudgetSecondary
+	}
+	if resource := headers.Get("X-RateLimit-Resource"); resource != "" {
+		return Budget(resource)
+	}
+	return route
 }
 
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,
@@ -177,7 +215,7 @@ func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, er
 		if field != "" {
 			into = &object
 		}
-		next, err := c.call(ctx, http.MethodGet, target, nil, into)
+		next, _, err := c.call(ctx, http.MethodGet, target, nil, BudgetCore, into)
 		if err != nil {
 			return nil, err
 		}
@@ -203,15 +241,10 @@ func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, er
 }
 
 // call sends method to target, with body as JSON when it is not nil, reads a 2xx answer into into
-// when into is not nil, and returns the next page's URL its Link header names, "" for none.
-func (c Client) call(ctx context.Context, method, target string, body []byte, into any) (string, error) {
-	next, _, err := c.callHeaders(ctx, method, target, body, into)
-	return next, err
-}
-
-// callHeaders is call with the response headers. GraphQL needs them when GitHub reports an error
-// within a successful HTTP response, specifically to honor a RATE_LIMITED retry-after.
-func (c Client) callHeaders(ctx context.Context, method, target string, body []byte, into any) (string, http.Header, error) {
+// when into is not nil, and returns the next page's URL its Link header names ("" for none) and
+// GitHub's response headers. An answer other than 2xx is an *Answer; when it is a rate limit, it
+// names the budget spent, route's (the called API's own) when GitHub names no other.
+func (c Client) call(ctx context.Context, method, target string, body []byte, route Budget, into any) (string, http.Header, error) {
 	var payload io.Reader
 	if body != nil {
 		payload = bytes.NewReader(body)
@@ -235,9 +268,12 @@ func (c Client) callHeaders(ctx context.Context, method, target string, body []b
 		return "", response.Header, err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		path := c.answerPath(request.URL)
-		return "", response.Header, &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
+		refused := &Answer{Method: method, Path: c.answerPath(request.URL), Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
 			RateLimited: RateLimited(response, answer), RetryAfter: retryAfter(response, answer, time.Now())}
+		if refused.RateLimited {
+			refused.Budget = spent(response.Header, response.Header.Get("X-RateLimit-Remaining") == "0", route)
+		}
+		return "", response.Header, refused
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), response.Header, nil
@@ -332,7 +368,8 @@ func nextPage(link string) string {
 // Answer is a GitHub REST answer other than 2xx: the request's method and path (its query left
 // out), GitHub's HTTP status, the body GitHub sent with it, and whether it is a rate limit, which
 // every further call on the same token meets until the limit resets, with how long GitHub asks the
-// caller to wait before its next call (retryAfter; zero when it is not one).
+// caller to wait before its next call (retryAfter; zero when it is not one) and the budget the limit
+// spent (empty when it is not one).
 type Answer struct {
 	Method      string
 	Path        string
@@ -340,6 +377,7 @@ type Answer struct {
 	Body        string
 	RateLimited bool
 	RetryAfter  time.Duration
+	Budget      Budget
 }
 
 func (a *Answer) Error() string {

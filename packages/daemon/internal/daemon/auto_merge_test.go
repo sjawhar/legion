@@ -3,21 +3,22 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -33,18 +34,15 @@ import (
 func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
 	for _, tc := range []struct {
-		name      string
-		at        phase.Phase
-		ready     string
-		mergeNote string
-		lingers   bool
-		want      int
+		name string
+		seed readyMergeSeed
+		want int
 	}{
-		{"awaiting its merge at the READY head", phase.AwaitingMerge, "ready-head", "", false, 0},
-		{"awaiting its merge, the head past READY", phase.AwaitingMerge, "older-head", "", false, 1},
-		{"back in implementing", phase.Implementing, "ready-head", "", false, 1},
-		{"awaiting a person's merge at the READY head", phase.AwaitingMerge, "ready-head", byHand, false, 1},
-		{"awaiting its merge at the READY head in a lingering tree", phase.AwaitingMerge, "ready-head", "", true, 1},
+		{"awaiting its merge at the READY head", awaitingREADY, 0},
+		{"awaiting its merge, the head past READY", awaitingREADY.with(func(s *readyMergeSeed) { s.ready = "older-head" }), 1},
+		{"back in implementing", awaitingREADY.with(func(s *readyMergeSeed) { s.at = phase.Implementing }), 1},
+		{"awaiting a person's merge at the READY head", awaitingREADY.with(func(s *readyMergeSeed) { s.mergeNote = byHand }), 1},
+		{"awaiting its merge at the READY head in a lingering tree", awaitingREADY.with(func(s *readyMergeSeed) { s.lingers = true }), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -65,30 +63,13 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 					_, _ = w.Write([]byte(`{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`))
 					return
 				}
-				autoMerge := `{"enabledAt":"2026-10-11T00:00:00Z"}`
-				if disables > 0 {
-					autoMerge = "null"
-				}
-				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"id":"PR_42","headRefOid":"ready-head","autoMergeRequest":%s,"mergeQueueEntry":null}}}}`, autoMerge)
+				_, _ = w.Write([]byte(armedPullJSON("ready-head", disables == 0)))
 			}))
 			t.Cleanup(server.Close)
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
-			child := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
-			if tc.lingers {
-				until, parent := time.Now().Add(time.Hour), "LEGION-207"
-				putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
-					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
-				child.Tree, child.Parent = "LEGION-207", &parent
-			}
-			putOutboxIssue(t, pool, records, child)
-			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-				return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: tc.ready, MergeNote: tc.mergeNote})
-			}); err != nil {
-				t.Fatalf("seed the merger's READY: %v", err)
-			}
-			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-				repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL}
+			seedReadyMerge(t, pool, records, "LEGION-208", tc.seed)
+			runner := mergeRunner(pool, records, server.URL, quietLogger(), time.Now)
 			if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())); err != nil {
 				t.Fatalf("execute the disarm: %v", err)
 			}
@@ -137,11 +118,10 @@ func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 		}); err != nil {
 			t.Errorf("commit the READY: %v", err)
 		}
-		_, _ = fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"id":"PR_42","headRefOid":"ready-head","autoMergeRequest":{"enabledAt":"2026-10-11T00:00:00Z"},"mergeQueueEntry":null}}}}`)
+		_, _ = w.Write([]byte(armedPullJSON("ready-head", true)))
 	}))
 	t.Cleanup(server.Close)
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL}
+	runner := mergeRunner(pool, records, server.URL, quietLogger(), time.Now)
 	if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())); err != nil {
 		t.Fatalf("execute the disarm: %v", err)
 	}
@@ -153,73 +133,39 @@ func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 }
 
 // A ready_merge row submits the merge as the implement App only while the record still awaits that
-// exact READY head. A READY a person merges, a READY the issue has left, and a tree that lingers are
-// stale; GitHub's expected-head check guards the head between the row's read and its mutation.
+// exact READY head on an open pull request. A READY a person merges, a READY the issue has left, a
+// tree that lingers, and a pull request the record holds closed are stale; GitHub's expected-head
+// check guards the head between the row's read and its mutation.
 func TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead(t *testing.T) {
 	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
 	for _, tc := range []struct {
-		name      string
-		at        phase.Phase
-		ready     string
-		mergeNote string
-		lingers   bool
-		merges    int
+		name   string
+		seed   readyMergeSeed
+		merges int
 	}{
-		{"awaiting its merge at the READY head", phase.AwaitingMerge, "ready-head", "", false, 1},
-		{"awaiting another READY head", phase.AwaitingMerge, "older-head", "", false, 0},
-		{"back in implementing", phase.Implementing, "ready-head", "", false, 0},
-		{"awaiting a person's merge", phase.AwaitingMerge, "ready-head", byHand, false, 0},
-		{"awaiting its merge in a lingering tree", phase.AwaitingMerge, "ready-head", "", true, 0},
+		{"awaiting its merge at the READY head", awaitingREADY, 1},
+		{"awaiting another READY head", awaitingREADY.with(func(s *readyMergeSeed) { s.ready = "older-head" }), 0},
+		{"back in implementing", awaitingREADY.with(func(s *readyMergeSeed) { s.at = phase.Implementing }), 0},
+		{"awaiting a person's merge", awaitingREADY.with(func(s *readyMergeSeed) { s.mergeNote = byHand }), 0},
+		{"awaiting its merge in a lingering tree", awaitingREADY.with(func(s *readyMergeSeed) { s.lingers = true }), 0},
+		{"awaiting its merge on a pull request the record holds closed", awaitingREADY.with(func(s *readyMergeSeed) { s.pr = record.PullRequestClosed }), 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var mu sync.Mutex
-			var bearers []string
-			merges := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				defer mu.Unlock()
-				bearers = append(bearers, r.Header.Get("Authorization"))
-				body, _ := io.ReadAll(r.Body)
-				w.Header().Set("Content-Type", "application/json")
-				if strings.Contains(string(body), "mergePullRequest") {
-					merges++
-					if !strings.Contains(string(body), `"head":"ready-head"`) {
-						t.Errorf("merge request %s, want READY's expected head", body)
-					}
-					_, _ = w.Write([]byte(`{"data":{}}`))
-					return
-				}
-				_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
-			}))
-			t.Cleanup(server.Close)
+			github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, mergedAnswer)
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
-			child := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
-			if tc.lingers {
-				until, parent := time.Now().Add(time.Hour), "LEGION-207"
-				putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
-					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
-				child.Tree, child.Parent = "LEGION-207", &parent
-			}
-			putOutboxIssue(t, pool, records, child)
-			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-				return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: tc.ready, MergeNote: tc.mergeNote})
-			}); err != nil {
-				t.Fatalf("seed the merger's READY: %v", err)
-			}
-			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-				repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL}
+			seedReadyMerge(t, pool, records, "LEGION-208", tc.seed)
+			runner := mergeRunner(pool, records, github.url, quietLogger(), time.Now)
 			if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())); err != nil {
 				t.Fatalf("execute the READY merge: %v", err)
 			}
-			mu.Lock()
-			defer mu.Unlock()
-			if merges != tc.merges {
+			if merges, bearers := github.merged(); merges != tc.merges {
 				t.Fatalf("merges %d, want %d", merges, tc.merges)
-			}
-			for _, bearer := range bearers {
-				if bearer != "Bearer implement-app-token-for-acme" {
-					t.Fatalf("a GitHub call carried %q, want the implement App's token", bearer)
+			} else {
+				for _, bearer := range bearers {
+					if bearer != "Bearer implement-app-token-for-acme" {
+						t.Fatalf("a GitHub call carried %q, want the implement App's token", bearer)
+					}
 				}
 			}
 		})
@@ -228,127 +174,57 @@ func TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead(t *testing.T) {
 
 // GitHub refusing a ready_merge row's submission where a retry would meet the same refusal (squash
 // merges disabled, a permission the App lacks) fails loudly: the issue's architect is told once,
-// with GitHub's message, and the row finishes rather than retrying forever. A transient failure
+// with GitHub's message, and the row ends rather than retrying forever. A transient failure
 // (GitHub's server error) tells nobody and keeps the row on its backoff.
-func TestAREADYMergeRowTellsTheArchitectOnceWhenGitHubRefusesItForGood(t *testing.T) {
+func TestAPermanentREADYMergeRefusalTellsTheArchitectOnce(t *testing.T) {
 	const squash = "Squash merges are not allowed on this repository."
 	for _, tc := range []struct {
-		name      string
-		answer    func(http.ResponseWriter)
-		permanent bool
+		name           string
+		answer         func(http.ResponseWriter)
+		ready, notices int
+		reasonMentions []string
 	}{
-		{"refused for good", func(w http.ResponseWriter) {
-			_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":"UNPROCESSABLE","message":%q}]}`, squash)
-		}, true},
-		{"a server error", func(w http.ResponseWriter) { http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway) }, false},
+		{"refused for good", refusedAnswer(squash), 0, 1, []string{squash, "#42"}},
+		{"a server error", func(w http.ResponseWriter) { http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway) }, 1, 0, nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, _ := io.ReadAll(r.Body)
-				w.Header().Set("Content-Type", "application/json")
-				if strings.Contains(string(body), "mergePullRequest") {
-					tc.answer(w)
-					return
-				}
-				_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
-			}))
-			t.Cleanup(server.Close)
+			github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, tc.answer)
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
-			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-				return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
-			}); err != nil {
-				t.Fatalf("seed the merger's READY: %v", err)
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now()))
+			if err := mergeRunner(pool, records, github.url, quietLogger(), time.Now).RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
 			}
-			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-				repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: time.Now}
-			now := time.Now().UTC()
-			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
-			var leased []record.OutboxRow
-			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-				var err error
-				leased, err = records.ClaimDue(context.Background(), tx, "LEGION", now, 1, outboxLease)
-				return err
-			}); err != nil || len(leased) != 1 {
-				t.Fatalf("lease the READY merge = %v, %v", leased, err)
-			}
-			err := runner.execute(context.Background(), leased[0])
-			var notices []string
-			rows, qerr := pool.Query(context.Background(), "select payload->>'kind', payload->>'role', payload->>'reason' from outbox where kind = 'notice' and issue = 'LEGION-208'")
-			if qerr != nil {
-				t.Fatalf("read notices: %v", qerr)
-			}
-			for rows.Next() {
-				var kind, role, reason string
-				if err := rows.Scan(&kind, &role, &reason); err != nil {
-					t.Fatalf("scan notice: %v", err)
+			reasons := assertMergeRows(t, pool, tc.ready, "merge-refused", tc.notices)
+			for _, mention := range tc.reasonMentions {
+				if !strings.Contains(reasons[0], mention) {
+					t.Fatalf("merge-refused reason %q, want it to name %q", reasons[0], mention)
 				}
-				notices = append(notices, kind+" "+role+" "+reason)
-			}
-			rows.Close()
-			if !tc.permanent {
-				if err == nil || len(notices) != 0 {
-					t.Fatalf("execute = %v with notices %q; want the failure, to retry, and nobody told", err, notices)
-				}
-				return
-			}
-			if !errors.Is(err, errReadyMergeRefusedFinished) {
-				t.Fatalf("execute = %v; want the permanent-refusal finish signal", err)
-			}
-			if len(notices) != 1 || !strings.HasPrefix(notices[0], "merge-refused architect ") || !strings.Contains(notices[0], squash) || !strings.Contains(notices[0], "#42") {
-				t.Fatalf("notices %q; want one merge-refused to the architect naming #42 and GitHub's message", notices)
 			}
 		})
 	}
 }
 
 // A permanent ready_merge refusal writes its architect notice and finishes the row in one
-// transaction. If FinishOutbox loses its first connection, the transaction rolls the notice back
-// too; after the lease expires, the one retried row leaves exactly one notice and no ready_merge
-// row. Writing the notice first and finishing later would send it twice.
+// transaction. When FinishLeasedOutbox loses its connection, the notice rolls back with it and the
+// row stays leased; once its lease expires, the row runs again and leaves exactly one notice and no
+// ready_merge row. Writing the notice first and finishing later would send it twice.
 func TestARetriedPermanentREADYMergeRefusalPostsOneNotice(t *testing.T) {
-	const squash = "Squash merges are not allowed on this repository."
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(string(body), "mergePullRequest") {
-			_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":"UNPROCESSABLE","message":%q}]}`, squash)
-			return
-		}
-		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
-	}))
-	t.Cleanup(server.Close)
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer("Squash merges are not allowed on this repository."))
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
-	}); err != nil {
-		t.Fatalf("seed the merger's READY: %v", err)
-	}
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
 	now := time.Now().UTC()
-	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		if err := records.Enqueue(context.Background(), tx, row); err != nil {
-			return err
-		}
-		return records.Enqueue(context.Background(), tx, row)
-	}); err != nil {
-		t.Fatalf("enqueue duplicate READY merge: %v", err)
-	}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
 	flaky := &flakyOutboxStore{Store: records, finishFailures: 1}
 	clock := now
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: flaky, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: func() time.Time { return clock }}
+	runner := mergeRunner(pool, flaky, github.url, quietLogger(), func() time.Time { return clock })
 
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("first RunOnce: %v", err)
 	}
-	assertReadyMergeRefusalRows(t, pool, 1, 0)
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
 	if got := flaky.failedFinishes(); got != 1 {
 		t.Fatalf("failed finishes = %d, want the injected one", got)
 	}
@@ -357,238 +233,516 @@ func TestARetriedPermanentREADYMergeRefusalPostsOneNotice(t *testing.T) {
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("retried RunOnce: %v", err)
 	}
-	assertReadyMergeRefusalRows(t, pool, 0, 1)
+	assertMergeRows(t, pool, 0, "merge-refused", 1)
 }
 
-func assertReadyMergeRefusalRows(t *testing.T, pool interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, wantReady, wantNotice int) {
-	t.Helper()
-	var ready, notices int
-	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'ready_merge'`).Scan(&ready); err != nil {
-		t.Fatalf("count READY merge rows: %v", err)
-	}
-	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'notice' and payload->>'kind' = 'merge-refused'`).Scan(&notices); err != nil {
-		t.Fatalf("count merge-refused notices: %v", err)
-	}
-	if ready != wantReady || notices != wantNotice {
-		t.Fatalf("READY merge rows = %d and notices = %d, want %d and %d", ready, notices, wantReady, wantNotice)
-	}
-}
-
-// A ready_merge row waiting on a required review or check is routine, even after its retry backoff
-// reaches the cap. It must not flood warnings while a person supplies the review GitHub requires.
-func TestAWaitingREADYMergeStaysDebugAfterItsBackoffCaps(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"BLOCKED","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
-	}))
-	t.Cleanup(server.Close)
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
-	}); err != nil {
-		t.Fatalf("seed the merger's READY: %v", err)
-	}
-	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	row.Attempts = waitWarnAttempts
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.Enqueue(context.Background(), tx, row)
-	}); err != nil {
-		t.Fatalf("enqueue READY merge: %v", err)
-	}
-	var logged bytes.Buffer
-	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})), pool: pool, dispatchProject: "LEGION",
-		records: records, tokens: roleTokens{}, project: "legion", repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: time.Now}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	if text := logged.String(); !strings.Contains(text, `level=DEBUG msg="outbox row waits"`) || strings.Contains(text, "level=WARN") {
-		t.Fatalf("waiting READY merge logged %q, want one debug line and no warning", text)
-	}
-}
-
-// A GitHub GraphQL RATE_LIMITED response is transient, and its Retry-After delay outranks the
-// outbox's ordinary backoff so the implement App does not immediately exhaust its token again.
-func TestARateLimitedREADYMergeHonorsGitHubsRetryAfter(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(string(body), "mergePullRequest") {
-			w.Header().Set("Retry-After", "180")
-			_, _ = w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
-	}))
-	t.Cleanup(server.Close)
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
-	}); err != nil {
-		t.Fatalf("seed the merger's READY: %v", err)
-	}
-	now := time.Date(2026, 10, 16, 5, 0, 0, 0, time.UTC)
-	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.Enqueue(context.Background(), tx, row)
-	}); err != nil {
-		t.Fatalf("enqueue READY merge: %v", err)
-	}
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: func() time.Time { return now }}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	var nextAt time.Time
-	if err := pool.QueryRow(context.Background(), `select next_at from outbox where kind = 'ready_merge'`).Scan(&nextAt); err != nil {
-		t.Fatalf("read rate-limited row: %v", err)
-	}
-	if want := now.Add(180 * time.Second); !nextAt.Equal(want) {
-		t.Fatalf("rate-limited READY merge next_at = %s, want GitHub's retry-after %s", nextAt, want)
-	}
-}
-
-// When a slow worker's lease expires, a second worker owns the ready_merge row. The stale worker's
-// permanent refusal must roll its notice back with its failed finish; only the replacement lease
-// can leave the one architect notice.
+// When a slow worker's lease expires, another worker owns the ready_merge row. The stale worker's
+// permanent refusal rolls its notice back with its finish, which no longer holds the lease; only
+// the worker holding the lease leaves the one architect notice.
 func TestOnlyTheOwningREADYMergeLeasePostsAPermanentRefusal(t *testing.T) {
+	github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, refusedAnswer("Squash merges are not allowed on this repository."))
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
 	now := time.Now().UTC()
-	row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-	enqueueOutbox(t, pool, records, row)
-	claim := func(at time.Time) record.OutboxRow {
-		var claimed record.OutboxRow
-		if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-			rows, err := records.ClaimDue(context.Background(), tx, "LEGION", at, 1, outboxLease)
-			if err != nil {
-				return err
-			}
-			if len(rows) != 1 {
-				return fmt.Errorf("claimed %d rows", len(rows))
-			}
-			claimed = rows[0]
-			return nil
-		}); err != nil {
-			t.Fatalf("claim READY merge: %v", err)
-		}
-		return claimed
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+
+	if err := mergeRunner(pool, leaseStealer{records}, github.url, quietLogger(), func() time.Time { return now }).RunOnce(context.Background()); err != nil {
+		t.Fatalf("stale RunOnce: %v", err)
 	}
-	first := claim(now)
-	second := claim(first.LeaseUntil.Add(time.Nanosecond))
-	runner := &outbox{log: quietLogger(), pool: pool, records: records, now: time.Now}
-	refused := &ghautomerge.Refused{Number: 42, Head: "ready-head", Action: "merge", Message: "GitHub GraphQL: Squash merges are disabled"}
-	if err := runner.finishReadyMergeRefused(context.Background(), first, refused); err == nil {
-		t.Fatal("stale lease recorded a permanent refusal, want its transaction rolled back")
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
+
+	later := now.Add(3 * outboxLease)
+	if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return later }).RunOnce(context.Background()); err != nil {
+		t.Fatalf("owning RunOnce: %v", err)
 	}
-	assertReadyMergeRefusalRows(t, pool, 1, 0)
-	if err := runner.finishReadyMergeRefused(context.Background(), second, refused); err != nil {
-		t.Fatalf("replacement lease records refusal: %v", err)
-	}
-	assertReadyMergeRefusalRows(t, pool, 0, 1)
+	assertMergeRows(t, pool, 0, "merge-refused", 1)
 }
 
-// One App token shares GitHub's rate limit across every row a RunOnce already leased. After the
-// first ready_merge receives RATE_LIMITED, the runner must defer its remaining GitHub rows without
-// sending them another GraphQL request.
-func TestARateLimitedREADYMergeDefersTheRestOfItsBatch(t *testing.T) {
-	var mu sync.Mutex
-	requests := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		mu.Lock()
-		requests++
-		mu.Unlock()
-		w.Header().Set("Content-Type", "application/json")
-		if strings.Contains(string(body), "mergePullRequest") {
+// A ready_merge row only GitHub's rules hold back (a required check still running or a required
+// review, BLOCKED; GitHub still computing, UNKNOWN) waits routinely, logged at debug however long it
+// waits, so a person supplying the review GitHub requires sees no warning flood. One waiting on a
+// branch update (BEHIND) or a draft (DRAFT) waits on someone, so it warns once it has waited long.
+func TestAWaitingREADYMergeWarnsOnlyWhenItWaitsOnSomeone(t *testing.T) {
+	for state, level := range map[string]string{"BLOCKED": "DEBUG", "UNKNOWN": "DEBUG", "BEHIND": "WARN", "DRAFT": "WARN"} {
+		t.Run(state, func(t *testing.T) {
+			github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", state) }, mergedAnswer)
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+			row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())
+			row.Attempts = waitWarnAttempts
+			enqueueOutbox(t, pool, records, row)
+			var logged bytes.Buffer
+			log := slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
+			if err := mergeRunner(pool, records, github.url, log, time.Now).RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			assertMergeRows(t, pool, 1, "merge-refused", 0)
+			var levels []string
+			for line := range strings.Lines(logged.String()) {
+				var entry struct{ Level, Kind string }
+				if err := json.Unmarshal([]byte(line), &entry); err != nil {
+					t.Fatalf("decode log line %q: %v", line, err)
+				}
+				if entry.Kind == string(record.OutboxKindReadyMerge) {
+					levels = append(levels, entry.Level)
+				}
+			}
+			if len(levels) != 1 || levels[0] != level {
+				t.Fatalf("the waiting row logged at %v, want one line at %s", levels, level)
+			}
+		})
+	}
+}
+
+// A ready_merge row ends as stale only on the record's word. While the record still awaits READY's
+// head on an open pull request, GitHub showing the pull request closed or at another head is a
+// webhook the record has not applied yet, or a GitHub read behind the record: the row waits and
+// decides again. So a reopen landing while the row reads the close leaves the merge submitted on
+// the next run, and a close the record has applied ends the row quietly, the architect already told
+// of the close. A disagreement that outlasts waitWarnAttempts runs ends the row and tells the
+// architect once (merge-stalled), so the row never waits unseen forever.
+func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
+	t.Run("a reopen lands while the row reads the close", func(t *testing.T) {
+		pool := isolatedOutboxPool(t)
+		records := record.NewStore()
+		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY.with(func(s *readyMergeSeed) { s.pr = record.PullRequestClosed }))
+		github := newMergeGitHub(t, func(read int) string {
+			if read > 1 {
+				return pullJSON("OPEN", "ready-head", "CLEAN")
+			}
+			// The reopen's transaction commits as GitHub answers the row's read of the close.
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				if err := records.PutPullRequest(context.Background(), tx, readyPullRequest("LEGION-208", record.PullRequestOpen)); err != nil {
+					return err
+				}
+				row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())
+				if err != nil {
+					return err
+				}
+				return records.Enqueue(context.Background(), tx, row)
+			}); err != nil {
+				t.Errorf("apply the reopen: %v", err)
+			}
+			return pullJSON("CLOSED", "ready-head", "UNKNOWN")
+		}, mergedAnswer)
+		now := time.Now().UTC()
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+		clock := now
+		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("first RunOnce: %v", err)
+		}
+		assertMergeRows(t, pool, 1, "merge-stalled", 0)
+		clock = clock.Add(time.Minute)
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("second RunOnce: %v", err)
+		}
+		assertMergeRows(t, pool, 0, "merge-stalled", 0)
+		if merges, _ := github.merged(); merges != 1 {
+			t.Fatalf("merges %d, want READY's merge submitted once the reopen reached both", merges)
+		}
+	})
+	t.Run("GitHub and the record both hold the pull request closed", func(t *testing.T) {
+		github := newMergeGitHub(t, func(int) string { return pullJSON("CLOSED", "ready-head", "UNKNOWN") }, mergedAnswer)
+		pool := isolatedOutboxPool(t)
+		records := record.NewStore()
+		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY.with(func(s *readyMergeSeed) { s.pr = record.PullRequestClosed }))
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now()))
+		if err := mergeRunner(pool, records, github.url, quietLogger(), time.Now).RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		assertMergeRows(t, pool, 0, "merge-stalled", 0)
+	})
+	t.Run("the disagreement outlasts its bound", func(t *testing.T) {
+		github := newMergeGitHub(t, func(int) string { return pullJSON("CLOSED", "ready-head", "UNKNOWN") }, mergedAnswer)
+		pool := isolatedOutboxPool(t)
+		records := record.NewStore()
+		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+		now := time.Now().UTC()
+		row := mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+		row.Attempts = waitWarnAttempts - 1
+		enqueueOutbox(t, pool, records, row)
+		clock := now
+		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("first RunOnce: %v", err)
+		}
+		assertMergeRows(t, pool, 1, "merge-stalled", 0)
+		clock = clock.Add(time.Hour)
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("second RunOnce: %v", err)
+		}
+		reasons := assertMergeRows(t, pool, 0, "merge-stalled", 1)
+		if !strings.Contains(reasons[0], "#42 CLOSED") || !strings.Contains(reasons[0], "ready-head") {
+			t.Fatalf("merge-stalled reason %q, want it to name the closed pull request and READY's head", reasons[0])
+		}
+	})
+}
+
+// A rate-limited ready_merge waits as long as GitHub asks, longer than the outbox's own backoff,
+// whether GitHub answers the GraphQL mutation with RATE_LIMITED and 200 or with a 429.
+func TestARateLimitedREADYMergeWaitsGitHubsRetryAfter(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		answer func(http.ResponseWriter)
+		wait   time.Duration
+	}{
+		{"GraphQL's RATE_LIMITED", func(w http.ResponseWriter) {
 			w.Header().Set("Retry-After", "180")
 			_, _ = w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
-			return
-		}
-		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
-	}))
-	t.Cleanup(server.Close)
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	now := time.Date(2026, 10, 16, 5, 0, 0, 0, time.UTC)
-	for _, issue := range []string{"LEGION-208", "LEGION-209"} {
-		putOutboxIssue(t, pool, records, record.Issue{Key: issue, Project: "LEGION", Tree: issue, Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
-		if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-			return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: issue, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
-		}); err != nil {
-			t.Fatalf("seed %s merger: %v", issue, err)
-		}
-		row, err := record.NewOutboxRow(issue, record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
-		if err != nil {
-			t.Fatal(err)
-		}
-		enqueueOutbox(t, pool, records, row)
-	}
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: func() time.Time { return now }}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
-	}
-	mu.Lock()
-	got := requests
-	mu.Unlock()
-	if got != 2 {
-		t.Fatalf("GraphQL requests = %d, want only the first row's read and rate-limited mutation", got)
-	}
-	var rows int
-	var earliest time.Time
-	var detail string
-	if err := pool.QueryRow(context.Background(), `select count(*), min(next_at), string_agg(issue || ':' || attempts || ':' || next_at::text || ':' || last_error, ', ' order by issue) from outbox where kind = 'ready_merge'`).Scan(&rows, &earliest, &detail); err != nil {
-		t.Fatalf("read deferred READY merges: %v", err)
-	}
-	if rows != 2 || earliest.Before(now.Add(180*time.Second)) {
-		t.Fatalf("deferred READY merges = %d earliest %s (%s), want two rows no earlier than %s", rows, earliest, detail, now.Add(180*time.Second))
+		}, 180 * time.Second},
+		{"a 429", func(w http.ResponseWriter) {
+			w.Header().Set("Retry-After", "120")
+			http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusTooManyRequests)
+		}, 120 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", "CLEAN") }, tc.answer)
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+			now := time.Date(2026, 10, 16, 5, 0, 0, 0, time.UTC)
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+			if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return now }).RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			if nextAt, _ := outboxRowState(t, pool, "LEGION-208"); !nextAt.Equal(now.Add(tc.wait)) {
+				t.Fatalf("rate-limited READY merge next_at = %s, want GitHub's retry-after %s", nextAt, now.Add(tc.wait))
+			}
+		})
 	}
 }
 
-// GitHub can rate-limit the GraphQL endpoint with a non-2xx REST answer. That path retains the
-// Retry-After header too, rather than falling back to the ordinary one-second retry.
-func TestAHTTPRateLimitedREADYMergeHonorsGitHubsRetryAfter(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Retry-After", "120")
-		http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusTooManyRequests)
+// A GitHub rate limit defers the rest of its batch only where the rest would spend the same budget.
+// The implement App's REST core budget (an issue branch's create) and its GraphQL budget (a disarm,
+// a READY merge) are separate, so a REST core limit never holds back a disarm, the effect that keeps
+// an unreviewed head from merging, nor a GraphQL limit an issue branch. GitHub's secondary limit
+// (a Retry-After) covers every call the token makes. A deferred row is not run in the batch at all,
+// and its last error names the row whose limit deferred it.
+func TestARateLimitDefersOnlyTheRowsThatSpendItsBudget(t *testing.T) {
+	reset := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
+	primary := func(resource string) map[string]string {
+		return map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset, "X-RateLimit-Resource": resource}
+	}
+	for _, tc := range []struct {
+		name          string
+		first, second record.OutboxPayload
+		restLimit     map[string]string
+		mergeLimit    map[string]string
+		deferred      bool
+		wait          time.Duration
+	}{
+		{name: "a REST core limit leaves a disarm behind it to run", first: record.IssueBranch{Generation: 1}, second: record.AutoMergeDisable{Number: 43},
+			restLimit: primary("core")},
+		{name: "a GraphQL limit defers a disarm behind it", first: record.ReadyMerge{Number: 42, Head: "ready-head"}, second: record.AutoMergeDisable{Number: 43},
+			mergeLimit: primary("graphql"), deferred: true, wait: 9 * time.Minute},
+		{name: "a GraphQL limit leaves an issue branch behind it to run", first: record.ReadyMerge{Number: 42, Head: "ready-head"}, second: record.IssueBranch{Generation: 1},
+			mergeLimit: primary("graphql")},
+		{name: "a secondary limit defers an issue branch behind it", first: record.ReadyMerge{Number: 42, Head: "ready-head"}, second: record.IssueBranch{Generation: 1},
+			mergeLimit: map[string]string{"Retry-After": "180"}, deferred: true, wait: 180 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newBudgetGitHub(t, tc.restLimit, tc.mergeLimit)
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
+			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-210", Project: "LEGION", Tree: "LEGION-210", Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
+			issueOf := func(payload record.OutboxPayload) string {
+				switch payload.(type) {
+				case record.ReadyMerge:
+					return "LEGION-208"
+				case record.AutoMergeDisable:
+					return "LEGION-209"
+				default:
+					return "LEGION-210"
+				}
+			}
+			now := time.Now().UTC().Truncate(time.Microsecond)
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, issueOf(tc.first), tc.first, now))
+			enqueueOutbox(t, pool, records, mustOutboxRow(t, issueOf(tc.second), tc.second, now))
+			var firstID int64
+			if err := pool.QueryRow(context.Background(), "select id from outbox where issue = $1", issueOf(tc.first)).Scan(&firstID); err != nil {
+				t.Fatalf("read the first row's id: %v", err)
+			}
+			if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return now }).RunOnce(context.Background()); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+			second := issueOf(tc.second)
+			ran := github.calledFor(second)
+			if ran == tc.deferred {
+				t.Fatalf("GitHub calls for %s's row: %t, want deferred %t", second, ran, tc.deferred)
+			}
+			if !tc.deferred {
+				return
+			}
+			nextAt, lastError := outboxRowState(t, pool, second)
+			if nextAt.Before(now.Add(tc.wait)) || !strings.Contains(lastError, fmt.Sprintf("row %d", firstID)) {
+				t.Fatalf("the deferred row waits until %s with last error %q; want no earlier than %s, naming row %d", nextAt, lastError, now.Add(tc.wait), firstID)
+			}
+		})
+	}
+}
+
+// budgetGitHub is GitHub for TestARateLimitDefersOnlyTheRowsThatSpendItsBudget: acme/widgets' REST
+// API, which answers an issue branch's read of main with restLimit's headers and a 403 when it is
+// set, and GraphQL, where #42 is a READY merge's pull request, mergeable now, whose merge GitHub
+// rate-limits with mergeLimit's headers when it is set, and #43 a pull request armed at another
+// head, whose disarm GitHub accepts. It records which issue's row called it.
+type budgetGitHub struct {
+	url    string
+	mu     sync.Mutex
+	called map[string]bool
+}
+
+func newBudgetGitHub(t *testing.T, restLimit, mergeLimit map[string]string) *budgetGitHub {
+	t.Helper()
+	g := &budgetGitHub{called: map[string]bool{}}
+	disabled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/repos/acme/widgets/git/") {
+			g.called["LEGION-210"] = true
+			switch {
+			case restLimit != nil:
+				for name, value := range restLimit {
+					w.Header().Set(name, value)
+				}
+				http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
+			case r.Method == http.MethodGet:
+				_, _ = io.WriteString(w, `{"ref":"refs/heads/main","object":{"sha":"`+branchMainCommit+`"}}`)
+			default:
+				w.WriteHeader(http.StatusCreated)
+				_, _ = io.WriteString(w, `{}`)
+			}
+			return
+		}
+		var request struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode GraphQL request: %v", err)
+		}
+		switch {
+		case strings.Contains(request.Query, "disablePullRequestAutoMerge"):
+			g.called["LEGION-209"] = true
+			disabled = true
+			_, _ = io.WriteString(w, `{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`)
+		case strings.Contains(request.Query, "mergePullRequest"):
+			g.called["LEGION-208"] = true
+			for name, value := range mergeLimit {
+				w.Header().Set(name, value)
+			}
+			if mergeLimit == nil {
+				_, _ = io.WriteString(w, `{"data":{}}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`)
+		case request.Variables["number"] == float64(43):
+			g.called["LEGION-209"] = true
+			_, _ = io.WriteString(w, armedPullJSON("other-head", !disabled))
+		default:
+			g.called["LEGION-208"] = true
+			_, _ = io.WriteString(w, pullJSON("OPEN", "ready-head", "CLEAN"))
+		}
 	}))
 	t.Cleanup(server.Close)
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	g.url = server.URL
+	return g
+}
+
+func (g *budgetGitHub) calledFor(issue string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.called[issue]
+}
+
+// mergeGitHub is GitHub's GraphQL API as a ready_merge row calls it: read answers the row's read of
+// pull request #42 (given how many reads came before it), and mutation answers its merge or arm. It
+// counts the merges sent and records every call's bearer, and fails the test on a merge that names
+// another expected head than ready-head.
+type mergeGitHub struct {
+	url     string
+	mu      sync.Mutex
+	merges  int
+	bearers []string
+}
+
+func newMergeGitHub(t *testing.T, read func(int) string, mutation func(http.ResponseWriter)) *mergeGitHub {
+	t.Helper()
+	g := &mergeGitHub{}
+	reads := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		g.mu.Lock()
+		g.bearers = append(g.bearers, r.Header.Get("Authorization"))
+		isMerge := strings.Contains(string(body), "mergePullRequest") || strings.Contains(string(body), "enablePullRequestAutoMerge")
+		if isMerge {
+			g.merges++
+			if !strings.Contains(string(body), `"head":"ready-head"`) {
+				t.Errorf("merge request %s, want READY's expected head", body)
+			}
+		} else {
+			reads++
+		}
+		count := reads
+		g.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		if isMerge {
+			mutation(w)
+			return
+		}
+		_, _ = io.WriteString(w, read(count))
+	}))
+	t.Cleanup(server.Close)
+	g.url = server.URL
+	return g
+}
+
+func (g *mergeGitHub) merged() (int, []string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.merges, append([]string(nil), g.bearers...)
+}
+
+// mergedAnswer is GitHub accepting a merge; refusedAnswer is GitHub refusing it with message, an
+// UNPROCESSABLE a retry meets again.
+func mergedAnswer(w http.ResponseWriter) { _, _ = io.WriteString(w, `{"data":{}}`) }
+
+func refusedAnswer(message string) func(http.ResponseWriter) {
+	return func(w http.ResponseWriter) {
+		_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":"UNPROCESSABLE","message":%q}]}`, message)
+	}
+}
+
+// pullJSON is ghautomerge's read of acme/widgets#42 as GitHub answers it in a repository that allows
+// no auto-merge: the pull request in state at head, in mergeState, with nothing armed.
+func pullJSON(state, head, mergeState string) string {
+	return fmt.Sprintf(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":%q,"mergeStateStatus":%q,"isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`,
+		state, head, mergeState)
+}
+
+// armedPullJSON is a disarm's read of an open pull request at head, its auto-merge enabled while
+// armed.
+func armedPullJSON(head string, armed bool) string {
+	autoMerge := "null"
+	if armed {
+		autoMerge = `{"enabledAt":"2026-10-11T00:00:00Z"}`
+	}
+	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"id":"PR","state":"OPEN","headRefOid":%q,"autoMergeRequest":%s,"mergeQueueEntry":null}}}}`, head, autoMerge)
+}
+
+// readyMergeSeed is the record a ready_merge row of an issue's pull request #42 at ready-head runs
+// against: the issue's phase, the merger's READY head and by-hand note, whether the issue's tree
+// lingers, and the pull request's recorded state.
+type readyMergeSeed struct {
+	at        phase.Phase
+	ready     string
+	mergeNote string
+	lingers   bool
+	pr        record.PullRequestState
+}
+
+// awaitingREADY is the issue awaiting its merge at ready-head, its pull request open.
+var awaitingREADY = readyMergeSeed{at: phase.AwaitingMerge, ready: "ready-head", pr: record.PullRequestOpen}
+
+// with is the seed changed by change.
+func (s readyMergeSeed) with(change func(*readyMergeSeed)) readyMergeSeed {
+	change(&s)
+	return s
+}
+
+// seedReadyMerge records issue as seed has it.
+func seedReadyMerge(t *testing.T, pool *pgxpool.Pool, records record.Store, issue string, seed readyMergeSeed) {
+	t.Helper()
+	child := record.Issue{Key: issue, Project: "LEGION", Tree: issue, Title: "Workflow", Phase: seed.at, Generation: 1, Status: "retro", Rank: "U"}
+	if seed.lingers {
+		until, parent := time.Now().Add(time.Hour), "LEGION-207"
+		putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
+			Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
+		child.Tree, child.Parent = "LEGION-207", &parent
+	}
+	putOutboxIssue(t, pool, records, child)
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
+		if err := records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: issue, Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: seed.ready, MergeNote: seed.mergeNote}); err != nil {
+			return err
+		}
+		return records.PutPullRequest(context.Background(), tx, readyPullRequest(issue, seed.pr))
 	}); err != nil {
-		t.Fatalf("seed the merger's READY: %v", err)
+		t.Fatalf("seed %s's READY: %v", issue, err)
 	}
-	now := time.Date(2026, 10, 16, 5, 0, 0, 0, time.UTC)
-	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+}
+
+// readyPullRequest is issue's pull request #42 at ready-head, recorded in state.
+func readyPullRequest(issue string, state record.PullRequestState) record.PullRequest {
+	return record.PullRequest{State: state, Issue: issue, Repo: "acme/widgets", Number: 42, Branch: "legion/" + issue, HeadSHA: "ready-head", Failing: []string{}}
+}
+
+// mergeRunner is the outbox the merge tests drive: as the implement App (roleTokens), for
+// acme/widgets, against GitHub at api, logging to log, on the clock now.
+func mergeRunner(pool *pgxpool.Pool, records record.Store, api string, log *slog.Logger, now func() time.Time) *outbox {
+	return &outbox{log: log, pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: api, now: now}
+}
+
+// leaseStealer is a record store whose ClaimDue lets another worker take every row it hands out, as
+// a worker too slow for its lease meets: it claims them again in the same transaction, as of the
+// moment their leases expire, so the rows it returns hold stale leases.
+type leaseStealer struct{ record.Store }
+
+func (s leaseStealer) ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, lease time.Duration) ([]record.OutboxRow, error) {
+	rows, err := s.Store.ClaimDue(ctx, tx, project, now, limit, lease)
 	if err != nil {
-		t.Fatal(err)
+		return nil, err
 	}
-	enqueueOutbox(t, pool, records, row)
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: func() time.Time { return now }}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("RunOnce: %v", err)
+	if _, err := s.Store.ClaimDue(ctx, tx, project, now.Add(lease), limit, lease); err != nil {
+		return nil, err
 	}
+	return rows, nil
+}
+
+// assertMergeRows checks the outbox holds ready ready_merge rows and notices notices of noticeKind,
+// and returns those notices' reasons, oldest first.
+func assertMergeRows(t *testing.T, pool *pgxpool.Pool, ready int, noticeKind string, notices int) []string {
+	t.Helper()
+	var readyRows int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'ready_merge'`).Scan(&readyRows); err != nil {
+		t.Fatalf("count ready_merge rows: %v", err)
+	}
+	rows, err := pool.Query(context.Background(), `select payload->>'role', payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = $1 order by id`, noticeKind)
+	if err != nil {
+		t.Fatalf("read %s notices: %v", noticeKind, err)
+	}
+	defer rows.Close()
+	var reasons []string
+	for rows.Next() {
+		var role, reason string
+		if err := rows.Scan(&role, &reason); err != nil {
+			t.Fatalf("scan a %s notice: %v", noticeKind, err)
+		}
+		if role != string(claim.RoleArchitect) {
+			t.Fatalf("a %s notice for %q, want the architect", noticeKind, role)
+		}
+		reasons = append(reasons, reason)
+	}
+	if readyRows != ready || len(reasons) != notices {
+		t.Fatalf("ready_merge rows %d and %s notices %q; want %d and %d", readyRows, noticeKind, reasons, ready, notices)
+	}
+	return reasons
+}
+
+// outboxRowState is when issue's one outbox row runs next and the error it last failed with.
+func outboxRowState(t *testing.T, pool *pgxpool.Pool, issue string) (time.Time, string) {
+	t.Helper()
 	var nextAt time.Time
-	if err := pool.QueryRow(context.Background(), `select next_at from outbox where kind = 'ready_merge'`).Scan(&nextAt); err != nil {
-		t.Fatalf("read rate-limited row: %v", err)
+	var lastError string
+	if err := pool.QueryRow(context.Background(), `select next_at, last_error from outbox where issue = $1`, issue).Scan(&nextAt, &lastError); err != nil {
+		t.Fatalf("read %s's outbox row: %v", issue, err)
 	}
-	if want := now.Add(120 * time.Second); !nextAt.Equal(want) {
-		t.Fatalf("HTTP rate-limited READY merge next_at = %s, want GitHub's retry-after %s", nextAt, want)
-	}
+	return nextAt, lastError
 }

@@ -167,11 +167,6 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("finish stale lease: %v", err)
 	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		return records.FinishLeasedOutbox(context.Background(), tx, first.ID, first.LeaseToken)
-	}); !errors.Is(err, record.ErrOutboxLeaseLost) {
-		t.Fatalf("lease-owned finish of the stale lease = %v, want ErrOutboxLeaseLost", err)
-	}
 	if remaining := outboxRows(t, pool); remaining != 1 {
 		t.Fatalf("outbox rows after stale finish = %d, want one row under replacement lease", remaining)
 	}

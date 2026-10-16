@@ -238,9 +238,12 @@ one in a repository that allows auto-merge is armed, and in a repository that al
 daemon waits until GitHub reports the pull request mergeable — a required check passing, a required
 review a person gives — and then merges it. The repository's own required reviews and checks decide
 when it merges, rules Legion neither reads nor changes nor bypasses, and a person may still merge it
-first. The submission reads GitHub, then the record, when it runs, and submits nothing once the head
-moved past the `READY` head or the issue left that `READY`; a refusal GitHub would repeat on a retry
-ends the submission and is told to the architect. GitHub checks the expected head only when
+first. The submission reads GitHub, then the record, when it runs, and submits nothing once the
+record shows the issue left that `READY` or the pull request closed. While the record still awaits
+the `READY` head, GitHub showing the pull request closed or at another head means one of them has
+not caught up: the submission waits, and if the two still disagree after its retries it ends and
+tells the architect. A refusal GitHub would repeat on a retry ends the submission and is told to
+the architect too. GitHub checks the expected head only when
 auto-merge is enabled, so an arm outliving its `READY` would merge an unreviewed head. Arming is right
 only for the `READY` head of an issue awaiting its merge, so the daemon queues a disarm on every
 other push or reopen, when a child is set back to `todo`, and when an issue leaves the workflow. The

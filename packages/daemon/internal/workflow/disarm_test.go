@@ -23,19 +23,21 @@ import (
 // awaiting_merge the move withdraws the READY as a red or a conflict does: the issue goes back to
 // implementing with its implementer started, and the architect hears a checks-red naming the move,
 // so the new head comes back through testing, review and a new READY. Elsewhere the issue stays
-// where it is.
+// where it is. A push landing on the READY head queues nothing; a reopen there queues READY's
+// merge again, since the close ended the row that was submitting it.
 func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
 	for _, move := range []struct {
-		name  string
-		state record.PullRequestState
-		fact  func(head string) intake.Fact
+		name     string
+		state    record.PullRequestState
+		fact     func(head string) intake.Fact
+		requeues bool
 	}{
 		{"a push", record.PullRequestOpen, func(head string) intake.Fact {
 			return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
-		}},
+		}, false},
 		{"a reopen", record.PullRequestClosed, func(head string) intake.Fact {
 			return intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Reopened: true}
-		}},
+		}, true},
 	} {
 		for _, tc := range []struct {
 			name                string
@@ -63,6 +65,13 @@ func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
 				}
 				if got := autoMergeDisables(t, pool); !slices.Equal(got, want) {
 					t.Fatalf("auto-merge disables %v, want %v", got, want)
+				}
+				var merges []record.ReadyMerge
+				if move.requeues && tc.head == "head" {
+					merges = []record.ReadyMerge{{Number: 42, Head: "head"}}
+				}
+				if got := readyMerges(t, pool); !slices.Equal(got, merges) {
+					t.Fatalf("READY merges %v, want %v", got, merges)
 				}
 				if !tc.withdrawn {
 					if got := issuePhase(t, pool); got != tc.at {
