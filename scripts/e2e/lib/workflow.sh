@@ -542,7 +542,7 @@ await_ready_merge() {
   [ "${3:-}" != --delete-branch ] || delete_branch=1
   local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
   local started=$SECONDS beat=$SECONDS polls=0
-  merge_when_clean_by= merge_when_clean_commit=
+  merge_when_clean_by='' merge_when_clean_commit=''
   note "waiting up to ${bound}s for the daemon's submission of $repo_name#$pr to merge it; nothing merges it by hand"
   while ((SECONDS - started < bound)); do
     polls=$((polls + 1))

@@ -23,8 +23,9 @@ import (
 // repository allows auto-merge, whether its auto-merge is enabled and whether it has a merge-queue
 // entry, and every mutation sent. requeue is GitHub enqueueing again a pull request it dequeues
 // while its auto-merge is still enabled; failDisable answers the disable with an error, stuckArm
-// answers it as done while leaving auto-merge enabled, and refuseSubmit answers an enable or merge
-// with GitHub's refusal.
+// answers it as done while leaving auto-merge enabled, refuseSubmit answers an enable or merge with
+// GitHub's refusal, movedOnRefuse is the head a push moves the pull request to as GitHub refuses
+// it, and submitStatus answers an enable or merge with that HTTP status instead.
 type github struct {
 	mu                             sync.Mutex
 	notFound                       string
@@ -34,7 +35,8 @@ type github struct {
 	queueRequired, autoMergeOK     bool
 	armed, queued                  bool
 	requeue, failDisable, stuckArm bool
-	refuseSubmit                   string
+	refuseSubmit, movedOnRefuse    string
+	submitStatus                   int
 	mutations                      []string
 }
 
@@ -72,7 +74,14 @@ func (g *github) serve(t *testing.T) string {
 				verb = "enable"
 			}
 			g.mutations = append(g.mutations, fmt.Sprintf("%s %v %v %v", verb, request.Variables["id"], request.Variables["head"], request.Variables["method"]))
+			if g.submitStatus != 0 {
+				http.Error(w, `{"message":"Server Error"}`, g.submitStatus)
+				return
+			}
 			if g.refuseSubmit != "" {
+				if g.movedOnRefuse != "" {
+					g.head = g.movedOnRefuse
+				}
 				_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":"UNPROCESSABLE","message":%q}]}`, g.refuseSubmit)
 				return
 			}
@@ -268,14 +277,37 @@ func TestSubmitUsesGitHubsAnswerForTheREADYHead(t *testing.T) {
 	}
 }
 
-// GitHub's refusal of the merge or the arm is the submission's failure, not a wait: the row retries
-// with the refusal logged, and the next run reads the pull request again.
-func TestSubmitFailsWhenGitHubRefusesTheSubmission(t *testing.T) {
-	g := &github{head: "head", mergeState: "CLEAN", refuseSubmit: "Head branch was modified. Review and try the merge again."}
-	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-	_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
-	if err == nil || errors.Is(err, wait.ErrWaiting) || !strings.Contains(err.Error(), "Head branch was modified") {
-		t.Fatalf("Submit with GitHub refusing = %v, want GitHub's refusal as a failure", err)
+// GitHub's refusal of the merge or the arm is permanent when GitHub still stands where it refused:
+// the same open pull request at READY's head, nothing armed, and the same submission chosen, so a
+// retry would send the same request and meet the same refusal. Submit returns it as *Refused, with
+// GitHub's message. A refusal after which the pull request moved, and an HTTP failure, are
+// transient: the row retries and reads GitHub again.
+func TestSubmitTellsAPermanentRefusalFromATransientOne(t *testing.T) {
+	const squash = "Squash merges are not allowed on this repository."
+	for _, tc := range []struct {
+		name      string
+		g         *github
+		permanent bool
+	}{
+		{"GitHub refuses the merge and stands where it was", &github{head: "head", mergeState: "CLEAN", refuseSubmit: squash}, true},
+		{"GitHub refuses the arm and stands where it was", &github{head: "head", mergeState: "BLOCKED", autoMergeOK: true, refuseSubmit: squash}, true},
+		{"GitHub refuses the merge as a push moves the head", &github{head: "head", mergeState: "CLEAN", refuseSubmit: "Head branch was modified. Review and try the merge again.", movedOnRefuse: "moved"}, false},
+		{"GitHub answers the merge with a server error", &github{head: "head", mergeState: "CLEAN", submitStatus: http.StatusBadGateway}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(tc.g.serve(t))}
+			_, err := Submit(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "head", keeping("head"))
+			var refused *Refused
+			if err == nil || errors.Is(err, wait.ErrWaiting) {
+				t.Fatalf("Submit = %v, want GitHub's failure", err)
+			}
+			if errors.As(err, &refused) != tc.permanent {
+				t.Fatalf("Submit = %v (%T); want permanent %t", err, err, tc.permanent)
+			}
+			if tc.permanent && (refused.Message != squash || !strings.Contains(err.Error(), squash)) {
+				t.Fatalf("refusal = %+v, want GitHub's message %q", refused, squash)
+			}
+		})
 	}
 }
 

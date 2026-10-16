@@ -1055,8 +1055,7 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 	if err != nil {
 		return err
 	}
-	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
-	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
+	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, r.keepFor(row.Issue))
 	if err != nil {
 		return err
 	}
@@ -1069,7 +1068,9 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // (ghautomerge.Submit), deciding by GitHub and then the record when it runs: only while the issue
 // still awaits that READY head does it ask GitHub to enqueue, merge or arm it. GitHub's merge state
 // and rules decide which; a repository that allows no auto-merge leaves the row waiting until
-// GitHub reports the pull request mergeable, and a head moved since READY submits nothing.
+// GitHub reports the pull request mergeable, and a head moved since READY submits nothing. A
+// refusal a retry would meet again (ghautomerge.Refused) is told to the issue's architect as a
+// merge-refused notice, with GitHub's message, and finishes the row; every other failure retries.
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
@@ -1077,8 +1078,17 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 	if err != nil {
 		return err
 	}
-	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
-	submitted, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, keep)
+	submitted, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, r.keepFor(row.Issue))
+	var refused *ghautomerge.Refused
+	if errors.As(err, &refused) {
+		r.log.Error("outbox READY merge refused by GitHub for good; its architect is told and the row ends", "row", row.ID, "issue", row.Issue,
+			"number", payload.Number, "head", payload.Head, "error", err)
+		notice, err := record.NewOutboxRow(row.Issue, record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: refused.Error()}, r.now().UTC())
+		if err != nil {
+			return err
+		}
+		return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return r.records.Enqueue(ctx, tx, notice) })
+	}
 	if err != nil {
 		return err
 	}
@@ -1095,6 +1105,12 @@ func (r *outbox) graphQL(ctx context.Context) (githubrest.Client, error) {
 		return githubrest.Client{}, fmt.Errorf("mint implement App token: %w", err)
 	}
 	return githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}, nil
+}
+
+// keepFor is issue's readyHeadToKeep as the ghautomerge.Keep that Disarm and Submit ask after
+// reading GitHub.
+func (r *outbox) keepFor(issue string) ghautomerge.Keep {
+	return func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, issue) }
 }
 
 // readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the

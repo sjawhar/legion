@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -135,6 +136,11 @@ func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 // mergeable now is merged, and a repository that allows auto-merge gets it armed; every mutation
 // carries head as GitHub's expected head. A repository that allows none of those waits until GitHub
 // reports the pull request mergeable. GitHub's own rules decide each answer; Submit bypasses none.
+//
+// A mutation GitHub refuses is read again: when GitHub still stands where it refused it (the same
+// open pull request at head, nothing armed, the same submission chosen), a retry would meet the
+// same refusal, and Submit returns it as *Refused. Any other failure, an HTTP or network one
+// included, is returned as it is, for the row to retry.
 func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string, keep Keep) (Submitted, error) {
 	answer, err := readRepository(ctx, github, repo, number)
 	if err != nil {
@@ -159,26 +165,67 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	if pull.armed() {
 		return Submitted{Already: true}, nil
 	}
-	variables := map[string]any{"id": pull.ID, "head": head, "method": "SQUASH"}
-	switch {
-	case pull.IsMergeQueueEnabled:
-		return submitted(ctx, github, enable, variables, Submitted{AutoMerge: true}, "enqueue", number, repo)
-	case mergeableNow(pull.MergeStateStatus):
-		return submitted(ctx, github, merge, variables, Submitted{Merged: true}, "merge", number, repo)
-	case answer.AutoMergeAllowed:
-		return submitted(ctx, github, enable, variables, Submitted{AutoMerge: true}, "enable auto-merge for", number, repo)
-	default:
+	chosen, ok := choose(answer)
+	if !ok {
 		return Submitted{}, wait.Errorf("pull request #%d of %s is %s at READY's head %s, and the repository allows no auto-merge: the daemon merges it once GitHub reports it mergeable",
 			number, repo, pull.MergeStateStatus, head)
 	}
+	sent := github.GraphQL(ctx, chosen.mutation, map[string]any{"id": pull.ID, "head": head, "method": "SQUASH"}, nil)
+	if sent == nil {
+		return chosen.done, nil
+	}
+	failed := fmt.Errorf("%s pull request #%d of %s at READY's head %s: %w", chosen.action, number, repo, head, sent)
+	var refusal *githubrest.GraphQLError
+	if !errors.As(sent, &refusal) {
+		return Submitted{}, failed
+	}
+	after, err := readRepository(ctx, github, repo, number)
+	if err != nil || after.PullRequest == nil || after.PullRequest.State != "OPEN" || after.PullRequest.HeadRefOid != head || after.PullRequest.armed() {
+		return Submitted{}, failed
+	}
+	if again, ok := choose(after); !ok || again != chosen {
+		return Submitted{}, failed
+	}
+	messages := make([]string, 0, len(refusal.Failures))
+	for _, failure := range refusal.Failures {
+		messages = append(messages, failure.Message)
+	}
+	return Submitted{}, &Refused{Number: number, Head: head, Action: chosen.action, Message: strings.Join(messages, "; ")}
 }
 
-// submitted sends mutation and reports done when GitHub accepts it.
-func submitted(ctx context.Context, github githubrest.Client, mutation string, variables map[string]any, done Submitted, action string, number int, repo ghrepo.Repository) (Submitted, error) {
-	if err := github.GraphQL(ctx, mutation, variables, nil); err != nil {
-		return Submitted{}, fmt.Errorf("%s pull request #%d of %s at READY's head %s: %w", action, number, repo, variables["head"], err)
+// Refused is GitHub refusing Submit's mutation where a retry would meet the same refusal: Action is
+// what Submit asked of pull request Number at READY's Head, and Message is GitHub's answer.
+type Refused struct {
+	Number                int
+	Head, Action, Message string
+}
+
+func (r *Refused) Error() string {
+	return fmt.Sprintf("GitHub refused to %s pull request #%d at READY's head %s and still stands where it refused, so a retry meets the same refusal: %s",
+		r.Action, r.Number, r.Head, r.Message)
+}
+
+// submission is the mutation Submit sends for a pull request, what it asks GitHub to do, and what
+// GitHub's acceptance of it means.
+type submission struct {
+	mutation, action string
+	done             Submitted
+}
+
+// choose is the submission GitHub's answer calls for: an enqueue on a base that requires a merge
+// queue, a merge of a pull request mergeable now, an arm in a repository that allows auto-merge,
+// and none otherwise.
+func choose(answer repository) (submission, bool) {
+	switch {
+	case answer.PullRequest.IsMergeQueueEnabled:
+		return submission{enable, "enqueue", Submitted{AutoMerge: true}}, true
+	case mergeableNow(answer.PullRequest.MergeStateStatus):
+		return submission{merge, "merge", Submitted{Merged: true}}, true
+	case answer.AutoMergeAllowed:
+		return submission{enable, "enable auto-merge for", Submitted{AutoMerge: true}}, true
+	default:
+		return submission{}, false
 	}
-	return done, nil
 }
 
 // mergeableNow is GitHub's merge states in which the pull request merges without waiting, the

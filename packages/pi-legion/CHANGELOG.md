@@ -51,7 +51,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
   reports it mergeable. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
   once the gate opens, and READY no longer waits for a required check still running or for an
-  unfinished disarm.
+  unfinished disarm. The `legion-architect` skill's new `merge-refused` row says what to do when
+  GitHub refuses that submission in a way a retry would meet again: the daemon stops submitting
+  it, and a person fixes the repository setting or App permission and merges the pull request.
 - The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
   human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
   whole change since the version they approved, Dispatch carries their approval to the new version,

@@ -208,7 +208,8 @@ until GitHub reports the pull request mergeable and then merges it. The reposito
 and checks decide when it merges; Legion bypasses none, and a review only a person can give is waited
 for. READY accepts a head whose required checks are still running, and refuses one whose required
 check failed or never reported. The row reads GitHub, then the record, and submits nothing once the
-issue has left that READY or the head moved past it. GitHub checks the expected head only when
+issue has left that READY or the head moved past it; a refusal GitHub would repeat on a retry ends
+the row and is told to the architect once (`merge-refused`). GitHub checks the expected head only when
 auto-merge is enabled, and arming is right only for an awaiting issue's READY head, so the daemon
 queues an `auto_merge_disable` outbox row on every other push or reopen, when a child is set back to
 `todo`, and when an issue leaves the workflow. The row reads GitHub, then the record: it keeps the arm

@@ -124,6 +124,34 @@ func readyMerges(t *testing.T, pool *pgxpool.Pool) []record.ReadyMerge {
 	return merges
 }
 
+// A pull request closed while its READY awaits the merge ends that READY's merge row, which finds
+// it closed. Reopened at the READY head, the READY still stands, so the daemon submits its merge
+// again; reopened at another head, the READY is withdrawn and nothing is submitted, and a READY a
+// person merges is never submitted.
+func TestAReopenAtTheREADYHeadSubmitsTheMergeAgain(t *testing.T) {
+	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	for _, tc := range []struct {
+		name, head, mergeNote string
+		want                  []record.ReadyMerge
+	}{
+		{name: "at the READY head", head: "head", want: []record.ReadyMerge{{Number: 42, Head: "head"}}},
+		{name: "at another head", head: "moved"},
+		{name: "at the READY head of a by-hand READY", head: "head", mergeNote: byHand},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket, MergeNote: tc.mergeNote})
+			applyRefusingNothing(t, pool, readyEngine(""), intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.head, Reopened: true})
+			if got := readyMerges(t, pool); !slices.Equal(got, tc.want) {
+				t.Fatalf("READY merges after the reopen = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // A READY the design gate refused is posted when a human approves: the packet is kept with the
 // merger's completion across the refusal, and nothing is posted before the approval.
 func TestAREADYTheGateRefusedIsPostedWhenAHumanApproves(t *testing.T) {

@@ -167,6 +167,25 @@ func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record
 	return e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
 }
 
+// resubmitReopenedReady queues the merge of an awaiting READY's head again (record.ReadyMerge) when
+// its pull request is reopened at that head: the close ended the READY's merge row, which found the
+// pull request closed, and the READY still stands. A reopen at another head has withdrawn the READY
+// (withdrawMovedReady), a READY a person merges is never submitted, and a tree that lingers submits
+// nothing.
+func (e *Engine) resubmitReopenedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	if issue.Phase != phase.AwaitingMerge {
+		return nil
+	}
+	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
+	if err != nil || merger.HandoffCommit == "" || merger.HandoffCommit != pr.HeadSHA || merger.MergeNote != "" {
+		return err
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return err
+	}
+	return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
+}
+
 // disarm queues the disarm of pr's merge (record.AutoMergeDisable): arming is legitimate only for
 // the READY head of an awaiting_merge pull request, so every head move but one landing on that
 // head, every READY withdrawal and every re-entry disarms. The executor decides by the record when

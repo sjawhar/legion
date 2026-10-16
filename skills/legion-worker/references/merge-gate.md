@@ -134,11 +134,13 @@ reviewing until you finish.
   GitHub refuses it once the head has moved. In a repository that allows neither, the row waits,
   reading GitHub again on the outbox's backoff, until GitHub reports the pull request mergeable —
   a required check finishing, a required review a person gives — and then merges it. GitHub's
-  rules decide each answer: the daemon bypasses none, and a person may merge it first. No role runs
-  `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull request touches
-  a path the project's `merge.by_hand` names), READY stands but the daemon submits nothing: the
-  merger tells the architect the note and the head, and a person merges under the repository's
-  rules. The daemon tells that READY with the note at its head and the packet's `Merge:` line
+  rules decide each answer: the daemon bypasses none, and a person may merge it first. A refusal a
+  retry would meet again (squash merges disabled, a permission the App lacks) ends the row and is
+  told to the architect once (`merge-refused`), with GitHub's message; any other failure retries.
+  No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull
+  request touches a path the project's `merge.by_hand` names), READY stands but the daemon submits
+  nothing: the merger tells the architect the note and the head, and a person merges under the
+  repository's rules. The daemon tells that READY with the note at its head and the packet's `Merge:` line
   replaced, so the issue and the merge queue role are never asked to arm it. A READY the design
   gate refused is submitted by the daemon when the approval that opens the gate moves the issue to
   `awaiting_merge`. A push that moves the head past a READY the gate holds voids it before then:
@@ -152,7 +154,8 @@ reviewing until you finish.
   moved the head past it, its CI turned red, or it conflicts with its base, each of which sends the
   issue back to `implementing`), when a child is set back to `todo`, and when the issue leaves the
   workflow. A by-hand READY covers no arm, so whoever arms it is undone. A `ready_merge` row the
-  issue has left since, or whose head moved, submits nothing. No role runs a disarm.
+  issue has left since, or whose head moved, submits nothing; a pull request reopened at an
+  awaiting READY's head gets that head's merge submitted again. No role runs a disarm.
 
 ## After the merge
 
