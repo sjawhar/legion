@@ -9,6 +9,7 @@ import (
 	appsv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/apps/v1"
 	corev1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/core/v1"
 	metav1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/meta/v1"
+	networkingv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/networking/v1"
 	rbacv1 "github.com/pulumi/pulumi-kubernetes/sdk/v4/go/kubernetes/rbac/v1"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
@@ -172,7 +173,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 					Containers: corev1.ContainerArray{
 						corev1.ContainerArgs{Name: pulumi.String("envoy-dispatch"), Image: pulumi.String(s.images.envoy), Command: pulumi.StringArray{pulumi.String("/usr/local/bin/envoy-dispatch")}, Resources: resources("1", "4Gi"), Env: corev1.EnvVarArray{
 							valueEnv("HOME", "/home/envoy"), secretEnv("DATABASE_URL", dispatchSecretName, "DATABASE_URL"), secretEnv("DISPATCH_AGENT_TOKEN", dispatchSecretName, "DISPATCH_AGENT_TOKEN"), secretEnv("DISPATCH_SIGNING_KEY", dispatchSecretName, "DISPATCH_SIGNING_KEY"), secretEnv("DISPATCH_SIGNIN_CLIENT_SECRET", dispatchSecretName, "DISPATCH_SIGNIN_CLIENT_SECRET"),
-							valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "127.0.0.1"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: args.NatsUrl}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", "127.0.0.1:1055"), valueEnv("ENVOY_URL", "http://127.0.0.1:9020"),
+							valueEnv("DISPATCH_SIGNIN_ISSUER", "https://accounts.google.com"), valueEnv("DISPATCH_SIGNIN_CLIENT_ID", s.signIn.clientID), valueEnv("DISPATCH_SIGNIN_DOMAIN", s.signIn.domain), valueEnv("DISPATCH_SERVER_URL", "https://"+s.hostname+"."+s.tailnetDNSName), valueEnv("DISPATCH_LISTEN_HOST", "0.0.0.0"), corev1.EnvVarArgs{Name: pulumi.String("NATS_URLS"), Value: args.NatsUrl}, valueEnv("ENVOY_ALLOW_REMOTE_NATS", "1"), valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"), valueEnv("ENVOY_NATS_SOCKS5_PROXY", "127.0.0.1:1055"), valueEnv("ENVOY_URL", "http://127.0.0.1:9020"),
 						}, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:8766/healthz")}}, PeriodSeconds: pulumi.Int(10), TimeoutSeconds: pulumi.Int(3), FailureThreshold: pulumi.Int(3), InitialDelaySeconds: pulumi.Int(5)}},
 						corev1.ContainerArgs{Name: pulumi.String("envoy-listener"), Image: pulumi.String(s.images.envoy), Resources: resources("200m", "512Mi"), Env: listenerEnv, VolumeMounts: corev1.VolumeMountArray{corev1.VolumeMountArgs{Name: pulumi.String("nats-seed"), MountPath: pulumi.String("/var/run/secrets/envoy"), ReadOnly: pulumi.Bool(true)}}, ReadinessProbe: &corev1.ProbeArgs{Exec: &corev1.ExecActionArgs{Command: pulumi.StringArray{pulumi.String("curl"), pulumi.String("-fsS"), pulumi.String("http://127.0.0.1:9020/healthz")}}}},
 					},
@@ -188,5 +189,37 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 	_ = deployment
+	if _, err := corev1.NewService(ctx, s.hostname, &corev1.ServiceArgs{
+		Metadata: metadata(s.hostname),
+		Spec: &corev1.ServiceSpecArgs{
+			Selector: pulumi.StringMap{"app": pulumi.String(s.hostname)},
+			Ports:    corev1.ServicePortArray{corev1.ServicePortArgs{Port: pulumi.Int(8766), TargetPort: pulumi.Int(8766)}},
+		},
+	}, child...); err != nil {
+		return nil, err
+	}
+	namespacePeers := make(networkingv1.NetworkPolicyPeerArray, 0, len(args.AllowedNamespaces))
+	for _, namespace := range args.AllowedNamespaces {
+		namespacePeers = append(namespacePeers, networkingv1.NetworkPolicyPeerArgs{
+			NamespaceSelector: &metav1.LabelSelectorArgs{
+				MatchLabels: pulumi.StringMap{"kubernetes.io/metadata.name": pulumi.String(namespace)},
+			},
+		})
+	}
+	if _, err := networkingv1.NewNetworkPolicy(ctx, s.hostname, &networkingv1.NetworkPolicyArgs{
+		Metadata: metadata(s.hostname),
+		Spec: &networkingv1.NetworkPolicySpecArgs{
+			PodSelector: &metav1.LabelSelectorArgs{MatchLabels: pulumi.StringMap{"app": pulumi.String(s.hostname)}},
+			PolicyTypes: pulumi.StringArray{pulumi.String("Ingress")},
+			Ingress: networkingv1.NetworkPolicyIngressRuleArray{
+				networkingv1.NetworkPolicyIngressRuleArgs{
+					From:  namespacePeers,
+					Ports: networkingv1.NetworkPolicyPortArray{networkingv1.NetworkPolicyPortArgs{Port: pulumi.Int(8766)}},
+				},
+			},
+		},
+	}, child...); err != nil {
+		return nil, err
+	}
 	return &dispatchKubernetes{kubeconfig: kubeconfig}, nil
 }

@@ -69,7 +69,7 @@
           },
           {
             "name": "DISPATCH_LISTEN_HOST",
-            "value": "127.0.0.1"
+            "value": "0.0.0.0"
           },
           {
             "name": "NATS_URLS",

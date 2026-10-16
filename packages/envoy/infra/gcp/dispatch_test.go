@@ -208,6 +208,57 @@ func TestDispatchRegistersKubernetesResources(t *testing.T) {
 	require.Positive(t, kubernetesResources)
 }
 
+func TestDispatchServiceExposesPort8766(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	service := m.One(t, "kubernetes:core/v1:Service")
+	inputs := service.Inputs.Mappable()
+	metadata := inputs["metadata"].(map[string]any)
+	require.Equal(t, "example-dispatch", metadata["name"])
+	spec := inputs["spec"].(map[string]any)
+	require.Equal(t, map[string]any{"app": "example-dispatch"}, spec["selector"])
+	ports := spec["ports"].([]any)
+	require.Len(t, ports, 1)
+	port := ports[0].(map[string]any)
+	require.EqualValues(t, 8766, port["port"])
+	require.EqualValues(t, 8766, port["targetPort"])
+}
+
+func TestDispatchNetworkPolicyAdmitsNoNamespaceByDefault(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	policy := m.One(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy")
+	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
+	require.Equal(t, []any{"Ingress"}, spec["policyTypes"])
+	ingress := spec["ingress"].([]any)[0].(map[string]any)
+	require.Empty(t, ingress["from"])
+	ports := ingress["ports"].([]any)
+	require.Len(t, ports, 1)
+	require.EqualValues(t, 8766, ports[0].(map[string]any)["port"])
+}
+
+func TestDispatchNetworkPolicyAdmitsOnlyTheGivenNamespaces(t *testing.T) {
+	args := dispatchArgs()
+	args.AllowedNamespaces = []string{"envoy", "legion"}
+	m, err := runDispatch(t, args, true)
+	require.NoError(t, err)
+
+	policy := m.One(t, "kubernetes:networking.k8s.io/v1:NetworkPolicy")
+	spec := policy.Inputs.Mappable()["spec"].(map[string]any)
+	ingress := spec["ingress"].([]any)[0].(map[string]any)
+	from := ingress["from"].([]any)
+	require.Len(t, from, 2)
+	var namespaces []string
+	for _, peer := range from {
+		selector := peer.(map[string]any)["namespaceSelector"].(map[string]any)
+		labels := selector["matchLabels"].(map[string]any)
+		namespaces = append(namespaces, labels["kubernetes.io/metadata.name"].(string))
+	}
+	require.ElementsMatch(t, []string{"envoy", "legion"}, namespaces)
+}
+
 func TestDispatchRenderingsMatchGoldens(t *testing.T) {
 	require.Equal(t, readGolden(t, "dispatch-kubeconfig.golden"),
 		gcp.DispatchKubeconfig("example-endpoint", "ZXhhbXBsZS1jYQ==", "example-dispatch"))
