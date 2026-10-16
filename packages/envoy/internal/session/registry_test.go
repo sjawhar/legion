@@ -32,6 +32,18 @@ func setupNATS(t *testing.T) *bus.Client {
 	return client
 }
 
+func TestSessionEntry_HostOrMachine(t *testing.T) {
+	reported := SessionEntry{MachineID: "example-listener", Host: "example-host-b"}
+	if got := reported.HostOrMachine(); got != "example-host-b" {
+		t.Fatalf("HostOrMachine() = %q, want the reported host", got)
+	}
+
+	legacy := SessionEntry{MachineID: "example-listener"}
+	if got := legacy.HostOrMachine(); got != "example-listener" {
+		t.Fatalf("HostOrMachine() = %q, want the fallback to MachineID for a session with no reported host", got)
+	}
+}
+
 func TestSessionRegistry_PutAndGet(t *testing.T) {
 	client := setupNATS(t)
 	reg, err := OpenSessionRegistry(client.Conn, WithSessionReplicas(1), WithSessionTTL(10*time.Second))

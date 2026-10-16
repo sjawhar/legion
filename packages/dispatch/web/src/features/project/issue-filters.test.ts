@@ -13,6 +13,7 @@ function agent(sessionID: string): Agent {
     session_id: sessionID,
     title: "Implementer",
     dir: "/w",
+    host: "host",
     machine_id: "host",
     roles: [],
     capabilities: [],

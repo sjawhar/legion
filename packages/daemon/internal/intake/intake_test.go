@@ -442,6 +442,30 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	}
 }
 
+// A SetRepositories whose consumer update fails changes nothing: the decoder's set stays the
+// repositories the GitHub consumer still filters on, so the caller can retry it and nothing decodes
+// an event of a repository the consumer was never told to hear.
+func TestAFailedSetRepositoriesChangesNothing(t *testing.T) {
+	js, stream := testJetStream(t)
+	spec := consumerSpec(&lockedBuffer{})
+	consumers, err := OpenConsumers(context.Background(), js, spec)
+	if err != nil {
+		t.Fatalf("OpenConsumers: %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	widgets := []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion"), ghrepo.MustParse("acme/widgets")}
+	if err := consumers.SetRepositories(canceled, widgets); err == nil {
+		t.Fatal("SetRepositories with a failed consumer update reported no failure")
+	}
+	if got := consumers.repositories(); !slices.Equal(got, capturedRepositories) {
+		t.Fatalf("the decoder's set after a failed update = %v, want it unchanged, %v", got, capturedRepositories)
+	}
+	if got, want := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects, githubFilters(capturedRepositories); !slices.Equal(got, want) {
+		t.Fatalf("GitHub consumer filters = %v, want them unchanged, %v", got, want)
+	}
+}
+
 // The consumer has the daemon prepare an issue event's resolved repository before the fact is
 // applied (ConsumerSpec.PrepareRepository): the workflow performs no I/O, so what it reads of the
 // repository is read here, and a failed read is retried rather than applied without it. The fact

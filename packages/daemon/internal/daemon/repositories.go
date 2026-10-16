@@ -316,9 +316,12 @@ func (w *workflowRuntime) nameMapping(ctx context.Context) error {
 }
 
 // refreshMapping reads the repository mapping again, for Dispatch's settings.repo_project.updated
-// on the project and for an issue on a left-out repository coming up for admission: it swaps the
-// mapping, then has GitHub intake hear every served repository and every repository a live record
-// names, so a repository unmapped while its issues run is still heard.
+// on the project and for an issue on a left-out repository coming up for admission. It has GitHub
+// intake hear every repository the new mapping serves and every repository a live record names,
+// so a repository unmapped while its issues run is still heard, and only then publishes the new
+// mapping: a refresh that fails before the subscription took publishes nothing, so a repository
+// is never served, and an issue never recorded on it, while GitHub intake does not hear it, and
+// the issue's next admission recheck refreshes again.
 func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	w.mappingMu.Lock()
 	defer w.mappingMu.Unlock()
@@ -329,14 +332,33 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	if accepted, err = nameAccepted(ctx, accepted, w.defaultBranches); err != nil {
 		return err
 	}
-	added, removed := w.repositories.set(accepted, refused)
-	heard, err := w.heardRepositories(ctx)
-	if err != nil {
-		return err
+	served := make([]ghrepo.Repository, 0, len(accepted))
+	for _, mapped := range accepted {
+		served = append(served, mapped.Repo)
 	}
-	if len(heard) == 0 {
-		w.log.Warn("legion workflow repositories: no repository is mapped or named by a live record; GitHub intake keeps the repositories it hears")
-	} else if err := w.consumers.SetRepositories(ctx, heard); err != nil {
+	// The live-record snapshot, the subscription update and the publication run under the lock
+	// every fact applies under (intake.SerializeFacts), which an admission holds from resolving an
+	// issue's repository through committing its record: one that resolved a repository of the old
+	// mapping commits before the snapshot reads it, so the repository it recorded stays heard, and
+	// one that resolves after resolves against the new mapping.
+	var heard []ghrepo.Repository
+	var added, removed []string
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		if err := intake.SerializeFacts(ctx, tx); err != nil {
+			return fmt.Errorf("serialize the mapping's publication with admission: %w", err)
+		}
+		var err error
+		if heard, err = w.heardRepositories(ctx, tx, served); err != nil {
+			return err
+		}
+		if len(heard) == 0 {
+			w.log.Warn("legion workflow repositories: no repository is mapped or named by a live record; GitHub intake keeps the repositories it hears")
+		} else if err := w.consumers.SetRepositories(ctx, heard); err != nil {
+			return err
+		}
+		added, removed = w.repositories.set(accepted, refused)
+		return nil
+	}); err != nil {
 		return err
 	}
 	w.log.Info("legion workflow repositories changed", "added", added, "removed", removed,
@@ -344,42 +366,49 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 	return nil
 }
 
-// heardRepositories is what GitHub intake hears: every served repository and every repository a
-// record of a live tree names, once each, sorted.
-func (w *workflowRuntime) heardRepositories(ctx context.Context) ([]ghrepo.Repository, error) {
+// heardAtBoot is what GitHub intake hears when the boot opens it: the served repositories of the
+// mapping the boot read and every repository a live record names.
+func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository, error) {
+	var heard []ghrepo.Repository
+	err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		heard, err = w.heardRepositories(ctx, tx, w.repositories.Accepted())
+		return err
+	})
+	return heard, err
+}
+
+// heardRepositories is what GitHub intake hears: every repository of served and every repository
+// a record of a live tree names, as tx reads the records, once each, sorted.
+func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
-	for _, repo := range w.repositories.Accepted() {
+	for _, repo := range served {
 		heard[strings.ToLower(repo.String())] = repo
 	}
-	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
-		issues, err := w.records.Issues(ctx, tx)
-		if err != nil {
-			return err
-		}
-		for _, issue := range issues {
-			if _, ok := heard[strings.ToLower(issue.Repo)]; ok {
-				continue
-			}
-			root, err := w.records.Issue(ctx, tx, issue.Tree)
-			if err != nil || root == nil {
-				return err
-			}
-			live, err := record.TreeLive(ctx, w.records, tx, *root)
-			if err != nil {
-				return err
-			}
-			if !live {
-				continue
-			}
-			repo, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
-			if err != nil {
-				return err
-			}
-			heard[strings.ToLower(repo.String())] = repo
-		}
-		return nil
-	}); err != nil {
+	issues, err := w.records.Issues(ctx, tx)
+	if err != nil {
 		return nil, fmt.Errorf("read the repositories live records name: %w", err)
+	}
+	for _, issue := range issues {
+		if _, ok := heard[strings.ToLower(issue.Repo)]; ok {
+			continue
+		}
+		root, err := w.records.Issue(ctx, tx, issue.Tree)
+		if err != nil || root == nil {
+			return nil, err
+		}
+		live, err := record.TreeLive(ctx, w.records, tx, *root)
+		if err != nil {
+			return nil, err
+		}
+		if !live {
+			continue
+		}
+		repo, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+		if err != nil {
+			return nil, err
+		}
+		heard[strings.ToLower(repo.String())] = repo
 	}
 	repos := make([]ghrepo.Repository, 0, len(heard))
 	for _, repo := range heard {
