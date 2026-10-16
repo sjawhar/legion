@@ -26,7 +26,10 @@ import (
 // settings.repo_project.updated of its project, it reads the mapping again. A newly mapped
 // repository both Apps are installed on is served (GitHub intake hears it, its owner joins the
 // owners), one missing an App is left out and not heard, and a repository unmapped while a live
-// record names it is still heard, so its running issue's facts still arrive.
+// record names it is still heard, so its running issue's facts still arrive. Its owner leaves the
+// owners every role's gh bundle mints for: one App uninstalled there would otherwise fail every
+// pane's bundle, and the issue's own panes keep that owner as their default (appauth's
+// GitHubCredential mints for a role's own owner whether or not the set holds it).
 func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	url := workflowNATS(t)
@@ -44,16 +47,16 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 		t.Fatal(err)
 	}
 	github := newNamedGitHub(t, map[string]string{
-		"acme/widgets": "acme/widgets@main", "zeta/tools": "Zeta/Tools@release/v7.1", "acme/gadgets": "acme/gadgets@main",
+		"acme/widgets": "acme/widgets@main", "zeta/tools": "Zeta/Tools@release/v7.1", "orbit/gadgets": "orbit/gadgets@main",
 	})
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{
 		{Repo: "acme/widgets", Project: "CAPTURE", Default: true},
-		{Repo: "acme/gadgets", Project: "CAPTURE"},
+		{Repo: "orbit/gadgets", Project: "CAPTURE"},
 	}}
 	records := projectRecords{Store: record.NewStore(), project: "CAPTURE"}
-	// A running tree's issue on acme/gadgets, which the mapping change below unmaps.
+	// A running tree's issue on orbit/gadgets, which the mapping change below unmaps.
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-7", Repo: "acme/gadgets", DefaultBranch: "main", Tree: "CAPTURE-7",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-7", Repo: "orbit/gadgets", DefaultBranch: "main", Tree: "CAPTURE-7",
 			Project: "CAPTURE", Title: "running", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1}); err != nil {
 			return err
 		}
@@ -89,13 +92,13 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 	go func() { done <- w.consumers.Run(ctx, pool) }()
 	t.Cleanup(func() { cancel(); <-done })
 
-	// acme/gadgets moves to another project; zeta/tools is mapped; acme/thing is mapped with no
+	// orbit/gadgets moves to another project; zeta/tools is mapped; acme/thing is mapped with no
 	// review App installed on it.
 	client.set(
 		dispatch.RepoProject{Repo: "acme/widgets", Project: "CAPTURE", Default: true},
 		dispatch.RepoProject{Repo: "zeta/tools", Project: "CAPTURE"},
 		dispatch.RepoProject{Repo: "acme/thing", Project: "CAPTURE"},
-		dispatch.RepoProject{Repo: "acme/gadgets", Project: "OTHER"},
+		dispatch.RepoProject{Repo: "orbit/gadgets", Project: "OTHER"},
 	)
 	installs.mu.Lock()
 	installs.missing["review acme/thing"] = true
@@ -115,7 +118,7 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 		t.Fatalf("publish the mapping change: %v", err)
 	}
 
-	want := []string{"notifications.github.Zeta.Tools.>", "notifications.github.acme.gadgets.>", "notifications.github.acme.widgets.>"}
+	want := []string{"notifications.github.Zeta.Tools.>", "notifications.github.acme.widgets.>", "notifications.github.orbit.gadgets.>"}
 	testwait.Eventually(t, "the GitHub consumer hears the changed mapping", func() bool {
 		consumer, err := stream.Consumer(context.Background(), "legion-go-CAPTURE-github")
 		if err != nil {
@@ -130,13 +133,13 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 		return slices.Equal(got, want)
 	})
 	if got := w.repositories.Owners(); !slices.Equal(got, []string{"acme", "zeta"}) {
-		t.Fatalf("Owners = %v, want acme and zeta", got)
+		t.Fatalf("Owners = %v, want acme and zeta, the served repositories' owners alone", got)
 	}
 	refused := w.repositories.Refused()
 	if len(refused) != 1 || refused[0].Repo != "acme/thing" || !strings.Contains(refused[0].Reason, "the review App is not installed on acme/thing") {
 		t.Fatalf("Refused = %#v, want acme/thing left out for its review App", refused)
 	}
-	if accepted := w.repositories.Accepted(); slices.Contains(accepted, ghrepo.MustParse("acme/gadgets")) {
-		t.Fatalf("Accepted = %v still serves acme/gadgets, unmapped from the project", accepted)
+	if accepted := w.repositories.Accepted(); slices.Contains(accepted, ghrepo.MustParse("orbit/gadgets")) {
+		t.Fatalf("Accepted = %v still serves orbit/gadgets, unmapped from the project", accepted)
 	}
 }
