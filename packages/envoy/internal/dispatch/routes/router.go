@@ -113,7 +113,7 @@ type AppContextOptions struct {
 	Files            files.Store
 	TestHooksEnabled bool
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
-	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
+	// named with no sign-in issuer exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
 	// fence; BuildAppContext refuses it for a non-loopback ServerURL.
 	DevSignIn bool
@@ -328,7 +328,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 
 // issueSession ensures the person's session generation and sets the session cookie a sign-in
 // issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
-// both mint through it, so a local dev sign-in carries exactly the cookie a pool sign-in does.
+// both mint through it, so a local dev sign-in carries exactly the cookie an issuer sign-in does.
 //
 // subject is the Google account a domain-mode sign-in just recorded, empty otherwise. After the
 // generation is read, the address's row must still record that account: another account's

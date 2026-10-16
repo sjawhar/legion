@@ -153,7 +153,7 @@ func main() {
 		slog.Info("dispatch: loaded github app", "slug", appCfg.Slug, "client_id", appCfg.ClientID, "source", appSource.String())
 	}
 	if boot.DevSignIn {
-		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in pool; cookies are valid on this process only", "origin", serverURL)
+		slog.Warn("dispatch: dev sign-in mounted: any email signs in at /auth/_dev/signin without the sign-in issuer; cookies are valid on this process only", "origin", serverURL)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -638,7 +638,7 @@ func devSignInFence(boot bootConfig, env settingValues) error {
 		return errors.New("DISPATCH_DEV_SIGNIN=1 mints session cookies, so DISPATCH_IDENTITY must be cookie")
 	}
 	if boot.SignInIssuer != "" {
-		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in pool, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
+		return errors.New("DISPATCH_DEV_SIGNIN=1 signs people in without the sign-in issuer, so DISPATCH_SIGNIN_* must be unset: a loopback server holds no sign-in client secret")
 	}
 	if !routes.LoopbackHostPort(boot.ListenAddr) {
 		return fmt.Errorf("DISPATCH_DEV_SIGNIN=1 is for a loopback server only: DISPATCH_LISTEN_HOST=%q (listen address %q) must be 127.0.0.1 or [::1]", env.get("DISPATCH_LISTEN_HOST"), boot.ListenAddr)

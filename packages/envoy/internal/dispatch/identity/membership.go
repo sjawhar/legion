@@ -14,8 +14,8 @@ import (
 
 const (
 	// MembershipMaxAge is how long a confirmation of a person's membership stands: the first
-	// request after it lapses refreshes the person's sign-in with the pool, so someone the pool
-	// drops from the group loses Dispatch within the hour.
+	// request after it lapses refreshes the person's sign-in with the issuer, so someone the rule
+	// no longer admits loses Dispatch within the hour.
 	MembershipMaxAge = time.Hour
 	// refreshTimeout bounds a refresh, which runs on a context of its own.
 	refreshTimeout = 15 * time.Second
@@ -58,7 +58,7 @@ func (m *Membership) Confirm(ctx context.Context, email string) error {
 		return nil
 	}
 	// The refresh belongs to the person, not to the request that found it due: a browser
-	// hanging up must neither cancel it nor have its cancellation read as the pool's refusal.
+	// hanging up must neither cancel it nor have its cancellation read as the issuer's refusal.
 	_, err, _ = m.refreshes.Do(email, func() (any, error) {
 		refreshCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), refreshTimeout)
 		defer cancel()
@@ -122,15 +122,16 @@ func (m *Membership) end(ctx context.Context, email, subject, reason string) err
 			slog.Info("dispatch: a failed confirmation ended nothing: another Google account has signed in to the address since", "email", email, "reason", reason)
 			return ErrNoIdentity
 		}
-	} else {
-		if err := m.Sessions.RevokeSessions(ctx, email); err != nil {
-			return err
-		}
-		if err := m.People.End(ctx, email); err != nil {
-			return err
-		}
+		slog.Warn("dispatch: sign-in ended: Google did not confirm the person's membership of the domain", "email", email, "reason", reason)
+		return ErrNoIdentity
 	}
 	slog.Warn("dispatch: sign-in ended: the sign-in pool did not confirm the person's membership", "email", email, "reason", reason)
+	if err := m.Sessions.RevokeSessions(ctx, email); err != nil {
+		return err
+	}
+	if err := m.People.End(ctx, email); err != nil {
+		return err
+	}
 	return ErrNoIdentity
 }
 
