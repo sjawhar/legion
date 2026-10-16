@@ -3,8 +3,8 @@
 Compose definitions run the on-prem Envoy listener, the Dispatch server against an external
 database, and a single-node Envoy with its own NATS. All services use host networking. The
 listener serves `127.0.0.1:9020` for local session registration and webhook ingress; Dispatch
-serves `127.0.0.1:8766` by default for the SPA, Google sign-in through the shared sign-in pool,
-and the native Dispatch API.
+serves `127.0.0.1:8766` by default for the SPA, Google sign-in through a Cognito sign-in pool or
+with Google directly, and the native Dispatch API.
 
 ## Host configuration lives in `compose/.env`
 
@@ -35,7 +35,8 @@ DISPATCH_INSECURE_COOKIE=1            # cookies over the http:// tailnet URL
 
 The origin humans open in the browser is the sign-in callback origin: the server builds
 `<DISPATCH_SERVER_URL>/auth/callback` from `DISPATCH_SERVER_URL` in `compose/.env`, and
-the sign-in pool's app client must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
+Dispatch's client at the sign-in issuer — the sign-in pool's app client, or the Google web
+client — must list exactly that URL. On Sami's devbox that is `http://example-host-devbox:8766`
 (recorded as `DISPATCH_PUBLIC_ORIGIN` in `compose/.env`); a deploy whose `/auth/start` redirect
 stops matching it breaks sign-in for everyone, so the auto-deployer checks the redirect after
 every deploy and rolls back on a mismatch.
@@ -145,13 +146,13 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | Var | Required | Notes |
 | --- | --- | --- |
 | `DATABASE_URL` | yes | The external Dispatch Postgres URL (production: the Aurora `dispatch` database). The compose runs no Postgres of its own. |
-| `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; the sign-in pool's app client for Dispatch must list `<DISPATCH_SERVER_URL>/auth/callback`. |
+| `DISPATCH_SERVER_URL` | yes | Public browser origin and sign-in callback origin. It must be the URL humans type into their browser; Dispatch's client at the sign-in issuer (the sign-in pool's app client, or the Google web client) must list `<DISPATCH_SERVER_URL>/auth/callback`. |
 | `NATS_URLS` | yes | Comma-separated NATS URLs for Dispatch. |
 | `ENVOY_ALLOW_REMOTE_NATS` | yes, for a shared NATS | Set to `1` to reach a NATS that is not this host's own. The server owns the `ENVOY_NOTIFICATIONS` stream, so every start reconciles it; without this the start refuses a non-loopback NATS, naming the URL. `compose/dispatch.compose.yml` sets it. |
 | `NATS_NKEY_SEED_FILE` | no | A file holding the NATS nkey user seed this process connects as (trimmed); wins over `NATS_NKEY_SEED`. A set but empty, missing, unreadable, blank or non-user-seed value refuses startup naming the variable and path. Neither set connects without a credential. |
 | `NATS_NKEY_SEED` | no | The NATS nkey user seed itself, when `NATS_NKEY_SEED_FILE` is unset. |
 | `DISPATCH_AGENT_TOKEN` | yes | Shared devbox fallback bearer token; per-person tokens minted in Dispatch Settings are preferred for individual agents. To rotate it, set the new value followed by the old one, separated by a space or a line feed, move every consumer, then set the new value alone (`cmd/dispatch/README.md`). |
-| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET` / `DISPATCH_SIGNIN_GROUP` | cookie identity | The sign-in pool's issuer, Dispatch's app client and its secret, and the group a person must be in. Cookie identity requires all four at startup, and some without the others refuse to boot. Header identity is for tests and local harnesses only, and refuses every one of these settings. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
+| `DISPATCH_SIGNIN_ISSUER` / `DISPATCH_SIGNIN_CLIENT_ID` / `DISPATCH_SIGNIN_CLIENT_SECRET`, with `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | cookie identity | The issuer people sign in through, Dispatch's client there and its secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with the issuer `https://accounts.google.com` and a Google web client. Cookie identity requires the issuer, client ID, secret and one of the two at startup; some without the others, both the group and the domain, a domain under another issuer, or a group under Google's refuse to boot. Header identity is for tests and local harnesses only, and refuses every one of these settings. `DISPATCH_ALLOWED_LOGINS` is removed and refused at startup. |
 | `DISPATCH_LISTEN_HOST` | no | Defaults to `127.0.0.1`; for direct tailnet access, set it to `$(tailscale ip -4)`, never `0.0.0.0`. |
 | `DISPATCH_PORT` | no | Defaults to `8766`; the healthcheck follows it. |
 | `DISPATCH_IDENTITY` | no | `cookie` (default) is Dispatch's production identity. `header:<name>` is only for tests and local harnesses. |

@@ -118,6 +118,33 @@ func TestVerifyClassifiesRejection(t *testing.T) {
 	}
 }
 
+// Verify reads what it always has, whatever a token holds of the claims a domain-mode sign-in reads
+// (email, email_verified, hd): a Cognito ID token whose email_verified is a number, null, an object
+// or either spelling of true verifies with its Cognito fields, and the Workspace claims stay empty,
+// since only the code flow's domain-mode session reads them.
+func TestVerifyReadsACognitoTokenWhateverItsWorkspaceClaimsHold(t *testing.T) {
+	issuer := oidctest.New(t)
+	verifier, signing := newVerifierFor(t, issuer)
+	for _, value := range []any{1, nil, map[string]any{"value": true}, "true", true} {
+		claims := issuer.Claims("pool-subject", testAudience)
+		claims["cognito:username"] = "ExampleIdP_a@d.example"
+		claims["cognito:groups"] = []string{"dispatch-members"}
+		claims["identities"] = []map[string]any{{"providerName": "ExampleIdP"}}
+		claims["email"] = "someone-else@d.example"
+		claims["email_verified"] = value
+		claims["hd"] = "d.example"
+		got, err := verifier.Verify(context.Background(), issuer.Mint(t, signing, claims))
+		if err != nil {
+			t.Errorf("email_verified %#v: Verify: %v", value, err)
+			continue
+		}
+		if got.Subject != "pool-subject" || got.Username != "ExampleIdP_a@d.example" || !reflect.DeepEqual(got.Groups, []string{"dispatch-members"}) ||
+			!reflect.DeepEqual(got.Providers, []string{"ExampleIdP"}) || got.Email != "" || got.EmailVerified || got.HostedDomain != "" {
+			t.Errorf("email_verified %#v: claims = %#v, want the Cognito fields and no Workspace claims", value, got)
+		}
+	}
+}
+
 func TestVerifyRefreshesKeySetForRotatedKey(t *testing.T) {
 	issuer := oidctest.New(t)
 	verifier, signing := newVerifierFor(t, issuer)

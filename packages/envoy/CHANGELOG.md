@@ -4,6 +4,26 @@
 
 ### Added
 
+- Dispatch signs people in with Google directly for one Google Workspace domain, with no Cognito
+  sign-in pool and no AWS account: `DISPATCH_SIGNIN_DOMAIN` takes the place of
+  `DISPATCH_SIGNIN_GROUP` beside the issuer, client ID and client secret, under the issuer
+  `https://accounts.google.com` and a Google web client. A person signs in when their Google ID
+  token's `hd` is the domain and Google has verified their `email`, and is named by that email;
+  anyone else reaches the refusal page with the reason (not in the domain, email not verified, no
+  email). The authorization request asks Google for offline access with `prompt=consent` and the
+  domain as `hd`, and the hourly confirmation applies the same rule to the refreshed token. The code
+  flow reads `email`, `email_verified` and `hd` from the verified token in domain mode alone; the
+  shared verifier, which Cognito tokens, pods' tokens and the listener go through, is unchanged.
+  Migration `0112` adds the nullable `people.sub`: in domain mode a sign-in records the Google
+  account's `sub`, and a sign-in under another account for the same address (a Workspace admin
+  gave a deleted account's address to a new one) ends every session of the address in the
+  transaction that updates the locked person row, as does a confirmation whose refreshed token
+  names another account.
+  Exactly one of the group and the domain is set: both, a domain under another issuer, a group
+  under Google's, and a domain that is not a lowercase DNS name refuse the boot, and header identity
+  and dev sign-in refuse the domain. A deployment with the four Cognito settings boots, signs in and
+  confirms as before; its refusal texts for partial settings now name the domain beside the group.
+  The compose deployment passes `DISPATCH_SIGNIN_DOMAIN` through.
 - Every live session now carries `host` beside `machine_id`: where the session process actually
   runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
   listener happened to register it. Sessions on separate machines registering through one shared
@@ -15,7 +35,6 @@
   /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
   whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
   own defensive fallback to `machine_id` for a listener that predates the field too.
-
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
