@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- A closed issue can give up an external link (a write whose links are a subset of what it already
+  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
+  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
+
 ### Added
 
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
