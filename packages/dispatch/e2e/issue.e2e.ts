@@ -11,6 +11,7 @@ import {
   getIssueEvents,
   mintAgentToken,
   patchIssue,
+  putRepoProject,
 } from "./api";
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
@@ -1020,6 +1021,74 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
     expect(child.assignee).toBe("alice");
     await page.goto(`/issues/${hers.key}`);
     await expect(page.getByLabel(`Assignee of ${hers.key}`)).toHaveValue("alice");
+  } finally {
+    await context.close();
+  }
+});
+
+test("issue header picks the issue's repository from its project's mappings, and a child resolves to it", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" });
+  await putRepoProject("acme/widgets", { default: true, project: "CORE" });
+  await putRepoProject("acme/gadgets", { project: "CORE" });
+  await putRepoProject("acme/elsewhere", { default: true, project: "OPS" });
+  const parent = await createIssue({ project: "CORE", title: "Change the pinned toolchain" });
+  expect(parent).toMatchObject({ repo: null, resolved_repo: "acme/widgets" });
+  const child = await createIssue({
+    force: true,
+    parent: parent.key,
+    project: "CORE",
+    title: "Bump",
+  });
+
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/issues/${parent.key}`);
+    const header = page.getByTestId("issue-header");
+    const control = page.getByLabel(`Repository of ${parent.key}`);
+    // The badge names the project's default, which the issue inherits.
+    await expect(control).toHaveValue("");
+    await expect(header.locator("span", { hasText: /^acme\/widgets$/ })).toBeVisible();
+    // The project's mappings are read once the reader reaches for the control; another project's
+    // are not offered.
+    await control.focus();
+    await expect(control.locator("option")).toHaveText(["Inherit", "acme/gadgets", "acme/widgets"]);
+
+    const patch = page.waitForRequest(
+      (request) =>
+        request.method() === "PATCH" &&
+        new URL(request.url()).pathname === `/api/v1/issues/${parent.key}`
+    );
+    await control.selectOption("acme/gadgets");
+    expect((await patch).postDataJSON()).toEqual({ repo: "acme/gadgets" });
+    await expect(header.locator("span", { hasText: /^acme\/gadgets$/ })).toBeVisible();
+    // The child names no repository of its own, so it resolves to its parent's.
+    await expect
+      .poll(() => getIssue(child.key))
+      .toMatchObject({ repo: null, resolved_repo: "acme/gadgets" });
+    const events = await getIssueEvents(parent.key);
+    expect(events.filter((event) => event.type === "issue.updated").at(-1)).toMatchObject({
+      actor: { id: "alice", kind: "user" },
+      payload: { repo: "acme/gadgets", resolved_repo: "acme/gadgets" },
+    });
+    const shot = testInfo.outputPath(`issue-header-repository-${testInfo.project.name}.png`);
+    await page.screenshot({ path: shot });
+    await testInfo.attach(`issue header repository (${testInfo.project.name})`, {
+      contentType: "image/png",
+      path: shot,
+    });
+
+    // Inherit clears the issue's own repository: it resolves to the project's default again.
+    await control.selectOption("");
+    await expect
+      .poll(() => getIssue(parent.key))
+      .toMatchObject({ repo: null, resolved_repo: "acme/widgets" });
+    await page.reload();
+    await expect(page.getByLabel(`Repository of ${parent.key}`)).toHaveValue("");
+    await expect(header.locator("span", { hasText: /^acme\/widgets$/ })).toBeVisible();
   } finally {
     await context.close();
   }

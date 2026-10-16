@@ -85,12 +85,13 @@ issues you own as well as the root. An issue left at `triage` while work is unde
 Waiting for the deploy lane is not a status and is never announced.
 
 ```bash
-# PATCH /api/v1/issues/{key} — status, title, labels, priority, external links (merged by URL), route, parent, blocked_by
+# PATCH /api/v1/issues/{key} — status, title, labels, priority, external links (merged by URL), route, parent, blocked_by, repo
 dispatch issue-update --issue PROJ-175 --status testing
 dispatch issue-update --issue PROJ-175 --status done --reason 'Shipped in owner/repo#7; verified on the production dashboard.'
 dispatch issue-update --issue PROJ-175 --priority 1   # 0–3; see Priority is yours to set
 dispatch issue-update --issue PROJ-175 --external-link https://github.com/owner/repo/pull/7
 dispatch issue-update --issue PROJ-175 --parent PROJ-170   # same-project key; --parent '' clears it
+dispatch issue-update --issue PROJ-175 --repo acme/widgets   # mapped to the project; --repo '' clears it
 ```
 
 Closing takes a `--reason`, and the command refuses `--status done` without one: it posts the reason on
@@ -100,8 +101,14 @@ error names the posted message; after a timeout or a server error it also says t
 landed, so read the issue's status first. A retry points its reason at the posted message rather
 than repeating it.
 
-The two clears differ: `--clear-priority` sends null, while `--parent ''` and `--route ''` clear with an
-empty string. Guessing the other one is a refusal either way.
+The two clears differ: `--clear-priority` sends null, while `--parent ''`, `--route ''` and
+`--repo ''` clear with an empty string. Guessing the other one is a refusal either way.
+
+An issue targets one repository: its own `--repo`, else its nearest ancestor's, else the project's
+default (set on the Settings page), else none. A repository not mapped to the issue's project is
+refused `REPO_NOT_MAPPED`, naming it. `dispatch read` prints the result as
+`Repository: owner/name (own)`, `Repository: owner/name (inherited or project default)`, or
+`Repository: none`.
 
 Link the pull request that delivers the issue with `--external-link` when you open it; the issue page
 renders its state and checks from that link, and `dispatch read` lists it under `External links:`.

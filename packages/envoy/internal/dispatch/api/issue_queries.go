@@ -70,13 +70,15 @@ const issueSummaryHead = `
 	       ` + issueClaimColumns + `,
 	       count(a.id) filter (where i.closed_at is null),
 	       ` + issueProgressColumns + `,
-	       ` + issueComponentsColumns + `
+	       ` + issueComponentsColumns + `,
+	       ` + issueRepoColumns + `
 	from issues i`
 
 var issueSummaryTail = `
 	left join asks a on a.issue_key = i.key and a.state = 'open'
 	` + issueProgressLateral + `
 	` + issueComponentsLateral + `
+	` + issueRepoLateral + `
 	where ($1 = '' or i.project_key = $1)
 	  and ($2 = '' or i.status = $2)
 	  and ($3 = '' or i.parent_key = $3)
@@ -86,7 +88,7 @@ var issueSummaryTail = `
 	  and ((cardinality($7::smallint[]) = 0 and not $8::boolean)
 	       or i.priority = any($7::smallint[])
 	       or ($8::boolean and i.priority is null))
-	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `
+	group by i.key, progress.children_done, progress.children_total, ` + issueComponentsColumns + `, repo.resolved
 	order by ` + issueStatusCase + `, i.rank asc, i.created_at asc, i.key asc
 `
 
@@ -283,13 +285,16 @@ func (s *server) scanIssueSummaries(ctx context.Context, listQuery string, argum
 		var components componentsScan
 		var claim claimScan
 		var progress progressScan
+		var repo repoScan
 		targets := []any{&issue.Key, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels, &issue.Parent, &issue.BlockedBy, &issue.Assignee, &issue.Route, &issue.UpdatedAt, &issue.LastSeq, &issue.PrimaryArtifactID}
 		targets = append(targets, claim.targets()...)
 		targets = append(targets, &issue.OpenAsks)
 		targets = append(targets, progress.targets()...)
-		if err := rows.Scan(append(targets, components.targets()...)...); err != nil {
+		targets = append(targets, components.targets()...)
+		if err := rows.Scan(append(targets, repo.targets()...)...); err != nil {
 			return nil, err
 		}
+		issue.Repo, issue.ResolvedRepo = repo.own, repo.resolved
 		resolved, err := claim.resolve(issue.Key)
 		if err != nil {
 			return nil, err
@@ -397,6 +402,7 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	var components componentsScan
 	var claim claimScan
 	var progress progressScan
+	var repo repoScan
 	targets := []any{
 		&issue.Key, &issue.Project, &issue.Number, &issue.Title, &issue.Status, &issue.Priority, &issue.Rank, &issue.Labels,
 		&issue.Parent, &issue.BlockedBy, &issue.Assignee, &issue.Route, &createdBy, &issue.CreatedAt, &issue.UpdatedAt, &issue.ClosedAt,
@@ -404,6 +410,7 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 	}
 	targets = append(targets, claim.targets()...)
 	targets = append(targets, progress.targets()...)
+	targets = append(targets, components.targets()...)
 	if err := q.QueryRow(ctx, `
 		select i.key, i.project_key, i.number, i.title, i.status, i.priority, i.rank, i.labels, i.parent_key,
 		       coalesce((select array_agg(l.target_key order by l.target_key) from issue_links l where l.issue_key = i.key and l.kind = 'blocked_by'), '{}'),
@@ -411,14 +418,17 @@ func (s *server) loadIssueWithProgress(ctx context.Context, q queryer, key strin
 		       coalesce((select a.id::text from artifacts a where a.issue_key = i.key and a.is_primary), ''),
 		       i.last_seq, `+issueClaimColumns+`,
 		       `+issueProgressColumns+`,
-		       `+issueComponentsColumns+`
+		       `+issueComponentsColumns+`,
+		       `+issueRepoColumns+`
 		from issues i
 		`+issueProgressLateral+`
 		`+issueComponentsLateral+`
+		`+issueRepoLateral+`
 		where i.key = $1
-	`, key).Scan(append(targets, components.targets()...)...); err != nil {
+	`, key).Scan(append(targets, repo.targets()...)...); err != nil {
 		return model.Issue{}, model.IssueProgress{}, err
 	}
+	issue.Repo, issue.ResolvedRepo = repo.own, repo.resolved
 	issue.Components = components.resolve(issue.Key)
 	resolved, err := claim.resolve(issue.Key)
 	if err != nil {

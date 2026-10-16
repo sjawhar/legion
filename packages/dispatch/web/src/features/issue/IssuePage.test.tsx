@@ -55,6 +55,8 @@ const issue: IssueDetails = {
   project: "CORE",
   referenced_by_count: 0,
   route: null,
+  repo: null,
+  resolved_repo: null,
   status: "todo",
   priority: null,
   rank: "U",
