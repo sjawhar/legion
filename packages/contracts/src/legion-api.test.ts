@@ -443,7 +443,7 @@ test("the state golden names the claims nothing will wake, and the list cannot b
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// The lifecycle rows held behind their issues' running ones (contract 26): the golden carries
+// The lifecycle rows held behind their issues' running ones (contract 28): the golden carries
 // LEGION-208's supervise row 802 waiting behind row 801 for two and a half minutes, a state with none
 // carries an empty list rather than none, a row's wait is never negative, and the list cannot be
 // dropped: a plugin from before the field refuses the state, which is what the bump is for.

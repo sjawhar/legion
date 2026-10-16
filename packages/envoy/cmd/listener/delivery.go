@@ -114,7 +114,7 @@ func isControlTopic(topic string) bool {
 }
 
 func isExceptionsTopic(topic string) bool {
-	return strings.HasPrefix(topic, "notifications.envoy.exceptions.")
+	return strings.HasPrefix(topic, bus.ExceptionTopicPrefix)
 }
 
 func publishDeliveryException(client *bus.Client, item contracts.Envelope, reason, recipientSession string, fanoutRefusal bool) error {
@@ -137,7 +137,7 @@ func publishDeliveryException(client *bus.Client, item contracts.Envelope, reaso
 		EventID:        exceptionID,
 		Source:         "envoy",
 		SourceEventID:  item.EventID,
-		Topic:          "notifications.envoy.exceptions." + item.Topic,
+		Topic:          bus.ExceptionTopicPrefix + item.Topic,
 		DedupeKey:      "envoy.exception." + exceptionID,
 		IssuedAt:       contracts.NowMillis(),
 		PayloadSummary: "delivery exception: " + reason,

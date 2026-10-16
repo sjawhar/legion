@@ -753,7 +753,7 @@ func TestNextDueIsTheEarliestLaterMomentAnUnleasedRowComesDue(t *testing.T) {
 	})
 }
 
-// Migration 0043 indexes the outbox by issue, then id, for the reads each issue's lanes make.
+// Migration 0046 indexes the outbox by issue, then id, for the reads each issue's lanes make.
 func TestRecordMigrationCreatesTheOutboxIssueIndex(t *testing.T) {
 	st := migratedStore(t)
 	inTx(t, st, func(tx pgx.Tx) {

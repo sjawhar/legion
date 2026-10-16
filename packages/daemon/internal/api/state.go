@@ -36,7 +36,7 @@ type State struct {
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
 	// HeldOutboxRows is every due lifecycle outbox row held behind its issue's running lifecycle
 	// row (record.Store.HeldRows), in the order the store lists them: next_at, then id. Never null;
-	// empty while every due lifecycle row runs (contract 26).
+	// empty while every due lifecycle row runs (contract 28).
 	HeldOutboxRows []HeldOutboxRow `json:"heldOutboxRows"`
 	// StrandedClaims is every claim nothing will wake (workflow.Stranded), by issue and then
 	// role: the trees that will not move again until someone acts. Never null; empty while every

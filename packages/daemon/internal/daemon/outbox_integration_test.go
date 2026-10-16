@@ -545,15 +545,8 @@ func (s *flakyOutboxStore) ClaimRow(ctx context.Context, tx pgx.Tx, id int64, no
 }
 
 func (s *flakyOutboxStore) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
-	s.mu.Lock()
-	fail := s.finishFailures > 0
-	if fail {
-		s.finishFailures--
-		s.finishesFailed++
-	}
-	s.mu.Unlock()
-	if fail {
-		return errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
+	if err := s.failFinish(); err != nil {
+		return err
 	}
 	return s.Store.FinishOutbox(ctx, tx, id, leaseToken)
 }
@@ -562,6 +555,25 @@ func (s *flakyOutboxStore) failedClaims() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.claimsFailed
+}
+
+func (s *flakyOutboxStore) FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	if err := s.failFinish(); err != nil {
+		return err
+	}
+	return s.Store.FinishLeasedOutbox(ctx, tx, id, leaseToken)
+}
+
+// failFinish is the dropped connection a finish meets while finishFailures remain.
+func (s *flakyOutboxStore) failFinish() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finishFailures == 0 {
+		return nil
+	}
+	s.finishFailures--
+	s.finishesFailed++
+	return errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
 }
 
 func (s *flakyOutboxStore) failedFinishes() int {

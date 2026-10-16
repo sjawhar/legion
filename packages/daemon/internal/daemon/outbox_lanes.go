@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -259,9 +260,11 @@ func (r *outbox) nextDue(ctx context.Context, issue string, kinds []record.Outbo
 // outside every transaction with the lease renewed under it, and the finish or retry fences on the
 // lease token. It reports a claim that failed. A claim that returns nothing — another runner's
 // lease, a row finished since the list, or one an older row of its issue since queued ahead of —
-// is no one's failure and is passed over silently. The settle runs even once ctx has ended: the
-// effect ran, so what it came to is recorded on a bounded context of its own
-// (outboxSettleTimeout) rather than left to run again at the next boot.
+// is no one's failure and is passed over silently. A claimed row whose kind spends a GitHub budget
+// a limit still stands on (deferral) runs nothing and is retried at that limit's end, so it never
+// meets the limit again. The settle runs even once ctx has ended: the effect ran, so what it came
+// to is recorded on a bounded context of its own (outboxSettleTimeout) rather than left to run
+// again at the next boot.
 func (r *outbox) runRow(ctx context.Context, listed record.OutboxRow) error {
 	now := r.now().UTC()
 	var row record.OutboxRow
@@ -277,6 +280,13 @@ func (r *outbox) runRow(ctx context.Context, listed record.OutboxRow) error {
 		return err
 	}
 	if !claimed {
+		return nil
+	}
+	if limit, ok := r.deferral(row.Kind, r.now().UTC()); ok {
+		cause := fmt.Errorf("deferred until %s behind row %d's GitHub rate limit: %w", limit.until.Format(time.RFC3339), limit.row, limit.err)
+		if err := r.retryAt(ctx, row, limit.until, cause); err != nil {
+			r.log.Error("outbox row deferral not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
+		}
 		return nil
 	}
 	renewal := r.renewLease(ctx, row)

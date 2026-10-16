@@ -195,7 +195,7 @@ const legionStrandedClaim = z.strictObject({
 });
 
 /** `api.HeldOutboxRow` — one due lifecycle outbox row its issue's lifecycle lane cannot run yet,
- * because another lifecycle row of the issue is running (`record.Store.HeldRows`, contract 26):
+ * because another lifecycle row of the issue is running (`record.Store.HeldRows`, contract 28):
  * the lane runs an issue's lifecycle rows one at a time, in the order they were queued. `waitedSeconds`
  * counts from the moment the row became due, so a retried row's earlier backoffs are not counted as
  * waiting on its sibling; `waitsOn` is the id of the running row — or, for a role's start fenced
@@ -292,7 +292,7 @@ const legionCapabilityState = z.strictObject({
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
  * claim nothing will wake, by issue and then role, never null (contract 23); `heldOutboxRows` is
  * every due lifecycle outbox row held behind its issue's running one, by when it came due and then
- * id, never null (contract 26). */
+ * id, never null (contract 28). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,

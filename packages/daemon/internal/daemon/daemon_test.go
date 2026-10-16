@@ -427,7 +427,7 @@ func TestRunServesTheStateOfItsOwnBoot(t *testing.T) {
 }
 
 // A due lifecycle row held behind its issue's running one is on the state the daemon serves
-// (api.State.HeldOutboxRows, contract 26). The architect's accepted retry_or_escalate of a held
+// (api.State.HeldOutboxRows, contract 28). The architect's accepted retry_or_escalate of a held
 // phase enqueues the implementer's start while the issue's lifecycle lane is still running an
 // earlier row of the issue — here the planner's suspend, under a live lease — so GET
 // /legion/v1/state lists the start, by kind and id, with the row it waits on; once that row's lease

@@ -66,10 +66,10 @@ func TestVersionPrintsTheStampedRelease(t *testing.T) {
 
 // noStore fails the test if a command opens a store: neither --version nor the usage reads one.
 func noStore(t *testing.T) seed.Stores {
-	return seed.Stores{seed.AWSSecretsManager: func(context.Context, string, string) (seed.Store, error) {
+	return seed.Stores{seed.AWSSecretsManager: {Open: func(context.Context, string, string) (seed.Store, error) {
 		t.Error("a store was opened")
 		return nil, errors.New("no store in this test")
-	}}
+	}}}
 }
 
 // brokenStdout fails every write, as stdout on a full disk (/dev/full) does. A closed stdout does
@@ -128,6 +128,19 @@ func TestHelpNamesVersion(t *testing.T) {
 	}
 	if strings.Contains(stderr.String(), "the command is seed") {
 		t.Errorf("--help reports a usage error: %q", stderr.String())
+	}
+}
+
+// TestTheCommandKnowsBothStores: the stores main hands the seed command are AWS Secrets Manager and
+// GCP Secret Manager, as its usage error for another --store names them.
+func TestTheCommandKnowsBothStores(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{"seed", "check", "--store", "elsewhere", "--name", "example"}, &stdout, &stderr, stores)
+	if code != 2 {
+		t.Fatalf("exit %d, want 2", code)
+	}
+	if want := "envoy-infra seed: --store is one of: aws-secrets-manager, gcp-secret-manager\n"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr %q lacks %q", stderr.String(), want)
 	}
 }
 
