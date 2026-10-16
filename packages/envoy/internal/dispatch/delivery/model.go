@@ -284,10 +284,13 @@ type DeliveryShippedPRView struct {
 
 // DeliveryRunView is one deploy run on `GET /api/v1/delivery/timeline`: a production deploy
 // (Production succeeded; sized by PRs) and/or a pipeline failure (FailedJobs, RootFailingJob, or a
-// failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly. PRs
-// is every population pull request in the window the run shipped first, whatever facets the
-// request names, and is always a slice, never nil, so it serializes as `[]` for a run that
-// shipped none.
+// failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly.
+// FailedJobs is in compareRunJobs' order (by start, a job that never started last, then by name in
+// byte order), and RootFailingJob is the first by name among failed jobs finishing together. PRs
+// is every population pull request in the window the run shipped first (FirstShippingApply, the
+// lower run id of two deploys completing together), whatever facets the request names, by merge
+// time then id in byte order, and is always a slice, never nil, so it serializes as `[]` for a run
+// that shipped none.
 type DeliveryRunView struct {
 	ID             int64                      `json:"id"`
 	URL            string                     `json:"url"`
