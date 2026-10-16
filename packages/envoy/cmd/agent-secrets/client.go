@@ -311,17 +311,23 @@ func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentI
 
 // --- GET /v1/settings, POST /v1/secrets/{name}/reread (public: no proof) ---
 
-// Settings is GET /v1/settings's exact response shape: the store and namespace every agent secret
-// lives under and, per store, the key they are encrypted with and where they are. A broker from
-// before the store field answers none, and holds them in AWS Secrets Manager.
+// Settings is GET /v1/settings's exact response shape: the namespace and key every agent secret
+// lives under, the account and region (AWS) or project (GCP) they are in, and which store the
+// broker uses.
 type Settings struct {
-	Store         string `json:"store,omitempty"`
 	SecretsPrefix string `json:"secrets_prefix"`
-	KMSKeyARN     string `json:"kms_key_arn,omitempty"`
-	AWSAccountID  string `json:"aws_account_id,omitempty"`
-	AWSRegion     string `json:"aws_region,omitempty"`
-	KMSKeyName    string `json:"kms_key_name,omitempty"`
-	GCPProject    string `json:"gcp_project,omitempty"`
+	KMSKeyARN     string `json:"kms_key_arn"`
+	AWSAccountID  string `json:"aws_account_id"`
+	AWSRegion     string `json:"aws_region"`
+	// Store is "" or "aws-secrets-manager" for the AWS backend (a broker that predates this field
+	// answers neither), or "gcp-secret-manager" for the GCP backend.
+	Store string `json:"store,omitempty"`
+	// KMSKeyName is the GCP backend's CMEK key name
+	// (projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>), the GCP
+	// counterpart of KMSKeyARN.
+	KMSKeyName string `json:"kms_key_name,omitempty"`
+	// GCPProject is the GCP backend's project, the counterpart of AWSAccountID.
+	GCPProject string `json:"gcp_project,omitempty"`
 }
 
 func (c *client) Settings(ctx context.Context) (Settings, error) {
