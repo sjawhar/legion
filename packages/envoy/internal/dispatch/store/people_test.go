@@ -523,16 +523,26 @@ func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t 
 		t.Fatalf("membership after End = %#v, want subject-2 kept with no refresh token", got)
 	}
 
-	// A person recorded with no subject (header identity, a group sign-in, before the column)
-	// has nothing to compare: their first domain sign-in records its subject and ends nothing.
+	// A person recorded with no subject (header identity, a group sign-in, before the column) may
+	// hold a cookie from before a switch to domain mode: their first domain sign-in treats the
+	// unrecorded subject as another account and ends any session the row already had.
 	if err := people.Record(ctx, "recorded@example.com"); err != nil {
 		t.Fatal(err)
 	}
 	if err := people.SignIn(ctx, "recorded@example.com", "subject-3", "refresh-5", time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	if _, found := sessionGeneration(t, sessions, "recorded@example.com"); found {
-		t.Error("a first domain sign-in of a recorded person touched user_sessions")
+	if generation, found := sessionGeneration(t, sessions, "recorded@example.com"); !found || generation != 1 {
+		t.Errorf("session generation %d (row %t) after a recorded person's first domain sign-in, want 1: an unrecorded subject ends any session the row already had", generation, found)
+	}
+
+	// A sign-in whose own insert creates the row has no earlier session to end, however its
+	// subject reads: it is not a reassignment.
+	if err := people.SignIn(ctx, "brand-new@example.com", "subject-4", "refresh-6", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := sessionGeneration(t, sessions, "brand-new@example.com"); found {
+		t.Error("a sign-in whose own insert created the row touched user_sessions")
 	}
 }
 

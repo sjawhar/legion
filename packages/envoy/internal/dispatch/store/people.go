@@ -81,7 +81,10 @@ func (s *PgPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken
 // signInSubject records a sign-in for a Workspace domain in one transaction. It creates email's
 // row when there is none and then locks it, so two sign-ins to one address take turns, two first
 // sign-ins included: the second waits on the first's insert, then reads the subject it committed.
-// When the row holds a subject other than subject (Google gave the address to another account) it
+// A row this sign-in's own insert just created has no session to end, however its subject reads.
+// For a row that already existed, when its recorded subject is not subject (Google gave the
+// address to another account, or the row recorded no Google account at all: a Cognito-era,
+// header- or dev-recorded row, which may hold a cookie from before a switch to domain mode) it
 // ends every session of email (revokeSessionsSQL) before it records subject with the refresh
 // token. A revoke that fails rolls the sign-in back, leaving the old subject for the next sign-in
 // to revoke again; one that commits is logged at WARN with the address.
@@ -91,14 +94,15 @@ func (s *PgPeopleStore) signInSubject(ctx context.Context, email, subject, refre
 		return fmt.Errorf("record sign-in of %q: %w", email, err)
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `insert into people (email) values ($1) on conflict (email) do nothing`, email); err != nil {
+	inserted, err := tx.Exec(ctx, `insert into people (email) values ($1) on conflict (email) do nothing`, email)
+	if err != nil {
 		return fmt.Errorf("record sign-in of %q: %w", email, err)
 	}
 	var stored string
 	if err := tx.QueryRow(ctx, `select coalesce(sub, '') from people where email = $1 for update`, email).Scan(&stored); err != nil {
 		return fmt.Errorf("read the subject the sign-in of %q replaces: %w", email, err)
 	}
-	revoked := stored != "" && stored != subject
+	revoked := inserted.RowsAffected() == 0 && stored != subject
 	if revoked {
 		if _, err := tx.Exec(ctx, revokeSessionsSQL, email); err != nil {
 			return fmt.Errorf("end the sessions of %q, which another Google account signs in to now: %w", email, err)
