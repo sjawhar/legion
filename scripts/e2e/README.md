@@ -1265,6 +1265,66 @@ Two notes on what the script had to learn about its own surface:
   `set -e` ignores a negated pipeline (shellcheck SC2251), so the negated form could never fail the
   run.
 
+## multi-repo-acceptance.sh
+
+The Task 6.3 observer for the multi-repository live acceptance (Task 6.4, LEGION-1986's PR 6): a
+read-only CLI the operator runs by hand, one observation at a time, as the tree advances on the
+deployment's own repositories. It never starts a daemon, Dispatch, or any agent of its own, and it
+writes nothing: every admission, push, pull request and Dispatch write the acceptance checklist
+names is the operator's and the agents' own.
+
+```sh
+export LEGION_E2E_REPO_T=<owner>/<toolchain repo> LEGION_E2E_REPO_C=<owner>/<consumer repo>
+export LEGION_E2E_PIN_FILE=<path inside C that pins T's commit>
+export LEGION_E2E_REPO_X=<owner>/<negative control repo> LEGION_E2E_REPO_O=<second owner>/<repo>
+export LEGION_E2E_DAEMON_URL=http://127.0.0.1:<port> DISPATCH_URL=<dispatch> DISPATCH_TOKEN_FILE=<0600 file>
+export MULTIREPO_EVIDENCE_DIR=<dir kept for the PR body>
+bash scripts/e2e/multi-repo-acceptance.sh record-head "$LEGION_E2E_REPO_T"
+bash scripts/e2e/multi-repo-acceptance.sh children <parent KEY>
+bash scripts/e2e/multi-repo-acceptance.sh branch-base <T child KEY>
+bash scripts/e2e/multi-repo-acceptance.sh pin "$LEGION_E2E_REPO_C" <T merge sha>
+bash scripts/e2e/multi-repo-acceptance.sh done <KEY>...
+bash scripts/e2e/multi-repo-acceptance.sh second-owner <O child KEY>
+bash scripts/e2e/multi-repo-acceptance.sh cache <issue KEY> <pod> [container]
+bash scripts/e2e/multi-repo-acceptance.sh negative pr-in-x <T child KEY>   # run twice: before, then after
+bash scripts/e2e/multi-repo-acceptance.sh negative no-repo <KEY>
+bash scripts/e2e/multi-repo-acceptance.sh negative repo-edit <child KEY>
+```
+
+Every input above is required and is an operator value, never a literal in the script: it refuses
+to start naming the first one that is unset, refuses two of `LEGION_E2E_REPO_{T,C,X,O}` naming the
+same repository, refuses `LEGION_E2E_REPO_T` and `LEGION_E2E_REPO_O` sharing an owner (the
+second-owner observation needs two), and refuses a `LEGION_E2E_DAEMON_URL` whose `GET /healthz`
+does not answer `{"status":"ok"}`. `dispatch`, `gh`, `jq` and `curl` must be on `PATH`; `cache`
+also needs `kubectl`. State reads go through one helper, `state_json` (`curl --fail
+"$LEGION_E2E_DAEMON_URL/legion/v1/state"`, no bearer: `GET /legion/v1/state` is served openly, the
+same bytes `legion state --json` prints), so every jq path below reads the one live shape.
+
+Each observation prints `CHECK <name>: PASS` or `CHECK <name>: FAIL` (a FAIL exits non-zero) and
+writes its own evidence file under `MULTIREPO_EVIDENCE_DIR`, the whole state or Dispatch read it
+judged beside the fields it checked — keep that directory and quote each file in the PR body:
+
+| observation | judges |
+| :--- | :--- |
+| `record-head <T>` | T's default-branch head now, for `branch-base` to compare the first child commit's parent against |
+| `children <parent>` | `dispatch read --ref dispatch://<parent>/children`, then each child's `Repository:` line and `.issues[<key>].repo` from `state_json`: one child resolves to T and one to C, in both |
+| `branch-base <T child>` | `legion/<child>`'s first commit's first parent on GitHub equals the stored `record-head` |
+| `pin <C> <T merge sha>` | `LEGION_E2E_PIN_FILE` on C's default branch names the sha |
+| `done <KEY>...` | `dispatch read --issue <KEY>` shows `Status: done` for every key named |
+| `second-owner <O child>` | `.issues[<child>].pullRequest.repo` is O, its phase is at or past `production_check`, and the issue's Dispatch messages record both the successful read of T and the refused push to T |
+| `cache <issue> <pod> [container]` | the fetch container's log (`kubectl logs`, default container `workspace-fetch`) names the repository-cache stream and the GitHub delta, and `.repositories.mapped[] | select(.repo==<repo>) | .cache.ready` is `true` |
+| `negative pr-in-x <T child>` | twice-run: the first call has no stored snapshot and takes one of `{issue, pendingStatusWrites}` before the operator opens the pull request on `legion/<child>` in X; the second compares a fresh snapshot after that pull request closes, and PASSes only when they are byte-equal |
+| `negative no-repo <KEY>` | `.issues | has(<KEY>)` is `false`, and the issue's Dispatch messages hold "Legion did not admit this issue" |
+| `negative repo-edit <child>` | `.issues[<child>].repo` is unchanged after the operator's `dispatch issue-update --repo`, and the issue's Dispatch messages hold "is not applied" |
+
+`scripts/e2e/lib/multi-repo-acceptance.test.ts` pins the script's refusals and these jq paths
+against a `Bun.serve` stub daemon and a fake `dispatch`, standing in for a live run: it runs the
+script with every input unset, with T and O sharing an owner, with the stub's `/healthz` answering
+404, and with a fixed `/legion/v1/state` body that the `children` and `negative no-repo`
+observations judge both ways (one PASS, one FAIL), so the paths above are pinned before the live
+run, not by it. Task 6.4, the live run against the deployment's own repositories, is the operator's
+and has not run in this suite.
+
 ## lib/free-port.sh
 
 Prints one TCP port that nothing listens on, for a stage proof to hand a binary that binds it
