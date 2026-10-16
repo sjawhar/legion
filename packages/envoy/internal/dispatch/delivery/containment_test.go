@@ -5,6 +5,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/ordertest"
 )
 
 func TestProductionApplies(t *testing.T) {
@@ -270,7 +272,7 @@ func TestARunsProductionJobIsTheSameInEveryListingOrder(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			everyOrder(test.jobs, func(listed []DeliveryRunJob) {
+			ordertest.EveryOrder(test.jobs, func(listed []DeliveryRunJob) {
 				if got := production.Job(listed); got == nil || got.Name != test.want {
 					t.Fatalf("Production.Job of jobs listed %q = %+v, want %s", jobNames(listed), got, test.want)
 				}

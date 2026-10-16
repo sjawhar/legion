@@ -4,6 +4,8 @@ import (
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/ordertest"
 )
 
 func TestIsSummaryOrGuardJob(t *testing.T) {
@@ -79,25 +81,6 @@ func TestRootFailingJob(t *testing.T) {
 	})
 }
 
-// everyOrder calls f with a copy of jobs in each of its orders. GitHub's listing order, and the
-// order a store read answers rows tied on its order in, are neither of them the run's: whatever
-// a run's jobs show must not move with them, or the live Delivery hub sends the run again.
-func everyOrder(jobs []DeliveryRunJob, f func([]DeliveryRunJob)) {
-	var permute func(k int)
-	permute = func(k int) {
-		if k == len(jobs) {
-			f(slices.Clone(jobs))
-			return
-		}
-		for i := k; i < len(jobs); i++ {
-			jobs[k], jobs[i] = jobs[i], jobs[k]
-			permute(k + 1)
-			jobs[k], jobs[i] = jobs[i], jobs[k]
-		}
-	}
-	permute(0)
-}
-
 func jobNames(jobs []DeliveryRunJob) []string {
 	names := make([]string, len(jobs))
 	for i, job := range jobs {
@@ -108,7 +91,9 @@ func jobNames(jobs []DeliveryRunJob) []string {
 
 // TestAFailedRunReadsTheSameInEveryListingOrder: a run's failed jobs come by when each started (a
 // job that never started last, then by name), and its root failing job among jobs that finished
-// together is the first by name, in every order its jobs are listed in.
+// together is the first by name, in every order its jobs are listed in. GitHub's listing order, and
+// the order a store read answers rows tied on its order in, are neither of them the run's: whatever
+// a run's jobs show must not move with them, or the live Delivery hub sends the run again.
 func TestAFailedRunReadsTheSameInEveryListingOrder(t *testing.T) {
 	base := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
 	t.Run("failed jobs started and finished together", func(t *testing.T) {
@@ -121,7 +106,7 @@ func TestAFailedRunReadsTheSameInEveryListingOrder(t *testing.T) {
 			{Name: "deploy", StartedAt: new(base), CompletedAt: new(base.Add(time.Minute)), Conclusion: new(DeliveryJobConclusionSuccess)},
 		}
 		wantFailed := []string{"setup", "build", "lint", "verdict", "unit"}
-		everyOrder(jobs, func(listed []DeliveryRunJob) {
+		ordertest.EveryOrder(jobs, func(listed []DeliveryRunJob) {
 			if got := jobNames(FailedJobs(listed)); !slices.Equal(got, wantFailed) {
 				t.Fatalf("FailedJobs of jobs listed %q = %q, want %q", jobNames(listed), got, wantFailed)
 			}
@@ -136,7 +121,7 @@ func TestAFailedRunReadsTheSameInEveryListingOrder(t *testing.T) {
 			{Name: "e2e", Conclusion: new(DeliveryJobConclusionFailure)},
 			{Name: "smoke", Conclusion: new(DeliveryJobConclusionFailure)},
 		}
-		everyOrder(jobs, func(listed []DeliveryRunJob) {
+		ordertest.EveryOrder(jobs, func(listed []DeliveryRunJob) {
 			if got := RootFailingJob(listed); got == nil || got.Name != "e2e" {
 				t.Fatalf("RootFailingJob of jobs listed %q = %+v, want e2e, the first by name", jobNames(listed), got)
 			}

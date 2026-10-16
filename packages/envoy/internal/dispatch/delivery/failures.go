@@ -5,8 +5,10 @@
 package delivery
 
 import (
+	"cmp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // compareRunJobs is the order a run's jobs are read in (ListRunJobs, ListRunJobsForRuns): by when
@@ -14,15 +16,21 @@ import (
 // name, so no two of its jobs compare equal, and the order is the run's whatever order GitHub listed
 // them in or a table scan answered them in. GET /api/v1/delivery/runs/{id} lists a run's jobs in it.
 func compareRunJobs(a, b DeliveryRunJob) int {
+	return compareOptionalTime(a.StartedAt, b.StartedAt, a.Name, b.Name)
+}
+
+// compareOptionalTime orders by aTime and bTime, a nil time last, then by aName and bName in byte
+// order: the one rule a run's jobs are ordered by, whether by start or by finish.
+func compareOptionalTime(aTime, bTime *time.Time, aName, bName string) int {
 	switch {
-	case a.StartedAt == nil && b.StartedAt != nil:
+	case aTime == nil && bTime != nil:
 		return 1
-	case a.StartedAt != nil && b.StartedAt == nil:
+	case aTime != nil && bTime == nil:
 		return -1
-	case a.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt):
-		return a.StartedAt.Compare(*b.StartedAt)
+	case aTime != nil && !aTime.Equal(*bTime):
+		return aTime.Compare(*bTime)
 	}
-	return strings.Compare(a.Name, b.Name)
+	return cmp.Compare(aName, bName)
 }
 
 // FailedJobs is every job in jobs with Conclusion == DeliveryJobConclusionFailure, in
@@ -81,13 +89,7 @@ func earliestFinishing(jobs []DeliveryRunJob) *DeliveryRunJob {
 // finishesBefore reports whether a finished before b (nil CompletedAt last), or, finishing
 // together or neither finished, whether a's name comes first.
 func finishesBefore(a, b DeliveryRunJob) bool {
-	if (a.CompletedAt == nil) != (b.CompletedAt == nil) {
-		return b.CompletedAt == nil
-	}
-	if a.CompletedAt != nil && !a.CompletedAt.Equal(*b.CompletedAt) {
-		return a.CompletedAt.Before(*b.CompletedAt)
-	}
-	return a.Name < b.Name
+	return compareOptionalTime(a.CompletedAt, b.CompletedAt, a.Name, b.Name) < 0
 }
 
 // RootFailingJob is the earliest-finishing (by CompletedAt; nil CompletedAt sorts last, ties by

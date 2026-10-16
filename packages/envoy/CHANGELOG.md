@@ -789,7 +789,7 @@
   forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
   timer armed for a moment the clock has already passed fires at once.
 
-- The delivery live hub no longer re-sends runs nothing in which changed (LEGION-690). Each item it
+- The delivery live hub no longer re-sends a run in which nothing changed (LEGION-690). Each item it
   sends is revised by a hash of its JSON, and several store reads answered rows tied on their order
   in whatever order Postgres's plan read them: a run's jobs (no order at all), the pull requests a
   run shipped and the waiting list (merged in one second), and runs started in one instant. The
@@ -804,7 +804,9 @@
   requests merged together come back by id (`owner/repo#N` in byte order, the page's own order) and
   runs started together by run id. A run's root failing job and its production job, among jobs
   finishing together, are the first by name, and a run whose production jobs all failed falls back
-  to the first by start rather than the first listed.
+  to the first by start rather than the first listed. The Pipeline page's failing jobs name, as a
+  job's last failing run among runs that completed together, the one with the higher run id rather
+  than whichever was listed last.
 
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
