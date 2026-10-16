@@ -1,9 +1,9 @@
 //go:build e2e
 
-// The Stage 4a harness's repository cache checks: the cache of the run's repository serves, an issue
-// pod launched while it is ready fills its feed from it and asks GitHub only for the delta, and an
-// issue whose volume is lost is provisioned again from the cache and its pushed branch. The rig is
-// live_test.go.
+// The Stage 4a harness's repository cache checks: an issue pod's launch makes its repository's
+// cache and fills its feed from it alone, a second pod does too, asking GitHub only for the
+// delta, and an issue whose volume is lost is provisioned again through the cache onto a commit of
+// its pushed branch that neither the default branch nor the cache holds. The rig is live_test.go.
 
 package sandbox
 
@@ -19,7 +19,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/repocache"
@@ -28,49 +27,60 @@ import (
 
 // cacheStreamLine is the fetch container's last line when it filled the feed from the repository
 // cache: the tar's bytes, the cache's address, and the bytes and refs GitHub's delta brought.
-var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes from the repository cache (http://\S+) in \S+; ([0-9,]+) bytes from GitHub for the delta \(([0-9]+) refs?\)`)
+var cacheStreamLine = regexp.MustCompile(`workspace-init fetch: ([0-9,]+) bytes from the repository cache (http://\S+) in \S+, its history verified in \S+; ([0-9,]+) bytes from GitHub for the delta \(([0-9]+) refs?\)`)
 
-// repository-cache: before the run's repository is mapped no cache exists, so an issue pod launched
-// then (cache-a) clones its feed from GitHub and says so — the negative control of
-// cache-second-pod. Once the repository is mapped, the runtime's cache for it runs and is Ready,
-// and its /healthz, asked inside its own pod, answers ready at the head GitHub names for the
-// repository's default branch.
+// repository-cache: the run's repository has no cache until cache-a, its first issue pod, is
+// launched: the launch makes it (its Sandbox recorded for the teardown first), cache-a's fetch
+// waits for it and fills its feed from it, asking GitHub only for the delta, and the cache, Ready,
+// answers /healthz — asked inside its own pod with its own token — at the head GitHub names for the
+// repository's default branch. The same request without the token is refused.
 func (r *liveRig) checkRepositoryCache() error {
-	before := r.claim("cache-a")
-	if err := r.ensureRunning(before); err != nil {
-		return err
-	}
-	log, err := r.fetchLog(SandboxName(before.token))
-	if err != nil {
-		return err
-	}
-	if want := "workspace-init fetch: no ready repository cache for " + r.env.repo.String() + ": cloning from GitHub ("; !strings.Contains(log, want) {
-		return fmt.Errorf("cache-a, launched before any cache, logged %q, want %q", strings.TrimSpace(log), want)
-	}
-	note("operator", "cache-a's workspace-fetch log, launched with no cache: %s", oneLine(log))
-
 	name := CacheSandboxName(r.env.project, r.env.repo)
+	if _, found := r.rt.RepositoryCache(r.env.repo); found {
+		return fmt.Errorf("the repository cache %s exists before any issue of %s launched", name, r.env.repo)
+	}
 	if err := r.recordSandbox(name); err != nil {
 		return err
 	}
 	r.mappedMu.Lock()
 	r.mapped = []ghrepo.Repository{r.env.repo}
 	r.mappedMu.Unlock()
-	if err := r.rt.EnsureRepositoryCache(r.ctx, r.env.repo); err != nil {
+	first := r.claim("cache-a")
+	if err := r.ensureRunning(first); err != nil {
 		return err
 	}
-	note("runtime", "EnsureRepositoryCache(%s): Sandbox %s", r.env.repo, name)
+	if _, found := r.rt.RepositoryCache(r.env.repo); !found {
+		return fmt.Errorf("cache-a's launch made no repository cache of %s", r.env.repo)
+	}
+	if err := r.assertCacheFed(first); err != nil {
+		return err
+	}
 	status, err := r.awaitCacheReady()
 	if err != nil {
 		return err
 	}
-	out, err := r.kubectl("exec", name, "-c", cacheContainer, "--", "curl", "-s", fmt.Sprintf("localhost:%d/healthz", repocache.Port))
+	ask := func(token string) (string, error) {
+		header := ""
+		if token != "" {
+			header = `-H "Authorization: Bearer $(cat "$` + repocache.CacheTokenFileEnv + `")" `
+		}
+		return r.kubectl("exec", name, "-c", cacheContainer, "--", "sh", "-c", fmt.Sprintf(`curl -s -w ' %%{http_code}' %slocalhost:%d/healthz`, header, repocache.Port))
+	}
+	refused, err := ask("")
 	if err != nil {
 		return err
 	}
+	if !strings.HasSuffix(strings.TrimSpace(refused), " 401") || strings.Contains(refused, r.env.repo.String()) {
+		return fmt.Errorf("the cache's /healthz without its token answered %q, want 401 naming nothing", strings.TrimSpace(refused))
+	}
+	out, err := ask("its own")
+	if err != nil {
+		return err
+	}
+	body, code, _ := strings.Cut(strings.TrimSpace(out), " ")
 	var health repocache.Health
-	if err := json.Unmarshal([]byte(out), &health); err != nil {
-		return fmt.Errorf("the cache's /healthz answered %q, not its JSON: %w", strings.TrimSpace(out), err)
+	if err := json.Unmarshal([]byte(body), &health); err != nil || code != "200" {
+		return fmt.Errorf("the cache's /healthz with its token answered %q, not 200 and its JSON: %v", strings.TrimSpace(out), err)
 	}
 	head, err := r.githubHead(r.defaultBranch)
 	if err != nil {
@@ -79,25 +89,24 @@ func (r *liveRig) checkRepositoryCache() error {
 	if !health.Ready || health.Repo != r.env.repo.String() || health.Head != head || health.Bytes <= 0 || health.LastFetchAt.IsZero() {
 		return fmt.Errorf("the cache's /healthz answered %+v, want ready for %s at %s's head %s", health, r.env.repo, r.defaultBranch, head)
 	}
-	note("runtime", "RepositoryCache(%s): ready at %s", r.env.repo, status.Address)
-	note("operator", "exec %s -c %s -- curl -s localhost:%d/healthz: %s; GitHub's %s is %s", name, cacheContainer, repocache.Port, strings.TrimSpace(out), r.defaultBranch, head)
+	note("runtime", "cache-a's launch made %s; RepositoryCache(%s): %s at %s", name, r.env.repo, status.State, status.Address)
+	note("operator", "exec %s -c %s -- curl localhost:%d/healthz: %s without its token, %s with it; GitHub's %s is %s", name, cacheContainer, repocache.Port, strings.TrimSpace(refused), body, r.defaultBranch, head)
 	return nil
 }
 
-// cache-second-pod: an issue pod (cache-b) launched while the cache is Ready fills its feed from
-// the cache's tar and fetches from GitHub only the delta, under 1 MiB; its clone's objects are the
-// feed's (objects/info/alternates names the feed on the issue volume), and git checks the clone's
+// cache-second-pod: a second issue pod (cache-b) fills its feed from the cache's tar and fetches
+// from GitHub only the delta, under 1 MiB; its clone's objects are the feed's
+// (objects/info/alternates names the feed on the issue volume), and git checks the clone's
 // connectivity through them.
 func (r *liveRig) checkCacheSecondPod() error {
-	status, err := r.awaitCacheReady()
-	if err != nil {
+	if _, err := r.awaitCacheReady(); err != nil {
 		return err
 	}
 	c := r.claim("cache-b")
 	if err := r.ensureRunning(c); err != nil {
 		return err
 	}
-	if err := r.assertCacheFed(c, status); err != nil {
+	if err := r.assertCacheFed(c); err != nil {
 		return err
 	}
 	clone := TreeRoot + "/repos/github.com/" + r.env.repo.Owner() + "/" + r.env.repo.Name()
@@ -116,11 +125,13 @@ func (r *liveRig) checkCacheSecondPod() error {
 	return nil
 }
 
-// cache-lost-volume: cache-b's Sandbox and volume are deleted while no runtime runs, and its issue
-// branch exists on GitHub (created by the harness at the default branch, as a role's push would
-// have left one). Relaunched with the branch as its recovery source, the new pod fills its new
-// feed from the cache again — the branch the cache has not fetched yet arriving in GitHub's delta
-// — and provisions the workspace on the branch, whose commit is the workspace's @-.
+// cache-lost-volume: with the cache warm, the harness pushes legion/S4A-9 onto the repository as a
+// commit of its own — a file only that commit adds, on top of the default branch's head — so the
+// branch's commit is neither the default branch's nor the head the cache serves (deleted when the
+// harness ends). cache-b's Sandbox and volume are then deleted while no runtime runs. Relaunched
+// with the branch as its recovery source, the new pod fills its new feed from the cache again — the
+// branch the cache has not fetched arriving in GitHub's delta — and provisions the workspace on
+// the branch: its @- is that commit, and the file that commit added is in the workspace.
 func (r *liveRig) checkCacheLostVolume() error {
 	status, err := r.awaitCacheReady()
 	if err != nil {
@@ -134,14 +145,25 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if err != nil {
 		return err
 	}
-	if err := r.createRunBranch(dir.Bookmark); err != nil {
-		return err
-	}
-	branchHead, err := r.githubHead(dir.Bookmark)
+	base, err := r.githubHead(r.defaultBranch)
 	if err != nil {
 		return err
 	}
-	note("operator", "branch %s on %s at %s (the default branch's head), deleted when the run ends", dir.Bookmark, r.env.repo, branchHead)
+	cached := ""
+	for _, read := range r.rt.RepositoryCaches() {
+		if read.Sandbox == status.Sandbox && read.Health != nil {
+			cached = read.Health.Head
+		}
+	}
+	marker, content := ".legion-e2e/"+c.issue+".txt", fmt.Sprintf("the commit only %s holds, pushed at %s\n", dir.Bookmark, time.Now().UTC().Format(time.RFC3339Nano))
+	branchHead, err := r.pushRunCommit(dir.Bookmark, base, marker, content)
+	if err != nil {
+		return err
+	}
+	if branchHead == base || branchHead == cached {
+		return fmt.Errorf("the pushed %s is %s, which the default branch (%s) or the cache (%s) already holds", dir.Bookmark, branchHead, base, cached)
+	}
+	note("operator", "pushed %s on %s at %s, adding %s on the default branch's %s (the cache serves %s); deleted when the run ends", dir.Bookmark, r.env.repo, branchHead, marker, base, cached)
 
 	r.stopRuntime()
 	name := SandboxName(c.token)
@@ -163,7 +185,7 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if err := r.rt.ReconcileOrphans(r.ctx, r.known(c), time.Hour); err != nil {
 		return err
 	}
-	if status, err = r.awaitCacheReady(); err != nil {
+	if _, err := r.awaitCacheReady(); err != nil {
 		return err
 	}
 	since := time.Now()
@@ -181,7 +203,7 @@ func (r *liveRig) checkCacheLostVolume() error {
 	if _, err := r.awaitRunning(c, since); err != nil {
 		return err
 	}
-	if err := r.assertCacheFed(c, status); err != nil {
+	if err := r.assertCacheFed(c); err != nil {
 		return err
 	}
 	log, err := r.initLog(name)
@@ -196,23 +218,70 @@ func (r *liveRig) checkCacheLostVolume() error {
 		return err
 	}
 	if parent != branchHead {
-		return fmt.Errorf("the recovered workspace's @- is %q, want %s's commit %s", parent, dir.Bookmark, branchHead)
+		return fmt.Errorf("the recovered workspace's @- is %q, want %s's commit %s (the default branch is %s)", parent, dir.Bookmark, branchHead, base)
+	}
+	held, err := r.exec(c, "cat", dir.Dir+"/"+marker)
+	if err != nil || held != strings.TrimSpace(content) {
+		return fmt.Errorf("the recovered workspace's %s holds %q (%v), want %q", marker, held, err, strings.TrimSpace(content))
 	}
 	note("runtime", "Spawn(%s) with WorkspaceRecoveredFrom %s into a new Sandbox and volume", c.token, dir.Bookmark)
-	note("operator", "init log: %s; workspace @- %s = %s", oneLine(log), parent, dir.Bookmark)
+	note("operator", "init log: %s; workspace @- %s = %s, not the default branch's %s; %s holds the pushed line", oneLine(log), parent, dir.Bookmark, base, marker)
 	return nil
 }
 
+// pushRunCommit puts branch on the run's repository at a new commit on parent that adds path
+// holding content — built with GitHub's git data API, so nothing reaches the default branch — and
+// deletes the branch when the run ends, whatever happens in between. It returns the commit.
+func (r *liveRig) pushRunCommit(branch, parent, path, content string) (string, error) {
+	github, err := r.github()
+	if err != nil {
+		return "", err
+	}
+	var commit struct {
+		Tree struct {
+			SHA string `json:"sha"`
+		} `json:"tree"`
+	}
+	if err := github.Get(r.ctx, "/git/commits/"+parent, &commit); err != nil {
+		return "", fmt.Errorf("read the commit %s: %w", parent, err)
+	}
+	var tree, created struct {
+		SHA string `json:"sha"`
+	}
+	if err := github.Post(r.ctx, "/git/trees", map[string]any{
+		"base_tree": commit.Tree.SHA,
+		"tree":      []map[string]string{{"path": path, "mode": "100644", "type": "blob", "content": content}},
+	}, &tree); err != nil {
+		return "", fmt.Errorf("write the tree adding %s: %w", path, err)
+	}
+	if err := github.Post(r.ctx, "/git/commits", map[string]any{
+		"message": "Stage 4a: " + branch + "'s own commit", "tree": tree.SHA, "parents": []string{parent},
+	}, &created); err != nil {
+		return "", fmt.Errorf("write the commit adding %s: %w", path, err)
+	}
+	r.t.Cleanup(func() {
+		if err := r.deleteBranch(branch); err != nil {
+			fmt.Printf("teardown: could not delete branch %s of %s: %v\n", branch, r.env.repo, err)
+		}
+	})
+	if err := github.Post(r.ctx, "/git/refs", map[string]string{"ref": "refs/heads/" + branch, "sha": created.SHA}, nil); err != nil {
+		return "", fmt.Errorf("create refs/heads/%s at %s: %w", branch, created.SHA, err)
+	}
+	return created.SHA, nil
+}
+
 // assertCacheFed is cache-stream's evidence for c's pod: its workspace-fetch log's last line names
-// the bytes it streamed from the cache at status.Address and the GitHub delta, under 1 MiB.
-func (r *liveRig) assertCacheFed(c *liveClaim, status CacheStatus) error {
+// the bytes it streamed from the repository's cache at the address the runtime gave it and the
+// GitHub delta, under 1 MiB, and nothing was cloned from GitHub.
+func (r *liveRig) assertCacheFed(c *liveClaim) error {
 	log, err := r.fetchLog(SandboxName(c.token))
 	if err != nil {
 		return err
 	}
+	address := r.rt.cacheURL(CacheSandboxName(r.env.project, r.env.repo))
 	match := cacheStreamLine.FindStringSubmatch(log)
-	if match == nil || match[2] != status.Address {
-		return fmt.Errorf("%s's workspace-fetch log does not name the stream from the cache at %s: %s", c.name, status.Address, strings.TrimSpace(log))
+	if match == nil || match[2] != address || strings.Contains(log, "cloned "+r.env.repo.String()+" from GitHub") {
+		return fmt.Errorf("%s's workspace-fetch log does not name the stream from the cache at %s alone: %s", c.name, address, strings.TrimSpace(log))
 	}
 	streamed, delta := printedCount(match[1]), printedCount(match[3])
 	if streamed <= 0 || delta < 0 || delta >= 1<<20 {
@@ -279,21 +348,6 @@ func (r *liveRig) githubHead(branch string) (string, error) {
 	return ref.Object.SHA, nil
 }
 
-// createRunBranch creates branch on the run's repository at the default branch's head, and deletes
-// it when the run ends, whatever happens in between: the branch is the run's own.
-func (r *liveRig) createRunBranch(branch string) error {
-	github, err := r.github()
-	if err != nil {
-		return err
-	}
-	r.t.Cleanup(func() {
-		if err := r.deleteBranch(branch); err != nil {
-			fmt.Printf("teardown: could not delete branch %s of %s: %v\n", branch, r.env.repo, err)
-		}
-	})
-	return ghbranch.Create(r.ctx, github, r.env.repo, branch, r.defaultBranch)
-}
-
 // deleteBranch deletes branch of the run's repository; one already gone is no failure.
 func (r *liveRig) deleteBranch(branch string) error {
 	github, err := r.github()
@@ -306,6 +360,8 @@ func (r *liveRig) deleteBranch(branch string) error {
 	if err != nil {
 		return err
 	}
+	request.Header.Set("Authorization", "Bearer "+github.Token)
+	request.Header.Set("Accept", "application/vnd.github+json")
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
 		return err
