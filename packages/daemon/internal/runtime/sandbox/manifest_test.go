@@ -216,10 +216,9 @@ func TestManifestGoldens(t *testing.T) {
 // Every issue pod and the project controller's pod carry the two stop-eviction annotations
 // unconditionally (the image probe carries only Karpenter's,
 // TestTheProbePodCarriesNoGKEExtendedDurationAnnotation): Karpenter's own, which protects a pod on
-// an AWS cluster, and GKE Autopilot's cluster-autoscaler equivalent, which Karpenter's annotation
-// does nothing for (GKE ignores it) — so a pod on Autopilot without this one can be evicted
-// mid-turn by consolidation or a node upgrade. Both are unconditional, so no operator
-// configuration can regress this by omission.
+// an AWS cluster, and the Cluster Autoscaler's, which GKE Autopilot honours and Karpenter's
+// annotation does nothing for (GKE ignores it) — so a pod on Autopilot without this one can be
+// evicted mid-turn by consolidation or a node upgrade.
 func TestEveryIssueAndControllerPodIsProtectedFromAutoscalerEviction(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
