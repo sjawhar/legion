@@ -551,11 +551,11 @@ func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	return server.URL, len(body)
 }
 
-// With a ready repository cache — LEGION_REPOSITORY_CACHE_URL, which the runtime sets on the fetch
-// container only then — `fetch` unpacks the cache's tar into the feed and fetches from GitHub, with
-// the provisioning token, only what the remote gained since: one line says both, with each source's
-// bytes. A relaunch, whose feed on the issue volume holds the repository already, fetches the delta
-// alone and says so.
+// With a ready repository cache — LEGION_REPOSITORY_CACHE_URL and its token's file, which the
+// runtime sets on every issue pod's fetch container — `fetch` unpacks the cache's tar into the feed
+// and fetches from GitHub, with the provisioning token, only what the remote gained since: one line
+// says both, with each source's bytes. A relaunch, whose feed on the issue volume holds the
+// repository already, fetches the delta alone and says so.
 func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t, "main")
 	cache, length := v.cacheTarServer(t)
