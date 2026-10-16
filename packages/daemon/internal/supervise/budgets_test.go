@@ -3,7 +3,9 @@ package supervise
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -237,6 +239,58 @@ func TestSpawnsTheRuntimeKeepsRefusingEndInFailed(t *testing.T) {
 	h.wantBudgets(Budgets{LaunchFailures: 3})
 	h.wantCalls("Spawn", 3)
 	h.wantCalls("Suspend", 0)
+}
+
+// testLaunchBackoff is the first wait before a launch tried again after a charged launch failure
+// in every machine the harness builds (Timeouts.LaunchBackoff): long enough that a test can tell a
+// wait from none, short enough that a test spending the budget does not slow the suite.
+const testLaunchBackoff = 20 * time.Millisecond
+
+// Each try that follows a charged launch failure waits first, doubling, so a fault that lasts a
+// moment cannot spend a claim's whole launch budget in that moment: the second try waits at least
+// half the first step of the backoff, the third at least the whole of it. That holds for a launch
+// the runtime refuses, which the launch tries again itself, and for a process that dies before its
+// agent is ready, which relaunches after its charge.
+func TestChargedLaunchFailuresAreSpacedByTheBackoff(t *testing.T) {
+	for name, fail := range map[string]func(*harness){
+		"a launch the runtime refuses": func(h *harness) {
+			h.rt.ScriptSpawn(fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom}, fake.SpawnResult{Err: errBoom})
+			if err := h.handle(RequestSpawn{Claim: testToken}); !errors.Is(err, errBoom) {
+				t.Fatalf("spawn returned %v, want the runtime's last refusal", err)
+			}
+		},
+		"a process that dies before its agent is ready": func(h *harness) {
+			h.launch()
+			h.observe(runtime.Gone)
+			h.observe(runtime.Gone)
+			h.observe(runtime.Gone)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			var mu sync.Mutex
+			tried := map[uint64]time.Time{}
+			h.store.onPut = func(c Claim) {
+				mu.Lock()
+				defer mu.Unlock()
+				if _, seen := tried[c.Generation]; c.State == StateLaunching && !seen {
+					tried[c.Generation] = time.Now()
+				}
+			}
+
+			fail(h)
+
+			h.wantState(StateFailed)
+			h.wantBudgets(Budgets{LaunchFailures: 3})
+			mu.Lock()
+			defer mu.Unlock()
+			for generation, least := range map[uint64]time.Duration{2: testLaunchBackoff / 2, 3: testLaunchBackoff} {
+				if gap := tried[generation].Sub(tried[generation-1]); gap < least {
+					t.Errorf("try %d came %s after try %d, want at least %s", generation, gap, generation-1, least)
+				}
+			}
+		})
+	}
 }
 
 func TestALaunchWhoseSpecCannotBeBuiltIsALaunchFailure(t *testing.T) {
