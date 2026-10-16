@@ -18,7 +18,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -118,16 +117,6 @@ func (g *branchGitHub) answerWith(answer func() (int, string)) {
 	g.answer = answer
 }
 
-// defaultBranchOf is the outbox's and the specs' reader of a repository's default branch over
-// github, as the daemon wires it (defaultBranches.Of), with roleTokens' implement App.
-func defaultBranchOf(github *branchGitHub) func(context.Context, ghrepo.Repository) (string, error) {
-	return newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now).Of
-}
-
-// mainBranch is a repository's default branch for an outbox test whose subject is not the default
-// branch: main, asking GitHub nothing.
-func mainBranch(context.Context, ghrepo.Repository) (string, error) { return "main", nil }
-
 // roleTokens mints a token named for the App it is minted as, so a request shows which App made it.
 type roleTokens struct{}
 
@@ -142,8 +131,8 @@ func (t roleTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner s
 }
 
 // branchAdmission is an outbox over a fresh database whose admission admits LEGION-208 when the
-// test applies its todo, with GitHub answered by github, whose default branch is release/v7.1, and
-// the runner's clock the test's own.
+// test applies its todo, on acme/widgets at the default branch GitHub named when admission recorded
+// it, release/v7.1, with GitHub answered by github and the runner's clock the test's own.
 type branchAdmission struct {
 	runner *outbox
 	rt     *fake.Runtime
@@ -158,19 +147,19 @@ func newBranchAdmission(t *testing.T, answer func() (int, string)) (*branchAdmis
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	github := newBranchGitHub(t, rt, answer)
 	github.defaultBranch = "release/v7.1"
-	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
+	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: servedRepositories{"acme/widgets": "release/v7.1"}}, quietLogger())
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	clock := time.Now()
 	var logs bytes.Buffer
 	runner := &outbox{
 		dispatchProject: "LEGION",
 		pool:            pool, records: records, supervisor: sup, tokens: roleTokens{}, project: "legion", stateDir: t.TempDir(),
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url, defaultBranch: defaultBranchOf(github),
-		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine, admission},
+		githubAPI: github.url,
+		dispatch:  &outboxDispatch{issue: dispatch.Issue{Key: "LEGION-208", Status: "todo"}}, notices: &outboxPublisher{}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: slog.New(slog.NewJSONHandler(&logs, nil)),
 		provision: func(_ context.Context, request workspace.Request) (workspace.Workspace, error) {
 			if request.DefaultBranch != "release/v7.1" {
-				t.Errorf("the workspace of %s was provisioned at %q, want GitHub's default branch release/v7.1", request.Issue, request.DefaultBranch)
+				t.Errorf("the workspace of %s was provisioned at %q, want the recorded default branch release/v7.1", request.Issue, request.DefaultBranch)
 			}
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
@@ -197,11 +186,11 @@ func (b *branchAdmission) launches() int {
 	return len(b.rt.CallsOf("Spawn")) + len(b.rt.CallsOf("Resume"))
 }
 
-// Admitting a root creates its branch on GitHub at the repository's default branch, as GitHub
-// names it, as the implement App, before its architect starts: the architect's start waits for the
-// branch's row. The row reads the repository's default branch, then that branch's ref, and creates
-// the branch at its commit. A branch GitHub already has (its create answered 422 "Reference already
-// exists") is the same success.
+// Admitting a root creates its branch on GitHub at the default branch its record names, as the
+// implement App, before its architect starts: the architect's start waits for the branch's row.
+// The row reads that branch's ref and creates the branch at its commit; it asks GitHub nothing of
+// the repository's default branch, which admission recorded. A branch GitHub already has (its
+// create answered 422 "Reference already exists") is the same success.
 func TestAdmissionCreatesTheRootsBranchAtTheDefaultBranchBeforeItsArchitectStarts(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -216,7 +205,7 @@ func TestAdmissionCreatesTheRootsBranchAtTheDefaultBranchBeforeItsArchitectStart
 			admitted.run(t)
 			admitted.run(t)
 
-			if got, want := github.read(), []string{"/repos/acme/widgets", "/repos/acme/widgets/git/ref/heads/release/v7.1"}; !slices.Equal(got, want) {
+			if got, want := github.read(), []string{"/repos/acme/widgets/git/ref/heads/release/v7.1"}; !slices.Equal(got, want) {
 				t.Fatalf("GitHub reads = %q, want %q", got, want)
 			}
 			want := branchCreate{ref: "refs/heads/legion/LEGION-208", sha: branchBaseCommit, authorization: "Bearer implement-app-token-for-acme"}
@@ -287,7 +276,7 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	records := record.NewStore()
 	github := newBranchGitHub(t, nil, branchRefused)
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: github.url}
+		githubAPI: github.url}
 	until := time.Now().Add(time.Hour)
 	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted,
 		Generation: 2, Status: "in_progress", Rank: "U"})
@@ -322,13 +311,17 @@ func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string) (
 }
 
 // Branch creation and the disarm mint the implement App's token for the owner of the repository
-// they act on, and a mint that fails names that owner, so the outbox's failure line says whose
-// installation refused.
+// the issue's record names, and a mint that fails names that owner, so the outbox's failure line
+// says whose installation refused.
 func TestBranchCreationAndTheDisarmNameTheOwnerTheyMintFor(t *testing.T) {
-	runner := &outbox{log: quietLogger(), tokens: refusingOwnerTokens{}, repo: ghrepo.MustParse("acme/widgets"),
-		defaultBranch: func(context.Context, ghrepo.Repository) (string, error) { return "main", nil }}
-	want := "mint the implement App token for acme: GitHub is down"
-	if err := runner.createBranch(context.Background(), "LEGION-208"); err == nil || err.Error() != want {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow",
+		Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U"}
+	putOutboxIssue(t, pool, records, issue)
+	runner := &outbox{log: quietLogger(), pool: pool, records: records, tokens: refusingOwnerTokens{}}
+	want := "mint the implement App token for zeta: GitHub is down"
+	if err := runner.createBranch(context.Background(), issue); err == nil || err.Error() != want {
 		t.Errorf("createBranch with a refused mint = %v, want %q", err, want)
 	}
 	row := mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 7}, time.Now())

@@ -45,9 +45,7 @@ type workflowRuntime struct {
 	handlers        []intake.Handler
 	dispatch        dispatch.Client
 	tokens          appauth.Tokens
-	owner           string
 	grants          *credential.Grants
-	project         config.Project
 	projectID       string
 	dispatchProject string
 	stateDir        string
@@ -177,14 +175,13 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
-// checked for both GitHub Apps), the App tokens minted for every served owner, then the fill of any
-// record written before the record carried its repository.
-func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
+// checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
+// from, the App tokens minted for every served owner, then the fill of any record written before
+// the record carried its repository.
+func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
 	}
-	// The loader refuses a workflow whose projects do not configure the daemon's own.
-	project := cfg.Projects[cfg.Project]
 	log.Info("legion workflow boot stage", "stage", "config")
 	tokens := suppliedTokens
 	if tokens == nil {
@@ -195,8 +192,8 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		return nil, fmt.Errorf("the GitHub App token source answers no App installation, which the repository mapping is checked against")
 	}
 	w := &workflowRuntime{
-		tokens: tokens, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: newRepositories(cfg.Project),
-		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
+		tokens: tokens, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
+		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
 		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
@@ -213,7 +210,6 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		}
 		reviewAppLogin = login
 	}
-	w.owner = project.Repo.Owner()
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	if err := w.nameMapping(ctx); err != nil {
 		return nil, err
@@ -408,7 +404,7 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner s
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, w.defaultBranches.Of,
+		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.githubAPI,
 		supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
 }

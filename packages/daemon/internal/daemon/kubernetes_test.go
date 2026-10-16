@@ -538,7 +538,7 @@ dispatch_token_file: ./dispatch-token
 nats_urls: [nats://nats.internal.example:4222]
 controller: daemon
 projects:
-  DEMO: { repo: acme/widgets }
+  DEMO: {}
 github_apps:
   implement: { app_id: "1", private_key_command: "exit 1" }
   review: { app_id: "2", private_key_command: "exit 1" }

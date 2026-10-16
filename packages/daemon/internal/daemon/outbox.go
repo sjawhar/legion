@@ -13,7 +13,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
@@ -73,7 +72,6 @@ type outbox struct {
 	// is shared, and another project's rows are another daemon's.
 	dispatchProject string
 	stateDir        string
-	repo            ghrepo.Repository
 	log             *slog.Logger
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
@@ -81,9 +79,13 @@ type outbox struct {
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
-	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of): the
-	// base an issue's branch is created at and its workspace provisioned from.
-	defaultBranch func(context.Context, ghrepo.Repository) (string, error)
+}
+
+// issueRepository is the repository issue's record names, which every repository-dependent row
+// acts on: its branch's creation, its workspace's provisioning and removal, and its pull
+// request's disarm, each with the implement App's token minted for that repository's owner.
+func issueRepository(issue record.Issue) (ghrepo.Repository, error) {
+	return ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
 }
 
 // outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
@@ -95,14 +97,14 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, githubAPI string, defaultBranch func(context.Context, ghrepo.Repository) (string, error), tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
-		defaultBranch: defaultBranch, log: log, now: time.Now,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, githubAPI: githubAPI,
+		log: log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -939,6 +941,8 @@ func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string
 // (C4): then the daemon provisions and removes none on its host.
 func (r *outbox) podsProvision() bool { return r.supervisor.deps.Runtime.ProvisionsWorkspaces() }
 
+// provisionWorkspace provisions issue's workspace in the repository its record names, at the
+// default branch the record names, as the implement App for that repository's owner.
 func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) error {
 	if r.podsProvision() {
 		return nil
@@ -946,19 +950,16 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if r.tokens == nil {
 		return errors.New("supervise executor has no GitHub App token manager")
 	}
-	if r.repo.IsZero() {
-		return errors.New("workspace provisioning has no configured repository")
-	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
-	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", r.repo.Owner(), issue.Key, err)
-	}
-	base, err := r.defaultBranch(ctx, r.repo)
+	repo, err := issueRepository(issue)
 	if err != nil {
 		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
 	}
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint the implement App token for %s to provision %s: %w", repo.Owner(), issue.Key, err)
+	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, DefaultBranch: base, CredentialHelper: workspace.GitHubCredentialHelper,
+		StateDir: r.stateDir, Repo: repo, Issue: issue.Key, DefaultBranch: issue.DefaultBranch, CredentialHelper: workspace.GitHubCredentialHelper,
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
 	}); err != nil {
@@ -1027,28 +1028,29 @@ func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload 
 		r.log.Info("outbox issue branch of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key, "tree", issue.Tree)
 		return nil
 	}
-	if err := r.createBranch(ctx, issue.Key); err != nil {
+	if err := r.createBranch(ctx, issue); err != nil {
 		return fmt.Errorf("create the branch of %s, which its roles' starts wait for: %w", issue.Key, err)
 	}
 	return nil
 }
 
-// createBranch creates issue's branch on GitHub at the repository's default branch, as GitHub
-// names it, unless GitHub already has it, as the implement App: the App of the roles that write an
-// issue branch (appauth.AppRoleFor), and the one workspace provisioning clones with.
-func (r *outbox) createBranch(ctx context.Context, issue string) error {
+// createBranch creates issue's branch on GitHub, in the repository its record names, at the
+// default branch the record names, unless GitHub already has it, as the implement App for that
+// repository's owner: the App of the roles that write an issue branch (appauth.AppRoleFor), and
+// the one workspace provisioning clones with.
+func (r *outbox) createBranch(ctx context.Context, issue record.Issue) error {
 	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
 	defer cancel()
-	base, err := r.defaultBranch(ctx, r.repo)
+	repo, err := issueRepository(issue)
 	if err != nil {
 		return err
 	}
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
 	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s: %w", r.repo.Owner(), err)
+		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
-	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue), base)
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repo)}
+	return ghbranch.Create(ctx, github, repo, workspace.Bookmark(issue.Key), issue.DefaultBranch)
 }
 
 // autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
@@ -1060,17 +1062,25 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
 	defer cancel()
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
-	if err != nil {
-		return fmt.Errorf("mint the implement App token for %s: %w", r.repo.Owner(), err)
-	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
-	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
-	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
+	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
 		return err
 	}
-	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "owner", r.repo.Owner(), "number", payload.Number,
+	repo, err := issueRepository(issue)
+	if err != nil {
+		return err
+	}
+	lease, err := r.tokens.Token(ctx, appauth.Implement, repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint the implement App token for %s: %w", repo.Owner(), err)
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
+	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
+	disarmed, err := ghautomerge.Disarm(ctx, github, repo, payload.Number, keep)
+	if err != nil {
+		return err
+	}
+	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "repo", repo.String(), "number", payload.Number,
 		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
 	return nil
 }
@@ -1112,9 +1122,6 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 	if r.podsProvision() {
 		return nil
 	}
-	if r.repo.IsZero() {
-		return errors.New("workspace removal has no configured repository")
-	}
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
 		return err
@@ -1143,7 +1150,11 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 			return wait.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
 		}
 	}
-	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)
+	repo, err := issueRepository(issue)
+	if err != nil {
+		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
+	}
+	working, err := workspace.Location(r.stateDir, repo, row.Issue)
 	if err != nil {
 		return fmt.Errorf("locate workspace for %s: %w", row.Issue, err)
 	}

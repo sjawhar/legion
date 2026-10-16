@@ -9,24 +9,28 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// Every delivery first hands the agent's working copy its role's App identity, so a commit the
-// task makes is authored by the bot rather than by whoever the workspace last named.
+// Every delivery first hands the agent's working copy its role's App identity for the claim's
+// issue, so a commit the task makes is authored by the bot rather than by whoever the workspace
+// last named; a claim whose issue works no repository adopts nothing and still gets the task.
 func TestADeliveryAdoptsTheRoleIdentityBeforeThePrompt(t *testing.T) {
 	bot := runtime.GitIdentity{Name: "legion-implementer[bot]", Email: "7+legion-implementer[bot]@users.noreply.github.com"}
 	for _, tc := range []struct {
-		name    string
-		fail    error
-		prompts int
+		name      string
+		adopt     bool
+		fail      error
+		prompts   int
+		adoptions int
 	}{
-		{"an adopted working copy gets the task", nil, 1},
-		{"a working copy that cannot be adopted does not", errors.New("the working copy is stale"), 0},
+		{"an adopted working copy gets the task", true, nil, 1, 1},
+		{"a working copy that cannot be adopted does not", true, errors.New("the working copy is stale"), 0, 1},
+		{"an issue on no repository adopts nothing and gets the task", false, nil, 1, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
-			var asked []claim.Role
-			h.deps.Identity = func(_ context.Context, role claim.Role) (runtime.GitIdentity, error) {
-				asked = append(asked, role)
-				return bot, nil
+			var asked []string
+			h.deps.Identity = func(_ context.Context, role claim.Role, issue string) (runtime.GitIdentity, bool, error) {
+				asked = append(asked, string(role)+" "+issue)
+				return bot, tc.adopt, nil
 			}
 			h.restart()
 			if tc.fail != nil {
@@ -40,11 +44,11 @@ func TestADeliveryAdoptsTheRoleIdentityBeforeThePrompt(t *testing.T) {
 			h.wantPrompts(tc.prompts)
 
 			adoptions := h.rt.CallsOf("AdoptWorkingCopy")
-			if len(adoptions) != 1 || adoptions[0].Identity != bot {
-				t.Fatalf("adoptions = %+v, want one for %v", adoptions, bot)
+			if len(adoptions) != tc.adoptions || tc.adoptions == 1 && adoptions[0].Identity != bot {
+				t.Fatalf("adoptions = %+v, want %d for %v", adoptions, tc.adoptions, bot)
 			}
-			if len(asked) != 1 {
-				t.Fatalf("identity asked for roles %v, want once for the claim's role", asked)
+			if want := string(h.claim().Role) + " " + h.claim().Issue; len(asked) != 1 || asked[0] != want {
+				t.Fatalf("identity asked for %v, want once for %q, the claim's role and issue", asked, want)
 			}
 		})
 	}
@@ -63,9 +67,9 @@ func controllerClaim() Claim {
 func TestTheControllersTaskReachesItWithNoWorkingCopyAdopted(t *testing.T) {
 	h := newHarnessOf(t, controllerClaim())
 	var asked []claim.Role
-	h.deps.Identity = func(_ context.Context, role claim.Role) (runtime.GitIdentity, error) {
+	h.deps.Identity = func(_ context.Context, role claim.Role, _ string) (runtime.GitIdentity, bool, error) {
 		asked = append(asked, role)
-		return runtime.GitIdentity{}, errors.New("no App for the controller role")
+		return runtime.GitIdentity{}, false, errors.New("no App for the controller role")
 	}
 	h.restart()
 	h.launch()

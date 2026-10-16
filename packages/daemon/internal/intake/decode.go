@@ -289,8 +289,8 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 		return nil, nil, nil
 	}
 	// The payload names the event's repository; the subject's segments cannot, since a name may hold
-	// a dot. Only a configured repository's event is this daemon's, as in the shipped daemon, which
-	// registers a pull request only for its issue's repository (reducers.ts registerPrFenced).
+	// a dot. Only the event of a repository GitHub intake hears (ConsumerSpec.Repositories, as
+	// SetRepositories changes them), named as GitHub names it, is this daemon's.
 	repo, _ := rawString(raw, "repo")
 	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
 	if at < 0 {

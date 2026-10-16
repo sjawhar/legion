@@ -532,7 +532,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories, Linger: time.Hour}, logger)
 	admission := admit.New(records, engine, 2, "LEGION", logger)
 	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st, tokens: outboxTokens{},
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), githubAPI: newBranchGitHub(t, nil, branchExists).url, defaultBranch: mainBranch,
+		stateDir: t.TempDir(), githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: done.Key, Status: "todo"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine, admission}, log: logger, now: func() time.Time { return clock },
 	}

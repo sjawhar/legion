@@ -18,7 +18,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -46,7 +45,7 @@ func TestAnOldTreesCleanupBeforeTheNewTreesStartHandsTheCarriedChildsSandboxOver
 	// a pod, which suspends the Sandbox again; what it wrote is what the assertions read.
 	clock := time.Now()
 	runner := &outbox{pool: f.pool, records: f.records, project: "legion", dispatchProject: "LEGION", supervisor: f.sup, trees: st, tokens: outboxTokens{},
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), githubAPI: newBranchGitHub(t, nil, branchExists).url, defaultBranch: mainBranch,
+		stateDir: t.TempDir(), githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo"}}, notices: &outboxPublisher{},
 		log: f.logger, now: func() time.Time { return clock },
 	}

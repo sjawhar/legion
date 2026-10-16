@@ -391,6 +391,29 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context) ([]ghrepo.Repos
 	return repos, nil
 }
 
+// issueRepository is the repository issue's record names and its recorded default branch: what
+// every launch of the issue's claims works (specs.repository) and the owner its commit identity is
+// minted for (adoptIdentity). An issue the workflow does not record, such as an operator's claim,
+// works no repository: the zero repository and no error.
+func (w *workflowRuntime) issueRepository(ctx context.Context, key string) (ghrepo.Repository, string, error) {
+	var issue *record.Issue
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = w.records.Issue(ctx, tx, key)
+		return err
+	}); err != nil {
+		return ghrepo.Repository{}, "", fmt.Errorf("read the record of %s: %w", key, err)
+	}
+	if issue == nil {
+		return ghrepo.Repository{}, "", nil
+	}
+	repo, err := ghrepo.Parse("the repository of "+key, issue.Repo)
+	if err != nil {
+		return ghrepo.Repository{}, "", err
+	}
+	return repo, issue.DefaultBranch, nil
+}
+
 // prepareRepository readies, before a Dispatch issue event in todo is applied, what the workflow
 // reads in memory when it records the issue (ResolveRepository): a left-out repository's Apps are
 // checked again when an issue on it comes up for admission (handed to Legion, or a child of a

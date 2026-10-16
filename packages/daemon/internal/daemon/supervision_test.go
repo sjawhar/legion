@@ -146,8 +146,9 @@ func TestRunBuildsTheRuntimeOverTheWorkerStream(t *testing.T) {
 
 // Every launch the daemon asks for carries what a pane needs and the claim does not: the role
 // prompt the operator gave, the claim's addressing, the operator's deployment instructions as
-// boot wrote them, the Envoy bearer as a secret, and the configured repository — none here, so the
-// runtime makes the issue's own directory its workspace.
+// boot wrote them, the Envoy bearer as a secret, and the repository the issue's record names —
+// none here, a daemon with no workflow, so the runtime makes the issue's own directory its
+// workspace.
 func TestRunLaunchesWithThePromptInstructionsAndSecretsItWasGiven(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.InstructionsPath = filepath.Join(t.TempDir(), "instructions.md")
