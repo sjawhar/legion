@@ -1330,6 +1330,17 @@ function progressText(progress: IssueProgress | undefined, sep: string): string 
   return parts.join(sep);
 }
 
+/** Which repository the issue targets and where it came from: its own, or resolved through its
+ *  parent chain and the project's default mapping. */
+function repositoryLine(issue: {
+  readonly repo: string | null;
+  readonly resolved_repo: string | null;
+}): string {
+  if (issue.resolved_repo === null) return "Repository: none";
+  if (issue.repo !== null) return `Repository: ${issue.repo} (own)`;
+  return `Repository: ${issue.resolved_repo} (inherited or project default)`;
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1344,6 +1355,7 @@ function issueSummary(
   if (issue.assignee === undefined) throw new Error("Dispatch issue is missing assignee");
   if (issue.components === undefined) throw new Error("Dispatch issue is missing components");
   if (issue.claim === undefined) throw new Error("Dispatch issue is missing claim");
+  if (issue.resolved_repo === undefined) throw new Error("Dispatch issue is missing resolved_repo");
   if (issue.external_links === undefined) {
     throw new Error("Dispatch issue is missing external_links");
   }
@@ -1357,6 +1369,7 @@ function issueSummary(
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, titles)}`,
+    repositoryLine(issue),
     `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
       ? []
@@ -2272,6 +2285,7 @@ export async function executeDispatchTool(
       const priority = optionalPriority(args, "priority");
       const assignee = optionalString(args, "assignee");
       const components = optionalComponents(args, "components");
+      const repo = optionalString(args, "repo");
       const labels = args.labels;
       const blockedBy = args.blocked_by;
       try {
@@ -2286,6 +2300,7 @@ export async function executeDispatchTool(
           ...(priority === undefined ? {} : { priority }),
           ...(assignee === undefined ? {} : { assignee }),
           ...(components === undefined ? {} : { components }),
+          ...(repo === undefined ? {} : { repo }),
           ...(Array.isArray(labels) ? { labels: labels as string[] } : {}),
           actor,
         });
@@ -2337,6 +2352,7 @@ export async function executeDispatchTool(
       const route = optionalString(args, "route");
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
+      const repo = optionalString(args, "repo");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const blockedBy = Array.isArray(args.blocked_by) ? (args.blocked_by as string[]) : undefined;
@@ -2384,6 +2400,7 @@ export async function executeDispatchTool(
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
           ...(blockedBy === undefined ? {} : { blocked_by: blockedBy }),
           ...(components === undefined ? {} : { components }),
+          ...(repo === undefined ? {} : { repo: repo === "" ? null : repo }),
           ...(requestedLinks === undefined
             ? {}
             : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
@@ -2446,6 +2463,13 @@ export async function executeDispatchTool(
                 : `blocked by ${after.blocked_by.join(", ")}`,
             ]),
         ...(components === undefined ? [] : [componentsChange(components, after.components)]),
+        ...(repo === undefined
+          ? []
+          : [
+              after.repo === null
+                ? `repo cleared (resolves to ${after.resolved_repo ?? "none"})`
+                : `repo -> ${after.repo}`,
+            ]),
       ];
       const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
         setsStatus: status !== undefined,
