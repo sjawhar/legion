@@ -808,7 +808,7 @@ func (s *shim) prompt() shimwire.Prompt {
 func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	tokens := &workflowTokenRecorder{}
-	var logged bytes.Buffer
+	var logged syncBuffer
 	logger := slog.New(slog.NewJSONHandler(&logged, nil))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
