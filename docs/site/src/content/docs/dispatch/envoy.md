@@ -1,12 +1,12 @@
 ---
 title: "Envoy: how events reach Dispatch, Legion and the agents"
-description: The Envoy listener and NATS under it, how GitHub webhooks and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
+description: The Envoy listener and NATS under it, how GitHub webhooks, Slack mentions and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
 sidebar:
   label: Envoy
   order: 9
 ---
 
-Envoy carries events between GitHub, Dispatch, Legion, and agent sessions. It has two parts:
+Envoy carries events between GitHub, Slack, Dispatch, Legion, and agent sessions. It has two parts:
 
 - **NATS JetStream** holds the events. Every event is a message on a subject under
   `notifications.`, kept for 72 hours in the `ENVOY_NOTIFICATIONS` stream. Envoy also keeps its
@@ -45,6 +45,27 @@ notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is
 `notifications.github.acme.site_io`. A redelivered webhook is recognised and stored once.
 
+## How Slack mentions arrive
+
+A Slack app sends its events to the listener's public route `/webhook/slack`, which the listener
+mounts when `ENVOY_WEBHOOKS` lists `slack`. Set the app's Event Subscriptions request URL to it, for
+example `https://envoy.internal.example/webhook/slack`, and subscribe it to the `app_mention` bot
+event (its `app_mentions:read` scope). The listener answers Slack's `url_verification` challenge,
+and checks every other delivery's signature against `ENVOY_SLACK_SIGNING_SECRET`, the app's
+signing secret, answering `401` to one that does not match.
+
+A mention of the app is published under the Slack team's and channel's ids, and a mention inside a
+thread a second time under the thread's root, its timestamp's dot written `_`:
+
+```text
+notifications.slack.<team>.<channel>.mention                  every mention in the channel
+notifications.slack.<team>.<channel>.thread.<root ts>.mention  a mention inside that thread
+```
+
+Its payload carries `channel_id`, `user_id`, `text`, `ts`, `thread_ts` (inside a thread) and
+`bot_id` (when a bot posted it). A Legion project's controller subscribes to
+`notifications.slack.*.<channel>.mention` for each channel its project's `slack_channels` names.
+
 ## How Dispatch's events arrive
 
 Dispatch publishes every change it records to NATS itself, under the thing it belongs to:
@@ -77,6 +98,7 @@ side.
 | `notifications.dispatch.issue.<KEY>.>` | Every event of one Dispatch issue. |
 | `notifications.github.<owner>.<repo>.pr.<n>.>` | Every event of one pull request. |
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
+| `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
@@ -133,9 +155,10 @@ The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image.
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | Required with `github`: the webhook secret. |
 | `ENVOY_REVIEWER_APP_ID` | Required with `github`: the id of the GitHub App that posts reviews. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | The mention that publishes a `.mention` event. Defaults to `@legion`. |
+| `ENVOY_SLACK_SIGNING_SECRET` | Required with `slack`: the Slack app's signing secret. |
 
 A listener on anything but loopback refuses to start without `ENVOY_API_TOKEN` or the OIDC pair.
-Keep the API private: only `/webhook/...` needs to be reachable from GitHub.
+Keep the API private: only `/webhook/...` needs to be reachable from GitHub and Slack.
 
 ### With Pulumi
 

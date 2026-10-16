@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - A session reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707): an Oh My Pi
   profile's `$PI_CODING_AGENT_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and

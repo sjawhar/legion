@@ -1456,10 +1456,10 @@ carries none. Each row's check, and the fact a passing one reports:
   `.claude/skills/*/SKILL.md` the workspace carries is among what Oh My Pi discovers —
   `discovered: <paths>`, or `the repository carries no .omp/extensions, .omp/skills or
   .claude/skills`.
-- `dispatch-envoy-tools`: the ten `envoy_*` tools are registered and `dispatch read --issue
-  <issue>` answers, which is why the row's summary reads "reaches Dispatch through the `dispatch`
-  command and Envoy through the pi-envoy tools" — `ten Envoy tools registered; dispatch read
-  <issue> answered from <path>`.
+- `dispatch-envoy-tools`: the eleven Envoy tools (the ten `envoy_*` tools and `slack_post`) are
+  registered and `dispatch read --issue <issue>` answers, which is why the row's summary reads
+  "reaches Dispatch through the `dispatch` command and Envoy through the pi-envoy tools" — `11
+  Envoy tools registered; dispatch read <issue> answered from <path>`.
 - `github`: `gh api graphql -f query='{ viewer { login } }'` answers the role's App login under the
   role's token file (REST `GET /user` is not a call an App installation token may make, so the row
   never reads it) — `gh viewer login: <login>`.
@@ -3008,8 +3008,9 @@ agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
 (`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
-prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line and the
-deployment instructions. Both its containers, the init container and the launcher, carry the
+prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, with the
+project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
+instructions. Both its containers, the init container and the launcher, carry the
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
 the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike, so the pod is
 `Guaranteed`, never the class the kubelet evicts first under node memory pressure; the image probe
@@ -3172,7 +3173,8 @@ keeping nothing until the daemon has answered, the command:
    does;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
-   and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
+   and `Slack channels:` line (from the secret's answer: `designGate` and `slackChannels`) and the
+   deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion
    extension sends it as the session's first turn right after its role claim succeeds and before

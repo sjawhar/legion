@@ -77,7 +77,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@s
 ```yaml
 projects:
   LEGION: { repo: sjawhar/legion }
-  WIDGETS: { repo: acme/widgets, merge_queue_role: merge-queue }
+  WIDGETS: { repo: acme/widgets, merge_queue_role: merge-queue, slack_channels: [C00000000] }
 ```
 
 ## Version Control

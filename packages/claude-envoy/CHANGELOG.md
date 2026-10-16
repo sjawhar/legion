@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `dispatch issue` prints the new issue's dashboard link on its `Created` line.
 - The `dispatch` command's approval texts, and the `dispatch` skill this plugin ships, state the
   carried approval (LEGION-573): a human's own answer to a decision block carries their approval
   to the version it writes when that answer is the whole change since the version they approved,

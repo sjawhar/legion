@@ -7,6 +7,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 26 (sjawhar/legion#1998): `POST /legion/v1/controller/secret` answers the
+  project's `slackChannels`, and both controllers, the one `legion controller start` launches and
+  the one the daemon launches under `controller: daemon`, are told each channel and its mention
+  topic. The controller skill subscribes to them at every start and answers each mention in its
+  thread with `slack_post` (`references/slack-mentions.md`). Install this release's pair with a
+  daemon at 26.
+- The `dispatch-envoy-tools` capability row expects `slack_post` among the Envoy tools, eleven in
+  all.
 - Every root architect's and phase worker's session measures six live capabilities as it boots
   and reports them with `POST /legion/v1/claims/ready` (`capabilities`, contract 21, LEGION-663),
   which the daemon renders in `legion state`: `subagents` (`pi.agents` exposed, `task` registered,
