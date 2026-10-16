@@ -78,8 +78,8 @@ func githubReadFailed(err error) *refusal {
 // alone (unreviewedChange): READY is refused when the issue's review round recorded no approval,
 // and when GitHub's compare of the approved head with READY's head shows anything above it but
 // retro's learnings under docs/solutions/ and its removal of .legion/<issue>/, since no review
-// approved that change. The merger's prompt has it check the same; this holds a merger that skips
-// that step, and a READY a person merges, to it too.
+// approved that change. Nothing else holds those commits to retro's: the merger only quotes them,
+// and a READY a person merges is held to it too.
 func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead, approvedHead string, pr *record.PullRequest, disarmPending bool) (readyAnswer, *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return readyAnswer{}, &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}

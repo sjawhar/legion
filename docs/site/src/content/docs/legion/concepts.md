@@ -216,10 +216,10 @@ Legion uses GitHub's own review mechanisms rather than labels:
 
 ## READY and the merge
 
-When the reviewer has approved and retro is done, the merger checks that the pull request's head is
-the approved one (plus only retro's notes), that every check the base branch requires has passed,
-and that every workflow its rulesets require has a run on the head that succeeded.
-It then sends **READY**, which the daemon posts on the Dispatch issue as one message:
+When the reviewer has approved and retro is done, the merger sends **READY**. The daemon accepts
+it only when the pull request's head is the approved one plus only retro's notes, every check the
+base branch requires has passed, and every workflow its rulesets require has a run on the head that
+succeeded. It posts the READY on the Dispatch issue as one message:
 
 ```text
 READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pull request url>)

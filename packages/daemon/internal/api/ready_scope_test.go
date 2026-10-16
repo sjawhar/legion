@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -171,6 +172,33 @@ func TestHandoffCompleteReadyHoldsAByHandPullRequestToItsApprovedHead(t *testing
 	code, body := ready(t, h, merger)
 	if code != http.StatusConflict || !strings.HasPrefix(body, "READY_UNREVIEWED_CHANGE: ") || !strings.Contains(body, "migrations/versions/0002_more.py") {
 		t.Fatalf("a by-hand READY above an unreviewed change = %d %q", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none", got)
+	}
+}
+
+// READY compares the approved head with the head GitHub shows, which READY's commit names, never
+// the head the record holds: the record follows GitHub only by webhook, so it can still hold an
+// earlier, retro-only push while GitHub's head already carries a product change above it. Comparing
+// the recorded head would read retro's learnings alone and accept a change no review approved.
+func TestHandoffCompleteReadyComparesGitHubsHeadNotALaggingRecord(t *testing.T) {
+	const retroOnly = "e7200000000000000000000000000000000000ff"
+	recordedAt, githubAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC), time.Date(2026, 10, 12, 10, 5, 0, 0, time.UTC)
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) {
+		g.pullUpdatedAt = githubAt
+		g.compare = `{"status":"ahead","files":[{"filename":"docs/solutions/legion/retro-LEGION-208.md","status":"added"},{"filename":"src/main.go","status":"modified"}]}`
+		g.compareAnswers = map[string]string{approvedSHA + "..." + retroOnly: retroCompare}
+	})
+	h, facts, merger := newReadyHarness(t, github)
+	seedPullRequestAt(t, h, "LEGION-208", retroOnly, recordedAt)
+	code, body := ready(t, h, merger)
+	if code != http.StatusConflict || !strings.HasPrefix(body, "READY_UNREVIEWED_CHANGE: ") || !strings.Contains(body, "src/main.go") {
+		t.Fatalf("READY while the record lags at a retro-only head = %d %q; want READY_UNREVIEWED_CHANGE naming src/main.go", code, body)
+	}
+	if got := github.compares(); len(got) != 1 || got[0] != approvedSHA+"..."+headSHA {
+		t.Fatalf("READY compared %v, want GitHub's head %s, not the record's %s", got, headSHA, retroOnly)
 	}
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("handoff facts = %#v, want none", got)

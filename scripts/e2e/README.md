@@ -49,9 +49,10 @@ It records the issue at `merging` with the pull request at the head and the revi
 approval of the approved sha, posts the merger's READY through the real route, and runs the check
 itself (`unreviewedChange`) on the same two heads with the implement App's token, since READY
 publishes a pull request already merged without reading it. With `LEGION_READY_SCOPE_REFUSE` set,
-both must be refused `READY_UNREVIEWED_CHANGE` naming that path; unset, neither may be refused for
-the change above the approved head (READY may still be refused for a required check). It only
-reads GitHub; the pull request and its two heads are the operator's to make and close.
+both must be refused `READY_UNREVIEWED_CHANGE` naming that path. Unset, the check must pass, and
+READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a
+conflict, a by-hand file list or a required check. It only reads GitHub; the pull request and its
+two heads are the operator's to make and close.
 
 
 ## stage1-skeleton.sh

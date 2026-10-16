@@ -81,12 +81,14 @@ type handoffGitHub struct {
 	bearers      []string
 	// contentsRead is each path read through the contents API, as path@ref.
 	contentsRead []string
-	// compare is GitHub's answer to READY's compare of the round's approved head with the pull
-	// request's head, with compareStatus when that is not 0; compareRead is each basehead
-	// (<base>...<head>) READY asked it for.
-	compare       string
-	compareStatus int
-	compareRead   []string
+	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
+	// head, with compareStatus when that is not 0; compareAnswers holds the answer to any other
+	// basehead (<base>...<head>), and one in neither is GitHub's 404; compareRead is each basehead
+	// READY asked it for.
+	compare        string
+	compareStatus  int
+	compareAnswers map[string]string
+	compareRead    []string
 }
 
 func newHandoffGitHub(t *testing.T) *handoffGitHub {
@@ -162,11 +164,20 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			}
 			_, _ = io.WriteString(w, "["+strings.Join(listing, ",")+"]")
 		case strings.HasPrefix(path, "compare/"):
-			g.compareRead = append(g.compareRead, strings.TrimPrefix(path, "compare/"))
-			if g.compareStatus != 0 {
-				w.WriteHeader(g.compareStatus)
+			basehead := strings.TrimPrefix(path, "compare/")
+			g.compareRead = append(g.compareRead, basehead)
+			answer, known := g.compareAnswers[basehead]
+			if basehead == approvedSHA+"..."+g.pullHead {
+				answer, known = g.compare, true
+				if g.compareStatus != 0 {
+					w.WriteHeader(g.compareStatus)
+				}
 			}
-			_, _ = io.WriteString(w, g.compare)
+			if !known {
+				notFound(w, "Not Found")
+				return
+			}
+			_, _ = io.WriteString(w, answer)
 		default:
 			http.NotFound(w, r)
 		}

@@ -87,13 +87,17 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 	}
 	t.Logf("READY of %s#%d at %s, approved at %s: %d %s %q note %q (%s)", repository, number, head, approved,
 		recorder.Code, failure.Code, failure.Error, answer.Note, time.Since(started).Round(time.Millisecond))
+	// READY's refusals that only a head past its scope check can get: the handoffs, the conflict,
+	// the by-hand file list and the required checks. Any other refusal ends READY before the check,
+	// or is the check's own, so it proves nothing about the head's change above the approved one.
+	afterScope := map[string]bool{"READY_HEAD_CARRIES_HANDOFFS": true, "READY_HEAD_CONFLICTS": true, "READY_FILES_TRUNCATED": true, "READY_CHECKS_NOT_GREEN": true}
 	switch {
 	case refuse != "":
 		if failure.Code != "READY_UNREVIEWED_CHANGE" || !strings.Contains(failure.Error, refuse) {
 			t.Fatalf("READY = %d %s %q; want READY_UNREVIEWED_CHANGE naming %s", recorder.Code, failure.Code, failure.Error, refuse)
 		}
-	case failure.Code == "READY_UNREVIEWED_CHANGE" || failure.Code == "READY_NOT_APPROVED" || failure.Code == "GITHUB_READ_FAILED":
-		t.Fatalf("READY = %d %s %q; want it not refused for its change above the approved head", recorder.Code, failure.Code, failure.Error)
+	case recorder.Code != http.StatusOK && !afterScope[failure.Code]:
+		t.Fatalf("READY = %d %s %q; want it accepted, or refused only by a check after its scope check", recorder.Code, failure.Code, failure.Error)
 	}
 
 	lease, err := tokens.Token(h.ctx, appauth.Implement, repository.Owner())
