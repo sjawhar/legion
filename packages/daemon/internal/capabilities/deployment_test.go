@@ -50,9 +50,6 @@ func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 			t.Errorf("row %d is %s, want %s: the table's order", i, state.Name, row.Name)
 		}
 		want := map[Site]string{SiteImage: StatusPresent, SiteLive: StatusUnchecked, SiteDeployment: StatusPresent, SiteWithheld: StatusWithheld}[row.Site]
-		if row.Awaits != "" {
-			want = StatusInstalled
-		}
 		if state.Status != want {
 			t.Errorf("%s: status %q, want %q", row.Name, state.Status, want)
 		}
@@ -62,7 +59,7 @@ func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 		if row.Site == SiteLive && state.Detail != "no session has reported yet ("+row.Ruling+"): "+row.Summary {
 			t.Errorf("%s: detail %q, want no session reported, the ruling, the summary", row.Name, state.Detail)
 		}
-		if row.Site == SiteImage && row.Awaits == "" && state.Detail != "checked by the daemon's probe of the worker image, which passed" {
+		if row.Site == SiteImage && state.Detail != "checked by the daemon's probe of the worker image, which passed" {
 			t.Errorf("%s: detail %q, want the probe named", row.Name, state.Detail)
 		}
 		if state.Decision != "" || state.ConfigLine != "" {
@@ -322,6 +319,7 @@ func TestLogWarnsOfAnOpenLiveRow(t *testing.T) {
 		`capability=web-search`,
 		`detail="pod legion-omp-legion-663/implementer (implementer, LEGION-663): web_search is not among the active tools"`,
 		`configLine=""`,
+		`source=""`,
 	} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("the warning lacks %s:\n%s", want, lines[0])
@@ -377,6 +375,7 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 		{"fallback on", satisfied, ModelFallback, StatusPresent, "retry.modelFallback is true under the pod's Oh My Pi settings (read by the probe)"},
 		{"fallback off", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff}, ModelFallback, StatusOpen, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
 		{"fallback unread", Deployment{Runtime: "kubernetes"}, ModelFallback, StatusOpen, "not read: no probe has reported retry.modelFallback"},
+		{"fallback probe could not read it", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackUnread}, ModelFallback, StatusOpen, "not read: the probe could not read retry.modelFallback under the pod's Oh My Pi settings (the probe pod's log says why)"},
 		{"fallback off on the host", Deployment{Runtime: "tmux", ModelFallback: bootprobe.ModelFallbackOff}, ModelFallback, StatusOpen, "retry.modelFallback is false under the host's Oh My Pi settings (read by the plugin gate)"},
 		{"fallback unread on the host", Deployment{Runtime: "tmux"}, ModelFallback, StatusOpen, "not read: the plugin gate could not read retry.modelFallback"},
 		{"a decided fallback gap", Deployment{Runtime: "kubernetes", ModelFallback: bootprobe.ModelFallbackOff, Decided: decided}, ModelFallback, StatusDecided, "retry.modelFallback is false under the pod's Oh My Pi settings (read by the probe)"},
@@ -433,6 +432,7 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 		`capability=resource-limits`,
 		`detail="roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester"`,
 		`configLine="capabilities.decided.resource-limits: \"<reason>\""`,
+		`source=configuration`,
 	} {
 		if !strings.Contains(lines[0], want) {
 			t.Errorf("the warning lacks %s:\n%s", want, lines[0])
@@ -461,7 +461,10 @@ func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
 		{"no broker, every role reserved", Deployment{Runtime: "kubernetes"}, []Name{Secrets}},
 		{"a broker whose login is not issued, a role lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, RolesWithoutResources: lacking}, []Name{ResourceLimits}},
 		{"a broker whose login is not issued, every role reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
+		{"a broker login failed", Deployment{Runtime: "kubernetes", AgentSecrets: true, SecretsLogin: "failed"}, nil},
 		{"fallback off alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackOff}, nil},
+		{"fallback unread alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackUnread}, nil},
+		{"fallback never read alone", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
 		{"a probe that waited on capacity alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, Probed: true, ProbeCapacityWaits: 1, ProbeCapacityReason: "the pool is full"}, nil},
 		{"tmux", Deployment{Runtime: "tmux"}, []Name{Secrets, ResourceLimits}},
 		{"tmux, both decided", Deployment{Runtime: "tmux", Decided: map[Name]string{Secrets: "later", ResourceLimits: "one tree per node"}}, nil},
@@ -471,6 +474,9 @@ func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
 			var names []Name
 			for _, state := range got {
 				names = append(names, state.Name)
+				if state.Source != SourceConfiguration {
+					t.Errorf("%s: Source = %q, want %q: OpenFromConfiguration names only the configuration's own gaps", state.Name, state.Source, SourceConfiguration)
+				}
 			}
 			if !slices.Equal(names, tc.want) {
 				t.Fatalf("OpenFromConfiguration() names %v, want %v", names, tc.want)
@@ -481,16 +487,22 @@ func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
 					t.Errorf("%s = %+v, want Report's %+v", state.Name, state, want)
 				}
 			}
+			// Every open row the check leaves out is boot's to measure, and says so.
+			for _, state := range tc.deployment.openStates() {
+				if !slices.Contains(names, state.Name) && state.Source != SourceBoot {
+					t.Errorf("%s is open with Source %q and left out, want %q on every open row the check leaves out", state.Name, state.Source, SourceBoot)
+				}
+			}
 		})
 	}
 }
 
-// Every deployment row of Table has a measurement: a row added to the table without one would
-// read as open with no detail.
+// Every deployment row of Table has a measurement, with a non-empty Source: a row added to the
+// table without one would read as open with no detail and no source.
 func TestEveryDeploymentRowIsMeasured(t *testing.T) {
 	for _, name := range Decidable() {
-		if _, detail := (Deployment{Runtime: "kubernetes"}).measure(name); detail == "" || strings.HasPrefix(detail, "no measurement") {
-			t.Errorf("deployment row %s has no measurement (%q)", name, detail)
+		if _, source, detail := (Deployment{Runtime: "kubernetes"}).measure(name); detail == "" || strings.HasPrefix(detail, "no measurement") || source == "" {
+			t.Errorf("deployment row %s has no measurement (%q, source %q)", name, detail, source)
 		}
 	}
 }

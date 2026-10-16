@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -212,9 +213,9 @@ func New(opts Options) (*Runtime, error) {
 			return nil, err
 		}
 	}
-	tmuxPath, err := lookPath("tmux", paneEnv["PATH"])
-	if err != nil {
-		return nil, err
+	tmuxPath, ok := lookpath.On(paneEnv["PATH"], "tmux")
+	if !ok {
+		return nil, fmt.Errorf("tmux runtime: tmux is not on the daemon's PATH (%s)", paneEnv["PATH"])
 	}
 	r := &Runtime{
 		socket:           "legion-" + opts.Project,
@@ -258,20 +259,6 @@ func New(opts Options) (*Runtime, error) {
 	sort.Strings(r.environ)
 	r.run = r.runTmux
 	return r, nil
-}
-
-// lookPath finds command on searchPath, the PATH the panes run under.
-func lookPath(command, searchPath string) (string, error) {
-	for _, dir := range filepath.SplitList(searchPath) {
-		if dir == "" {
-			continue
-		}
-		candidate := filepath.Join(dir, command)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0 {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("tmux runtime: %s is not on the daemon's PATH (%s)", command, searchPath)
 }
 
 // Socket is the private server's socket and session name, `legion-<project>`.

@@ -41,15 +41,38 @@ def tool_result_quote($lead; $max):
 # note to quote.
 def tool_result_texts(name): [tool_results(name)[] | select(.isError == false) | .text];
 
+# arguments_carry(name; $args) is whether one of tool_results' entries answers a call whose
+# arguments carry $args, judged on the argument that carries the call's target and never on the
+# model's `i` intent, which Oh My Pi puts in every tool's arguments (an intent naming a command the
+# call never ran, or naming skill://<name> on a read of the skill's file path, must not satisfy a
+# bound assertion): bash is bound on its command, read on its path, and every other tool on its
+# arguments object with `i` removed, as JSON text (the hover among lsp's results by its action and
+# file in the device's content; NoSuchSymbol in a codegraph call; an edit's `input`, which carries
+# the file's path and the ops, since Oh My Pi's edit has no path argument). A write's stored
+# arguments are its content (call_arguments reads every write as a possible device write), which
+# carries no `i`, so for a tool called through xd://<name> the object matched is the content itself,
+# unchanged. A bash call dispatched through eval (call_arguments is {} for eval, omp-tool-calls.jq)
+# or through a write to xd://bash whose content is no JSON object (call_arguments is {} then too)
+# has no command, so a bound bash assertion does not see it, while tool_result_said("bash"; …),
+# whose $args is "", still counts every bash call, since "" is in every string. Arguments that are
+# no JSON text, or no object, are read as {} the same way, so one odd call never aborts the program.
+def arguments_carry(name; $args):
+  (.arguments | fromjson? // {} | if type == "object" then . else {} end)
+  | (if name == "bash" then .command elif name == "read" then .path else del(.i) | tojson end) // ""
+  | tostring | contains($args);
+
 # tool_ran(name) is whether one call of the tool returned without error.
 def tool_ran(name): any(tool_results(name)[]; .isError == false);
 
 # tool_result_answered(name; $args; $text) is whether one call of the tool whose arguments carry
-# $args returned without error with $text in its text, literally and case-sensitively: the hover of
-# one file among a tool's hovers, the read of one skill:// among its reads.
+# $args (arguments_carry: the command for bash, the path for read, the arguments object without
+# the intent for every other tool) returned without error with $text in its text, literally and
+# case-sensitively: the hover of one file among a tool's hovers, the read of one skill:// among its
+# reads.
 def tool_result_answered(name; $args; $text):
-  any(tool_results(name)[]; .isError == false and (.arguments | contains($args)) and (.text | contains($text)));
+  any(tool_results(name)[]; .isError == false and arguments_carry(name; $args) and (.text | contains($text)));
 
 # tool_result_said(name; $text) is tool_result_answered for every call of the tool, whatever its
-# arguments: they are always JSON text, and every string contains "".
+# arguments: "" is in every command and every JSON text, so it still counts every call of the tool,
+# the eval-dispatched and device-written bash calls included.
 def tool_result_said(name; $text): tool_result_answered(name; ""; $text);

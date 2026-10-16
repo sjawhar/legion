@@ -296,7 +296,7 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the
 // line carries it, on the table the pod printed before it.
 func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
-	for _, mark := range []string{"off", "on"} {
+	for _, mark := range []string{"off", "on", bootprobe.ModelFallbackUnread} {
 		t.Run(mark, func(t *testing.T) {
 			g := newProbeRig(t, nil)
 			g.succeeds("probe-image: capability eval-js: present (Oh My Pi is its JavaScript runtime, and the launch probes ran it)\n" +
@@ -771,6 +771,85 @@ func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
 	})
 }
 
+// The capacity stop (stuck) only fires once a probe pod's Unschedulable age passes the boot
+// timeout, and an attempt only sees that if its own budget outlives the real wall-clock time that
+// takes — the race LEGION-636 found: a deployment whose worker_boot_timeout_seconds reached
+// slow_command_timeout_seconds gave every attempt's budget no room to see it, so the daemon's six
+// attempts all timed out "still Pending" instead. Each case starts a pod Unschedulable from its
+// creation (age 0) and, after a real delay standing in for the boot timeout's wall-clock cost,
+// jumps the rig's clock once and nudges the pod so the attempt's wait notices without waiting on
+// the recheck interval; a budget shorter than that delay can never observe the jump.
+func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing.T) {
+	const bootTimeout = 600 * time.Millisecond
+	ageOutAfter := func(t *testing.T, g *probeRig, delay time.Duration) {
+		t.Helper()
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		go func() {
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+			g.advance(bootTimeout + time.Second)
+			if pod := g.pod(probeSandboxName); pod != nil {
+				g.update(pod, func(*corev1.Pod) {})
+			}
+		}()
+	}
+
+	t.Run("a budget that outlives the boot timeout ends the attempt waiting on capacity", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged); o.BootTimeout = bootTimeout }))
+		g.with(func() { g.log = okLine(3) + "\n" })
+		var pods atomic.Int32
+		g.finishes(func(p *corev1.Pod) {
+			if pods.Add(1) == 1 {
+				unschedulable(0)(p)
+				return
+			}
+			p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+			}}}
+		})
+		ageOutAfter(t, g, bootTimeout)
+		p := probeOptions(t)
+		p.Budget = bootTimeout + time.Second // ProbeBudget's shape: the boot timeout plus a margin that outlasts the rig's recheckInterval.
+		p.Retry.Attempts = 1
+
+		report, err := g.r.ProbeImage(g.ctx, p)
+
+		if err != nil {
+			t.Fatalf("ProbeImage = %v, want the pass after one capacity wait", err)
+		}
+		if report.CapacityWaits != 1 {
+			t.Errorf("report = %d capacity waits, want 1", report.CapacityWaits)
+		}
+		if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 1 {
+			t.Errorf("logged %d capacity waits, want 1:\n%s", got, logged.String())
+		}
+	})
+
+	t.Run("a budget below the boot timeout never sees the capacity wait", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged); o.BootTimeout = bootTimeout }))
+		g.finishes(unschedulable(0))
+		// The pod ages out exactly as above, but the one attempt's budget has run out by then.
+		ageOutAfter(t, g, bootTimeout)
+		p := probeOptions(t)
+		p.Budget = 300 * time.Millisecond // slow_command_timeout_seconds's old shape: below the boot timeout.
+		p.Retry.Attempts = 1
+
+		err := g.probe(p)
+
+		wantContains(t, err, "the worker image probe never completed within its retry budget (1 attempts)",
+			"probe pod "+probeSandboxName+" still Pending after 300ms")
+		if strings.Contains(logged.String(), "waiting on capacity") {
+			t.Errorf("a budget below the boot timeout read a capacity wait it never had time to see:\n%s", logged.String())
+		}
+	})
+}
+
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
 // with provider keys configured it exports the providers Secret's keys as the worker's shim does.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
@@ -874,3 +953,81 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 
 // slogTo is a logger that records everything the runtime says into w.
 func slogTo(w io.Writer) *slog.Logger { return slog.New(slog.NewTextHandler(w, nil)) }
+
+// TestLastBytesKeepsTheEndOfTheTail: the probe log tail is kept from its end, not its start, so a
+// log whose OK line falls after lines longer than the keep bound still ends on that line.
+func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
+	const keep = 64 << 10
+	line := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for range 99 {
+		log.WriteString(line)
+		log.WriteByte('\n')
+	}
+	ok := okLine(3)
+	log.WriteString(ok)
+	log.WriteByte('\n')
+	full := log.String()
+
+	t.Run("keeps the end, dropping the partial first line", func(t *testing.T) {
+		got, err := lastBytes(strings.NewReader(full), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if !strings.HasSuffix(got, ok+"\n") {
+			t.Fatalf("lastBytes result does not end with the OK line: %q", got)
+		}
+		if want := keep + len("…\n"); len(got) > want {
+			t.Fatalf("len(lastBytes result) = %d, want at most %d", len(got), want)
+		}
+		if !strings.HasPrefix(got, "…\n") {
+			t.Fatalf("lastBytes result does not start with …\\n: %q", got)
+		}
+		rest := strings.TrimPrefix(got, "…\n")
+		cut := len(full) - len(rest)
+		if cut == 0 || full[cut-1] != '\n' {
+			t.Fatalf("lastBytes kept a partial first line: cut at %d, preceding byte %q", cut, full[cut-1])
+		}
+	})
+
+	t.Run("a stream shorter than keep comes back unchanged", func(t *testing.T) {
+		short := "a short log\n"
+		got, err := lastBytes(strings.NewReader(short), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if got != short {
+			t.Fatalf("lastBytes = %q, want %q unchanged", got, short)
+		}
+	})
+
+	t.Run("a stream exactly keep long comes back unchanged", func(t *testing.T) {
+		exact := strings.Repeat("y", keep)
+		got, err := lastBytes(strings.NewReader(exact), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if got != exact {
+			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
+		}
+	})
+}
+
+// A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps
+// its tail from the end, so the OK line is read however much came before it.
+func TestProbeImagePassesOnALongLogWithTheOKLineLast(t *testing.T) {
+	g := newProbeRig(t, nil)
+	line := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for range 99 {
+		log.WriteString(line)
+		log.WriteByte('\n')
+	}
+	log.WriteString(okLine(3))
+	log.WriteByte('\n')
+	g.succeeds(log.String())
+
+	if _, err := g.r.ProbeImage(g.ctx, probeOptions(t)); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass: the OK line was there to read", err)
+	}
+}

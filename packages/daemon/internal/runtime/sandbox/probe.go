@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -46,11 +47,21 @@ const (
 	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so
 	// the TypeScript probe's 50 (LOG_TAIL_LINES, worker-image-probe.ts:59) would leave a refused
 	// image's own messages, printed before the table, out of the tail the refusal quotes. The
-	// read's 64 KiB bound (probeLog) keeps the OK line, the tail's last line, in reach: a
-	// capability line is its prefix, the row's own words, and a command's quoted output cut at 300
-	// characters (capabilities.maxDetail), about 500 bytes at the longest, so a hundred such
-	// lines stay near 50 KiB, and a passing pod prints about twenty.
+	// tail probeLog keeps (probeLogBytes) is kept from its end (lastBytes), so the OK line, the
+	// tail's last line, is in reach whatever a line's length: a capability line is its prefix,
+	// the row's own words, and a command's quoted output cut at 300 characters
+	// (capabilities.maxDetail), about 500 bytes at the longest, so a hundred such lines stay near
+	// 50 KiB, and a passing pod prints about twenty. PodLogOptions.LimitBytes is not used for the
+	// bound: it counts from the start of the returned tail too, the same cutoff lastBytes avoids.
 	probeLogLines = 100
+	// probeLogReadBytes is the most probeLog reads from the API: 100 lines of up to 10 KiB apiece,
+	// comfortably past what probeLogLines ever holds, bounding the read whatever a line's length
+	// turned out to be (io.LimitReader on the stream).
+	probeLogReadBytes = 1 << 20
+	// probeLogBytes is what probeLog keeps of that read, and what a refusal quotes: the last
+	// probeLogBytes of the tail (lastBytes), so a long line early in the tail never pushes the OK
+	// line, the tail's last line, out of reach.
+	probeLogBytes = 64 << 10
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
 	// save (worker-image-probe.ts:144).
 	probeTerminationGrace = 5
@@ -68,9 +79,12 @@ type ImageProbe struct {
 	// Contract is the daemon API contract the image's plugin must declare: the daemon's own
 	// DaemonAPIVersion.
 	Contract int
-	// Budget is how long one attempt waits for the probe pod to finish
-	// (slow_command_timeout_seconds). The Sandbox's shutdownTime is the budget and one API call
-	// after it, so the log of a pod that finished at the budget is still there to read.
+	// Budget is how long one attempt waits for the probe pod to finish: slow_command_timeout_seconds,
+	// or, when worker_boot_timeout_seconds leaves it less than a minute of room, worker_boot_timeout_seconds
+	// plus that minute instead (internal/daemon's ProbeBudget), so the capacity stop below (stuck)
+	// can always see a probe pod's Unschedulable age pass the boot timeout within one attempt. The
+	// Sandbox's shutdownTime is the budget and one API call after it, so the log of a pod that
+	// finished at the budget is still there to read.
 	Budget time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
@@ -119,15 +133,15 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 	}
 	digest := "sha256:" + hex
 	name := probeName(r.project, hex, r.probeRun)
-	// The report is the passing attempt's: a transient attempt reports nothing, and a refusal ends
-	// the run. The capacity waits are the run's own count.
+	// The report is the passing attempt's (Outcome.Report): a transient attempt reports nothing,
+	// and a refusal ends the run. The capacity waits are the run's own count.
 	var report bootprobe.ImageReport
 	waits, reason := 0, ""
 	err := bootprobe.Run(ctx, "worker image", p.Retry, r.log, func(ctx context.Context) bootprobe.Outcome {
-		outcome, passed := r.probeAttempt(ctx, p, name, digest)
+		outcome := r.probeAttempt(ctx, p, name, digest)
 		switch {
 		case outcome.Passed:
-			report = passed
+			report = outcome.Report
 		case outcome.Waiting != "":
 			waits, reason = waits+1, outcome.Waiting
 		}
@@ -200,8 +214,7 @@ func (p *Prober) ProbeImage(ctx context.Context, probe ImageProbe) (bootprobe.Im
 // probeAttempt is one run of the probe Sandbox: create it (replacing this project's leftover),
 // wait up to the budget for its pod to finish, read the pod's log, judge it, and delete the
 // Sandbox whatever happened — with a context of its own, so a stopping daemon still cleans up.
-// The report is what a passing pod's OK line said of the image; the zero report otherwise.
-func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest string) (bootprobe.Outcome, bootprobe.ImageReport) {
+func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest string) bootprobe.Outcome {
 	// A pod an earlier attempt's Sandbox left, whose deletion is still under way, holds the name.
 	if err := r.await(ctx, p.Budget, "the pod of an earlier probe sandbox "+name+" to go", func() (bool, error) {
 		pod := r.storedPod(name)
@@ -211,7 +224,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		s, err := r.storedSandbox(name)
 		return s != nil && ownedBy(pod, s.UID), err
 	}); err != nil {
-		return unlessStopped(ctx, err, "probe sandbox "+name), bootprobe.ImageReport{}
+		return unlessStopped(ctx, err, "probe sandbox "+name)
 	}
 	// Built at each create, so the shutdown is the budget from that moment, whatever came before it.
 	manifest := func() (*unstructured.Unstructured, error) {
@@ -219,7 +232,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	}
 	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
 	if !created {
-		return outcome, bootprobe.ImageReport{}
+		return outcome
 	}
 	defer func() {
 		// Detached from ctx, which may be what ended the probe, so nothing but this bound ends the
@@ -277,13 +290,13 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	})
 	switch {
 	case ctx.Err() != nil:
-		return bootprobe.Outcome{}, bootprobe.ImageReport{}
+		return bootprobe.Outcome{}
 	case readErr != nil:
-		return bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s: %v", name, readErr)}, bootprobe.ImageReport{}
+		return bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s: %v", name, readErr)}
 	case err != nil:
-		return bootprobe.Outcome{Detail: r.unfinished(ctx, name, uid, p.Budget)}, bootprobe.ImageReport{}
+		return bootprobe.Outcome{Detail: r.unfinished(ctx, name, uid, p.Budget)}
 	case verdict != nil:
-		return *verdict, bootprobe.ImageReport{}
+		return *verdict
 	}
 	logTail, logErr := r.probeLog(ctx, name)
 	return r.judge(name, digest, finished, logTail, logErr, p.Contract)
@@ -410,8 +423,10 @@ const providersMountRecheck = 15 * time.Second
 // once it has been so for longer than the boot timeout — the same bound the liveness rules give an
 // issue pod (observe.go), long enough for Karpenter to add a node under the pool's limits when it
 // can, so a cold pool scaling up is not mistaken for a full one — rather than counted against the
-// attempt budget, since a full pool says nothing about the image; or a providers Secret it cannot
-// mount, which leaves the pod Pending, never Failed, and which its events say. They are read at
+// attempt budget, since a full pool says nothing about the image — reachable within the attempt by
+// construction, since the attempt's budget (ImageProbe.Budget, internal/daemon's ProbeBudget)
+// always clears the boot timeout by at least a minute; or a providers Secret it cannot mount,
+// which leaves the pod Pending, never Failed, and which its events say. They are read at
 // most every providersMountRecheck; mountRead holds when they last were.
 //
 // Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
@@ -511,7 +526,8 @@ func probeWaiting(pod *corev1.Pod) string {
 	return ""
 }
 
-// probeLog is the probe container's last log lines.
+// probeLog is the probe container's last log lines, kept to probeLogBytes from the tail's end
+// (lastBytes), so a refusal's quote reaches the OK line whatever a line's length.
 func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -521,19 +537,50 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 		return "", err
 	}
 	defer stream.Close()
-	text, err := io.ReadAll(io.LimitReader(stream, 64<<10))
+	text, err := lastBytes(io.LimitReader(stream, probeLogReadBytes), probeLogBytes)
 	if err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(string(text)), nil
+	return strings.TrimSpace(text), nil
+}
+
+// lastBytes reads r to its end, keeping only the last keep bytes (one buffer of 2×keep, compacted
+// in place), and answers that tail: with a leading … line (everything up to and including the
+// first \n dropped, so what remains starts on its own line) when anything of r was cut, unchanged
+// when r was keep bytes or shorter.
+func lastBytes(r io.Reader, keep int) (string, error) {
+	buf := make([]byte, 0, 2*keep)
+	chunk := make([]byte, keep)
+	dropped := false
+	for {
+		n, err := io.ReadFull(r, chunk)
+		buf = append(buf, chunk[:n]...)
+		if len(buf) > keep {
+			dropped = true
+			buf = append(buf[:0], buf[len(buf)-keep:]...)
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	if !dropped {
+		return string(buf), nil
+	}
+	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+		buf = buf[i+1:]
+	}
+	return "…\n" + string(buf), nil
 }
 
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
 // judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
-// (judgeProbeLog, worker-image-probe.ts:470-508), in this order, and on a pass what the OK line
-// reported of the image. A pod the kubelet failed for
+// (judgeProbeLog, worker-image-probe.ts:470-508), in this order, carrying on a pass what the OK
+// line reported of the image, in Outcome.Report. A pod the kubelet failed for
 // reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
 // unread log is judged by the read's error. A Failed pod past those is one whose probe container
 // exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an
@@ -555,15 +602,14 @@ var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 // container, so only a CLI that predates the user line succeeds without one. Naming another is the
 // providers Secret holding another seed. An image whose CLI predates a flag the probe command
 // passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks. The
-// report carries the line's model-fallback mark, which the daemon keeps.
-func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) (bootprobe.Outcome, bootprobe.ImageReport) {
-	none := bootprobe.ImageReport{}
+// passing outcome's Report carries the line's model-fallback mark, which the daemon keeps.
+func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
 	if why := kubeletFailure(pod); why != "" {
 		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
-		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}, none
+		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
 	}
 	if logErr != nil {
-		return apiOutcome(digest, logErr, fmt.Sprintf("read probe pod %s's log", name), false), none
+		return apiOutcome(digest, logErr, fmt.Sprintf("read probe pod %s's log", name), false)
 	}
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
@@ -574,48 +620,48 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		}
 		if flag := undefinedFlag.FindStringSubmatch(logTail); flag != nil {
 			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
-				name, ended, flag[1], logTail), none
+				name, ended, flag[1], logTail)
 		}
-		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail), none
+		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail)
 	}
 	if !strings.Contains(logTail, bootprobe.OKPrefix) {
-		return imageRefusal(digest, "pod %s Succeeded without printing %s — log tail: %s", name, bootprobe.OKPrefix, logTail), none
+		return imageRefusal(digest, "pod %s Succeeded without printing %s — log tail: %s", name, bootprobe.OKPrefix, logTail)
 	}
 	confirmed, ok := bootprobe.ConfirmedContract(logTail)
 	if !ok {
-		return imageRefusal(digest, "pod %s Succeeded without confirming daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail), none
+		return imageRefusal(digest, "pod %s Succeeded without confirming daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail)
 	}
 	if confirmed != contract {
-		return imageRefusal(digest, "pod %s Succeeded but confirmed daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail), none
+		return imageRefusal(digest, "pod %s Succeeded but confirmed daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
 	}
 	if mark := bootprobe.AgentModels(logTail); mark != bootprobe.AgentModelsResolved {
 		if mark == "" {
 			mark = "none"
 		}
 		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models (its OK line's agent-models mark: %s, where the daemon's probe requires %s) — log tail: %s",
-			name, mark, bootprobe.AgentModelsResolved, logTail), none
+			name, mark, bootprobe.AgentModelsResolved, logTail)
 	}
 	if !bootprobe.ExtensionsDiscovered(logTail) {
 		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
-			name, logTail), none
+			name, logTail)
 	}
 	if !bootprobe.CapabilitiesChecked(logTail) {
-		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail), none
+		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail)
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {
 		case r.natsUser:
 		case "":
 			return imageRefusal(digest, "pod %s named no nkey user, where the pane seed the daemon hands every pod is user %s: its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: %s",
-				name, r.natsUser, logTail), none
+				name, r.natsUser, logTail)
 		default:
 			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s read nkey user %s through its NATS_NKEY_SEED_FILE, the providers Secret %s's NATS_NKEY_SEED, where the pane seed the daemon hands every pod is user %s: put that seed in that key — log tail: %s",
-				name, got, ProvidersSecretName(r.project), r.natsUser, logTail)}, none
+				name, got, ProvidersSecretName(r.project), r.natsUser, logTail)}
 		}
 	}
 	report := bootprobe.ImageReport{ModelFallback: bootprobe.ModelFallback(logTail)}
 	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "model-fallback", report.ModelFallback, "log", logTail)
-	return bootprobe.Outcome{Passed: true}, report
+	return bootprobe.Outcome{Passed: true, Report: report}
 }
 
 // probeSandbox is a Sandbox with the lifecycle fields only the probe sets: upstream's Lifecycle,
