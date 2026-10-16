@@ -63,20 +63,18 @@ const (
 	gvisor    = "gvisor"
 )
 
-// evictionProtectionAnnotations are the autoscaler annotations every Legion pod carries so no
-// autoscaler evicts it mid-turn: Karpenter's own (AWS) and GKE Autopilot's cluster-autoscaler
-// equivalent (an autoscaler that reads neither ignores both). Both are unconditional, like every
-// other placement decision the runtime makes for itself (NodeSelector, Tolerations,
-// PriorityClass): a protection every pod needs is the default, not an operator opt-in.
-const (
-	karpenterNoDisruptAnnotation    = "karpenter.sh/do-not-disrupt"
-	autoscalerSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
-)
-
+// evictionProtectionAnnotations are the autoscaler stop-eviction annotations a long-running Legion
+// pod carries unconditionally, so no autoscaler evicts it mid-turn: Karpenter's own (AWS) and GKE
+// Autopilot's cluster-autoscaler equivalent (an autoscaler that reads neither ignores both). Both
+// are unconditional, like every other placement decision the runtime makes for itself (NodeSelector,
+// Tolerations, PriorityClass): a protection every long-running pod needs is the default, not an
+// operator opt-in. Used by podTemplate (an issue's worker pod, and the project controller's) alone:
+// the short-lived, explicitly-deleted image-probe pod (probeManifest) carries the Karpenter
+// annotation only, never GKE's — see probeManifest's comment.
 func evictionProtectionAnnotations() map[string]string {
 	return map[string]string{
-		karpenterNoDisruptAnnotation:    "true",
-		autoscalerSafeToEvictAnnotation: "false",
+		"karpenter.sh/do-not-disrupt":                    "true",
+		"cluster-autoscaler.kubernetes.io/safe-to-evict": "false",
 	}
 }
 
