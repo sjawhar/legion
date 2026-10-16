@@ -127,15 +127,21 @@ func testTools(t *testing.T) map[string]string {
 
 func localBareRemote(t *testing.T) string {
 	t.Helper()
-	root := t.TempDir()
+	return seedRemote(t, t.TempDir(), "main")
+}
+
+// seedRemote is a bare repository at <root>/remote.git, standing in for GitHub, whose default
+// branch (its HEAD) is defaultBranch, holding one commit; it returns the repository's path.
+func seedRemote(t *testing.T, root, defaultBranch string) string {
+	t.Helper()
 	remote := filepath.Join(root, "remote.git")
-	runSetup(t, root, "git", "init", "--bare", "--initial-branch=main", remote)
+	runSetup(t, root, "git", "init", "--bare", "--initial-branch="+defaultBranch, remote)
 
 	seed := filepath.Join(root, "seed")
 	runSetup(t, root, "jj", "git", "init", "--colocate", seed)
-	runSetup(t, root, "jj", "bookmark", "set", "main", "-R", seed)
+	runSetup(t, root, "jj", "bookmark", "set", jjString(defaultBranch), "-R", seed)
 	runSetup(t, root, "jj", "git", "remote", "add", "origin", remote, "-R", seed)
-	runSetup(t, root, "jj", "git", "push", "--remote", "origin", "--bookmark", "main", "--allow-empty-description", "-R", seed)
+	runSetup(t, root, "jj", "git", "push", "--remote", "origin", "--bookmark", "exact:"+jjString(defaultBranch), "--allow-empty-description", "-R", seed)
 	return remote
 }
 
@@ -172,23 +178,30 @@ func fromOrigin(t *testing.T, run *recordingRunner, dir string, argv ...string) 
 	return runSetupWith(t, dir, []string{"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=url." + run.remote + ".insteadOf", "GIT_CONFIG_VALUE_0=https://github.com/acme/widgets"}, argv...)
 }
 
-// newLocalRunner is a runner against a fresh local bare remote. jj reads no configuration of the
-// user's who runs the tests: its user configuration is empty and its config home, where jj keeps a
-// repository's configuration, is the test's own, as in a pod's init container.
+// newLocalRunner is a runner against a fresh local bare remote whose default branch is main. jj
+// reads no configuration of the user's who runs the tests: its user configuration is empty and its
+// config home, where jj keeps a repository's configuration, is the test's own, as in a pod's init
+// container.
 func newLocalRunner(t *testing.T) *recordingRunner {
+	t.Helper()
+	return newLocalRunnerOnBranch(t, "main")
+}
+
+// newLocalRunnerOnBranch is newLocalRunner against a remote whose default branch is defaultBranch.
+func newLocalRunnerOnBranch(t *testing.T, defaultBranch string) *recordingRunner {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", home)
 	t.Setenv("JJ_CONFIG", filepath.Join(home, "no-user-config.toml"))
 	t.Setenv("JJ_USER", "Legion test")
 	t.Setenv("JJ_EMAIL", "legion-test@example.invalid")
-	return &recordingRunner{t: t, remote: localBareRemote(t), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
+	return &recordingRunner{t: t, remote: seedRemote(t, t.TempDir(), defaultBranch), timeout: testTimeout, runner: NewRunner(testTimeout, testTools(t))}
 }
 
 // provisionRequest is a host provisioning's request, the tmux runtime's: the one-shot credential
-// goes under the state directory. That directory's path holds a space, as state_dir and --root
-// may, so every refusal's way out a test runs through sh proves it names the shared clone as one
-// word.
+// goes under the state directory, and the repository's default branch is main. That directory's
+// path holds a space, as state_dir and --root may, so every refusal's way out a test runs through
+// sh proves it names the shared clone as one word.
 func provisionRequest(t *testing.T) Request {
 	t.Helper()
 	state := filepath.Join(t.TempDir(), "legion state")
@@ -196,9 +209,110 @@ func provisionRequest(t *testing.T) Request {
 		StateDir:         state,
 		Repo:             ghrepo.MustParse("acme/widgets"),
 		Issue:            "WIDGETS-42",
+		DefaultBranch:    "main",
 		CredentialHelper: GitHubCredentialHelper,
 		Source:           FromGitHub("test-installation-token", state),
 		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
+	}
+}
+
+// A repository whose default branch is not main, and holds a slash, provisions at that branch, on
+// the host's path and on a pod's feed: the workspace's parent is its head, a feed's fetch brings it
+// by exact name, and nothing names main.
+func TestProvisionStartsAtADefaultBranchWithASlash(t *testing.T) {
+	for _, source := range []string{"github", "feed"} {
+		t.Run(source, func(t *testing.T) {
+			run := newLocalRunnerOnBranch(t, "release/v7.1")
+			req := provisionRequest(t)
+			req.DefaultBranch = "release/v7.1"
+			if source == "feed" {
+				req = feedRequest(t, run, req)
+			}
+			working, err := Provision(context.Background(), run, req)
+			if err != nil {
+				t.Fatalf("Provision: %v", err)
+			}
+			if working.DefaultBranch != "release/v7.1" {
+				t.Errorf("the workspace's default branch is %q, want release/v7.1", working.DefaultBranch)
+			}
+			if parent, head := commitOf(t, working.Dir, "@-"), commitOf(t, working.Clone, "release/v7.1@origin"); parent != head {
+				t.Errorf("the workspace's @- is %s, want release/v7.1's %s", parent, head)
+			}
+			if bookmark, at := commitOf(t, working.Clone, working.Bookmark), commitOf(t, working.Dir, "@"); bookmark != at {
+				t.Errorf("the issue's bookmark is on %s, want the fresh working copy %s", bookmark, at)
+			}
+			for _, call := range run.Calls() {
+				for _, arg := range call.Argv {
+					if arg == "main" || strings.Contains(arg, jjString("main")) || strings.HasPrefix(arg, "main@") || strings.HasSuffix(arg, ":main") {
+						t.Errorf("a command named main: %q", call.Argv)
+					}
+				}
+			}
+			if source == "feed" {
+				if fetch := findCall(t, run.Calls(), "jj", "git", "fetch"); !slices.Contains(fetch.Argv, "exact:"+jjString("release/v7.1")) {
+					t.Errorf("the feed fetch %q names no exact release/v7.1", fetch.Argv)
+				}
+			}
+		})
+	}
+}
+
+// A default branch whose name jj's own parser would read as syntax (`#`, `%`, `|`, `"`) names that
+// one branch and no other: on the host's path and on a pod's feed, provisioning starts at its head,
+// never at the decoy branch the bare name would select or fail on, both for the first workspace
+// and for one recreated after its directory and branch were lost, once the default branch has
+// moved on GitHub: the feed's fetch brings the branch by its exact name.
+func TestProvisionStartsAtADefaultBranchWhoseNameJJWouldParse(t *testing.T) {
+	for _, tc := range []struct{ branch, decoy string }{
+		{"release#stable", "release"},
+		{"release%2Fstable", "release/stable"},
+		{"release|stable", "release"},
+		{`say"hi`, "say"},
+	} {
+		for _, source := range []string{"github", "feed"} {
+			t.Run(tc.branch+"/"+source, func(t *testing.T) {
+				run := newLocalRunnerOnBranch(t, tc.branch)
+				decoy := pushRemoteBranch(t, run.remote, tc.decoy, "decoy.txt")
+				provision := func(what string) Workspace {
+					t.Helper()
+					req := provisionRequest(t)
+					req.StateDir = filepath.Join(filepath.Dir(run.remote), "legion state")
+					req.Source = FromGitHub("test-installation-token", req.StateDir)
+					req.DefaultBranch = tc.branch
+					if source == "feed" {
+						req = feedRequest(t, run, req)
+					}
+					working, err := Provision(context.Background(), run, req)
+					if err != nil {
+						t.Fatalf("%s: Provision at %q: %v", what, tc.branch, err)
+					}
+					head := strings.TrimSpace(runSetup(t, filepath.Dir(run.remote), "git", "--git-dir="+run.remote, "rev-parse", "refs/heads/"+tc.branch))
+					if parent := commitOf(t, working.Dir, "@-"); parent != head {
+						t.Fatalf("%s: the workspace's @- is %s, want %q's head %s (the decoy %q is %s)", what, parent, tc.branch, head, tc.decoy, decoy)
+					}
+					return working
+				}
+
+				first := provision("first provisioning")
+				runSetup(t, first.Clone, "jj", "bookmark", "delete", "exact:"+jjString(first.Bookmark), "--ignore-working-copy", "-R", first.Clone)
+				runSetup(t, first.Clone, "jj", "workspace", "forget", filepath.Base(first.Dir), "--ignore-working-copy", "-R", first.Clone)
+				if err := os.RemoveAll(first.Dir); err != nil {
+					t.Fatal(err)
+				}
+				pushRemoteBranch(t, run.remote, tc.branch, "moved.txt")
+				provision("provisioning after the workspace was lost")
+			})
+		}
+	}
+}
+
+// A request with no default branch is refused before anything runs.
+func TestProvisionRequiresADefaultBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	req := provisionRequest(t)
+	req.DefaultBranch = ""
+	if _, err := Provision(context.Background(), run, req); err == nil || err.Error() != "workspace default branch is required" || len(run.Calls()) != 0 {
+		t.Fatalf("Provision = %v after %d commands, want the refusal and none", err, len(run.Calls()))
 	}
 }
 
@@ -559,7 +673,7 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		readOnly(t, fetch.Feed)
 		before := len(run.Calls())
 		working, err := Provision(context.Background(), run, Request{
-			StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: GitHubCredentialHelper, Source: FromFeed(fetch.Feed),
+			StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, DefaultBranch: "main", CredentialHelper: GitHubCredentialHelper, Source: FromFeed(fetch.Feed),
 			Log: func(line string) { t.Logf("provisioning logged: %s", line) },
 		})
 		if err != nil {
@@ -596,14 +710,14 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 }
 
 // The feed is GitHub as it stood when the pod's workspace-fetch ran, and a tree agent can push to
-// the shared clone's origin in the meantime. Provisioning from the feed moves only main and the
-// issue's own bookmark, so a bookmark another agent pushed after the snapshot keeps its target
-// and its tracking — its next push is not refused as stale.
+// the shared clone's origin in the meantime. Provisioning from the feed moves only the default
+// branch and the issue's own bookmark, so a bookmark another agent pushed after the snapshot keeps
+// its target and its tracking — its next push is not refused as stale.
 func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	run := newLocalRunner(t)
 	state := filepath.Join(t.TempDir(), "state")
 	request := func(issue, feed string) Request {
-		return Request{StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: GitHubCredentialHelper, Source: FromFeed(feed),
+		return Request{StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, DefaultBranch: "main", CredentialHelper: GitHubCredentialHelper, Source: FromFeed(feed),
 			Log: func(line string) { t.Logf("provisioning logged: %s", line) }}
 	}
 	first := fetchRequest(t)

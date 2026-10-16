@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
+	"github.com/sjawhar/envoy/internal/ordertest"
 )
 
 // The rows below are the ones the prototype's collector/tests/test_pipeline.py builds in code
@@ -291,6 +292,29 @@ func TestFailingJobsStopAtNow(t *testing.T) {
 	if _, listed := byName["typecheck"]; listed {
 		t.Errorf("typecheck is listed, but its only failure in the window is run 6's, after now: %+v", failing)
 	}
+}
+
+// TestAFailingJobsLastRunIsTheSameInEveryRunOrder: of the runs that completed in one instant, a
+// failing job's last run is the one with the higher run id, in every order the runs are listed in
+// (ListRunsStartedIn answers runs that started together by run id, but runs that completed together
+// can have started apart).
+func TestAFailingJobsLastRunIsTheSameInEveryRunOrder(t *testing.T) {
+	var c ciRuns
+	// Runs 8 and 9 both complete at 10:30 on Oct 2; run 9 started earlier. Run 7 completes first.
+	c.add(7, 32, 10, "failure", 9, job("build / unit", 9, "failure"))
+	c.add(8, 32, 30, "failure", 10, job("build / unit", 29, "failure"))
+	c.add(9, 32, 90, "failure", 9, job("build / unit", 89, "failure"))
+	lastFailed := time.Date(2026, 10, 2, 10, 30, 0, 0, time.UTC)
+	ordertest.EveryOrder(c.runs, func(runs []delivery.DeliveryRun) {
+		ids := make([]int64, len(runs))
+		for i, run := range runs {
+			ids[i] = run.RunID
+		}
+		_, _, failing := PRChecks(runs, c.jobs, pipelineDays, pipelineNow, "")
+		if len(failing) != 1 || failing[0].Failures != 3 || !failing[0].LastFailedAt.Equal(lastFailed) || failing[0].LastRunURL != runURL(9) {
+			t.Fatalf("failing jobs of runs listed %v = %+v, want build / unit failing 3 times, last in run 9 at %s", ids, failing, lastFailed)
+		}
+	})
 }
 
 // TestPRChecksJobCellsCountOnlyTimedJobsOfTimedRuns: a job's samples come only from runs that

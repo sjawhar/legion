@@ -863,7 +863,7 @@ func newBudgetGitHub(t *testing.T, restLimit, mergeLimit map[string]string) *bud
 				}
 				http.Error(w, `{"message":"API rate limit exceeded"}`, http.StatusForbidden)
 			case r.Method == http.MethodGet:
-				_, _ = io.WriteString(w, `{"ref":"refs/heads/main","object":{"sha":"`+branchMainCommit+`"}}`)
+				_, _ = io.WriteString(w, `{"ref":"refs/heads/main","object":{"sha":"`+branchBaseCommit+`"}}`)
 			default:
 				w.WriteHeader(http.StatusCreated)
 				_, _ = io.WriteString(w, `{}`)
@@ -1040,10 +1040,11 @@ func readyPullRequest(issue string, state record.PullRequestState) record.PullRe
 }
 
 // mergeRunner is the outbox the merge tests drive: as the implement App (roleTokens), for
-// acme/widgets, against GitHub at api, logging to log, on the clock now.
+// acme/widgets, whose default branch is main (mainBranch), against GitHub at api, logging to log,
+// on the clock now.
 func mergeRunner(pool *pgxpool.Pool, records record.Store, api string, log *slog.Logger, now func() time.Time) *outbox {
 	return &outbox{log: log, pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: api, now: now}
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: api, defaultBranch: mainBranch, now: now}
 }
 
 // leaseStealer is a record store whose ClaimDue lets another worker take every row it hands out, as

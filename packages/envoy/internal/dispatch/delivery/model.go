@@ -52,8 +52,10 @@ func (s DeliverySettings) Production() Production {
 }
 
 // Job is the run's production job: among listed jobs, the earliest-completing one whose conclusion
-// as a production deploy is success. When no listed job qualifies, it falls back to the first
-// listed job so callers still read a failed, skipped, or incomplete production job.
+// as a production deploy is success, the first by name among those completing together. When no
+// listed job qualifies, it falls back to the first listed job in compareRunJobs' order, so callers
+// still read a failed, skipped, or incomplete production job. Neither depends on the order jobs
+// holds them in.
 func (p Production) Job(jobs []DeliveryRunJob) *DeliveryRunJob {
 	var first, selected *DeliveryRunJob
 	for i := range jobs {
@@ -61,14 +63,14 @@ func (p Production) Job(jobs []DeliveryRunJob) *DeliveryRunJob {
 		if !slices.Contains(p.JobNames, job.Name) {
 			continue
 		}
-		if first == nil {
+		if first == nil || compareRunJobs(*job, *first) < 0 {
 			first = job
 		}
 		conclusion := p.Conclusion(*job)
 		if conclusion == nil || *conclusion != DeliveryJobConclusionSuccess || job.CompletedAt == nil {
 			continue
 		}
-		if selected == nil || job.CompletedAt.Before(*selected.CompletedAt) {
+		if selected == nil || finishesBefore(*job, *selected) {
 			selected = job
 		}
 	}
@@ -282,10 +284,14 @@ type DeliveryShippedPRView struct {
 
 // DeliveryRunView is one deploy run on `GET /api/v1/delivery/timeline`: a production deploy
 // (Production succeeded; sized by PRs) and/or a pipeline failure (FailedJobs, RootFailingJob, or a
-// failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly. PRs
-// is every population pull request in the window the run shipped first, whatever facets the
-// request names, and is always a slice, never nil, so it serializes as `[]` for a run that
-// shipped none.
+// failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly.
+// FailedJobs is in compareRunJobs' order (by start, a job that never started last, then by name in
+// byte order), and RootFailingJob is the earliest-finishing failed job that isn't a summary/guard
+// job, falling back to the earliest failed job overall, ties by name. PRs
+// is every population pull request in the window the run shipped first (FirstShippingApply, the
+// lower run id of two deploys completing together), whatever facets the request names, by merge
+// time then id in byte order, and is always a slice, never nil, so it serializes as `[]` for a run
+// that shipped none.
 type DeliveryRunView struct {
 	ID             int64                      `json:"id"`
 	URL            string                     `json:"url"`

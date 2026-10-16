@@ -68,9 +68,10 @@ printf '%s\n' "$*" >> "${0%/bin/codegraph}/codegraph.log"
 // whose git clones a local bare remote in place of github.com/acme/widgets, the provisioning token
 // file `fetch` is pointed at and `provision` never is, the pod's feed, a TMPDIR standing in for the
 // fetching container's own filesystem, and, as in a pod, a jj config home that starts empty and no
-// user configuration.
+// user configuration. defaultBranch is the remote's default branch, which `provision` is told.
 type issueVolume struct {
 	root, token, feed, jjLog, credentialLog, codegraphLog, realJJ, tmp, bin string
+	defaultBranch                                                           string
 	env                                                                     map[string]string
 }
 
@@ -108,7 +109,7 @@ func newIssueVolume(t *testing.T) *issueVolume {
 	v := &issueVolume{
 		root: root, token: token, feed: filepath.Join(dir, "feed"), jjLog: filepath.Join(dir, "jj.log"),
 		credentialLog: filepath.Join(dir, "credential.log"), codegraphLog: filepath.Join(dir, "codegraph.log"),
-		realJJ: realJJ, tmp: tmp, bin: bin,
+		realJJ: realJJ, tmp: tmp, bin: bin, defaultBranch: "main",
 	}
 	v.env = map[string]string{
 		"PATH":                 bin + string(filepath.ListSeparator) + os.Getenv("PATH"),
@@ -129,20 +130,20 @@ func newIssueVolume(t *testing.T) *issueVolume {
 	return v
 }
 
-// withRemote gives the volume's git a real repository to clone: a bare remote whose main holds one
-// commit, as github.com/acme/widgets would.
-func (v *issueVolume) withRemote(t *testing.T) *issueVolume {
+// withRemote gives the volume's git a real repository to clone: a bare remote whose default branch,
+// defaultBranch, holds one commit, as github.com/acme/widgets would.
+func (v *issueVolume) withRemote(t *testing.T, defaultBranch string) *issueVolume {
 	t.Helper()
 	dir := t.TempDir()
 	remote := filepath.Join(dir, "remote.git")
 	seed := filepath.Join(dir, "seed")
 	for _, argv := range [][]string{
-		{"git", "init", "--bare", "--initial-branch=main", remote},
+		{"git", "init", "--bare", "--initial-branch=" + defaultBranch, remote},
 		{v.realJJ, "git", "init", "--colocate", seed},
 		{v.realJJ, "describe", "-m", "seed", "-R", seed},
-		{v.realJJ, "bookmark", "set", "main", "-r", "@", "-R", seed},
+		{v.realJJ, "bookmark", "set", defaultBranch, "-r", "@", "-R", seed},
 		{v.realJJ, "git", "remote", "add", "origin", remote, "-R", seed},
-		{v.realJJ, "git", "push", "--remote", "origin", "--bookmark", "main", "-R", seed},
+		{v.realJJ, "git", "push", "--remote", "origin", "--bookmark", defaultBranch, "-R", seed},
 	} {
 		setup := exec.Command(argv[0], argv[1:]...)
 		setup.Dir = dir
@@ -152,6 +153,7 @@ func (v *issueVolume) withRemote(t *testing.T) *issueVolume {
 		}
 	}
 	v.env["WINIT_REMOTE"] = remote
+	v.defaultBranch = defaultBranch
 	return v
 }
 
@@ -169,7 +171,7 @@ func (v *issueVolume) fetchArgs() []string {
 }
 
 func (v *issueVolume) args(issue string) []string {
-	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", winitHelper, "--feed", v.feed}
+	return []string{"provision", "--issue", issue, "--repo", winitRepo, "--root", v.root, "--credential-helper", winitHelper, "--feed", v.feed, "--default-branch", v.defaultBranch}
 }
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
@@ -352,6 +354,12 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 			says: func(*issueVolume) string { return `--feed must be an absolute path (got "")` },
 		},
 		{
+			name: "no --default-branch",
+			args: func(v *issueVolume) []string { return v.args("LEGION-42")[:11] },
+			code: 1,
+			says: func(*issueVolume) string { return "--default-branch is required" },
+		},
+		{
 			name: "pointed at the provisioning token",
 			env:  func(t *testing.T, v *issueVolume) { t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token) },
 			code: 1,
@@ -427,7 +435,7 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 // container must never call it (#1647) — only a synchronous warm-up regressing back onto the init
 // container's launch path would.
 func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.fetch(t)
 
 	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
@@ -435,7 +443,7 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
 	workspace := v.workspace("LEGION-42")
-	if want := "workspace-init: " + workspace + " on legion/LEGION-42\n"; stdout != want {
+	if want := "workspace-init: " + workspace + " on legion/LEGION-42 from main\n"; stdout != want {
 		t.Fatalf("stdout %q, want %q", stdout, want)
 	}
 	if listed := v.jj(t, "workspace", "list", "-R", v.clone()); !strings.Contains(listed, "legion-42:") {
@@ -467,6 +475,31 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 		t.Fatalf("workspace-init called codegraph %q, want it to build no index on the pod's registration path", calls)
 	}
 	holdsNoToken(t, v.root, "after provisioning")
+}
+
+// A repository whose default branch is not main, and holds a slash, provisions at that branch: the
+// init log names it, the workspace's parent is the remote's head of it, and the issue's bookmark
+// is the fresh working copy's.
+func TestWorkspaceInitProvisionsAtADefaultBranchWithASlash(t *testing.T) {
+	v := newIssueVolume(t).withRemote(t, "release/v7.1")
+	v.fetch(t)
+
+	code, stdout, stderr := runWorkspaceInitHere(v.args("LEGION-42"))
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	workspace := v.workspace("LEGION-42")
+	if want := "workspace-init: " + workspace + " on legion/LEGION-42 from release/v7.1\n"; stdout != want {
+		t.Fatalf("stdout %q, want %q", stdout, want)
+	}
+	head := v.git(t, "--git-dir="+v.env["WINIT_REMOTE"], "rev-parse", "refs/heads/release/v7.1")
+	if parent := v.jj(t, "log", "-r", "@-", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", workspace); parent != head {
+		t.Fatalf("the workspace's @- is %s, want release/v7.1's %s", parent, head)
+	}
+	if bookmark, at := v.jj(t, "log", "-r", "legion/LEGION-42", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", v.clone()),
+		v.jj(t, "log", "-r", "@", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", workspace); bookmark != at {
+		t.Fatalf("legion/LEGION-42 is on %s, want the workspace's working copy %s", bookmark, at)
+	}
 }
 
 // staleLock leaves a git lock file at path, last written age ago, as a git or jj process killed or
@@ -509,7 +542,7 @@ func (v *issueVolume) provisioned(t *testing.T, issue string) string {
 // volume no other pod mounts, so nothing can hold a lock there: it removes the workspace's stale
 // index.lock, logging its path and age, and the update-stale that failed on it succeeds.
 func TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.fetch(t)
 	v.provisioned(t, "LEGION-42")
 	// The working copy is rebased from outside the workspace onto a commit carrying a file, so the
@@ -538,7 +571,7 @@ func TestWorkspaceInitRemovesTheWorkspacesStaleIndexLock(t *testing.T) {
 // the clone — an issue's that shared it, or a worktree an agent added — keeps its lock as it was,
 // however old.
 func TestWorkspaceInitLeavesAnotherWorkspacesLockAlone(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.fetch(t)
 	v.provisioned(t, "LEGION-42")
 	v.provisioned(t, "LEGION-43")
@@ -564,7 +597,7 @@ func TestWorkspaceInitLeavesAnotherWorkspacesLockAlone(t *testing.T) {
 // workspace: one per issue volume, which no other pod mounts. provision removes each stale one,
 // logging it, and provisions.
 func TestWorkspaceInitRemovesTheClonesStaleLocks(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.fetch(t)
 	v.provisioned(t, "LEGION-42")
 	git := filepath.Join(v.clone(), ".git")
@@ -594,7 +627,7 @@ func TestWorkspaceInitFailsOnALockItCannotRemove(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root removes a file from a directory it cannot write")
 	}
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.fetch(t)
 	v.provisioned(t, "LEGION-42")
 	entry := filepath.Join(v.clone(), ".git", "worktrees", "legion-42")
@@ -623,7 +656,7 @@ func TestWorkspaceInitFailsOnALockItCannotRemove(t *testing.T) {
 func TestWorkspaceInitRefusesASymlinkedGitDirectory(t *testing.T) {
 	for _, linked := range []string{".git", filepath.Join(".git", "worktrees")} {
 		t.Run(linked, func(t *testing.T) {
-			v := newIssueVolume(t).withRemote(t)
+			v := newIssueVolume(t).withRemote(t, "main")
 			v.fetch(t)
 			v.provisioned(t, "LEGION-42")
 			path := filepath.Join(v.clone(), linked)
@@ -665,7 +698,7 @@ func TestWorkspaceInitRefusesASymlinkedGitDirectory(t *testing.T) {
 func TestWorkspaceInitDetectsLostVolumeWithoutRoleSessionDependency(t *testing.T) {
 	for _, content := range []string{"empty", "clone", "session"} {
 		t.Run(content, func(t *testing.T) {
-			v := newIssueVolume(t).withRemote(t)
+			v := newIssueVolume(t).withRemote(t, "main")
 			v.fetch(t)
 			t.Setenv("LEGION_EXPECT_ISSUE_VOLUME", "true")
 			switch content {
@@ -708,7 +741,7 @@ func TestWorkspaceInitDetectsLostVolumeWithoutRoleSessionDependency(t *testing.T
 // branch, workspace-init.ts). The commit is read uncolored, so an operator's `ui.color = "always"`
 // never wraps it in escape codes.
 func TestWorkspaceInitRecordsTheRecoveryMarker(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	v.fetch(t)
 	t.Setenv("LEGION_WORKSPACE_RECOVERED_FROM", "legion/LEGION-42")
 	colored := filepath.Join(t.TempDir(), "color-always.toml")
@@ -964,7 +997,7 @@ func fifo(t *testing.T, path string, flag int, holder *initProcess) string {
 // volume, never holds it. Held mid-clone, it has written no one-shot credential to its TMPDIR, and
 // no file on the volume holds the token — nor after it was killed there.
 func TestWorkspaceInitProvisionHoldsNoToken(t *testing.T) {
-	v := newIssueVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t, "main")
 	first := v.holder(t)
 	if entries, err := os.ReadDir(v.tmp); err != nil || len(entries) != 0 {
 		t.Errorf("while provision's clone runs, TMPDIR holds %v (%v), want no credential", entries, err)
@@ -1014,7 +1047,7 @@ func TestWorkspaceInitHoldEndsWithItsTest(t *testing.T) {
 	}{{"the test kills workspace-init", true}, {"start's cleanup kills workspace-init", false}} {
 		var jj string
 		t.Run(tc.name, func(t *testing.T) {
-			v := newIssueVolume(t).withRemote(t)
+			v := newIssueVolume(t).withRemote(t, "main")
 			jj = filepath.Join(v.bin, "jj")
 			first := v.holder(t)
 			if tc.kill {

@@ -2,8 +2,8 @@
  * The notice a resumed agent gets when its role launcher found its workspace recreated since its
  * session was last written: `LEGION_WORKSPACE_RECREATED=true`, which the launcher sets on every
  * generation it starts (packages/daemon/internal/launcher, `WorkspaceRecreatedVariable`).
- * Provisioning built that workspace from the issue's branch as pushed, main when nothing was, so
- * what the session remembers doing there may be gone.
+ * Provisioning built that workspace from the issue's branch as pushed, the repository's default
+ * branch when nothing was, so what the session remembers doing there may be gone.
  */
 export const WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
 
@@ -32,8 +32,9 @@ export function workspaceRecreatedNotice(
     id: crypto.randomUUID(),
     content:
       `Your workspace was recreated since your last turn: it holds what was pushed to legion/${issue} ` +
-      "(main if nothing was), and anything you had not pushed is gone. Before you continue, check " +
-      "the workspace against what you remember doing and re-read your last handoff.",
+      "(the repository's default branch if nothing was), and anything you had not pushed is gone. " +
+      "Before you continue, check the workspace against what you remember doing and re-read your " +
+      "last handoff.",
   };
 }
 

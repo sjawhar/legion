@@ -133,12 +133,18 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. How long a node takes to pull that is not
+tree with the two npm language servers is 66 MiB. On EKS, how long a node takes to pull that is not
 recorded here: the stage 4a launch below is where it is measured. The pull must fit the launch's
 wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
-"Liveness rules" below); a launch whose launcher has not connected by then fails and is counted.
+"Liveness rules" below); a launch whose launcher has not connected by then fails and is counted. On
+GKE Autopilot (measured 2026-10-16), an issue or controller pod usually waits for a node of its own
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) and pulls the image cold there: 2m23s and
+3m33s from creation to the first init container in the two launches measured (1m19s and 2m25s of
+that waiting for the node, 56s and 58s pulling), and one cold pull of a new digest on an existing
+node took 2m14s by itself — so a GKE deployment needs a larger `worker_boot_timeout_seconds` (for
+example 300) to keep that provisioning-plus-pull time from being counted as a launch failure.
 The image probe's own wait is derived from the same key: each attempt's budget is
 `slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
 60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
@@ -469,11 +475,11 @@ Neither `workspace-init` looks for session files: an issue pod is not
 told `LEGION_EXPECT_ISSUE_VOLUME` for a session, and the controller's pod is not told
 `LEGION_RESUME_SESSION_FILE`. So a claim resumed on a new volume (an issue closed as `done` or its
 tree drained, its volume deleted, then re-admitted) provisions its workspace from the issue's pushed
-branch (`legion/<issue>`, or `main` when none was pushed) and continues its own session; anything
-it had not pushed is gone with the old volume. A child issue re-admitted as a root of its own keeps
-its roles' sessions under either store (`Machine.Retree`): under `postgres` they are in the table,
-and under `pvc` on the issue's own volume, which its Sandbox keeps across the move while the old
-tree lingers ([Volume retention](#volume-retention)).
+branch (`legion/<issue>`, or the repository's default branch when none was pushed) and continues
+its own session; anything it had not pushed is gone with the old volume. A child issue re-admitted
+as a root of its own keeps its roles' sessions under either store (`Machine.Retree`): under
+`postgres` they are in the table, and under `pvc` on the issue's own volume, which its Sandbox
+keeps across the move while the old tree lingers ([Volume retention](#volume-retention)).
 
 Such an agent is told so before its next turn. Provisioning records when it created a workspace, in
 the workspace's own `.jj/legion-created`, which jj never snapshots (`workspace.RecordCreated`). At
@@ -487,10 +493,10 @@ which an init container killed mid-write can leave, decides only that notice: th
 takes the workspace as not recreated, and resumes. At session start a Legion session's plugin reads
 the variable and saves one message to the session, ahead of the next turn whatever starts it (a
 task, an Envoy event): `Your workspace was recreated since your last turn: it holds what was pushed
-to legion/<KEY> (main if nothing was), and anything you had not pushed is gone. …`
-(`packages/pi-legion/src/workspace-recreated.ts`, a steer that starts no turn), with an id of its
-own process in the message's `details`. A prompt, the daemon's next task or a person's direct
-message that pi-envoy delivers as a user turn, first recovers a failed last turn, and Oh My Pi
+to legion/<KEY> (the repository's default branch if nothing was), and anything you had not pushed
+is gone. …` (`packages/pi-legion/src/workspace-recreated.ts`, a steer that starts no turn), with an
+id of its own process in the message's `details`. A prompt, the daemon's next task or a person's
+direct message that pi-envoy delivers as a user turn, first recovers a failed last turn, and Oh My Pi
 recovers an empty `length` stop by moving the branch back to that turn's parent, which takes the
 saved message off the branch with it. The plugin's `before_agent_start`, which runs after that
 recovery on either path, sends the message again when the branch no longer holds this process's
@@ -994,7 +1000,7 @@ every issue pod is relaunched onto the new image.
 
 ### Contract discipline
 
-`DaemonAPIVersion` (24) is the Go daemon's own contract number; each claim records the contract
+`DaemonAPIVersion` (27) is the Go daemon's own contract number; each claim records the contract
 its process registered with as `pluginContract`. A role's `pi-legion` declares the contract it was built against
 (`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass
 (`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path
@@ -1529,11 +1535,15 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    stored claim of the issue recorded one), `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after
    the volume was lost, and the XDG base directories (`initEnvironment`, `manifest.go`); nothing
    names a role, a generation, a lock wait or another issue's workspace. The workspace starts at the
-   issue's branch, `legion/<KEY>`, which the daemon created on GitHub at `main` before the issue's
-   architect or planner started. Before any git or jj runs it removes every git lock file
-   (`<file>.lock`) in the clone's git directory and in the issue's own worktree entry of it, and
-   logs each with its path and age (`RemoveStaleGitLocks`, `internal/workspace/stalelock.go`): a
-   git or jj interrupted mid-write leaves its lock, and every later write of that file fails on it,
+   issue's branch, `legion/<KEY>`, which the daemon created on GitHub at the repository's default
+   branch, as GitHub names it (`default_branch`, `release/v7.1` as readily as `main`), before the
+   issue's architect or planner started; with no such branch it starts at that default branch,
+   which the pod's command names (`--default-branch`), and its log says which (`workspace-init:
+   <dir> on legion/<KEY> from <default branch>`). Before any git or jj runs it removes every git
+   lock file (`<file>.lock`) in the clone's git directory and in the issue's own worktree entry of
+   it, and logs each with its path and age (`RemoveStaleGitLocks`,
+   `internal/workspace/stalelock.go`): a git or jj interrupted mid-write leaves its lock, and every
+   later write of that file fails on it,
    but no process can hold one now, since no role container of the pod has started and no other pod
    mounts the volume. Another worktree entry of the clone keeps its locks; a lock it cannot remove,
    and a clone whose `.git` or `.git/worktrees` is a symlink (git never makes either one, and it
@@ -1546,7 +1556,10 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
 3. Each role container runs `legion launcher --connect tcp://<advertise_host, or bind with none
    set>:<worker_stream_port> --token-file … --sandbox <name> --role <role> --private-dir …`: PID 1
    of that role, starting and stopping the role's `legion worker-shim` (Oh My Pi) child on the
-   daemon's command, never a worker process of its own.
+   daemon's command, never a worker process of its own. Its log has one line for each connection
+   the daemon accepted, `launcher: connected to the daemon at <address> as launcher <id> (sandbox
+   <name>, role <role>, pod <uid>)`, and one for each connection that ended, `launcher: daemon
+   connection: <why>; reconnecting`, so a connected launcher reads apart from one still dialing.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (20Gi by default) and `storage_class`, labelled
@@ -1587,8 +1600,8 @@ Every container carries a reservation, cpu and memory with request equal to limi
 ephemeral-storage limit over a smaller request: each role container its role's
 (`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init containers the
 reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). So
-the pod is `Guaranteed`, each container is bounded on the node's disk, and it carries no affinity
-([Issue sizing](#issue-sizing-one-reservation-per-pod)).
+the pod is `Guaranteed`, each container is bounded on the node's disk, and Legion sets no affinity
+on it (GKE Autopilot adds its own, below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 Every role container is told `GH_CONFIG_DIR=/var/run/legion/gh`, so the image's plain `gh` reads
 its App token from the files there, and `git` reads the same file through the shared clone's
@@ -1657,12 +1670,30 @@ Every pod runs:
   when it names none) and `automountServiceAccountToken: false`;
 - under Pod Security "restricted": non-root user 1000 on the pod, and on each container no
   privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
-- on the Legion pool, with its node selector and toleration, and nothing else of its placement: no
-  affinity;
+- on the Legion pool, with its node selector and toleration, and nothing else of its placement that
+  Legion itself sets: no affinity (GKE Autopilot adds its own to an annotated pod, below);
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated `karpenter.sh/do-not-disrupt: "true"`.
+- annotated against autoscaler eviction:
+  - `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own, which GKE's cluster-autoscaler ignores;
+  - the issue pod and the project controller's additionally carry
+    `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, the upstream Cluster Autoscaler's own
+    annotation, which GKE Autopilot honours as a request for up to seven days of extended-duration
+    protection from its own scale-down and node-upgrade eviction — not indefinitely, and not from
+    node pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or an
+    operator-initiated drain;
+  - on GKE Autopilot this second annotation also adds a required node affinity
+    (`cloud.google.com/extended-duration-pods`) and gives the pod a node of its own whenever
+    possible, which usually costs each pod it creates (an issue's first launch, or a relaunch that
+    replaces the pod) a fresh node and a cold image pull ([Image size and pull
+    time](#image-size-and-pull-time));
+  - a pod carrying it is refused outright under the `cloud.google.com/gke-spot` node selector or
+    toleration (GKE offers no extended duration to a Spot Pod requested any other way, such as the
+    `autopilot-spot` compute class); the boot probe (below) carries only Karpenter's, so it does
+    not catch a `gke-spot` scheduling config before every issue and controller launch is refused;
+  - the image probe pod (below) carries only the first: a dedicated node per boot would cost more
+    than the eviction window buys a probe that is already short-lived and retried on failure.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -1765,8 +1796,9 @@ worker-stream ports ([`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-
 Some of provisioning's refusals name `jj` commands against the issue's clone, the repository its
 workspace is a `jj workspace` of, `-R /legion/repos/github.com/<owner>/<repo>`
 (`packages/daemon/internal/workspace/bookmark.go`):
-- a local bookmark deleted and never pushed: restore it, cancel the deletion, or start from main;
-- a conflicted local bookmark: keep an added commit, or start from main.
+- a local bookmark deleted and never pushed: restore it, cancel the deletion, or start from the
+  repository's default branch;
+- a conflicted local bookmark: keep an added commit, or start from the repository's default branch.
 
 The refusals for an origin row that racing fetches conflicted or moved name no command, because
 provisioning again settles them.
@@ -1909,15 +1941,19 @@ implementer's and tester's 6Gi holds its agent, one lane and a browser with room
 the reviewer's 4Gi holds its agent, a browser and its review pair, and the pod's 19 GiB holds six
 agents beside them.
 
-No pod carries an affinity: each owns its volume and shares nothing with another pod, so the
-scheduler bin-packs it wherever the `legion` pool has room for its reservation, and Karpenter adds a
+Legion sets no affinity itself (GKE Autopilot adds its own to an annotated pod, [Anatomy of a
+Sandbox pod](#anatomy-of-a-sandbox-pod)): each pod owns its volume and shares nothing with another
+pod, so the scheduler bin-packs it wherever the `legion` pool has room for its reservation, and
+Karpenter adds a
 node under the pool's limits when none has, of the smallest type the pool's requirements allow. In
 production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
 floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB: a 3 CPU / 19 GiB
 issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 19 would place three), cpu the binding
-dimension. A pod relaunched onto another node waits for its `ReadWriteOnce` volume to detach from
-the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach` events until the old
-pod is gone; then it runs on.
+dimension. On GKE Autopilot each issue and controller pod tends to get a node of its own instead
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so node count there tracks pod count rather
+than this two-per-node packing. A pod relaunched onto another node waits for its `ReadWriteOnce`
+volume to detach from the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach`
+events until the old pod is gone; then it runs on.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu⌉) and `/proc/meminfo`'s `MemTotal`
@@ -2205,10 +2241,13 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   attempt that starts after it expired fails with `Authentication failed`, which the fetch reads as
   permanent, and the launch's next pod is handed a token afresh.
 - **`workspace-init`** mounts the issue's volume, the feed read-only, and the config home — never
-  the Secret — and runs `legion workspace-init provision`: the clone's clone and fetch reach
-  `https://github.com/<owner>/<repo>`, the remote its origin names, at the feed over git's file
-  transport, then the workspace add, `update-stale`, and the configuration writes, once it has
-  removed the clone's stale git locks ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
+  the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
+  --default-branch <name> --root /legion --credential-helper '!gh auth git-credential' --feed
+  /var/run/legion/feed`: the clone's clone and fetch reach `https://github.com/<owner>/<repo>`,
+  the remote its origin names, at the feed over git's file transport, the fetch bringing the
+  default branch and the issue's branch alone, each by its exact name, then the workspace add,
+  `update-stale`, and the configuration writes, once it has removed the clone's stale git locks
+  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)).
   It takes no lock and waits on no other pod: the clone is the issue's own, on the issue's own
   volume, and no other provision shares the repository. What an agent of the issue planted can run
   there, with nothing to take that the agent does not already hold.
@@ -2279,6 +2318,37 @@ own with no timeout, since one would end a watch. A launch the limiter holds bac
 and is charged no launch failure. A pod log read is the exception: it is bounded whole at 30 s,
 its wait on the limiter included, since client-go bounds a log stream per attempt and not across
 its retries.
+
+An API server under load answers some requests overloaded or failed instead of acting on them: API
+Priority and Fairness's 429, once client-go's own Retry-After retries ran out, and any 5xx, such as
+the 500 etcd's throttle reaches a client as (`rpc error: code = ResourceExhausted desc =
+etcdserver: throttle: too many requests`). Such an answer to one of a launch's requests refused
+nothing the launch did, so the runtime sends that request again after a jittered backoff (250 ms,
+doubling to 8 s) rather than failing the launch, and the launch goes on from that request once the
+server answers it. Each request waits so for up to a boot timeout from its first overloaded
+answer, or until the launch step it belongs to ends when that comes first, so a try under a long
+throttle can take several boot timeouts, one per request it sends. Two of a launch's waits send a
+request of their own, and that request ends with the wait's budget: the wait for a Sandbox being
+deleted, and the read confirming the old pod is gone. A failed launch's suspension of
+its Sandbox waits the server out for at most 30 s. Each throttled request logs `sandbox runtime:
+the API server answered a launch's request overloaded; sending it again after a backoff` once,
+naming it, and `… it had answered overloaded` once the server answers, with how many overloaded
+answers it waited out. No launch failure is charged while it waits. A request the server still
+answers overloaded at its deadline fails the launch with that answer, which says how often and
+how long it was waited out, and the failure is charged as any other is.
+
+The rule an operator sees: a 429, a 5xx, or a timeout the server itself reports is waited out; a
+refusal of the request (a 403, a 409, a 422, an admission webhook's denial) and no answer at all
+(the client's own timeout, a connection that never reached the server) fail the launch, charged.
+`serverBusy` in `internal/runtime/sandbox/busy.go` is the one place that decides it. A write sent
+again may have been applied the first time: a Secret create refused as already existing, or an
+update refused as a conflict, is read and written once more, and a fenced relabel of the Sandbox
+refused as invalid is read again, failing the try when the Sandbox has not changed since. While
+the API server refuses the informers' own lists or watches as overloaded, a launch waiting for its
+role launcher waits on, within its deadline, until the informers list and watch again. Only a
+launch's requests wait the server out; a sweep, a claim's suspension or a hello's credential read
+fails on the answer and is tried again by its own caller. A charged launch failure is followed by
+the supervisor's launch backoff ([Supervision](site/src/content/docs/legion/concepts.md#supervision)).
 
 A role's launcher credential is read once however often its launcher says hello. The read is
 single-flight per Secret of a Sandbox and outlives the hello that began it: the hello waits for it
@@ -2530,14 +2600,20 @@ issue's pod (every role container of it alike) and the image probe's.
 - **Each role's model** is the operator's: the `models.yml` and `overlay.yml` they keep in a
   directory of their own (for example `~/.local/state/legion-model-config`), which
   `deploy/kubernetes/operator-route/apply.sh --context <kube context> <directory>` writes into the
-  ConfigMap `legion-operator-route` in namespace `legion`, its only writer. To change a role's
-  model, edit its line under `modelRoles` in that `overlay.yml` and run the same command again.
-  Pods started after that use it; a running pod keeps the files it started with until it restarts,
-  since both are mounted by `subPath`, which the kubelet never refreshes. The example overlay also
-  turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried on another
-  model; which model is the repository's `retry.fallbackChains` to name): the probe pod reads the
-  effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its
-  OK line's `model-fallback` mark (`unread` when it could not read it: the probe pod's log says
+  ConfigMap `legion-operator-route` in namespace `legion`, with a server-side apply under its own
+  field manager that forces conflicts: it takes the two keys over from any tool that wrote them
+  before and names that tool's field manager on stderr. A tool that still declares the ConfigMap
+  acts at its own next apply: a forced one writes its copy back, and one without force fails on any
+  key whose value differs and leaves the operator's copy; either way, stop it declaring the
+  ConfigMap first.
+  To change a role's model, edit its line under `modelRoles` in that `overlay.yml` and run the same
+  command again. Pods started after that use it; a running pod keeps the files it started with until
+  it restarts, since both are mounted by `subPath`, which the kubelet never refreshes. The example
+  overlay also turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried
+  on another model; which model is the repository's `retry.fallbackChains` to name): the probe pod
+  reads the effective value under the operator's configuration
+  (`omp config get retry.modelFallback`) onto its OK line's `model-fallback` mark (`unread` when it
+  could not read it: the probe pod's log says
   why), and the daemon reports the `model-fallback` capability open while a deployment's copy
   turns it off or the probe could not read it — a report, not a refusal; a
   `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to
@@ -2993,10 +3069,15 @@ exits 3, which the daemon reads as a lost volume and answers with a fresh contro
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
-agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
-so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
-"true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
-is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
+agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it, so under
+Karpenter it lands wherever the pool has room for it (on GKE Autopilot it usually gets a node of its own,
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and it is annotated `karpenter.sh/do-not-disrupt:
+"true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
+or replaces for drift the node it runs on, though issue pods can still be scheduled onto that node;
+GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod) has what it does not stop), after which
+Autopilot may evict it like any other pod, and it is relaunched and resumes the same session like
+any claim's pod that dies ("The claim", above). Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
 `LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them

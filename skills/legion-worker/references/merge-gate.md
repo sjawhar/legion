@@ -25,12 +25,20 @@ the head voids it.
   every commit above that push's head changes only `.legion/` (a push that changes only
   `.legion/` carries `skip-checks: true`, so GitHub runs no workflow for it). With `<o>/<r>`,
   `<n>`, `<base>`, `<headRefName>` and `<headRefOid>` from
-  `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set, from
-  the base branch's rulesets
-  (`gh api repos/<o>/<r>/rules/branches/<base> --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context'`)
-  and its branch protection, when it has any
-  (`gh api repos/<o>/<r>/branches/<base> --jq '.protection.required_status_checks.checks[].context'`);
-  a read GitHub refuses is reported to the architect, never guessed. The CI head, the head of the
+  `gh pr view <n> --json baseRefName,headRefOid,headRefName`, four reads. The required set is the
+  base branch's rulesets' required checks and its branch protection's, when it has any. Both
+  branch endpoints take the base as a URL path, each segment escaped and each `/` kept (a raw `#`
+  or `%` reads another branch), built in the same command from the name GitHub returns, never
+  pasted or carried over from an earlier command:
+
+  ```bash
+  base=$(gh pr view <n> -R <o>/<r> --json baseRefName -q .baseRefName) && \
+    base_path=$(jq -rn --arg b "$base" '$b | split("/") | map(@uri) | join("/")') && \
+    echo rulesets: && gh api "repos/<o>/<r>/rules/branches/$base_path" --jq '.[] | select(.type=="required_status_checks") | .parameters.required_status_checks[].context' && \
+    echo protection: && gh api "repos/<o>/<r>/branches/$base_path" --jq '.protection.required_status_checks.checks[].context'
+  ```
+
+  A read GitHub refuses stops the command there, and is reported to the architect, never guessed. The CI head, the head of the
   branch's newest `pull_request` run
   (`gh api 'repos/<o>/<r>/actions/runs?branch=<headRefName>&event=pull_request&per_page=30' --jq '.workflow_runs[0].head_sha'`,
   newest first); the PR body's `CI:` line names runs at that same commit
@@ -62,7 +70,8 @@ the head voids it.
   `APPROVE`: submit one more `APPROVE` naming the new head by SHA, its body naming both SHAs
   and the fingerprint — a confirmation, not a round; no thermo pass, no thread pass. Equal and
   that review was `COMMENT` or `REQUEST_CHANGES`: continue that round against the new head;
-  nothing restarts. Different: a new round — thermo again, one review.
+  nothing restarts. Different, or either run printed no fingerprint: a new round — thermo again,
+  one review.
 - Answer every thread you opened, and every thread a bot opened that is none of Legion's role
   Apps, as `skill://legion-worker/references/review-threads.md` says; the same reference says
   when every thread is settled enough to approve, and resolving one never gates your approval.
