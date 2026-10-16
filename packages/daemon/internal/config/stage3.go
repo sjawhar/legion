@@ -38,11 +38,14 @@ type Gates struct {
 }
 
 // Project maps a Dispatch project prefix to its repository, parsed at load, its optional
-// merge-queue role, and merge rules.
+// merge-queue role, merge rules, and the Slack channels whose @-mentions reach its controller.
 type Project struct {
 	Repo           ghrepo.Repository
 	MergeQueueRole string
 	Merge          MergeRules
+	// SlackChannels are `slack_channels`, the Slack channel ids whose app mentions the project's
+	// controller subscribes to, in the file's order; nil when the file names none.
+	SlackChannels []string
 }
 
 // MergeRules is the project's `merge` policy. A path matching ByHand is never auto-armed.
@@ -97,6 +100,10 @@ const missingDispatchTokenFile = "dispatch_token_file is required when dispatch_
 var (
 	projectKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*$`)
 	roleNamePattern   = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+	// slackChannelPattern is a Slack channel id: C for a public channel, G for a private one, then
+	// capital letters and digits. It is one NATS subject token of the mention topic the controller
+	// subscribes to (notifications.slack.<team>.<channel>.mention), so nothing else is taken.
+	slackChannelPattern = regexp.MustCompile(`^[CG][A-Z0-9]+$`)
 )
 
 func readProjects(value *yaml.Node, key string) (map[string]Project, error) {
@@ -104,6 +111,8 @@ func readProjects(value *yaml.Node, key string) (map[string]Project, error) {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
 	projects := make(map[string]Project, len(value.Content)/2)
+	// channelOwner is the project whose slack_channels named a channel first, in file order.
+	channelOwner := map[string]string{}
 	for index := 0; index+1 < len(value.Content); index += 2 {
 		keyNode, entryNode := value.Content[index], value.Content[index+1]
 		name := keyNode.Value
@@ -117,6 +126,13 @@ func readProjects(value *yaml.Node, key string) (map[string]Project, error) {
 		if err != nil {
 			return nil, err
 		}
+		for _, channel := range project.SlackChannels {
+			if owner, taken := channelOwner[channel]; taken {
+				return nil, fmt.Errorf("%s.%s.slack_channels names %q, which %s.%s.slack_channels already names: a channel's mentions reach one project's controller",
+					key, name, channel, key, owner)
+			}
+			channelOwner[channel] = name
+		}
 		projects[name] = project
 	}
 	if len(projects) == 0 {
@@ -129,7 +145,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping with repo", key)
 	}
-	fields, err := members(value, key, "repo", "merge", "merge_queue_role", "mergeQueueRole")
+	fields, err := members(value, key, "repo", "merge", "merge_queue_role", "mergeQueueRole", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		// The shipped loader's own words (validateProjectEntry, config.ts).
@@ -164,7 +180,30 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 			return Project{}, err
 		}
 	}
+	if channels := fields["slack_channels"]; channels != nil {
+		if project.SlackChannels, err = readSlackChannels(channels, key+".slack_channels"); err != nil {
+			return Project{}, err
+		}
+	}
 	return project, nil
+}
+
+// readSlackChannels is a project's `slack_channels`: Slack channel ids, each named once. An empty
+// list is no channel, as an absent key is.
+func readSlackChannels(value *yaml.Node, key string) ([]string, error) {
+	channels, err := readStrings(value, key)
+	if err != nil || len(channels) == 0 {
+		return nil, err
+	}
+	for index, channel := range channels {
+		if !slackChannelPattern.MatchString(channel) {
+			return nil, fmt.Errorf("%s entry %q is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)", key, channel)
+		}
+		if slices.Contains(channels[:index], channel) {
+			return nil, fmt.Errorf("%s names %q twice", key, channel)
+		}
+	}
+	return channels, nil
 }
 
 func readMergeRules(value *yaml.Node, key string) (MergeRules, error) {

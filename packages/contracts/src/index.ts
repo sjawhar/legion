@@ -10,5 +10,6 @@ export * from "./dispatch-tools";
 export * from "./envelope";
 export * from "./legion-roles";
 export * from "./repo";
+export * from "./slack";
 export * from "./subject";
 export * from "./tool-schema";

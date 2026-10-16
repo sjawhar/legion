@@ -174,4 +174,13 @@ package api
 // gains a third `model-fallback` mark, `unread`, when the probe could not read `retry.modelFallback`.
 // A 24 plugin's strict reader refuses a state whose deployment rows carry `source`, so the boot
 // gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 25
+//
+// 26: `slackChannels` on POST /legion/v1/controller/secret's answer (ControllerSecretResponse), the
+// project's `slack_channels`, always emitted, `[]` for none, which `legion controller start` tells
+// the controller as its addressing (daemon.ControllerAddressing), as the daemon tells the
+// controller it launches. A `legion` from before 26 against a 26 daemon would start a controller
+// that never hears the project's Slack mentions, and a 26 `legion` refuses a 25 daemon's answer for
+// want of the list; the secret route's contract check refuses either pair before it mints, naming
+// both. The controller's Slack procedure reads the `slack_post` tool, which the pi-envoy built with
+// this contract registers.
+const DaemonAPIVersion = 26

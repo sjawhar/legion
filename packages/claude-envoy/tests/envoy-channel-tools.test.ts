@@ -81,6 +81,38 @@ test("sends Envoy messages through the shared transport", async () => {
   })
 })
 
+test("replies in a Slack thread through the listener with slack_post", async () => {
+  const posts: unknown[] = []
+  const client = createEnvoyClient({
+    baseUrl: "http://envoy.test",
+    fetch: async (request, init) => {
+      expect(String(request)).toBe("http://envoy.test/v1/slack/post")
+      posts.push(JSON.parse(String(init?.body)))
+      return Response.json({
+        channel: "C00000000",
+        thread_ts: "1700000000.000100",
+        ts: "1700000000.000200",
+      })
+    },
+  })
+  const runtime: ChannelToolRuntime = { identity, client, session: sessionWith([]) }
+
+  const result = await executeEnvoyTool(runtime, "slack_post", {
+    channel: "C00000000",
+    thread_ts: "1700000000.000100",
+    text: "Filed as ACME-12.",
+  })
+
+  expect(posts).toEqual([
+    { channel: "C00000000", thread_ts: "1700000000.000100", text: "Filed as ACME-12." },
+  ])
+  expect(result).toEqual({
+    channel: "C00000000",
+    thread_ts: "1700000000.000100",
+    ts: "1700000000.000200",
+  })
+})
+
 test("a dispatch_* call is an unknown tool even with Dispatch configured, and reaches no Dispatch", async () => {
   const requests: string[] = []
   const server = Bun.serve({

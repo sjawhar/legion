@@ -154,6 +154,34 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	}
 }
 
+// The daemon's controller is told the project's Slack channels after its design gate policy, each
+// with the one mention topic it subscribes to, as `legion controller start` tells the operator's;
+// a project with no channel tells it nothing of Slack.
+func TestTheControllersLaunchNamesTheProjectsSlackMentionTopics(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	s := specs{
+		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateRootIssues,
+		slackChannels: []string{"C00000000", "G00000001"},
+	}
+	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	want := "Design gate policy: `gates.design: root-issues`. Slack channels: `C00000000` " +
+		"(`notifications.slack.*.C00000000.mention`), `G00000001` (`notifications.slack.*.G00000001.mention`); " +
+		"subscribe to each topic at every start and answer each mention in its thread " +
+		"(skill://legion-controller, \"Slack mentions\")."
+	if spec.Prompt.Addressing != want {
+		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
+	}
+	if got := ControllerAddressing(config.DesignGateOff, nil); got != DesignGateFragment(config.DesignGateOff) {
+		t.Errorf("addressing with no channel = %q, want the design gate policy alone", got)
+	}
+}
+
 // spec.Plugins is set iff the runtime is Kubernetes, the claim has registered a session, and its
 // recorded contract differs from this daemon's — never for tmux, a claim with no session, a claim
 // already at the daemon's contract, or a daemon that knows no plugin pair (LEGION-164's degraded

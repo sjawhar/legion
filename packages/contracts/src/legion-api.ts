@@ -351,11 +351,13 @@ export const LegionControllerRegisterResponse = z.strictObject({
 export type LegionControllerRegistration = z.output<typeof LegionControllerRegisterResponse>;
 
 /** `api.ControllerSecretResponse`, the body of `POST /legion/v1/controller/secret`: the controller
- * capability the operator's bearer bought, and the project's `gates.design`, which
- * `legion controller start` tells the controller. The CLI reads it; the plugin never does. */
+ * capability the operator's bearer bought, the project's `gates.design`, and the project's
+ * `slack_channels` (never null; `[]` for none), which `legion controller start` tells the
+ * controller. The CLI reads it; the plugin never does. */
 export const LegionControllerSecretResponse = z.strictObject({
   secret: nonEmptyString,
   designGate: z.enum(["root-issues", "off"]),
+  slackChannels: z.array(z.string().regex(/^[CG][A-Z0-9]+$/)),
 });
 
 /** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:

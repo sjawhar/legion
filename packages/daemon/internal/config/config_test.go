@@ -295,6 +295,70 @@ func TestLoadReadsProjectMergeRules(t *testing.T) {
 	}
 }
 
+// A project's slack_channels are the Slack channel ids whose @-mentions reach its controller, kept
+// in the order the file writes them.
+func TestLoadReadsProjectSlackChannels(t *testing.T) {
+	body := strings.Replace(minimalFile, "{ repo: acme/widgets }",
+		"{ repo: acme/widgets, slack_channels: [C00000000, G00000001] }", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project slack channels: %v", err)
+	}
+	if got, want := cfg.Projects["DEMO"].SlackChannels, []string{"C00000000", "G00000001"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("SlackChannels = %q, want %q", got, want)
+	}
+}
+
+// A channel belongs to one project: the loader refuses a channel named twice, in one project or in
+// two, and an id that is not a Slack channel's, which would make a subject no mention is published
+// under.
+func TestLoadRefusesProjectSlackChannels(t *testing.T) {
+	for _, tc := range []struct{ name, projects, want string }{
+		{
+			name:     "not a list",
+			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: C00000000 }\n",
+			want:     "projects.DEMO.slack_channels must be an array of non-empty strings",
+		},
+		{
+			name:     "not a channel id",
+			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [general] }\n",
+			want:     `projects.DEMO.slack_channels entry "general" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
+		},
+		{
+			name:     "a direct message",
+			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [D00000000] }\n",
+			want:     `projects.DEMO.slack_channels entry "D00000000" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
+		},
+		{
+			name:     "a subject wildcard",
+			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: ['C*'] }\n",
+			want:     `projects.DEMO.slack_channels entry "C*" is not a Slack channel id (C or G, then capital letters and digits, such as C0123ABCD)`,
+		},
+		{
+			name:     "twice in one project",
+			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [C00000000, C00000000] }\n",
+			want:     `projects.DEMO.slack_channels names "C00000000" twice`,
+		},
+		{
+			name: "in two projects",
+			projects: "projects:\n  DEMO: { repo: acme/widgets, slack_channels: [C00000000] }\n" +
+				"  OTHER: { repo: acme/other, slack_channels: [C00000001, C00000000] }\n",
+			want: `projects.OTHER.slack_channels names "C00000000", which projects.DEMO.slack_channels already names: a channel's mentions reach one project's controller`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := strings.Replace(minimalFile, "projects:\n  DEMO: { repo: acme/widgets }\n", tc.projects, 1)
+			if body == minimalFile {
+				t.Fatal("the fixture's projects block was not replaced")
+			}
+			_, err := Load(writeConfigFile(t, body), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadReadsPrivateKeyCommand(t *testing.T) {
 	body := strings.Replace(minimalFile, "private_key: implement-test-key", "private_key_command: printf command-key", 1)
 

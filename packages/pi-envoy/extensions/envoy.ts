@@ -2440,6 +2440,17 @@ export default function envoyExtension(pi: PiApi): void {
             title,
           });
         }
+        case EnvoyToolOperation.slackPost: {
+          const posted = await client.slackPost({
+            channel: stringFor(parameters, "channel"),
+            threadTs: stringFor(parameters, "thread_ts"),
+            text: stringFor(parameters, "text"),
+          });
+          return toolSuccess(
+            `posted ${posted.ts} in ${posted.channel}, thread ${posted.threadTs}`,
+            { channel: posted.channel, thread_ts: posted.threadTs, ts: posted.ts }
+          );
+        }
       }
     } catch (error) {
       return toolFailure(error);

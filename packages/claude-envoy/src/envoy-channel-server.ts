@@ -828,6 +828,15 @@ export async function executeEnvoyTool(
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input)
       return runtime.session.delivery.inbox()
+    case EnvoyToolOperation.slackPost: {
+      const args = parseArguments(spec, input)
+      const posted = await runtime.client.slackPost({
+        channel: args.channel,
+        threadTs: args.thread_ts,
+        text: args.text,
+      })
+      return { channel: posted.channel, thread_ts: posted.threadTs, ts: posted.ts }
+    }
   }
 }
 

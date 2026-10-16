@@ -52,6 +52,9 @@ type Options struct {
 	Controller ControllerStore
 	// DesignGate is the project's `gates.design`, which the controller secret route answers.
 	DesignGate config.DesignGate
+	// SlackChannels is the project's `slack_channels`, which the controller secret route answers;
+	// nil answers an empty list.
+	SlackChannels []string
 	// ControllerLaunched is the daemon launching the project's controller itself (`controller:
 	// daemon`): one controller runs per project, so the controller secret route refuses the operator
 	// and a registration registers the controller only from a launch of the controller's claim.
@@ -142,6 +145,8 @@ type server struct {
 	operatorHash      [sha256.Size]byte
 	controller        ControllerStore
 	designGate        config.DesignGate
+	// slackChannels is Options.SlackChannels, never nil.
+	slackChannels []string
 	// controllerLaunched is Options.ControllerLaunched.
 	controllerLaunched bool
 	// pluginRelaunchable is Options.PluginRelaunchable.
@@ -189,6 +194,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		project:            opts.Project,
 		controller:         opts.Controller,
 		designGate:         opts.DesignGate,
+		slackChannels:      append([]string{}, opts.SlackChannels...),
 		controllerLaunched: opts.ControllerLaunched,
 		pluginRelaunchable: opts.PluginRelaunchable,
 		tokens:             opts.Tokens,

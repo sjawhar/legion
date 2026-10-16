@@ -37167,6 +37167,8 @@ function agentSubject(session) {
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
 }
+// ../contracts/src/slack.ts
+var SLACK_POST_TEXT_MAX = 4000;
 // ../contracts/src/tool-schema.ts
 function overCapMessage(length, max) {
   return `is ${length - max} characters over the ${max}-character limit (${length}/${max})`;
@@ -39947,7 +39949,8 @@ var EnvoyToolOperation = {
   setRole: "setRole",
   getRole: "getRole",
   whoami: "whoami",
-  listSessions: "listSessions"
+  listSessions: "listSessions",
+  slackPost: "slackPost"
 };
 var envoyToolSpecs = [
   {
@@ -40018,6 +40021,16 @@ var envoyToolSpecs = [
       title: schema.string().optional()
     }),
     operation: EnvoyToolOperation.listSessions
+  },
+  {
+    name: "slack_post",
+    description: "Reply in a Slack thread as the Envoy listener's Slack bot. channel is the Slack channel id (a mention's channel_id); thread_ts is the thread's root ts: the mention's thread_ts, or its own ts when it has none. Answers the new message's ts; a refusal carries Slack's own error code (not_in_channel: the bot is not in that channel). Sent once and never retried: after 'Slack did not answer' the reply may already be in the thread, so do not post it again.",
+    arguments: (schema) => ({
+      channel: schema.string({ min: 1 }).describe("Slack channel id, such as C0123ABCD."),
+      thread_ts: schema.string({ min: 1 }).describe("The thread's root ts, which keeps the reply in the mention's thread."),
+      text: schema.string({ min: 1, max: SLACK_POST_TEXT_MAX }).describe(`The reply, in Slack mrkdwn, at most ${SLACK_POST_TEXT_MAX} characters.`)
+    }),
+    operation: EnvoyToolOperation.slackPost
   }
 ];
 function sendConfirmationText(result) {
@@ -40057,6 +40070,11 @@ var RoleHeldWireSchema = exports_external.object({
   error: exports_external.string(),
   role: exports_external.string(),
   holder: exports_external.string()
+});
+var SlackPostWireSchema = exports_external.object({
+  channel: exports_external.string(),
+  thread_ts: exports_external.string(),
+  ts: exports_external.string()
 });
 var ErrorWireSchema = exports_external.object({
   error: exports_external.string(),
@@ -40115,9 +40133,10 @@ function createEnvoyClient(config2) {
   const baseUrl = normalizeEnvoyUrl(config2.baseUrl);
   const timeoutMs = config2.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config2.token;
-  const request = async (path2, init) => {
+  const request = async (path2, init, retry = true) => {
     const url2 = `${baseUrl}${path2}`;
-    for (let attempt = 0;attempt < 2; attempt += 1) {
+    const attempts = retry ? 2 : 1;
+    for (let attempt = 0;attempt < attempts; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -40129,7 +40148,7 @@ function createEnvoyClient(config2) {
           signal: AbortSignal.timeout(timeoutMs)
         });
       } catch (error49) {
-        if (attempt === 0) {
+        if (attempt + 1 < attempts) {
           await waitForRetry();
           continue;
         }
@@ -40144,7 +40163,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt === 0) {
+      if (response.status >= 500 && attempt + 1 < attempts) {
         await waitForRetry();
         continue;
       }
@@ -40152,11 +40171,11 @@ function createEnvoyClient(config2) {
     }
     throw new Error("Envoy request exhausted retries");
   };
-  const post = (path2, body) => request(path2, {
+  const post = (path2, body, retry = true) => request(path2, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
-  });
+  }, retry);
   return {
     subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
@@ -40241,6 +40260,10 @@ function createEnvoyClient(config2) {
         search.set("title", input.title);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
+    },
+    slackPost: async (input) => {
+      const posted = SlackPostWireSchema.parse(JSON.parse(await post("/v1/slack/post", { channel: input.channel, thread_ts: input.threadTs, text: input.text }, false)));
+      return { channel: posted.channel, threadTs: posted.thread_ts, ts: posted.ts };
     }
   };
 }
@@ -43351,6 +43374,15 @@ async function executeEnvoyTool(runtime, name, input) {
     case EnvoyToolOperation.inbox:
       parseArguments(spec, input);
       return runtime.session.delivery.inbox();
+    case EnvoyToolOperation.slackPost: {
+      const args = parseArguments(spec, input);
+      const posted = await runtime.client.slackPost({
+        channel: args.channel,
+        threadTs: args.thread_ts,
+        text: args.text
+      });
+      return { channel: posted.channel, thread_ts: posted.threadTs, ts: posted.ts };
+    }
   }
 }
 function pluginStateDirectory() {

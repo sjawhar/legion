@@ -115,13 +115,14 @@ func newControllerDaemonWithTokens(t *testing.T, tokens appauth.Tokens) *control
 	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens, githubOwner: "acme"})
 }
 
-// controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate,
-// and, for the tests of the controller's GitHub credential route, a Tokens fake and the
-// repository owner its mints need.
+// controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate and
+// Slack channels, and, for the tests of the controller's GitHub credential route, a Tokens fake and
+// the repository owner its mints need.
 type controllerDaemonOptions struct {
-	gate        config.DesignGate
-	tokens      appauth.Tokens
-	githubOwner string
+	gate          config.DesignGate
+	slackChannels []string
+	tokens        appauth.Tokens
+	githubOwner   string
 }
 
 // newControllerDaemonWithOptions is the daemon's HTTP surface as `legion controller start` and
@@ -132,7 +133,7 @@ func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) 
 	d := &controllerDaemon{t: t, controller: &memoryController{}, dispatch: &statusWrites{}}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
-		DesignGate: opts.gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DesignGate: opts.gate, SlackChannels: opts.slackChannels, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Tokens: opts.tokens, GitHubOwner: opts.githubOwner,
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -650,19 +651,48 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 	}
 }
 
+// The controller is told each of the project's Slack channels with its mention topic, after the
+// design gate policy, as the daemon tells a controller it launches (daemon.ControllerAddressing).
+func TestControllerStartTellsTheControllerTheProjectsSlackChannels(t *testing.T) {
+	d := newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, slackChannels: []string{"C00000000"}})
+	c := newControllerStart(t, d, controllerOptions{})
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	argv := c.argv()
+	want := "\n\nDesign gate policy: `gates.design: root-issues`. Slack channels: `C00000000` (`notifications.slack.*.C00000000.mention`); "
+	if len(argv) != 2 || !strings.Contains(argv[1], want) {
+		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry %q", argv, want)
+	}
+}
+
 // A daemon that answers the secret without a policy it knows is refused, never guessed at: the
 // controller would otherwise promise, or withhold, a design approval on an assumption.
 func TestControllerSecretWithoutADesignGatePolicyIsRefused(t *testing.T) {
-	for _, body := range []string{`{"secret":"s"}`, `{"secret":"s","designGate":"sometimes"}`} {
+	for _, body := range []string{`{"secret":"s","slackChannels":[]}`, `{"secret":"s","designGate":"sometimes","slackChannels":[]}`} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(body))
 		}))
-		_, _, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
+		_, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
 		server.Close()
 		if err == nil || !strings.Contains(err.Error(), "not 'root-issues' or 'off'; upgrade the daemon") {
 			t.Fatalf("fetchControllerSecret(%s) error = %v; want the policy refusal", body, err)
 		}
+	}
+}
+
+// A daemon that answers the secret without its Slack channel list is one from before it, refused
+// rather than read as a project with none: its controller would never hear a mention.
+func TestControllerSecretWithoutSlackChannelsIsRefused(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"secret":"s","designGate":"off"}`))
+	}))
+	defer server.Close()
+	_, err := fetchControllerSecret(context.Background(), server.URL, controllerOperatorToken, api.DaemonAPIVersion)
+	if err == nil || !strings.Contains(err.Error(), "answered no slackChannels; upgrade the daemon to this legion's release") {
+		t.Fatalf("fetchControllerSecret error = %v; want the missing-list refusal", err)
 	}
 }
 

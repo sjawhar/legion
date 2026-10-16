@@ -2970,6 +2970,76 @@ describe("envoy OMP extension", () => {
     expect(result.content[0]?.text).toContain("no live session ses_missing");
   });
 
+  test("slack_post replies in the thread through the listener and names the posted ts", async () => {
+    const posts: unknown[] = [];
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/v1/slack/post") {
+        posts.push(JSON.parse(String(init?.body)));
+        return response({
+          channel: "C00000000",
+          thread_ts: "1700000000.000100",
+          ts: "1700000000.000200",
+        });
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?slack-post");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const slackPost = fixture.tools.find((tool) => tool.name === "slack_post");
+    if (slackPost === undefined) throw new Error("slack_post was not registered");
+
+    const result = await slackPost.execute("", {
+      channel: "C00000000",
+      thread_ts: "1700000000.000100",
+      text: "Filed as ACME-12.",
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.content[0]?.text).toBe(
+      "posted 1700000000.000200 in C00000000, thread 1700000000.000100"
+    );
+    expect(result.details).toEqual({
+      channel: "C00000000",
+      thread_ts: "1700000000.000100",
+      ts: "1700000000.000200",
+    });
+    expect(posts).toEqual([
+      { channel: "C00000000", thread_ts: "1700000000.000100", text: "Filed as ACME-12." },
+    ]);
+  });
+
+  test("slack_post surfaces Slack's refusal verbatim and posts once", async () => {
+    let posts = 0;
+    globalThis.fetch = async (input, init) => {
+      if (new URL(input.toString()).pathname === "/v1/slack/post") {
+        posts += 1;
+        return new Response(
+          JSON.stringify({ error: "Slack refused chat.postMessage: not_in_channel" }),
+          { status: 502 }
+        );
+      }
+      return responseWithRegistration(input, init, {});
+    };
+    const { default: envoyExtension } = await import("./envoy.ts?slack-post-refused");
+    const fixture = createPi();
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.({}, sessionContext());
+    const slackPost = fixture.tools.find((tool) => tool.name === "slack_post");
+    if (slackPost === undefined) throw new Error("slack_post was not registered");
+
+    const result = await slackPost.execute("", {
+      channel: "C00000000",
+      thread_ts: "1700000000.000100",
+      text: "hello",
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toContain("Slack refused chat.postMessage: not_in_channel");
+    expect(posts).toBe(1);
+  });
+
   test("rejects malformed wildcard bases before opening subscriptions", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?malformed-wildcard-base");

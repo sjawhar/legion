@@ -14517,6 +14517,8 @@ function agentSubject(session) {
 function canonicalRepo(owner, repo) {
   return `${owner.trim().toLowerCase()}/${repo.trim().toLowerCase().replace(/\.git$/, "")}`;
 }
+// ../contracts/src/slack.ts
+var SLACK_POST_TEXT_MAX = 4000;
 // ../contracts/src/tool-schema.ts
 function overCapMessage(length, max) {
   return `is ${length - max} characters over the ${max}-character limit (${length}/${max})`;

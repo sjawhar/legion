@@ -36,6 +36,9 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
+	// slackChannels is the project's slack_channels, whose mention topics the controller is told
+	// after the design gate policy (ControllerAddressing).
+	slackChannels []string
 	// mergeRules is the project's merge policy, which a merger is told after its addressing.
 	mergeRules config.MergeRules
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
@@ -133,10 +136,10 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part, the project's design gate policy as its addressing — what `legion controller
-// start` tells the operator's controller — the deployment instructions and the launch secrets. It
-// has no repository and no git identity: the controller works Dispatch, never a checkout, and
-// commits nothing.
+// the headless part, the project's design gate policy and Slack channels as its addressing — what
+// `legion controller start` tells the operator's controller — the deployment instructions and the
+// launch secrets. It has no repository and no git identity: the controller works Dispatch, never a
+// checkout, and commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -150,7 +153,7 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,
-			Addressing:                 DesignGateFragment(s.designGate),
+			Addressing:                 ControllerAddressing(s.designGate, s.slackChannels),
 			DeploymentInstructionsPath: s.instructions,
 		},
 	}, nil
@@ -196,6 +199,36 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 // the architect is in its Go role part (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
+}
+
+// ControllerAddressing is the controller's launch addressing under either launch: the daemon's
+// own (controllerSpawnSpec) and `legion controller start`'s. It is the design gate policy, then,
+// when the project names Slack channels, SlackChannelsFragment.
+func ControllerAddressing(policy config.DesignGate, slackChannels []string) string {
+	addressing := DesignGateFragment(policy)
+	if len(slackChannels) > 0 {
+		addressing += " " + SlackChannelsFragment(slackChannels)
+	}
+	return addressing
+}
+
+// SlackChannelsFragment names each of the project's Slack channels with the one topic of its app
+// mentions the controller subscribes to, `notifications.slack.*.<channel>.mention`, spelled here so
+// the model never hand-encodes one; a thread's own copy of a mention is not subscribed, since the
+// channel's carries the same event. What the controller does with a mention is the skill's.
+func SlackChannelsFragment(channels []string) string {
+	named := make([]string, 0, len(channels))
+	for _, channel := range channels {
+		named = append(named, fmt.Sprintf("`%s` (`%s`)", channel, SlackMentionTopic(channel)))
+	}
+	return "Slack channels: " + strings.Join(named, ", ") +
+		"; subscribe to each topic at every start and answer each mention in its thread (skill://legion-controller, \"Slack mentions\")."
+}
+
+// SlackMentionTopic is the Envoy topic of every app mention in channel, whatever the Slack team:
+// the channel copy Envoy's Slack webhook publishes (`notifications.slack.<team>.<channel>.mention`).
+func SlackMentionTopic(channel string) string {
+	return "notifications.slack.*." + channel + ".mention"
 }
 
 // MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.

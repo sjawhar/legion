@@ -599,7 +599,7 @@ describe("repository-extensions", () => {
 });
 
 describe("dispatch-envoy-tools", () => {
-  test("passes when the ten tools are active and dispatch read answers, naming PATH's dispatch", async () => {
+  test("passes when the eleven tools are active and dispatch read answers, naming PATH's dispatch", async () => {
     const bin = path.join(workspace, "bin");
     await mkdir(bin, { recursive: true });
     const dispatch = path.join(bin, "dispatch");
@@ -611,7 +611,7 @@ describe("dispatch-envoy-tools", () => {
     const rows = await measure(host);
     expect(rows["dispatch-envoy-tools"]).toEqual({
       ok: true,
-      detail: `ten Envoy tools registered; dispatch read LEGION-663 answered from ${dispatch}`,
+      detail: `11 Envoy tools registered; dispatch read LEGION-663 answered from ${dispatch}`,
     });
     const run = host.runs.find((candidate) => candidate.command === "dispatch");
     expect(run?.args).toEqual(["read", "--issue", "LEGION-663"]);
@@ -623,7 +623,7 @@ describe("dispatch-envoy-tools", () => {
     process.env.PATH = path.join(workspace, "nowhere");
     const rows = await measure(fakeHost());
     expect(rows["dispatch-envoy-tools"].detail).toBe(
-      "ten Envoy tools registered; dispatch read LEGION-663 answered from dispatch"
+      "11 Envoy tools registered; dispatch read LEGION-663 answered from dispatch"
     );
   });
 
@@ -634,7 +634,7 @@ describe("dispatch-envoy-tools", () => {
     });
     expect(rows["dispatch-envoy-tools"]).toEqual({
       ok: false,
-      detail: "Envoy tools missing: envoy_whoami, envoy_sessions",
+      detail: "Envoy tools missing: envoy_whoami, envoy_sessions, slack_post",
     });
     expect(host.runs.map((run) => run.command)).toEqual(["gh"]);
   });
