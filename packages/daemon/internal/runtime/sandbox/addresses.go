@@ -186,10 +186,10 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 // the three fields the shim's token file depends on: its audience, expiry and path. Nothing else of
 // a stored volume is compared: a field the API server's defaulting or an admission webhook adds, or
 // another projection source beside the token's, changes nothing the shim reads, and reading it as a
-// lack would rebuild the pod and re-provision its workspace at every relaunch. A role that does not
-// enroll (enrolledWith) lacks nothing.
+// lack would rebuild the pod and re-provision its workspace at every relaunch. A runtime that
+// enrolls no pod lacks nothing.
 func (r *Runtime) movedEnrollment(pod *corev1.Pod, role claim.Role) (movedAddress, bool) {
-	broker := r.enrolledWith(role)
+	broker := r.agentSecrets
 	if broker == nil {
 		return movedAddress{}, false
 	}

@@ -8,7 +8,7 @@
   (sjawhar/legion#1998).
 - `LegionControllerSecretResponse` carries `slackChannels`, the project's `slack_channels` (never
   null, `[]` for none), which `legion controller start` tells the controller: daemon API contract
-  26.
+  31.
 - `ArtifactReview` and `ArtifactReviewEventPayload` document a third provenance, the carried
   review: an `approved` review Dispatch records in a human's name at the version his answer to a
   decision block writes, when that answer is the whole change since the version he approved, with

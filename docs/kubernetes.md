@@ -1681,9 +1681,8 @@ booting on a full pool ([The image is probed before it publishes](#the-image-is-
 ### A pod whose address moved
 
 A role process's addresses are fixed when it is launched, and nothing changes a running process's
-argv or environment. The daemon hands every role process six from its configuration, and the
-daemon-launched controller, which never enrolls with the secrets broker, every one but
-`AGENT_SECRETS_URL`, which it is compared without. The
+argv or environment. The daemon hands every role process, the daemon-launched controller's included, six from its
+configuration. The
 worker stream listener, `tcp://<advertise_host, or bind with none set>:<worker_stream_port>`, is in
 every launcher container's command (item 3 of the anatomy list above), so it is fixed for the pod's
 life: a launcher dials it and never redials elsewhere. The other five reach a generation's Oh
@@ -2998,8 +2997,13 @@ keeper relaunches it. Its one init container, `legion workspace-init controller 
 exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
-name and to the volume it owns. It is never enrolled with the secrets broker: it has no
-agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
+name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is enrolled with the secrets broker as an issue pod's
+roles are: it projects the broker's token, has a key directory of its own, and its shim takes the
+three agent-secrets flags and its agent `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`. It runs
+as the operator's ServiceAccount (`runtime.kubernetes.pod`), the same account as every issue pod,
+so the binding `BROKER_SERVICES` gives that account for the `legion-daemon` service makes it that
+service's pod, and the broker grants it a secret the service owns at tier `agent`, such as
+`LEGION_SLACK_BOT_TOKEN`, with no person asked. Like every Legion pod it carries no affinity,
 so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
 "true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
 is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its

@@ -87,7 +87,7 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 26 for contract 26's `slackChannels` on `POST /legion/v1/controller/secret`'s answer
+number is 31 for contract 31's `slackChannels` on `POST /legion/v1/controller/secret`'s answer
 (sjawhar/legion#1998: the project's `slack_channels`, which `legion controller start` tells the
 controller as the daemon tells the one it launches), after contract 25's `source` on a deployment
 capability row (LEGION-636) and contract 24's `pluginContract` on the claim views (LEGION-164),
