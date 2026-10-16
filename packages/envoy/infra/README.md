@@ -1400,10 +1400,13 @@ holds it.
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
 session on the host share: in each direction the listener's entries, then each of the session's
 the listener's lack. A `gcp:NatsHub` user with `machineId` holds it, and a hub's own `listener`
-holds `ListenerPermissions` for the hub's hostname. This repository's listener and a session,
-connected as one user holding `HostPermissions`, and connected as a user holding
-`ListenerPermissions` beside a credential-free session user holding `SessionPermissions`, are
-checked against real nats-server 2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
+holds `ListenerPermissions` for the hub's hostname. Sharing one user makes the host one trust
+domain: any process that reaches the server as it, a listener's own process or any session on the
+host, holds the whole grant above, host sessions included, since sessions run as the Unix user
+that already reads the host's seed. This repository's listener and a session, connected as one
+user holding `HostPermissions`, and connected as a user holding `ListenerPermissions` beside a
+credential-free session user holding `SessionPermissions`, are checked against real nats-server
+2.10 and 2.15.1 servers; `AGENTS.md` in this directory says how.
 
 A plugin release builds the sets from Envoy's names at its own commit, so a listener built from a
 later commit that publishes or subscribes to a subject those names lacked needs a hub rendered by
