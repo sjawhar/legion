@@ -174,7 +174,7 @@ profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubec
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
-(`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
+(`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value; the mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My Pi settings — the probe pod's log says why — and the daemon's report shows the row open).
 An image row the image carries prints `present` with its evidence (`codegraph`'s: the CLI on PATH and
 the plugin enabled in the profile's lock, which a pod's launch loads with extension discovery on). A live row prints
 `reported` (``each session reports it at start; `legion state` renders it: <summary>``: the probe
@@ -1402,6 +1402,8 @@ configuration and its own boot, since no image or pod can show them:
 - `model-fallback`: the pod's Oh My Pi has `retry.modelFallback` true, as the probe's OK line's
   `model-fallback` mark reports it; under tmux the plugin gate reads the host's Oh My Pi once the gate
   has passed. The example overlay turns it on ([Operator configuration](#operator-configuration)).
+  The mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My
+  Pi settings (the probe pod's log says why), and the daemon's report shows the row open.
 - `resource-limits`: every workflow role — and the controller's, under `controller: daemon` —
   reserves CPU and memory (`config.RoleResources.Reserved`: `runtime.kubernetes.resources.<role>`
   or the daemon's default, each both request and limit, [Issue sizing](#issue-sizing-one-reservation-per-pod)),
@@ -1489,9 +1491,12 @@ daemon sees), as `capability <name> is open: <detail>; to record a decision, add
 capabilities.decided.<name>: "<reason>"` on a deployment row and `capability <name> is open: pod
 <sandbox>/<container> (<role>, <issue>): <fact>` — the row's rendered detail — on a live one.
 `legion state --json`: under `capabilities` every row as `{name, status, detail, decision?,
-configLine?}`, `status` one of `present`, `installed`, `unchecked`, `withheld`, `decided` or
-`open` (daemon API contract 16 added the list and contract 21 dropped `live` from it; the image
-rows are `present` once the probe passed and `unchecked` before it or under tmux), and under each
+configLine?, source?}`, `status` one of `present`, `unchecked`, `withheld`, `decided` or `open`
+(daemon API contract 16 added the list, contract 21 dropped `live` from it and contract 25 dropped
+`installed`, which nothing has emitted since LEGION-629; the image rows are `present` once the
+probe passed and `unchecked` before it or under tmux), `source` (`configuration` or `boot`, contract
+25) on a deployment row alone — what legion.yaml alone decides or what boot measured — never on a
+live row, and under each
 claim's `capabilities` (`issues.<KEY>.architect` and `issues.<KEY>.workers.<role>.claim`) that
 claim's latest report — `measuredAt`, `incarnation`, `ok` (the names its checks passed) and
 `open[{name, detail}]` — whatever process sent it; compare its `incarnation` with the claim's
@@ -2523,10 +2528,11 @@ issue's pod (every role container of it alike) and the image probe's.
   turns `retry.modelFallback` on (LEGION-578's ruling: a failed model call is retried on another
   model; which model is the repository's `retry.fallbackChains` to name): the probe pod reads the
   effective value under the operator's configuration (`omp config get retry.modelFallback`) onto its
-  OK line's `model-fallback` mark, and the daemon reports the `model-fallback` capability open while
-  a deployment's copy turns it off — a report, not a refusal; a `capabilities.decided.model-fallback:
-  "<reason>"` line in `legion.yaml` records a decision to keep it off ([The deployment's capability
-  report](#the-deployments-capability-report)).
+  OK line's `model-fallback` mark (`unread` when it could not read it: the probe pod's log says
+  why), and the daemon reports the `model-fallback` capability open while a deployment's copy
+  turns it off or the probe could not read it — a report, not a refusal; a
+  `capabilities.decided.model-fallback: "<reason>"` line in `legion.yaml` records a decision to
+  keep it off ([The deployment's capability report](#the-deployments-capability-report)).
 - **`runtime.kubernetes.agent_secrets`** enrolls every pod the daemon runs with the secrets broker
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only

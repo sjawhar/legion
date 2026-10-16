@@ -61,3 +61,7 @@ build at the fixed head printed
 `capability codegraph: installed (… on PATH; … enabled in …; a pod's agent gets the codegraph tool
 once its launch loads profile plugins (dispatch://LEGION-629))` and still passed; the stub removed
 from PATH in `cmd/legion/probe_image_test.go` still reads `missing` and exits 1.
+
+The `installed` status and `Capability.Awaits` went with LEGION-636: no row had awaited since
+LEGION-629 turned the pod lane's profile-plugin loading on, so no daemon had emitted `installed`
+since, and the status and the field it carried left the wire (contract 25).
