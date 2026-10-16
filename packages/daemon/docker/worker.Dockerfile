@@ -368,10 +368,9 @@ RUN set -eu; \
     jj_repo="${JJ_TOOL#github:}"; jj_repo="${jj_repo%@*}"; jj_tag="v${JJ_TOOL##*@}"; \
     gh_tag="v${GH_TOOL#gh@}"; \
     codegraph_node_tag="$(cat /in/codegraph-node-version)"; \
-    ls_pkg=/in/language-servers/package.json; \
-    typescript_version="$(sed -n 's/^ *"typescript": "\([^"]*\)",\{0,1\}$/\1/p' "$ls_pkg")"; \
-    tsls_version="$(sed -n 's/^ *"typescript-language-server": "\([^"]*\)",\{0,1\}$/\1/p' "$ls_pkg")"; \
-    pyright_version="$(sed -n 's/^ *"pyright": "\([^"]*\)",\{0,1\}$/\1/p' "$ls_pkg")"; \
+    pin() { sed -n "s/^ *\"$1\": \"\([^\"]*\)\".*/\1/p" /in/language-servers/package.json; }; \
+    typescript_version=$(pin typescript); tsls_version=$(pin typescript-language-server); pyright_version=$(pin pyright); \
+    [ -n "$typescript_version" ] && [ -n "$tsls_version" ] && [ -n "$pyright_version" ]; \
     printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
       "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" \
       "$typescript_version" "$tsls_version" "$pyright_version" > /in/tags.env; \
