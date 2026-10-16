@@ -1241,9 +1241,10 @@ The daemon's own NATS seed is optional too, and no pod ever gets it: `nats_daemo
 connection authenticates as. That user's grants, which `legion-pane` does not hold, are exactly
 what the connection uses: publish `$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS`,
 `$JS.API.CONSUMER.INFO.ENVOY_NOTIFICATIONS.>`, `$JS.API.CONSUMER.CREATE.ENVOY_NOTIFICATIONS.>`,
-`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (its two
-durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`), and subscribe
-`notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
+`$JS.API.CONSUMER.MSG.NEXT.ENVOY_NOTIFICATIONS.>` and `$JS.ACK.ENVOY_NOTIFICATIONS.>` (which its
+two durable consumers, `legion-go-<project>-dispatch` and `legion-go-<project>-github`, use, though
+the trailing `>` reaches every consumer of the stream, each host's listener consumer included), and
+subscribe `notifications.envoy.exceptions.notifications.role.>` and `_INBOX.>`. It publishes on no core
 subject: role and controller notices go to the Envoy listener over HTTP, and control directives
 over the worker stream, so the Go daemon needs no `legion.ctl` grant. These subjects were verified
 live: a server granting exactly them logged no refusal across a boot creating both durables, a

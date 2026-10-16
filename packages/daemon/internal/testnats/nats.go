@@ -30,7 +30,7 @@ import (
 // Image is the NATS server image the daemon's existing NATS tests use.
 const Image = "mirror.gcr.io/library/nats:2.10"
 
-// HubImage is the NATS server image gcp:NatsHub runs.
+// HubImage is packages/envoy/internal/testnats.HubImage, the image the GCP hub is tested against; bump both together.
 const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
 
 // Images are the NATS server images a grant must work against.

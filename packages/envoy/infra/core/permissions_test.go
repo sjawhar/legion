@@ -149,9 +149,8 @@ func TestASetIsAUsersRules(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// The daemon grant is written out by hand. It is deliberately not derived from Envoy's
-// subject names, so changing either the deployment grant or the daemon's NATS calls requires a
-// conscious review of this least-privilege boundary.
+// The expected daemon grant is written out literally rather than built from Envoy's subject names,
+// so a change to the grant or to the names it is built from fails here until reviewed.
 func TestDaemonPermissions(t *testing.T) {
 	require.Equal(t, core.Permissions{
 		Publish: core.Rules{Allow: []string{

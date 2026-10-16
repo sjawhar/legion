@@ -13,9 +13,10 @@ type Permissions struct {
 	Publish, Subscribe []string
 }
 
-// Grant returns the least-privilege NATS grant for one Legion daemon. Its two durable consumers
-// inspect and create consumers in Envoy's notification stream, fetch their messages, and
-// acknowledge them. It also receives role-lane delivery exceptions and JetStream API replies.
+// Grant returns the NATS grant for one Legion daemon. Its two durable consumers inspect and create
+// consumers in Envoy's notification stream, fetch their messages, and acknowledge them; the
+// consumer subjects end in `>`, so the grant reaches every consumer of the stream, not only those
+// two. It also receives role-lane delivery exceptions and JetStream API replies.
 //
 // Each call owns its lists so a consumer can narrow a grant without changing another caller's.
 func Grant() Permissions {

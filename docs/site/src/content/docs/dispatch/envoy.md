@@ -94,10 +94,7 @@ per project, `legion-go-<project>-dispatch` (filtering `notifications.dispatch.i
 `legion-go-<project>-github` (filtering each of the project's repositories). It sends its own
 notices to roles and to the controller through the listener's HTTP API, not over NATS.
 
-So the NATS user the daemon connects as needs exactly these permissions:
-
-When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
-`core.DaemonPermissions()` instead of a host's or an explicit user's grant.
+So the NATS user the daemon connects as needs these permissions:
 
 | Publish | Subscribe |
 | --- | --- |
@@ -109,6 +106,14 @@ When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `tru
 
 The last row is the subject a consumer acknowledges a message on. Replies to the API requests come
 back on `_INBOX.>`.
+
+The consumer subjects end in `>`, so the grant reaches every consumer of `ENVOY_NOTIFICATIONS`,
+not just the daemon's two: a holder of the daemon's seed can read, recreate with another filter,
+and drain any consumer of the stream, every host's listener consumer and another project's daemon
+consumers included. Treat the daemon's seed as a credential of the whole stream.
+
+When `envoy-infra:gcp:NatsHub` renders this user, set its `daemon` field to `true`; that selects
+`core.DaemonPermissions()` instead of a host's or an explicit user's grant.
 
 The `$JS.API` subjects are chosen by the NATS client library, not by Legion's code: the same two
 consumers written against another client library ask for different ones. So a grant is proven by
