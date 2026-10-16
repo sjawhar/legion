@@ -174,8 +174,8 @@ func byHandShare(mergeNote string) string {
 //
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
-//   - READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE (unreviewedChange, the first of readyChecks'
-//     reads of the head): the head is not the review round's approved head plus retro's commits.
+//   - READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE (unreviewedChange, among readyChecks' refusals
+//     after READY_HEAD_MOVED): the head is not the review round's approved head plus retro's commits.
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_DISARM_PENDING, READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS,
 //     READY_FILES_TRUNCATED, READY_CHECKS_NOT_GREEN.

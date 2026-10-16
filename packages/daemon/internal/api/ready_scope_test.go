@@ -104,7 +104,12 @@ func TestHandoffCompleteReadyRefusesAChangeAboveTheApprovedHeadNoReviewApproved(
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) { g.compare, g.compareStatus = tc.compare, tc.status })
+			github.set(func(g *handoffGitHub) {
+				g.compare = tc.compare
+				if tc.status != 0 {
+					g.fail["compare/"] = tc.status
+				}
+			})
 			h, facts, merger := newReadyHarness(t, github)
 			status, body := ready(t, h, merger)
 			if status != http.StatusConflict || !strings.HasPrefix(body, tc.want[0]) {
@@ -208,9 +213,7 @@ func TestHandoffCompleteReadyComparesGitHubsHeadNotALaggingRecord(t *testing.T) 
 // GitHub failing the compare is GitHub's failure, to retry, not the head's.
 func TestHandoffCompleteReadyRefusesWhenGitHubFailsTheCompare(t *testing.T) {
 	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) {
-		g.compare, g.compareStatus = `{"message":"Server Error"}`, http.StatusInternalServerError
-	})
+	github.set(func(g *handoffGitHub) { g.fail["compare/"] = http.StatusInternalServerError })
 	h, facts, merger := newReadyHarness(t, github)
 	code, body := ready(t, h, merger)
 	if code != http.StatusBadGateway || !strings.HasPrefix(body, "GITHUB_READ_FAILED: ") || !strings.Contains(body, "complete again") {

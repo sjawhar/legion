@@ -12,7 +12,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -49,14 +48,7 @@ func TestRealGitHubReadyHoldsTheHeadToRetrosCommits(t *testing.T) {
 	}
 	issue, approved, head := get("LEGION_READY_SCOPE_ISSUE"), get("LEGION_READY_SCOPE_APPROVED"), get("LEGION_READY_SCOPE_HEAD")
 	refuse := os.Getenv("LEGION_READY_SCOPE_REFUSE")
-	apps, err := config.ResolveGitHubApps(config.GitHubApps{
-		Implement: config.GitHubApp{AppID: "3202636", PrivateKeyCommand: privateKeyCommand("LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64")},
-		Review:    config.GitHubApp{AppID: "3202653", PrivateKeyCommand: privateKeyCommand("GH_REVIEW_APP_PRIVATE_KEY_B64")},
-	})
-	if err != nil {
-		t.Fatalf("resolve the GitHub App private-key commands: %v", err)
-	}
-	tokens := appauth.New(apps, appauth.Options{})
+	tokens := appauth.New(realGitHubApps(t), appauth.Options{})
 
 	h := newHarness(t)
 	h.handler = NewServer("127.0.0.1", 0, Options{

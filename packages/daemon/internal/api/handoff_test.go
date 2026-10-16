@@ -82,11 +82,10 @@ type handoffGitHub struct {
 	// contentsRead is each path read through the contents API, as path@ref.
 	contentsRead []string
 	// compare is GitHub's answer to the compare of approvedSHA with pullHead, the pull request's
-	// head, with compareStatus when that is not 0; compareAnswers holds the answer to any other
-	// basehead (<base>...<head>), and one in neither is GitHub's 404; compareRead is each basehead
+	// head; compareAnswers holds the answer to any other basehead (<base>...<head>), and one in
+	// neither is GitHub's 404 (fail makes the compare fail outright); compareRead is each basehead
 	// READY asked it for.
 	compare        string
-	compareStatus  int
 	compareAnswers map[string]string
 	compareRead    []string
 }
@@ -169,9 +168,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			answer, known := g.compareAnswers[basehead]
 			if basehead == approvedSHA+"..."+g.pullHead {
 				answer, known = g.compare, true
-				if g.compareStatus != 0 {
-					w.WriteHeader(g.compareStatus)
-				}
 			}
 			if !known {
 				notFound(w, "Not Found")

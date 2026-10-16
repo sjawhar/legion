@@ -75,11 +75,8 @@ func githubReadFailed(err error) *refusal {
 // advance of the record, which would then drop it as older (READY_PULL_REQUEST_CLOSED).
 //
 // Before the head's handoffs are read, the head must be the approved code plus retro's commits
-// alone (unreviewedChange): READY is refused when the issue's review round recorded no approval,
-// and when GitHub's compare of the approved head with READY's head shows anything above it but
-// retro's learnings under docs/solutions/ and its removal of .legion/<issue>/, since no review
-// approved that change. Nothing else holds those commits to retro's: the merger only quotes them,
-// and a READY a person merges is held to it too.
+// alone (unreviewedChange). Nothing else holds those commits to retro's: the merger only quotes
+// them, and a READY a person merges is held to it too.
 func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead, approvedHead string, pr *record.PullRequest, disarmPending bool) (readyAnswer, *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return readyAnswer{}, &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}
@@ -331,13 +328,15 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		} `json:"files"`
 	}
 	err := github.Get(ctx, "/compare/"+approved+"..."+head+"?per_page=1", &compare)
-	if answer := (*githubrest.Answer)(nil); errors.As(err, &answer) && answer.Status == http.StatusNotFound {
-		return unreviewed("GitHub does not know %s, the head %s's review round approved, or cannot compare it with head %s of pull request #%d", shortSHA(approved), issue, shortSHA(head), number)
+	approvedAt := fmt.Sprintf("%s, the head %s's review round approved", shortSHA(approved), issue)
+	var answer *githubrest.Answer
+	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
+		return unreviewed("GitHub does not know %s, or cannot compare it with head %s of pull request #%d", approvedAt, shortSHA(head), number)
 	}
 	if err != nil {
 		return githubReadFailed(err)
 	}
-	compared := fmt.Sprintf("GitHub's compare of %s, the head %s's review round approved, with head %s of pull request #%d", shortSHA(approved), issue, shortSHA(head), number)
+	compared := fmt.Sprintf("GitHub's compare of %s, with head %s of pull request #%d", approvedAt, shortSHA(head), number)
 	if compare.Status != "ahead" && compare.Status != "identical" {
 		return unreviewed("%s is %q: the approved head is not an ancestor of the head, so the head is not the approved code plus retro's commits", compared, compare.Status)
 	}
@@ -359,7 +358,7 @@ func unreviewedChange(ctx context.Context, github githubrest.Client, issue strin
 		if len(outside) > unreviewedChangeNamed {
 			named += fmt.Sprintf(" and %d more", len(outside)-unreviewedChangeNamed)
 		}
-		return unreviewed("head %s of pull request #%d changes %s since %s, the head %s's review round approved: only retro's commits, to docs/solutions/ and %s, may sit above it, so no review approved that change", shortSHA(head), number, named, shortSHA(approved), issue, handoffs)
+		return unreviewed("head %s of pull request #%d changes %s since %s: only retro's commits, to docs/solutions/ and %s, may sit above it, so no review approved that change", shortSHA(head), number, named, approvedAt, handoffs)
 	}
 	if len(files) >= compareFilesLimit {
 		return unreviewed("%s lists %d changed files, the most it lists, so a path past them is unread and may be one no review approved", compared, len(files))
