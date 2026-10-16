@@ -174,6 +174,8 @@ func byHandShare(mergeNote string) string {
 //
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
+//   - READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE (unreviewedChange, the first of readyChecks'
+//     reads of the head): the head is not the review round's approved head plus retro's commits.
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_DISARM_PENDING, READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS,
 //     READY_FILES_TRUNCATED, READY_CHECKS_NOT_GREEN.
@@ -201,12 +203,18 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request")
 		return readyAnswer{}, false
 	}
+	approvedHead, err := s.approvedHead(ctx, issue.Key)
+	if err != nil {
+		s.log.Error("api: read the approved head of a completing issue", "issue", issue.Key, "error", err)
+		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's approved head")
+		return readyAnswer{}, false
+	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
 	var rules config.MergeRules
 	if s.mergeRules != nil {
 		rules = s.mergeRules(issue.Project)
 	}
-	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr, disarmPending)
+	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, approvedHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)
 		return readyAnswer{}, false
@@ -231,6 +239,18 @@ func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullReq
 	}
 	pending, err := s.records.DisarmPending(ctx, tx, issue)
 	return pr, pending, err
+}
+
+// approvedHead is the head issue's review round approved, "" when it recorded none
+// (record.ApprovedHead): what READY holds the pull request's head to (unreviewedChange).
+func (s *server) approvedHead(ctx context.Context, issue string) (string, error) {
+	var head string
+	err := pgx.BeginTxFunc(ctx, s.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		var err error
+		head, err = record.ApprovedHead(ctx, s.records, tx, issue)
+		return err
+	})
+	return head, err
 }
 
 // handoffPosition reads the issue record, its tree's generation (the root's), and its review round:
