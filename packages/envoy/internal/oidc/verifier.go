@@ -64,16 +64,23 @@ func Reason(err error) string {
 // For a Cognito ID token, Username is `cognito:username` (for a person federated
 // from an identity provider, `<provider>_<id>`), Groups is `cognito:groups`,
 // Providers names the providers of its `identities`, and Nonce is the sign-in's
-// nonce; a token that carries none of them leaves them empty.
+// nonce; a token that carries none of them leaves them empty. For a Google ID
+// token a domain-mode CodeFlow reads, Email is `email`, EmailVerified is
+// `email_verified` (true only for the JSON true or the string "true"), and
+// HostedDomain is `hd`, the account's Workspace domain; Verify never reads
+// these three, so it leaves them empty.
 type Claims struct {
-	Subject   string
-	Issuer    string
-	Audience  []string
-	Expiry    time.Time
-	Username  string
-	Groups    []string
-	Providers []string
-	Nonce     string
+	Subject       string
+	Issuer        string
+	Audience      []string
+	Expiry        time.Time
+	Username      string
+	Groups        []string
+	Providers     []string
+	Nonce         string
+	Email         string
+	EmailVerified bool
+	HostedDomain  string
 }
 
 // cognitoClaims are the claims beyond the standard ones that Claims carries.
@@ -227,15 +234,25 @@ func (a *audience) UnmarshalJSON(data []byte) error {
 
 func decodeClaims(raw string) (tokenClaims, error) {
 	var claims tokenClaims
-	if !LooksLikeJWT(raw) {
-		return claims, errors.New("not three dot-separated segments")
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(raw[strings.IndexByte(raw, '.')+1 : strings.LastIndexByte(raw, '.')])
+	payload, err := tokenPayload(raw)
 	if err != nil {
-		return claims, fmt.Errorf("payload is not base64url: %w", err)
+		return claims, err
 	}
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return claims, fmt.Errorf("payload is not a claim set: %w", err)
 	}
 	return claims, nil
+}
+
+// tokenPayload is the JSON payload of raw, a compact JWT, decoded from base64url without verifying
+// anything.
+func tokenPayload(raw string) ([]byte, error) {
+	if !LooksLikeJWT(raw) {
+		return nil, errors.New("not three dot-separated segments")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(raw[strings.IndexByte(raw, '.')+1 : strings.LastIndexByte(raw, '.')])
+	if err != nil {
+		return nil, fmt.Errorf("payload is not base64url: %w", err)
+	}
+	return payload, nil
 }

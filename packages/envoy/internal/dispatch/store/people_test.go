@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -101,7 +102,7 @@ func revokingPool(t *testing.T) (*oidctest.Issuer, *oidc.CodeFlow) {
 	t.Helper()
 	pool := oidctest.New(t)
 	pool.EnableCodeFlow(pool.PublishKey(t, "pool-key"), "dispatch-client", "client-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), pool.URL(), "dispatch-client", "client-secret")
+	flow, err := oidc.NewCodeFlow(context.Background(), pool.URL(), "dispatch-client", "client-secret", "")
 	if err != nil {
 		t.Fatalf("discover the sign-in pool: %v", err)
 	}
@@ -434,5 +435,295 @@ func TestRetireKeepsASignInRecordedSinceTheRead(t *testing.T) {
 	}
 	if membership, _, err := people.Membership(ctx, email); err != nil || membership.RefreshToken != "refresh-new" {
 		t.Errorf("membership = %#v err=%v, want the later sign-in's refresh-new", membership, err)
+	}
+}
+
+// sessionGeneration is the session generation of login, and whether user_sessions holds a row for
+// it.
+func sessionGeneration(t *testing.T, sessions *PgSessionStore, login string) (int64, bool) {
+	t.Helper()
+	generation, found, err := sessions.CurrentSessionGeneration(context.Background(), login)
+	if err != nil {
+		t.Fatalf("read the session generation of %s: %v", login, err)
+	}
+	return generation, found
+}
+
+// In domain mode the row holds the Google account's subject. A sign-in under the subject the row
+// holds keeps the address's sessions; one under another subject (a deleted account's address
+// given to a new account) ends every session of the address and records the new subject, logging
+// the address. A sign-in under a group neither reads nor writes the subject, and ending a sign-in
+// keeps it, so the next account's sign-in is still compared with it.
+func TestPgPeopleStoreEndsTheSessionsOfAnAddressAnotherGoogleAccountSignsInTo(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	membership := func() auth.PersonMembership {
+		t.Helper()
+		membership, found, err := people.Membership(ctx, email)
+		if err != nil || !found {
+			t.Fatalf("membership of %s: found=%t err=%v", email, found, err)
+		}
+		return membership
+	}
+	logs := captureLogs(t)
+
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
+		t.Fatalf("first sign-in: %v", err)
+	}
+	if got := membership(); got.Subject != "subject-1" || got.RefreshToken != "refresh-1" {
+		t.Fatalf("membership after the first sign-in = %#v, want subject-1 with refresh-1", got)
+	}
+	if _, found := sessionGeneration(t, sessions, email); found {
+		t.Fatal("a first sign-in under a subject touched user_sessions")
+	}
+	generation, err := sessions.EnsureSession(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-2", time.Now()); err != nil {
+		t.Fatalf("sign-in under the same subject: %v", err)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation {
+		t.Fatalf("a sign-in under the subject the row holds moved the generation from %d to %d", generation, got)
+	}
+	if strings.Contains(logs.String(), "another Google account") {
+		t.Fatalf("a sign-in under the same subject logged a revoke:\n%s", logs.String())
+	}
+
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-3", time.Now()); err != nil {
+		t.Fatalf("sign-in under another subject: %v", err)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("a sign-in under another subject left the generation at %d, want %d: every earlier cookie ended", got, generation+1)
+	}
+	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "refresh-3" {
+		t.Fatalf("membership after another subject's sign-in = %#v, want subject-2 with refresh-3", got)
+	}
+	if out := logs.String(); !strings.Contains(out, "level=WARN") || !strings.Contains(out, "another Google account") || !strings.Contains(out, "email="+email) {
+		t.Errorf("the revoke was not logged at WARN with the address:\n%s", out)
+	}
+
+	if err := people.SignIn(ctx, email, "refresh-4", time.Now()); err != nil {
+		t.Fatalf("sign-in under a group: %v", err)
+	}
+	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "refresh-4" {
+		t.Fatalf("membership after a group sign-in = %#v, want subject-2 kept with refresh-4", got)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("a group sign-in moved the generation to %d", got)
+	}
+	if err := people.End(ctx, email); err != nil {
+		t.Fatal(err)
+	}
+	if got := membership(); got.Subject != "subject-2" || got.RefreshToken != "" {
+		t.Fatalf("membership after End = %#v, want subject-2 kept with no refresh token", got)
+	}
+
+	// A person recorded with no subject (header identity, a group sign-in, before the column) may
+	// hold a cookie from before a switch to domain mode: their first domain sign-in treats the
+	// unrecorded subject as another account and ends any session the row already had.
+	if err := people.Record(ctx, "recorded@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignInSubject(ctx, "recorded@example.com", "subject-3", "refresh-5", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if generation, found := sessionGeneration(t, sessions, "recorded@example.com"); !found || generation != 1 {
+		t.Errorf("session generation %d (row %t) after a recorded person's first domain sign-in, want 1: an unrecorded subject ends any session the row already had", generation, found)
+	}
+
+	// A sign-in whose own insert creates the row has no earlier session to end, however its
+	// subject reads: it is not a reassignment.
+	if err := people.SignInSubject(ctx, "brand-new@example.com", "subject-4", "refresh-6", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, found := sessionGeneration(t, sessions, "brand-new@example.com"); found {
+		t.Error("a sign-in whose own insert created the row touched user_sessions")
+	}
+}
+
+// The revoke and the new subject commit together: a revoke that fails leaves the row's subject and
+// refresh token as they were, so the next sign-in under the new subject revokes again.
+func TestPgPeopleStoreRecordsNoSubjectWhoseRevokeFailed(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := sessions.EnsureSession(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Pool.Exec(ctx, `
+		create function refuse_session_revoke() returns trigger language plpgsql as $$ begin raise exception 'the test refuses every revoke'; end $$;
+		create trigger refuse_session_revoke before insert or update on user_sessions for each row execute function refuse_session_revoke();
+	`); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err == nil || !strings.Contains(err.Error(), "the test refuses every revoke") {
+		t.Fatalf("a sign-in whose revoke fails: err = %v, want the revoke's error", err)
+	}
+	if membership, _, err := people.Membership(ctx, email); err != nil || membership.Subject != "subject-1" || membership.RefreshToken != "refresh-1" {
+		t.Fatalf("membership after the failed revoke = %#v err=%v, want subject-1 and refresh-1 as they were", membership, err)
+	}
+	if _, err := database.Pool.Exec(ctx, `drop trigger refuse_session_revoke on user_sessions`); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
+		t.Fatalf("the retry: %v", err)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("the retry left the generation at %d, want %d", got, generation+1)
+	}
+}
+
+// Two first sign-ins to one address at once, each under its own Google account: the second waits
+// for the first to commit and then ends the first's sessions, as it would had the first committed
+// before it began. The first is held mid-transaction, its row written and not committed.
+func TestPgPeopleStoreEndsTheSessionsOfAConcurrentFirstSignIn(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	first, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Rollback(ctx)
+	if _, err := first.Exec(ctx, `insert into people (email, refresh_token, confirmed_at, sub) values ($1, 'v1:first', now(), 'subject-1')`, email); err != nil {
+		t.Fatal(err)
+	}
+	second := make(chan error, 1)
+	go func() { second <- people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()) }()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var waiting int
+		if err := database.Pool.QueryRow(ctx, `select count(*) from pg_stat_activity where datname = current_database() and cardinality(pg_blocking_pids(pid)) > 0`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+		if waiting > 0 {
+			break
+		}
+		select {
+		case err := <-second:
+			t.Fatalf("the second sign-in finished while the first was uncommitted: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the second sign-in never waited on the first")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := first.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("the second sign-in: %v", err)
+	}
+	if generation, found := sessionGeneration(t, sessions, email); !found || generation != 1 {
+		t.Fatalf("session generation %d (row %t) after a second account's concurrent first sign-in, want 1: the first account's sessions ended", generation, found)
+	}
+	if membership, _, err := people.Membership(ctx, email); err != nil || membership.Subject != "subject-2" || membership.RefreshToken != "refresh-2" {
+		t.Fatalf("membership = %#v err=%v, want subject-2 with refresh-2", membership, err)
+	}
+}
+
+// A confirmation under a Google account writes only while the row still records that account: a
+// refresh that began before another account signed in to the address cannot overwrite the new
+// holder's refresh token. A Cognito confirmation, with no subject, writes whatever the row holds.
+func TestPgPeopleStoreConfirmKeepsTheRowOfAnotherGoogleAccount(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	const email = "a.person@example.com"
+	signedIn := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	later := signedIn.Add(90 * time.Minute)
+	if err := people.SignInSubject(ctx, email, "subject-1", "refresh-1", signedIn); err != nil {
+		t.Fatal(err)
+	}
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", signedIn); err != nil {
+		t.Fatal(err)
+	}
+	membership := func() auth.PersonMembership {
+		t.Helper()
+		membership, _, err := people.Membership(ctx, email)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return membership
+	}
+	if err := people.ConfirmSubject(ctx, email, "subject-1", "refresh-stale", later); err != nil {
+		t.Fatalf("a stale confirmation: %v", err)
+	}
+	if got := membership(); got.RefreshToken != "refresh-2" || got.Subject != "subject-2" || !got.ConfirmedAt.Equal(signedIn) {
+		t.Fatalf("after subject-1's stale confirmation: %#v, want subject-2's refresh-2 confirmed %s", got, signedIn)
+	}
+	if err := people.ConfirmSubject(ctx, email, "subject-2", "refresh-3", later); err != nil {
+		t.Fatal(err)
+	}
+	if got := membership(); got.RefreshToken != "refresh-3" || !got.ConfirmedAt.Equal(later) {
+		t.Fatalf("after subject-2's confirmation: %#v, want refresh-3 confirmed %s", got, later)
+	}
+	if err := people.Confirm(ctx, email, "refresh-4", later); err != nil {
+		t.Fatal(err)
+	}
+	if got := membership(); got.RefreshToken != "refresh-4" {
+		t.Fatalf("after a confirmation with no subject: %#v, want refresh-4", got)
+	}
+}
+
+// EndSubject ends a sign-in only while the row records the account it names: under another
+// account's subject it writes nothing, and under the row's own it advances the generation and
+// forgets the token, keeping the subject. A row with no subject ends only for an empty one.
+func TestPgPeopleStoreEndSubjectEndsOnlyTheAccountItNames(t *testing.T) {
+	ctx := context.Background()
+	database := migratedEmptyStore(t)
+	people := NewPgPeopleStore(database.Pool, "signing-key", nil)
+	sessions := NewPgSessionStore(database.Pool)
+	const email = "a.person@example.com"
+	if err := people.SignInSubject(ctx, email, "subject-2", "refresh-2", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	generation, err := sessions.EnsureSession(ctx, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ended, err := people.EndSubject(ctx, email, "subject-1"); err != nil || ended {
+		t.Fatalf("EndSubject under another account: ended %t, %v; want false", ended, err)
+	}
+	if membership, _, _ := people.Membership(ctx, email); membership.RefreshToken != "refresh-2" {
+		t.Fatalf("after EndSubject under another account: %#v, want refresh-2 kept", membership)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation {
+		t.Fatalf("EndSubject under another account moved the generation to %d", got)
+	}
+	if ended, err := people.EndSubject(ctx, email, "subject-2"); err != nil || !ended {
+		t.Fatalf("EndSubject under the row's account: ended %t, %v; want true", ended, err)
+	}
+	if membership, _, _ := people.Membership(ctx, email); membership.RefreshToken != "" || membership.Subject != "subject-2" {
+		t.Fatalf("after EndSubject: %#v, want no refresh token and subject-2 kept", membership)
+	}
+	if got, _ := sessionGeneration(t, sessions, email); got != generation+1 {
+		t.Fatalf("EndSubject left the generation at %d, want %d", got, generation+1)
+	}
+	if err := people.Record(ctx, "recorded@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if ended, err := people.EndSubject(ctx, "recorded@example.com", "subject-1"); err != nil || ended {
+		t.Fatalf("EndSubject of a row with no subject under an account: ended %t, %v; want false", ended, err)
+	}
+	if ended, err := people.EndSubject(ctx, "recorded@example.com", ""); err != nil || !ended {
+		t.Fatalf("EndSubject of a row with no subject under none: ended %t, %v; want true", ended, err)
+	}
+	if ended, err := people.EndSubject(ctx, "nobody@example.com", ""); err != nil || ended {
+		t.Fatalf("EndSubject of no row: ended %t, %v; want false", ended, err)
 	}
 }
