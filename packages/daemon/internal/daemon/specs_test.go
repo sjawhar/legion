@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"os"
 	"regexp"
@@ -128,6 +129,10 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 			t.Error("the controller's launch asked for a git identity")
 			return runtime.GitIdentity{}, nil
 		},
+		defaultBranch: func(context.Context, ghrepo.Repository) (string, error) {
+			t.Error("the controller's launch asked for a default branch")
+			return "main", nil
+		},
 	}
 	spec, err := s.SpawnSpec(context.Background(), supervise.Claim{Token: claim.ControllerToken("s1"), Project: "s1", Role: claim.RoleController})
 	if err != nil {
@@ -146,11 +151,52 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	if spec.Prompt.DeploymentInstructionsPath != s.instructions {
 		t.Errorf("instructions = %q, want %q", spec.Prompt.DeploymentInstructionsPath, s.instructions)
 	}
-	if !spec.Repository.IsZero() || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
-		t.Errorf("repository %q, env %v, recovered from %q; want none of them", spec.Repository, spec.Env, spec.WorkspaceRecoveredFrom)
+	if !spec.Repository.IsZero() || spec.DefaultBranch != "" || len(spec.Env) != 0 || spec.WorkspaceRecoveredFrom != "" {
+		t.Errorf("repository %q, default branch %q, env %v, recovered from %q; want none of them", spec.Repository, spec.DefaultBranch, spec.Env, spec.WorkspaceRecoveredFrom)
 	}
 	if !maps.Equal(spec.Secrets, s.secrets) {
 		t.Errorf("secrets = %v, want the launch secrets %v", spec.Secrets, s.secrets)
+	}
+}
+
+// A launch on the project's repository names that repository's default branch as GitHub names it,
+// which each runtime provisions the issue's workspace at; a read that fails refuses the launch,
+// naming the repository, and a daemon with no repository asks for none.
+func TestAWorkerLaunchNamesItsRepositorysDefaultBranch(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	token, err := claim.NewToken("s1", "S1-2", claim.RoleImplementer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := supervise.Claim{Token: token, Issue: "S1-2", Tree: "S1-1", Role: claim.RoleImplementer}
+	var asked []ghrepo.Repository
+	read := func(_ context.Context, repo ghrepo.Repository) (string, error) {
+		asked = append(asked, repo)
+		return "release/v7.1", nil
+	}
+	s := specs{stateDir: t.TempDir(), project: "s1", prompts: composer, repo: ghrepo.MustParse("acme/widgets"), defaultBranch: read}
+	spec, err := s.SpawnSpec(context.Background(), c)
+	if err != nil {
+		t.Fatalf("SpawnSpec: %v", err)
+	}
+	if spec.Repository != s.repo || spec.DefaultBranch != "release/v7.1" || !slices.Equal(asked, []ghrepo.Repository{s.repo}) {
+		t.Fatalf("the launch names %s at %q after asking for %v, want acme/widgets at release/v7.1, asked once", spec.Repository, spec.DefaultBranch, asked)
+	}
+
+	s.defaultBranch = func(context.Context, ghrepo.Repository) (string, error) {
+		return "", errors.New("read the default branch of acme/widgets: GitHub answered GET /repos/acme/widgets with 404")
+	}
+	if _, err := s.SpawnSpec(context.Background(), c); err == nil || !strings.Contains(err.Error(), "the default branch of acme/widgets for "+string(token)) || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("SpawnSpec with a failed read = %v, want the refusal naming the repository and GitHub's answer", err)
+	}
+
+	asked = nil
+	s.repo, s.defaultBranch = ghrepo.Repository{}, read
+	if spec, err := s.SpawnSpec(context.Background(), c); err != nil || spec.DefaultBranch != "" || len(asked) != 0 {
+		t.Fatalf("SpawnSpec with no repository = %q, %v after asking for %v; want no default branch and no read", spec.DefaultBranch, err, asked)
 	}
 }
 

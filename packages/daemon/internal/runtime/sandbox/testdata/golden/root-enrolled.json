@@ -680,6 +680,8 @@
               "LEGION-208",
               "--repo",
               "sjawhar/legion-smoke",
+              "--default-branch",
+              "main",
               "--root",
               "/legion",
               "--credential-helper",

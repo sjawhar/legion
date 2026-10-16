@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `subscribe` sends `host` (`machineID()`: `ENVOY_MACHINE_ID`, falling back to the kernel
+  hostname) on every call, including the registration heartbeat's re-subscribe: where the
+  session process actually runs, which the listener now stores separately from the registering
+  listener's own `machine_id`. `SessionInfo` and `RoleInfo` gain an optional `host`.
+
 - Every text that says when to request approval again states the carried approval (LEGION-573):
   a human's own answer to a decision block carries their approval to the version it writes when
   that answer is the whole change since the version they approved, so nothing is requested for

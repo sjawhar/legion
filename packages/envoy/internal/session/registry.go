@@ -1,6 +1,7 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,21 @@ type SessionEntry struct {
 	// process that merely has the session loaded from shared on-disk state.
 	Driving        bool `json:"driving,omitempty"`
 	SelfSubscribed bool `json:"self_subscribed,omitempty"`
+	// Host is the machine the client-reported `machineID()` (envoy-client's
+	// os.hostname()/ENVOY_MACHINE_ID) names as where the session process actually runs. It is
+	// never the routing key: MachineID is the listener that owns this entry's delivery (the
+	// registering listener's own ENVOY_MACHINE_ID, store.Registry.Match, hostFor), and stays
+	// that way whether every session registers through one shared listener or each machine runs
+	// its own. Host is empty for a session whose plugin predates this field (subscribeBody had
+	// no "host"); HostOrMachine falls back to MachineID so every caller sees a populated value.
+	Host string `json:"host,omitempty"`
+}
+
+// HostOrMachine is the session's real machine for display: Host when the registering plugin
+// reported one, MachineID (the routing listener's own id) otherwise. MachineID keeps its
+// routing meaning either way; this method only decides what a human sees.
+func (e SessionEntry) HostOrMachine() string {
+	return cmp.Or(e.Host, e.MachineID)
 }
 
 type SessionRegistryOption func(*sessionRegistryOpts)

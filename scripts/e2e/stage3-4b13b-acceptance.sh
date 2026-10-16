@@ -460,11 +460,12 @@ retarget_pr() {
   [ "$(gh -R "$repo" pr view "$n" --json baseRefName --jq .baseRefName)" = "$scratch_base" ] || fail "$repo#$n did not retarget to $scratch_base"
   note "$issue opened $repo#$n; its base read $base here, and is $scratch_base"
 }
-# reviewer_approved N prints each commit the review App approved on pull request N, and fails when
-# it approved none.
+# reviewer_approved N prints each commit the review App (role_app reviewer) approved on pull
+# request N, and fails when it approved none.
 reviewer_approved() {
-  local approved
-  approved=$(gh api --paginate "repos/$repo/pulls/$1/reviews" --jq '.[] | select(.user.login == "legion-reviewer[bot]" and .state == "APPROVED") | .commit_id') || return 1
+  local approved app
+  app=$(role_app reviewer) || return 1
+  approved=$(gh api --paginate "repos/$repo/pulls/$1/reviews" --jq ".[] | select(.user.login == \"$app\" and .state == \"APPROVED\") | .commit_id") || return 1
   [ -n "$approved" ] && printf '%s\n' "$approved"
 }
 
@@ -482,7 +483,7 @@ instruction_for() {
   case "$role:$phase" in
     implementer:implementing) printf '%s' "Acceptance implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$issue, and open its pull request with base branch $scratch_base (pass --base $scratch_base to gh pr create; this proof's pull requests never target main). Record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge." ;;
     tester:testing) printf '%s' "Acceptance test operation: inspect the implementer's actual one-file change and this issue's pull request, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass and a summary that begins 'TESTER-SUMMARY $issue:'." ;;
-    reviewer:reviewing) printf '%s' "Acceptance final review: use the bash tool to submit APPROVE on this issue's pull request (head legion/$issue) in $repo at its current head as legion-reviewer[bot], then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round." ;;
+    reviewer:reviewing) printf '%s' "Acceptance final review: use the bash tool to submit APPROVE on this issue's pull request (head legion/$issue) in $repo at its current head as $(role_app reviewer), then complete the reviewer handoff. This exact smoke instruction takes precedence over waiting for another review round." ;;
     implementer:retro) printf '%s' "Acceptance retro: write the required retro handoff for this issue's pull request and complete the phase. Do not change the approved implementation." ;;
     merger:merging) printf '%s' "Acceptance hold: this is a proof run. Do not verify, build or send READY yet, and do not call handoff_complete. Reply with the single line 'holding' and wait for the next targeted instruction, which says exactly what to do." ;;
   esac
@@ -661,6 +662,7 @@ main_sha=$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)
 gh api "repos/$repo/git/refs" -f ref="refs/heads/$scratch_base" -f sha="$main_sha" >/dev/null
 note "scratch base $repo:$scratch_base at main $main_sha"
 start_daemon
+read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), ports NATS $port_nats Dispatch $port_dispatch daemon $port_daemon listener $port_listener"
 pane_watcher &
 watcher_pid=$!
@@ -981,9 +983,10 @@ reviewed_through() {
   reviewer_approved "${pr_of[$1]}" >/dev/null && phase_at_least "$1" retro &&
     daemon_state | jq -e --arg i "$1" '.issues[$i].pullRequest.reviewDecision == "approved"' >/dev/null
 }
+review_app=$(role_app reviewer)
 for issue in "$root1" "$root2" "$root3"; do
-  until_true 900 "$repo#${pr_of[$issue]} approved by legion-reviewer[bot], and $issue past reviewing on that approval" reviewed_through "$issue"
-  note "$issue: legion-reviewer[bot] approved $({ reviewer_approved "${pr_of[$issue]}" || true; } | cut -c1-8 | tr '\n' ' '); the head is now $(gh api "repos/$repo/pulls/${pr_of[$issue]}" --jq .head.sha | cut -c1-8)"
+  until_true 900 "$repo#${pr_of[$issue]} approved by $review_app, and $issue past reviewing on that approval" reviewed_through "$issue"
+  note "$issue: $review_app approved $({ reviewer_approved "${pr_of[$issue]}" || true; } | cut -c1-8 | tr '\n' ' '); the head is now $(gh api "repos/$repo/pulls/${pr_of[$issue]}" --jq .head.sha | cut -c1-8)"
 done
 pass
 

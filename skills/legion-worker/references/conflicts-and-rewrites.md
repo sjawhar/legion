@@ -11,7 +11,7 @@ Every path it cites is in sjawhar/legion.
   merge, never `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
   because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
-  pick up `main` or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
+  pick up the default branch or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
   `skill://legion-worker`). A conflict-forced rebase that leaves the branch's diff unchanged is a
   confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
   kept by the rules below and the learnings that cite it, and the operation it names is always
@@ -28,10 +28,15 @@ Every path it cites is in sjawhar/legion.
   `-r` all rewrite descendants; `-r` only re-parents them to fill the hole, which is worse).
   Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
   bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
-  built on your prior commits, in this tree or another, ever moves:
+  built on your prior commits, in this tree or another, ever moves. `base` is the pull request's
+  base branch (the repository's default branch unless the pull request is stacked), read as a jj
+  string literal: jj parses a bare bookmark name as an expression, and a name pasted between
+  quotes can close them itself (`release"@origin|"stable` would select `release` and `stable`), so
+  the revset is built from the serialized name alone:
 
   ```bash
-  jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
+  base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && \
+    jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "merge: resolve conflict against ${base}@origin"
   ```
 
   Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
@@ -44,8 +49,9 @@ Every path it cites is in sjawhar/legion.
   pushes its own commits* in `skill://legion-worker`; a merge is a code push, so its head carries
   no `skip-checks: true` line): the merge descends from both the bookmark's old position and the
   destination, so it is a genuine fast-forward and *Rewriting pushed commits* never applies.
-- **After a retarget.** Retargeting a pull request to a new base does not re-run Tests. Merge the
-  bookmark onto the new base (`jj new legion/<KEY> <new base> -m "<message>"`) and push it the
+- **After a retarget.** Retargeting a pull request to a new base does not re-run Tests. Read
+  `base` again and merge the bookmark onto it in one command
+  (`base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && jj -R "$LEGION_WORKSPACE" new legion/<KEY> "${base}@origin" -m "<message>"`) and push it the
   ordinary way — a genuine fast-forward, never `--allow-backwards` — so the new head runs Tests
   against the new merge result, and cite that run in the PR body.
 
@@ -55,20 +61,23 @@ The fingerprint every role compares after a conflict-forced rebase (every flag a
 verified on jj 0.45.1):
 
 ```bash
+base=$(gh pr view <n> -R <owner>/<repo> --json baseRefName -q '.baseRefName | @json') && \
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
-  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <head-sha>)" --to <head-sha> \
+fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point(${base}@origin | <head-sha>)" --to <head-sha> \
     --git --context 0 '~(.legion | docs/solutions)' \
-  | sed -e '/^@@/d' -e '/^index /d' | sha256sum
+  | sed -e '/^@@/d' -e '/^index /d' | sha256sum) && echo "$fingerprint"
 ```
 
 - `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
-- `fork_point(main@origin | <head-sha>)` is the base the branch was cut from *at that head*:
-  the old base for the pre-rebase head, the new base for the rebased one, so one command
-  serves both sides. On a stacked PR substitute its base branch for `main`
-  (`gh pr view <n> --json baseRefName`).
-- A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
-  workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a
-  changed diff — never as unchanged.
+- `fork_point(${base}@origin | <head-sha>)` is the base the branch was cut from *at that head*:
+  the old base for the pre-rebase head, the new base for the rebased one, so one command serves
+  both sides. `base` is the pull request's base branch as a jj string literal, as in the merge
+  above.
+- A head the rebase hid is still addressable by its SHA in the shared workspace. The check
+  prints a fingerprint only when every step of it succeeded: the base read, the fetch and the
+  diff (`pipefail` keeps the diff's failure through `sed` and `sha256sum`, which would otherwise
+  hash empty input to `e3b0c442…`). A nonzero exit or no printed fingerprint (a failed read of the
+  base, or a SHA the workspace cannot resolve) counts as a changed diff — never as unchanged.
 - `--context 0` drops context lines; the `sed` drops `@@` hunk headers (line positions move
   on a rebase) and `index` lines (blob ids move when the base's copy of a file changed). What
   is left is exactly the added and removed lines per file.
