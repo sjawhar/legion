@@ -966,7 +966,9 @@ func (r *liveRig) checkIndependentProvision() error {
 		if err != nil {
 			return err
 		}
-		head, err := r.exec(c, "jj", "-R", clone, "log", "-r", r.defaultBranch+"@origin", "--no-graph", "-T", "commit_id", "--ignore-working-copy")
+		// git reads a ref name literally, where a jj revset would parse it: the colocated clone's
+		// refs/remotes/origin/<default branch> is the commit jj's <default branch>@origin names.
+		head, err := r.exec(c, "git", "--git-dir="+clone+"/.git", "rev-parse", "--verify", "refs/remotes/origin/"+r.defaultBranch+"^{commit}")
 		if err != nil {
 			return err
 		}

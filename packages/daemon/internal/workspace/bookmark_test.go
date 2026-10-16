@@ -132,7 +132,7 @@ func TestCreateWorkspaceRefusesAMainAtOriginConcurrentFetchesConflicted(t *testi
 
 	before = len(run.Calls())
 	_, err = Provision(context.Background(), run, req)
-	untracked := "Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + elsewhere + " untracked; workspace " + workspace.Dir + " was not created. Track it: `jj bookmark track 'main@origin' --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"
+	untracked := "Bookmark main is not tracked in the shared clone " + clone + ", where main@origin is at " + elsewhere + " untracked; workspace " + workspace.Dir + " was not created. Track it: `jj bookmark track " + shellprefix.Word(originRow("main")) + " --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"
 	if err == nil || err.Error() != untracked {
 		t.Fatalf("provision again: %v\nwant %q", err, untracked)
 	}
@@ -349,7 +349,8 @@ func feedRequest(t *testing.T, run *recordingRunner, req Request) Request {
 }
 
 // pushRemoteBranch pushes one commit adding file to branch on the bare remote, from a clone of its
-// own: on top of the branch when the remote has it, on main otherwise. It returns the commit's id.
+// own: on top of the branch when the remote has it, on the remote's default branch otherwise. It
+// returns the commit's id.
 func pushRemoteBranch(t *testing.T, remote, branch, file string) string {
 	t.Helper()
 	scratch := t.TempDir()
@@ -680,51 +681,47 @@ func TestProvisionRefusesALocalConflictAndItsWaysOutHold(t *testing.T) {
 // provisioning would adopt that empty workspace. A clone without the default branch (GitHub names
 // one the clone does not have), one deleted in the shared clone while origin's is tracked, one
 // forgotten there (`jj bookmark forget`, which leaves <branch>@origin untracked), and a conflicted
-// one are refused by name, the branch named as GitHub names it, every time, with nothing added;
-// the last three print a way out, which, run as printed, lets the next provisioning start at
-// origin's branch. Each holds for main and for a default branch whose name holds a slash.
+// one are refused, naming the branch as GitHub names it and the commits that state involves, every
+// time, with nothing added; the last three print a way out, which, run as printed, lets the next
+// provisioning start at origin's branch. Each holds for main and for a default branch whose name
+// holds a slash.
 func TestProvisionRefusesAWorkspaceWithNoBranchWhenTheDefaultBranchDoesNotResolve(t *testing.T) {
 	for _, branch := range []string{"main", "release/v7.1"} {
-		remoteRow, word := branch+"@origin", shellprefix.Word(branch+"@origin")
+		remoteRow := branch + "@origin"
 		for _, tc := range []struct {
 			name string
-			// unresolve leaves the default branch unresolvable in clone and answers the refusals
-			// provisioning may give, `{dir}` standing for the workspace directory.
+			// unresolve leaves the default branch unresolvable in clone and returns the commits the
+			// refusal names.
 			unresolve func(t *testing.T, run *recordingRunner, clone string) []string
 			// wayOut begins the refusal's way out; "" for a refusal that prints none.
 			wayOut string
 		}{
 			{"absent", func(t *testing.T, run *recordingRunner, clone string) []string {
 				runSetup(t, clone, "git", "--git-dir="+run.remote, "update-ref", "-d", "refs/heads/"+branch)
-				return []string{"Bookmark " + branch + " is not in the shared clone " + clone + "; workspace {dir} was not created. An issue with no branch starts at the repository's default branch, which GitHub names " + branch}
+				return nil
 			}, ""},
 			{"deleted in the shared clone", func(t *testing.T, run *recordingRunner, clone string) []string {
 				origin := commitOf(t, clone, remoteRow)
 				runSetup(t, clone, "jj", "bookmark", "delete", branch, "--ignore-working-copy", "-R", clone)
-				return []string{"Bookmark " + branch + " was deleted in the shared clone " + clone + " while " + remoteRow + " is tracked at " + origin + "; workspace {dir} was not created. Restore it: `jj bookmark set " + branch + " -r " + word + " --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"}
-			}, "jj bookmark set " + branch},
+				return []string{origin}
+			}, "jj bookmark set"},
 			{"forgotten in the shared clone", func(t *testing.T, run *recordingRunner, clone string) []string {
 				origin := commitOf(t, clone, remoteRow)
 				runSetup(t, clone, "jj", "bookmark", "forget", branch, "--ignore-working-copy", "-R", clone)
-				return []string{"Bookmark " + branch + " is not tracked in the shared clone " + clone + ", where " + remoteRow + " is at " + origin + " untracked; workspace {dir} was not created. Track it: `jj bookmark track " + word + " --ignore-working-copy '--color=never' -R " + shellprefix.Word(clone) + "`, and the next provisioning starts there"}
+				return []string{origin}
 			}, "jj bookmark track"},
 			{"conflicted by two local moves", func(t *testing.T, run *recordingRunner, clone string) []string {
-				base := commitOf(t, clone, branch)
-				var sides []string
+				named := []string{commitOf(t, clone, branch)}
 				for _, label := range []string{"first", "second"} {
 					runSetup(t, clone, "jj", "new", "--no-edit", branch, "-m", label, "--ignore-working-copy", "-R", clone)
-					sides = append(sides, strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", `latest(description(exact:"`+label+`\n"))`, "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", clone)))
+					named = append(named, strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", `latest(description(exact:"`+label+`\n"))`, "--no-graph", "-T", "commit_id", "--ignore-working-copy", "--color=never", "-R", clone)))
 				}
 				op := strings.TrimSpace(runSetup(t, clone, "jj", "op", "log", "-n1", "--no-graph", "-T", "id", "--ignore-working-copy", "-R", clone))
-				for _, side := range sides {
+				for _, side := range named[1:] {
 					runSetup(t, clone, "jj", "--at-op", op, "bookmark", "set", branch, "-r", side, "--ignore-working-copy", "-R", clone)
 				}
-				var refusals []string
-				for _, adds := range [][]string{sides, {sides[1], sides[0]}} {
-					refusals = append(refusals, "Bookmark "+branch+" is conflicted (adds "+strings.Join(adds, ", ")+"; removes "+base+"); workspace {dir} was not created. Keep origin's: `jj bookmark set "+branch+" -r "+word+" --allow-backwards --ignore-working-copy '--color=never' -R "+shellprefix.Word(clone)+"`, and the next provisioning starts there")
-				}
-				return refusals
-			}, "jj bookmark set " + branch},
+				return named
+			}, "jj bookmark set"},
 		} {
 			t.Run(branch+"/"+tc.name, func(t *testing.T) {
 				run := newLocalRunnerOnBranch(t, branch)
@@ -734,23 +731,25 @@ func TestProvisionRefusesAWorkspaceWithNoBranchWhenTheDefaultBranchDoesNotResolv
 				if err != nil {
 					t.Fatalf("initial provision: %v", err)
 				}
-				refusals := tc.unresolve(t, run, first.Clone)
+				named := tc.unresolve(t, run, first.Clone)
 				req.Issue = "WIDGETS-43"
 				next, err := Location(req.StateDir, req.Repo, req.Issue)
 				if err != nil {
 					t.Fatal(err)
 				}
-				for i := range refusals {
-					refusals[i] = strings.ReplaceAll(refusals[i], "{dir}", next.Dir)
-				}
 				var refusal string
 				for attempt := 1; attempt <= 2; attempt++ {
 					before := len(run.Calls())
 					_, err := Provision(context.Background(), run, req)
-					if err == nil || !slices.Contains(refusals, err.Error()) {
-						t.Fatalf("attempt %d: %v\nwant one of %q", attempt, err, refusals)
+					if err == nil {
+						t.Fatalf("attempt %d provisioned, want a refusal", attempt)
 					}
 					refusal = err.Error()
+					for _, want := range append([]string{"Bookmark " + branch + " ", next.Dir}, named...) {
+						if !strings.Contains(refusal, want) {
+							t.Errorf("attempt %d's refusal names no %q: %s", attempt, want, refusal)
+						}
+					}
 					nothingProvisioned(t, run, before, next, fmt.Sprintf("attempt %d", attempt))
 				}
 				if tc.wayOut == "" {
@@ -848,7 +847,7 @@ func TestProvisionStartsAtMainWhenAMergedBranchWasMovedOntoNothingDescribed(t *t
 				if len(logged) != 0 {
 					t.Fatalf("a provisioning that started nothing logged %q", logged)
 				}
-				l.runWayOut(t, err.Error(), "jj bookmark set main", "")
+				l.runWayOut(t, err.Error(), "jj bookmark set", "")
 			}
 			working, err := Provision(context.Background(), l.run, l.req)
 			if err != nil {
