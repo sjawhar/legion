@@ -32,6 +32,61 @@ const (
 	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 )
 
+// OutboxLane is which executor of an issue runs a kind. An issue's rows run on two lanes side by
+// side. The lifecycle lane runs the rows that start, stop and tidy the issue's roles and their
+// resources, one at a time in the order they were queued: each assumes the state its predecessor
+// leaves (a start after the branch it waits for, a workspace removal after the suspend that
+// stopped the roles). The board lane runs the issue's Dispatch writes and notice publishes beside
+// them, so a status write or a notice never waits behind a start pulling an image, and a slow
+// publish never holds a stop back.
+type OutboxLane string
+
+const (
+	LaneLifecycle OutboxLane = "lifecycle"
+	LaneBoard     OutboxLane = "board"
+)
+
+// laneKinds is each lane's kinds in the order LaneKinds lists them. Every OutboxKind is in exactly
+// one lane (TestEveryOutboxKindIsInExactlyOneLane).
+var laneKinds = map[OutboxLane][]OutboxKind{
+	LaneLifecycle: {OutboxKindSupervise, OutboxKindIssueSuspend, OutboxKindLingerClose, OutboxKindWorkspaceRemove, OutboxKindGateSeed, OutboxKindIssueBranch, OutboxKindAutoMergeDisable},
+	LaneBoard:     {OutboxKindDispatchStatus, OutboxKindDispatchMessage, OutboxKindNotice, OutboxKindControllerNotice, OutboxKindMergeQueuePublish},
+}
+
+// LaneOf is the lane that runs kind.
+func LaneOf(kind OutboxKind) OutboxLane {
+	for lane, kinds := range laneKinds {
+		for _, k := range kinds {
+			if k == kind {
+				return lane
+			}
+		}
+	}
+	return ""
+}
+
+// LaneKinds is the kinds lane runs, in a fixed order; nil for a lane that is not one.
+func LaneKinds(lane OutboxLane) []OutboxKind {
+	kinds := laneKinds[lane]
+	if kinds == nil {
+		return nil
+	}
+	return append([]OutboxKind(nil), kinds...)
+}
+
+// LaneKey names one lane of one issue.
+type LaneKey struct {
+	Issue string
+	Lane  OutboxLane
+}
+
+// HeldRow is a due lifecycle row its lane cannot run yet: WaitsOn is the id of the row of its issue
+// under the live lease it waits behind (Store.HeldRows).
+type HeldRow struct {
+	OutboxRow
+	WaitsOn int64
+}
+
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
 type OutboxPayload interface{ OutboxKind() OutboxKind }
 
@@ -311,7 +366,7 @@ func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePu
 // IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at main, where GitHub does
 // not have it yet, before any role of the issue starts: GitHub can refuse the push that creates a
 // branch of a large repository, where it takes a push that moves one. A start of the issue waits
-// while the row is unfinished (Store.ClaimDue).
+// while the row is unfinished (outboxInOrder).
 type IssueBranch struct {
 	// Generation is the issue generation the branch is created for. A row of an earlier generation,
 	// or of a tree that lingers, finishes without acting.

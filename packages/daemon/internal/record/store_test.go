@@ -9,6 +9,7 @@ import (
 	"os"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -369,61 +370,395 @@ func TestMarkProcessedIsIdempotent(t *testing.T) {
 	})
 }
 
-func TestOutboxLeaseFencesConcurrentWorkersAndExpires(t *testing.T) {
+// outboxKeys names rows for comparison: `kind:issue`, with a supervise row's op or a status
+// write's status after it.
+func outboxKeys(rows []OutboxRow) []string {
+	keys := []string{}
+	for _, row := range rows {
+		key := string(row.Kind) + ":" + row.Issue
+		var payload struct {
+			Op     string `json:"op"`
+			Status string `json:"status"`
+		}
+		if json.Unmarshal(row.Payload, &payload) == nil {
+			switch row.Kind {
+			case OutboxKindSupervise:
+				key += ":" + payload.Op
+			case OutboxKindDispatchStatus:
+				key += ":" + payload.Status
+			}
+		}
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// claimEachDue is what a lane does with project's outbox at now: lists the rows it may run and
+// claims each by id. It fails the test when a listed row is not claimable, since nothing else ran
+// between the list and the claim.
+func claimEachDue(t *testing.T, records *Postgres, tx pgx.Tx, project string, now time.Time) []OutboxRow {
+	t.Helper()
+	ctx := context.Background()
+	due, err := records.DueRows(ctx, tx, project, "", nil, now)
+	must(t, err)
+	claimed := []OutboxRow{}
+	for _, row := range due {
+		leased, ok, err := records.ClaimRow(ctx, tx, row.ID, now, time.Minute)
+		must(t, err)
+		if !ok {
+			t.Fatalf("row %d was listed due but not claimed", row.ID)
+		}
+		claimed = append(claimed, leased)
+	}
+	return claimed
+}
+
+// A lane claims a due row by one conditional update, so two lanes that both listed it lease it
+// exactly once: the first claim takes the lease, and a second begun while the first is uncommitted
+// waits on the row and then finds the lease taken. A leased row is listed due to nobody, and a stale
+// token neither finishes nor retries it. Once the lease lapses the row is due again and claimable
+// under a new token; once finished it is claimable by nobody.
+func TestClaimRowLeasesADueRowExactlyOnceUntilItsLeaseLapses(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
 	now := time.Date(2026, 9, 22, 16, 0, 0, 0, time.UTC)
-	payload := json.RawMessage(`{"status":"testing"}`)
+	var row OutboxRow
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: payload, NextAt: now}))
+		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"testing"}`), NextAt: now}))
+		due, err := records.DueRows(ctx, tx, "LEGION", "", nil, now)
+		must(t, err)
+		if len(due) != 1 || due[0].LeaseToken != "" || due[0].LeaseUntil != nil {
+			t.Fatalf("due rows = %#v, want the one row, unleased", due)
+		}
+		row = due[0]
 	})
 
 	tx1, err := st.BeginTx(ctx, pgx.TxOptions{})
 	must(t, err)
-	rows1, err := records.ClaimDue(ctx, tx1, "LEGION", now, 1, time.Minute)
+	first, ok, err := records.ClaimRow(ctx, tx1, row.ID, now, time.Minute)
 	must(t, err)
-	if len(rows1) != 1 || rows1[0].LeaseToken == "" || rows1[0].LeaseUntil == nil {
-		t.Fatalf("first claim = %#v, want one row with a lease", rows1)
+	if !ok || first.ID != row.ID || first.LeaseToken == "" || first.LeaseUntil == nil || !first.LeaseUntil.Equal(now.Add(time.Minute)) {
+		t.Fatalf("first claim = %#v, %v, want the row leased for a minute", first, ok)
 	}
-
-	tx2, err := st.BeginTx(ctx, pgx.TxOptions{})
-	must(t, err)
-	rows2, err := records.ClaimDue(ctx, tx2, "LEGION", now, 1, time.Minute)
-	must(t, err)
-	if len(rows2) != 0 {
-		t.Fatalf("second concurrent claim = %#v, want no locked row", rows2)
+	type attempt struct {
+		ok  bool
+		err error
 	}
-	must(t, tx2.Commit(ctx))
+	second := make(chan attempt, 1)
+	go func() {
+		tx2, err := st.BeginTx(ctx, pgx.TxOptions{})
+		if err != nil {
+			second <- attempt{err: err}
+			return
+		}
+		defer tx2.Rollback(ctx)
+		_, ok, err := records.ClaimRow(ctx, tx2, row.ID, now, time.Minute)
+		if err == nil {
+			err = tx2.Commit(ctx)
+		}
+		second <- attempt{ok: ok, err: err}
+	}()
 	must(t, tx1.Commit(ctx))
+	if got := <-second; got.err != nil || got.ok {
+		t.Fatalf("second claim of the leased row = %+v, want nothing claimed", got)
+	}
 
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.FinishOutbox(ctx, tx, rows1[0].ID, "stale-lease"))
-		must(t, records.RetryOutbox(ctx, tx, rows1[0].ID, "stale-lease", now.Add(24*time.Hour), "stale"))
+		due, err := records.DueRows(ctx, tx, "LEGION", "", nil, now)
+		must(t, err)
+		if len(due) != 0 {
+			t.Fatalf("due rows while leased = %#v, want none", due)
+		}
+		must(t, records.FinishOutbox(ctx, tx, row.ID, "stale-lease"))
+		must(t, records.RetryOutbox(ctx, tx, row.ID, "stale-lease", now.Add(24*time.Hour), "stale"))
 	})
 
-	tx3, err := st.BeginTx(ctx, pgx.TxOptions{})
-	must(t, err)
-	rows3, err := records.ClaimDue(ctx, tx3, "LEGION", now.Add(2*time.Minute), 1, time.Minute)
-	must(t, err)
-	if len(rows3) != 1 || rows3[0].ID != rows1[0].ID {
-		t.Fatalf("expired lease claim = %#v, want the original outbox row", rows3)
-	}
-	must(t, records.FinishOutbox(ctx, tx3, rows3[0].ID, rows3[0].LeaseToken))
-	must(t, tx3.Commit(ctx))
+	lapsed := now.Add(2 * time.Minute)
+	inTx(t, st, func(tx pgx.Tx) {
+		due, err := records.DueRows(ctx, tx, "LEGION", "", nil, lapsed)
+		must(t, err)
+		if len(due) != 1 || due[0].ID != row.ID || due[0].Attempts != 0 {
+			t.Fatalf("due rows once the lease lapsed = %#v, want the original row, untouched by the stale retry", due)
+		}
+		again, ok, err := records.ClaimRow(ctx, tx, row.ID, lapsed, time.Minute)
+		must(t, err)
+		if !ok || again.LeaseToken == first.LeaseToken || again.LeaseUntil == nil || !again.LeaseUntil.Equal(lapsed.Add(time.Minute)) {
+			t.Fatalf("claim once the lease lapsed = %#v, %v, want the row under a new lease", again, ok)
+		}
+		must(t, records.FinishOutbox(ctx, tx, again.ID, again.LeaseToken))
+	})
 
 	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.ClaimDue(ctx, tx, "LEGION", now.Add(3*time.Minute), 1, time.Minute)
+		due, err := records.DueRows(ctx, tx, "LEGION", "", nil, now.Add(3*time.Minute))
 		must(t, err)
-		if len(rows) != 0 {
-			t.Fatalf("finished row still due: %#v", rows)
+		if len(due) != 0 {
+			t.Fatalf("finished row still due: %#v", due)
+		}
+		if _, ok, err := records.ClaimRow(ctx, tx, row.ID, now.Add(3*time.Minute), time.Minute); err != nil || ok {
+			t.Fatalf("claim of the finished row = %v, %v, want nothing claimed", ok, err)
+		}
+	})
+}
+
+// ClaimRow decides by the row as it is at the claim, not as the lane listed it: a start the branch
+// rule holds behind an older issue_branch row of its issue is refused though due and unleased, and
+// claimable once the branch row finishes.
+func TestClaimRowReEvaluatesTheOrderingRulesAtTheClaim(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	var branch, start OutboxRow
+	inTx(t, st, func(tx pgx.Tx) {
+		row, err := NewOutboxRow("LEGION-208", IssueBranch{Generation: 1}, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+		row, err = NewOutboxRow("LEGION-208", SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+		rows, err := records.DueRows(ctx, tx, "LEGION", "", nil, now.Add(time.Hour))
+		must(t, err)
+		if len(rows) != 1 || rows[0].Kind != OutboxKindIssueBranch {
+			t.Fatalf("due rows = %v, want the branch row alone", outboxKeys(rows))
+		}
+		branch = rows[0]
+		must(t, tx.QueryRow(ctx, "select id from outbox where kind = $1", string(OutboxKindSupervise)).Scan(&start.ID))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		if _, ok, err := records.ClaimRow(ctx, tx, start.ID, now, time.Minute); err != nil || ok {
+			t.Fatalf("claim of the start behind its branch row = %v, %v, want refused", ok, err)
+		}
+		leased, ok, err := records.ClaimRow(ctx, tx, branch.ID, now, time.Minute)
+		must(t, err)
+		if !ok {
+			t.Fatal("the branch row was not claimed")
+		}
+		must(t, records.FinishOutbox(ctx, tx, leased.ID, leased.LeaseToken))
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		if _, ok, err := records.ClaimRow(ctx, tx, start.ID, now, time.Minute); err != nil || !ok {
+			t.Fatalf("claim of the start once its branch row finished = %v, %v, want claimed", ok, err)
+		}
+	})
+}
+
+// A lease is renewed only by its holder: the right token moves lease_until, a wrong one moves
+// nothing, and a finished row has no lease to renew.
+func TestRenewOutboxLeaseRenewsOnlyUnderItsToken(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Date(2026, 9, 22, 16, 0, 0, 0, time.UTC)
+	var leased OutboxRow
+	inTx(t, st, func(tx pgx.Tx) {
+		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: json.RawMessage(`{"op":"suspend"}`), NextAt: now}))
+		claimed := claimEachDue(t, records, tx, "LEGION", now)
+		if len(claimed) != 1 {
+			t.Fatalf("claimed %v, want the one row", outboxKeys(claimed))
+		}
+		leased = claimed[0]
+	})
+	// dueAt is whether the row is due at at: a lease renewed to five minutes keeps it from the two-minute mark.
+	dueAt := func(tx pgx.Tx, at time.Time) bool {
+		due, err := records.DueRows(ctx, tx, "LEGION", "", nil, at)
+		must(t, err)
+		return len(due) == 1
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		renewed, err := records.RenewOutboxLease(ctx, tx, leased.ID, "another-lane", now.Add(5*time.Minute))
+		must(t, err)
+		if renewed || !dueAt(tx, now.Add(2*time.Minute)) {
+			t.Fatalf("renewal under a wrong token = %v and the row due at two minutes = %v, want false and true", renewed, dueAt(tx, now.Add(2*time.Minute)))
+		}
+		renewed, err = records.RenewOutboxLease(ctx, tx, leased.ID, leased.LeaseToken, now.Add(5*time.Minute))
+		must(t, err)
+		if !renewed || dueAt(tx, now.Add(2*time.Minute)) || !dueAt(tx, now.Add(6*time.Minute)) {
+			t.Fatalf("renewal under the lease's token = %v, want true and the row due only after five minutes", renewed)
+		}
+		must(t, records.FinishOutbox(ctx, tx, leased.ID, leased.LeaseToken))
+		renewed, err = records.RenewOutboxLease(ctx, tx, leased.ID, leased.LeaseToken, now.Add(9*time.Minute))
+		must(t, err)
+		if renewed {
+			t.Fatal("a finished row's lease was renewed")
+		}
+	})
+}
+
+// `legion state` shows a lifecycle row held behind its issue's running one. A due, unleased
+// lifecycle row is held when another lifecycle row of its issue is under a live lease, on that
+// row; a start the branch rule holds behind an issue_branch row is held on the branch row while it
+// runs, and listed by nothing while the branch row waits unleased for its retry. A due lifecycle
+// row no sibling is running is not held, a board row is never held, another project's rows are
+// never listed, and the held rows come by next_at then id with their own next_at.
+func TestHeldRowsListsLifecycleRowsBehindTheirIssuesRunningOne(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	enqueue := func(tx pgx.Tx, issue string, payload OutboxPayload, at time.Time) int64 {
+		row, err := NewOutboxRow(issue, payload, at)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+		var id int64
+		must(t, tx.QueryRow(ctx, "select max(id) from outbox").Scan(&id))
+		return id
+	}
+	lease := func(tx pgx.Tx, id int64) {
+		if _, ok, err := records.ClaimRow(ctx, tx, id, now, time.Minute); err != nil || !ok {
+			t.Fatalf("lease of row %d = %v, %v, want leased", id, ok, err)
+		}
+	}
+	suspend := SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1}
+	start := SuperviseRequest{Op: "start", Tree: "LEGION-209", Role: claim.RoleArchitect, Generation: 1}
+	var runningSuspend, removal, runningBranch, fencedStart int64
+	inTx(t, st, func(tx pgx.Tx) {
+		// (a) LEGION-208: a workspace removal and a status write due behind a running suspend.
+		runningSuspend = enqueue(tx, "LEGION-208", suspend, now)
+		removal = enqueue(tx, "LEGION-208", WorkspaceRemove{Linger: 1}, now)
+		enqueue(tx, "LEGION-208", StatusWrite{Status: "done"}, now)
+		// (b) LEGION-209: a start due behind its branch row, which is running; due a minute before 208's.
+		runningBranch = enqueue(tx, "LEGION-209", IssueBranch{Generation: 1}, now)
+		fencedStart = enqueue(tx, "LEGION-209", start, now.Add(-time.Minute))
+		// (c) LEGION-210: a start behind a branch row on its backoff, which nobody runs.
+		enqueue(tx, "LEGION-210", IssueBranch{Generation: 1}, now.Add(time.Minute))
+		enqueue(tx, "LEGION-210", SuperviseRequest{Op: "start", Tree: "LEGION-210", Role: claim.RoleArchitect, Generation: 1}, now)
+		// (d) LEGION-211: a due linger close with nothing of its issue running.
+		enqueue(tx, "LEGION-211", LingerClose{Generation: 1}, now)
+		// OTHER-7: shape (a) in another project.
+		otherSuspend := enqueue(tx, "OTHER-7", SuperviseRequest{Op: "suspend", Tree: "OTHER-7", Role: claim.RolePlanner, Generation: 1}, now)
+		enqueue(tx, "OTHER-7", WorkspaceRemove{Linger: 1}, now)
+		lease(tx, runningSuspend)
+		lease(tx, runningBranch)
+		lease(tx, otherSuspend)
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		held, err := records.HeldRows(ctx, tx, "LEGION", now)
+		must(t, err)
+		if len(held) != 2 {
+			t.Fatalf("held rows = %+v, want LEGION-209's start then LEGION-208's workspace removal", held)
+		}
+		if held[0].ID != fencedStart || held[0].WaitsOn != runningBranch || !held[0].NextAt.Equal(now.Add(-time.Minute)) {
+			t.Errorf("first held row = %+v, want the start %d, due at %s, waiting on its branch row %d", held[0], fencedStart, now.Add(-time.Minute), runningBranch)
+		}
+		if held[1].ID != removal || held[1].WaitsOn != runningSuspend || !held[1].NextAt.Equal(now) {
+			t.Errorf("second held row = %+v, want the workspace removal %d, due at %s, waiting on the suspend %d", held[1], removal, now, runningSuspend)
+		}
+		other, err := records.HeldRows(ctx, tx, "OTHER", now)
+		must(t, err)
+		if len(other) != 1 || other[0].Issue != "OTHER-7" || other[0].Kind != OutboxKindWorkspaceRemove {
+			t.Errorf("OTHER's held rows = %+v, want its workspace removal alone", other)
+		}
+	})
+	// Once the running rows finish, nothing of LEGION is held: 208's removal and 211's close are
+	// due to run, 209's start is due behind no running row, and 210's start waits on its backoff.
+	inTx(t, st, func(tx pgx.Tx) {
+		var token string
+		for _, id := range []int64{runningSuspend, runningBranch} {
+			must(t, tx.QueryRow(ctx, "select lease_token from outbox where id = $1", id).Scan(&token))
+			must(t, records.FinishOutbox(ctx, tx, id, token))
+		}
+		held, err := records.HeldRows(ctx, tx, "LEGION", now)
+		must(t, err)
+		if len(held) != 0 {
+			t.Fatalf("held rows with nothing running = %+v, want none", held)
+		}
+	})
+}
+
+// UnfinishedLanes names each lane with a row left, once, by issue then lane, for the project alone:
+// an issue with a status write and a start has both lanes, one with two board rows has the board
+// lane once, and a project with no rows has none.
+func TestUnfinishedLanesNamesEachLaneWithARowLeft(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, row := range []OutboxRow{
+			{Kind: OutboxKindDispatchStatus, Issue: "LEGION-208", Payload: json.RawMessage(`{"status":"testing"}`)},
+			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: json.RawMessage(`{"op":"start"}`)},
+			{Kind: OutboxKindNotice, Issue: "LEGION-209", Payload: json.RawMessage(`{"kind":"phase-finished"}`)},
+			{Kind: OutboxKindDispatchMessage, Issue: "LEGION-209", Payload: json.RawMessage(`{"body":"Done."}`)},
+			{Kind: OutboxKindSupervise, Issue: "OTHER-7", Payload: json.RawMessage(`{"op":"start"}`)},
+		} {
+			row.NextAt = now
+			must(t, records.Enqueue(ctx, tx, row))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		lanes, err := records.UnfinishedLanes(ctx, tx, "LEGION")
+		must(t, err)
+		want := []LaneKey{{Issue: "LEGION-208", Lane: LaneBoard}, {Issue: "LEGION-208", Lane: LaneLifecycle}, {Issue: "LEGION-209", Lane: LaneBoard}}
+		if !reflect.DeepEqual(lanes, want) {
+			t.Errorf("LEGION's unfinished lanes = %v, want %v", lanes, want)
+		}
+		none, err := records.UnfinishedLanes(ctx, tx, "NOBODY")
+		must(t, err)
+		if none == nil || len(none) != 0 {
+			t.Errorf("a project with no rows has lanes %#v, want an empty list", none)
+		}
+	})
+}
+
+// NextDue is when a lane with nothing to run next has something: the earliest next_at after now
+// among the issue's rows of its kinds that no live lease holds. A row due already is not it, nor one
+// under a live lease, nor another issue's or another lane's row; a lapsed lease does not hide a row.
+func TestNextDueIsTheEarliestLaterMomentAnUnleasedRowComesDue(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	start := json.RawMessage(`{"op":"start"}`)
+	live, lapsed := now.Add(10*time.Minute), now.Add(-time.Minute)
+	inTx(t, st, func(tx pgx.Tx) {
+		for _, row := range []OutboxRow{
+			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: start, NextAt: now},
+			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: start, NextAt: now.Add(2 * time.Minute), LeaseToken: "running", LeaseUntil: &live},
+			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: start, NextAt: now.Add(4 * time.Minute), LeaseToken: "gone", LeaseUntil: &lapsed},
+			{Kind: OutboxKindSupervise, Issue: "LEGION-208", Payload: start, NextAt: now.Add(5 * time.Minute)},
+			{Kind: OutboxKindNotice, Issue: "LEGION-208", Payload: json.RawMessage(`{"kind":"phase-finished"}`), NextAt: now.Add(3 * time.Minute)},
+			{Kind: OutboxKindSupervise, Issue: "LEGION-209", Payload: start, NextAt: now.Add(time.Minute)},
+		} {
+			must(t, records.Enqueue(ctx, tx, row))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		next, ok, err := records.NextDue(ctx, tx, "LEGION-208", LaneKinds(LaneLifecycle), now)
+		must(t, err)
+		if !ok || !next.Equal(now.Add(4*time.Minute)) {
+			t.Errorf("LEGION-208's lifecycle lane is next due at %s, %v, want %s: the row whose lease lapsed", next, ok, now.Add(4*time.Minute))
+		}
+		next, ok, err = records.NextDue(ctx, tx, "LEGION-208", nil, now)
+		must(t, err)
+		if !ok || !next.Equal(now.Add(3*time.Minute)) {
+			t.Errorf("LEGION-208 is next due at %s, %v, want %s: its notice", next, ok, now.Add(3*time.Minute))
+		}
+		if next, ok, err := records.NextDue(ctx, tx, "LEGION-208", LaneKinds(LaneLifecycle), now.Add(5*time.Minute)); err != nil || ok {
+			t.Errorf("LEGION-208's lifecycle lane once every row is due = %s, %v, %v, want nothing later", next, ok, err)
+		}
+		if next, ok, err := records.NextDue(ctx, tx, "LEGION-210", nil, now); err != nil || ok {
+			t.Errorf("an issue with no rows is next due at %s, %v, %v, want never", next, ok, err)
+		}
+	})
+}
+
+// Migration 0043 indexes the outbox by issue, then id, for the reads each issue's lanes make.
+func TestRecordMigrationCreatesTheOutboxIssueIndex(t *testing.T) {
+	st := migratedStore(t)
+	inTx(t, st, func(tx pgx.Tx) {
+		var definition string
+		must(t, tx.QueryRow(context.Background(), "select indexdef from pg_indexes where tablename = 'outbox' and indexname = 'outbox_issue'").Scan(&definition))
+		if !strings.HasSuffix(definition, "(issue, id)") {
+			t.Fatalf("outbox_issue = %q, want an index on (issue, id)", definition)
 		}
 	})
 }
 
 // Daemons of different projects share one database, and each runs only its own project's outbox:
-// a claim leases no row of another project's issue, which stays due for its own daemon, and the
-// pending status writes list none of them. A project whose key another begins with is another.
+// a daemon lists and leases no row of another project's issue, which stays due for its own daemon,
+// and the pending status writes list none of them. A project whose key another begins with is
+// another.
 func TestTheOutboxIsEachProjectsOwn(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -436,30 +771,71 @@ func TestTheOutboxIsEachProjectsOwn(t *testing.T) {
 		}
 		must(t, records.Enqueue(ctx, tx, OutboxRow{Kind: OutboxKindNotice, Issue: "OTHER-7", Payload: json.RawMessage(`{"kind":"phase-finished"}`), NextAt: now}))
 	})
-	issues := func(rows []OutboxRow) []string {
-		keys := []string{}
-		for _, row := range rows {
-			keys = append(keys, string(row.Kind)+":"+row.Issue)
-		}
-		return keys
-	}
 	inTx(t, st, func(tx pgx.Tx) {
-		claimed, err := records.ClaimDue(ctx, tx, "LEGION", now, 10, time.Minute)
-		must(t, err)
-		if got := issues(claimed); !reflect.DeepEqual(got, []string{"dispatch_status:LEGION-208"}) {
+		claimed := claimEachDue(t, records, tx, "LEGION", now)
+		if got := outboxKeys(claimed); !reflect.DeepEqual(got, []string{"dispatch_status:LEGION-208:in_progress"}) {
 			t.Errorf("LEGION's claim = %v, want its own status row alone", got)
 		}
 		pending, err := records.PendingStatusWrites(ctx, tx, "LEGION")
 		must(t, err)
-		if got := issues(pending); !reflect.DeepEqual(got, []string{"dispatch_status:LEGION-208"}) {
+		if got := outboxKeys(pending); !reflect.DeepEqual(got, []string{"dispatch_status:LEGION-208:in_progress"}) {
 			t.Errorf("LEGION's pending status writes = %v, want its own alone", got)
 		}
 	})
 	inTx(t, st, func(tx pgx.Tx) {
-		claimed, err := records.ClaimDue(ctx, tx, "OTHER", now, 10, time.Minute)
-		must(t, err)
-		if got := issues(claimed); !reflect.DeepEqual(got, []string{"dispatch_status:OTHER-7", "notice:OTHER-7"}) {
+		claimed := claimEachDue(t, records, tx, "OTHER", now)
+		if got := outboxKeys(claimed); !reflect.DeepEqual(got, []string{"dispatch_status:OTHER-7:in_progress", "notice:OTHER-7"}) {
 			t.Errorf("OTHER's claim after LEGION's = %v, want both of its rows, due and unleased", got)
+		}
+	})
+}
+
+// DueRows lists what a lane may run now and nothing it may not: a newer status write of an issue
+// waits unlisted while an older one is unfinished and is listed once it is, a start waits unlisted
+// while an older issue_branch row of its issue exists, and a kinds or issue filter narrows the list
+// to those kinds or that issue.
+func TestDueRowsListsOnlyTheRowsALaneMayRunNow(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	enqueue := func(tx pgx.Tx, issue string, payload OutboxPayload) {
+		row, err := NewOutboxRow(issue, payload, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		enqueue(tx, "LEGION-208", StatusWrite{Status: "testing"})
+		enqueue(tx, "LEGION-208", StatusWrite{Status: "retro"})
+		enqueue(tx, "LEGION-208", IssueBranch{Generation: 1})
+		enqueue(tx, "LEGION-208", SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1})
+		enqueue(tx, "LEGION-209", Notice{Kind: "phase-finished", Role: claim.RoleTester, Summary: "Tests passed"})
+	})
+	due := func(tx pgx.Tx, issue string, kinds []OutboxKind) []string {
+		rows, err := records.DueRows(ctx, tx, "LEGION", issue, kinds, now)
+		must(t, err)
+		return outboxKeys(rows)
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		if got, want := due(tx, "", nil), []string{"dispatch_status:LEGION-208:testing", "issue_branch:LEGION-208", "notice:LEGION-209"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("due rows = %v, want %v: the newer status and the start behind their older rows", got, want)
+		}
+		if got, want := due(tx, "LEGION-209", nil), []string{"notice:LEGION-209"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("due rows of LEGION-209 = %v, want %v", got, want)
+		}
+		if got, want := due(tx, "", []OutboxKind{OutboxKindIssueBranch, OutboxKindNotice}), []string{"issue_branch:LEGION-208", "notice:LEGION-209"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("due branch and notice rows = %v, want %v", got, want)
+		}
+		if got, want := due(tx, "LEGION-208", LaneKinds(LaneBoard)), []string{"dispatch_status:LEGION-208:testing"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("due board rows of LEGION-208 = %v, want %v", got, want)
+		}
+		for _, row := range claimEachDue(t, records, tx, "LEGION", now) {
+			must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
+		}
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		if got, want := due(tx, "", nil), []string{"dispatch_status:LEGION-208:retro", "supervise:LEGION-208:start"}; !reflect.DeepEqual(got, want) {
+			t.Fatalf("due rows once the older ones finished = %v, want %v", got, want)
 		}
 	})
 }
@@ -489,16 +865,9 @@ func TestAStartWaitsForItsIssuesBranch(t *testing.T) {
 	claimed := func(at time.Time) []string {
 		var keys []string
 		inTx(t, st, func(tx pgx.Tx) {
-			rows, err := records.ClaimDue(ctx, tx, "LEGION", at, 10, time.Minute)
-			must(t, err)
+			rows := claimEachDue(t, records, tx, "LEGION", at)
+			keys = outboxKeys(rows)
 			for _, row := range rows {
-				payload, err := DecodeOutboxPayload(row)
-				must(t, err)
-				key := string(row.Kind) + ":" + row.Issue
-				if request, ok := payload.(SuperviseRequest); ok {
-					key += ":" + string(request.Op)
-				}
-				keys = append(keys, key)
 				must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
 			}
 		})
@@ -515,8 +884,8 @@ func TestAStartWaitsForItsIssuesBranch(t *testing.T) {
 
 // A status write the outbox failed and pushed back is still unwritten, so it stays listed through its
 // backoff; a finished one is deleted and gone, and a row of another kind is never listed. The list
-// runs oldest first, the order ClaimDue writes an issue's statuses in, so a newer write queued
-// behind a backing-off one is listed after it rather than ahead of it as a due write.
+// runs oldest first, the order an issue's statuses run in, so a newer write queued behind a
+// backing-off one is listed after it rather than ahead of it as a due write.
 func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -531,8 +900,7 @@ func TestPendingStatusWritesListsEveryUnfinishedStatusEffect(t *testing.T) {
 	// LEGION-208's write fails and backs off a minute, as outbox.retry records it; LEGION-209's lands.
 	backoffUntil := now.Add(time.Minute)
 	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := records.ClaimDue(ctx, tx, "LEGION", now, 10, time.Minute)
-		must(t, err)
+		rows := claimEachDue(t, records, tx, "LEGION", now)
 		if len(rows) != 3 {
 			t.Fatalf("claimed %#v, want all three rows", rows)
 		}
@@ -839,7 +1207,7 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 	_, err = st.Migrate(ctx)
 	must(t, err)
 	inTx(t, st, func(tx pgx.Tx) {
-		rows, err := NewStore().ClaimDue(ctx, tx, "LEGION", time.Now().Add(time.Hour), 10, time.Minute)
+		rows, err := NewStore().DueRows(ctx, tx, "LEGION", "", nil, time.Now().Add(time.Hour))
 		must(t, err)
 		kept := map[string]SuperviseRequest{}
 		for _, row := range rows {

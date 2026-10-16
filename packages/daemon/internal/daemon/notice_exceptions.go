@@ -296,7 +296,7 @@ func (r *outbox) exceptionNotice(exception roleLaneException) (reportedNotice, b
 // still passes the fence.
 func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) error {
 	now := r.now()
-	released := []int64{}
+	released := []record.OutboxRow{}
 	if err := pgx.BeginTxFunc(ctx, r.pool, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		waiting, err := r.records.WaitingNotices(ctx, tx, r.dispatchProject, now)
 		if err != nil {
@@ -320,7 +320,7 @@ func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) 
 				return err
 			}
 			if owner, err := owningArchitect(route.project, route.issues, issue, notice.Kind, r.holdsItsRole); err == nil && slices.Contains(architects, owner) {
-				released = append(released, row.ID)
+				released = append(released, row)
 			}
 		}
 		return nil
@@ -331,8 +331,8 @@ func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) 
 		return nil
 	}
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		for _, id := range released {
-			if err := r.records.ExpediteOutbox(ctx, tx, id, now); err != nil {
+		for _, row := range released {
+			if err := r.records.ExpediteOutbox(ctx, tx, row, now); err != nil {
 				return err
 			}
 		}
@@ -340,6 +340,10 @@ func (r *outbox) releaseWaiting(ctx context.Context, architects ...claim.Token) 
 	}); err != nil {
 		return fmt.Errorf("release the notices waiting for %v: %w", architects, err)
 	}
-	r.log.Info("outbox notices released: their architect is ready", "architects", architects, "rows", released)
+	ids := make([]int64, len(released))
+	for i, row := range released {
+		ids[i] = row.ID
+	}
+	r.log.Info("outbox notices released: their architect is ready", "architects", architects, "rows", ids)
 	return nil
 }
