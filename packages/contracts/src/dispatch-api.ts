@@ -1430,6 +1430,15 @@ export interface Agent {
   readonly title: string;
   readonly dir: string;
   readonly machine_id: string;
+  /**
+   * The session's real machine, as its own Envoy plugin reported it (envoy-client's
+   * machineID(): `ENVOY_MACHINE_ID`, falling back to the kernel hostname). `machine_id` is
+   * always the listener that registered the session and owns its delivery, which may be a
+   * single shared listener for every machine; this is the one to show and filter on. The
+   * listener falls back to `machine_id` itself for a session whose plugin predates this field,
+   * so it is never empty.
+   */
+  readonly host: string;
   readonly roles: string[];
   /**
    * Wire value from the Envoy registry: an open string list. The known values
@@ -2660,11 +2669,16 @@ export interface DeliveryRun {
   readonly conclusion: "success" | "failure" | "cancelled" | null;
   /** Null when the run has no production job. */
   readonly production: DeliveryRunProduction | null;
+  /** Every failed job, by when each started (a job that never started last), then by name in
+   *  byte order. */
   readonly failed_jobs: readonly DeliveryRunJob[];
   /** The earliest-finishing failed job that isn't a summary/guard job, falling back to the
-   *  earliest failed job overall; null on a run with no failed job. */
+   *  earliest failed job overall, the first by name in byte order among those finishing together
+   *  (a job that never finished last); null on a run with no failed job. */
   readonly root_failing_job: DeliveryRunJob | null;
-  /** Every window pull request this run shipped first, whatever facets the request names. */
+  /** Every window pull request this run shipped first, whatever facets the request names, by
+   *  `merged_at`, then by `id` in byte order. Of two production deploys completing in the same
+   *  second, the one with the lower run id ships a pull request both could. */
   readonly prs: readonly { readonly id: string; readonly title: string }[];
 }
 

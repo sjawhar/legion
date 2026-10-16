@@ -327,6 +327,59 @@ func TestFirstShippingApply(t *testing.T) {
 	})
 }
 
+// TestAppliesCompletingTogetherShipTheSameInEveryOrder: two production applies whose jobs completed
+// in the same second are ordered by run id, and the lower run id ships a pull request both could,
+// in every order the runs are listed in and every order the applies are handed over in. The live
+// hub narrows the runs it read as a preset window slides, so the input changes length and order
+// with no stored row changed; a pull request's deploy_run and a run's prs must not change with it.
+func TestAppliesCompletingTogetherShipTheSameInEveryOrder(t *testing.T) {
+	const jobName = "production / production-apply"
+	merged := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+	completed := merged.Add(30 * time.Minute)
+	success := DeliveryRunConclusionSuccess
+	runs := []DeliveryRun{
+		{RunID: 9, CreatedAt: new(merged.Add(time.Minute)), StartedAt: merged.Add(time.Minute), Conclusion: &success},
+		{RunID: 7, CreatedAt: new(merged.Add(2 * time.Minute)), StartedAt: merged.Add(2 * time.Minute), Conclusion: &success},
+		{RunID: 8, CreatedAt: new(merged.Add(3 * time.Minute)), StartedAt: merged.Add(3 * time.Minute), Conclusion: &success},
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		9: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(completed)}},
+		7: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(completed)}},
+		8: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(completed.Add(time.Second))}},
+	}
+	production := Production{JobNames: []string{jobName}}
+	runIDs := func(applies []Apply) []int64 {
+		ids := make([]int64, len(applies))
+		for i, apply := range applies {
+			ids[i] = apply.RunID
+		}
+		return ids
+	}
+	t.Run("ProductionApplies", func(t *testing.T) {
+		ordertest.EveryOrder(runs, func(listed []DeliveryRun) {
+			order := make([]int64, len(listed))
+			for i, run := range listed {
+				order[i] = run.RunID
+			}
+			if got := runIDs(ProductionApplies(listed, jobsByRun, production).Applies); !slices.Equal(got, []int64{7, 9, 8}) {
+				t.Fatalf("ProductionApplies of runs listed %v = %v, want [7 9 8]: by completion, then run id", order, got)
+			}
+		})
+	})
+	t.Run("FirstShippingApply", func(t *testing.T) {
+		applies := []Apply{
+			{RunID: 9, CompletedAt: completed, CreatedAt: merged.Add(time.Minute)},
+			{RunID: 7, CompletedAt: completed, CreatedAt: merged.Add(2 * time.Minute)},
+			{RunID: 8, CompletedAt: completed.Add(time.Second), CreatedAt: merged.Add(3 * time.Minute)},
+		}
+		ordertest.EveryOrder(applies, func(listed []Apply) {
+			if got := FirstShippingApply(merged, listed); got == nil || got.RunID != 7 {
+				t.Fatalf("FirstShippingApply of applies listed %v = %+v, want run 7, the lower run id of the two completing first", runIDs(listed), got)
+			}
+		})
+	})
+}
+
 // TestProductionAppliesReadsTheRunsCreation: an apply carries the run's creation (Created), never
 // its head commit's time, which a merge queue writes before the merge it carries is recorded, and
 // a row stored before created_at reads its start in its place. Run 1 is the merge queue's: its

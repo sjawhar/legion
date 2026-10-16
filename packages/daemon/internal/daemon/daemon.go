@@ -90,6 +90,13 @@ const (
 	// periodic retry owns it until tmux can say the old pane was reaped or absent.
 	bootOrphanReconcileAttempts   = 3
 	bootOrphanReconcileRetryDelay = 100 * time.Millisecond
+	// launchBackoffFirst is the machines' first wait before a launch is tried again after a
+	// charged launch failure (supervise.Timeouts.LaunchBackoff), doubled for each one after it: a
+	// three-failure budget's tries span three seconds at least, never a moment one fault lasts.
+	launchBackoffFirst = 2 * time.Second
+	// busyBackoffFirst is the Sandbox runtime's first wait before a launch's request the API server
+	// answered overloaded is sent again (sandbox.Options.BusyBackoff), doubled up to 8 s.
+	busyBackoffFirst = 250 * time.Millisecond
 )
 
 // overrides are the parts of a daemon a test replaces; the zero value is the real daemon.
@@ -912,6 +919,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			RPC:                   cfg.WorkerRPCTimeout,
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
+			LaunchBackoff:         launchBackoffFirst,
 		},
 		PluginContract:     api.DaemonAPIVersion,
 		PluginRelaunchable: p.pluginRelaunchable,

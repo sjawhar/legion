@@ -794,7 +794,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
 		Store: r.trees,
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
-		Agent: stubAgent, BootTimeout: liveBootTimeout,
+		Agent: stubAgent, BootTimeout: liveBootTimeout, BusyBackoff: 250 * time.Millisecond,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
 	}

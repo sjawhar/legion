@@ -20,6 +20,7 @@ import {
   readSessionTitle,
   sessionDirectory,
 } from "@legion/envoy-client/dispatch-session-state";
+import { machineID } from "@legion/envoy-client/machine";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
@@ -2797,6 +2798,7 @@ describe("envoy OMP extension", () => {
           driving: false,
           self_subscribed: true,
           capabilities: ["aside", "steer"],
+          host: machineID(),
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
@@ -5047,6 +5049,7 @@ describe("envoy OMP extension", () => {
         driving: false,
         self_subscribed: true,
         capabilities: ["aside", "steer"],
+        host: machineID(),
       },
     });
   });

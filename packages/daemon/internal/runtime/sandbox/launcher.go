@@ -348,13 +348,14 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 // launcherBound reports whether pod is one whose launchers this runtime bound: the Secret of every
 // role of roles, the pod's launcher roles, exists, is the Sandbox's, and binds pod by uid. A running
 // pod an older runtime made (one worker container, no launchers) or one whose binding never landed
-// is replaced rather than trusted. Any other failure to read a Secret, such as a timeout, a
-// throttled request or a server error, proves nothing about the pod: it is returned, so only the
-// launch that read it fails, and the caller stops that role's previous process (runtime.Runtime's
-// Spawn and Resume); the pod and every other role running in it are left as they are. Each Secret
-// it finds bound to pod, holding a launcher token, is held as its role's credential
-// (cacheLauncherCredential), so the launcher a kept pod's launch waits for is not refused for a
-// read of its own that failed earlier (credentialRetry).
+// is replaced rather than trusted. Any other failure to read a Secret, such as the client's
+// timeout, or a throttled request or a server error the launch's deadline for it outlasted
+// (resend), proves nothing about the pod: it is returned, so only the launch that read it fails,
+// and the caller stops that role's previous process (runtime.Runtime's Spawn and Resume); the pod
+// and every other role running in it are left as they are. Each Secret it finds bound to pod,
+// holding a launcher token, is held as its role's credential (cacheLauncherCredential), so the
+// launcher a kept pod's launch waits for is not refused for a read of its own that failed earlier
+// (credentialRetry).
 func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, roles []claim.Role) (bool, error) {
 	for _, role := range roles {
 		name := roleSecretName(s.Name, role)
