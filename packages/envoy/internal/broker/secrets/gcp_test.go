@@ -43,8 +43,12 @@ type fakeSecret struct {
 	// noVersion is a secret with no version at all.
 	noVersion bool
 	state     secretmanagerpb.SecretVersion_State
-	expires   bool
-	value     []byte
+	// expires, when set, is the secret's expire_time.
+	expires time.Time
+	// denyVersion makes GetSecretVersion on the secret answer PERMISSION_DENIED, as for a secret
+	// outside the namespace the broker's condition grants it.
+	denyVersion bool
+	value       []byte
 }
 
 // fakeSecretManager is the four Secret Manager calls the store makes, over gRPC with TLS, as the
@@ -91,8 +95,8 @@ func (f *fakeSecretManager) secretProto(name string, s *fakeSecret) *secretmanag
 		auto.CustomerManagedEncryption = &secretmanagerpb.CustomerManagedEncryption{KmsKeyName: s.replicationKey}
 	}
 	p.Replication = &secretmanagerpb.Replication{Replication: &secretmanagerpb.Replication_Automatic_{Automatic: auto}}
-	if s.expires {
-		p.Expiration = &secretmanagerpb.Secret_ExpireTime{ExpireTime: timestamppb.New(time.Now().Add(30 * 24 * time.Hour))}
+	if !s.expires.IsZero() {
+		p.Expiration = &secretmanagerpb.Secret_ExpireTime{ExpireTime: timestamppb.New(s.expires)}
 	}
 	return p
 }
@@ -126,6 +130,9 @@ func (f *fakeSecretManager) GetSecretVersion(_ context.Context, req *secretmanag
 	s, secret, err := f.latest(req.GetName())
 	if err != nil {
 		return nil, err
+	}
+	if s.denyVersion {
+		return nil, status.Errorf(codes.PermissionDenied, "Permission denied on %s", req.GetName())
 	}
 	v := &secretmanagerpb.SecretVersion{Name: secret + "/versions/1", State: s.state}
 	auto := &secretmanagerpb.ReplicationStatus_AutomaticStatus{}
@@ -203,41 +210,57 @@ func servedSecret(value string) *fakeSecret {
 
 func TestGCPListReadsAnnotationsKeyStateAndExpiry(t *testing.T) {
 	f := &fakeSecretManager{secrets: map[string]*fakeSecret{
-		fakePrefix + "served":                     servedSecret("v1"),
-		fakePrefix + "default-key":                {annotations: map[string]string{"owner": "shared", "tier": "agent"}, state: secretmanagerpb.SecretVersion_ENABLED, value: []byte("v")},
-		fakePrefix + "disabled":                   {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_DISABLED, value: []byte("v")},
-		fakePrefix + "no-version":                 {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, noVersion: true},
-		fakePrefix + "expiring":                   {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, expires: true, value: []byte("v")},
-		fakePrefix + "no-tags":                    {replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, value: []byte("v")},
-		fakeProject + "/secrets/other-prefix-key": servedSecret("not ours"),
+		fakePrefix + "served":      servedSecret("v1"),
+		fakePrefix + "default-key": {annotations: map[string]string{"owner": "shared", "tier": "agent"}, state: secretmanagerpb.SecretVersion_ENABLED, value: []byte("v")},
+		fakePrefix + "disabled":    {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_DISABLED, value: []byte("v")},
+		fakePrefix + "no-version":  {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, noVersion: true},
+		fakePrefix + "expiring":    {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, expires: time.Now().Add(30 * 24 * time.Hour), value: []byte("v")},
+		fakePrefix + "expired":     {annotations: map[string]string{"owner": "shared", "tier": "agent"}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, expires: time.Now().Add(-time.Minute), value: []byte("v")},
+		fakePrefix + "no-tags":     {replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, value: []byte("v")},
+		// The name filter is a case-insensitive substring match, so these two are listed too;
+		// neither is the broker's, and a version lookup on either is denied.
+		fakeProject + "/secrets/other-agent-secrets-key": {denyVersion: true},
+		fakeProject + "/secrets/AGENT-SECRETS-upper":     {denyVersion: true},
 	}}
 	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
-	listings, err := store.List(context.Background(), fakePrefix)
+	ctx := context.Background()
+	listings, err := store.List(ctx, fakePrefix)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("List = %v; want the secrets outside the prefix dropped before any call for them", err)
 	}
 	byID := map[string]Listing{}
 	for _, ls := range listings {
 		byID[ls.ID] = ls
 	}
-	if len(byID) != 6 {
-		t.Fatalf("List answered %d secrets, want the 6 under the prefix: %+v", len(byID), listings)
+	if len(byID) != 7 {
+		t.Fatalf("List answered %d secrets, want the 7 under the prefix: %+v", len(byID), listings)
+	}
+	onKey := func(ls Listing) bool {
+		t.Helper()
+		on, err := ls.OnKey(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return on
 	}
 	served := byID[fakePrefix+"served"]
-	if served.Source != served.ID || served.Tags["owner"] != "ada@example.com" || served.Tags["tier"] != "human" || !served.OnKey || !served.HasCurrentValue || served.Deleted {
+	if served.Source != served.ID || served.Tags["owner"] != "ada@example.com" || served.Tags["tier"] != "human" || !onKey(served) || !served.HasCurrentValue || served.Deleted {
 		t.Fatalf("served = %+v; want on the key, with a value, tagged from its annotations", served)
 	}
-	if ls := byID[fakePrefix+"default-key"]; ls.OnKey || !ls.HasCurrentValue {
+	if ls := byID[fakePrefix+"default-key"]; onKey(ls) || !ls.HasCurrentValue {
 		t.Fatalf("default-key = %+v; want not on the key", ls)
 	}
-	if ls := byID[fakePrefix+"disabled"]; !ls.OnKey || ls.HasCurrentValue {
+	if ls := byID[fakePrefix+"disabled"]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("disabled = %+v; want on the key with no current value", ls)
 	}
-	if ls := byID[fakePrefix+"no-version"]; !ls.OnKey || ls.HasCurrentValue {
+	if ls := byID[fakePrefix+"no-version"]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("no-version = %+v; want on the key (its replication policy's) with no current value", ls)
 	}
-	if ls := byID[fakePrefix+"expiring"]; !ls.Deleted || !ls.OnKey || !ls.HasCurrentValue {
-		t.Fatalf("expiring = %+v; want Deleted", ls)
+	if ls := byID[fakePrefix+"expiring"]; ls.Deleted || !onKey(ls) || !ls.HasCurrentValue {
+		t.Fatalf("expiring = %+v; want served until its expire_time, which is ahead", ls)
+	}
+	if ls := byID[fakePrefix+"expired"]; !ls.Deleted {
+		t.Fatalf("expired = %+v; want Deleted once its expire_time has passed", ls)
 	}
 	if ls := byID[fakePrefix+"no-tags"]; len(ls.Tags) != 0 || ls.Tags == nil {
 		t.Fatalf("no-tags = %+v; want an empty, non-nil tag map", ls)
@@ -255,8 +278,11 @@ func TestGCPDescribeAndRead(t *testing.T) {
 	ctx := context.Background()
 
 	ls, err := store.Describe(ctx, fakePrefix+"served")
-	if err != nil || ls.ID != fakePrefix+"served" || !ls.OnKey || !ls.HasCurrentValue {
+	if err != nil || ls.ID != fakePrefix+"served" || !ls.HasCurrentValue {
 		t.Fatalf("Describe(served) = %+v, %v", ls, err)
+	}
+	if on, err := ls.OnKey(ctx); err != nil || !on {
+		t.Fatalf("Describe(served).OnKey = %v, %v; want on the key", on, err)
 	}
 	if _, err := store.Describe(ctx, fakePrefix+"missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Describe(missing) = %v, want ErrNotFound", err)

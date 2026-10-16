@@ -210,7 +210,7 @@ func TestAReloadThatCatchesAChangeKeepsItForListLag(t *testing.T) {
 // side: a served name a reread finds gone is still kept, so a lagging listing cannot bring it back.
 func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
-	count := &countingDescriber{SecretsManagerAPI: store}
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
 	loader := policytest.Loader(store)
 	loader.Store = policytest.StoreThrough(store, count)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
@@ -220,24 +220,13 @@ func TestARereadOfANameThatExistsNowhereCostsNoReload(t *testing.T) {
 	if lk, err := cur.RefreshOne(context.Background(), "NO_SUCH_KEY"); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent {
 		t.Fatalf("RefreshOne(NO_SUCH_KEY) = %+v, %v; want absent", lk, err)
 	}
-	before := count.calls.Load()
+	before := count.Calls.Load()
 	if err := cur.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if got := count.calls.Load() - before; got != 0 {
+	if got := count.Calls.Load() - before; got != 0 {
 		t.Fatalf("the reload after a reread of a name that exists nowhere made %d DescribeSecret calls; want 0", got)
 	}
-}
-
-// countingDescriber counts the DescribeSecret calls a reread or a reload makes.
-type countingDescriber struct {
-	secrets.SecretsManagerAPI
-	calls atomic.Int64
-}
-
-func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
-	c.calls.Add(1)
-	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
 // heldCurrent loads an empty namespace's policy and starts a reload whose listing waits until the

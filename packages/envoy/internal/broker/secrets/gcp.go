@@ -6,12 +6,12 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	gax "github.com/googleapis/gax-go/v2"
-	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -100,10 +100,11 @@ func (g GCP) ValidName(id string) error {
 	return nil
 }
 
-// List lists every secret of the prefix's project whose id starts with the prefix's id prefix,
-// with ListSecrets' name filter (name:<id prefix>, a case-insensitive substring match the policy's
-// own prefix cut makes exact), reading every page, then reads each listed secret's latest version
-// with one GetSecretVersion for its state and key. A failed call fails the whole List.
+// List lists every secret of the prefix's project whose id starts with the prefix's id prefix:
+// ListSecrets' name filter (name:<id prefix>) is a case-insensitive substring match, so a listed
+// secret whose full name does not start with prefix, byte for byte, is dropped here before any
+// call is made for it. It reads every page, then each kept secret's latest version with one
+// GetSecretVersion for its state and key. A failed call fails the whole List.
 func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 	parent, idPrefix, ok := strings.Cut(prefix, "/secrets/")
 	if !ok {
@@ -111,13 +112,12 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 	}
 	var listings []Listing
 	it := g.Client.ListSecrets(ctx, &secretmanagerpb.ListSecretsRequest{Parent: parent, Filter: "name:" + idPrefix})
-	for {
-		secret, err := it.Next()
-		if err == iterator.Done {
-			return listings, nil
-		}
+	for secret, err := range it.All() {
 		if err != nil {
 			return nil, fmt.Errorf("list secrets under %s: %w", prefix, gcpErr(err))
+		}
+		if !strings.HasPrefix(secret.GetName(), prefix) {
+			continue
 		}
 		ls, err := g.listing(ctx, secret)
 		if err != nil {
@@ -125,11 +125,13 @@ func (g GCP) List(ctx context.Context, prefix string) ([]Listing, error) {
 		}
 		listings = append(listings, ls)
 	}
+	return listings, nil
 }
 
 // Describe reads one secret with GetSecret, then its latest version with GetSecretVersion:
-// ErrNotFound for one Secret Manager does not hold, and Deleted for one with an expire_time,
-// which Secret Manager deletes, with every version, when that time comes.
+// ErrNotFound for one Secret Manager does not hold, and Deleted for one whose expire_time has
+// passed (Secret Manager deletes it, with every version, once that time comes, and reads it until
+// then).
 func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: id})
 	if status.Code(err) == codes.NotFound {
@@ -144,25 +146,28 @@ func (g GCP) Describe(ctx context.Context, id string) (Listing, error) {
 // listing is the Listing of one Secret the API answered, with its latest version read.
 func (g GCP) listing(ctx context.Context, secret *secretmanagerpb.Secret) (Listing, error) {
 	name := secret.GetName()
-	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations(), Deleted: secret.GetExpireTime() != nil}
+	expire := secret.GetExpireTime()
+	ls := Listing{ID: name, Source: name, Tags: secret.GetAnnotations(), Deleted: expire != nil && !expire.AsTime().After(time.Now())}
 	if ls.Tags == nil {
 		ls.Tags = map[string]string{}
 	}
 	latest := name + "/versions/" + gcpLatest
 	version, err := g.Client.GetSecretVersion(ctx, &secretmanagerpb.GetSecretVersionRequest{Name: latest})
+	var onKey bool
 	switch status.Code(err) {
 	case codes.OK:
 		ls.HasCurrentValue = version.GetState() == secretmanagerpb.SecretVersion_ENABLED
 		// The version's own key is what encrypts the value; a version made before the secret's
 		// replication policy was changed stays on the key it was made with.
-		ls.OnKey = g.onKey(version.GetReplicationStatus().GetAutomatic().GetCustomerManagedEncryption().GetKmsKeyVersionName())
+		onKey = g.onKey(version.GetReplicationStatus().GetAutomatic().GetCustomerManagedEncryption().GetKmsKeyVersionName())
 	case codes.NotFound:
 		// A secret with no version: the policy refuses it for its missing value, unless its
 		// replication policy names another key, which a value alone would not fix.
-		ls.OnKey = secret.GetReplication().GetAutomatic().GetCustomerManagedEncryption().GetKmsKeyName() == g.KeyName
+		onKey = secret.GetReplication().GetAutomatic().GetCustomerManagedEncryption().GetKmsKeyName() == g.KeyName
 	default:
 		return Listing{}, fmt.Errorf("describe %s: %w", latest, gcpErr(err))
 	}
+	ls.OnKey = func(context.Context) (bool, error) { return onKey, nil }
 	return ls, nil
 }
 

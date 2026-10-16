@@ -391,15 +391,6 @@ func formatTime(t *time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// tagMap is tags as a map.
-func tagMap(tags []smtypes.Tag) map[string]string {
-	m := make(map[string]string, len(tags))
-	for _, tag := range tags {
-		m[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
-	}
-	return m
-}
-
 // orDash is s, or "-" when it is empty.
 func orDash(s string) string {
 	if s == "" {
@@ -457,14 +448,14 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 
 // checkSettingsKeyARN refuses, before any AWS call, settings whose aws_account_id or aws_region does
 // not match the account and region in kms_key_arn. The broker derives both from the key ARN the same
-// way (internal/broker/api handlers_secrets.go, policy.KeyARNParts), so the account the sign-in is
+// way (internal/broker/api handlers_secrets.go, secrets.AWSKeyARNParts), so the account the sign-in is
 // checked against (requireAccount) and the region the SDK is pinned to are the key ARN's, not a
 // separately-sent field a spoofed or plain-http broker could set on its own to steer a write.
 func checkSettingsKeyARN(settings Settings) error {
-	if !policy.ValidKeyARN(settings.KMSKeyARN) {
+	if !secrets.ValidAWSKeyARN(settings.KMSKeyARN) {
 		return fmt.Errorf("the broker's settings name an invalid KMS key ARN %q (expected arn:aws:kms:<region>:<account>:key/<key id>)", settings.KMSKeyARN)
 	}
-	region, account := policy.KeyARNParts(settings.KMSKeyARN)
+	region, account := secrets.AWSKeyARNParts(settings.KMSKeyARN)
 	if settings.AWSAccountID != account {
 		return fmt.Errorf("the broker's settings name account %s, but its KMS key ARN %s is in account %s: the broker's settings are inconsistent", settings.AWSAccountID, settings.KMSKeyARN, account)
 	}
@@ -610,7 +601,7 @@ func cmdSecretList(args []string, stdout, stderr io.Writer) int {
 			if !strings.HasPrefix(id, s.settings.SecretsPrefix) {
 				continue // the name filter matched more than the namespace
 			}
-			tags := tagMap(e.Tags)
+			tags := secrets.TagMap(e.Tags)
 			views = append(views, secretView{
 				Name: s.displayName(id), SecretName: id,
 				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
@@ -672,7 +663,7 @@ func cmdSecretShow(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	tags := tagMap(out.Tags)
+	tags := secrets.TagMap(out.Tags)
 	view := secretView{
 		Name: s.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
 		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
@@ -821,7 +812,7 @@ func cmdSecretRetag(args []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		return secretFail(stderr, form, err)
 	}
-	tags := tagMap(held.Tags)
+	tags := secrets.TagMap(held.Tags)
 	owner, tier := tags[policy.TagOwner], tags[policy.TagTier]
 	if *newOwner != "" {
 		owner, err = ownerTag(*newOwner, email)

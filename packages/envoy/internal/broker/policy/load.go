@@ -61,14 +61,6 @@ func ValidPersonOwner(owner string) bool {
 	return emailPattern.MatchString(owner)
 }
 
-// keyARNPattern is a KMS key's ARN, whose last segment is the key id.
-var keyARNPattern = regexp.MustCompile(`^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$`)
-
-// ValidKeyARN reports whether arn names a KMS key by its key ARN, the form secrets.AWS.KeyARN takes.
-func ValidKeyARN(arn string) bool {
-	return keyARNPattern.MatchString(arn)
-}
-
 // Loader reads the policy from the secret store: every secret whose name starts with Prefix, with
 // its owner and tier tags, whether it is on the agent-secrets key, and whether it has a current
 // value.
@@ -105,7 +97,10 @@ func (l Loader) Load(ctx context.Context) (*Set, error) {
 		if !ok || ls.Deleted {
 			continue
 		}
-		secret, reason := l.secret(slug, ls)
+		secret, reason, err := l.secret(ctx, slug, ls)
+		if err != nil {
+			return nil, err
+		}
 		if reason != "" {
 			slog.Error(RefusedMessage, "name", ls.ID, "reason", reason)
 			continue
@@ -157,7 +152,10 @@ func (l Loader) LoadOne(ctx context.Context, name string) (Lookup, error) {
 	if ls.Deleted {
 		return Lookup{Reason: ReasonAbsent}, nil
 	}
-	secret, reason := l.secret(slug, ls)
+	secret, reason, err := l.secret(ctx, slug, ls)
+	if err != nil {
+		return Lookup{}, err
+	}
 	if reason != "" {
 		slog.Error(RefusedMessage, "name", id, "reason", reason)
 		return Lookup{Reason: reason}, nil
@@ -165,15 +163,17 @@ func (l Loader) LoadOne(ctx context.Context, name string) (Lookup, error) {
 	return Lookup{Secret: secret, Served: true}, nil
 }
 
-// secret reads one secret under the prefix, answering the reason it is refused when it is.
-func (l Loader) secret(slug string, ls secrets.Listing) (Secret, string) {
+// secret reads one secret under the prefix, answering the reason it is refused when it is. It asks
+// the store whether the secret is on the agent-secrets key only after every tag check, so a secret
+// refused for its name or tags costs no key lookup; a failed lookup is an error.
+func (l Loader) secret(ctx context.Context, slug string, ls secrets.Listing) (Secret, string, error) {
 	if !slugPattern.MatchString(slug) {
-		return Secret{}, ReasonNameMalformed
+		return Secret{}, ReasonNameMalformed, nil
 	}
 	s := Secret{Name: SlugToName(slug), Source: ls.Source}
 	var ok bool
 	if s.Owner, ok = ls.Tags[TagOwner]; !ok {
-		return Secret{}, ReasonOwnerTagMissing
+		return Secret{}, ReasonOwnerTagMissing, nil
 	}
 	switch {
 	case s.Owner == OwnerShared:
@@ -183,22 +183,26 @@ func (l Loader) secret(slug string, ls secrets.Listing) (Secret, string) {
 	case slices.Contains(l.Services, s.Owner):
 		s.kind = ownerService
 	default:
-		return Secret{}, ReasonOwnerTagMalformed
+		return Secret{}, ReasonOwnerTagMalformed, nil
 	}
 	if s.Tier, ok = ls.Tags[TagTier]; !ok {
-		return Secret{}, ReasonTierTagMissing
+		return Secret{}, ReasonTierTagMissing, nil
 	}
 	if s.Tier != TierAgent && s.Tier != TierHuman {
-		return Secret{}, ReasonTierTagMalformed
+		return Secret{}, ReasonTierTagMalformed, nil
 	}
 	if s.kind == ownerService && s.Tier == TierHuman {
-		return Secret{}, ReasonServiceOwnerHumanTier
+		return Secret{}, ReasonServiceOwnerHumanTier, nil
 	}
-	if !ls.OnKey {
-		return Secret{}, ReasonNotOnAgentSecretsKey
+	onKey, err := ls.OnKey(ctx)
+	if err != nil {
+		return Secret{}, "", err
+	}
+	if !onKey {
+		return Secret{}, ReasonNotOnAgentSecretsKey, nil
 	}
 	if !ls.HasCurrentValue {
-		return Secret{}, ReasonNoCurrentValue
+		return Secret{}, ReasonNoCurrentValue, nil
 	}
-	return s, ""
+	return s, "", nil
 }

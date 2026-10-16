@@ -4,11 +4,15 @@ package policytest
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -56,6 +60,17 @@ func Store(store *secrets.Local) secrets.AWS {
 // Manager calls, in place of store itself.
 func StoreThrough(store *secrets.Local, client secrets.SecretsManagerAPI) secrets.AWS {
 	return secrets.AWS{Client: client, KMS: store, KeyARN: KeyARN}
+}
+
+// CountingDescriber counts the DescribeSecret calls a reread or a reload makes through it.
+type CountingDescriber struct {
+	secrets.SecretsManagerAPI
+	Calls atomic.Int64
+}
+
+func (c *CountingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	c.Calls.Add(1)
+	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
 // Loader is the policy.Loader over store, with services registered.

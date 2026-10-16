@@ -333,21 +333,19 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.SecretsStore != secrets.StoreAWS && cfg.SecretsStore != secrets.StoreGCP {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_STORE must be %s or %s, got %q", secrets.StoreAWS, secrets.StoreGCP, cfg.SecretsStore)
 	}
-	required := []struct{ name, value string }{
-		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
-		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix},
-	}
 	// Each store takes its own key variable and refuses the other's, so a deployment moved
 	// between stores cannot keep the old key set and silently mean nothing by it.
-	keyVar, otherKeyVar, otherKey := "BROKER_SECRETS_KMS_KEY_ARN", "BROKER_SECRETS_KMS_KEY_NAME", cfg.SecretsKMSKeyName
+	keyVar, key, otherKeyVar, otherKey := "BROKER_SECRETS_KMS_KEY_ARN", cfg.SecretsKMSKeyARN, "BROKER_SECRETS_KMS_KEY_NAME", cfg.SecretsKMSKeyName
 	if cfg.SecretsStore == secrets.StoreGCP {
-		keyVar, otherKeyVar, otherKey = "BROKER_SECRETS_KMS_KEY_NAME", "BROKER_SECRETS_KMS_KEY_ARN", cfg.SecretsKMSKeyARN
+		keyVar, key, otherKeyVar, otherKey = otherKeyVar, otherKey, keyVar, key
 	}
 	if otherKey != "" {
 		return Config{}, fmt.Errorf("%s is not read with BROKER_SECRETS_STORE=%s; set %s instead", otherKeyVar, cfg.SecretsStore, keyVar)
 	}
-	required = append(required, struct{ name, value string }{keyVar, cfg.SecretsKMSKeyARN + cfg.SecretsKMSKeyName})
-	for _, req := range required {
+	for _, req := range []struct{ name, value string }{
+		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
+		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, key},
+	} {
 		if strings.TrimSpace(req.value) == "" {
 			return Config{}, fmt.Errorf("%s is required", req.name)
 		}
@@ -364,7 +362,7 @@ func Load(getenv func(string) string) (Config, error) {
 		if !strings.HasSuffix(cfg.SecretsPrefix, "/") || strings.HasPrefix(cfg.SecretsPrefix, "/") || strings.ContainsFunc(cfg.SecretsPrefix, unicode.IsSpace) {
 			return Config{}, fmt.Errorf("BROKER_SECRETS_PREFIX must be a Secrets Manager name prefix ending in /, such as production/agent-secrets/, got %q", cfg.SecretsPrefix)
 		}
-		if !policy.ValidKeyARN(cfg.SecretsKMSKeyARN) {
+		if !secrets.ValidAWSKeyARN(cfg.SecretsKMSKeyARN) {
 			return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
 		}
 	case secrets.StoreGCP:

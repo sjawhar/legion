@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -11,6 +13,37 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 )
+
+// awsKeyARNPattern is a KMS key's ARN, whose last segment is the key id.
+var awsKeyARNPattern = regexp.MustCompile(`^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$`)
+
+// ValidAWSKeyARN reports whether arn names a KMS key by its key ARN, the form AWS.KeyARN takes.
+func ValidAWSKeyARN(arn string) bool {
+	return awsKeyARNPattern.MatchString(arn)
+}
+
+// AWSKeyARNParts answers the region and account of a key ARN ValidAWSKeyARN accepts,
+// arn:aws:kms:<region>:<account>:key/<key id>: the region and account every agent secret lives in.
+func AWSKeyARNParts(arn string) (region, account string) {
+	parts := strings.Split(arn, ":")
+	return parts[3], parts[4]
+}
+
+// currentStage is the staging label GetSecretValue reads when it names no version.
+const currentStage = "AWSCURRENT"
+
+// HasCurrentVersion reports whether a secret's version stages (ListSecrets'
+// SecretVersionsToStages, DescribeSecret's VersionIdsToStages) name a version labelled AWSCURRENT,
+// the one GetSecretValue reads: the broker serves a secret only then, and the agent-secrets CLI
+// shows it as having a value only then.
+func HasCurrentVersion(versionsToStages map[string][]string) bool {
+	for _, stages := range versionsToStages {
+		if slices.Contains(stages, currentStage) {
+			return true
+		}
+	}
+	return false
+}
 
 // SecretsManagerAPI is the three Secrets Manager calls the AWS store reads with: ListSecrets for
 // List, DescribeSecret for Describe and GetSecretValue for Read. Secrets Manager's own client and
@@ -50,9 +83,10 @@ func (a AWS) ValidName(id string) error {
 
 // List lists every secret under prefix with ListSecrets' name filter, a case-sensitive prefix
 // match, reading every page. Whether a secret has a value is read from the same listing's
-// SecretVersionsToStages, with no call per secret, and the key's aliases are read at most once per
-// List, when a secret first names its key by one. A failed Secrets Manager or KMS call fails the
-// whole List.
+// SecretVersionsToStages, with no call per secret. A listing's OnKey reads the key's aliases at
+// most once per List, the first time it is asked about a secret that names its key by one, so a
+// secret the policy refuses for its name or tags costs no KMS call. A failed Secrets Manager call
+// fails the whole List.
 func (a AWS) List(ctx context.Context, prefix string) ([]Listing, error) {
 	var listings []Listing
 	keys := a.keys()
@@ -65,13 +99,9 @@ func (a AWS) List(ctx context.Context, prefix string) ([]Listing, error) {
 			return nil, fmt.Errorf("list secrets under %s: %w", prefix, err)
 		}
 		for _, e := range page.SecretList {
-			onKey, err := a.onKey(ctx, aws.ToString(e.KmsKeyId), &keys)
-			if err != nil {
-				return nil, err
-			}
 			listings = append(listings, Listing{
-				ID: aws.ToString(e.Name), Source: aws.ToString(e.ARN), Tags: tagMap(e.Tags),
-				OnKey: onKey, HasCurrentValue: HasCurrentVersion(e.SecretVersionsToStages), Deleted: e.DeletedDate != nil,
+				ID: aws.ToString(e.Name), Source: aws.ToString(e.ARN), Tags: TagMap(e.Tags),
+				OnKey: a.onKey(aws.ToString(e.KmsKeyId), keys), HasCurrentValue: HasCurrentVersion(e.SecretVersionsToStages), Deleted: e.DeletedDate != nil,
 			})
 		}
 	}
@@ -90,18 +120,14 @@ func (a AWS) Describe(ctx context.Context, id string) (Listing, error) {
 	case err != nil:
 		return Listing{}, fmt.Errorf("describe %s: %w", id, err)
 	}
-	keys := a.keys()
-	onKey, err := a.onKey(ctx, aws.ToString(out.KmsKeyId), &keys)
-	if err != nil {
-		return Listing{}, err
-	}
 	return Listing{
-		ID: aws.ToString(out.Name), Source: aws.ToString(out.ARN), Tags: tagMap(out.Tags),
-		OnKey: onKey, HasCurrentValue: HasCurrentVersion(out.VersionIdsToStages), Deleted: out.DeletedDate != nil,
+		ID: aws.ToString(out.Name), Source: aws.ToString(out.ARN), Tags: TagMap(out.Tags),
+		OnKey: a.onKey(aws.ToString(out.KmsKeyId), a.keys()), HasCurrentValue: HasCurrentVersion(out.VersionIdsToStages), Deleted: out.DeletedDate != nil,
 	}, nil
 }
 
-func tagMap(tags []types.Tag) map[string]string {
+// TagMap is a Secrets Manager secret's tags as a map, the last value of a repeated key winning.
+func TagMap(tags []types.Tag) map[string]string {
 	m := make(map[string]string, len(tags))
 	for _, t := range tags {
 		m[aws.ToString(t.Key)] = aws.ToString(t.Value)
@@ -110,44 +136,48 @@ func tagMap(tags []types.Tag) map[string]string {
 }
 
 // keyIdentifiers are the forms a secret's KmsKeyId may name the agent-secrets key in: its ARN, its
-// key id, or one of the aliases that currently point at it (read once a List or Describe first
-// meets an alias).
+// key id, or one of the aliases that currently point at it (read once a List's or Describe's
+// OnKey first meets an alias).
 type keyIdentifiers struct {
 	arn, id string
 	aliases map[string]bool
 }
 
-// keys is the agent-secrets key's identifiers before any alias is read.
-func (a AWS) keys() keyIdentifiers {
-	return keyIdentifiers{arn: a.KeyARN, id: a.KeyARN[strings.LastIndex(a.KeyARN, "/")+1:]}
+// keys is the agent-secrets key's identifiers before any alias is read, shared by every listing of
+// one List or Describe.
+func (a AWS) keys() *keyIdentifiers {
+	return &keyIdentifiers{arn: a.KeyARN, id: a.KeyARN[strings.LastIndex(a.KeyARN, "/")+1:]}
 }
 
-// onKey reports whether kmsKeyID, a secret's KmsKeyId as Secrets Manager lists it, names the
-// agent-secrets key. An empty one is the AWS-managed key.
-func (a AWS) onKey(ctx context.Context, kmsKeyID string, keys *keyIdentifiers) (bool, error) {
-	switch {
-	case kmsKeyID == "":
-		return false, nil
-	case kmsKeyID == keys.arn || kmsKeyID == keys.id:
-		return true, nil
-	case !strings.HasPrefix(kmsKeyID, "alias/") && !strings.Contains(kmsKeyID, ":alias/"):
-		return false, nil
-	}
-	if keys.aliases == nil {
-		keys.aliases = map[string]bool{}
-		pages := kms.NewListAliasesPaginator(a.KMS, &kms.ListAliasesInput{KeyId: aws.String(keys.arn)})
-		for pages.HasMorePages() {
-			page, err := pages.NextPage(ctx)
-			if err != nil {
-				return false, fmt.Errorf("list the aliases of %s: %w", keys.arn, err)
-			}
-			for _, al := range page.Aliases {
-				keys.aliases[aws.ToString(al.AliasName)] = true
-				keys.aliases[aws.ToString(al.AliasArn)] = true
-			}
+// onKey answers a listing's OnKey: whether kmsKeyID, a secret's KmsKeyId as Secrets Manager lists
+// it, names the agent-secrets key. An empty one is the AWS-managed key.
+func (a AWS) onKey(kmsKeyID string, keys *keyIdentifiers) func(context.Context) (bool, error) {
+	return func(ctx context.Context) (bool, error) {
+		switch {
+		case kmsKeyID == "":
+			return false, nil
+		case kmsKeyID == keys.arn || kmsKeyID == keys.id:
+			return true, nil
+		case !strings.HasPrefix(kmsKeyID, "alias/") && !strings.Contains(kmsKeyID, ":alias/"):
+			return false, nil
 		}
+		if keys.aliases == nil {
+			aliases := map[string]bool{}
+			pages := kms.NewListAliasesPaginator(a.KMS, &kms.ListAliasesInput{KeyId: aws.String(keys.arn)})
+			for pages.HasMorePages() {
+				page, err := pages.NextPage(ctx)
+				if err != nil {
+					return false, fmt.Errorf("list the aliases of %s: %w", keys.arn, err)
+				}
+				for _, al := range page.Aliases {
+					aliases[aws.ToString(al.AliasName)] = true
+					aliases[aws.ToString(al.AliasArn)] = true
+				}
+			}
+			keys.aliases = aliases
+		}
+		return keys.aliases[kmsKeyID], nil
 	}
-	return keys.aliases[kmsKeyID], nil
 }
 
 // Read answers the secret's current value. A secret Secrets Manager does not hold

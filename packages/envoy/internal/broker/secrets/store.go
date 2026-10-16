@@ -7,7 +7,6 @@ package secrets
 import (
 	"context"
 	"errors"
-	"slices"
 )
 
 // BROKER_SECRETS_STORE's values: which store the broker reads the agent secrets from.
@@ -51,29 +50,16 @@ type Listing struct {
 	// Tags carry the policy's owner and tier: the secret's AWS tags, or its Secret Manager
 	// annotations.
 	Tags map[string]string
-	// OnKey is whether the secret is encrypted with the agent-secrets key the store was built
-	// with. A secret on the provider's default key is not.
-	OnKey bool
+	// OnKey answers whether the secret is encrypted with the agent-secrets key the store was
+	// built with; a secret on the provider's default key is not. It may make a call (the AWS
+	// store resolves the key's aliases, at most once per List or Describe), so the policy asks it
+	// only after every tag check, and a failed call fails the whole load.
+	OnKey func(ctx context.Context) (bool, error)
 	// HasCurrentValue is whether a read would answer a value: a version labelled AWSCURRENT, or a
 	// Secret Manager versions/latest that is ENABLED.
 	HasCurrentValue bool
-	// Deleted is a secret scheduled for deletion: Secrets Manager's DeletedDate, or Secret
-	// Manager's expire_time.
+	// Deleted is a secret scheduled for deletion: Secrets Manager's DeletedDate, or a Secret
+	// Manager expire_time that has passed (a secret whose expire_time is still ahead stays
+	// readable until then, so it is served until then).
 	Deleted bool
-}
-
-// currentStage is the staging label GetSecretValue reads when it names no version.
-const currentStage = "AWSCURRENT"
-
-// HasCurrentVersion reports whether a secret's version stages (ListSecrets'
-// SecretVersionsToStages, DescribeSecret's VersionIdsToStages) name a version labelled AWSCURRENT,
-// the one GetSecretValue reads: the broker serves a secret only then, and the agent-secrets CLI
-// shows it as having a value only then.
-func HasCurrentVersion(versionsToStages map[string][]string) bool {
-	for _, stages := range versionsToStages {
-		if slices.Contains(stages, currentStage) {
-			return true
-		}
-	}
-	return false
 }

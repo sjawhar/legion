@@ -2263,14 +2263,18 @@ code relies on: `Load` calls `Store.List` on `BROKER_SECRETS_PREFIX` and keeps o
 `strings.CutPrefix` finds under it, so a lister that answers more serves and logs nothing outside
 the namespace (`secrets.AWS` lists with `ListSecrets`' `name` filter, a case-sensitive prefix
 match, which `secrets.Local` reproduces; `secrets.GCP` with `ListSecrets`' `name:<id prefix>`
-filter, a case-insensitive substring match the prefix cut makes exact); a name under the prefix
+filter, a case-insensitive substring match, then drops every listed name that does not start with
+the prefix byte for byte before any call for it); a name under the prefix
 maps one-to-one to a request name (`slugPattern`); each store answers one `secrets.Listing` per
-secret with `OnKey` (AWS: the secret's `KmsKeyId`, an alias on it resolved through
-`kms:ListAliases` lazily, at most once per `List`; GCP: the latest version's
-`kms_key_version_name`, or the replication policy's key for a secret with no version),
+secret with `OnKey`, a function the policy calls only after every name and tag check, so a secret
+refused for those costs no key lookup (AWS: the secret's `KmsKeyId`, an alias on it resolved
+through `kms:ListAliases` at most once per `List` or `Describe`, and a failed lookup fails the
+load; GCP: the latest version's
+`kms_key_version_name`, or the replication policy's key for a secret with no version, already read),
 `HasCurrentValue` (AWS: a version labelled `AWSCURRENT` in the same listing's
 `SecretVersionsToStages`, with no call per secret; GCP: `versions/latest` is `ENABLED`, one
-`GetSecretVersion` per listed secret) and `Deleted` (AWS `DeletedDate`, GCP `expire_time`), and the
+`GetSecretVersion` per listed secret) and `Deleted` (AWS `DeletedDate`; GCP an `expire_time` that
+has passed, since Secret Manager reads a secret until its `expire_time`), and the
 value check comes after every other reason, so a secret refused for a tag or its key is logged for
 that (`secrets.Local` gives a secret created without a value no version, as Secrets Manager does);
 an owner tag naming a service is refused as malformed unless `Loader.Services` lists it, which
@@ -2324,7 +2328,7 @@ before the writer lock and before a miss-path reread token (`Loader.secretName`,
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
 answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,
-the key ARN with its region and account (`policy.KeyARNParts`) or the Cloud KMS key name with the
+the key ARN with its region and account (`secrets.AWSKeyARNParts`) or the Cloud KMS key name with the
 project number (`secrets.GCPProject`), the other store's fields omitted.
 
 `agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,

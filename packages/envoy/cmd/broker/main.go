@@ -104,25 +104,24 @@ func main() {
 	// fake file (an AWS-shaped store whatever BROKER_SECRETS_STORE says, since the file holds
 	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
 	// Manager under Application Default Credentials.
-	var store secrets.Store
+	var secretStore secrets.Store
+	var credentials string
 	switch {
 	case fakeSecrets != "":
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
-		store = secrets.AWS{Client: local, KMS: local, KeyARN: cfg.SecretsKMSKeyARN}
-		slog.Info("secret store", "store", cfg.SecretsStore, "credentials", "fake secrets file")
+		secretStore, credentials = secrets.AWS{Client: local, KMS: local, KeyARN: cfg.SecretsKMSKeyARN}, "fake secrets file"
 	case cfg.SecretsStore == secrets.StoreGCP:
 		client, err := secrets.NewGCPClient(ctx)
 		fatal(err)
 		defer client.Close()
-		store = secrets.GCP{Client: client, KeyName: cfg.SecretsKMSKeyName}
-		slog.Info("secret store", "store", cfg.SecretsStore, "credentials", "application-default")
+		secretStore, credentials = secrets.GCP{Client: client, KeyName: cfg.SecretsKMSKeyName}, "application-default"
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
-		store = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKeyARN}
-		slog.Info("secret store", "store", cfg.SecretsStore, "credentials", "aws-sdk")
+		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKeyARN}, "aws-sdk"
 	}
-	loader := policy.Loader{Store: store, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
+	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
@@ -165,7 +164,7 @@ func main() {
 
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
-	reqMachine := newRequestMachine(cfg, st, current, store, enr.Replay)
+	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,

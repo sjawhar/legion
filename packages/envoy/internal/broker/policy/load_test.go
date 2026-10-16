@@ -63,6 +63,50 @@ func TestLoadServesEveryWellTaggedSecretOnTheKey(t *testing.T) {
 	}
 }
 
+// failingAliases fails every ListAliases call, counting them.
+type failingAliases struct{ calls int }
+
+func (f *failingAliases) ListAliases(context.Context, *kms.ListAliasesInput, ...func(*kms.Options)) (*kms.ListAliasesOutput, error) {
+	f.calls++
+	return nil, errors.New("AccessDeniedException: not authorized to perform kms:ListAliases")
+}
+
+// TestARefusalForANameOrTagCostsNoAliasLookup pins that the policy asks whether a secret is on
+// the agent-secrets key only after its name and tags pass: a secret that names its key by an alias
+// but is refused for a malformed name or tag, or is scheduled for deletion, is refused (or absent)
+// by itself without a kms:ListAliases call, so a KMS that refuses the lookup fails no load. A
+// well-tagged secret on an alias still asks, and that failure fails the load.
+func TestARefusalForANameOrTagCostsNoAliasLookup(t *testing.T) {
+	onAlias := func(name string, edit func(*secrets.LocalSecret)) secrets.LocalSecret {
+		s := policytest.Secret(name, owner, policy.TierAgent, "v")
+		s.KmsKeyID = "alias/agent-secrets"
+		edit(&s)
+		return s
+	}
+	deleting := onAlias("DELETING", func(s *secrets.LocalSecret) { s.DeletedAt = new(time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)) })
+	store := secrets.NewLocal(
+		onAlias("ADMIN_TIER", func(s *secrets.LocalSecret) { s.Tags[policy.TagTier] = "admin" }),
+		onAlias("NO_OWNER", func(s *secrets.LocalSecret) { delete(s.Tags, policy.TagOwner) }),
+		deleting,
+	)
+	aliases := &failingAliases{}
+	loader := policy.Loader{Store: secrets.AWS{Client: store, KMS: aliases, KeyARN: policytest.KeyARN}, Prefix: policytest.Prefix}
+	policytest.CaptureLog(t)
+	ctx := context.Background()
+	if _, err := loader.Load(ctx); err != nil || aliases.calls != 0 {
+		t.Fatalf("Load = %v after %d ListAliases calls; want the refusals alone, with no lookup", err, aliases.calls)
+	}
+	for name, reason := range map[string]string{"ADMIN_TIER": policy.ReasonTierTagMalformed, "DELETING": policy.ReasonAbsent} {
+		if lk, err := loader.LoadOne(ctx, name); err != nil || lk.Reason != reason || aliases.calls != 0 {
+			t.Fatalf("LoadOne(%s) = %+v, %v after %d ListAliases calls; want %s with no lookup", name, lk, err, aliases.calls, reason)
+		}
+	}
+	store.Put(onAlias("SERVED", func(*secrets.LocalSecret) {}))
+	if _, err := loader.Load(ctx); err == nil || !strings.Contains(err.Error(), "AccessDeniedException") || aliases.calls != 1 {
+		t.Fatalf("Load with a well-tagged secret on an alias = %v after %d ListAliases calls; want the lookup's failure after one", err, aliases.calls)
+	}
+}
+
 // TestLoadRefusesEachUnservableSecretByNameWithTheExactLine pins every reason a secret under the
 // prefix is refused, each logged as the one line the deployment's alarm filters on, while every
 // other secret is still served: one person's malformed tag never freezes anyone else's policy. A
@@ -259,27 +303,6 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	}
 }
 
-// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's AWS store
-// and the agent-secrets CLI's VALUE column read: a secret has a value while one of its versions
-// carries AWSCURRENT, and not otherwise.
-func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
-	for _, tc := range []struct {
-		stages map[string][]string
-		want   bool
-	}{
-		{onlyCurrent, true},
-		{map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}, true},
-		{nil, false},
-		{map[string][]string{}, false},
-		{map[string][]string{"v1": {"AWSPENDING"}}, false},
-		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
-	} {
-		if got := secrets.HasCurrentVersion(tc.stages); got != tc.want {
-			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
-		}
-	}
-}
-
 // TestReloadServesASecretOnceItIsGivenAValue pins that a secret created and tagged without a value
 // is left out of the live policy, and that the reload after its value is put serves it, with no
 // restart. Its synctest bubble waits for the reload goroutine to return.
@@ -328,7 +351,7 @@ func (f *failingSecrets) ListSecrets(ctx context.Context, in *secretsmanager.Lis
 func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
-		loader := policy.Loader{Store: secrets.AWS{Client: store, KMS: store, KeyARN: policytest.KeyARN}, Prefix: policytest.Prefix}
+		loader := policy.Loader{Store: policytest.StoreThrough(store.Local, store), Prefix: policytest.Prefix}
 		logged := policytest.CaptureLog(t)
 		cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
 		if err != nil {
@@ -504,16 +527,16 @@ func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
 // Manager refuses a longer SecretId as invalid input rather than answering it not found.
 func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
 	store := secrets.NewLocal()
-	count := &countingDescriber{SecretsManagerAPI: store}
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
 	loader := policytest.Loader(store)
 	loader.Store = policytest.StoreThrough(store, count)
 	ctx := context.Background()
 
 	atLimit := "A" + strings.Repeat("B", 512-len(policytest.Prefix)-1)
-	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.calls.Load() != 1 {
-		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.calls.Load())
+	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.Calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.Calls.Load())
 	}
-	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.calls.Load() != 1 {
-		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.calls.Load())
+	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.Calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.Calls.Load())
 	}
 }

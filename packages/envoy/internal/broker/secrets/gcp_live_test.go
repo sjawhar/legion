@@ -19,9 +19,9 @@ import (
 // TestGCPLive runs the store against a real Secret Manager project under Application Default
 // Credentials, the way the broker runs on GKE, and asserts what the fake asserts: a secret on the
 // agent-secrets key with annotations is listed, described and read; one on Google's default key is
-// not OnKey; one with no version has no value; a disabled one has no value and is not readable; an
-// expiring one is Deleted. Every secret it makes is under a random prefix of its own and deleted
-// at the end, so the broker's namespace is untouched.
+// not OnKey; one with no version has no value; a disabled one has no value and is not readable; one
+// whose expire_time is an hour ahead is not Deleted and reads. Every secret it makes is under a
+// random prefix of its own and deleted at the end, so the broker's namespace is untouched.
 //
 //	BROKER_GCP_LIVE_PROJECT=<project number> BROKER_GCP_LIVE_KMS_KEY=<key name> \
 //	  go test -tags gcplive ./internal/broker/secrets/ -run Live -count=1 -v
@@ -118,23 +118,34 @@ func TestGCPLive(t *testing.T) {
 	if len(byID) != 5 {
 		t.Fatalf("List answered %d secrets within 90s, want 5: %+v", len(byID), byID)
 	}
-	if ls := byID[served]; !ls.OnKey || !ls.HasCurrentValue || ls.Deleted || ls.Tags["owner"] != "ada@example.com" || ls.Tags["tier"] != "human" {
+	onKey := func(ls Listing) bool {
+		t.Helper()
+		on, err := ls.OnKey(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return on
+	}
+	if ls := byID[served]; !onKey(ls) || !ls.HasCurrentValue || ls.Deleted || ls.Tags["owner"] != "ada@example.com" || ls.Tags["tier"] != "human" {
 		t.Fatalf("served = %+v", ls)
 	}
-	if ls := byID[defaultKey]; ls.OnKey || !ls.HasCurrentValue {
+	if ls := byID[defaultKey]; onKey(ls) || !ls.HasCurrentValue {
 		t.Fatalf("default-key = %+v; want not on the key", ls)
 	}
-	if ls := byID[noVersion]; !ls.OnKey || ls.HasCurrentValue {
+	if ls := byID[noVersion]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("no-version = %+v; want on the key with no value", ls)
 	}
-	if ls := byID[disabled]; !ls.OnKey || ls.HasCurrentValue {
+	if ls := byID[disabled]; !onKey(ls) || ls.HasCurrentValue {
 		t.Fatalf("disabled = %+v; want on the key with no value", ls)
 	}
-	if ls := byID[expiring]; !ls.Deleted {
-		t.Fatalf("expiring = %+v; want Deleted", ls)
+	if ls := byID[expiring]; ls.Deleted || !onKey(ls) || !ls.HasCurrentValue {
+		t.Fatalf("expiring = %+v; want served until its expire_time, an hour ahead", ls)
+	}
+	if v, err := store.Read(ctx, expiring); err != nil || v != "v" {
+		t.Fatalf("Read(expiring) = %d bytes, %v; want its value until its expire_time", len(v), err)
 	}
 
-	if ls, err := store.Describe(ctx, served); err != nil || !ls.OnKey || !ls.HasCurrentValue {
+	if ls, err := store.Describe(ctx, served); err != nil || !onKey(ls) || !ls.HasCurrentValue {
 		t.Fatalf("Describe(served) = %+v, %v", ls, err)
 	}
 	if _, err := store.Describe(ctx, prefix+"missing"); !errors.Is(err, ErrNotFound) {

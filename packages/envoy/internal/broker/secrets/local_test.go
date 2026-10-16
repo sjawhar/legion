@@ -100,7 +100,7 @@ func TestLocalWriteLifecycle(t *testing.T) {
 		t.Fatalf("TagResource: %v", err)
 	}
 	d := describe()
-	if tags := tagMap(d.Tags); len(tags) != 2 || tags["owner"] != "ada@example.com" || tags["tier"] != "human" || aws.ToString(d.KmsKeyId) != "alias/dev" {
+	if tags := TagMap(d.Tags); len(tags) != 2 || tags["owner"] != "ada@example.com" || tags["tier"] != "human" || aws.ToString(d.KmsKeyId) != "alias/dev" {
 		t.Fatalf("after retag: key %q, tags %v; want alias/dev, owner kept and tier human", aws.ToString(d.KmsKeyId), tags)
 	}
 

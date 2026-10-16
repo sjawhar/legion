@@ -45,7 +45,7 @@ func (s *server) readSettings(w http.ResponseWriter, r *http.Request) {
 		resp.GCPProject = secrets.GCPProject(s.deps.SecretsPrefix)
 	default:
 		resp.KMSKeyARN = s.deps.SecretsKMSKeyARN
-		resp.AWSRegion, resp.AWSAccountID = policy.KeyARNParts(s.deps.SecretsKMSKeyARN)
+		resp.AWSRegion, resp.AWSAccountID = secrets.AWSKeyARNParts(s.deps.SecretsKMSKeyARN)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }

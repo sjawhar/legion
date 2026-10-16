@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -487,7 +486,7 @@ func TestCreateServesASecretCreatedAfterTheLastReload(t *testing.T) {
 func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 2}
-	count := &countingDescriber{SecretsManagerAPI: fixtureStore(m)}
+	count := &policytest.CountingDescriber{SecretsManagerAPI: fixtureStore(m)}
 	loader := policytest.Loader(fixtureStore(m), fixtureService) // the fixture's services, as newFixture registers them
 	loader.Store = policytest.StoreThrough(fixtureStore(m), count)
 	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
@@ -500,7 +499,7 @@ func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
 			t.Fatalf("miss %d: %v", i, err)
 		}
 	}
-	if got := count.calls.Load(); got != 2 {
+	if got := count.Calls.Load(); got != 2 {
 		t.Fatalf("DescribeSecret calls = %d, want 2 (the burst); the third miss must skip the reread", got)
 	}
 }
@@ -522,17 +521,6 @@ func TestANameNoSecretCanCarrySpendsNoMissReread(t *testing.T) {
 	if err != nil || req.State != "granted" {
 		t.Fatalf("Create(BRAND_NEW_KEY) after the invalid names = %+v, %v; want granted through the reread they must not have spent", req, err)
 	}
-}
-
-// countingDescriber counts the DescribeSecret calls a policy reread makes.
-type countingDescriber struct {
-	secrets.SecretsManagerAPI
-	calls atomic.Int64
-}
-
-func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
-	c.calls.Add(1)
-	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
 // TestARereadItsCallerAbandonedRaisesNoAlarm pins that a miss-path reread cut short by its own
