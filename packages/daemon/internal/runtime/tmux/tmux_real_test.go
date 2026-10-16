@@ -1672,10 +1672,18 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	ctx := context.Background()
 	realGH := filepath.Join(t.TempDir(), "gh")
-	// The stand-in answers `legion gh`'s read of a command's options (`<command> --help`) as gh's
-	// help does, and every other run with the GH_CONFIG_DIR it was given.
-	stub := "#!/bin/sh\ncase \"$*\" in\n*--help) printf '%s\\n' FLAGS '  -q, --jq string   Query' '  --help   Show help' ;;\n" +
-		"*) printf 'real gh %s\\n' \"$GH_CONFIG_DIR\" ;;\nesac\n"
+	// The stand-in answers `legion gh`'s reads of a command's help (`<command> --help`) with the real
+	// gh's help of that command, saved beside the wrapper's own tests, and every other run with the
+	// GH_CONFIG_DIR it was given.
+	help, err := filepath.Abs(filepath.Join("..", "..", "..", "cmd", "legion", "testdata", "gh-help"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/bin/sh\nfor last; do :; done\n" +
+		"if [ \"$#\" -gt 1 ] && [ \"$last\" = --help ]; then\n" +
+		"  path=$(printf '%s ' \"$@\" | sed -e 's/ --help $//' -e 's/ /_/g')\n" +
+		"  exec cat '" + help + "'/\"$path\".txt\nfi\n" +
+		"printf 'real gh %s\\n' \"$GH_CONFIG_DIR\"\n"
 	if err := os.WriteFile(realGH, []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}

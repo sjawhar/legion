@@ -292,9 +292,10 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 	}
 	// The payload names the event's repository; the subject's segments cannot, since a name may hold
 	// a dot. Only the event of a repository GitHub intake hears (ConsumerSpec.Repositories, as
-	// SetRepositories changes them), named as GitHub names it, is this daemon's.
+	// SetRepositories changes them) is this daemon's, matched case-insensitively as GitHub matches
+	// owner and repository names, and its fact names the heard repository.
 	repo, _ := rawString(raw, "repo")
-	at := slices.IndexFunc(repositories, func(configured ghrepo.Repository) bool { return configured.String() == repo })
+	at := slices.IndexFunc(repositories, func(heard ghrepo.Repository) bool { return strings.EqualFold(heard.String(), repo) })
 	if at < 0 {
 		return nil, nil, nil
 	}

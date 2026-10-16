@@ -1638,10 +1638,11 @@ Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bund
 `GH_CONFIG_DIR=/var/run/legion/gh/<owner>`, the issue's repository's owner's directory, and
 `LEGION_GH_PATH=/usr/local/bin/gh`, the image's real gh. The `gh` first on its PATH is
 `/opt/legion/bin/gh`, which runs `legion gh`: it runs the real gh with `GH_CONFIG_DIR` at the
-directory of the owner the command names, resolved as gh resolves it (a `repos/<owner>/…` endpoint
-of `gh api`, a pull request or issue URL over `-R`/`--repo`, `-R` over `GH_REPO`, `gh repo <command>
-<owner>/<repo>`), at the issue owner's when it names none, and refuses a command naming an owner the
-bundle holds no directory for. `git` reads the same files through the shared clone's
+directory of the owner the command targets, read as gh reads it from the real gh's own help (see
+docs/deployment.md, "What a pane's gh, git and jj are"), and at the issue owner's when the command
+names no repository at all; a command it cannot read for certain, one naming two owners, and one
+naming an owner the bundle holds no directory for are refused with exit 2 and send nothing. `git`
+reads the same files through the shared clone's
 `credential.helper`, `!legion git-credential`, with `credential.useHttpPath` on, so the helper
 answers from the `hosts.yml` of the owner in the path git asks about and from nothing else;
 `workspace-init provision` is passed it as `--credential-helper '!legion git-credential'`, and the
@@ -2689,8 +2690,9 @@ issue's pod (every role container of it alike) and the image probe's.
   project, and checks, per repository, that both GitHub Apps are installed on it (`GET
   /repos/{owner}/{repo}/installation` under each App's JWT): a repository either App is missing
   from is left out, not refused, and `legion state --json` names it under `repositories.refused`
-  with the App it lacks; a project with no repository mapped, or none both Apps are installed on,
-  does not boot. Every role's gh bundle holds a directory for each served repository's owner. An
+  with the App it lacks; a project with no repository mapped does not boot, and one whose every
+  repository lacks an App boots serving none, admitting nothing until an App is installed. Every
+  role's gh bundle holds a directory for each served repository's owner. An
   issue is recorded on the repository Dispatch resolves for it, with that repository's default
   branch as GitHub names it, when the daemon first records it, and keeps both. **Upgrade order:**
   Dispatch first (it resolves each issue's repository), then map the project's repositories there
@@ -3185,7 +3187,11 @@ at `/legion` with its `sessions` directory at Oh My Pi's sessions directory, so 
 the session. It provisions no workspace: no `workspace-fetch`, no provisioning token. Its `gh`
 bundle, projected read-only at `/var/run/legion/gh` by a `gh-controller` volume, acts as the review
 App, refreshed every minute as every role's is; a failed review-App mint fails the launch naming
-the role, and the keeper relaunches it. Its one init container, `legion workspace-init controller --root
+the role, and the keeper relaunches it. A project with no GitHub owner to mint for (none of its
+repositories has an App) starts the controller anyway with `gh` acting as nobody, as `legion
+controller start` does there: its role Secret records an empty `github-default`, its `gh-controller`
+volume is an empty directory, and it holds owners from its next pod on. Its one init container,
+`legion workspace-init controller --root
 /legion`, makes the sessions directory; in a pod created to resume a session whose file is gone it
 exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no

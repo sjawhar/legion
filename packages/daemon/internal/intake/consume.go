@@ -137,11 +137,11 @@ func githubConsumerConfig(spec ConsumerSpec, repositories []ghrepo.Repository) j
 // change under one lock every decode reads the set under, so no event is decoded against the one
 // while the consumer filters on the other: an event of a repository added here is decoded from the
 // moment the consumer delivers it, and one of a repository taken out is acknowledged untouched. An
-// update JetStream refuses changes neither, so the caller can retry it. An empty or zero repository
-// is refused, since a consumer with no filter would hear every subject.
+// update JetStream refuses changes neither, so the caller can retry it. No repository is a daemon
+// that serves none yet (githubHearsNoRepository); a zero one is refused.
 func (c *Consumers) SetRepositories(ctx context.Context, repositories []ghrepo.Repository) error {
-	if len(repositories) == 0 || slices.ContainsFunc(repositories, ghrepo.Repository.IsZero) {
-		return fmt.Errorf("GitHub intake needs at least one repository to hear")
+	if slices.ContainsFunc(repositories, ghrepo.Repository.IsZero) {
+		return fmt.Errorf("GitHub intake cannot hear a zero repository")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -427,9 +427,6 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	if strings.TrimSpace(spec.Project) == "" {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer project is required")
 	}
-	if len(spec.Repositories) == 0 {
-		return ConsumerSpec{}, fmt.Errorf("intake consumer repositories are required")
-	}
 	if slices.ContainsFunc(spec.Repositories, ghrepo.Repository.IsZero) {
 		return ConsumerSpec{}, fmt.Errorf("intake consumer repository is required")
 	}
@@ -445,7 +442,15 @@ func normalizedSpec(spec ConsumerSpec) (ConsumerSpec, error) {
 	return spec, nil
 }
 
+// githubHearsNoRepository is the GitHub consumer's one filter while GitHub intake hears no
+// repository: a subject Envoy publishes no repository's event on, since a GitHub owner's login
+// never begins with a hyphen. A consumer with no filter would hear every subject of the stream.
+const githubHearsNoRepository = "notifications.github.-.-"
+
 func githubFilters(repositories []ghrepo.Repository) []string {
+	if len(repositories) == 0 {
+		return []string{githubHearsNoRepository}
+	}
 	filters := make([]string, 0, len(repositories))
 	for _, repo := range repositories {
 		filters = append(filters, githubRepositoryPrefix(repo)+".>")

@@ -36,11 +36,15 @@ func TestLingerHoursReachesTheEngineAsItsDuration(t *testing.T) {
 	}
 }
 
-// loginTokens answers each App role's lease with the bot login named for it.
+// loginTokens answers each App role's lease, and its login, with the bot login named for it.
 type loginTokens map[appauth.AppRole]string
 
 func (t loginTokens) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
 	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: t[role]}}, nil
+}
+
+func (t loginTokens) AppLogin(_ context.Context, role appauth.AppRole) (string, error) {
+	return t[role], nil
 }
 
 func (loginTokens) InstalledOn(context.Context, appauth.AppRole, ghrepo.Repository) (bool, error) {
@@ -54,8 +58,8 @@ func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner 
 }
 
 // The engine judges a push by its pusher against the review App's login, so a configuration whose
-// two roles resolve to one App would count no fix attempt at all: boot refuses it, and a review
-// lease with no login, before anything else opens.
+// two roles resolve to one App would count no fix attempt at all: boot refuses it, and a review App
+// with no login, before anything else opens.
 func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testing.T) {
 	dispatchServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !servedMapping(t, w, r, "demo") {
@@ -82,15 +86,15 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 	}
 }
 
-// The boot mint hands back the review App's bot login — the login the engine judges a push's pusher
-// against — from the lease it minted.
-func TestMintAtBootReturnsTheReviewAppLogin(t *testing.T) {
+// The boot reads the review App's bot login, the login the engine judges a push's pusher against,
+// under the App's own JWT, with no owner to mint for.
+func TestAppLoginsAtBootReturnsTheReviewAppLogin(t *testing.T) {
 	tokens := loginTokens{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}
-	login, err := mintAtBoot(context.Background(), tokens, "acme", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	login, err := appLoginsAtBoot(context.Background(), tokens, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
-		t.Fatalf("mintAtBoot: %v", err)
+		t.Fatalf("appLoginsAtBoot: %v", err)
 	}
 	if login != "legion-reviewer[bot]" {
-		t.Fatalf("mintAtBoot = %q, want the review App's login %q", login, "legion-reviewer[bot]")
+		t.Fatalf("appLoginsAtBoot = %q, want the review App's login %q", login, "legion-reviewer[bot]")
 	}
 }

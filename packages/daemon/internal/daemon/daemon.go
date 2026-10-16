@@ -767,32 +767,51 @@ func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools ma
 	if tools == nil {
 		return nil
 	}
-	// Location lays every repository's clone out as <root>/<owner>/<name>; a probe repository
-	// names the root without restating that layout here.
-	probe, err := workspace.Location(cfg.StateDir, ghrepo.MustParse("owner/name"), cfg.Project)
+	clones, err := sharedClones(cfg.StateDir)
 	if err != nil {
 		return err
 	}
-	clones, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(probe.Clone)), "*", "*"))
-	if err != nil {
-		return fmt.Errorf("list the shared clones: %w", err)
-	}
 	for _, clone := range clones {
-		if _, err := os.Stat(filepath.Join(clone, ".git")); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			return fmt.Errorf("read the shared clone %s: %w", clone, err)
-		}
-		changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), clone)
+		changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), clone.Clone)
 		if err != nil {
-			return fmt.Errorf("set the shared clone %s's git credential helper: %w", clone, err)
+			return fmt.Errorf("set the shared clone %s's git credential helper: %w", clone.Clone, err)
 		}
 		if changed {
-			log.Info("legion daemon set the shared clone's git credential helper", "clone", clone, "helper", workspace.GitHubCredentialHelper)
+			log.Info("legion daemon set the shared clone's git credential helper", "clone", clone.Clone, "helper", workspace.GitHubCredentialHelper)
 		}
 	}
 	return nil
+}
+
+// sharedClones is every shared clone a daemon provisioned under stateDir, one per repository,
+// with the repository as the clone's path spells it, in path order. A directory of the layout that
+// holds no git checkout is not one.
+func sharedClones(stateDir string) ([]workspace.Workspace, error) {
+	// Location lays every repository's clone out as <root>/<owner>/<name>; a probe repository
+	// names the root without restating that layout here.
+	probe, err := workspace.Location(stateDir, ghrepo.MustParse("owner/name"), "probe")
+	if err != nil {
+		return nil, err
+	}
+	paths, err := filepath.Glob(filepath.Join(filepath.Dir(filepath.Dir(probe.Clone)), "*", "*"))
+	if err != nil {
+		return nil, fmt.Errorf("list the shared clones: %w", err)
+	}
+	var clones []workspace.Workspace
+	for _, path := range paths {
+		if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("read the shared clone %s: %w", path, err)
+		}
+		repo, err := ghrepo.Parse("the shared clone "+path, filepath.Base(filepath.Dir(path))+"/"+filepath.Base(path))
+		if err != nil {
+			return nil, err
+		}
+		clones = append(clones, workspace.Workspace{Clone: path, Repo: repo})
+	}
+	return clones, nil
 }
 
 // supervision is everything that runs a claim: the worker stream, the runtime, and the machines,

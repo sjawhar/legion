@@ -53,6 +53,28 @@ func TestAGitHubFactFromAnotherRepositoryChangesNothing(t *testing.T) {
 	}
 }
 
+// GitHub owner and repository names are case-insensitive, so a pull request GitHub spells
+// Acme/Widgets is the pull request of an issue whose record keeps acme/widgets, the spelling the
+// backfill kept from its clone.
+func TestAPullRequestInAnotherSpellingOfTheIssuesRepositoryIsItsOwn(t *testing.T) {
+	pool := migratedPool(t)
+	openTree(t, pool)
+	parent := "LEGION-208"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent,
+		Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V", LastDispatchSeq: 1})
+	applyFacts(t, pool, testEngine(config.DesignGateRootIssues, nil))("opened", intake.PullRequestOpened{
+		Repo: "Acme/Widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", UpdatedAt: time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)})
+	var pr *record.PullRequest
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		var err error
+		pr, err = record.NewStore().PullRequest(context.Background(), tx, "LEGION-209")
+		return err
+	})
+	if pr == nil || pr.Number != 42 || pr.Repo != "Acme/Widgets" {
+		t.Fatalf("LEGION-209's pull request = %+v, want #42 on Acme/Widgets", pr)
+	}
+}
+
 type recordSnapshot struct {
 	Issue  *record.Issue
 	PR     *record.PullRequest

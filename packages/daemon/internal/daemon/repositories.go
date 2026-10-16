@@ -253,8 +253,10 @@ func nameAccepted(ctx context.Context, accepted []mappedRepository, named *defau
 // loadMapping is the boot's read of the repository mapping, run again after a failure GitHub or
 // Dispatch reports as its own trouble (appauth.TransientError, dispatch.Unreachable) on the App
 // mint's schedule; any other failure refuses the boot. A project with no repository mapped refuses
-// it too, as does one none of whose repositories both Apps are installed on: the workflow would
-// have nothing to work. nameMapping, once the Apps' tokens are minted, reads GitHub's spelling.
+// it too. One whose every mapped repository lacks an App boots serving none, each left out and
+// reported: it admits nothing, saying why on each issue, until an App is installed and the
+// mapping's next read or an issue's admission recheck finds it. nameMapping, once the Apps' tokens
+// are minted, reads GitHub's spelling.
 func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	var accepted []mappedRepository
 	var refused []refusedRepository
@@ -277,13 +279,6 @@ func (w *workflowRuntime) loadMapping(ctx context.Context) error {
 	}
 	if len(accepted) == 0 && len(refused) == 0 {
 		return fmt.Errorf("project %s has no repository mapped in Dispatch (Settings → Repositories → Projects)", w.dispatchProject)
-	}
-	if len(accepted) == 0 {
-		reasons := make([]string, 0, len(refused))
-		for _, refusal := range refused {
-			reasons = append(reasons, refusal.Reason)
-		}
-		return fmt.Errorf("no repository mapped to project %s in Dispatch has both GitHub Apps installed (%s): install them, or map a repository they are installed on", w.dispatchProject, strings.Join(reasons, "; "))
 	}
 	w.repositories.set(accepted, refused)
 	return nil
@@ -351,9 +346,7 @@ func (w *workflowRuntime) refreshMapping(ctx context.Context) error {
 		if heard, err = w.heardRepositories(ctx, tx, served); err != nil {
 			return err
 		}
-		if len(heard) == 0 {
-			w.log.Warn("legion workflow repositories: no repository is mapped or named by a live record; GitHub intake keeps the repositories it hears")
-		} else if err := w.consumers.SetRepositories(ctx, heard); err != nil {
+		if err := w.consumers.SetRepositories(ctx, heard); err != nil {
 			return err
 		}
 		added, removed = w.repositories.set(accepted, refused)
@@ -379,7 +372,10 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 }
 
 // heardRepositories is what GitHub intake hears: every repository of served and every repository
-// a record of a live tree names, as tx reads the records, once each, sorted.
+// a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
+// GitHub spells it, which Envoy's subjects carry, whatever spelling a record keeps (a backfilled
+// record keeps its clone's): a served repository as the mapping names it, and any other in the
+// spelling GitHub last named for it, the record's own until the daemon has read it.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -404,7 +400,11 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		if !live {
 			continue
 		}
-		repo, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+		spelling := issue.Repo
+		if read, ok := w.defaultBranches.Kept(issue.Repo); ok {
+			spelling = read.Name.String()
+		}
+		repo, err := ghrepo.Parse("the repository of "+issue.Key, spelling)
 		if err != nil {
 			return nil, err
 		}

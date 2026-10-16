@@ -2,168 +2,199 @@ package main
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
 
-// ghHelp is the FLAGS part of the real gh 2.98 help of the commands ghTargetOf's table reads,
-// parsed by the same parser `legion gh` runs over the real gh's own --help.
-var ghHelp = map[string]string{
-	"api": `FLAGS
-      --cache duration           Cache the response
-  -F, --field key=value          Add a typed parameter
-  -H, --header key:value         Add a HTTP request header
-      --hostname string          The GitHub hostname
-  -i, --include                  Include HTTP response status line
-      --input file               The file to use as body
-  -q, --jq string                Query to select values
-  -X, --method string            The HTTP method
-      --paginate                 Make additional HTTP requests
-  -p, --preview strings          Opt into GitHub API previews
-  -f, --raw-field key=value      Add a string parameter
-      --silent                   Do not print the response body
-  -t, --template string          Format JSON output
+// ghHelpDir holds the real gh's help of each command the resolver's tests read, saved from gh
+// 2.98.0 (testdata/gh-help/VERSION), one file per path, its words joined by "_".
+const ghHelpDir = "testdata/gh-help"
 
-INHERITED FLAGS
-  --help   Show help for command
-`,
-	"pr view": `FLAGS
-  -c, --comments          View pull request comments
-  -q, --jq expression     Filter JSON output using a jq expression
-      --json fields       Output JSON with the specified fields
-  -t, --template string   Format JSON output using a Go template
-  -w, --web               Open a pull request in the browser
-
-INHERITED FLAGS
-      --help                     Show help for command
-  -R, --repo [HOST/]OWNER/REPO   Select another repository
-`,
-	"pr create": `FLAGS
-  -b, --body string         Body for the pull request
-  -d, --draft               Mark pull request as a draft
-  -f, --fill                Use commit info for title and body
-  -t, --title string        Title for the pull request
-
-INHERITED FLAGS
-      --help                     Show help for command
-  -R, --repo [HOST/]OWNER/REPO   Select another repository
-`,
-	"pr list": `FLAGS
-  -L, --limit int         Maximum number of items to fetch
-
-INHERITED FLAGS
-      --help                     Show help for command
-  -R, --repo [HOST/]OWNER/REPO   Select another repository
-`,
-	"repo view": `FLAGS
-  -b, --branch string     View a specific branch of the repository
-  -q, --jq expression     Filter JSON output using a jq expression
-      --json fields       Output JSON with the specified fields
-  -w, --web               Open a repository in the browser
-
-INHERITED FLAGS
-  --help   Show help for command
-`,
+// savedGhHelp answers gh's help of path from ghHelpDir as the real gh does: a path it has no file
+// for prints the help of the nearest parent it has (gh's answer to a subcommand it does not know),
+// and one with no such parent at all is an error (gh's `unknown command`, exit 1).
+func savedGhHelp(path []string) (string, error) {
+	for p := path; len(p) > 0; p = p[:len(p)-1] {
+		data, err := os.ReadFile(filepath.Join(ghHelpDir, strings.Join(p, "_")+".txt"))
+		if err == nil {
+			return string(data), nil
+		}
+	}
+	return "", fmt.Errorf("unknown command %q for \"gh\"", path[0])
 }
 
-func fakeGhFlags(t *testing.T) func(path []string) (ghFlags, error) {
-	return func(path []string) (ghFlags, error) {
-		help, ok := ghHelp[strings.Join(path, " ")]
-		if !ok {
-			t.Fatalf("ghTargetOf asked for the flags of %q, which the test has no help for", path)
+// parseGhHelp reads gh's own help: a group by its COMMANDS section, a leaf's canonical path (an
+// alias's command), every option's arity, pflag's optional value, a shorthand taken by another
+// option than --help, and the arguments its USAGE names; it refuses a help it cannot read whole.
+func TestParseGhHelpReadsRealGhHelp(t *testing.T) {
+	read := func(path ...string) ghCommand {
+		t.Helper()
+		text, err := savedGhHelp(path)
+		if err != nil {
+			t.Fatal(err)
 		}
-		return parseGhFlags(help)
+		cmd, err := parseGhHelp(path, text)
+		if err != nil {
+			t.Fatalf("parseGhHelp(%q): %v", path, err)
+		}
+		return cmd
+	}
+	for _, group := range [][]string{{"pr"}, {"repo"}, {"repo", "deploy-key"}, {"search"}} {
+		if cmd := read(group...); !cmd.group || !slices.Equal(cmd.path, group) {
+			t.Errorf("gh %s's help reads as %+v, want the group %q", strings.Join(group, " "), cmd, group)
+		}
+	}
+	view := read("pr", "view")
+	if view.group || !view.flags["json"].value || view.flags["web"].value || !view.readsGHRepo() || view.shorts['R'] != "repo" || view.shorts['h'] != "help" {
+		t.Errorf("gh pr view reads as %+v", view)
+	}
+	if kinds := []string{view.slots[0].kind()}; len(view.slots) != 1 || kinds[0] != "url" {
+		t.Errorf("gh pr view's arguments read as %+v, want one URL-capable slot", view.slots)
+	}
+	if co := read("co"); !slices.Equal(co.path, []string{"pr", "checkout"}) || co.group {
+		t.Errorf("gh co reads as %+v, want its command, pr checkout", co)
+	}
+	if add := read("repo", "deploy-key", "add"); !add.flags["title"].value || add.group {
+		t.Errorf("gh repo deploy-key add reads as %+v, want --title taking a value", add)
+	}
+	if clone := read("repo", "clone"); !clone.passthrough || len(clone.slots) != 2 || clone.slots[0].kind() != "repository" {
+		t.Errorf("gh repo clone reads as %+v, want a repository slot and a -- passthrough", clone)
+	}
+	if transfer := read("issue", "transfer"); len(transfer.slots) != 2 || transfer.slots[1].kind() != "second-repository" {
+		t.Errorf("gh issue transfer reads as %+v, want its destination a second repository", transfer.slots)
+	}
+	if commit := read("browse").flags["commit"]; !commit.value || !commit.optional {
+		t.Errorf("gh browse --commit reads as %+v, want a value taken only after =", commit)
+	}
+	if status := read("auth", "status"); status.shorts['h'] != "hostname" {
+		t.Errorf("gh auth status's -h reads as %q, want --hostname", status.shorts['h'])
+	}
+	if search := read("search", "issues"); search.readsGHRepo() || search.slots[0].kind() != "query" {
+		t.Errorf("gh search issues reads as %+v, want a query and no inherited -R", search)
+	}
+
+	for _, tc := range []struct {
+		name, help, want string
+	}{
+		{"no usage", "FLAGS\n  --help   Show help for command\n", "names no usage"},
+		{"no --help", "USAGE\n  gh pr view [flags]\n\nFLAGS\n  -w, --web   Open\n", "lists no --help"},
+		{"an option line it cannot read", "USAGE\n  gh pr view [flags]\n\nFLAGS\n  --help   Show help\n  -w --web   Open\n", "cannot read the options"},
+		{"a parent's help", "USAGE\n  gh pr <command> [flags]\n", "gh has no command"},
+	} {
+		if _, err := parseGhHelp([]string{"pr", "view"}, tc.help); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("parseGhHelp of %s = %v, want an error containing %q", tc.name, err, tc.want)
+		}
 	}
 }
 
-// ghTargetOf reads the owner of the repository a gh command acts on as gh itself resolves it, with
-// each option's arity read from gh's help: for `gh api`, the owner of a repos/<owner>/ endpoint
-// (GH_REPO only fills its {owner} placeholder); for any other command, a github.com URL given as
-// its first positional selector, then -R/--repo, then GH_REPO; for `gh repo <sub>`, its repository
-// argument, then -R, then GH_REPO. A command that names none is not named, and gh acts on its
-// working directory's repository, the issue's. A selector that names no GitHub login, or a host
-// other than github.com, is refused.
-func TestGhTargetOfFollowsGhsSelectorPrecedenceAndOptionArity(t *testing.T) {
+// ghTargetOf reads the owner a gh command targets from every selector gh's own help names, and
+// fails closed: an argument it cannot place is refused, naming it, and so is a command naming two
+// owners; only a command naming no repository at all is not named. GH_REPO names the owner only
+// when nothing explicit does, and only for a leaf that reads it.
+func TestGhTargetOfFailsClosed(t *testing.T) {
 	acme := map[string]string{"GH_REPO": "acme/widgets"}
 	for _, tc := range []struct {
 		argv  []string
 		env   map[string]string
-		owner string
-		named bool
+		owner string // "" with no refusal: not named
+		err   string // a refusal containing this
 	}{
-		{argv: []string{"api", "repos/acme/widgets/pulls"}, owner: "acme", named: true},
-		{argv: []string{"api", "repos/sjawhar/legion"}, env: acme, owner: "sjawhar", named: true},
-		{argv: []string{"api", "-X", "GET", "/repos/Acme/widgets/branches/main"}, owner: "acme", named: true},
-		{argv: []string{"api", "--method", "GET", "repos/sjawhar/legion-smoke", "--jq", ".full_name"}, owner: "sjawhar", named: true},
-		{argv: []string{"api", "-H", "Accept: application/json", "https://api.github.com/repos/sjawhar/legion"}, owner: "sjawhar", named: true},
-		{argv: []string{"api", "repos/{owner}/{repo}/pulls"}, env: acme, owner: "acme", named: true},
-		{argv: []string{"api", "repos/{owner}/{repo}/pulls"}},
-		{argv: []string{"api", "graphql", "-f", "query={viewer{login}}"}},
-		{argv: []string{"api", "user"}, env: acme},
-		{argv: []string{"pr", "view", "1", "-R", "sjawhar/legion", "--json", "number"}, env: acme, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/pull/1", "-R", "acme/widgets", "--json", "number"}, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "view", "--json", "url", "https://github.com/Sjawhar/legion/pull/2"}, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "view", "-wR", "sjawhar/legion", "3"}, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "view", "3", "-Rsjawhar/legion"}, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "view", "3", "--repo=github.com/sjawhar/legion"}, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "-R", "sjawhar/legion", "view", "1"}, owner: "sjawhar", named: true},
-		{argv: []string{"pr", "create", "-R", "acme/widgets", "--body", "https://github.com/sjawhar/legion/pull/1", "--fill"}, owner: "acme", named: true},
-		{argv: []string{"pr", "create", "-b", "https://github.com/sjawhar/legion/pull/1", "-f"}},
+		// The re-review's reproductions.
+		{argv: []string{"-R", "sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
+		{argv: []string{"--repo=sjawhar/legion", "pr", "view", "1", "--json", "title"}, owner: "sjawhar"},
+		{argv: []string{"api", "--", "repos/sjawhar/legion"}, owner: "sjawhar"},
+		{argv: []string{"pr", "view", "--json", "title", "--", "https://github.com/sjawhar/legion/pull/1"}, owner: "sjawhar"},
+		{argv: []string{"repo", "deploy-key", "add", "key.pub", "-R", "sjawhar/legion", "--title", "-Racme/widgets"}, owner: "sjawhar"},
+		{argv: []string{"pr", "--json", "number", "view", "https://github.com/sjawhar/legion/pull/1"}, err: `"--json" comes before the command's name`},
+		// The first review's reproductions.
+		{argv: []string{"api", "repos/sjawhar/legion"}, env: acme, owner: "sjawhar"},
+		{argv: []string{"pr", "view", "1", "-R", "sjawhar/legion", "--json", "title"}, env: acme, owner: "sjawhar"},
+		{argv: []string{"pr", "view", "https://github.com/sjawhar/legion/pull/1", "-R", "acme/widgets"}, err: "more than one owner, acme (--repo acme/widgets) and sjawhar"},
+		{argv: []string{"repo", "view", "--json", "nameWithOwner", "sjawhar/legion"}, env: acme, owner: "sjawhar"},
+		// A command naming no repository, and GH_REPO where the leaf reads it.
 		{argv: []string{"pr", "list"}},
-		{argv: []string{"pr", "list", "-L", "5"}, env: map[string]string{"GH_REPO": "github.com/Acme/w"}, owner: "acme", named: true},
-		{argv: []string{"repo", "view", "--json", "nameWithOwner", "sjawhar/legion"}, env: acme, owner: "sjawhar", named: true},
-		{argv: []string{"repo", "view", "https://github.com/sjawhar/legion"}, owner: "sjawhar", named: true},
-		{argv: []string{"repo", "view"}, env: acme, owner: "acme", named: true},
-		{argv: []string{"repo", "view"}},
-		{argv: []string{"repo", "clone", "Acme/widgets", "--", "--depth=1"}, owner: "acme", named: true},
-		{argv: []string{"repo", "list", "sjawhar"}, owner: "sjawhar", named: true},
-		{argv: []string{"release", "list", "-R", "sjawhar/legion"}, env: acme, owner: "sjawhar", named: true},
-		{argv: []string{"auth", "status"}},
-		{argv: []string{"--help"}},
+		{argv: []string{"pr", "list"}, env: acme, owner: "acme"},
+		{argv: []string{"api", "graphql", "-f", "query=q", "-F", "owner=Sjawhar", "-F", "name=legion"}, env: acme, owner: "sjawhar"},
+		{argv: []string{"api", "graphql", "-f", "query=q", "-F", "o=sjawhar", "-F", "id=PRRT_x"}},
+		{argv: []string{"api", "user"}, env: acme},
+		{argv: []string{"api", "graphql", "-f", "query={viewer{login}}"}, env: acme},
+		{argv: []string{"pr"}},
 		{argv: nil},
+		{argv: []string{"--help"}},
+		{argv: []string{"pr", "view", "1", "--help"}},
+		{argv: []string{"pr", "view", "1", "-R", "acme/w", "-h"}},
+		{argv: []string{"api", "graphql", "-f", "query={viewer{login}}"}},
+		{argv: []string{"api", "graphql", "-F", "owner={owner}", "-f", "query=q"}, env: acme, owner: "acme"},
+		{argv: []string{"api", "repos/{owner}/{repo}/pulls"}},
+		{argv: []string{"api", "repos/{owner}/{repo}/pulls"}, env: acme, owner: "acme"},
+		{argv: []string{"auth", "status"}, env: acme},
+		{argv: []string{"auth", "status", "-h", "github.com"}},
+		{argv: []string{"browse", "--commit"}},
+		{argv: []string{"search", "issues", "is:open"}, env: acme},
+		// Explicit selectors.
+		{argv: []string{"api", "-X", "GET", "https://api.github.com/orgs/Acme/teams"}, owner: "acme"},
+		{argv: []string{"co", "https://github.com/sjawhar/legion/pull/1"}, owner: "sjawhar"},
+		{argv: []string{"pr", "-R", "sjawhar/legion", "view", "1"}, owner: "sjawhar"},
+		{argv: []string{"pr", "create", "--fill", "-R", "github.com/Acme/widgets"}, owner: "acme"},
+		{argv: []string{"repo", "clone", "sjawhar/legion", "--", "--depth=1", "-R", "acme/w"}, owner: "sjawhar"},
+		{argv: []string{"repo", "create", "sjawhar/new", "--private"}, owner: "sjawhar"},
+		{argv: []string{"repo", "create", "newrepo", "--private"}},
+		{argv: []string{"repo", "list", "Sjawhar"}, owner: "sjawhar"},
+		{argv: []string{"search", "issues", "repo:sjawhar/legion is:open"}, owner: "sjawhar"},
+		{argv: []string{"search", "issues", "--owner", "acme", "bug"}, owner: "acme"},
+		{argv: []string{"issue", "transfer", "3", "sjawhar/legion", "-R", "sjawhar/other"}, owner: "sjawhar"},
+		{argv: []string{"secret", "set", "TOKEN", "--org", "acme"}, owner: "acme"},
+		// Refusals.
+		{argv: []string{"pr", "view", "1", "--bogus"}, err: `"--bogus" is no option`},
+		{argv: []string{"pr", "view", "1", "-Z"}, err: "names -Z"},
+		{argv: []string{"pr", "nonexist"}, err: "gh has no command `gh pr nonexist`"},
+		{argv: []string{"nonexist"}, err: "cannot read `gh nonexist`"},
+		{argv: []string{"--bogus", "pr", "list"}, err: `"--bogus" comes before the command's name`},
+		{argv: []string{"api", "repositories/12345"}, err: "by its id"},
+		{argv: []string{"api", "https://ghe.example.com/api/v3/repos/acme/w"}, err: "another host"},
+		{argv: []string{"api", "--hostname", "ghe.example.com", "repos/acme/w"}, err: "another host"},
+		{argv: []string{"api", "repos/../x/y"}, err: `"..", which is no GitHub login`},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "../x/y"}, err: `names another host`},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "../y"}, err: "no GitHub login"},
+		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "widgets"}, err: "names no owner"},
+		{argv: []string{"repo", "view", "widgets"}, err: "names no owner"},
+		{argv: []string{"pr", "view", "1", "-R"}, err: "has no value"},
+		{argv: []string{"search", "issues", "--owner", "acme", "repo:sjawhar/x"}, err: "more than one owner"},
+		{argv: []string{"issue", "transfer", "3", "sjawhar/legion"}, err: "names a second repository"},
+		{argv: []string{"label", "clone", "acme/widgets", "-R", "sjawhar/legion"}, err: "more than one owner"},
+		{argv: []string{"secret", "set", "TOKEN", "--org", "acme", "-R", "sjawhar/x"}, err: "more than one owner"},
+		{argv: []string{"auth", "status", "-h", "ghe.example.com"}, err: "another host"},
+		{argv: []string{"browse", "-c", "abc"}, err: "shorthand takes a value"},
 	} {
-		owner, named, err := ghTargetOf(tc.argv, tc.env, fakeGhFlags(t))
-		if err != nil || owner != tc.owner || named != tc.named {
-			t.Errorf("ghTargetOf(%q, %v) = %q, %t, %v; want %q, %t", tc.argv, tc.env, owner, named, err, tc.owner, tc.named)
-		}
-	}
-	for _, tc := range []struct {
-		argv []string
-		env  map[string]string
-		want string
-	}{
-		{argv: []string{"pr", "view", "1", "-R", "gitlab.com/acme/widgets"}, want: `"gitlab.com"`},
-		{argv: []string{"api", "repos/../x/y"}, want: `".."`},
-		{argv: []string{"pr", "list"}, env: map[string]string{"GH_REPO": "../x/y"}, want: `".."`},
-	} {
-		if _, _, err := ghTargetOf(tc.argv, tc.env, fakeGhFlags(t)); err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("ghTargetOf(%q, %v) = %v, want a refusal naming %s", tc.argv, tc.env, err, tc.want)
+		owner, named, err := ghTargetOf(tc.argv, tc.env, savedGhHelp)
+		switch {
+		case tc.err != "":
+			if err == nil || !strings.Contains(err.Error(), tc.err) {
+				t.Errorf("ghTargetOf(%q, %v) = %q, %t, %v; want a refusal containing %q", tc.argv, tc.env, owner, named, err, tc.err)
+			}
+		case err != nil || owner != tc.owner || named != (tc.owner != ""):
+			t.Errorf("ghTargetOf(%q, %v) = %q, %t, %v; want %q", tc.argv, tc.env, owner, named, err, tc.owner)
 		}
 	}
 }
 
-// parseGhFlags reads which options take a value from gh's own help, a placeholder word after the
-// option's name, and refuses a help that lists no --help, which is no gh command's help.
-func TestParseGhFlagsReadsEachOptionsArity(t *testing.T) {
-	flags, err := parseGhFlags(ghHelp["pr view"])
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, want := range map[string]bool{"jq": true, "json": true, "template": true, "repo": true, "comments": false, "web": false, "help": false} {
-		if flags.long[name] != want {
-			t.Errorf("--%s takes a value: %t, want %t", name, flags.long[name], want)
+// Every refusal names the argument it could not place and how to name the repository instead:
+// -R, or, for gh api, which has none, the endpoint.
+func TestGhTargetOfRefusalsSayHowToNameTheRepository(t *testing.T) {
+	for argv, want := range map[string]string{
+		"pr view 1 --bogus":      "pass -R <owner>/<repo>",
+		"api repositories/12345": "name it in the endpoint, repos/<owner>/<repo>/…",
+		"pr --json n view 1":     "pass -R <owner>/<repo>",
+	} {
+		_, _, err := ghTargetOf(strings.Fields(argv), nil, savedGhHelp)
+		if err == nil || !strings.Contains(err.Error(), want) || !strings.Contains(err.Error(), "sends no token") {
+			t.Errorf("ghTargetOf(%q) = %v, want a refusal saying it sends no token and %q", argv, err, want)
 		}
-	}
-	for name, want := range map[rune]bool{'q': true, 't': true, 'R': true, 'c': false, 'w': false} {
-		if flags.short[name] != want {
-			t.Errorf("-%c takes a value: %t, want %t", name, flags.short[name], want)
-		}
-	}
-	if _, err := parseGhFlags("unknown command \"nope\" for \"gh\"\n"); err == nil {
-		t.Error("parseGhFlags of a help with no --help = nil, want a refusal")
 	}
 }
 
@@ -190,18 +221,25 @@ func legionGh(t *testing.T, env map[string]string, args ...string) (code int, st
 
 // `legion gh` execs the real gh (LEGION_GH_PATH) as `gh`, with its arguments untouched and
 // GH_CONFIG_DIR pointed at the directory of the owner the command names, and at the issue's
-// owner's (the GH_CONFIG_DIR it was given) when it names none. A command naming an owner the bundle
-// holds no directory for is refused, exit 2, naming the owner, and the real gh never runs. Each of
-// the three variables it needs is required, and an unset one is named with exit 2; --help with no
-// real gh to hand it to is legion's usage.
+// owner's (the GH_CONFIG_DIR it was given) when it names none. It reads each command from the
+// real gh's own help. A command naming an owner the bundle holds no directory for is refused, exit
+// 2, naming the owner, and so is one it cannot read; the real gh never runs. Each of the three
+// variables it needs is required, and an unset one is named with exit 2; --help with no real gh to
+// hand it to is legion's usage.
 func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 	root, defaultDir := gitCredentialBundle(t)
+	help, err := filepath.Abs(ghHelpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The stub answers `<command> --help` with the saved help of that command, as the real gh
+	// would, and every other run with its argv and GH_CONFIG_DIR.
 	stub := filepath.Join(t.TempDir(), "gh")
-	// The stub answers `legion gh`'s own help reads (`<command> --help`) with an option list, and
-	// every other run, `gh --help` included, with its argv and GH_CONFIG_DIR.
-	script := "#!/bin/sh\ncase \"$#:$*\" in\n1:*) printf '%s|%s|%s\\n' \"$0\" \"$GH_CONFIG_DIR\" \"$*\" ;;\n" +
-		"*--help) printf '%s\\n' FLAGS '  -q, --jq string   Query' '      --fill   Use' '      --help   Show help' '  -R, --repo [HOST/]OWNER/REPO   Select' ;;\n" +
-		"*) printf '%s|%s|%s\\n' \"$0\" \"$GH_CONFIG_DIR\" \"$*\" ;;\nesac\n"
+	script := "#!/bin/sh\nfor last; do :; done\n" +
+		"if [ \"$#\" -gt 1 ] && [ \"$last\" = --help ]; then\n" +
+		"  path=$(printf '%s ' \"$@\" | sed -e 's/ --help $//' -e 's/ /_/g')\n" +
+		"  exec cat '" + help + "'/\"$path\".txt\nfi\n" +
+		"printf '%s|%s|%s\\n' \"$0\" \"$GH_CONFIG_DIR\" \"$*\"\n"
 	if err := os.WriteFile(stub, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -222,10 +260,18 @@ func TestLegionGhExecsTheRealGhWithTheOwnersDirectory(t *testing.T) {
 		}
 	}
 
-	for _, args := range [][]string{{"pr", "view", "https://github.com/other/thing/pull/1"}, {"api", "repos/Other/thing"}} {
-		code, stdout, stderr := legionGh(t, env, args...)
-		if code != 2 || stdout != "" || !strings.Contains(stderr, `"other" is not an owner of this project`) {
-			t.Errorf("legion gh %q = exit %d, stdout %q, stderr %q; want exit 2 refusing other and no gh run", args, code, stdout, stderr)
+	for _, tc := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"pr", "view", "https://github.com/other/thing/pull/1"}, `"other" is not an owner of this project`},
+		{[]string{"api", "repos/Other/thing"}, `"other" is not an owner of this project`},
+		{[]string{"pr", "view", "1", "--bogus"}, `"--bogus" is no option`},
+		{[]string{"issue", "view", "1"}, "cannot read `gh issue view`"},
+	} {
+		code, stdout, stderr := legionGh(t, env, tc.args...)
+		if code != 2 || stdout != "" || !strings.Contains(stderr, tc.want) {
+			t.Errorf("legion gh %q = exit %d, stdout %q, stderr %q; want exit 2 containing %q and no gh run", tc.args, code, stdout, stderr, tc.want)
 		}
 	}
 

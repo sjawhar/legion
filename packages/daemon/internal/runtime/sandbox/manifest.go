@@ -478,8 +478,10 @@ func kubeletEscape(text string) string {
 // (GitHubHostsKey(owner) as <owner>/hosts.yml, GitHubConfigKey(owner) as <owner>/config.yml) for
 // the launch's owners (gitHubOwners), read-only to the pod's user, from the same Secret as the
 // launcher token, so the refresher's one Update reaches the container's GHConfigDir. A projection's
-// items are fixed for the pod's life, so a pod holds the owners of its creation; the Sandbox's first
-// template (sandboxManifest), which never runs, has none.
+// items are fixed for the pod's life, so a pod holds the owners of its creation. A launch with no
+// owners — a controller whose project has no GitHub owner to mint for, and the Sandbox's first
+// template (sandboxManifest), which never runs — gets an empty directory instead: a Secret
+// projection with no items would project every key of the Secret, the launcher token among them.
 func (r *Runtime) volumes(l launch) []corev1.Volume {
 	providers, _ := r.providers()
 	memory := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
@@ -500,11 +502,15 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			corev1.Volume{Name: roleVolume("private", role), VolumeSource: memory},
 			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
 		)
-		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
-			SecretName:  roleSecretName(l.name, role),
-			Items:       slices.Clone(ghItems),
-			DefaultMode: new(int32(0o440)),
-		}}})
+		gh := corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory}}
+		if len(ghItems) > 0 {
+			gh = corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName:  roleSecretName(l.name, role),
+				Items:       slices.Clone(ghItems),
+				DefaultMode: new(int32(0o440)),
+			}}
+		}
+		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: gh})
 	}
 	volume := corev1.Volume{Name: issueVolume, VolumeSource: corev1.VolumeSource{
 		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: IssueClaimName(l.spec.Claim)},

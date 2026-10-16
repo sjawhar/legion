@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -752,6 +753,60 @@ func (s *shim) prompt() shimwire.Prompt {
 	return prompt
 }
 
+// A project whose every mapped repository lacks an App boots, serving none: it mints for no owner,
+// still knows the review App's login, and its state names each left-out repository with the App it
+// lacks, for an operator to install.
+func TestWorkflowBootServingNoRepositoryReportsWhatItLeftOut(t *testing.T) {
+	cfg := workflowConfig(t, workflowNATS(t))
+	tokens := &workflowTokenRecorder{missing: map[string]bool{"review acme/widgets": true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- run(ctx, cfg, quietLogger(), overrides{
+			listen: heldListen, runtime: fakeRuntime(fake.NewRuntime(), &built{}).runtime, clock: stillClock{},
+			workflowTokens: tokens, githubAPI: repositoriesGitHub(t),
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("daemon did not stop")
+		}
+	})
+	var state api.State
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if response, err := pollClient.Get("http://127.0.0.1:" + strconv.Itoa(cfg.Port) + "/legion/v1/state"); err == nil {
+			err = json.NewDecoder(response.Body).Decode(&state)
+			response.Body.Close()
+			if err == nil && response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("the daemon stopped instead of booting: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the daemon never answered its state")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	want := api.RepositoriesView{Refused: []api.RefusedRepositoryView{{Repo: "acme/widgets", Reason: "the review App is not installed on acme/widgets"}}}
+	if len(state.Repositories.Owners) != 0 || len(state.Repositories.Mapped) != 0 || !reflect.DeepEqual(state.Repositories.Refused, want.Refused) {
+		t.Fatalf("state's repositories = %+v, want none served and acme/widgets left out for its review App", state.Repositories)
+	}
+	if roles := tokens.Roles(); len(roles) != 0 {
+		t.Fatalf("the boot minted %v with no owner to mint for", roles)
+	}
+}
+
 // The workflow has to assemble every integration boundary before opening its API. The order in
 // this log is the boot sequence operators rely on when an external dependency refuses.
 func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
@@ -1081,6 +1136,8 @@ func workflowJetStream(t *testing.T, natsURL string) jetstream.JetStream {
 type workflowTokenRecorder struct {
 	mu    sync.Mutex
 	roles []appauth.AppRole
+	// missing names the installations not made, "<role> <owner/name>"; every other is.
+	missing map[string]bool
 }
 
 func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
@@ -1091,9 +1148,14 @@ func (r *workflowTokenRecorder) Token(_ context.Context, role appauth.AppRole, _
 	return appauth.Lease{Token: "workflow-test-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: "legion-" + string(role) + "[bot]"}}, nil
 }
 
-// InstalledOn answers both Apps installed on every repository.
-func (r *workflowTokenRecorder) InstalledOn(context.Context, appauth.AppRole, ghrepo.Repository) (bool, error) {
-	return true, nil
+// AppLogin answers each App's own bot login, as its lease names it.
+func (r *workflowTokenRecorder) AppLogin(_ context.Context, role appauth.AppRole) (string, error) {
+	return "legion-" + string(role) + "[bot]", nil
+}
+
+// InstalledOn answers each App installed on every repository but those missing names.
+func (r *workflowTokenRecorder) InstalledOn(_ context.Context, role appauth.AppRole, repo ghrepo.Repository) (bool, error) {
+	return !r.missing[string(role)+" "+repo.String()], nil
 }
 
 // servedMapping answers Dispatch's repository mapping, acme/widgets the default of project, and

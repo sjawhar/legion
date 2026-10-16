@@ -433,45 +433,26 @@ func (m *Manager) identity(ctx context.Context, appID, jwt, installationToken st
 }
 
 func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken string) (GitIdentity, error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app", nil)
+	slug, err := m.appSlug(ctx, jwt)
 	if err != nil {
 		return GitIdentity{}, err
 	}
-	m.appHeaders(request, jwt)
-	response, err := m.client.Do(request)
-	if err != nil {
-		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
-	}
-	body, err := readBody(response, "GitHub App identity lookup")
-	if err != nil {
-		return GitIdentity{}, err
-	}
-	var app struct {
-		Slug string `json:"slug"`
-	}
-	if err := json.Unmarshal(body, &app); err != nil || app.Slug == "" {
-		return GitIdentity{}, fmt.Errorf("GitHub App identity lookup returned an invalid app slug")
-	}
-
-	login := app.Slug + "[bot]"
-	request, err = http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
+	login := slug + "[bot]"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/users/"+url.PathEscape(login), nil)
 	if err != nil {
 		return GitIdentity{}, err
 	}
 	request.Header.Set("Authorization", "token "+installationToken)
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("User-Agent", "legion-daemon")
-	response, err = m.client.Do(request)
+	response, err := m.client.Do(request)
 	if err != nil {
 		return GitIdentity{}, &TransientError{Err: fmt.Errorf("GitHub App bot identity lookup: %w", err)}
 	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return GitIdentity{}, transient(response, refusalBody(response), fmt.Errorf("GitHub App bot identity lookup failed (%d)", response.StatusCode))
 	}
-	body, err = readBody(response, "GitHub App bot identity lookup")
+	body, err := readBody(response, "GitHub App bot identity lookup")
 	if err != nil {
 		return GitIdentity{}, err
 	}
@@ -489,6 +470,34 @@ func (m *Manager) fetchIdentity(ctx context.Context, jwt, installationToken stri
 		Name:  login,
 		Email: id + "+" + login + "@users.noreply.github.com",
 	}, nil
+}
+
+// appSlug is the slug of the App jwt signs for, read from GET /app: its bot login is the slug's,
+// "<slug>[bot]".
+func (m *Manager) appSlug(ctx context.Context, jwt string) (string, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, m.baseURL+"/app", nil)
+	if err != nil {
+		return "", err
+	}
+	m.appHeaders(request, jwt)
+	response, err := m.client.Do(request)
+	if err != nil {
+		return "", &TransientError{Err: fmt.Errorf("GitHub App identity lookup: %w", err)}
+	}
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return "", transient(response, refusalBody(response), fmt.Errorf("GitHub App identity lookup failed (%d)", response.StatusCode))
+	}
+	body, err := readBody(response, "GitHub App identity lookup")
+	if err != nil {
+		return "", err
+	}
+	var app struct {
+		Slug string `json:"slug"`
+	}
+	if err := json.Unmarshal(body, &app); err != nil || app.Slug == "" {
+		return "", fmt.Errorf("GitHub App identity lookup returned an invalid app slug")
+	}
+	return app.Slug, nil
 }
 
 func (m *Manager) appHeaders(request *http.Request, jwt string) {

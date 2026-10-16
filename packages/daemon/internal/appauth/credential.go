@@ -13,10 +13,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// ErrNoOwner is GitHubCredential's refusal when there is no GitHub owner to mint for: a project
-// with no repository, and a caller that names none.
-var ErrNoOwner = errors.New("no GitHub owner to mint an App lease for")
-
 // ErrOwnerOutsideProject is GitHubCredential's refusal of a controller asked for a default owner
 // that is not one of the project's.
 var ErrOwnerOutsideProject = errors.New("is not an owner of the project's repositories")
@@ -55,7 +51,7 @@ func GitHubCredential(tokens Tokens, owners func() []string) runtime.GitHubCrede
 		}
 		names := slices.Sorted(maps.Keys(all))
 		if len(names) == 0 {
-			return ghconfig.Bundle{}, fmt.Errorf("the %s App for %s: %w", appRole, role, ErrNoOwner)
+			return ghconfig.Bundle{}, fmt.Errorf("the %s App for %s: %w", appRole, role, runtime.ErrNoGitHubOwner)
 		}
 		bundle := ghconfig.Bundle{Default: owner, Owners: make(map[string]ghconfig.Rendered, len(names))}
 		if owner == "" {

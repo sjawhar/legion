@@ -120,6 +120,7 @@ func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.
 		}
 		spec.Env = id.Env()
 	}
+
 	if c.WorkspaceLost {
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}

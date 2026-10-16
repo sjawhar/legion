@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // ownerTokens names each lease for the App, the owner and whether it reads or writes, so a test
@@ -103,8 +104,8 @@ func TestGitHubCredentialBundlesEveryOwnerOfTheProject(t *testing.T) {
 		t.Errorf("a refused read mint = %v, want an error naming the owner and the role", err)
 	}
 	none := GitHubCredential(ownerTokens{}, func() []string { return nil })
-	if _, err := none(context.Background(), claim.RoleController, ""); !errors.Is(err, ErrNoOwner) {
-		t.Errorf("a bundle with no owner = %v, want ErrNoOwner", err)
+	if _, err := none(context.Background(), claim.RoleController, ""); !errors.Is(err, runtime.ErrNoGitHubOwner) {
+		t.Errorf("a bundle with no owner = %v, want runtime.ErrNoGitHubOwner", err)
 	}
 	var minted []string
 	counting := GitHubCredential(countingTokens{minted: &minted}, owners)

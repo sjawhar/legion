@@ -193,7 +193,7 @@ package api
 // `github-default`), and `POST /legion/v1/controller/github-credential` takes an optional
 // `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
 // `expiresAt` in place of one `hosts` and `config`. An image built at 27 has neither the wrapper
-// nor the two commands, so the image probe refuses it. (Taken above 27, sjawhar/legion#2000's.)
+// nor the two commands, so the image probe refuses it.
 //
 // 29: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
 // targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
@@ -202,7 +202,7 @@ package api
 // `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
 // repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
 // plugin at 28 reads the state with a strict schema that knows none of these fields, so it
-// refuses the state. (Taken above 28, the per-owner credentials'.)
+// refuses the state.
 //
 // 30: sjawhar/legion#1986 (the repository cache) -- the daemon runs one repository cache pod per
 // served repository, whose one container is the image's `legion workspace-init cache`, and every
@@ -215,6 +215,5 @@ package api
 // which holds the image's pi-legion to this number, refuses such an image at boot instead. The
 // state's `repositories` gains `cache` on each mapped repository under the Kubernetes runtime, with
 // its `state`, and `caches`, the caches of repositories the mapping no longer names, each with
-// `retainedUntil`, which a plugin at 29 reads with a strict schema that knows neither. (Taken above
-// 29, the issue repository's.)
+// `retainedUntil`, which a plugin at 29 reads with a strict schema that knows neither.
 const DaemonAPIVersion = 30
