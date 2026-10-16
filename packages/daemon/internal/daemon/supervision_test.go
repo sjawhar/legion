@@ -1058,7 +1058,7 @@ func admitIssue(t *testing.T, cfg config.Config, issue string, role claim.Role, 
 	records := recordpkg.NewStore()
 	if err := st.Tx(context.Background(), func(tx pgx.Tx) error {
 		record := recordpkg.Issue{
-			Key: issue, Repo: "acme/widgets", DefaultBranch: "main", Tree: issue, Project: cfg.Project, Title: issue, Phase: phase.Admitted,
+			Key: issue, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: issue, Project: cfg.Project, Title: issue, Phase: phase.Admitted,
 			Generation: 1, Status: "in_progress",
 		}
 		if err := records.PutIssue(context.Background(), tx, record); err != nil {

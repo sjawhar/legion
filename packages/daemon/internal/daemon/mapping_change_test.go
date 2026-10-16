@@ -56,7 +56,7 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 	records := projectRecords{Store: record.NewStore(), project: "CAPTURE"}
 	// A running tree's issue on orbit/gadgets, which the mapping change below unmaps.
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-7", Repo: "orbit/gadgets", DefaultBranch: "main", Tree: "CAPTURE-7",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "CAPTURE-7", Repo: "orbit/gadgets", DefaultBranch: "main", GitHubRepo: "orbit/gadgets", Tree: "CAPTURE-7",
 			Project: "CAPTURE", Title: "running", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, LastDispatchSeq: 1}); err != nil {
 			return err
 		}

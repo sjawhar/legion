@@ -75,9 +75,14 @@ type Issue struct {
 	// the daemon first recorded the issue (a root's admission, a child's recording under its tree, an
 	// orphan's admission). Neither changes after that: a carried child, a re-admission and a
 	// hand-over keep them, and a later edit of the issue's repository in Dispatch is not applied.
-	// Every repository-dependent action reads them.
+	// Every repository-dependent action reads them. Repo is spelled as the issue's workspace and
+	// shared clone are, which can be a clone's spelling that differs from GitHub's in case.
 	Repo          string
 	DefaultBranch string
+	// GitHubRepo is GitHub's own spelling of Repo, taken with it and never changed: what Envoy's
+	// event subjects carry, which NATS matches case-sensitively, so GitHub intake hears the issue's
+	// repository by it, read from the record at boot.
+	GitHubRepo string
 }
 
 // RepoNote is what the daemon last said on a Dispatch issue about its repository: the resolved
@@ -365,13 +370,19 @@ type Store interface {
 	MarkProcessed(ctx context.Context, tx pgx.Tx, source, eventID string) (fresh bool, err error)
 	Issue(ctx context.Context, tx pgx.Tx, key string) (*Issue, error)
 	Issues(ctx context.Context, tx pgx.Tx) ([]Issue, error)
-	// PutIssue writes issue, refusing one without its repository or default branch, and one that
-	// would give a recorded issue another of either.
+	// PutIssue writes issue, refusing one without its repository, default branch or GitHub's
+	// spelling of the repository, one whose GitHub spelling names another repository, and one that
+	// would give a recorded issue another of any of them.
 	PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error
 	// UnfilledIssues is every record of the Dispatch project key project written before the record
 	// carried its repository, by key; FillIssueRepository fills one such record, once.
 	UnfilledIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
-	FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, defaultBranch string) error
+	FillIssueRepository(ctx context.Context, tx pgx.Tx, key, repo, defaultBranch, githubRepo string) error
+	// UnnamedIssues is every record of the Dispatch project key project that carries its repository
+	// but was written before the record carried GitHub's spelling of it, by key; NameIssueRepository
+	// names one such record, once, with a spelling of its own repository.
+	UnnamedIssues(ctx context.Context, tx pgx.Tx, project string) ([]Issue, error)
+	NameIssueRepository(ctx context.Context, tx pgx.Tx, key, githubRepo string) error
 	// RepoNote is what the daemon last said on issue about its repository, nil for nothing;
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)

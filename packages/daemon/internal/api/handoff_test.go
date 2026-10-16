@@ -226,7 +226,7 @@ func seedIssueAt(t *testing.T, h *harness, key string, at phase.Phase) {
 	t.Helper()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return record.NewStore().PutIssue(context.Background(), tx, record.Issue{
-			Key: key, Repo: "acme/widgets", DefaultBranch: "main", Tree: key, Project: testProject, Title: key, Phase: at, Generation: 1, Status: "in_progress",
+			Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: testProject, Title: key, Phase: at, Generation: 1, Status: "in_progress",
 		})
 	})
 	if err != nil {
@@ -398,7 +398,7 @@ func TestHandoffCompleteReadyReadsTheIssuesRecordedRepositoryAsItsOwner(t *testi
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		records := record.NewStore()
-		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", Tree: "LEGION-208",
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: "LEGION-208", Repo: "zeta/tools", DefaultBranch: "main", GitHubRepo: "zeta/tools", Tree: "LEGION-208",
 			Project: testProject, Title: "LEGION-208", Phase: phase.Merging, Generation: 1, Status: "in_progress"}); err != nil {
 			return err
 		}
@@ -626,10 +626,10 @@ func TestAStaleCompletionDoesNotTakeTheNewRunsKey(t *testing.T) {
 		Tokens: handoffTokens{}, GitHubAPI: github.url,
 	}).Handler
 	// The tester takes run 1's task, and the child is then re-entered at run 2 while it works.
-	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
-	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	machine, ok := h.supervisor.Machine(tester.token)
 	if !ok {
@@ -691,7 +691,7 @@ func TestAConflictRoundsCompletionIsTheNewRoundsAndNotTheLastOnes(t *testing.T) 
 		Tokens: handoffTokens{}, GitHubAPI: github.url,
 	}).Handler
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	h.recordIssue(issue)
 	if err := h.store.Tx(ctx, func(tx pgx.Tx) error {
@@ -856,7 +856,7 @@ func TestACompletionInAForeignTurnIsNotTheRefusedTasksRun(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _ := newHandoffHarness(t, newHandoffGitHub(t), nil, nil)
-			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			token, boot := h.launch("LEGION-208", claim.RoleTester)
 			session := "ses_tester_foreign"
@@ -951,7 +951,7 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	github := newHandoffGitHub(t)
 	h, facts := newHandoffHarness(t, github, nil, nil)
 	// The tester served run 1, and the child is re-entered at run 2 once that turn ends.
-	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 1, Status: "in_progress"})
 	tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 	machine, ok := h.supervisor.Machine(tester.token)
@@ -962,7 +962,7 @@ func TestATakenBackConfirmationDoesNotMoveTheRunTheClaimIsServing(t *testing.T) 
 	if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
 		t.Fatalf("end the first run's turn: %v", err)
 	}
-	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+	h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 		Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 	// The next run's task is sent, a foreign turn confirms it, and the agent refuses it as busy.
 	id := "outbox:99"
@@ -1022,7 +1022,7 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 			delivered := tc.delivered
 			github := newHandoffGitHub(t)
 			h, facts := newHandoffHarness(t, github, nil, nil)
-			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
+			h.recordIssue(record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "LEGION-208",
 				Phase: phase.Testing, Generation: 2, Status: "in_progress"})
 			tester := newLiveClaim(t, h, "LEGION-208", claim.RoleTester)
 			machine, ok := h.supervisor.Machine(tester.token)

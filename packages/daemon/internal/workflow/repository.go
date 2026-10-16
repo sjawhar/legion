@@ -23,11 +23,13 @@ type Repositories interface {
 }
 
 // Resolution is the repository an issue is recorded on: Repo and DefaultBranch when Legion serves
-// it, GitHub's spelling and default branch, or Refusal, why it does not. LeftOut is a mapped
-// repository Legion leaves out for a GitHub App not installed on it, which Refusal names.
+// it, with GitHubRepo, GitHub's spelling of Repo that Envoy's event subjects carry, or Refusal, why
+// it does not. LeftOut is a mapped repository Legion leaves out for a GitHub App not installed on
+// it, which Refusal names.
 type Resolution struct {
 	Repo          string
 	DefaultBranch string
+	GitHubRepo    string
 	Refusal       string
 	LeftOut       bool
 }

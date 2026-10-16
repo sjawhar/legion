@@ -143,10 +143,10 @@ func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
 	const root, child = "LEGION-207", "LEGION-208"
 	until := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	parent := root
-	lingering := record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}
+	lingering := record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}
 	reopened := lingering
 	reopened.Generation, reopened.LingerUntil, reopened.Phase, reopened.Status = 4, nil, phase.Admitted, "in_progress"
-	member := record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	member := record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	orphaned := member
 	orphaned.Tree = child
 	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now())
@@ -204,8 +204,8 @@ func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
 	parent := root
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		for _, put := range []error{
-			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
 			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 		} {
 			if put != nil {
@@ -253,7 +253,7 @@ func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
 func TestAnOldTreeCloseOfAHandedOverChildFinishesAtTheGenerationFence(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "child", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "child", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: "LEGION-207", Role: claim.RoleImplementer, Generation: 1, Linger: 1}, time.Now())
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
@@ -273,8 +273,8 @@ func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
 	parent := root
 	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 		for _, put := range []error{
-			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
 			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 		} {
 			if put != nil {
@@ -329,8 +329,8 @@ func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 			parent := root
 			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 				for _, put := range []error{
-					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
 					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 				} {
 					if put != nil {
@@ -400,8 +400,8 @@ func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
 			parent := root
 			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 				for _, put := range []error{
-					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "B"}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "B"}),
 					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 				} {
 					if put != nil {
@@ -473,8 +473,8 @@ func TestAStaleHandOverRowLeavesANewerLingersFence(t *testing.T) {
 			parent := root
 			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 				for _, put := range []error{
-					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
-					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
 					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 2}),
 					func() error {
 						if !tc.cancelled {
@@ -530,8 +530,8 @@ func TestAPermanentlyRefusedHandOverDropsItsFence(t *testing.T) {
 	parent := root
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, put := range []error{
-			records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}),
-			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B"}),
+			records.PutIssue(ctx, tx, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B"}),
 			records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 3}),
 		} {
 			if put != nil {
@@ -647,7 +647,7 @@ func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
 func TestOutboxNoticeReturnsPublisherFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-2", Title: "Root", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-2", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-2", Title: "Root", Phase: phase.Planning, Generation: 1, Status: "in_progress"})
 	row := leasedOutboxRow(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
 	publisher := &outboxPublisher{err: errors.New("listener unavailable")}
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
@@ -778,7 +778,7 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 	records := record.NewStore()
 	// A workspace removal is the expiry of the tree's linger, so the tree lingers when it runs.
 	until := time.Now().Add(-time.Minute)
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	row := mustOutboxRow(t, issue.Key, record.WorkspaceRemove{Linger: issue.Generation}, time.Now())
@@ -809,7 +809,7 @@ func TestOutboxWorkspaceRemovalUsesDeterministicLocationAndReturnsFailure(t *tes
 func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned := 0
@@ -880,10 +880,10 @@ func TestAStartOnALingeringTreeResumesNothing(t *testing.T) {
 	records := record.NewStore()
 	ctx := context.Background()
 	until := time.Now().Add(time.Hour)
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, root)
 	parent := root.Key
-	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
 	putOutboxIssue(t, pool, records, child)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
@@ -922,7 +922,7 @@ func TestAStartOnALingeringTreeResumesNothing(t *testing.T) {
 func TestOutboxStartRelaunchesAFailedClaim(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -974,7 +974,7 @@ func TestAResumeStartGivesAClaimHoldingThePhasesTaskThatTaskOnce(t *testing.T) {
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			ctx := context.Background()
-			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
 			putOutboxIssue(t, pool, records, issue)
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 			token, err := claim.NewToken("legion", issue.Key, claim.RoleTester)
@@ -1051,7 +1051,7 @@ func TestAResumeStartDeliversItsTaskUnlessTheClaimHoldsTheOneItResumes(t *testin
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			ctx := context.Background()
-			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
 			putOutboxIssue(t, pool, records, issue)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -1091,7 +1091,7 @@ func TestAResumeStartMeetingATaskADeathTookBackDeliversNothingMore(t *testing.T)
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			ctx := context.Background()
-			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 2, Status: "in_progress"}
+			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Implementing, Generation: 2, Status: "in_progress"}
 			putOutboxIssue(t, pool, records, issue)
 			sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 			token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -1130,7 +1130,7 @@ func TestAResumeStartHoldsBackItsTaskForTheTurnTheClaimIsWorking(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.ProductionCheck, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", issue.Key, claim.RoleImplementer)
@@ -1164,7 +1164,7 @@ func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	removals := 0
@@ -1207,10 +1207,10 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 	records := record.NewStore()
 	ctx := context.Background()
 	until := time.Now().Add(2 * time.Hour)
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 4, Status: "done", Rank: "U", LingerUntil: &until}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 4, Status: "done", Rank: "U", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, root)
 	parent := root.Key
-	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
 	putOutboxIssue(t, pool, records, child)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
@@ -1261,10 +1261,10 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	records := record.NewStore()
 	ctx := context.Background()
 	until := time.Now().Add(-time.Minute)
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "root", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, root)
 	parent := root.Key
-	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
+	child := record.Issue{Key: "LEGION-209", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: root.Key, Parent: &parent, Title: "child", Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "V"}
 	putOutboxIssue(t, pool, records, child)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	token, err := claim.NewToken("legion", child.Key, claim.RoleTester)
@@ -1324,7 +1324,7 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Held, Hold: &record.Hold{From: phase.Implementing}, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		return records.PutPullRequest(ctx, tx, record.PullRequest{Issue: issue.Key, Repo: "acme/widgets", Number: 114, Branch: "legion/LEGION-208", HeadSHA: "f8f30933", Failing: []string{}, State: record.PullRequestOpen})
@@ -1458,7 +1458,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			ctx := context.Background()
-			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"}
+			issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Reviewing, Generation: 1, Status: "needs_review"}
 			putOutboxIssue(t, pool, records, issue)
 			const head = "16973163"
 			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
@@ -1599,7 +1599,7 @@ func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *tes
 func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RolePlanner, Generation: issue.Generation}, time.Now())
@@ -1619,7 +1619,7 @@ func TestOutboxSuperviseReturnsProvisioningFailure(t *testing.T) {
 func TestTerminalReplayAfterPersistedFailureHoldsOnceAndEmitsOneWorkerDiedNotice(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Planner failure", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Planner failure", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	sup.deps.Limits.LaunchFailures = 1
@@ -1742,7 +1742,7 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	putOutboxIssue(t, pool, records, record.Issue{
-		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
+		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
 		Phase: phase.Implementing, Status: "in_progress", Rank: "00000",
 	})
 	holds := (&workflowRuntime{pool: pool, records: records}).phaseHolds
@@ -1774,7 +1774,7 @@ func TestPhaseHoldsAnswersFromTheIssuesCurrentPhase(t *testing.T) {
 	}
 
 	putOutboxIssue(t, pool, records, record.Issue{
-		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
+		Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: "LEGION", Title: "phase holds",
 		Phase: phase.Testing, Status: "testing", Rank: "00000",
 	})
 	implementing, err := holds(context.Background(), "LEGION-208", phase.Implementing)
@@ -1979,7 +1979,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LastDispatchSeq: 5}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, runtime := newOutboxSupervisor(t, "legion", t.TempDir())
 	provisioned, removed := 0, 0
@@ -2056,7 +2056,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	records := record.NewStore()
 	ctx := context.Background()
 	until := time.Now().Add(-time.Minute)
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Done, Generation: 3, Status: "done", Rank: "U", LingerUntil: &until, LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())
@@ -2123,7 +2123,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
+	issue := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Planning, Generation: 1, Status: "in_progress"}
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	rt.InPod = true
@@ -2190,7 +2190,7 @@ func TestAStartThatFindsTheRootArchitectRunningTellsItItsTree(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	ctx := context.Background()
-	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
+	root := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Admitted, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 5}
 	putOutboxIssue(t, pool, records, root)
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	engine := workflow.New(records, workflow.Config{Project: "legion", Repositories: testRepositories}, quietLogger())

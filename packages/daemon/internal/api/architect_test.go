@@ -146,14 +146,14 @@ func seedTree(t *testing.T, h *harness, root string, children ...string) {
 	records := record.NewStore()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		if err := records.PutIssue(context.Background(), tx, record.Issue{
-			Key: root, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Status: "in_progress",
+			Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Status: "in_progress",
 		}); err != nil {
 			return err
 		}
 		for _, child := range children {
 			parent := root
 			if err := records.PutIssue(context.Background(), tx, record.Issue{
-				Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: testProject, Title: child, Parent: &parent,
+				Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: child, Parent: &parent,
 				Phase: phase.Planning, Status: "in_progress",
 			}); err != nil {
 				return err
@@ -435,8 +435,8 @@ func TestABrokenParentChainIsTheTreeRootArchitects(t *testing.T) {
 	records := record.NewStore()
 	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		for _, child := range []record.Issue{
-			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
-			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-211", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "no parent", Phase: phase.ProductionCheck, Status: "in_progress"},
+			{Key: "LEGION-212", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-208", Project: testProject, Title: "unrecorded parent", Parent: &unrecorded, Phase: phase.ProductionCheck, Status: "in_progress"},
 		} {
 			if err := records.PutIssue(context.Background(), tx, child); err != nil {
 				return err

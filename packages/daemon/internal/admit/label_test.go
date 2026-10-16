@@ -180,7 +180,7 @@ func TestReconcileAdmitsOnlyLabeledRoots(t *testing.T) {
 	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	seedWaiting(t, pool, "LEGION-GONE", "0")
 	until := fixedNow.Add(time.Hour)
-	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "1", LingerUntil: &until, HandedOver: true})
+	putIssue(t, pool, record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "1", LingerUntil: &until, HandedOver: true})
 
 	reconcile(t, pool, admission, []dispatch.IssueSummary{
 		{Key: "LEGION-GONE", ResolvedRepo: "acme/widgets", Title: "LEGION-GONE", Status: "todo", Rank: "0"},
@@ -206,7 +206,7 @@ func TestReadmissionWaitsForTheLabel(t *testing.T) {
 	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Repositories: testRepositories, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	until := fixedNow.Add(time.Hour)
-	lingering := record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, HandedOver: true}
+	lingering := record.Issue{Key: "LEGION-LINGER", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "lingering", Tree: "LEGION-LINGER", Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, HandedOver: true}
 	putIssue(t, pool, lingering)
 
 	apply(t, pool, admission, "todo-unlabeled", intake.DispatchIssue{Key: lingering.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: lingering.Title, Rank: lingering.Rank}, engine)
@@ -248,7 +248,7 @@ func TestALabelAddedToAReopenedChildOfALingeringTreeAdmitsItAsAnOrphan(t *testin
 				if err != nil {
 					t.Fatalf("read root: %v", err)
 				}
-				childIssue := record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", LastDispatchSeq: 2}
+				childIssue := record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: root, Project: testProject, Title: "child", Parent: &parent, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", LastDispatchSeq: 2}
 				if tc.lingering {
 					until := fixedNow.Add(time.Hour)
 					rootIssue.Phase, rootIssue.Status, rootIssue.LingerUntil = phase.Done, "done", &until
@@ -300,8 +300,8 @@ func TestReadmissionReentersAChildStrandedTodoWithoutTheLabel(t *testing.T) {
 	const root, child = "LEGION-LINGER", "LEGION-2"
 	until := fixedNow.Add(time.Hour)
 	parent := root
-	putIssue(t, pool, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "lingering", Tree: root, Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, HandedOver: true})
-	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "child", Tree: root, Parent: &parent, Phase: phase.Done, Generation: 2, Status: "done", Rank: "B", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "lingering", Tree: root, Phase: phase.Done, Generation: 3, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1, HandedOver: true})
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "child", Tree: root, Parent: &parent, Phase: phase.Done, Generation: 2, Status: "done", Rank: "B", LastDispatchSeq: 1})
 
 	apply(t, pool, admission, "child-reopened-unlabeled", intake.DispatchIssue{Key: child, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: "child", Parent: root, Rank: "B"}, engine)
 	if got := issue(t, pool, child); got.Tree != root || got.Phase != phase.Done || got.Status != "todo" {
@@ -332,8 +332,8 @@ func TestPromotingAWaitingRootReentersAChildStrandedWhileItsLabelWasOff(t *testi
 	seedSlotted(t, pool, "LEGION-ACTIVE", "A")
 	const root, child = "LEGION-WAIT", "LEGION-CHILD"
 	parent := root
-	putIssue(t, pool, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: root, Tree: root, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 1})
-	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", Project: testProject, Title: "child", Tree: root, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: root, Tree: root, Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "B", HandedOver: true, LastDispatchSeq: 1})
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: testProject, Title: "child", Tree: root, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "done", Rank: "C", LastDispatchSeq: 1})
 
 	// The root's label is taken off: it drops from the waiting line, and its tree is no longer live.
 	apply(t, pool, admission, "root-unlabeled", intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "B"}, engine)

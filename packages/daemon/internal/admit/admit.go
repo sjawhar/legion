@@ -364,6 +364,7 @@ func (a *Admission) putNewRoot(ctx context.Context, tx pgx.Tx, observation intak
 		DispatchStatus:  observation.Status,
 		Repo:            resolution.Repo,
 		DefaultBranch:   resolution.DefaultBranch,
+		GitHubRepo:      resolution.GitHubRepo,
 	}
 	if err := a.store.PutIssue(ctx, tx, issue); err != nil {
 		return fmt.Errorf("record admitted root %s: %w", observation.Key, err)

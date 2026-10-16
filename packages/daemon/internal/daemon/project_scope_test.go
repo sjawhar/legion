@@ -51,7 +51,7 @@ func TestAnotherProjectsIssuesAreNotThisDaemonsToAdmit(t *testing.T) {
 	// any the shared database already holds.
 	var base int
 	root := func(key, status, rank string) record.Issue {
-		return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", Tree: key, Project: other, Title: "Another project's root", Phase: phase.Admitted, Generation: 1, Status: status, Rank: rank}
+		return record.Issue{Key: key, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: key, Project: other, Title: "Another project's root", Phase: phase.Admitted, Generation: 1, Status: status, Rank: rank}
 	}
 	if err := pgx.BeginFunc(ctx, st.Pool(), func(tx pgx.Tx) error {
 		taken, err := records.Slots(ctx, tx)

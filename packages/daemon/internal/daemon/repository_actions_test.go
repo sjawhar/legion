@@ -83,9 +83,9 @@ func TestEachIssuesActionsActOnTheRepositoryItsRecordNames(t *testing.T) {
 	records := record.NewStore()
 	github := newTwoOwnersGitHub(t)
 	until := time.Now().Add(time.Hour)
-	widgets := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", Project: "LEGION", Tree: "LEGION-208", Title: "Widgets",
+	widgets := record.Issue{Key: "LEGION-208", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Project: "LEGION", Tree: "LEGION-208", Title: "Widgets",
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until}
-	tools := record.Issue{Key: "LEGION-209", Repo: "zeta/tools", DefaultBranch: "release/v7.1", Project: "LEGION", Tree: "LEGION-209", Title: "Tools",
+	tools := record.Issue{Key: "LEGION-209", Repo: "zeta/tools", DefaultBranch: "release/v7.1", GitHubRepo: "zeta/tools", Project: "LEGION", Tree: "LEGION-209", Title: "Tools",
 		Phase: phase.Done, Generation: 1, Status: "done", Rank: "V", LingerUntil: &until}
 	putOutboxIssue(t, pool, records, widgets)
 	putOutboxIssue(t, pool, records, tools)

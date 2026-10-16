@@ -100,9 +100,9 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	parent := rootKey
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, put := range []error{
-			records.PutIssue(ctx, tx, record.Issue{Key: rootKey, Repo: "acme/widgets", DefaultBranch: "main", Tree: rootKey, Project: "LEGION", Title: "root", Phase: phase.Done,
+			records.PutIssue(ctx, tx, record.Issue{Key: rootKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: rootKey, Project: "LEGION", Title: "root", Phase: phase.Done,
 				Generation: 1, Status: "done", Rank: "A", LingerUntil: &until, LastDispatchSeq: 1}),
-			records.PutIssue(ctx, tx, record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", Tree: rootKey, Project: "LEGION", Title: "child", Parent: &parent,
+			records.PutIssue(ctx, tx, record.Issue{Key: childKey, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: rootKey, Project: "LEGION", Title: "child", Parent: &parent,
 				Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
 			records.PutHandover(ctx, tx, record.Handover{Issue: childKey, Tree: rootKey, Generation: 1}),
 		} {
@@ -296,7 +296,7 @@ func TestAStartOfAnIssueInItsOwnTreeWaitsOnNoSiblingsLaunch(t *testing.T) {
 	runner := &outbox{log: quietLogger(), supervisor: sup, project: "legion"}
 	checked := make(chan error, 1)
 	go func() {
-		checked <- runner.stopElsewhere(context.Background(), record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", Tree: "LEGION-1"})
+		checked <- runner.stopElsewhere(context.Background(), record.Issue{Key: "LEGION-1", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: "LEGION-1"})
 	}()
 	select {
 	case err := <-checked:
@@ -321,9 +321,9 @@ func TestACarriedRolesStopDeadlineIsItsOldRootsLingerExpiry(t *testing.T) {
 		root *record.Issue
 		want time.Time
 	}{
-		{"an old root that lingers", &record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", LingerUntil: &until}, until},
-		{"an old root whose linger expired before the start asked", &record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", LingerUntil: &now}, now},
-		{"an old root that no longer lingers", &record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main"}, now.Add(stop)},
+		{"an old root that lingers", &record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", LingerUntil: &until}, until},
+		{"an old root whose linger expired before the start asked", &record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", LingerUntil: &now}, now},
+		{"an old root that no longer lingers", &record.Issue{Key: "LEGION-207", Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}, now.Add(stop)},
 		{"no old root recorded", nil, now.Add(stop)},
 	} {
 		if got := carriedStopDeadline(tc.root, now, stop); !got.Equal(tc.want) {
