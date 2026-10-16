@@ -3127,7 +3127,7 @@ probe=$(log_lines "sandbox runtime: the worker image passed its probe" | tail -1
 note "image probe: $(jq -c '{image, model, sandbox}' <<<"$probe")"
 # The daemon's capability report (capabilities.Deployment.Report, `.capabilities` of `legion state
 # --json`), once the probe's verdict is in it: the probe logs its pass before the daemon records it,
-# so the read waits for no image row to be unchecked. Every image row is present and none installed,
+# so the read waits for no image row to be unchecked. Every image row is present,
 # codegraph included (a pod's agent loads the profile's plugins, as repository-tools holds). The
 # live rows render from the live sessions' reports (LEGION-663):
 # packages/daemon/internal/capabilities/deployment.go renders each unchecked, its detail "no session
@@ -3162,7 +3162,7 @@ case $open_rows in
   '["secrets"]' | '["secrets","pool-capacity"]') ;;
   *) fail "the open capabilities are $open_rows, not [\"secrets\"] with or without pool-capacity: $(jq -c '[.[] | select(.status == "open") | {name, detail, configLine}]' "$evidence/capabilities-at-boot.json")" ;;
 esac
-note "capabilities at boot ($evidence/capabilities-at-boot.json): every image row present, codegraph included, and none installed; every live row unchecked, awaiting the first session's report; open: $(jq -r '[.[] | select(.status == "open") | .name] | join(", ")' "$evidence/capabilities-at-boot.json") (secrets: $(capability_row secrets))"
+note "capabilities at boot ($evidence/capabilities-at-boot.json): every image row present, codegraph included; every live row unchecked, awaiting the first session's report; open: $(jq -r '[.[] | select(.status == "open") | .name] | join(", ")' "$evidence/capabilities-at-boot.json") (secrets: $(capability_row secrets))"
 note "model-fallback reads '$(capability_row model-fallback)'; resource-limits reads '$(capability_row resource-limits)'; pool-capacity reads '$(capability_row pool-capacity)'"
 [ ! -e "$state/workspaces" ] || fail "the daemon's state_dir has a workspaces/ directory under the Sandbox runtime"
 probe_pod=$(jq -r '.sandbox' <<<"$probe")

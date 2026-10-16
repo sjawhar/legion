@@ -437,7 +437,7 @@ func TestAStaleRegistrationIsRelaunchedAtOnceChargingNothing(t *testing.T) {
 		AgentID: "agent", PluginContract: 1,
 	}, false)
 
-	wantSentence := "pi-legion speaks daemon API contract 1; this daemon requires 24: the daemon is relaunching this process onto the current plugin"
+	wantSentence := fmt.Sprintf("pi-legion speaks daemon API contract 1; this daemon requires %d: the daemon is relaunching this process onto the current plugin", api.DaemonAPIVersion)
 	if status != http.StatusConflict || !strings.Contains(string(body), wantSentence) {
 		t.Fatalf("stale register = %d %s, want 409 naming %q", status, body, wantSentence)
 	}
@@ -472,7 +472,7 @@ func TestAStaleControllerRegistrationIsRelaunchedAtOnce(t *testing.T) {
 		AgentID: "ses_controller", PluginContract: 1,
 	}, false)
 
-	wantSentence := "pi-legion speaks daemon API contract 1; this daemon requires 24: the daemon is relaunching this process onto the current plugin"
+	wantSentence := fmt.Sprintf("pi-legion speaks daemon API contract 1; this daemon requires %d: the daemon is relaunching this process onto the current plugin", api.DaemonAPIVersion)
 	if status != http.StatusConflict || !strings.Contains(string(body), wantSentence) {
 		t.Fatalf("the controller's stale register = %d %s, want 409 naming %q", status, body, wantSentence)
 	}
