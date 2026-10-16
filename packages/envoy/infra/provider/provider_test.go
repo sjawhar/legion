@@ -28,7 +28,6 @@ func schemaJSON(t *testing.T) string {
 }
 
 type property struct {
-	Type   string `json:"type"`
 	Secret bool   `json:"secret"`
 	Ref    string `json:"$ref"`
 	Items  struct {
