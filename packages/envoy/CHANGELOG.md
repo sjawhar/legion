@@ -4,6 +4,18 @@
 
 ### Added
 
+- Every live session now carries `host` beside `machine_id`: where the session process actually
+  runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
+  listener happened to register it. Sessions on separate machines registering through one shared
+  listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
+  keeps its routing meaning unchanged (the listener that owns the session's delivery,
+  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
+  session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
+  /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
+  whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
+  own defensive fallback to `machine_id` for a listener that predates the field too.
+
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running
