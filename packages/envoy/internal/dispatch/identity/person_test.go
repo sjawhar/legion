@@ -9,14 +9,14 @@ import (
 )
 
 // dispatchMembers is the group rule the Cognito tests sign in under.
-var dispatchMembers = SignInRule{Group: "dispatch-members"}
+var dispatchMembers = GroupRule{Group: "dispatch-members"}
 
 func TestPersonIsTheLowercasedEmailTheProviderUsernameCarries(t *testing.T) {
-	email, err := Person(oidc.Claims{
+	email, err := dispatchMembers.Person(oidc.Claims{
 		Username:  "ExampleIdP_A.B+C@D.example",
 		Groups:    []string{"other-group", "dispatch-members"},
 		Providers: []string{"ExampleIdP"},
-	}, dispatchMembers)
+	})
 	if err != nil {
 		t.Fatalf("Person: %v", err)
 	}
@@ -26,18 +26,18 @@ func TestPersonIsTheLowercasedEmailTheProviderUsernameCarries(t *testing.T) {
 }
 
 func TestPersonOutsideTheGroupIsRefusedByName(t *testing.T) {
-	email, err := Person(oidc.Claims{
+	email, err := dispatchMembers.Person(oidc.Claims{
 		Username:  "ExampleIdP_contractor@d.example",
 		Groups:    []string{"other-group"},
 		Providers: []string{"ExampleIdP"},
-	}, dispatchMembers)
+	})
 	if !errors.Is(err, ErrNotMember) {
 		t.Fatalf("Person outside the group: err = %v, want ErrNotMember", err)
 	}
 	if email != "contractor@d.example" {
 		t.Fatalf("refused person = %q, want the email, so the refusal can name them", email)
 	}
-	if _, err := Person(oidc.Claims{Username: "ExampleIdP_x@d.example", Providers: []string{"ExampleIdP"}}, dispatchMembers); !errors.Is(err, ErrNotMember) {
+	if _, err := dispatchMembers.Person(oidc.Claims{Username: "ExampleIdP_x@d.example", Providers: []string{"ExampleIdP"}}); !errors.Is(err, ErrNotMember) {
 		t.Fatalf("Person in no group: err = %v, want ErrNotMember", err)
 	}
 }
@@ -53,14 +53,14 @@ func TestPersonRefusesAUsernameNoProviderIssued(t *testing.T) {
 		{Username: "ExampleIdP_two@at@d.example", Groups: []string{"dispatch-members"}, Providers: []string{"ExampleIdP"}},
 		{Username: "_sami@d.example", Groups: []string{"dispatch-members"}, Providers: []string{""}},
 	} {
-		if email, err := Person(claims, dispatchMembers); !errors.Is(err, ErrNoPerson) {
+		if email, err := dispatchMembers.Person(claims); !errors.Is(err, ErrNoPerson) {
 			t.Errorf("Person(%+v) = %q, %v; want ErrNoPerson", claims, email, err)
 		}
 	}
 }
 
 // workspace is the domain rule the Google tests sign in under.
-var workspace = SignInRule{Domain: "example.com"}
+var workspace = DomainRule{Domain: "example.com"}
 
 // googleAccount is a verified Google ID token's claims, as a domain-mode code flow reads them, for
 // an account of the Workspace domain example.com.
@@ -71,7 +71,7 @@ func googleAccount() oidc.Claims {
 // Under the domain rule a person is the lowercased email of a token whose hd is the domain and
 // whose email Google has verified.
 func TestPersonUnderTheDomainIsTheVerifiedEmailOfTheDomain(t *testing.T) {
-	email, err := Person(googleAccount(), workspace)
+	email, err := workspace.Person(googleAccount())
 	if err != nil || email != "a.person@example.com" {
 		t.Fatalf("Person = %q, %v; want a.person@example.com", email, err)
 	}
@@ -97,7 +97,7 @@ func TestPersonUnderTheDomainRefusesEachWayWithItsReason(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			claims := googleAccount()
 			tc.change(&claims)
-			email, err := Person(claims, workspace)
+			email, err := workspace.Person(claims)
 			if !errors.Is(err, tc.want) || email != tc.email {
 				t.Errorf("Person = %q, %v; want %q, %v", email, err, tc.email, tc.want)
 			}
@@ -114,10 +114,10 @@ func TestPersonUnderTheDomainRefusesEachWayWithItsReason(t *testing.T) {
 // nobody in, and the group rule reads none of the Workspace claims.
 func TestEachRuleReadsOnlyItsOwnClaims(t *testing.T) {
 	cognito := oidc.Claims{Username: "ExampleIdP_a@example.com", Groups: []string{"dispatch-members"}, Providers: []string{"ExampleIdP"}, Subject: "pool-subject"}
-	if _, err := Person(cognito, workspace); !errors.Is(err, ErrNoEmail) {
+	if _, err := workspace.Person(cognito); !errors.Is(err, ErrNoEmail) {
 		t.Errorf("a Cognito token under the domain rule: err = %v, want ErrNoEmail", err)
 	}
-	if _, err := Person(googleAccount(), dispatchMembers); !errors.Is(err, ErrNoPerson) {
+	if _, err := dispatchMembers.Person(googleAccount()); !errors.Is(err, ErrNoPerson) {
 		t.Errorf("a Google token under the group rule: err = %v, want ErrNoPerson", err)
 	}
 }

@@ -40,7 +40,7 @@ type membershipRig struct {
 // does, and returns the membership that renews it.
 func newMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
-	return newMembershipRigFor(t, SignInRule{Group: memberGroup}, memberClaims(memberGroup), "")
+	return newMembershipRigFor(t, GroupRule{Group: memberGroup}, "", memberClaims(memberGroup), "")
 }
 
 // memberDomain is the Workspace domain of memberEmail, the domain rule's.
@@ -62,14 +62,14 @@ func googleMemberClaims() map[string]any {
 // it.
 func newDomainMembershipRig(t *testing.T) *membershipRig {
 	t.Helper()
-	return newMembershipRigFor(t, SignInRule{Domain: memberDomain}, googleMemberClaims(), "google-subject")
+	return newMembershipRigFor(t, DomainRule{Domain: memberDomain}, memberDomain, googleMemberClaims(), "google-subject")
 }
 
-func newMembershipRigFor(t *testing.T, rule SignInRule, claims map[string]any, subject string) *membershipRig {
+func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, claims map[string]any, subject string) *membershipRig {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret", rule.Domain)
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), "dispatch-client", "dispatch-secret", hostedDomain)
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}

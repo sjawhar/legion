@@ -76,9 +76,9 @@ func (s *testPeopleStore) Record(_ context.Context, email string) error {
 func (s *testPeopleStore) SignIn(ctx context.Context, email, subject, refreshToken string, confirmedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership := s.people[email]
+	membership, existed := s.people[email]
 	if subject != "" {
-		if membership.Subject != "" && membership.Subject != subject {
+		if existed && membership.Subject != subject {
 			if err := s.sessions.RevokeSessions(ctx, email); err != nil {
 				return err
 			}

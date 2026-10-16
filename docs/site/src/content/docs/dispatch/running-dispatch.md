@@ -91,16 +91,19 @@ such record: the old holder of a reassigned address keeps the sessions they alre
 their cookie expires, 30 days after it was issued, unless the pool user is removed from
 `DISPATCH_SIGNIN_GROUP` or disabled.
 
-To move a deployment from one way of signing in to the other, in either direction, end the old
-issuer's sign-ins first: revoke the refresh tokens at the old issuer (sign people out at the
-Cognito pool, or remove the client's access at Google), then clear them in Dispatch's database and
-end every browser session along with them,
+Moving a deployment from the Cognito pool to a domain needs no extra step: the first sign-in
+under the domain records a subject the address's row did not hold before, which ends every
+session of the address by itself (the same check that ends a reassigned address's sessions,
+above). Moving the other way, from a domain back to the Cognito pool, does need one: the group
+sign-in path never records or compares a subject, so nothing ends the domain sessions on its own.
+End the old issuer's sign-ins first: revoke the refresh tokens at Google (remove the client's
+access), then clear them in Dispatch's database and end every browser session along with them,
 `update people set refresh_token = null, confirmed_at = null; update user_sessions set generation = generation + 1`,
 and start Dispatch with the new settings. Skipping the session step leaves a cookie issued before
-the switch valid: the first sign-in under the new issuer records a fresh confirmation for the
-address, and that cookie's generation still matches. Everyone then signs in again under the new
-issuer; a refresh token left from the old one would be refused at the first hourly confirmation,
-and is still redeemable at the old issuer until it is revoked there.
+the switch valid: the first sign-in under the pool records a fresh confirmation for the address,
+and that cookie's generation still matches. Everyone then signs in again under the new issuer; a
+refresh token left from the old one would be refused at the first hourly confirmation, and is
+still redeemable at the old issuer until it is revoked there.
 
 ## Running it on your machine
 

@@ -127,8 +127,8 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if opts.People == nil {
 		return nil, fmt.Errorf("BuildAppContext: People store required")
 	}
-	if opts.SignIn != nil && (opts.SignInRule.Group == "") == (opts.SignInRule.Domain == "") {
-		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInRule naming exactly one of a group or a domain")
+	if opts.SignIn != nil && opts.SignInRule == nil {
+		return nil, fmt.Errorf("BuildAppContext: SignIn requires a SignInRule")
 	}
 	if opts.Identity == nil {
 		return nil, fmt.Errorf("BuildAppContext: Identity required")
@@ -300,7 +300,7 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
-	email, err := identity.Person(session.Claims, r.ctx.SignInRule)
+	email, err := r.ctx.SignInRule.Person(session.Claims)
 	if err != nil {
 		slog.Warn("dispatch: sign-in refused", append(r.ctx.SignInRule.RefusalLogFields(session.Claims), "reason", err)...)
 		writeSignInRefusedPage(w, email, err)

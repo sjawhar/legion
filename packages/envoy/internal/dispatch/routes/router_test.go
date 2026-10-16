@@ -98,9 +98,9 @@ func (s *memoryPeopleStore) SignIn(ctx context.Context, email, subject, refreshT
 	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	membership := s.people[email]
+	membership, existed := s.people[email]
 	if subject != "" {
-		if membership.Subject != "" && membership.Subject != subject {
+		if existed && membership.Subject != subject {
 			if s.sessions == nil {
 				return errors.New("memoryPeopleStore: a sign-in under another subject has no sessions to end")
 			}
@@ -126,6 +126,9 @@ func (s *memoryPeopleStore) Confirm(_ context.Context, email, subject, refreshTo
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	membership := s.people[email]
+	if subject != "" && membership.Subject != subject {
+		return nil
+	}
 	membership.RefreshToken, membership.ConfirmedAt = refreshToken, confirmedAt
 	s.people[email] = membership
 	return nil
@@ -169,21 +172,21 @@ type signInRig struct {
 // newSignInRig is a router signing the members of rigGroup in through a fake Cognito sign-in pool.
 func newSignInRig(t *testing.T, serverURL string) *signInRig {
 	t.Helper()
-	return newSignInRigFor(t, serverURL, identity.SignInRule{Group: rigGroup})
+	return newSignInRigFor(t, serverURL, identity.GroupRule{Group: rigGroup}, "")
 }
 
 // newDomainSignInRig is a router signing the people of the Workspace domain rigDomain in through a
 // fake issuer that mints Google's claims.
 func newDomainSignInRig(t *testing.T) *signInRig {
 	t.Helper()
-	return newSignInRigFor(t, "", identity.SignInRule{Domain: rigDomain})
+	return newSignInRigFor(t, "", identity.DomainRule{Domain: rigDomain}, rigDomain)
 }
 
-func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule) *signInRig {
+func newSignInRigFor(t *testing.T, serverURL string, rule identity.SignInRule, hostedDomain string) *signInRig {
 	t.Helper()
 	issuer := oidctest.New(t)
 	issuer.EnableCodeFlow(issuer.PublishKey(t, "signing-key"), rigClientID, "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret", rule.Domain)
+	flow, err := oidc.NewCodeFlow(context.Background(), issuer.URL(), rigClientID, "dispatch-secret", hostedDomain)
 	if err != nil {
 		t.Fatalf("NewCodeFlow: %v", err)
 	}
@@ -536,6 +539,41 @@ func TestDomainSignInUnderAnotherSubjectEndsTheAddressSessions(t *testing.T) {
 	}
 	if membership, _ := rig.people.get(rigGoogleEmail); membership.Subject != "google-subject-2" {
 		t.Errorf("recorded subject %q, want google-subject-2", membership.Subject)
+	}
+}
+
+// A cookie from before the switch to domain mode — a row recording no subject at all, a
+// Cognito-era, header- or dev-recorded row, with a session already live — stops working the
+// first time the address signs in through the domain, even though no other Google account has
+// taken it yet.
+func TestDomainSignInEndsACookieFromBeforeTheSwitchToDomainMode(t *testing.T) {
+	rig := newDomainSignInRig(t)
+	if err := rig.people.SignIn(context.Background(), rigGoogleEmail, "", "old-refresh-token", rig.clock()); err != nil {
+		t.Fatalf("sign in the pre-switch row: %v", err)
+	}
+	generation, err := rig.sessions.EnsureSession(context.Background(), rigGoogleEmail)
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+	before, err := http.ParseSetCookie(auth.IssueSessionCookie(rigGoogleEmail, generation, "signing-key", true))
+	if err != nil {
+		t.Fatalf("parse session cookie: %v", err)
+	}
+	if response := rig.whoami(before); response.Code != http.StatusOK {
+		t.Fatalf("the pre-switch cookie before signing in: whoami %d %s, want 200", response.Code, response.Body.String())
+	}
+	after := sessionCookie(rig.signIn(t, googleClaims("google-subject-1")))
+	if after == nil {
+		t.Fatal("a member of the domain did not receive a session cookie")
+	}
+	if response := rig.whoami(before); response.Code != http.StatusUnauthorized {
+		t.Errorf("the pre-switch cookie: whoami %d %s, want 401", response.Code, response.Body.String())
+	}
+	if response := rig.whoami(after); response.Code != http.StatusOK {
+		t.Errorf("the domain sign-in's own cookie: whoami %d %s, want 200", response.Code, response.Body.String())
+	}
+	if membership, _ := rig.people.get(rigGoogleEmail); membership.Subject != "google-subject-1" {
+		t.Errorf("recorded subject %q, want google-subject-1", membership.Subject)
 	}
 }
 

@@ -268,7 +268,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	person := identity.CookieIdentity{
 		SigningKey: "signing-key",
 		Sessions:   rig.sessions,
-		Membership: &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: identity.SignInRule{Group: "dispatch-members"}},
+		Membership: &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: identity.GroupRule{Group: "dispatch-members"}},
 	}
 	broker := events.NewBroker()
 	rig.documents = docs.New(docs.Deps{Store: database, Events: broker, Identity: person, Settle: time.Hour})
