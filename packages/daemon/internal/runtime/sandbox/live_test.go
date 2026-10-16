@@ -97,6 +97,9 @@ var liveChecks = []liveCheck{
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
 	{"independent-provision", (*liveRig).checkIndependentProvision, nil},
+	{"repository-cache", (*liveRig).checkRepositoryCache, nil},
+	{"cache-second-pod", (*liveRig).checkCacheSecondPod, nil},
+	{"cache-lost-volume", (*liveRig).checkCacheLostVolume, nil},
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
 	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
@@ -775,6 +778,11 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		// replaces while the displaced role still runs in it (displaced).
 		{"displaced", "S4A-6", "S4A-6", claim.RoleArchitect},
 		{"displacer", "S4A-6", "S4A-6", claim.RoleImplementer},
+		// cache-a and cache-b are two more issue pods on the run's repository: cache-a launched
+		// before the repository has a cache (repository-cache), cache-b while its cache is Ready
+		// (cache-second-pod) and again after its volume is lost (cache-lost-volume).
+		{"cache-a", "S4A-8", "S4A-8", claim.RoleArchitect},
+		{"cache-b", "S4A-9", "S4A-9", claim.RoleArchitect},
 	} {
 		token, err := claim.NewToken(env.claimProject, c.issue, c.role)
 		if err != nil {
