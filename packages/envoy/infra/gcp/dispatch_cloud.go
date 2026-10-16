@@ -126,10 +126,12 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	if err != nil {
 		return nil, err
 	}
+	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
+	// cluster; IAM refuses a member of a pool that does not exist yet.
 	principal := pulumi.All(project.Number(), project.ProjectId().Elem()).ApplyT(func(values []interface{}) string {
 		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/%s/sa/%s", values[0].(string), values[1].(string), s.namespace, s.hostname)
 	}).(pulumi.StringOutput)
-	_, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: args.NatsSeedSecret, Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child)
+	_, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: args.NatsSeedSecret, Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 	if err != nil {
 		return nil, err
 	}

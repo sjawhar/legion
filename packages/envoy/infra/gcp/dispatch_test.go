@@ -175,6 +175,17 @@ func TestDispatchRegistersItsCloudResources(t *testing.T) {
 	require.Equal(t, want, got)
 }
 
+// The accessor's member is a principal in the cluster's Workload Identity pool, which Google
+// creates with the cluster; IAM refuses a member of a pool that does not exist yet.
+func TestDispatchSeedAccessorWaitsForTheCluster(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	deps := m.One(t, "gcp:secretmanager/secretIamMember:SecretIamMember").RPC.GetDependencies()
+	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch",
+		"the seed accessor is granted after the cluster that creates its principal's pool")
+}
+
 func TestDispatchRegistersKubernetesResources(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
