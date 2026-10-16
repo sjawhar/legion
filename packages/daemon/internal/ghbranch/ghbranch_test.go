@@ -104,6 +104,34 @@ func TestCreateMakesTheBranchAtTheNamedBase(t *testing.T) {
 	}
 }
 
+const decoyCommit = "dec0de0123456789abcdef0123456789abcdef02"
+
+// A branch name git accepts (`git check-ref-format --branch`) may hold characters a URL reads as
+// its own syntax: `#` starts a fragment and `%` an escape. The base is read as that one ref and no
+// other, so a ref those characters would turn it into, at another commit (decoy), is never where
+// the branch starts, and a base the URL cannot carry unescaped is read all the same.
+func TestCreateReadsABaseWhoseNameHoldsURLSyntaxAsItself(t *testing.T) {
+	for _, tc := range []struct{ base, decoy string }{
+		{"release#stable", "release"},
+		{"release%2Fstable", "release/stable"},
+		{"release%stable", "release"},
+		{"hotfix/#12", "hotfix/"},
+	} {
+		t.Run(tc.base, func(t *testing.T) {
+			g := &github{refs: map[string]string{tc.base: baseCommit, tc.decoy: decoyCommit}, create: func() (int, string) { return http.StatusCreated, `{}` }}
+			if err := Create(context.Background(), widgets(g.serve(t)), ghrepo.MustParse("acme/widgets"), "legion/WIDGETS-12", tc.base); err != nil {
+				t.Fatalf("Create at %q: %v", tc.base, err)
+			}
+			if got := g.reads(); !slices.Equal(got, []string{"/repos/acme/widgets/git/ref/heads/" + tc.base}) {
+				t.Fatalf("read %q, want the ref %q alone", got, tc.base)
+			}
+			if got := g.creates[0]["sha"]; got != baseCommit {
+				t.Fatalf("created at %s, want %q's %s, not %q's %s", got, tc.base, baseCommit, tc.decoy, decoyCommit)
+			}
+		})
+	}
+}
+
 // A base GitHub does not have is refused naming it, before anything is created.
 func TestCreateRefusesABaseGitHubDoesNotHave(t *testing.T) {
 	g := &github{refs: map[string]string{"main": baseCommit}}
