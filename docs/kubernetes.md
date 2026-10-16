@@ -137,6 +137,12 @@ wait for the role's launcher before any init container runs: `worker_boot_timeou
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
 "Liveness rules" below); a launch whose launcher has not connected by then fails and is counted.
+The image probe's own wait is derived from the same key: each attempt's budget is
+`slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
+60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
+— so the capacity stop below (under "The image is probed before it publishes") always has room,
+within one attempt, to see a probe pod's Unschedulable age pass the boot timeout. The boot log
+names the derived bound when it applies, and so does `legion start --check-config`.
 Oh My Pi's boot after it fits the registration deadline,
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals` (360 s by default). The
 stage 4a harness's `image-probe` and `root-ready` checks (`scripts/e2e/README.md`) are where a
@@ -1925,8 +1931,11 @@ A pool with no room for the probe pod itself does not refuse the boot. The probe
 `Pending` with `PodScheduled=False Unschedulable`; once it has been so for longer than
 `worker_boot_timeout_seconds` — the same bound the liveness rules give an issue pod, long enough
 for Karpenter to add a node when the pool's limits allow one, so a cold pool scaling up is not
-read as full — the attempt ends waiting on capacity (`stuck`, `internal/runtime/sandbox/probe.go`),
-its Sandbox deleted, and the daemon logs `boot probe is waiting on capacity; running it again` with
+read as full — the attempt ends waiting on capacity (`stuck`, `internal/runtime/sandbox/probe.go`).
+That stop can always fire within the attempt: the attempt's own budget is derived from
+`worker_boot_timeout_seconds` whenever `slow_command_timeout_seconds` would otherwise leave it less
+room (`ProbeBudget`, "Image size and pull time" above), so the attempt outlives the boot timeout by
+construction. Ending the attempt, its Sandbox deleted, the daemon logs `boot probe is waiting on capacity; running it again` with
 `probe=worker image`, the pod's name and the scheduler's own reason in `detail` (`probe pod
 legion-probe-<project>-<digest12> is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu …`)
 and `retryIn`, the probe's longest interval, 5 min. It then creates the probe Sandbox again, as many

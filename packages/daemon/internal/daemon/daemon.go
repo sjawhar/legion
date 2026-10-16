@@ -180,6 +180,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		logPlugins(log, plan.plugins, plan.pluginsSource)
+		logProbeBudget(log, cfg)
 	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "prompts")

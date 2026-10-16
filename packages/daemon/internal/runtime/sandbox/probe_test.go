@@ -771,6 +771,85 @@ func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
 	})
 }
 
+// The capacity stop (stuck) only fires once a probe pod's Unschedulable age passes the boot
+// timeout, and an attempt only sees that if its own budget outlives the real wall-clock time that
+// takes — the race LEGION-636 found: a deployment whose worker_boot_timeout_seconds reached
+// slow_command_timeout_seconds gave every attempt's budget no room to see it, so the daemon's six
+// attempts all timed out "still Pending" instead. Each case starts a pod Unschedulable from its
+// creation (age 0) and, after a real delay standing in for the boot timeout's wall-clock cost,
+// jumps the rig's clock once and nudges the pod so the attempt's wait notices without waiting on
+// the recheck interval; a budget shorter than that delay can never observe the jump.
+func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing.T) {
+	const bootTimeout = 600 * time.Millisecond
+	ageOutAfter := func(t *testing.T, g *probeRig, delay time.Duration) {
+		t.Helper()
+		stop := make(chan struct{})
+		t.Cleanup(func() { close(stop) })
+		go func() {
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+			g.advance(bootTimeout + time.Second)
+			if pod := g.pod(probeSandboxName); pod != nil {
+				g.update(pod, func(*corev1.Pod) {})
+			}
+		}()
+	}
+
+	t.Run("a budget that outlives the boot timeout ends the attempt waiting on capacity", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged); o.BootTimeout = bootTimeout }))
+		g.with(func() { g.log = okLine(3) + "\n" })
+		var pods atomic.Int32
+		g.finishes(func(p *corev1.Pod) {
+			if pods.Add(1) == 1 {
+				unschedulable(0)(p)
+				return
+			}
+			p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+			}}}
+		})
+		ageOutAfter(t, g, bootTimeout)
+		p := probeOptions(t)
+		p.Budget = bootTimeout + 300*time.Millisecond // ProbeBudget's shape: the boot timeout plus a margin.
+		p.Retry.Attempts = 1
+
+		report, err := g.r.ProbeImage(g.ctx, p)
+
+		if err != nil {
+			t.Fatalf("ProbeImage = %v, want the pass after one capacity wait", err)
+		}
+		if report.CapacityWaits != 1 {
+			t.Errorf("report = %d capacity waits, want 1", report.CapacityWaits)
+		}
+		if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 1 {
+			t.Errorf("logged %d capacity waits, want 1:\n%s", got, logged.String())
+		}
+	})
+
+	t.Run("a budget below the boot timeout never sees the capacity wait", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged); o.BootTimeout = bootTimeout }))
+		g.finishes(unschedulable(0))
+		// The pod ages out exactly as above, but the one attempt's budget has run out by then.
+		ageOutAfter(t, g, bootTimeout)
+		p := probeOptions(t)
+		p.Budget = 300 * time.Millisecond // slow_command_timeout_seconds's old shape: below the boot timeout.
+		p.Retry.Attempts = 1
+
+		err := g.probe(p)
+
+		wantContains(t, err, "the worker image probe never completed within its retry budget (1 attempts)",
+			"probe pod "+probeSandboxName+" still Pending after 300ms")
+		if strings.Contains(logged.String(), "waiting on capacity") {
+			t.Errorf("a budget below the boot timeout read a capacity wait it never had time to see:\n%s", logged.String())
+		}
+	})
+}
+
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
 // with provider keys configured it exports the providers Secret's keys as the worker's shim does.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {

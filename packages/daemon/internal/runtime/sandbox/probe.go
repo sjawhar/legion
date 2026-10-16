@@ -68,9 +68,12 @@ type ImageProbe struct {
 	// Contract is the daemon API contract the image's plugin must declare: the daemon's own
 	// DaemonAPIVersion.
 	Contract int
-	// Budget is how long one attempt waits for the probe pod to finish
-	// (slow_command_timeout_seconds). The Sandbox's shutdownTime is the budget and one API call
-	// after it, so the log of a pod that finished at the budget is still there to read.
+	// Budget is how long one attempt waits for the probe pod to finish: slow_command_timeout_seconds,
+	// or, when worker_boot_timeout_seconds leaves it less than a minute of room, worker_boot_timeout_seconds
+	// plus that minute instead (internal/daemon's ProbeBudget), so the capacity stop below (stuck)
+	// can always see a probe pod's Unschedulable age pass the boot timeout within one attempt. The
+	// Sandbox's shutdownTime is the budget and one API call after it, so the log of a pod that
+	// finished at the budget is still there to read.
 	Budget time.Duration
 	// Retry waits out the attempts that say nothing about the image: bootprobe.Daemon at boot.
 	Retry bootprobe.Retry
@@ -410,8 +413,10 @@ const providersMountRecheck = 15 * time.Second
 // once it has been so for longer than the boot timeout — the same bound the liveness rules give an
 // issue pod (observe.go), long enough for Karpenter to add a node under the pool's limits when it
 // can, so a cold pool scaling up is not mistaken for a full one — rather than counted against the
-// attempt budget, since a full pool says nothing about the image; or a providers Secret it cannot
-// mount, which leaves the pod Pending, never Failed, and which its events say. They are read at
+// attempt budget, since a full pool says nothing about the image — reachable within the attempt by
+// construction, since the attempt's budget (ImageProbe.Budget, internal/daemon's ProbeBudget)
+// always clears the boot timeout by at least a minute; or a providers Secret it cannot mount,
+// which leaves the pod Pending, never Failed, and which its events say. They are read at
 // most every providersMountRecheck; mountRead holds when they last were.
 //
 // Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
