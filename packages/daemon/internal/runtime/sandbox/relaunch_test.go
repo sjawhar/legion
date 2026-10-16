@@ -23,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -1161,7 +1160,7 @@ const burstImage = "ghcr.io/sjawhar/legion-worker@sha256:0ld00000000000000000000
 func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *testing.T) {
 	const issues = 8
 	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer}
-	g := newRig(t, nil, withBreakableWatches(), withOptions(func(o *Options) { o.BootTimeout = 15 * time.Second }))
+	g := newRig(t, nil, withBreakableFeeds(), withOptions(func(o *Options) { o.BootTimeout = 15 * time.Second }))
 	type role struct {
 		spec    runtime.SpawnSpec
 		machine *supervise.Machine
@@ -1194,17 +1193,11 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 		}
 	}
 
-	var throttling, refusingFeeds atomic.Bool
-	var sent, tooMany, serverError, feedRefusals atomic.Int64
+	var throttling atomic.Bool
+	var sent, tooMany, serverError atomic.Int64
 	throttle := func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
 		switch a.GetVerb() {
 		case "get", "create", "update", "patch", "delete":
-		case "list":
-			if refusingFeeds.Load() {
-				feedRefusals.Add(1)
-				return true, nil, apierrors.NewTooManyRequests("the request has been limited by the API server's flow control", 1)
-			}
-			return false, nil, nil
 		default:
 			return false, nil, nil
 		}
@@ -1228,20 +1221,10 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 	g.dyn.PrependReactor("*", "sandboxes", throttle)
 	g.kube.PrependReactor("*", "secrets", throttle)
 	g.kube.PrependReactor("*", "pods", throttle)
-	refuseWatch := func(k8stesting.Action) (bool, watch.Interface, error) {
-		if !refusingFeeds.Load() {
-			return false, nil, nil
-		}
-		feedRefusals.Add(1)
-		return true, nil, apierrors.NewInternalError(errors.New(etcdThrottle))
-	}
-	g.dyn.PrependWatchReactor("sandboxes", refuseWatch)
-	g.kube.PrependWatchReactor("pods", refuseWatch)
 	throttling.Store(true)
-	refusingFeeds.Store(true)
-	g.breakWatches()
+	g.refuseFeeds(apierrors.NewInternalError(errors.New(etcdThrottle)))
 	testwait.Eventually(t, "the stores' feeds to fail", func() bool { return g.r.sandboxFeed.check() != nil && g.r.podFeed.check() != nil })
-	time.AfterFunc(500*time.Millisecond, func() { refusingFeeds.Store(false) })
+	time.AfterFunc(500*time.Millisecond, func() { g.refuseFeeds(nil) })
 
 	relaunched := make(chan error, len(all))
 	for _, r := range all {
@@ -1275,11 +1258,12 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 	if tooMany.Load() == 0 || serverError.Load() == 0 {
 		t.Fatalf("the throttle answered %d requests 429 and %d 500 of %d sent; want some of each", tooMany.Load(), serverError.Load(), sent.Load())
 	}
-	if feedRefusals.Load() == 0 {
+	feedRefusals := g.refuseFeeds(nil)
+	if feedRefusals == 0 {
 		t.Fatal("the server refused none of the informers' lists and watches")
 	}
 	t.Logf("the throttle answered %d requests 429 and %d 500 of %d sent, and refused %d of the informers' lists and watches",
-		tooMany.Load(), serverError.Load(), sent.Load(), feedRefusals.Load())
+		tooMany.Load(), serverError.Load(), sent.Load(), feedRefusals)
 }
 
 // A write the server applied and answered timed out (a 504) is sent again and refused as already

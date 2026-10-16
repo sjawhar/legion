@@ -238,9 +238,9 @@ type rig struct {
 
 	mu      sync.Mutex
 	actions []action
-	// watches are the informers' watches withBreakableWatches served, for breakWatches to end.
-	watches []watch.Interface
-	uids    atomic.Int64
+	// feeds, when set, are the informers' feeds withBreakableFeeds serves.
+	feeds *breakableFeeds
+	uids  atomic.Int64
 
 	// hold stops the controller creating pods; autoStart makes a pod it creates scheduled on a
 	// node, past workspace-init, and Running at once.
@@ -933,17 +933,47 @@ func withLaggingSandboxInformer(delay time.Duration) rigOption {
 	}
 }
 
-// withBreakableWatches serves every Sandbox and pod watch from the trackers through watchers the
-// rig keeps, so breakWatches can end the informers' watches, as an API server ends a watch, and
-// make them watch or list again.
-func withBreakableWatches() rigOption {
+// breakableFeeds is what withBreakableFeeds keeps of the informers' feeds: the watches it served,
+// for refuseFeeds to end, the refusal their next lists and watches are answered with (nil for
+// none), and how many it answered so.
+type breakableFeeds struct {
+	mu      sync.Mutex
+	watches []watch.Interface
+	refusal error
+	refused int
+}
+
+// refuse is the refusal a list or watch is answered with now, counted, or nil.
+func (f *breakableFeeds) refuse() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.refusal != nil {
+		f.refused++
+	}
+	return f.refusal
+}
+
+// withBreakableFeeds serves every Sandbox and pod list and watch the informers make through
+// reactors refuseFeeds controls: a watch from the tracker, kept so refuseFeeds can end it as an API
+// server ends a watch, and a list from the tracker, unless a refusal stands.
+func withBreakableFeeds() rigOption {
 	return func(g *rig, _ *Options) {
+		g.feeds = &breakableFeeds{}
 		for _, served := range []struct {
 			fake     *k8stesting.Fake
 			tracker  k8stesting.ObjectTracker
 			resource string
 		}{{&g.dyn.Fake, g.dyn.Tracker(), "sandboxes"}, {&g.kube.Fake, g.kube.Tracker(), "pods"}} {
+			served.fake.PrependReactor("list", served.resource, func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+				if err := g.feeds.refuse(); err != nil {
+					return true, nil, err
+				}
+				return false, nil, nil
+			})
 			served.fake.PrependWatchReactor(served.resource, func(a k8stesting.Action) (bool, watch.Interface, error) {
+				if err := g.feeds.refuse(); err != nil {
+					return true, nil, err
+				}
 				var opts metav1.ListOptions
 				if w, ok := a.(k8stesting.WatchActionImpl); ok {
 					opts = w.ListOptions
@@ -952,22 +982,31 @@ func withBreakableWatches() rigOption {
 				if err != nil {
 					return true, nil, err
 				}
-				g.mu.Lock()
-				g.watches = append(g.watches, w)
-				g.mu.Unlock()
+				g.feeds.mu.Lock()
+				g.feeds.watches = append(g.feeds.watches, w)
+				g.feeds.mu.Unlock()
 				return true, w, nil
 			})
 		}
 	}
 }
 
-// breakWatches ends every watch withBreakableWatches served.
-func (g *rig) breakWatches() {
-	g.mu.Lock()
-	watches := g.watches
-	g.watches = nil
-	g.mu.Unlock()
-	for _, w := range watches {
-		w.Stop()
+// refuseFeeds answers the informers' next lists and watches with refusal, and with refusal set
+// ends every watch withBreakableFeeds served, so the informers list and watch again; nil serves
+// them again. It returns how many lists and watches were refused so far.
+func (g *rig) refuseFeeds(refusal error) int {
+	g.feeds.mu.Lock()
+	g.feeds.refusal = refusal
+	refused := g.feeds.refused
+	watches := g.feeds.watches
+	if refusal != nil {
+		g.feeds.watches = nil
 	}
+	g.feeds.mu.Unlock()
+	if refusal != nil {
+		for _, w := range watches {
+			w.Stop()
+		}
+	}
+	return refused
 }
