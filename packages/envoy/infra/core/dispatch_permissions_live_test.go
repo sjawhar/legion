@@ -355,10 +355,23 @@ func newDispatchGitHub(t *testing.T) *dispatchGitHub {
 		fake.mu.Lock()
 		fake.paths = append(fake.paths, path)
 		fake.mu.Unlock()
-		switch path {
-		case "GET /app":
+		switch {
+		case path == "GET /app":
 			_, _ = fmt.Fprint(w, `{"id":1,"slug":"example","name":"Example"}`)
-		case "GET /app/installations", "GET /app/hook/deliveries":
+		case path == "GET /app/installations":
+			_, _ = fmt.Fprint(w, `[{"id":1,"app_slug":"example","account":{"login":"example"},"permissions":{"actions":"read","pull_requests":"read"}}]`)
+		case path == "GET /repos/acme/widgets/installation":
+			_, _ = fmt.Fprint(w, `{"id":1,"app_slug":"example","permissions":{"actions":"read","pull_requests":"read"}}`)
+		case path == "POST /app/installations/1/access_tokens":
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprintf(w, `{"token":"example-installation-token","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+		case path == "GET /installation/repositories":
+			_, _ = fmt.Fprint(w, `{"total_count":1,"repositories":[{"full_name":"acme/widgets"}]}`)
+		case path == "POST /graphql":
+			_, _ = fmt.Fprint(w, `{"data":{"search":{"issueCount":0,"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}`)
+		case strings.HasPrefix(path, "GET /repos/acme/widgets/actions/workflows/"):
+			_, _ = fmt.Fprint(w, `{"total_count":0,"workflow_runs":[]}`)
+		case path == "GET /app/hook/deliveries":
 			_, _ = fmt.Fprint(w, "[]")
 		default:
 			t.Errorf("unexpected GitHub App request %s", path)
