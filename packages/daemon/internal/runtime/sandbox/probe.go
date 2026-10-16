@@ -545,9 +545,9 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 }
 
 // lastBytes reads r to its end, keeping only the last keep bytes (one buffer of 2×keep, compacted
-// in place), and answers that tail: with a leading … and its partial first line (everything up to
-// and including the first \n) dropped when anything of r was cut, unchanged when r was keep bytes
-// or shorter.
+// in place), and answers that tail: with a leading … line (everything up to and including the
+// first \n dropped, so what remains starts on its own line) when anything of r was cut, unchanged
+// when r was keep bytes or shorter.
 func lastBytes(r io.Reader, keep int) (string, error) {
 	buf := make([]byte, 0, 2*keep)
 	chunk := make([]byte, keep)
@@ -572,7 +572,7 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
 		buf = buf[i+1:]
 	}
-	return "…" + string(buf), nil
+	return "…\n" + string(buf), nil
 }
 
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.

@@ -814,7 +814,7 @@ func TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout(t *testing
 		})
 		ageOutAfter(t, g, bootTimeout)
 		p := probeOptions(t)
-		p.Budget = bootTimeout + 300*time.Millisecond // ProbeBudget's shape: the boot timeout plus a margin.
+		p.Budget = bootTimeout + time.Second // ProbeBudget's shape: the boot timeout plus a margin that outlasts the rig's recheckInterval.
 		p.Retry.Attempts = 1
 
 		report, err := g.r.ProbeImage(g.ctx, p)
@@ -977,13 +977,13 @@ func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
 		if !strings.HasSuffix(got, ok+"\n") {
 			t.Fatalf("lastBytes result does not end with the OK line: %q", got)
 		}
-		if want := keep + len("…"); len(got) > want {
+		if want := keep + len("…\n"); len(got) > want {
 			t.Fatalf("len(lastBytes result) = %d, want at most %d", len(got), want)
 		}
-		if !strings.HasPrefix(got, "…") {
-			t.Fatalf("lastBytes result does not start with …: %q", got)
+		if !strings.HasPrefix(got, "…\n") {
+			t.Fatalf("lastBytes result does not start with …\\n: %q", got)
 		}
-		rest := strings.TrimPrefix(got, "…")
+		rest := strings.TrimPrefix(got, "…\n")
 		cut := len(full) - len(rest)
 		if cut == 0 || full[cut-1] != '\n' {
 			t.Fatalf("lastBytes kept a partial first line: cut at %d, preceding byte %q", cut, full[cut-1])

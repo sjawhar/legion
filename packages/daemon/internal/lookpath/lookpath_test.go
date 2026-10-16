@@ -21,6 +21,14 @@ func TestOnReadsThePATHItIsGiven(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(bin, "dir"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	workdir := t.TempDir()
+	t.Chdir(workdir)
+	if err := os.MkdirAll(filepath.Join(workdir, "relative", "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, "relative", "bin", "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	searchPath := "relative/bin:" + bin
 	if got, ok := On(searchPath, "tool"); !ok || got != filepath.Join(bin, "tool") {
 		t.Errorf("On(tool) = %q, %t, want %s", got, ok, filepath.Join(bin, "tool"))
@@ -33,8 +41,12 @@ func TestOnReadsThePATHItIsGiven(t *testing.T) {
 	if _, ok := On("", "tool"); ok {
 		t.Error("On found tool on an empty PATH")
 	}
-	if _, ok := On("relative/bin", "tool"); ok {
-		t.Error("On found tool on a relative PATH element alone")
+	if got, ok := On("relative/bin", "tool"); ok {
+		t.Errorf("On(relative/bin) = %q, %t, want none: a relative PATH element alone is skipped even though it resolves", got, ok)
+	}
+	absBin := filepath.Join(workdir, "relative", "bin")
+	if got, ok := On(absBin, "tool"); !ok || got != filepath.Join(absBin, "tool") {
+		t.Errorf("On(%s) = %q, %t, want %s", absBin, got, ok, filepath.Join(absBin, "tool"))
 	}
 }
 

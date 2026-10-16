@@ -75,11 +75,13 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   [the probe subsection](#the-image-is-probed-before-it-publishes)) requires of the image, each outside
   `HOME` for the same reason: the language servers Oh My Pi's LSP tools start when a working directory
   carries their root markers — `gopls` (built static in the Dockerfile's `go` stage, at
-  `/usr/local/bin/gopls`), `typescript-language-server` and `pyright-langserver`, the latter two npm
-  global packages under `/opt/node/lib/node_modules` with their launchers (and TypeScript's `tsc` and
-  `tsserver`, and the `pyright` CLI) linked at `/usr/local/bin`. TypeScript is pinned to the version
-  this repository's lockfile holds, since `typescript-language-server` runs `tsserver`, which TypeScript
-  7 no longer ships; the server resolves the TypeScript installed beside it unless the repository's own
+  `/usr/local/bin/gopls`), `typescript-language-server` and `pyright-langserver`, the latter two
+  installed under `/opt/language-servers/node_modules` by `npm ci --ignore-scripts` from
+  `packages/daemon/docker/language-servers`'s own `package.json` and `package-lock.json` (the pins live
+  in that `package.json`), with their launchers (and TypeScript's `tsc` and `tsserver`, and the
+  `pyright` CLI) linked at `/usr/local/bin`. TypeScript stays on this repository's own major, since
+  `typescript-language-server` runs `tsserver`, which TypeScript 7 no longer ships; the server resolves
+  the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
   on it), `curl`, `wget`, `jq`, `ssh-keygen` (from `openssh-client`, which also brings `ssh`, `scp` and
