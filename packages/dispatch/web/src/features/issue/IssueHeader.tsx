@@ -601,17 +601,15 @@ export function IssueHeader({
           )}
           {/* The repository is where the work goes, like the parent, so it sits in this rail,
               which scrolls rather than wrapping: a repository name can be long, and the state
-              row above must keep every control on one row at a phone width. */}
-          <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
-            <span className="font-medium">Repository:</span>
-            <RepoControl
-              disabled={isClosed || updateIssue.isPending}
-              issueKey={issue.key}
-              project={issue.project}
-              repo={issue.repo}
-              resolvedRepo={issue.resolved_repo}
-            />
-          </div>
+              row above must keep every control on one row at a phone width. An issue whose
+              project maps no repository has no item here. */}
+          <RepoControl
+            disabled={isClosed || updateIssue.isPending}
+            issueKey={issue.key}
+            project={issue.project}
+            repo={issue.repo}
+            resolvedRepo={issue.resolved_repo}
+          />
           <IssueComponentsLine issue={issue} />
           {issue.external_links.map((link) => (
             <div className="flex shrink-0 items-center" key={link.url}>

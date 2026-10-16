@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 
 import { ApiError, api } from "../../api/client";
@@ -101,8 +101,11 @@ function CachedControl(): ReactNode {
   );
 }
 
-function renderControl(own: { repo: string | null; resolvedRepo: string | null }) {
-  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue(mappings);
+function renderControl(
+  own: { repo: string | null; resolvedRepo: string | null },
+  mapped: RepoProject[] = mappings
+) {
+  const listRepoProjects = spyOn(api, "listRepoProjects").mockResolvedValue(mapped);
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
@@ -204,10 +207,33 @@ test("RepoControl sends null for Inherit", async () => {
   }
 });
 
-test("RepoControl says No repository when nothing resolves", () => {
-  const { unmount } = renderControl({ repo: null, resolvedRepo: null });
+// With nothing resolved the control cannot tell from the issue whether its project maps any
+// repository, so it reads the mappings at once: one is there to pick, so the badge says so.
+test("RepoControl says No repository when nothing resolves in a project that maps one", async () => {
+  const { listRepoProjects, unmount } = renderControl({ repo: null, resolvedRepo: null });
   try {
-    expect(screen.getByText("No repository", { selector: "span" })).toBeTruthy();
+    expect(await screen.findByText("No repository", { selector: "span" })).toBeTruthy();
+    expect(screen.getByText("Repository:")).toBeTruthy();
+    expect(listRepoProjects).toHaveBeenCalledTimes(1);
+  } finally {
+    unmount();
+  }
+});
+
+// A project that maps no repository offers nothing to pick, so the details rail carries no
+// repository item at all.
+test("RepoControl shows nothing for an issue whose project maps no repository", async () => {
+  const others = mappings.filter((mapping) => mapping.project !== "CORE");
+  const { queryClient, unmount } = renderControl({ repo: null, resolvedRepo: null }, others);
+  try {
+    // The mappings are read at once; once they are in and React has rendered them, the control
+    // has decided.
+    await waitFor(() =>
+      expect(queryClient.getQueryData<RepoProject[]>(["repo-projects"])).toEqual(others)
+    );
+    await act(async () => {});
+    expect(screen.queryByRole("combobox", { name: "Repository of CORE-1" })).toBeNull();
+    expect(screen.queryByText("Repository:")).toBeNull();
   } finally {
     unmount();
   }
