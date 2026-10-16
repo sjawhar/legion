@@ -17567,6 +17567,7 @@ async function executeDispatchTool(input) {
       }
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
+      const sentLinks = requestedLinks === undefined ? undefined : requestedLinks.length === 0 ? [] : [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))];
       let after;
       try {
         after = await client.updateIssue(issueKey, {
@@ -17578,9 +17579,7 @@ async function executeDispatchTool(input) {
           ...parent === undefined ? {} : { parent: parent === "" ? null : parent },
           ...blockedBy === undefined ? {} : { blocked_by: blockedBy },
           ...components === undefined ? {} : { components },
-          ...requestedLinks === undefined ? {} : requestedLinks.length === 0 ? { external_links: [] } : {
-            external_links: [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))]
-          },
+          ...sentLinks === undefined ? {} : { external_links: sentLinks },
           actor
         });
       } catch (error48) {
