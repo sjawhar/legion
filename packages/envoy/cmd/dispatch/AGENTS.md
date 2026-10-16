@@ -212,18 +212,21 @@ write identity errors with `identity.WriteError`.
   them. The authorization and token endpoints come from the issuer's discovery
   document, read at boot under `oidc.DiscoveryTimeout`. Those boot checks, the
   discovery and the request identity main builds live in
-  `cmd/dispatch/signin.go`, and `identity.SignInRule` (the group or the domain)
-  carries the choice to the router and `identity.Membership`.
-  `identity.Person` reads only its rule's issuer's claims. Under a group it
-  names the person by the email in the pool username (`<provider>_<email>`, the
-  provider one the ID token's `identities` names), never by the `email` claim,
-  which a person can write, and admits only a member of `DISPATCH_SIGNIN_GROUP`
-  (`cognito:groups`); anyone else gets a 403 page naming them. Under a domain
-  the code flow, built with the domain (`oidc.NewCodeFlow`'s hosted domain),
-  asks Google for offline access with `prompt=consent` and `hd`, and reads
-  `email`, `email_verified` and `hd` from the verified ID token itself
-  (`readWorkspaceClaims`; `Verify`, shared with pods' tokens and the listener,
-  reads none of them); `Person` admits the lowercased `email` of a token whose
+  `cmd/dispatch/signin.go`, and `identity.SignInRule` — an interface with two
+  implementations, `identity.GroupRule` and `identity.DomainRule`, which
+  `signInRule` chooses between once from boot's settings — carries the choice
+  to the router and `identity.Membership`; each implementation's `Person`
+  method reads only its own issuer's claims. Under a group it names the
+  person by the email in the pool username (`<provider>_<email>`, the
+  provider one the ID token's `identities` names), never by the `email`
+  claim, which a person can write, and admits only a member of
+  `DISPATCH_SIGNIN_GROUP` (`cognito:groups`); anyone else gets a 403 page
+  naming them. Under a domain the code flow, built with the domain
+  (`oidc.NewCodeFlow`'s hosted domain), asks Google for offline access with
+  `prompt=consent` and `hd`, and reads `email`, `email_verified` and `hd`
+  from the verified ID token itself (`readWorkspaceClaims`; `Verify`, shared
+  with pods' tokens and the listener, reads none of them); `DomainRule`'s
+  `Person` admits the lowercased `email` of a token whose
   `hd` is the domain and whose email is verified, and refuses anyone else with
   a reason on the 403 page (`ErrNotInDomain`, `ErrEmailNotVerified`,
   `ErrNoEmail`). The callback records the person in `people` with the issuer's
@@ -389,7 +392,7 @@ the table says human only.
 | --- | --- | --- | --- |
 | `/api/v1` | GET | public | List every `/api/v1` route with method, auth, and purpose. |
 | `/auth/start` | GET | public | Start Google sign-in at the sign-in issuer (the Cognito pool, or Google for `DISPATCH_SIGNIN_DOMAIN`, with offline access, `prompt=consent` and `hd`); `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `identity.Person` admits under `SignInRule`: a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie (`issueSession`). |
+| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `SignInRule.Person` admits (`GroupRule` or `DomainRule`): a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie (`issueSession`). |
 | `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the issuer's own session is left alone. |
 | `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
 | `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no issuer exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |

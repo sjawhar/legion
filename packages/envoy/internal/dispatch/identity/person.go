@@ -22,6 +22,9 @@ var (
 	ErrEmailNotVerified = errors.New("email not verified by Google")
 	// ErrNoEmail means a Google ID token carries no email address to name the person by.
 	ErrNoEmail = errors.New("no email in the sign-in")
+	// ErrSignInSuperseded means another account's sign-in has already taken the address since
+	// this one recorded its subject, so the cookie this sign-in would issue must not be given out.
+	ErrSignInSuperseded = errors.New("another account signed in to this address meanwhile")
 )
 
 // emailShape is an address with one @ and a dotted domain, the shape the deployment repository's
@@ -54,4 +57,10 @@ type SignInRule interface {
 	ConfirmSubject(claims oidc.Claims, stored string) (string, error)
 	// End ends email's sign-in under this rule, returning ErrNoIdentity once it no longer stands.
 	End(ctx context.Context, people auth.PeopleStore, sessions auth.SessionStore, email, subject, reason string) error
+	// ConfirmCookie confirms, after a sign-in has read the session generation it will put in a
+	// cookie, that email's row still names subject as the account that just signed in
+	// (auth.PeopleStore.Membership): a sign-in by another account that committed since has
+	// already taken the address, and issuing a cookie here would hand it to the wrong account.
+	// ErrSignInSuperseded means it has. A rule that records no subject has nothing to confirm.
+	ConfirmCookie(ctx context.Context, people auth.PeopleStore, email, subject string) error
 }

@@ -87,3 +87,17 @@ func (r DomainRule) End(ctx context.Context, people auth.PeopleStore, sessions a
 	slog.Warn("dispatch: sign-in ended: Google did not confirm the person's membership of the domain", "email", email, "reason", reason)
 	return ErrNoIdentity
 }
+
+// ConfirmCookie reads the address's row (auth.PeopleStore.Membership) and refuses with
+// ErrSignInSuperseded when it no longer names subject: a sign-in by another Google account
+// committed in between and has already taken the address.
+func (r DomainRule) ConfirmCookie(ctx context.Context, people auth.PeopleStore, email, subject string) error {
+	membership, _, err := people.Membership(ctx, email)
+	if err != nil {
+		return err
+	}
+	if membership.Subject != subject {
+		return ErrSignInSuperseded
+	}
+	return nil
+}

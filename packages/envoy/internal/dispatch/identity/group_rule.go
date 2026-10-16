@@ -70,6 +70,12 @@ func (r GroupRule) End(ctx context.Context, people auth.PeopleStore, sessions au
 	return ErrNoIdentity
 }
 
+// ConfirmCookie never refuses under a group: Dispatch records no subject for a pool sign-in, so
+// there is nothing another sign-in could have taken the address under.
+func (r GroupRule) ConfirmCookie(ctx context.Context, people auth.PeopleStore, email, subject string) error {
+	return nil
+}
+
 // providerEmail is the lowercased email a federated provider's username carries, the Cognito
 // sign-in pool's `<provider>_<email>` shape.
 func providerEmail(claims oidc.Claims) (string, bool) {

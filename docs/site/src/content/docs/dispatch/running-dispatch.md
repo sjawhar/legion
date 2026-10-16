@@ -91,19 +91,27 @@ such record: the old holder of a reassigned address keeps the sessions they alre
 their cookie expires, 30 days after it was issued, unless the pool user is removed from
 `DISPATCH_SIGNIN_GROUP` or disabled.
 
-Moving a deployment from the Cognito pool to a domain needs no extra step: the first sign-in
-under the domain records a subject the address's row did not hold before, which ends every
-session of the address by itself (the same check that ends a reassigned address's sessions,
-above). Moving the other way, from a domain back to the Cognito pool, does need one: the group
-sign-in path never records or compares a subject, so nothing ends the domain sessions on its own.
-End the old issuer's sign-ins first: revoke the refresh tokens at Google (remove the client's
-access), then clear them in Dispatch's database and end every browser session along with them,
-`update people set refresh_token = null, confirmed_at = null; update user_sessions set generation = generation + 1`,
-and start Dispatch with the new settings. Skipping the session step leaves a cookie issued before
-the switch valid: the first sign-in under the pool records a fresh confirmation for the address,
-and that cookie's generation still matches. Everyone then signs in again under the new issuer; a
-refresh token left from the old one would be refused at the first hourly confirmation, and is
-still redeemable at the old issuer until it is revoked there.
+Moving a deployment from the Cognito pool to a domain needs no session-generation bump: the first
+sign-in under the domain records a subject the address's row did not hold before, which ends
+every session of the address by itself (the same check that ends a reassigned address's sessions,
+above). It still needs the refresh-token step: revoke everyone's refresh tokens at the pool (a
+global sign-out, or disabling the app client) before the cutover. A person's own next sign-in
+under the domain overwrites their sealed pool token anyway, but someone who never signs in again
+keeps theirs in `people` indefinitely, still redeemable at the pool until it is revoked there.
+
+Moving the other way, from a domain back to the Cognito pool, needs both steps: the group sign-in
+path never records or compares a subject, so nothing ends the domain sessions on its own, and it
+never clears the recorded subject either. Revoke the refresh tokens at Google (remove the
+client's access), then clear them in Dispatch's database, clear the recorded subject along with
+them, and end every browser session,
+`update people set refresh_token = null, confirmed_at = null, sub = null; update user_sessions set generation = generation + 1`,
+and start Dispatch with the new settings. Skipping the session step there leaves a cookie issued
+before the switch valid: the first sign-in under the pool records a fresh confirmation for the
+address, and that cookie's generation still matches. Skipping the `sub` clear leaves a later
+return to domain mode unprotected: the same Google account signing in again finds its own
+`sub` still on the row, so nothing ends sessions a pool-era cookie still held. Everyone then signs
+in again under the new issuer; a refresh token left from the old one would be refused at the
+first hourly confirmation, and is still redeemable at the old issuer until it is revoked there.
 
 ## Running it on your machine
 

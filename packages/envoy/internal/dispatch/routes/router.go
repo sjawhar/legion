@@ -268,7 +268,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 }
 
 // authCallback completes a sign-in the issuer redirected back: it exchanges the code for the
-// person's ID token and signs in only a person SignInRule admits (identity.Person), keeping the
+// person's ID token and signs in only a person SignInRule admits (SignInRule.Person), keeping the
 // issuer's refresh token to confirm that hourly. Under a group the person is named by the email
 // their pool username carries; under a domain, by the email of a Google account of the domain,
 // and the account's subject is recorded with the sign-in, which ends the address's sessions when
@@ -322,12 +322,13 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 // issues, answering 500 when the generation cannot be recorded. authCallback and authDevSignIn
 // both mint through it, so a local dev sign-in carries exactly the cookie an issuer sign-in does.
 //
-// subject is the Google account a domain-mode sign-in just recorded, empty otherwise. After the
-// generation is read, the address's row must still record that account: another account's
-// sign-in that commits before that read has already ended the address's sessions and taken the
-// address, and one that commits after it advances the generation past the one the cookie carries.
-// So a cookie is issued only when the read generation predates any such sign-in; otherwise the
-// answer is 409 and no cookie.
+// subject is the account a sign-in under SignInRule just recorded, empty for a rule that records
+// none. After the generation is read, SignInRule.ConfirmCookie confirms the address's row still
+// names subject: another account's sign-in that commits before that read has already ended the
+// address's sessions and taken the address, and one that commits after it advances the
+// generation past the one the cookie carries. So a cookie is issued only when the read generation
+// predates any such sign-in; otherwise the answer is 409 and no cookie. A nil SignInRule (no
+// sign-in issuer configured at all) has nothing to confirm.
 func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, subject string) bool {
 	generation := int64(0)
 	if r.ctx.Sessions != nil {
@@ -339,16 +340,15 @@ func (r *router) issueSession(w http.ResponseWriter, req *http.Request, email, s
 			return false
 		}
 	}
-	if subject != "" {
-		membership, _, err := r.ctx.People.Membership(req.Context(), email)
-		if err != nil {
+	if r.ctx.SignInRule != nil {
+		if err := r.ctx.SignInRule.ConfirmCookie(req.Context(), r.ctx.People, email, subject); err != nil {
+			if errors.Is(err, identity.ErrSignInSuperseded) {
+				slog.Warn("dispatch: sign-in superseded: another Google account signed in to the address before its cookie", "email", email)
+				writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
+				return false
+			}
 			slog.Error("dispatch: read the account the sign-in recorded failed", "email", email, "error", err)
 			writeError(w, http.StatusInternalServerError, "record sign-in")
-			return false
-		}
-		if membership.Subject != subject {
-			slog.Warn("dispatch: sign-in superseded: another Google account signed in to the address before its cookie", "email", email)
-			writeCodeError(w, http.StatusConflict, "another Google account signed in to this address meanwhile; start over at /auth/start", "SIGNIN_SUPERSEDED")
 			return false
 		}
 	}

@@ -126,12 +126,17 @@ func requireCookieSignIn(boot bootConfig, devSignIn bool) error {
 }
 
 // signInRule is who boot's sign-in admits: the members of a Cognito pool's group, or the people of
-// a Google Workspace domain.
+// a Google Workspace domain; nil when boot configures neither (header identity, or dev sign-in),
+// matching discoverSignIn.
 func signInRule(boot bootConfig) identity.SignInRule {
-	if boot.SignInDomain != "" {
+	switch {
+	case boot.SignInDomain != "":
 		return identity.DomainRule{Domain: boot.SignInDomain}
+	case boot.SignInGroup != "":
+		return identity.GroupRule{Group: boot.SignInGroup}
+	default:
+		return nil
 	}
-	return identity.GroupRule{Group: boot.SignInGroup}
 }
 
 // discoverSignIn is the sign-in issuer's code flow for boot's DISPATCH_SIGNIN_* settings, its
