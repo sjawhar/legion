@@ -2,16 +2,24 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-636",
-  "completed": "2026-10-16T03:31:00Z",
+  "completed": "2026-10-16T04:33:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1984",
-  "head": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+  "head": "98c4c6e42fb16c21f1789a857e3ff02f8ca83e98",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran each of the four implement.json proofs independently on this worker pod with the branch's `legion` built from 6b44560d05a1 (`go build -o /tmp/legion ./cmd/legion`) and a second `legion` built from the fork point d0090f0d84dc (git archive into /tmp/main-src): the probe-image run on the pod's tree with the branch's pi-legion packed by scripts/e2e/lib/pack-plugin.sh (contract 25) gave 20 capability lines byte-identical to the fork-point binary's run on /opt/legion/pi-legion (diff empty), none `installed`, the OK line `model-fallback=on daemon-api-version=25`, exit 0; the `unread` wrapper gave exit 0, the stderr warning and `model-fallback=unread`, where the fork-point binary exits 1 with no OK line; the codegraph-off-PATH control gave the missing row, the stderr sentence and exit 1; `legion start --check-config` on a scratch copy of legion.yaml.example gave no probe line at the defaults, the `waits 660s` line at 600, and no line at 600 under 700; `npm ci --ignore-scripts --omit=dev --no-audit --no-fund` (a real install, where the implementer ran --dry-run) added the 3 packages at the pinned versions. Every observation matched the handoff."
+    "how": "Round 2 (the round-1 review's fixes, 98c4c6e4): rebuilt the branch's `legion` at that head and re-ran the implement.json proofs on this pod — probe-image with the packed pi-legion: 20 rows byte-identical to the fork-point build's run, no `installed`, OK line `model-fallback=on daemon-api-version=25`, nothing on stderr; the `unread` wrapper: exit 0, the stderr sentence, `model-fallback=unread`; the codegraph-off-PATH control: the missing row, the stderr sentence, exit 1, no OK line; `--check-config` at the defaults / 600 / 240 / 241 / tmux-600: the same lines as round 1. Every observation matched the handoff. Round 1's verification stands below (rounds[0])."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Round-1 review fixes (GitHub review 5542923182): the kept tail's … is a line of its own so the (?m)^-anchored OK-line readers still read an OK line that is the first retained line; the notices stage fails the build when any language-server pin is missing, not the last alone; the Stage 4b `boot` README row is restored whole; docs/kubernetes.md names the lockfile install.",
+      "surface": "In-package through the sandbox probe rig (a throwaway test, deleted after the run) and bootprobe's readers; the Dockerfile's exact guard line run under `sh -c 'set -eu'` on copies of docker/language-servers/package.json; the README row word-diffed against the fork point; the Worker Image run's build log for the image itself.",
+      "command": "go test ./internal/runtime/sandbox/ -run TestThrowaway -count=1 -v (3000 random streams vs a reference answering `…\\n` + tail; a 65 KiB line then okLine(3) through lastBytes, bootprobe.ConfirmedContract/CapabilitiesChecked/ExtensionsDiscovered, and g.r.ProbeImage on a rig whose pod log is that text); sh -c 'set -eu; pin() {…}; typescript_version=$(pin typescript); …; <worker.Dockerfile:373 verbatim>; echo REACHED …' against package.json as committed and with typescript, typescript-language-server and pyright each deleted; diff <(tr ' ' '\\n' < fork-point row 1031) <(tr ' ' '\\n' < head row 1031); gh run view 38849264948 --log",
+      "observed": "lastBytes equal to the reference in all 3000 cases; the retained tail starts `…\\nprobe-image: OK`, every reader reads contract 3 and the marks, and ProbeImage passes. Guard: every pin present → REACHED typescript=5.9.3 tsls=6.0.1 pyright=1.1.414, exit 0; typescript deleted → `typescript_version: typescript pin not read from …/package.json`, exit 2; typescript-language-server deleted → `tsls_version: typescript-language-server pin not read …`, exit 2; pyright deleted → `pyright_version: pyright pin not read …`, exit 2. README row 1031: 2229 → 2208 bytes, the word-diff exactly `and none \\`installed\\`,` → `,`. docs/kubernetes.md:76-84 names /opt/language-servers/node_modules and `npm ci --ignore-scripts` from the directory's own package.json and lockfile; no `npm global` / `/opt/node/lib/node_modules` wording remains outside the corepack link. Worker Image run 38849264948: toolchain `npm ci --ignore-scripts --omit=dev --no-audit --no-fund`, notices stage DONE under the new guard, `--version` step 6.0.1 / Version 5.9.3 / pyright 1.1.414, probe gate 20 rows with `lsp: present` and the OK line at contract 25, published ghcr.io/sjawhar/legion-worker:sha-98c4c6e42fb1@sha256:0eed5629d359ee2211d0d02386c47c31c0253385e5c16723d96857c843ed9e95.",
+      "headSha": "98c4c6e42fb16c21f1789a857e3ff02f8ca83e98",
+      "negativeControl": "The round-1 shapes, driven as controls: `…` glued to okLine(3) is not read by bootprobe.ConfirmedContract (read=false), the refusal the fix closes; the round-1 AND-list guard (`[ -n a ] && [ -n b ] && [ -n c ];`) on the copy with the middle pin deleted printed `REACHED tsls=[]` and exited 0 under `set -eu`."
+    },
     {
       "criterion": "Acceptance 2: the image's OK line and the 20-row table are unchanged in meaning (no row reads `installed`); the probe reports contract 25.",
       "surface": "This worker pod's own tree: the release image's /opt/omp/bin/omp and /opt/legion/pi-envoy, the branch's pi-legion packed by scripts/e2e/lib/pack-plugin.sh as the release packs it (daemonApiVersion 25), the branch's `legion` beside one built from the fork point d0090f0d (its probe at contract 24 against /opt/legion/pi-legion).",
@@ -62,17 +70,38 @@
     }
   ],
   "ci": {
-    "head": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
-    "tests": "run 38843553198: lint, typecheck, test success (the test job runs `go test ./...` in packages/daemon and Stage 1)",
-    "prTitle": "run 38843553261 and 38844274122: success",
-    "workerImage": "run 38843553276: build success, image published",
-    "docs": "run 38843553222: success",
-    "envoyAndContracts": "run 38843553271: contracts, pi-legion, pi-envoy, pi-shared, envoy-client, envoy-plugin, claude-envoy, envoy-smoke, envoy-e2e-local, envoy-infra-go, envoy-go, envoy-go-race, dispatch-memory success; the `dispatch` job still in_progress at 03:28Z (Dispatch's own suite, no daemon path in it)"
+    "head": "98c4c6e42fb16c21f1789a857e3ff02f8ca83e98",
+    "tests": "run 38849264915: lint, typecheck, test success (the test job runs `go test ./...` in packages/daemon and Stage 1: `stage 1 e2e: PASS`, four `true` jq lines, source on the boot WARN lines)",
+    "prTitle": "run 38849264943 and the comment-triggered reruns through 38850528821: success",
+    "workerImage": "run 38849264948: build success, image published (sha-98c4c6e42fb1@sha256:0eed5629…)",
+    "docs": "run 38849264985: success",
+    "envoyAndContracts": "run 38849264910: every job success but `dispatch`, still in_progress at 04:29Z (Dispatch's own suite, no daemon path in it); the round-1 run 38843553271 completed success",
+    "threads": "9 review threads, 9 resolved, 0 unresolved (GraphQL at 04:30Z)"
   },
   "limits": [
     "scripts/e2e/controller-start-tmux.sh was not run as a whole: it needs Docker (its Postgres and NATS containers), tmux and an Envoy listener, none of which this pod has. Its one assertion on the capability report (want_gaps, the two tmux `--check-config` gap lines) was driven directly and matched byte for byte; nothing else it checks is in this diff.",
     "The published image (sha-6b44560d05a1) was not run here (no Docker); its `legion probe-image` ran in the Worker Image run's publish gate, and the same binary's code paths were driven on this pod's tree.",
     "The daemon's live handling of a probe pod's `model-fallback=unread` line and a refusal's 64 KiB quote need a cluster probe pod; both are pinned by the sandbox probe rig tests in CI (TestProbeImageReportsTheModelFallbackMark, TestLastBytesKeepsTheEndOfTheTail, TestProbeImagePassesOnALongLogWithTheOKLineLast)."
   ],
-  "redTests": []
+  "redTests": [],
+  "round": 2,
+  "rounds": [
+    {
+      "round": 1,
+      "head": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+      "completed": "2026-10-16T03:31:00Z",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Re-ran each of the four implement.json proofs independently on this worker pod with the branch's `legion` built from 6b44560d05a1 (`go build -o /tmp/legion ./cmd/legion`) and a second `legion` built from the fork point d0090f0d84dc (git archive into /tmp/main-src): the probe-image run on the pod's tree with the branch's pi-legion packed by scripts/e2e/lib/pack-plugin.sh (contract 25) gave 20 capability lines byte-identical to the fork-point binary's run on /opt/legion/pi-legion (diff empty), none `installed`, the OK line `model-fallback=on daemon-api-version=25`, exit 0; the `unread` wrapper gave exit 0, the stderr warning and `model-fallback=unread`, where the fork-point binary exits 1 with no OK line; the codegraph-off-PATH control gave the missing row, the stderr sentence and exit 1; `legion start --check-config` on a scratch copy of legion.yaml.example gave no probe line at the defaults, the `waits 660s` line at 600, and no line at 600 under 700; `npm ci --ignore-scripts --omit=dev --no-audit --no-fund` (a real install, where the implementer ran --dry-run) added the 3 packages at the pinned versions. Every observation matched the handoff."
+      },
+      "ci": {
+        "head": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+        "tests": "run 38843553198: lint, typecheck, test success (the test job runs `go test ./...` in packages/daemon and Stage 1)",
+        "prTitle": "run 38843553261 and 38844274122: success",
+        "workerImage": "run 38843553276: build success, image published",
+        "docs": "run 38843553222: success",
+        "envoyAndContracts": "run 38843553271: contracts, pi-legion, pi-envoy, pi-shared, envoy-client, envoy-plugin, claude-envoy, envoy-smoke, envoy-e2e-local, envoy-infra-go, envoy-go, envoy-go-race, dispatch-memory success; the `dispatch` job still in_progress at 03:28Z (Dispatch's own suite, no daemon path in it)"
+      }
+    }
+  ]
 }
