@@ -754,6 +754,15 @@
 
 ### Fixed
 
+- Every listener `/v1` request with a body must set `Content-Type: application/json`; parameters
+  such as `charset=utf-8` are accepted. Any other type, a malformed one, or none is answered 415
+  with a JSON error before authentication or the handler runs, whether the body's length is known
+  or not (a chunked body is checked too). A cross-site browser request can no longer publish a
+  `text/plain` body through an unauthenticated loopback listener. A request with no body, such as
+  a `GET` or `DELETE`, is unaffected, and webhook routes keep their own signature and content
+  handling. Every Legion client already sends the header; an operator's own script that posts to
+  `/v1` without it now gets the 415 and must set the header.
+
 - A bus client whose NATS connection closes while a publish is in flight now replaces it once,
   and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close
   starts and the publish each dialled a replacement, and both were installed in turn, so the

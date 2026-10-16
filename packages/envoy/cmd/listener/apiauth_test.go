@@ -220,10 +220,11 @@ func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	cases := []struct {
-		name        string
-		path        string
-		contentType string
-		wantStatus  int
+		name          string
+		path          string
+		contentType   string
+		unknownLength bool
+		wantStatus    int
 	}{
 		{
 			name:        "allows JSON parameters",
@@ -243,6 +244,23 @@ func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
 			wantStatus:  http.StatusUnsupportedMediaType,
 		},
 		{
+			// A chunked body reaches the handler with ContentLength -1, so the gate must not
+			// read an unknown length as an empty body.
+			name:          "refuses non JSON body of unknown length",
+			path:          "/v1/messages/publish",
+			contentType:   "text/plain",
+			unknownLength: true,
+			wantStatus:    http.StatusUnsupportedMediaType,
+		},
+		{
+			// ParseMediaType still returns "application/json" beside its error here, so the
+			// gate must refuse on the error rather than on the type alone.
+			name:        "refuses malformed JSON content type",
+			path:        "/v1/messages/publish",
+			contentType: "application/json; charset",
+			wantStatus:  http.StatusUnsupportedMediaType,
+		},
+		{
 			name:        "leaves webhooks to their signature handler",
 			path:        "/webhook/github",
 			contentType: "text/plain",
@@ -252,7 +270,14 @@ func TestAPIAuthValidatesV1BodyContentType(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{}`))
+			var requestBody io.Reader = strings.NewReader(`{}`)
+			if tc.unknownLength {
+				requestBody = io.NopCloser(requestBody)
+			}
+			request := httptest.NewRequest(http.MethodPost, tc.path, requestBody)
+			if tc.unknownLength && request.ContentLength != -1 {
+				t.Fatalf("ContentLength = %d, want -1 for a body of unknown length", request.ContentLength)
+			}
 			if tc.contentType != "" {
 				request.Header.Set("Content-Type", tc.contentType)
 			}
