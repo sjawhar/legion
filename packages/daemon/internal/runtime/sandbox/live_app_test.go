@@ -14,7 +14,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 )
 
 // implementTokens is the harness's ProvisionTokens: the implement App's installation token,
@@ -42,8 +44,9 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role) (ghconfig
 }
 
 // resolveApp reads the implement App's key from the secret store, handed to one child process
-// through the agent-tier `secrets <KEY> -- …` injection, and mints the App's installation token for
-// the run's repository owner; the key stays in this process's memory.
+// through the agent-tier `secrets <KEY> -- …` injection, mints the App's installation token for
+// the run's repository owner, and with it reads the repository's default branch as GitHub names
+// it, the base every launch of the run provisions at; the key stays in this process's memory.
 func (r *liveRig) resolveApp() error {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(r.ctx, "secrets", r.env.appKeyName, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
@@ -61,6 +64,10 @@ func (r *liveRig) resolveApp() error {
 	if err != nil {
 		return fmt.Errorf("minting the implement App's installation token for %s: %w", owner, err)
 	}
-	r.tokens, r.identity = implementTokens{apps: apps, owner: owner}, lease.Identity
+	branch, err := ghbranch.DefaultBranch(r.ctx, githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI("", r.env.repo)}, r.env.repo)
+	if err != nil {
+		return err
+	}
+	r.tokens, r.identity, r.defaultBranch = implementTokens{apps: apps, owner: owner}, lease.Identity, branch
 	return nil
 }

@@ -134,6 +134,10 @@ func validateClaimShape(spec SpawnSpec, refuse func(string, ...any) error) error
 	if token != spec.Claim {
 		return refuse("the claim token of %s/%s/%s is %s", spec.Project, spec.Issue, spec.Role, token)
 	}
+	// Each runtime provisions the issue's workspace at the repository's default branch, by name.
+	if !spec.Repository.IsZero() && spec.DefaultBranch == "" {
+		return refuse("no default branch for repository %s", spec.Repository)
+	}
 	return nil
 }
 
@@ -154,6 +158,9 @@ func validateControllerShape(spec SpawnSpec, refuse func(string, ...any) error) 
 	}
 	if !spec.Repository.IsZero() {
 		return refuse("the controller works no repository (got %s)", spec.Repository)
+	}
+	if spec.DefaultBranch != "" {
+		return refuse("the controller works no repository, so it has no default branch (got %s)", spec.DefaultBranch)
 	}
 	if spec.WorkspaceRecoveredFrom != "" {
 		return refuse("the controller has no workspace to recover (got %s)", spec.WorkspaceRecoveredFrom)

@@ -103,6 +103,9 @@ type outbox struct {
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
+	// defaultBranch is a repository's default branch as GitHub names it (defaultBranches.Of): the
+	// base an issue's branch is created at and its workspace provisioned from.
+	defaultBranch func(context.Context, ghrepo.Repository) (string, error)
 	// The lane registry (outbox_lanes.go). mu guards running, laneCtx and lanes; running is true
 	// between Run's start and its stop, laneCtx is Run's context, which every lane runs under, and
 	// lanes is each live lane by its key. wg counts the lane goroutines, so Run returns only once
@@ -123,14 +126,14 @@ type outboxTrees interface {
 	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, githubAPI string, defaultBranch func(context.Context, ghrepo.Repository) (string, error), tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
 		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
 		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
-		log: log, now: time.Now, clock: supervise.RealClock{},
+		defaultBranch: defaultBranch, log: log, now: time.Now, clock: supervise.RealClock{},
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -967,13 +970,17 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 	if err != nil {
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
+	base, err := r.defaultBranch(ctx, r.repo)
+	if err != nil {
+		return fmt.Errorf("provision workspace for %s: %w", issue.Key, err)
+	}
 	// One provision at a time (provisionMu): the issue's workspace is added to the clone every
 	// issue of this project shares, and a second issue's lane provisioning beside this one would
 	// have the clone fetching and adding under both.
 	r.provisionMu.Lock()
 	defer r.provisionMu.Unlock()
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: workspace.GitHubCredentialHelper,
+		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, DefaultBranch: base, CredentialHelper: workspace.GitHubCredentialHelper,
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
 	}); err != nil {
@@ -1016,15 +1023,15 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
-// issueBranch creates the issue's branch, legion/<KEY>, on GitHub at main, so no role's push is the
-// one that creates it: GitHub can refuse such a push on a large repository (its check for changed
-// workflow files, which it runs for an App without the workflows permission, times out on a new
-// ref), where it takes one that moves the branch. A branch GitHub already has is left where it is. A
-// start of the issue waits for this row (the lifecycle lane's ordering rule, record.Store.DueRows and
-// ClaimRow), so a create GitHub refuses holds back the issue's roles, each attempt logged with
-// GitHub's answer, until one passes. A row of a
-// generation the issue has left, or of a tree that lingers, finishes without acting: the starts it
-// held back act on neither.
+// issueBranch creates the issue's branch, legion/<KEY>, on GitHub at the repository's default
+// branch, so no role's push is the one that creates it: GitHub can refuse such a push on a large
+// repository (its check for changed workflow files, which it runs for an App without the workflows
+// permission, times out on a new ref), where it takes one that moves the branch. A branch GitHub
+// already has is left where it is. A start of the issue waits for this row (the lifecycle lane's
+// ordering rule, record.Store.DueRows and ClaimRow), so a create GitHub refuses holds back the
+// issue's roles, each attempt logged with GitHub's answer, until one passes. A row of a generation
+// the issue has left, or of a tree that lingers, finishes without acting: the starts it held back
+// act on neither.
 func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload record.IssueBranch) error {
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
@@ -1049,18 +1056,22 @@ func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload 
 	return nil
 }
 
-// createBranch creates issue's branch on GitHub at main unless GitHub already has it, as the
-// implement App: the App of the roles that write an issue branch (appauth.AppRoleFor), and the one
-// workspace provisioning clones with.
+// createBranch creates issue's branch on GitHub at the repository's default branch, as GitHub
+// names it, unless GitHub already has it, as the implement App: the App of the roles that write an
+// issue branch (appauth.AppRoleFor), and the one workspace provisioning clones with.
 func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
 	defer cancel()
+	base, err := r.defaultBranch(ctx, r.repo)
+	if err != nil {
+		return err
+	}
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
-	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
+	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue), base)
 }
 
 // autoMergeDisable disarms pull request payload.Number as the implement App, which armed it

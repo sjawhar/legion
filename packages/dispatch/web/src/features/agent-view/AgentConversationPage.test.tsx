@@ -15,6 +15,7 @@ const SESSION = "01a0e090-4848-7473-acc5-fc96e6a646d3";
 const agent: Agent = {
   capabilities: ["aside", "btw", "steer"],
   dir: "/workspaces/planner",
+  host: "planner-host",
   last_activity: null,
   last_seen: Date.now(),
   machine_id: "planner-host",

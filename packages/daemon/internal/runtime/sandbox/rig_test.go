@@ -188,7 +188,8 @@ func testSpec(t *testing.T, token claim.Token, role claim.Role, issue string) ru
 			RolePromptPaths: []string{rolePrompt}, Addressing: "Legion addressing: your role topic is `notifications.role." + string(token) + "`.",
 			DeploymentInstructionsPath: instructions,
 		},
-		Repository: ghrepo.MustParse("sjawhar/legion-smoke"),
+		Repository:    ghrepo.MustParse("sjawhar/legion-smoke"),
+		DefaultBranch: "main",
 	}
 }
 

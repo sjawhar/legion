@@ -127,7 +127,7 @@ func carriedChildStops(t *testing.T, rootKey, childKey string, carry func(apply 
 	clock := start
 	runner := &outbox{
 		dispatchProject: "LEGION", pool: pool, records: records, supervisor: sup, trees: trees,
-		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
 		githubAPI: newBranchGitHub(t, nil, branchExists).url, notices: &outboxPublisher{},
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: childKey, Status: "todo", HandedOver: true, Labels: []string{"legion"}}},
 		handlers: []intake.Handler{engine, admission}, now: func() time.Time { return clock },

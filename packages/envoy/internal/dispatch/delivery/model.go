@@ -286,7 +286,8 @@ type DeliveryShippedPRView struct {
 // (Production succeeded; sized by PRs) and/or a pipeline failure (FailedJobs, RootFailingJob, or a
 // failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly.
 // FailedJobs is in compareRunJobs' order (by start, a job that never started last, then by name in
-// byte order), and RootFailingJob is the first by name among failed jobs finishing together. PRs
+// byte order), and RootFailingJob is the earliest-finishing failed job that isn't a summary/guard
+// job, falling back to the earliest failed job overall, ties by name. PRs
 // is every population pull request in the window the run shipped first (FirstShippingApply, the
 // lower run id of two deploys completing together), whatever facets the request names, by merge
 // time then id in byte order, and is always a slice, never nil, so it serializes as `[]` for a run

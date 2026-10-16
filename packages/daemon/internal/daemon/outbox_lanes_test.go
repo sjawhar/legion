@@ -359,7 +359,7 @@ func startLaneTree(t *testing.T, log *slog.Logger) *laneTree {
 	}
 	tree.runner = &outbox{
 		pool: tree.pool, dispatchProject: "LEGION", records: record.NewStore(), supervisor: sup, tokens: outboxTokens{}, project: "legion",
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), dispatch: tree.client, notices: tree.publisher, log: log,
+		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch, dispatch: tree.client, notices: tree.publisher, log: log,
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			tree.provisions.Add(1)
 			return workspace.Workspace{}, nil

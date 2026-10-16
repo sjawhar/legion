@@ -104,9 +104,9 @@ func (r remote) remove() error {
 type Source interface {
 	// check refuses a Source that cannot reach repository, before provisioning runs anything.
 	check(repository ghrepo.Repository) error
-	// open is the remote the clone and the fetch of repository use, with bookmark the issue's own;
-	// the caller removes it.
-	open(repository ghrepo.Repository, bookmark string) (remote, error)
+	// open is the remote the clone and the fetch of repository use, with bookmark the issue's own
+	// and defaultBranch the repository's; the caller removes it.
+	open(repository ghrepo.Repository, bookmark, defaultBranch string) (remote, error)
 }
 
 // FromFeed is a pod's feed directory, where Fetch cloned the repository in the pod's first init
@@ -121,12 +121,12 @@ func (dir feedSource) check(repository ghrepo.Repository) error {
 	return err
 }
 
-func (dir feedSource) open(repository ghrepo.Repository, bookmark string) (remote, error) {
+func (dir feedSource) open(repository ghrepo.Repository, bookmark, defaultBranch string) (remote, error) {
 	feed, err := feedRepository(string(dir), repository)
 	if err != nil {
 		return remote{}, err
 	}
-	return feedRemote(feed, repository, bookmark), nil
+	return feedRemote(feed, repository, bookmark, defaultBranch), nil
 }
 
 // FromGitHub is GitHub itself, reached with the one-shot credential holding token, created under
@@ -144,7 +144,7 @@ func (s gitHubSource) check(ghrepo.Repository) error {
 	return nil
 }
 
-func (s gitHubSource) open(ghrepo.Repository, string) (remote, error) {
+func (s gitHubSource) open(ghrepo.Repository, string, string) (remote, error) {
 	return newProvisioningCredential(s.credentialDir, s.token)
 }
 
@@ -170,9 +170,9 @@ func GitHubURL(repository ghrepo.Repository) string {
 // feedRemote reaches GitHubURL, the remote the shared clone's origin names, at the feed repository
 // instead, over git's file transport alone: no credential, and no network. The feed is GitHub as
 // it stood when the pod's workspace-fetch ran, and a tree agent may have pushed since, so a fetch
-// from it brings main and the issue's own bookmark alone: every other bookmark keeps its target
-// and its tracking.
-func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
+// from it brings the repository's default branch and the issue's own bookmark alone, each by its
+// exact name: every other bookmark keeps its target and its tracking.
+func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch string) remote {
 	return remote{
 		env: []string{
 			"GIT_ALLOW_PROTOCOL=file",
@@ -180,7 +180,7 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
 			"GIT_CONFIG_KEY_0=url." + feed + ".insteadOf",
 			"GIT_CONFIG_VALUE_0=" + GitHubURL(repo),
 		},
-		branches: []string{"main", bookmark},
+		branches: []string{defaultBranch, bookmark},
 	}
 }
 
