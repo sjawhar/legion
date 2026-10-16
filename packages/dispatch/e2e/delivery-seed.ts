@@ -8,10 +8,10 @@ import { sql } from "./psql";
 const SEED_ACTOR = `'{"kind":"system","id":"e2e-seed"}'`;
 
 const SETTINGS = `INSERT INTO delivery_settings (
-     singleton, deploy_repo, deploy_workflow_path, production_job_name,
+     singleton, deploy_repo, deploy_workflow_path, production_job_names,
      pr_checks_workflow_path, population_authors, excluded_repos, updated_by
    ) VALUES (
-     true, 'acme/widgets', '.github/workflows/deploy.yml', 'widgets-release / widgets-release',
+     true, 'acme/widgets', '.github/workflows/deploy.yml', ARRAY['widgets-release / widgets-release'],
      '.github/workflows/pr-checks.yml', ARRAY['octocat'], ARRAY[]::text[], ${SEED_ACTOR}
    )`;
 

@@ -24,7 +24,7 @@ type measuresFixture struct {
 	Settings struct {
 		DeployRepo           string   `json:"deploy_repo"`
 		DeployWorkflowPath   string   `json:"deploy_workflow_path"`
-		ProductionJobName    string   `json:"production_job_name"`
+		ProductionJobNames   []string `json:"production_job_names"`
 		PRChecksWorkflowPath string   `json:"pr_checks_workflow_path"`
 		PopulationAuthors    []string `json:"population_authors"`
 	} `json:"settings"`
@@ -90,7 +90,7 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 
 	if _, err := delivery.PutSettings(ctx, pool, delivery.DeliverySettings{
 		DeployRepo: fixture.Settings.DeployRepo, DeployWorkflowPath: fixture.Settings.DeployWorkflowPath,
-		ProductionJobName: fixture.Settings.ProductionJobName, PRChecksWorkflowPath: fixture.Settings.PRChecksWorkflowPath,
+		ProductionJobNames: fixture.Settings.ProductionJobNames, PRChecksWorkflowPath: fixture.Settings.PRChecksWorkflowPath,
 		PopulationAuthors: fixture.Settings.PopulationAuthors,
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -147,8 +147,8 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 		}
 		if run.Production != nil {
 			completedAt, conclusion := run.Production.CompletedAt, run.Production.Conclusion
-			jobs[fixture.Settings.ProductionJobName] = delivery.DeliveryRunJob{
-				Repo: fixture.Settings.DeployRepo, RunID: run.RunID, Name: fixture.Settings.ProductionJobName,
+			jobs[fixture.Settings.ProductionJobNames[0]] = delivery.DeliveryRunJob{
+				Repo: fixture.Settings.DeployRepo, RunID: run.RunID, Name: fixture.Settings.ProductionJobNames[0],
 				CompletedAt: &completedAt, Conclusion: &conclusion,
 			}
 		}
@@ -205,7 +205,7 @@ func seedMeasuresSettings(t *testing.T, database *store.Store) {
 	t.Helper()
 	if _, err := delivery.PutSettings(t.Context(), database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobNames: []string{"widgets-release / widgets-release"}, PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
@@ -392,7 +392,7 @@ func TestGetDeliveryMeasuresComputesTheFixture(t *testing.T) {
 		t.Fatalf("seed run 509: %v", err)
 	}
 	if err := delivery.UpsertRunJobs(t.Context(), database.Pool, fixture.Settings.DeployRepo, 509, []delivery.DeliveryRunJob{{
-		Repo: fixture.Settings.DeployRepo, RunID: 509, Name: fixture.Settings.ProductionJobName,
+		Repo: fixture.Settings.DeployRepo, RunID: 509, Name: fixture.Settings.ProductionJobNames[0],
 		CompletedAt: &ninthDone, Conclusion: new(delivery.DeliveryJobConclusionSuccess),
 	}}, true); err != nil {
 		t.Fatalf("seed run 509's production job: %v", err)

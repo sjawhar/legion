@@ -79,7 +79,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../.."
 
-python3 <<'PY'
+# The path model this check reads workflows with: workflow_paths.py, beside this script in the
+# repository it checks. PYTHONDONTWRITEBYTECODE keeps the import from leaving a __pycache__ in the
+# tree.
+PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=.github/scripts python3 <<'PY'
 import json
 import posixpath
 import re
@@ -88,8 +91,8 @@ import sys
 from pathlib import Path
 
 import yaml
+from workflow_paths import Filter, events, glob_regex, unread_patterns, walk
 
-SKIP_DIRS = {".git", ".jj", "node_modules", ".venv", "vendor"}
 WORKFLOWS = Path(".github/workflows")
 PATH_EVENTS = ("push", "pull_request", "pull_request_target", "merge_group")
 NEEDS_OUTPUT = re.compile(r"needs\.([\w-]+)\.outputs\.([\w-]+)")
@@ -140,72 +143,7 @@ def required_results(condition: str) -> set[str]:
 problems: list[str] = []
 
 
-def walk() -> list[str]:
-    found = []
-    stack = [Path(".")]
-    while stack:
-        for entry in sorted(stack.pop().iterdir()):
-            if entry.is_symlink() and entry.is_dir():
-                continue
-            if entry.is_dir():
-                if entry.name not in SKIP_DIRS:
-                    stack.append(entry)
-            else:
-                found.append(entry.as_posix())
-    return found
-
-
 FILES = walk()
-
-
-def glob_regex(pattern: str) -> re.Pattern:
-    """A path glob as a regex over a repository-relative path, with picomatch's meaning — the
-    matcher dorny/paths-filter runs (https://github.com/micromatch/picomatch#globbing-features):
-    `**` spans directories, `*` and `?` stay inside one. GitHub's own `paths` agree except for
-    `?`, `+` and `\\`, which event_filters refuses; a .dockerignore line reads the same."""
-    out, index = "", 0
-    while index < len(pattern):
-        if pattern.startswith("**/", index):
-            out += "(?:.*/)?"
-            index += 3
-        elif pattern.startswith("**", index):
-            out += ".*"
-            index += 2
-        elif pattern[index] == "*":
-            out += "[^/]*"
-            index += 1
-        elif pattern[index] == "?":
-            out += "[^/]"
-            index += 1
-        elif pattern[index] == "[" and "]" in pattern[index + 1 :]:
-            end = pattern.index("]", index + 1)
-            out += pattern[index : end + 1]
-            index = end + 1
-        else:
-            out += re.escape(pattern[index])
-            index += 1
-    return re.compile(out)
-
-
-class Filter:
-    """An ordered pattern list where the last match wins and `!` negates, as GitHub reads
-    `paths`. `everything` is an event with no path filter."""
-
-    def __init__(self, patterns: list[str] | None, ignore: bool = False):
-        self.everything = patterns is None
-        self.ignore = ignore
-        self.rules = [
-            (p.startswith("!"), glob_regex(p.removeprefix("!"))) for p in (patterns or [])
-        ]
-
-    def covers(self, path: str) -> bool:
-        if self.everything:
-            return True
-        matched = False
-        for negated, regex in self.rules:
-            if regex.fullmatch(path):
-                matched = not negated
-        return not matched if self.ignore else matched
 
 
 class AnyOf:
@@ -216,7 +154,6 @@ class AnyOf:
 
     def covers(self, path: str) -> bool:
         return any(f.covers(path) for f in self.filters)
-
 
 
 def dockerignore_filter(path: str | None):
@@ -645,16 +582,6 @@ def load(path: Path):
         return None
 
 
-def events(document: dict) -> dict:
-    """The workflow's `on:` as a mapping; YAML 1.1 reads a bare `on` key as True."""
-    triggers = document.get("on", document.get(True))
-    if isinstance(triggers, str):
-        return {triggers: None}
-    if isinstance(triggers, list):
-        return {name: None for name in triggers}
-    return triggers if isinstance(triggers, dict) else {}
-
-
 def event_filters(workflow: Path, document: dict) -> list[tuple[str, Filter]]:
     found = []
     for name, spec in events(document).items():
@@ -665,11 +592,9 @@ def event_filters(workflow: Path, document: dict) -> list[tuple[str, Filter]]:
         if key is None:
             found.append((f"on.{name}", Filter(None)))
             continue
-        # GitHub's filter patterns give `?` and `+` regex meanings (zero or one, one or more of
-        # the preceding character) and read `\` as an escape
-        # (https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#filter-pattern-cheat-sheet).
-        # glob_regex reads patterns as picomatch does, so it refuses those rather than guess.
-        unread = [p for p in spec[key] if any(char in str(p) for char in "?+\\")]
+        # glob_regex reads patterns as picomatch does, so it refuses GitHub's `?`, `+` and `\`
+        # rather than guess (workflow_paths.unread_patterns).
+        unread = unread_patterns(spec[key])
         if unread:
             problems.append(
                 f"::error file={workflow}::{workflow} on.{name}.{key} has {', '.join(unread)}: "

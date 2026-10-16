@@ -21,7 +21,7 @@ type RefreshTokenRevoker interface {
 
 // PgPeopleStore records the people who have signed in to Dispatch and each sign-in's membership
 // (migration 0068), its refresh token sealed (refreshTokenSeal), with the Google account that last
-// signed in to the address for a Workspace domain (migration 0109).
+// signed in to the address for a Workspace domain (migration 0111).
 type PgPeopleStore struct {
 	pool    *Pool
 	seal    refreshTokenSeal

@@ -36,6 +36,13 @@ type JobIntake struct {
 	// ctx is Run's context: every read a timer starts runs under it, so a stopped process stops them.
 	ctx context.Context
 
+	// reads holds a slot for each read in flight. When many runs' bursts end at once, as on the
+	// first start after an outage drains its backlog, at most reconcilePartialConcurrency runs'
+	// jobs are read from GitHub at a time, the bound the reconcile completes pull requests under;
+	// one listing per run at once would pass GitHub's 100 concurrent requests and rate-limit the
+	// App.
+	reads chan struct{}
+
 	mu      sync.Mutex
 	pending map[runKey]*pendingRun
 }
@@ -46,11 +53,13 @@ type runKey struct {
 	runID int64
 }
 
-// pendingRun is one run's burst: when its first event arrived, and the timer that reads the run's
-// jobs once the burst goes quiet or has waited jobMaxWait.
+// pendingRun is one run's burst: when its first event arrived, the production rule the newest
+// event read, and the timer that reads the run's jobs once the burst goes quiet or has waited
+// jobMaxWait.
 type pendingRun struct {
-	first time.Time
-	timer jobTimer
+	first      time.Time
+	production Production
+	timer      jobTimer
 }
 
 const (
@@ -80,31 +89,19 @@ func (realJobClock) Now() time.Time { return time.Now() }
 
 func (realJobClock) AfterFunc(d time.Duration, f func()) jobTimer { return time.AfterFunc(d, f) }
 
-// NewJobIntake builds a JobIntake. natsClient must already be connected, as for NewIntake.
-func NewJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client) *JobIntake {
-	return newJobIntake(natsClient, pool, github, realJobClock{})
-}
-
+// newJobIntake builds a JobIntake on natsClient, a connected client StartIntakes opens for it alone,
+// scheduling its reads by clock.
 func newJobIntake(natsClient *bus.Client, pool *store.Pool, github *githubapp.Client, clock jobClock) *JobIntake {
 	return &JobIntake{
 		nats: natsClient, pool: pool, github: github, clock: clock,
 		ctx: context.Background(), pending: map[runKey]*pendingRun{},
+		reads: make(chan struct{}, reconcilePartialConcurrency),
 	}
 }
 
-// HasApp reports whether the GitHub App credentials a jobs read needs are configured.
-func (j *JobIntake) HasApp() bool {
-	return j != nil && j.github != nil
-}
-
-// Run binds the durable job consumer and handles job events until ctx is cancelled. Idle, logged
-// once, without GitHub App credentials, as Intake and Reconcile are. A bind that fails is tried
-// again every settingsPollInterval.
+// Run binds the durable job consumer and handles job events until ctx is cancelled. A bind that
+// fails is tried again every settingsPollInterval.
 func (j *JobIntake) Run(ctx context.Context) {
-	if !j.HasApp() {
-		slog.Info("dispatch delivery: no GitHub App key — the job intake is idle")
-		return
-	}
 	j.ctx = ctx
 	defer j.stopPending()
 	var sub *natsgo.Subscription
@@ -194,12 +191,13 @@ func (j *JobIntake) receive(ctx context.Context, payload string) {
 	if !tracked {
 		return
 	}
-	j.schedule(runKey{repo: job.Repo, runID: runID})
+	j.schedule(runKey{repo: job.Repo, runID: runID}, settings.Production())
 }
 
 // schedule starts a run's burst or moves its read to jobQuiet after this event, but never past
-// jobMaxWait after the burst's first event.
-func (j *JobIntake) schedule(key runKey) {
+// jobMaxWait after the burst's first event. A later event replaces production so a settings update
+// observed before that event governs the deferred read.
+func (j *JobIntake) schedule(key runKey, production Production) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	now := j.clock.Now()
@@ -210,6 +208,7 @@ func (j *JobIntake) schedule(key runKey) {
 	} else {
 		run.timer.Stop()
 	}
+	run.production = production
 	due := now.Add(jobQuiet)
 	if limit := run.first.Add(jobMaxWait); limit.Before(due) {
 		due = limit
@@ -217,9 +216,9 @@ func (j *JobIntake) schedule(key runKey) {
 	run.timer = j.clock.AfterFunc(due.Sub(now), func() { j.fire(key, run) })
 }
 
-// fire ends a run's burst and reads its jobs. An event that arrives during the read starts the
-// next burst; two reads of one run that overlap are safe, since a read never undoes a later one
-// (UpsertRunJobs).
+// fire ends a run's burst and reads its jobs once a read slot is free (reads). An event that
+// arrives during the read starts the next burst; two reads of one run that overlap are safe, since
+// a read never undoes a later one (UpsertRunJobs). The read's deadline starts once it has its slot.
 func (j *JobIntake) fire(key runKey, run *pendingRun) {
 	j.mu.Lock()
 	if j.pending[key] != run {
@@ -228,15 +227,21 @@ func (j *JobIntake) fire(key runKey, run *pendingRun) {
 	}
 	delete(j.pending, key)
 	j.mu.Unlock()
+	select {
+	case j.reads <- struct{}{}:
+	case <-j.ctx.Done():
+		return
+	}
+	defer func() { <-j.reads }()
 	ctx, cancel := context.WithTimeout(j.ctx, intakeMessageTimeout)
 	defer cancel()
-	j.read(ctx, key)
+	j.read(ctx, key, run.production)
 }
 
 // read lists the run's jobs from GitHub and stores that listing. It marks the run's jobs complete
 // only when the same listing shows every job finished, so a listing taken before the run ended
 // never marks the run complete because another consumer recorded its end meanwhile.
-func (j *JobIntake) read(ctx context.Context, key runKey) {
+func (j *JobIntake) read(ctx context.Context, key runKey, production Production) {
 	owner, repo, err := splitRepo(key.repo)
 	if err != nil {
 		slog.Error("dispatch delivery: job run repository", "repo", key.repo, "error", err)
@@ -247,7 +252,7 @@ func (j *JobIntake) read(ctx context.Context, key runKey) {
 		slog.Warn("dispatch delivery: read the jobs of a running deploy run; its end reads them again", "repo", key.repo, "run_id", key.runID, "error", err)
 		return
 	}
-	jobs := RunJobs(key.repo, key.runID, fetched)
+	jobs := RunJobs(key.repo, key.runID, fetched, production)
 	if err := UpsertRunJobs(ctx, j.pool, key.repo, key.runID, jobs, JobsComplete(jobs)); err != nil {
 		slog.Error("dispatch delivery: store the jobs of a running deploy run", "repo", key.repo, "run_id", key.runID, "error", err)
 	}

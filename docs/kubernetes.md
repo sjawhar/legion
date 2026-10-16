@@ -24,10 +24,10 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   resolves the task agents and skills named by the prompts the image's own `legion` embeds
   (`packages/daemon/cmd/legion/probe_image.go`);
 - `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` packed from that commit's `packages/pi-envoy` and
-  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy` and `pi_legion` jobs
-  run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two roots a pod names as Oh
-  My Pi's explicit extensions — a role relaunched onto a newer plugin contract in a kept pod loads
-  the generation directory's copies instead, installed from npm at
+  `packages/pi-legion` (the exact `bun pm pack` steps `release.yaml`'s `pi_envoy_build` and
+  `pi_legion_build` jobs run), unpacked at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, the two
+  roots a pod names as Oh My Pi's explicit extensions — a role relaunched onto a newer plugin contract
+  in a kept pod loads the generation directory's copies instead, installed from npm at
   `$XDG_STATE_HOME/legion-plugins/g<generation>/node_modules/@sjawhar/{pi-envoy,pi-legion}`
   ("Contract discipline" below) — the Envoy plugin first, with extension discovery on. Neither is linked
   into the OMP profile: a plugin both installed and named by `--extension` loads twice, and the image
@@ -82,18 +82,32 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   7 no longer ships; the server resolves the TypeScript installed beside it unless the repository's own
   `node_modules` holds one, which it prefers. From Debian trixie's archive, at `/usr/bin`: `python3`
   (the interpreter Oh My Pi's Python eval runs — `omp setup python --check` answers `available: true`
-  on it), `curl`, `wget`, and `chromium` for the browser tools, installed without its Recommends (no
+  on it), `curl`, `wget`, `jq`, `ssh-keygen` (from `openssh-client`, which also brings `ssh`, `scp` and
+  `sftp`: they reach no host that `curl`, `wget`, `git`, `python3` and `socat` on the same apt line
+  could not already reach, and what a pod may reach is Legion's ruling, the withheld `network`
+  capability row — dispatch://LEGION-5, the pod is the boundary — a declaration the capability report
+  renders, not a network control this repository ships; the package's setuid
+  `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
+  and the build's final step refuses an image where any file under `/usr/lib/openssh` or
+  `/usr/bin/ssh-agent` carries one),
+  and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
   `PATH`, and downloads Chrome for Testing into its cache only with none of those — so the image's
   `chromium` is the one every worker gets, with nothing downloaded, and the probe runs that same
   resolution. The image sets no `PUPPETEER_EXECUTABLE_PATH`: a variable the image's `ENV` sets is one
   `runtime.kubernetes.pod.env` is refused, and an operator's pod env naming another browser is what the
-  probe checks (it runs that executable), not something to refuse. `uv` still installs each project's own Python, from its
-  `.python-version` or `requires-python`, the first time the project runs (`uv sync`, `uv run`): in a
-  Sandbox pod that is on the issue's volume ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod));
-  elsewhere it is uv's default, `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's
-  own eval, not a project's interpreter.
+  probe checks (it runs that executable), not something to refuse. `jq` and `ssh-keygen` are real
+  binaries so a worker's subprocesses — `bun test`, a script, a subagent's shell — find them, where the
+  harness's `jq` builtin reaches only the bash tool. A subprocess's `jq` is therefore the image's
+  `/usr/bin/jq`, trixie's, while the bash tool's own `jq` stays the harness's builtin, a different
+  engine (jaq), so an expression is checked with the engine the script will run
+  (`docs/solutions/legion/worker-pane-shell-gotchas.md`, "The bash tool's `jq` is jaq"). `uv` still
+  installs each project's own Python, from its `.python-version` or `requires-python`, the first time
+  the project runs (`uv sync`, `uv run`): in a Sandbox pod that is on the issue's volume
+  ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); elsewhere it is uv's default,
+  `~/.local/share/uv/python`. The image's `python3` is for Oh My Pi's own eval, not a project's
+  interpreter.
 
 It runs as user `legion` (uid 1000, declared numerically so `runAsNonRoot` can verify it from the image
 alone) with `HOME=/home/legion`, which must be writable (OMP writes sessions, logs, and `models.db` under
@@ -150,7 +164,7 @@ leaves those agents' models unresolved (`--skip-agent-models`). It then checks e
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv` and `kubectl` on `PATH` with `go version`
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq` and `ssh-keygen` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
@@ -180,11 +194,13 @@ A step of its own, before that final one, runs every toolchain command listed ab
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
 version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
-into a scratch directory the step removes. It reruns only when the toolchain or an earlier layer
-changes, so a commit that only rebuilds `legion` needs no package registry.
+`python3`, `curl`, `wget`, `jq --version`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
+into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
+throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. It reruns only
+when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
+registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -201,8 +217,8 @@ Where the digest is published:
   `<legion version>` worker-image tag.
 
 Worker-image tags: `sha-<12 hex of the built commit>` on every run (on a pull request that is the
-PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion` job
-released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
+PR head, never the ephemeral merge commit); `<legion version>` only on `main` when the `legion_publish`
+job released that version in the same run. Runs from any other ref publish the `sha-` worker-image tag
 only and never touch a release. The package also currently holds `sha256-<image digest hex>` OCI
 referrer indexes from earlier proof runs; each holds an attestation, not a worker image, so
 inspecting one does not print a worker-image digest.
@@ -251,9 +267,10 @@ The attestation is separate from the image's own BuildKit provenance, which the 
 + `docker/build-push-action` (the pair `release-envoy-listener.yaml` uses), layer cache in GitHub Actions
 cache (`cache-from: type=gha`, `cache-to: type=gha,mode=max`), pushed with the workflow's own `GITHUB_TOKEN`
 — no third-party builder, no project variable, no extra credential. It runs (1) from `release.yaml` after
-the `legion` job on every `main` push that touches any file the image builds from, (2) on every head of a pull
-request against `main` whose diff touches any of those files — building the PR head and publishing `sha-`
-only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the workflow exists on `main`. The
+the `legion_build` and `legion_publish` jobs on every `main` push that touches any file the image builds
+from, (2) on every head of a pull request against `main` whose diff touches any of those files — building
+the PR head and publishing `sha-` only — and (3) by `gh workflow run worker-image.yaml --ref <ref>` once the
+workflow exists on `main`. The
 files the image builds from are every context source `worker.Dockerfile` copies: the root manifest,
 lockfile, patches and each root workspace's `package.json` (the frozen install); the packages it copies
 whole — the Dockerfile (`packages/daemon/docker/**`), the two plugins and what they bundle (`packages/pi-envoy/**`,
@@ -284,10 +301,13 @@ host to load 646 on 2026-09-12 and the Legion daemon with it (the CI runner is n
 pushing the PR branch (trigger 2) or, once merged, dispatching (trigger 3); check the Dockerfile and workflow
 statically (`hadolint`, `actionlint` where installed) and run `bun test` for the TypeScript. Pulling and
 running the published image locally is fine. A failed build is retried with `gh run rerun <run-id> --failed`
-(`--failed` keeps the `legion` job's recorded outputs) or by pushing the branch again. A whole-run rerun of a
-`release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a `legion-v` tag, re-executes
-`legion`, which releases that tag again: the image is rebuilt, the `<legion version>` tag moves to the rebuild's
-digest, and the release body's "Worker image" names that digest.
+(`--failed` keeps `legion_build`'s and `legion_publish`'s recorded outputs) or by pushing the branch again. A
+whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
+`legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
+rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
+that digest. `release-envoy-listener.yaml` is the exception to `--failed`: when its `release_publish` fails at
+"Confirm the version" because another run took the tag first, only a whole-run re-run (`gh run rerun <run-id>`
+without `--failed`) heals it, since `release_build` must compute the version again and re-stamp the binaries.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is

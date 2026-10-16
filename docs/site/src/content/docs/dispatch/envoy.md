@@ -1,6 +1,6 @@
 ---
 title: "Envoy: how events reach Dispatch, Legion and the agents"
-description: The Envoy listener and NATS under it, how GitHub webhooks and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, and running the listener.
+description: The Envoy listener and NATS under it, how GitHub webhooks and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
 sidebar:
   label: Envoy
   order: 9
@@ -137,6 +137,13 @@ The listener is `envoy-listener` in the `ghcr.io/sjawhar/legion/envoy` image.
 A listener on anything but loopback refuses to start without `ENVOY_API_TOKEN` or the OIDC pair.
 Keep the API private: only `/webhook/...` needs to be reachable from GitHub.
 
+### With Pulumi
+
+The `envoy-infra` Pulumi plugin runs the listener on a Docker host from a Pulumi program in any
+language, as the component `envoy-infra:host:Listener`. Its
+[README](https://github.com/sjawhar/legion/blob/main/packages/envoy/infra/README.md) says how to
+install it, what it deploys and which settings it sets.
+
 ### Health and readiness
 
 `GET /healthz` needs no credential:
@@ -155,3 +162,86 @@ and takes the consumer within two seconds of the old one exiting.
 
 Give the listener about 30 seconds to stop after `SIGTERM`. It stops taking requests, lets
 deliveries in progress finish, then exits with a non-zero code so a restart policy brings it back.
+
+## Running Envoy on one machine
+
+`packages/envoy/deploy/compose/single-node.compose.yml` runs a NATS server with JetStream of its
+own and the listener in front of it, both on `127.0.0.1` only. The agent sessions on that machine
+register, subscribe, claim roles and send each other messages through it. Nothing on another
+machine reaches it, and no GitHub or Slack webhook arrives, so no pull request or check events
+reach the sessions. NATS takes no credential, so every user on the machine can read and send
+messages through it: run it on a machine whose users you trust.
+
+You need Linux with Docker Engine and the Compose plugin (`docker compose version` answers), and a
+checkout of this repository; the images are public. The two services listen on `4222` (NATS),
+`8222` (NATS monitoring) and `9020` (the listener). When something else on the machine uses one,
+move it in `.env` (`NATS_PORT`, `NATS_MONITOR_PORT`, `ENVOY_LISTENER_PORT`) and use that port
+wherever a command or the `envoy.json` below names the default.
+
+1. Write the machine's settings:
+
+   ```sh
+   cd packages/envoy/deploy/compose
+   cp -n single-node.env.example .env
+   ```
+
+   Set `ENVOY_MACHINE_ID` in `.env` to what `hostname -s` prints, with no `.` in it; the file says
+   what its other settings do. The other compose files here read the same `.env`, so `cp -n` leaves
+   one that already exists alone (it may print `not replacing`): add to it the template's settings
+   it lacks.
+
+2. Start it:
+
+   ```sh
+   docker compose -f single-node.compose.yml up -d --wait
+   curl http://127.0.0.1:9020/healthz
+   ```
+
+   `--wait` returns once both containers pass their health checks. The answer's `status` is then
+   `healthy`, or `starting` for a few seconds ([Health and readiness](#health-and-readiness)). Both
+   restart with Docker unless you stop them. `up` refuses an empty `ENVOY_MACHINE_ID` and an
+   `ENVOY_IMAGE_TAG` that was never published; when a container stays unhealthy instead (a port
+   already in use, say), `docker compose -f single-node.compose.yml logs --tail 50` says why.
+
+3. Point the sessions at it in `~/.config/legion/envoy.json` (`mkdir -p ~/.config/legion` first):
+
+   ```json
+   {
+     "dispatch": { "enabled": false },
+     "envoy": {
+       "enabled": true,
+       "url": "http://127.0.0.1:9020",
+       "natsUrls": ["nats://127.0.0.1:4222"]
+     }
+   }
+   ```
+
+   `"dispatch": { "enabled": false }` is for a machine with no Dispatch server; one that has a
+   server keeps its `dispatch` section. When `.env` sets `ENVOY_API_TOKEN`, put the same value in
+   `envoy.token`. A session under its own Oh My Pi profile, or with `ENVOY_CONFIG_FILE` set, reads
+   another file; [Connecting an agent](/legion/dispatch/for-agents/#connecting-an-agent) says which.
+
+4. Start an Oh My Pi session with `@sjawhar/pi-envoy` 10.0.0 or later
+   (`omp plugin install @sjawhar/pi-envoy`), then `omp`. A session reads `envoy.json` when it
+   starts, so restart any session that was already running; `/reload-plugins` does not reload it.
+   Check that it registered:
+
+   ```sh
+   curl http://127.0.0.1:9020/v1/sessions
+   ```
+
+   With `ENVOY_API_TOKEN` set, add `-H "Authorization: Bearer <token>"`. The answer lists each live
+   session with its `session_id`. Start a second session, and the two can message each other with
+   `envoy_send`.
+
+NATS keeps the event stream and Envoy's key-value buckets in the `envoy-single-node_nats-data`
+volume. A restart keeps the last 72 hours of events, and the subscriptions and role claims of every
+session still running. A running session renews its registration every two minutes; once it stops,
+Envoy drops its subscriptions and role claims within minutes.
+
+| Task | Command, from `packages/envoy/deploy/compose` |
+| --- | --- |
+| Upgrade to the newest published image | `docker compose -f single-node.compose.yml pull && docker compose -f single-node.compose.yml up -d --wait` |
+| Read the logs | `docker compose -f single-node.compose.yml logs -f` |
+| Stop it, keeping its data | `docker compose -f single-node.compose.yml down` |
+| Stop it and delete its data | `docker compose -f single-node.compose.yml down -v` |

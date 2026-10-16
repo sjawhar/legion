@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// TestVersionNamesTheStampedReleaseAndOtherwiseSaysDevel: the release job stamps its tag into the
-// binary (release-envoy-listener.yaml), and the sitting runbook checks a restart with
+// TestVersionNamesTheStampedReleaseAndOtherwiseSaysDevel: the release_build job stamps its tag into
+// the binary (release-envoy-listener.yaml), and the sitting runbook checks a restart with
 // `--version`, so a stamped build prints exactly the tag. Any other build says devel rather than
 // naming a release it is not.
 func TestVersionNamesTheStampedReleaseAndOtherwiseSaysDevel(t *testing.T) {

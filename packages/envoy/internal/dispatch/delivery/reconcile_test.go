@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // TestReconcileCatchesAMissedPullRequest proves the plan's "a missed event appears by the next
@@ -81,8 +82,11 @@ func TestReconcileCatchesAMissedPullRequest(t *testing.T) {
 // created_at beside run_started_at, which a re-run moves past it.
 func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 	pool, ctx := deliveryTestPool(t)
-	seedDeliverySettings(t, ctx, pool)
-
+	settings := seedDeliverySettings(t, ctx, pool)
+	settings.ProductionApplyStepName = new("Run ./.github/actions/apply")
+	if _, err := PutSettings(ctx, pool, settings, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("set apply step: %v", err)
+	}
 	fake := newFakeGitHub(t)
 	fake.handle("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, searchResponseJSON(0, nil, false, ""))
@@ -108,7 +112,7 @@ func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 	fake.handle("GET /repos/acme/widgets/actions/runs/900/jobs", func(w http.ResponseWriter, r *http.Request) {
 		mustEncode(t, w, map[string]any{
 			"jobs": []map[string]any{
-				{"name": "widgets-release / widgets-release", "started_at": "2024-01-01T02:00:00Z", "completed_at": "2024-01-01T02:10:00Z", "conclusion": "success"},
+				{"name": "widgets-release / widgets-release", "started_at": "2024-01-01T02:00:00Z", "completed_at": "2024-01-01T02:10:00Z", "conclusion": "success", "steps": []map[string]any{{"name": "Run ./.github/actions/apply", "conclusion": "skipped"}}},
 			},
 		})
 	})
@@ -130,6 +134,10 @@ func TestReconcileCatchesAMissedDeployRun(t *testing.T) {
 	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 900)
 	if err != nil || len(jobs) != 1 || jobs[0].Name != "widgets-release / widgets-release" {
 		t.Fatalf("reconciled run jobs = %+v, %v", jobs, err)
+	}
+	if jobs[0].ApplyStep == nil || *jobs[0].ApplyStep != "Run ./.github/actions/apply" ||
+		jobs[0].ApplyStepConclusion == nil || *jobs[0].ApplyStepConclusion != DeliveryJobConclusionSkipped {
+		t.Fatalf("reconciled apply step = %+v, want the skipped configured step", jobs[0])
 	}
 }
 
@@ -616,7 +624,7 @@ func TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError(t *testing.T)
 	reconcile := NewReconcile(pool, client)
 
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", ".github/workflows/deploy.yml", DeliveryRunKindDeploy, until)
+	err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", ".github/workflows/deploy.yml", DeliveryRunKindDeploy, Production{}, until)
 	if err == nil {
 		t.Fatal("reconcileWorkflow: err = nil, want the second run's rate limit to fail the pass")
 	}

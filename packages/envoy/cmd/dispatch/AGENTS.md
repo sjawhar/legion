@@ -228,7 +228,7 @@ write identity errors with `identity.WriteError`.
   a reason on the 403 page (`ErrNotInDomain`, `ErrEmailNotVerified`,
   `ErrNoEmail`). The callback records the person in `people` with the issuer's
   refresh token, and under a domain the Google account's `sub` (`people.sub`,
-  migration 0109): `PgPeopleStore.SignIn` ends every session of the address in
+  migration 0111): `PgPeopleStore.SignIn` ends every session of the address in
   the transaction that records a `sub` other than the stored one, so a failed
   revoke records nothing. `identity.Membership` renews that sign-in at least
   hourly: a refresh the issuer refuses, or one whose ID token no longer passes

@@ -2,7 +2,7 @@
   "settings": {
     "deploy_repo": "acme/widgets",
     "deploy_workflow_path": ".github/workflows/deploy.yml",
-    "production_job_name": "widgets-release / widgets-release",
+    "production_job_names": ["widgets-release / widgets-release"],
     "pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
     "population_authors": ["octocat"],
     "excluded_repos": []

@@ -14,7 +14,7 @@ import (
 
 // stubBinaries are the binaries the image rows look for, each a stub answering what the checks
 // run: `go version` and `chromium --version`.
-var stubBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "chromium"}
+var stubBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
 
 const stubScript = `#!/bin/sh
 case "$1" in
@@ -152,7 +152,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
 		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
-		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + ", " + filepath.Join(s.bin, "kubectl") + "; go version go1.26.8 linux/amd64",
+		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + ", " + filepath.Join(s.bin, "kubectl") + ", " + filepath.Join(s.bin, "jq") + ", " + filepath.Join(s.bin, "ssh-keygen") + "; go version go1.26.8 linux/amd64",
 		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {
@@ -197,18 +197,53 @@ func TestCheckImageNamesEveryMissingRow(t *testing.T) {
 	}
 }
 
-// One binary off PATH names that binary alone.
+// One binary off PATH names that binary alone: onPath's single-absent branch (two absent is the lsp
+// case in TestCheckImageNamesEveryMissingRow). Which names toolchain() checks, and in what order, is
+// pinned by the Toolchain detail in TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent, so one
+// name is enough here.
 func TestCheckImageNamesTheOneBinaryOffPATH(t *testing.T) {
 	s := newStubs(t)
 	s.remove("python3")
 
 	lines, err := CheckImage(context.Background(), s.image())
 
-	if want := "capability toolchain is missing: python3 is not on PATH"; err == nil || err.Error() != want {
+	want := "capability toolchain is missing: python3 is not on PATH"
+	if err == nil || err.Error() != want {
 		t.Fatalf("CheckImage = %v, want %q", err, want)
 	}
 	if got := byName(lines)[Toolchain]; got.Status != missing || got.Detail != "python3 is not on PATH" {
 		t.Errorf("toolchain line = %+v, want missing naming python3", got)
+	}
+}
+
+// The Toolchain row's Summary is the one copy of the toolchain list no surface renders (the probe
+// prints the detail), so it is held to the list toolchain() checks: the names recovered from a
+// passing detail, joined as the Summary spells them.
+func TestToolchainSummaryNamesTheListToolchainChecks(t *testing.T) {
+	s := newStubs(t)
+
+	detail, ok := toolchain(context.Background(), s.image())
+
+	if !ok {
+		t.Fatalf("toolchain() = %q, not ok; the stubs must make it pass", detail)
+	}
+	const prefix = "on PATH: "
+	listed, ok := strings.CutPrefix(detail, prefix)
+	if !ok {
+		t.Fatalf("toolchain() = %q, want it to begin %q", detail, prefix)
+	}
+	paths, _, _ := strings.Cut(listed, "; ")
+	var names []string
+	for _, path := range strings.Split(paths, ", ") {
+		names = append(names, filepath.Base(path))
+	}
+	want := "builds and runs with the generic toolchain: " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	i := slices.IndexFunc(Table, func(c Capability) bool { return c.Name == Toolchain })
+	if i < 0 {
+		t.Fatal("Table has no Toolchain row")
+	}
+	if row := Table[i]; row.Summary != want {
+		t.Errorf("Toolchain Summary %q, want %q (the list toolchain() checks)", row.Summary, want)
 	}
 }
 

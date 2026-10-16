@@ -29,6 +29,7 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/nats-io/nkeys"
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -38,6 +39,15 @@ import (
 // declaration and pulls the image before its first test step, so no test reaches the registry
 // mid-run; keep it a single-line string constant.
 const Image = "mirror.gcr.io/library/nats:2.10"
+
+// HubImage is the NATS server image the GCP hub runs, pinned by digest. The envoy-go and
+// envoy-infra-go CI jobs read this declaration and pull the image before their tests run; keep it
+// a single-line string constant.
+const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
+
+// Images are the two NATS server images the real-server tests run on, Image and HubImage, each
+// with the short name its subtest takes.
+var Images = []struct{ Name, Ref string }{{"2.10", Image}, {"hub", HubImage}}
 
 var (
 	mainRuns   bool
@@ -141,7 +151,7 @@ func (s *accountServer) url(t testing.TB) string {
 		return uri
 	}
 	if s.handedOut == s.declared {
-		if outcome := reload(t, s.ctr, accountsConfig(2*s.declared)); outcome != reloaded {
+		if outcome := reload(t, s.ctr, moduleConfigPath, accountsConfig(2*s.declared)); outcome != reloaded {
 			t.Fatalf("NATS refused %d accounts: %s", 2*s.declared, outcome)
 		}
 		s.declared *= 2
@@ -214,7 +224,7 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 
 // StartNkeyAuthorized runs a NATS test container on Image, with JetStream, that accepts only
 // clients authenticating as the nkey user whose public key is user, removed when the test ends,
-// and returns its client URL once the server answers there (answering).
+// and returns its client URL once the server refuses a client with no credential (awaitAuth).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
 	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
@@ -245,7 +255,7 @@ func StartNkeyGranted(t testing.TB, user string, allow ...string) *NkeyGrant {
 // configuration.
 func (g *NkeyGrant) Grant(t testing.TB, allow ...string) {
 	t.Helper()
-	if outcome := reload(t, g.ctr, publishGrantConfig(g.user, allow)); outcome != reloaded {
+	if outcome := reload(t, g.ctr, imageConfigPath, publishGrantConfig(g.user, allow)); outcome != reloaded {
 		t.Fatalf("NATS refused the new grant %q: %s", allow, outcome)
 	}
 }
@@ -257,15 +267,18 @@ const reloaded = "Reloaded server configuration"
 // reason.
 var reloadOutcome = regexp.MustCompile(reloaded + `|Failed to reload server configuration: [^\r\n]*`)
 
-// reload writes config as ctr's configuration file and signals the server to reload it, as an
-// operator does: the server keeps its connections. It returns this reload's outcome (reloaded, or
-// the server's refusal) once the server has logged it, not an earlier one's: it waits for one more
-// outcome line than the server's log held before the signal.
-func reload(t testing.TB, ctr *tcnats.NATSContainer, config string) string {
+// moduleConfigPath is where the NATS module's WithConfigFile puts a server's configuration.
+const moduleConfigPath = "/etc/nats.conf"
+
+// reload writes config to path, ctr's configuration file, and signals the server to reload it, as
+// an operator does: the server keeps its connections. It returns this reload's outcome (reloaded,
+// or the server's refusal) once the server has logged it, not an earlier one's: it waits for one
+// more outcome line than the server's log held before the signal.
+func reload(t testing.TB, ctr *tcnats.NATSContainer, path, config string) string {
 	t.Helper()
 	ctx := context.Background()
 	earlier := len(reloadOutcomes(t, ctr))
-	if err := ctr.CopyToContainer(ctx, []byte(config), "/etc/nats.conf", 0o644); err != nil {
+	if err := ctr.CopyToContainer(ctx, []byte(config), path, 0o644); err != nil {
 		t.Fatalf("write the new configuration: %v", err)
 	}
 	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
@@ -312,44 +325,102 @@ func nkeyConfig(entry string) string {
 	return fmt.Sprintf("jetstream {}\nauthorization {\n  users = [ %s ]\n}\n", entry)
 }
 
+// startNkeyConfig runs a NATS test container on Image, with JetStream and the NATS module's debug
+// and trace logging, whose configuration is config: StartImageConfig with the arguments -DV -js.
+// config must declare the users it enforces.
 func startNkeyConfig(t testing.TB, config string) (*tcnats.NATSContainer, string) {
 	t.Helper()
-	ctx := context.Background()
-	ctr, err := tcnats.Run(ctx, Image, tcnats.WithConfigFile(strings.NewReader(config)))
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start nkey-authorized NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(ctx)
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
-	answering(t, uri)
-	return ctr, uri
+	return StartImageConfig(t, Image, config, []string{"-DV", "-js"}, false)
 }
 
-// answering waits, within connectTimeout, for the server at uri to refuse a connection with no
-// credential with its own authorization violation: the proof it speaks the client protocol and
-// enforces its nkey users. Testcontainers can report a mapped port before the NATS protocol
-// handshake, and a dial then ends in EOF or a refusal that says nothing about the server's users.
-// A server that admits the connection enforces no users, and every refusal a test expects of it
-// would pass for the wrong reason, so that fails the test.
-func answering(t testing.TB, uri string) {
+// awaitAuth waits, within connectTimeout, for the server at uri to answer a connection with no
+// credential the way its configuration says: to admit it when admit is set, as a server with a
+// no_auth_user does, and otherwise to refuse it with its own authorization violation, the proof it
+// enforces its nkey users. Either answer also proves it speaks the client protocol. Testcontainers
+// can report a mapped port before the NATS protocol handshake, and a dial then ends in EOF or a
+// refusal that says nothing about the server's users, so that is retried. The opposite answer
+// fails the test at once: a server that admits the connection enforces no users, and every refusal
+// a test expects of it would pass for the wrong reason; one that refuses it has no no_auth_user.
+func awaitAuth(t testing.TB, uri string, admit bool) {
 	t.Helper()
 	deadline := time.Now().Add(connectTimeout)
 	var err error
 	for time.Now().Before(deadline) {
 		var conn *natsgo.Conn
-		if conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect()); err == nil {
+		conn, err = natsgo.Connect(uri, natsgo.Timeout(dialTimeout), natsgo.NoReconnect())
+		switch {
+		case err == nil:
 			conn.Close()
+			if admit {
+				return
+			}
 			t.Fatalf("NATS at %s admitted a client with no credential: it enforces no nkey users", uri)
-		}
-		if errors.Is(err, natsgo.ErrAuthorization) {
-			return
+		case errors.Is(err, natsgo.ErrAuthorization):
+			if !admit {
+				return
+			}
+			t.Fatalf("NATS at %s refused a client with no credential: it has no no_auth_user", uri)
 		}
 		time.Sleep(retryInterval)
 	}
+	if admit {
+		t.Fatalf("NATS at %s did not admit a client with no credential within %s: %v", uri, connectTimeout, err)
+	}
 	t.Fatalf("NATS at %s did not answer within %s: %v", uri, connectTimeout, err)
+}
+
+// imageConfigPath is where StartImageConfig puts a server's configuration: the path the alpine
+// images' default command reads its configuration from.
+const imageConfigPath = "/etc/nats/nats-server.conf"
+
+// StartImageConfig runs image as a NATS test container whose whole configuration is config, at
+// /etc/nats/nats-server.conf, with the arguments -c /etc/nats/nats-server.conf and then serverArgs
+// (so -js for JetStream), removed when the test ends (even when its start fails). It returns the
+// container with its client URL once the server answers a client with no credential (awaitAuth):
+// with anonymous false, by refusing it; with anonymous true, by admitting it, as a configuration
+// naming a no_auth_user makes it. Both official image variants take arguments that start with a
+// flag as nats-server's own.
+func StartImageConfig(t testing.TB, image, config string, serverArgs []string, anonymous bool) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	ctx := context.Background()
+	ctr, err := tcnats.Run(ctx, image,
+		testcontainers.WithCmd(append([]string{"-c", imageConfigPath}, serverArgs...)...),
+		testcontainers.WithFiles(testcontainers.ContainerFile{
+			Reader:            strings.NewReader(config),
+			ContainerFilePath: imageConfigPath,
+			FileMode:          0o644,
+		}),
+	)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		t.Fatalf("start NATS on %s: %v", image, err)
+	}
+	uri, err := ctr.ConnectionString(ctx)
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	awaitAuth(t, uri, anonymous)
+	return ctr, uri
+}
+
+// ConnectSeed connects to uri as the nkey user whose seed is seed, or with no credential when seed
+// is "", with a one-second dial timeout and no reconnect, then opts, and returns the connection or
+// the server's answer: a test that expects a refusal reads it from the error.
+func ConnectSeed(t testing.TB, uri, seed string, opts ...natsgo.Option) (*natsgo.Conn, error) {
+	t.Helper()
+	options := []natsgo.Option{natsgo.Timeout(dialTimeout), natsgo.NoReconnect()}
+	if seed != "" {
+		user, err := nkeys.FromSeed([]byte(seed))
+		if err != nil {
+			t.Fatalf("read the seed: %v", err)
+		}
+		public, err := user.PublicKey()
+		if err != nil {
+			t.Fatalf("read the seed's public key: %v", err)
+		}
+		options = append(options, natsgo.Nkey(public, user.Sign))
+	}
+	return natsgo.Connect(uri, append(options, opts...)...)
 }
 
 // StartRestartable runs a NATS test container a test can stop and start as a server restarts, and

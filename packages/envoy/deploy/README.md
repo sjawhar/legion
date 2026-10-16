@@ -1,10 +1,10 @@
 # Deploy
 
-Compose definitions run the on-prem Envoy listener, Dispatch server, its
-Postgres database, and the daily Postgres backup worker. All services use host
-networking. The listener serves `127.0.0.1:9020` for local OpenCode session
-registration and webhook ingress; Dispatch serves `127.0.0.1:8766` by default
-for the SPA, Google sign-in through the shared sign-in pool, and the native Dispatch API.
+Compose definitions run the on-prem Envoy listener, the Dispatch server against an external
+database, and a single-node Envoy with its own NATS. All services use host networking. The
+listener serves `127.0.0.1:9020` for local session registration and webhook ingress; Dispatch
+serves `127.0.0.1:8766` by default for the SPA, Google sign-in through the shared sign-in pool,
+and the native Dispatch API.
 
 ## Host configuration lives in `compose/.env`
 
@@ -13,12 +13,15 @@ Docker Compose reads `compose/.env` next to the compose files on every
 in a shell session. A `docker compose up` run by anyone (or any agent) then
 reproduces the same deployment; exported variables only override it.
 `compose/.env` holds secrets and is git-ignored; `compose/dispatch.env.example`
-is the template:
+is the template for Dispatch:
 
 ```bash
 cp compose/dispatch.env.example compose/.env
 $EDITOR compose/.env
 ```
+
+`compose/single-node.env.example` is the template for `single-node.compose.yml`;
+the site's Envoy page ("Running Envoy on one machine") uses it.
 
 For browser access over the tailnet, bind Dispatch to the host's Tailscale
 IPv4 address and allow the plain-HTTP session cookie. The tailnet link is
@@ -43,6 +46,9 @@ every interface.
 ## Layout
 
 - `compose/listener.compose.yml` — host-network listener container.
+- `compose/single-node.compose.yml` — Envoy on one machine: a JetStream NATS of its own and the
+  listener, both on loopback, for sessions that need to reach only each other. The site's Envoy
+  page ("Running Envoy on one machine") walks through it.
 - `compose/dispatch.compose.yml` — the production Dispatch server against an external database
   (`DATABASE_URL`).
 - `compose/dispatch.acceptance.compose.yml` — isolated Postgres and Dispatch services for a
@@ -107,7 +113,7 @@ restarts only `dispatch`.
 | `ENVOY_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate to `/v1` beside `ENVOY_API_TOKEN`. Set with `ENVOY_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
 | `ENVOY_OIDC_AUDIENCE` | conditional | Audience those tokens must carry (`envoy`). Set with `ENVOY_OIDC_ISSUER` or not at all. |
 | `ENVOY_API_ALLOW_UNAUTHENTICATED` | Fargate transition only | Set to `1` only temporarily to start a non-loopback listener with neither credential. |
-| `ENVOY_HOST_BRIDGE` | no | Address used to reach host services; defaults to `127.0.0.1`. |
+| `ENVOY_HOST_BRIDGE` | no | Where the listener reaches a session on this machine that registers a port (OpenCode's serve port). Unset, it is `host.docker.internal`; the compose files set `127.0.0.1`, since host networking does not resolve `host.docker.internal`. |
 | `ENVOY_WEBHOOKS` | no | Comma-separated enabled webhook providers. Without `github` the listener opens no CI store and publishes no CI settlements. |
 | `ENVOY_GITHUB_WEBHOOK_SECRET` | conditional | Required when GitHub webhooks are enabled. |
 | `ENVOY_GITHUB_MENTION_TRIGGER` | no | Defaults to `@legion`. |

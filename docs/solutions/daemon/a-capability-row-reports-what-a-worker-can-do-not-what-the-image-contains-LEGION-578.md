@@ -1,5 +1,5 @@
 ---
-title: "A capability row reports what a worker can do, not what the image contains: tooling the image carries but no process loads is installed, never present, and a check nothing runs is pending, never passed"
+title: "A capability row reports what a worker can do, not what the image contains: tooling the image carries but no process loads is installed, never present, and a check the daemon does not make is rendered from the sessions that make it, never as the daemon's verdict"
 category: daemon
 tags:
   - capabilities
@@ -15,6 +15,7 @@ related_issues:
   - "LEGION-578"
   - "sjawhar/legion#1846"
   - "LEGION-629"
+  - "LEGION-663"
 ---
 
 # A capability row reports what a worker can do, not what the image contains
@@ -29,8 +30,15 @@ related_issues:
   delivers it (`Capability.Awaits`). Render it on every surface the row appears on — the probe's
   table line and `legion state --json`'s row — and keep the gate's refusal as it was: an image
   lacking the tooling is still `missing` and still fails the build.
-- A row whose check nothing in the tree runs yet says so: `to be proved by a live check against a
-  running pod (<issue>)`, never `checked live`. A site label is not a verdict.
+- A row the daemon cannot check is rendered from the reports of the sessions that can: each
+  session measures the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
+  `dispatch-envoy-tools`, `github`) at its start and sends them with its ready
+  (`packages/pi-legion/src/capability-report.ts`), and the daemon renders the row `present` from
+  the live reports, `open` naming the failing sessions, or `unchecked` ("no session has reported
+  yet (<ruling>): <summary>") until one reports (LEGION-663; `docs/kubernetes.md`, "The
+  deployment's capability report"). Never `checked live` from a site label, and never a sentence
+  naming a proof script as the prover: a site label is not a verdict, and a proof that runs
+  elsewhere is not the row's evidence.
 - When the launch changes (the pod lane loads profile plugins), the `Awaits` sentence goes and the
   row reads `present`; that edit belongs to the change that alters the launch, not to the one that
   wrote the row.

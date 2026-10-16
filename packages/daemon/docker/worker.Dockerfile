@@ -21,12 +21,12 @@
 # loopback port inside the pod (the runtime stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
-# TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget
-# and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
-# repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
-# pnpm and yarn, the AWS CLI v2 and kubectl — each of these on PATH at /usr/local/bin or /usr/bin; and the
-# license of every third-party piece of all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the
-# notices stage).
+# TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget,
+# jq, openssh-client (ssh-keygen) and chromium (the browser Oh My Pi finds on PATH); and a generic
+# toolchain for the repositories the workers work, specific to none of them: uv and uvx, Node LTS with
+# npm and corepack's pnpm and yarn, the AWS CLI v2 and kubectl — each of these on PATH at /usr/local/bin
+# or /usr/bin; and the license of every third-party piece of all that at
+# /usr/share/doc/legion/THIRD_PARTY_NOTICES (the notices stage).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
 # the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
 # repository, and links the CodeGraph plugin into the profile, which fetches Oh My Pi's natives; the second
@@ -110,8 +110,9 @@ ARG PI_CODEGRAPH_VERSION=0.1.1
 # plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
-# jq: the same omp.extensions rewrite release.yaml's pi_envoy and pi_legion jobs run. python3/make/g++:
-# native devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
+# jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
+# python3/make/g++: native devDependencies in the workspace lockfile (mirrors
+# packages/envoy/docker/Dockerfile).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -156,10 +157,10 @@ COPY skills skills
 COPY scripts/pi-plugin-prepack.sh scripts/pi-plugin-prepack.sh
 COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
-# Each plugin ships from this checkout with the steps release.yaml's pi_envoy and pi_legion jobs run
-# before `bun pm pack`: the manifest pointed at the one packed bundle (the prepack refuses to pack
-# with the source manifest). Each tarball is unpacked into a directory: `omp plugin install` links a
-# directory and rejects a tarball path (ENOTDIR).
+# Each plugin ships from this checkout with the steps release.yaml's pi_envoy_build and
+# pi_legion_build jobs run before `bun pm pack`: the manifest pointed at the one packed bundle (the
+# prepack refuses to pack with the source manifest). Each tarball is unpacked into a directory: `omp
+# plugin install` links a directory and rejects a tarball path (ENOTDIR).
 WORKDIR /repo/packages/pi-envoy
 RUN jq '.omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
@@ -415,7 +416,7 @@ COPY --from=toolchain /opt/node/lib/node_modules/pyright/LICENSE.txt /in/pyright
 COPY --from=toolchain /opt/node/lib/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl and wget of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/node/lib/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq and openssh-client of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/node/lib/node_modules (their sections below)." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
@@ -452,12 +453,27 @@ FROM mirror.gcr.io/library/debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 ARG PI_CODEGRAPH_VERSION
 # git: jj's git backend and the workers' own git use. ca-certificates: GitHub, Dispatch, model APIs.
-# chromium, python3, curl and wget: what the capability check's browser, eval-python and toolchain rows
-# look for (packages/daemon/internal/capabilities/image.go), trixie's since the suite is the apt pin
-# (the note above the ARGs); chromium brings its library closure as its Depends (a font with it:
-# fontconfig-config requires one, fonts-dejavu-core first), and its Recommends stay out with everyone
-# else's — the setuid sandbox (chromium-sandbox) and fonts-liberation among them; Oh My Pi never uses
-# the sandbox, launching the browser with --no-sandbox --disable-setuid-sandbox.
+# chromium, python3, curl, wget, jq and openssh-client (for ssh-keygen): what the capability check's
+# browser, eval-python and toolchain rows look for (packages/daemon/internal/capabilities/image.go),
+# trixie's since the suite is the apt pin (the note above the ARGs); chromium brings its library
+# closure as its Depends (a font with it: fontconfig-config requires one, fonts-dejavu-core first),
+# and its Recommends stay out with everyone else's — the setuid sandbox (chromium-sandbox) and
+# fonts-liberation among them; Oh My Pi never uses the sandbox, launching the browser with
+# --no-sandbox --disable-setuid-sandbox. jq and ssh-keygen are real binaries, not the harness's: the
+# harness bash's jq builtin reaches only the bash tool, while a worker's subprocesses (`bun test`, a
+# script, a subagent's shell) need /usr/bin/jq. openssh-client is the one apt route to ssh-keygen and
+# also brings ssh, scp, sftp, ssh-agent and ssh-add, which reach no host that curl, wget, git, python3
+# and socat on this line could not already reach (git's ssh transport is what they make runnable; a
+# pod's git speaks https with its role's App token through gh): what a pod may reach is Legion's
+# ruling, the capability table's withheld `network` row
+# (packages/daemon/internal/capabilities/capabilities.go, dispatch://LEGION-5: the pod is the
+# boundary), a declaration the report renders, not a network control this repository ships. The
+# package's two set-id files lose their bits in the RUN below: /usr/lib/openssh/ssh-keysign, setuid
+# root for host-based authentication, which nothing here uses, and /usr/bin/ssh-agent, setgid _ssh by
+# its postinst. A pod would ignore both anyway (allowPrivilegeEscalation false and every capability
+# dropped, packages/daemon/internal/runtime/sandbox/manifest.go), and the final step refuses an image
+# where any file under /usr/lib/openssh or /usr/bin/ssh-agent carries one, so a rebuild of this layer
+# (a new trixie-slim digest, a package update) cannot bring a bit back unnoticed.
 # socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
 # (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
 # bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
@@ -467,8 +483,10 @@ ARG PI_CODEGRAPH_VERSION
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git python3 socat wget \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git jq openssh-client python3 socat wget \
     && rm -rf /var/lib/apt/lists/* \
+    && chmod u-s /usr/lib/openssh/ssh-keysign \
+    && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
     && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
@@ -569,7 +587,9 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # takes no --version; its --help, whose first line names the pnpm version, is the check. `kubectl
 # version --client` reports the client alone: it reads no kubeconfig and contacts no API server. socat
 # answers -V, not --version, with its compiled-in features after the version line; the step prints
-# that line alone.
+# that line alone. ssh-keygen takes no --version (its -V is the certificate-validity option), so it
+# generates a throwaway ed25519 key in the scratch directory, which -l fingerprints and the step
+# removes.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -580,8 +600,9 @@ RUN set -eu; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
-    python3 --version; curl --version; wget --version; chromium --version; \
+    python3 --version; curl --version; wget --version; jq --version; chromium --version; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
+    ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
     rm -rf "$scratch"
 # The notices stage's file, after the toolchain step so a notices change never reruns it, and before
 # `legion`, which changes on every commit while the notices change only with a dependency or a pin.
@@ -597,7 +618,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 # Tools.AgentSecrets names this path.
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold.
+# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
+# ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
@@ -617,7 +640,7 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
 # PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
 # CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
-# node, bun, uv and kubectl on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
+# node, bun, uv, kubectl, jq and ssh-keygen on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
 # capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
@@ -636,6 +659,8 @@ RUN set -eu; \
     for dir in /opt/legion /opt/legion/bin; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
+    setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
