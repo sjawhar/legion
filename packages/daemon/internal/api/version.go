@@ -183,4 +183,15 @@ package api
 // image at boot instead. (26 is LEGION-694's, open as sjawhar/legion#1999 when this was taken; a
 // release declaring 26 carries no `--default-branch`, so this branch takes the number above it, as
 // the collision note says.)
-const DaemonAPIVersion = 27
+//
+// 30: sjawhar/legion#1986 (the repository cache) -- the daemon runs one repository cache pod per
+// mapped repository, whose one container is the image's `legion workspace-init cache`, and an issue
+// pod's `workspace-init fetch` is told the cache's address (`LEGION_REPOSITORY_CACHE_URL`) while
+// the cache is ready, streams its feed from it and fetches only the delta from GitHub; its
+// `workspace-init provision` makes the issue's clone shared with the feed, which now lives on the
+// issue's own volume. An image whose `legion` was built before 30 exits 2 on the unknown
+// subcommand in every cache pod, so the daemon's image probe, which holds the image's pi-legion to
+// this number, refuses such an image at boot instead. (28 and 29 are sjawhar/legion#1986's
+// credentials and issue-repository pull requests, open when this was taken; a release declaring
+// either carries no cache, so this branch takes the number above them, as the collision note says.)
+const DaemonAPIVersion = 30

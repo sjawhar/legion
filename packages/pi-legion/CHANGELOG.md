@@ -45,6 +45,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- Daemon API contract 30 (sjawhar/legion#1986): under the Kubernetes runtime each mapped
+  repository gets a repository cache pod running the image's `legion workspace-init cache`, and
+  an issue pod's `workspace-init fetch` fills its feed from that cache while it is ready and
+  fetches only the delta from GitHub; an image built before it is refused by the daemon's image
+  probe. Install this release with a `legion` built from the same commit.
 - Daemon API contract 27 (sjawhar/legion#1986): an issue pod's `workspace-init provision` command
   names the repository's default branch (`--default-branch <name>`), which every branch and
   workspace now starts at, whatever its name (`develop`, `release/v7.1`); an image built before it
