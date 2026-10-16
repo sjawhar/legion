@@ -34,6 +34,17 @@ section can use the words without stopping to explain them.
   start from starts at that default branch too. A pull request or push names its repository, and
   counts for an issue only in the issue's own.
 
+## Several repositories
+
+One Legion deployment can work issues across several GitHub repositories, under several owners,
+with exactly one repository per issue — never two. A change that spans repositories is a parent
+issue with one child per repository, each child's own `--repo` fixed when the daemon records it.
+Every pane and pod holds a write token, minted from the role's GitHub App, for its own issue's
+owner alone, and a read-only token for every other owner the project maps (`legion gh`, the `gh`
+wrapper every pane and pod runs, picks the directory by the owner the command names); `git` reaches
+the same bundle through a credential helper keyed the same way, so a push to another owner's
+repository is refused there, not merely discouraged.
+
 ## The controller
 
 The controller is the one Legion agent a person talks to directly. By default (`controller:
