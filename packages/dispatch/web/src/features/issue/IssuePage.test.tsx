@@ -219,6 +219,7 @@ test("IssuePage shows a session creator's live title and personal-token owner", 
       {
         capabilities: [],
         dir: "/workspaces/chief-of-staff",
+        host: "example-host-devbox",
         last_activity: null,
         last_seen: 1_700_000_000_000,
         machine_id: "example-host-devbox",

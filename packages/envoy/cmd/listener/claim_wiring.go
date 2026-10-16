@@ -17,6 +17,11 @@ type subscribeBody struct {
 	// claim without the flag cannot displace a live driving claim.
 	Driving        bool `json:"driving"`
 	SelfSubscribed bool `json:"self_subscribed"`
+	// Host is envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel
+	// hostname): where the session process actually runs, as opposed to machineID below,
+	// which is always the registering listener's own machine (unrelated to the caller).
+	// Empty for a session whose plugin predates this field.
+	Host string `json:"host"`
 }
 
 func sessionEntryFromSubscribe(body subscribeBody, machineID string) session.SessionEntry {
@@ -28,5 +33,6 @@ func sessionEntryFromSubscribe(body subscribeBody, machineID string) session.Ses
 		Capabilities:   append([]string{}, body.Capabilities...),
 		Driving:        body.Driving,
 		SelfSubscribed: body.SelfSubscribed,
+		Host:           body.Host,
 	}
 }
