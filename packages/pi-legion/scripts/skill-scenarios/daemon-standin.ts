@@ -61,10 +61,11 @@ const SESSION_SECRET = "rig-secret";
 
 const startedAt = new Date().toISOString();
 /** `GET /legion/v1/state`: the one issue the worker holds, admitted in the phase its role works
- * (`workflow.RoleFor`, through daemon-pane.go). `capabilities` is the deployment's capability
- * report and `strandedClaims` the claims nothing will wake, both of which the strict reader
- * requires; the rig has no deployment to report on and its one claim runs, so each is the empty
- * list the daemon's MarshalJSON emits when there is none. */
+ * (`workflow.RoleFor`, through daemon-pane.go), on the rig's one repository. `capabilities` is the
+ * deployment's capability report, `strandedClaims` the claims nothing will wake and `repositories`
+ * the project's mapping, all of which the strict reader requires; the rig has no deployment to
+ * report on and its one claim runs, so the first two are the empty lists the daemon's MarshalJSON
+ * emits when there is none. */
 const STATE = LegionStateResponse.parse({
   daemon: { project, schemaVersion: 1, boots: 1, firstBootAt: startedAt, startedAt },
   admission: { cap: 1, active: [issue], waiting: [] },
@@ -74,12 +75,19 @@ const STATE = LegionStateResponse.parse({
       generation: 1,
       phase: runDaemonPane(DAEMON_MODULE, ["phase", role]).trim(),
       status: "in_progress",
+      repo: "sjawhar/legion-smoke",
+      defaultBranch: "main",
       workers: {},
     },
   },
   pendingStatusWrites: [],
   strandedClaims: [],
   capabilities: [],
+  repositories: {
+    owners: ["sjawhar"],
+    mapped: [{ repo: "sjawhar/legion-smoke", default: true }],
+    refused: [],
+  },
 });
 
 interface LogLine {

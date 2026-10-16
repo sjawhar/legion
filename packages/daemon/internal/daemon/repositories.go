@@ -25,9 +25,9 @@ import (
 // the project (Settings → Repositories → Projects), read at boot and on its
 // settings.repo_project.updated, each repository served once both GitHub Apps are installed on it
 // and every other one left out with the reason, for legion state. The mapping also files people's
-// issues, so it can name a repository Legion has no App on; leaving it out costs only its issues'
-// admission. Readers take the read lock; the readers of the mapping swap it whole under the write
-// lock.
+// issues, so it can name a repository that lacks one of Legion's Apps; leaving it out costs only its
+// issues' admission. Readers take the read lock; the readers of the mapping swap it whole under the
+// write lock.
 type repositories struct {
 	project string
 
