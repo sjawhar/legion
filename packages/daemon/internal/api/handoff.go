@@ -176,7 +176,7 @@ func byHandShare(mergeNote string) string {
 //     requires one).
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED,
-//     READY_CHECKS_NOT_GREEN.
+//     READY_DISARM_PENDING, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, whose token never leaves the daemon; a runtime that
@@ -195,7 +195,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		return readyAnswer{}, false
 	}
 	ctx := r.Context()
-	pr, err := s.readyPullRequest(ctx, issue.Key)
+	pr, disarmPending, err := s.readyRecord(ctx, issue.Key)
 	if err != nil {
 		s.log.Error("api: read the pull request of a completing issue", "issue", issue.Key, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request")
@@ -206,7 +206,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	if s.mergeRules != nil {
 		rules = s.mergeRules(issue.Project)
 	}
-	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr)
+	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)
 		return readyAnswer{}, false
@@ -214,17 +214,24 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	return answer, true
 }
 
-// readyPullRequest is issue's recorded pull request, nil when it has none.
-func (s *server) readyPullRequest(ctx context.Context, issue string) (*record.PullRequest, error) {
+// readyRecord is issue's recorded pull request, nil when it has none, and whether its unfinished
+// disarm keeps an earlier auto-merge arm standing (record.Store.DisarmPending). By-hand READY
+// refuses on that barrier; ordinary READY does not wait for it.
+func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, error) {
 	if s.pool == nil || s.records == nil {
-		return nil, errors.New("record dependencies are unavailable")
+		return nil, false, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	return s.records.PullRequest(ctx, tx, issue)
+	pr, err := s.records.PullRequest(ctx, tx, issue)
+	if err != nil {
+		return nil, false, err
+	}
+	pending, err := s.records.DisarmPending(ctx, tx, issue)
+	return pr, pending, err
 }
 
 // handoffPosition reads the issue record, its tree's generation (the root's), and its review round:

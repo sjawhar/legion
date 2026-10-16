@@ -1284,6 +1284,28 @@ func TestHandoffCompleteReadyDoesNotWaitForAnUnfinishedDisarm(t *testing.T) {
 	}
 }
 
+// A by-hand READY never leaves an arm from an earlier ordinary READY standing. A push that starts
+// touching a by_hand path queues its disarm before the merger reaches READY again; while that
+// durable disarm has not finished, the by-hand READY waits rather than accepting a head GitHub
+// could still merge automatically.
+func TestHandoffCompleteReadyByHandWaitsForAnUnfinishedDisarm(t *testing.T) {
+	github := byHandGitHub(t, `[{"filename":"migrations/versions/0002_by_hand.py"}]`)
+	h, facts, merger := newReadyHarness(t, github)
+	row, err := record.NewOutboxRow("LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
+		t.Fatalf("queue the disarm: %v", err)
+	}
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_DISARM_PENDING:") {
+		t.Fatalf("by-hand READY with the issue's disarm unfinished = %d %q, want it held", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none until the disarm finishes", got)
+	}
+}
+
 // ready posts the merger's READY and returns its answer: the note when it was published, or the
 // refusal's code and sentence.
 func ready(t *testing.T, h *harness, merger liveClaim) (code int, body string) {

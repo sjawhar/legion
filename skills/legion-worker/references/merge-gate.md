@@ -140,9 +140,12 @@ reviewing until you finish.
   No role runs `gh pr merge`. When the answer's `note` begins `MANUAL_MERGE_REQUIRED:` (the pull
   request touches a path the project's `merge.by_hand` names), READY stands but the daemon submits
   nothing: the merger tells the architect the note and the head, and a person merges under the
-  repository's rules. The daemon tells that READY with the note at its head and the packet's `Merge:` line
-  replaced, so the issue and the merge queue role are never asked to arm it. A READY the design
-  gate refused is submitted by the daemon when the approval that opens the gate moves the issue to
+  repository's rules. While an earlier auto-merge disarm for that pull request remains unfinished,
+  a by-hand READY refuses `READY_DISARM_PENDING`; retry it once the disarm finishes, so a stale
+  ordinary arm cannot merge the person-only head. Ordinary READY does not wait for the disarm. The
+  daemon tells that READY with the note at its head and the packet's `Merge:` line replaced, so the
+  issue and the merge queue role are never asked to arm it. A READY the design gate refused is
+  submitted by the daemon when the approval that opens the gate moves the issue to
   `awaiting_merge`. A push that moves the head past a READY the gate holds voids it before then:
   the architect is told `READY_HEAD_MOVED` and has the merger build a new READY at the new head.
   The packet's second line records the step,

@@ -24,8 +24,9 @@ import (
 // entry, and every mutation sent. requeue is GitHub enqueueing again a pull request it dequeues
 // while its auto-merge is still enabled; failDisable answers the disable with an error, stuckArm
 // answers it as done while leaving auto-merge enabled, refuseSubmit answers an enable or merge with
-// GitHub's refusal, movedOnRefuse is the head a push moves the pull request to as GitHub refuses
-// it, and submitStatus answers an enable or merge with that HTTP status instead.
+// GitHub's refusal, refuseType is that GraphQL error's type, movedOnRefuse is the head a push moves
+// the pull request to as GitHub refuses it, and submitStatus answers an enable or merge with that
+// HTTP status instead.
 type github struct {
 	mu                             sync.Mutex
 	notFound                       string
@@ -35,7 +36,8 @@ type github struct {
 	queueRequired, autoMergeOK     bool
 	armed, queued                  bool
 	requeue, failDisable, stuckArm bool
-	refuseSubmit, movedOnRefuse    string
+	refuseSubmit, refuseType       string
+	movedOnRefuse                  string
 	submitStatus                   int
 	mutations                      []string
 }
@@ -82,7 +84,11 @@ func (g *github) serve(t *testing.T) string {
 				if g.movedOnRefuse != "" {
 					g.head = g.movedOnRefuse
 				}
-				_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":"UNPROCESSABLE","message":%q}]}`, g.refuseSubmit)
+				kind := g.refuseType
+				if kind == "" {
+					kind = "UNPROCESSABLE"
+				}
+				_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":%q,"message":%q}]}`, kind, g.refuseSubmit)
 				return
 			}
 			if verb == "enable" {
@@ -291,6 +297,9 @@ func TestSubmitTellsAPermanentRefusalFromATransientOne(t *testing.T) {
 	}{
 		{"GitHub refuses the merge and stands where it was", &github{head: "head", mergeState: "CLEAN", refuseSubmit: squash}, true},
 		{"GitHub refuses the arm and stands where it was", &github{head: "head", mergeState: "BLOCKED", autoMergeOK: true, refuseSubmit: squash}, true},
+		{"GitHub rejects the merge as invalid", &github{head: "head", mergeState: "CLEAN", refuseSubmit: squash, refuseType: "VALIDATION_FAILED"}, true},
+		{"GitHub rate limits the merge", &github{head: "head", mergeState: "CLEAN", refuseSubmit: "API rate limit exceeded", refuseType: "RATE_LIMITED"}, false},
+		{"GitHub has an internal merge error", &github{head: "head", mergeState: "CLEAN", refuseSubmit: "Service temporarily unavailable", refuseType: "INTERNAL"}, false},
 		{"GitHub refuses the merge as a push moves the head", &github{head: "head", mergeState: "CLEAN", refuseSubmit: "Head branch was modified. Review and try the merge again.", movedOnRefuse: "moved"}, false},
 		{"GitHub answers the merge with a server error", &github{head: "head", mergeState: "CLEAN", submitStatus: http.StatusBadGateway}, false},
 	} {
@@ -304,8 +313,8 @@ func TestSubmitTellsAPermanentRefusalFromATransientOne(t *testing.T) {
 			if errors.As(err, &refused) != tc.permanent {
 				t.Fatalf("Submit = %v (%T); want permanent %t", err, err, tc.permanent)
 			}
-			if tc.permanent && (refused.Message != squash || !strings.Contains(err.Error(), squash)) {
-				t.Fatalf("refusal = %+v, want GitHub's message %q", refused, squash)
+			if tc.permanent && (!strings.Contains(refused.Message, squash) || !strings.Contains(err.Error(), squash)) {
+				t.Fatalf("refusal = %+v, want GitHub's message to include %q", refused, squash)
 			}
 		})
 	}

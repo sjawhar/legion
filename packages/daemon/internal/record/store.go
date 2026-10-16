@@ -505,6 +505,15 @@ func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, proje
 	return pending, nil
 }
 
+func (s *Postgres) DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2)",
+		string(OutboxKindAutoMergeDisable), issue).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a disarm pending: %w", issue, err)
+	}
+	return pending, nil
+}
+
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
@@ -512,7 +521,9 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
 	}
 	var err error
-	if row.CreatedAt.IsZero() {
+	if row.Kind == OutboxKindReadyMerge {
+		err = s.enqueueReadyMerge(ctx, tx, row)
+	} else if row.CreatedAt.IsZero() {
 		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
 			values ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
@@ -525,6 +536,26 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 		return fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
 	}
 	return nil
+}
+
+// enqueueReadyMerge adds one durable submission for a READY head, or expedites its still unfinished
+// one. The unique partial index 0044 makes the race between a reopen and a retry one row, and the
+// upsert leaves an in-flight lease alone while making a backoff row due now.
+func (s *Postgres) enqueueReadyMerge(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
+	if row.CreatedAt.IsZero() {
+		_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+			values ($1, $2, $3, $4, $5, $6, $7, $8)
+			on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge'
+			do update set next_at = least(outbox.next_at, excluded.next_at)`,
+			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
+		return err
+	}
+	_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge'
+		do update set next_at = least(outbox.next_at, excluded.next_at)`,
+		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.CreatedAt, row.LeaseToken, row.LeaseUntil)
+	return err
 }
 
 // ClaimDue leases project's due rows, oldest first. The database is shared by the daemons of

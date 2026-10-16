@@ -46,7 +46,8 @@ const (
 	messageReadSkew      = 5 * time.Second
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
-	// operator should look.
+	// operator should look. A ready_merge waits normally for required checks and reviews, so it
+	// stays debug at every attempt.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
@@ -56,6 +57,10 @@ const (
 	// mint with them, for the same reason: one unanswered call would stall every effect behind it.
 	autoMergeTimeout = 30 * time.Second
 )
+
+// errReadyMergeRefusedFinished marks a ready_merge row whose permanent refusal and architect
+// notice committed with its finish. RunOnce must neither retry nor finish the row again.
+var errReadyMergeRefusedFinished = errors.New("READY merge refusal recorded and row finished")
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
 // separate transactions so a slow external service never holds an issue transition lock.
@@ -160,6 +165,9 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := r.execute(ctx, row); err != nil {
+			if errors.Is(err, errReadyMergeRefusedFinished) {
+				continue
+			}
 			if errors.Is(err, wait.ErrWaiting) {
 				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
 				// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
@@ -169,7 +177,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				switch {
 				case row.Attempts == 0:
 					level = slog.LevelInfo
-				case row.Attempts >= waitWarnAttempts:
+				case row.Attempts >= waitWarnAttempts && row.Kind != record.OutboxKindReadyMerge:
 					level = slog.LevelWarn
 				}
 				r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
@@ -238,7 +246,12 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow) error 
 }
 
 func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) error {
-	nextAt := r.now().UTC().Add(retryBackoff(row.Attempts))
+	delay := retryBackoff(row.Attempts)
+	var githubFailure *githubrest.GraphQLError
+	if errors.As(cause, &githubFailure) && githubFailure.RateLimited && githubFailure.RetryAfter > delay {
+		delay = githubFailure.RetryAfter
+	}
+	nextAt := r.now().UTC().Add(delay)
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		return r.records.RetryOutbox(ctx, tx, row.ID, row.LeaseToken, nextAt, cause.Error())
 	}); err != nil {
@@ -1081,19 +1094,37 @@ func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload r
 	submitted, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, r.keepFor(row.Issue))
 	var refused *ghautomerge.Refused
 	if errors.As(err, &refused) {
-		r.log.Error("outbox READY merge refused by GitHub for good; its architect is told and the row ends", "row", row.ID, "issue", row.Issue,
-			"number", payload.Number, "head", payload.Head, "error", err)
-		notice, err := record.NewOutboxRow(row.Issue, record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: refused.Error()}, r.now().UTC())
-		if err != nil {
+		if err := r.finishReadyMergeRefused(ctx, row, refused); err != nil {
 			return err
 		}
-		return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error { return r.records.Enqueue(ctx, tx, notice) })
+		return errReadyMergeRefusedFinished
 	}
 	if err != nil {
 		return err
 	}
 	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head,
 		"missing", submitted.Missing, "stale", submitted.Stale, "already", submitted.Already, "autoMerge", submitted.AutoMerge, "merged", submitted.Merged)
+	return nil
+}
+
+// finishReadyMergeRefused tells the architect why GitHub will keep refusing row's submission and
+// finishes row in one transaction. A crash or database failure rolls both back, so a retry cannot
+// publish a second notice between a first notice's commit and the row's finish.
+func (r *outbox) finishReadyMergeRefused(ctx context.Context, row record.OutboxRow, refused *ghautomerge.Refused) error {
+	notice, err := record.NewOutboxRow(row.Issue, record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: refused.Error()}, r.now().UTC())
+	if err != nil {
+		return err
+	}
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if err := r.records.Enqueue(ctx, tx, notice); err != nil {
+			return err
+		}
+		return r.records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken)
+	}); err != nil {
+		return fmt.Errorf("record permanent READY merge refusal for row %d: %w", row.ID, err)
+	}
+	r.log.Error("outbox READY merge refused by GitHub for good; its architect is told and the row ends", "row", row.ID, "issue", row.Issue,
+		"number", refused.Number, "head", refused.Head, "error", refused)
 	return nil
 }
 

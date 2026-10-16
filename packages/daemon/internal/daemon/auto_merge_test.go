@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -279,12 +282,168 @@ func TestAREADYMergeRowTellsTheArchitectOnceWhenGitHubRefusesItForGood(t *testin
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("execute = %v; want the row finished once the architect is told", err)
+			if !errors.Is(err, errReadyMergeRefusedFinished) {
+				t.Fatalf("execute = %v; want the permanent-refusal finish signal", err)
 			}
 			if len(notices) != 1 || !strings.HasPrefix(notices[0], "merge-refused architect ") || !strings.Contains(notices[0], squash) || !strings.Contains(notices[0], "#42") {
 				t.Fatalf("notices %q; want one merge-refused to the architect naming #42 and GitHub's message", notices)
 			}
 		})
+	}
+}
+
+// A permanent ready_merge refusal writes its architect notice and finishes the row in one
+// transaction. If FinishOutbox loses its first connection, the transaction rolls the notice back
+// too; after the lease expires, the one retried row leaves exactly one notice and no ready_merge
+// row. Writing the notice first and finishing later would send it twice.
+func TestARetriedPermanentREADYMergeRefusalPostsOneNotice(t *testing.T) {
+	const squash = "Squash merges are not allowed on this repository."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), "mergePullRequest") {
+			_, _ = fmt.Fprintf(w, `{"data":null,"errors":[{"type":"UNPROCESSABLE","message":%q}]}`, squash)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
+	}))
+	t.Cleanup(server.Close)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
+	}); err != nil {
+		t.Fatalf("seed the merger's READY: %v", err)
+	}
+	now := time.Now().UTC()
+	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		if err := records.Enqueue(context.Background(), tx, row); err != nil {
+			return err
+		}
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Fatalf("enqueue duplicate READY merge: %v", err)
+	}
+	flaky := &flakyOutboxStore{Store: records, finishFailures: 1}
+	clock := now
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: flaky, tokens: roleTokens{}, project: "legion",
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: func() time.Time { return clock }}
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	assertReadyMergeRefusalRows(t, pool, 1, 0)
+	if got := flaky.failedFinishes(); got != 1 {
+		t.Fatalf("failed finishes = %d, want the injected one", got)
+	}
+
+	clock = clock.Add(outboxLease + time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("retried RunOnce: %v", err)
+	}
+	assertReadyMergeRefusalRows(t, pool, 0, 1)
+}
+
+func assertReadyMergeRefusalRows(t *testing.T, pool interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, wantReady, wantNotice int) {
+	t.Helper()
+	var ready, notices int
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'ready_merge'`).Scan(&ready); err != nil {
+		t.Fatalf("count READY merge rows: %v", err)
+	}
+	if err := pool.QueryRow(context.Background(), `select count(*) from outbox where kind = 'notice' and payload->>'kind' = 'merge-refused'`).Scan(&notices); err != nil {
+		t.Fatalf("count merge-refused notices: %v", err)
+	}
+	if ready != wantReady || notices != wantNotice {
+		t.Fatalf("READY merge rows = %d and notices = %d, want %d and %d", ready, notices, wantReady, wantNotice)
+	}
+}
+
+// A ready_merge row waiting on a required review or check is routine, even after its retry backoff
+// reaches the cap. It must not flood warnings while a person supplies the review GitHub requires.
+func TestAWaitingREADYMergeStaysDebugAfterItsBackoffCaps(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"BLOCKED","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
+	}))
+	t.Cleanup(server.Close)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
+	}); err != nil {
+		t.Fatalf("seed the merger's READY: %v", err)
+	}
+	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.Attempts = waitWarnAttempts
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Fatalf("enqueue READY merge: %v", err)
+	}
+	var logged bytes.Buffer
+	runner := &outbox{log: slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug})), pool: pool, dispatchProject: "LEGION",
+		records: records, tokens: roleTokens{}, project: "legion", repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: time.Now}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if text := logged.String(); !strings.Contains(text, `level=DEBUG msg="outbox row waits"`) || strings.Contains(text, "level=WARN") {
+		t.Fatalf("waiting READY merge logged %q, want one debug line and no warning", text)
+	}
+}
+
+// A GitHub GraphQL RATE_LIMITED response is transient, and its Retry-After delay outranks the
+// outbox's ordinary backoff so the implement App does not immediately exhaust its token again.
+func TestARateLimitedREADYMergeHonorsGitHubsRetryAfter(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), "mergePullRequest") {
+			w.Header().Set("Retry-After", "180")
+			_, _ = w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
+	}))
+	t.Cleanup(server.Close)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "ready-head"})
+	}); err != nil {
+		t.Fatalf("seed the merger's READY: %v", err)
+	}
+	now := time.Date(2026, 10, 16, 5, 0, 0, 0, time.UTC)
+	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Fatalf("enqueue READY merge: %v", err)
+	}
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
+		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL, now: func() time.Time { return now }}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	var nextAt time.Time
+	if err := pool.QueryRow(context.Background(), `select next_at from outbox where kind = 'ready_merge'`).Scan(&nextAt); err != nil {
+		t.Fatalf("read rate-limited row: %v", err)
+	}
+	if want := now.Add(180 * time.Second); !nextAt.Equal(want) {
+		t.Fatalf("rate-limited READY merge next_at = %s, want GitHub's retry-after %s", nextAt, want)
 	}
 }

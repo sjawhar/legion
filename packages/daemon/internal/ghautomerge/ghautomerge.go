@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -176,7 +175,7 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	}
 	failed := fmt.Errorf("%s pull request #%d of %s at READY's head %s: %w", chosen.action, number, repo, head, sent)
 	var refusal *githubrest.GraphQLError
-	if !errors.As(sent, &refusal) {
+	if !errors.As(sent, &refusal) || !terminalMutationRefusal(refusal) {
 		return Submitted{}, failed
 	}
 	after, err := readRepository(ctx, github, repo, number)
@@ -186,11 +185,24 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	if again, ok := choose(after); !ok || again != chosen {
 		return Submitted{}, failed
 	}
-	messages := make([]string, 0, len(refusal.Failures))
-	for _, failure := range refusal.Failures {
-		messages = append(messages, failure.Message)
+	return Submitted{}, &Refused{Number: number, Head: head, Action: chosen.action, Message: refusal.Error()}
+}
+
+// terminalMutationRefusal reports GraphQL mutation errors that no backoff can repair. GitHub's
+// rate-limit, service and unknown error types retry: only a confirmed unchanged pull request plus
+// one of these terminal rejections becomes Refused.
+func terminalMutationRefusal(refusal *githubrest.GraphQLError) bool {
+	if len(refusal.Failures) == 0 {
+		return false
 	}
-	return Submitted{}, &Refused{Number: number, Head: head, Action: chosen.action, Message: strings.Join(messages, "; ")}
+	for _, failure := range refusal.Failures {
+		switch failure.Type {
+		case "FORBIDDEN", "UNPROCESSABLE", "VALIDATION_FAILED":
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Refused is GitHub refusing Submit's mutation where a retry would meet the same refusal: Action is

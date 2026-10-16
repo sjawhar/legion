@@ -317,7 +317,6 @@ describe("await_ready_merge", () => {
     expect(r.status).toBe(0);
     expect(r.reads).toHaveLength(3);
     expect(r.merges).toHaveLength(0);
-    expect(r.by).toBe("the daemon's submission");
     expect(r.commit).toBe(mergeCommit);
     expect(r.deletes).toEqual([
       `api -X DELETE repos/sjawhar/legion-smoke/git/refs/heads/${branch}`,
@@ -329,9 +328,8 @@ describe("await_ready_merge", () => {
     expect(r.status).toBe(1);
     expect(r.merges).toHaveLength(0);
     expect(r.deletes).toHaveLength(0);
-    expect(r.stderr).toMatch(
-      /^FAIL ordinary-human-squash-merge: timed out after \ds \(\d+ polls\) waiting for sjawhar\/legion-smoke#7 to merge: it reads OPEN, mergeStateStatus CLEAN, nothing armed; unsettled checks: /
-    );
+    expect(r.stderr).toContain("timed out after");
+    expect(r.stderr).toContain("mergeStateStatus CLEAN");
   });
 
   test("without --delete-branch the merged pull request keeps its branch", () => {

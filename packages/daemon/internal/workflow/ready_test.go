@@ -152,6 +152,31 @@ func TestAReopenAtTheREADYHeadSubmitsTheMergeAgain(t *testing.T) {
 	}
 }
 
+// A ready_merge that was already waiting when a pull request closed must be reused when the pull
+// request reopens at that READY head. Two rows would submit the same mutation and turn one
+// permanent GitHub refusal into two architect notices.
+func TestAReopenAtTheREADYHeadReusesItsWaitingMergeRow(t *testing.T) {
+	pool := migratedPool(t)
+	records := record.NewStore()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestClosed, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: readyPacket})
+	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "head"}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Fatalf("queue the waiting READY merge: %v", err)
+	}
+	applyRefusingNothing(t, pool, readyEngine(""), intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Reopened: true})
+	if got, want := readyMerges(t, pool), []record.ReadyMerge{{Number: 42, Head: "head"}}; !slices.Equal(got, want) {
+		t.Fatalf("READY merges after the reopen = %v, want one row %v", got, want)
+	}
+}
+
 // A READY the design gate refused is posted when a human approves: the packet is kept with the
 // merger's completion across the refusal, and nothing is posted before the approval.
 func TestAREADYTheGateRefusedIsPostedWhenAHumanApproves(t *testing.T) {
