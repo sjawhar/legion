@@ -90,6 +90,14 @@ func (r *recordingRunner) Run(ctx context.Context, command Command) (Result, err
 	if commandWith(actual.Argv, "git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets") {
 		actual.Argv[4] = r.remote
 	}
+	// The fetch into a feed that already holds the repository names GitHub in its argv, too.
+	if len(actual.Argv) > 2 && actual.Argv[0] == "git" && actual.Argv[2] == "fetch" {
+		for i, arg := range actual.Argv {
+			if arg == "https://github.com/acme/widgets" {
+				actual.Argv[i] = r.remote
+			}
+		}
+	}
 	return r.runner.Run(ctx, actual)
 }
 
@@ -534,8 +542,8 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 		t.Errorf("the feed's main is %s, not the remote's", main)
 	}
 	clone := findCall(t, run.Calls(), "git", "clone")
-	if want := []string{"git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets", feed}; !slices.Equal(clone.Argv, want) {
-		t.Errorf("Fetch ran %q, want %q", clone.Argv, want)
+	if want := []string{"git", "clone", "--bare", "--quiet", "https://github.com/acme/widgets"}; !slices.Equal(clone.Argv[:len(want)], want) || len(clone.Argv) != len(want)+1 || !strings.HasPrefix(clone.Argv[len(want)], feed+".clone-") {
+		t.Errorf("Fetch ran %q, want %q into a temporary sibling of %s", clone.Argv, want, feed)
 	}
 	assertCredentialedEnvironmentBounded(t, clone, FetchTimeout)
 	if entries, err := os.ReadDir(req.CredentialDir); err != nil || len(entries) != 0 {

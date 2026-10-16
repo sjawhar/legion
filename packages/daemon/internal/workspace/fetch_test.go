@@ -634,3 +634,175 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 		})
 	}
 }
+
+// A feed that already holds the repository — the issue volume's feed on a relaunch, the repository
+// cache's clone at each refresh — is fetched into, not cloned again: every branch the remote has
+// moved, gained or lost reaches it, through the one-shot credential, bounded as the clone is, and
+// the credential is gone once Fetch returns.
+func TestFetchIntoAFeedThatHoldsTheRepositoryFetchesEveryBranch(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "doomed", "main")
+	feed, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	advanceRemote(t, run.remote)
+	gained := pushRemoteBranch(t, run.remote, "release/v7.1", "gained.txt")
+	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "-D", "doomed")
+	before := len(run.Calls())
+
+	again, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	if again != feed {
+		t.Fatalf("the second Fetch filled %s, want the first's %s", again, feed)
+	}
+	calls := run.Calls()[before:]
+	for _, call := range calls {
+		if commandWith(call.Argv, "git", "clone") {
+			t.Fatalf("the second Fetch cloned again: %q", call.Argv)
+		}
+	}
+	fetch := findCall(t, calls, "git", "--git-dir="+feed, "fetch")
+	if want := []string{"git", "--git-dir=" + feed, "fetch", "--prune", "--quiet", "https://github.com/acme/widgets", "+refs/heads/*:refs/heads/*"}; !slices.Equal(fetch.Argv, want) {
+		t.Fatalf("Fetch ran %q, want %q", fetch.Argv, want)
+	}
+	assertCredentialedEnvironmentBounded(t, fetch, FetchTimeout)
+	for _, branch := range []string{"main", "release/v7.1"} {
+		if got, want := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/"+branch)), strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+run.remote, "rev-parse", branch)); got != want {
+			t.Errorf("the feed's %s is %s, want the remote's %s", branch, got, want)
+		}
+	}
+	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/release/v7.1")); got != gained {
+		t.Errorf("the feed's release/v7.1 is %s, want the pushed %s", got, gained)
+	}
+	if refs := runSetup(t, feed, "git", "--git-dir="+feed, "for-each-ref", "--format=%(refname)", "refs/heads/doomed"); refs != "" {
+		t.Errorf("the branch the remote deleted is still in the feed: %q", refs)
+	}
+	if entries, err := os.ReadDir(req.CredentialDir); err != nil || len(entries) != 0 {
+		t.Errorf("the one-shot credential outlived Fetch: %v (%v)", entries, err)
+	}
+}
+
+// A clone that dies mid-transfer leaves nothing at the feed's repository: the clone runs in a
+// temporary sibling renamed into place once git finished, so a feed on a volume that outlives the
+// process (the issue's own, the cache's) never holds a half-cloned repository the next Fetch would
+// take for a whole one and fetch into. A sibling a Fetch killed outright left (no defer ran) is
+// removed by the next one, which clones whole.
+func TestFetchLeavesNoHalfClonedRepositoryAtTheFeed(t *testing.T) {
+	req := fetchRequest(t)
+	run := newLocalRunner(t)
+	killed := killedClone{Runner: run}
+	if _, err := Fetch(context.Background(), &killed, req); err == nil || !strings.Contains(err.Error(), "killed mid-transfer") {
+		t.Fatalf("Fetch = %v, want the killed clone's failure", err)
+	}
+	if killed.destination == "" {
+		t.Fatal("the stand-in saw no clone")
+	}
+	feed := filepath.Join(req.Feed, "acme", "widgets.git")
+	if killed.destination == feed {
+		t.Fatalf("Fetch cloned straight into %s", feed)
+	}
+	for _, path := range []string{feed, killed.destination} {
+		if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the killed clone left %s behind (%v)", path, err)
+		}
+	}
+
+	stale := feed + ".clone-12345"
+	if err := os.MkdirAll(filepath.Join(stale, "objects"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var logged []string
+	req.Log = func(line string) { logged = append(logged, line) }
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the next Fetch: %v", err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the next Fetch left the killed one's %s (%v)", stale, err)
+	}
+	if want := []string{"removed the clone an earlier fetch left at " + stale}; !slices.Equal(logged, want) {
+		t.Errorf("the next Fetch logged %q, want %q", logged, want)
+	}
+	if main := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")); main != strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+run.remote, "rev-parse", "main")) {
+		t.Errorf("the feed's main is %s, not the remote's", main)
+	}
+}
+
+// killedClone runs every command through Runner but a `git clone`, which it fails as a clone the
+// kernel killed mid-transfer would leave it: a partial repository at its destination, status 137.
+type killedClone struct {
+	Runner
+	destination string
+}
+
+func (r *killedClone) Run(ctx context.Context, command Command) (Result, error) {
+	if !commandWith(command.Argv, "git", "clone") {
+		return r.Runner.Run(ctx, command)
+	}
+	r.destination = command.Argv[len(command.Argv)-1]
+	if err := os.MkdirAll(filepath.Join(r.destination, "objects"), 0o700); err != nil {
+		return Result{}, err
+	}
+	return Result{ExitCode: 137, Stderr: "killed mid-transfer"}, nil
+}
+
+// Nothing ever collects the feed's garbage: provisioning clones the issue's clone with its objects
+// in the feed (objects/info/alternates), so an object the feed dropped — one only a branch GitHub
+// deleted reached — would be gone from the clone too. The feed's own configuration turns git's
+// automatic gc and maintenance off before the feed is in place.
+func TestFetchTurnsTheFeedsGarbageCollectionOff(t *testing.T) {
+	run := newLocalRunner(t)
+	feed, err := Fetch(context.Background(), run, fetchRequest(t))
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
+		if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "config", "--get", key)); got != want {
+			t.Errorf("the feed's %s is %q, want %q", key, got, want)
+		}
+	}
+}
+
+// What of a bare repository the cache streams and a feed takes: its history and refs, and nothing
+// of its own, nothing that would point it at objects elsewhere, and nothing git is still writing.
+func TestFeedEntryIsTheRepositorysHistoryAndRefsAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dir  bool
+		want bool
+	}{
+		{"HEAD", false, true},
+		{"packed-refs", false, true},
+		{"refs", true, true},
+		{"refs/heads", true, true},
+		{"refs/heads/release/v7.1", false, true},
+		{"objects", true, true},
+		{"objects/pack/pack-1a.pack", false, true},
+		{"objects/pack/pack-1a.idx", false, true},
+		{"objects/ab/cdef", false, true},
+		{"objects/info/packs", false, true},
+
+		{"config", false, false},
+		{"description", false, false},
+		{"hooks", true, false},
+		{"hooks/pre-push.sample", false, false},
+		{"info", true, false},
+		{"info/exclude", false, false},
+		{"FETCH_HEAD", false, false},
+		{"HEAD", true, false},
+		{"refs", false, false},
+		{"objects/info/alternates", false, false},
+		{"objects/info/http-alternates", false, false},
+		{"objects/pack/tmp_pack_x", false, false},
+		{"objects/incoming-x", true, false},
+		{"refs/heads/main.lock", false, false},
+		{"packed-refs.lock", false, false},
+	} {
+		if got := FeedEntry(tc.name, tc.dir); got != tc.want {
+			t.Errorf("FeedEntry(%q, dir %t) = %t, want %t", tc.name, tc.dir, got, tc.want)
+		}
+	}
+}

@@ -32,21 +32,27 @@ type FetchRequest struct {
 	Clock         Clock
 }
 
-// Fetch clones the repository from GitHub, bare, into the feed, with the provisioning token and
-// no configuration but the one-shot credential's and the pins: the process of a pod's first init
-// container, the only one that holds the token, whose feed is its own and which mounts nothing a
-// tree agent can write. It reaches GitHub as the tmux runtime's Source does, so the token's two
-// holders share one credential rule. Provision then clones and fetches the shared clone from the
-// feed with no credential. It returns the feed repository.
+// Fetch fills the feed from GitHub with the provisioning token and no configuration but the
+// one-shot credential's and the pins: the process of a pod's first init container, the only one
+// that holds the token, whose feed is its own and which mounts nothing a tree agent can write, and
+// the repository cache's process (repocache), whose volume is its own. It reaches GitHub as the
+// tmux runtime's Source does, so the token's holders share one credential rule. A feed that does
+// not hold the repository yet has it cloned bare into a temporary sibling, its garbage collection
+// turned off (feedConfiguration), and renamed into place once all of that succeeded, so the feed's
+// repository is either whole or absent; a feed that holds it already — the issue volume's feed on
+// a relaunch, the cache's clone at each refresh — has every branch fetched into it, the ones GitHub
+// deleted pruned. Provision then clones and fetches the shared clone from the feed with no
+// credential. It returns the feed repository.
 //
-// A clone that fails transiently (transientCloneFailure) is cloned again after the next of
-// fetchBackoff's waits, once per wait, its failure logged and whatever it left at the feed removed
+// A transfer that fails transiently (transientCloneFailure) is run again after the next of
+// fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left removed
 // first, all within FetchTimeout from the first attempt's start: each attempt is bounded by what
-// remains of it, and no retry starts past it. A clone still failing after the last wait, and every
-// other failure, is the answer at once. Each attempt's stderr has the token replaced by *** as soon
-// as the attempt returns, so nothing Fetch logs or returns carries it, wherever git echoed it.
+// remains of it, and no retry starts past it. A transfer still failing after the last wait, and
+// every other failure, is the answer at once. Each attempt's stderr has the token replaced by ***
+// as soon as the attempt returns, so nothing Fetch logs or returns carries it, wherever git echoed
+// it.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
-	feed, err := feedRepository(request.Feed, request.Repo)
+	feed, err := FeedRepository(request.Feed, request.Repo)
 	if err != nil {
 		return "", err
 	}
@@ -70,38 +76,131 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
 		return "", fmt.Errorf("create feed parent: %w", err)
 	}
-	clone := []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), feed}
-	env := merge(credential.env, isolatedGitConfig)
+	present, err := pathExists(feed)
+	if err != nil {
+		return "", err
+	}
+	var transfer feedTransfer
+	if present {
+		transfer = fetchInto(feed, request.Repo)
+	} else {
+		if transfer, err = cloneBeside(feed, request.Repo, request.Log); err != nil {
+			return "", err
+		}
+		defer func() {
+			_ = os.RemoveAll(transfer.destination)
+		}()
+	}
+	if err := transferWithRetries(ctx, run, request, transfer, merge(credential.env, isolatedGitConfig)); err != nil {
+		return "", err
+	}
+	if !present {
+		if err := feedConfiguration(ctx, run, transfer.destination); err != nil {
+			return "", err
+		}
+		if err := os.Rename(transfer.destination, feed); err != nil {
+			return "", fmt.Errorf("move the cloned repository into the feed at %s: %w", feed, err)
+		}
+	}
+	return feed, credential.remove()
+}
+
+// feedTransfer is how Fetch brings the repository from GitHub: verb names each attempt in the
+// log and in a failure, argv is the attempt, and destination, for a clone, is the temporary
+// directory the attempt clones into, removed before a retry.
+type feedTransfer struct {
+	verb        string
+	argv        []string
+	destination string
+}
+
+// fetchInto is the transfer into a feed repository that exists: every branch of GitHub's, named by
+// its URL in the argv rather than read from the feed's configuration, pruned of those GitHub
+// deleted.
+func fetchInto(feed string, repo ghrepo.Repository) feedTransfer {
+	return feedTransfer{verb: "fetch", argv: []string{"git", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo), "+refs/heads/*:refs/heads/*"}}
+}
+
+// cloneBeside is the transfer into a feed that lacks the repository: a bare clone into a temporary
+// sibling of feed. A sibling an earlier Fetch left — killed before it renamed or removed it — is
+// removed first and logged: only Fetch writes beside the feed's repository, and a killed clone of
+// a large repository left on a volume of fixed size would fill it.
+func cloneBeside(feed string, repo ghrepo.Repository, log func(string)) (feedTransfer, error) {
+	stale, err := filepath.Glob(feed + cloneSuffix + "*")
+	if err != nil {
+		return feedTransfer{}, err
+	}
+	for _, path := range stale {
+		if err := os.RemoveAll(path); err != nil {
+			return feedTransfer{}, fmt.Errorf("remove the clone an earlier fetch left at %s: %w", path, err)
+		}
+		log("removed the clone an earlier fetch left at " + path)
+	}
+	destination, err := os.MkdirTemp(filepath.Dir(feed), filepath.Base(feed)+cloneSuffix)
+	if err != nil {
+		return feedTransfer{}, fmt.Errorf("create the clone's temporary directory beside %s: %w", feed, err)
+	}
+	return feedTransfer{verb: "clone", argv: []string{"git", "clone", "--bare", "--quiet", GitHubURL(repo), destination}, destination: destination}, nil
+}
+
+// cloneSuffix follows the feed repository's name in the temporary directory its clone runs in.
+const cloneSuffix = ".clone-"
+
+// feedConfiguration is what the feed repository's own configuration sets: no automatic garbage
+// collection or maintenance, ever. The issue's clone keeps its objects in the feed
+// (objects/info/alternates), so an object a gc dropped from the feed — one reachable only from a
+// branch GitHub deleted and the fetch pruned — would be gone from the clone that still names it.
+func feedConfiguration(ctx context.Context, run Runner, gitDir string) error {
+	for _, pair := range [][2]string{{"gc.auto", "0"}, {"maintenance.auto", "false"}} {
+		if _, err := FeedGit(ctx, run, gitDir, "config", pair[0], pair[1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// FeedGit runs git on the bare repository gitDir — a feed's, or the repository cache's — under
+// the runner's slow-command budget, holding no credential and reading no configuration but that
+// repository's own: what reads or tends such a repository outside Fetch's transfer.
+func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Result, error) {
+	return RunChecked(ctx, run, append([]string{"git", "--git-dir=" + gitDir}, args...), isolatedGitConfig, "")
+}
+
+// transferWithRetries runs transfer under env until it succeeds, retrying a transient failure as
+// Fetch says.
+func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, env []string) error {
 	scrub := strings.NewReplacer(request.Token, "***")
 	now := request.Clock.Now()
 	deadline := now.Add(FetchTimeout)
 	for attempt := 1; ; attempt++ {
-		result, runErr := runCommandTimeout(ctx, run, clone, env, "", deadline.Sub(now))
+		result, runErr := runCommandTimeout(ctx, run, transfer.argv, env, "", deadline.Sub(now))
 		result.Stderr = scrub.Replace(result.Stderr)
-		_, failed := checkedResult(clone, result, runErr)
+		_, failed := checkedResult(transfer.argv, result, runErr)
 		if failed == nil {
-			return feed, credential.remove()
+			return nil
 		}
 		if runErr != nil || !transientCloneFailure(result) {
-			return "", failed
+			return failed
 		}
 		if attempt > len(fetchBackoff) {
-			return "", fmt.Errorf("%w\nclone attempt %d failed, and the fetch retries a clone at most %d times", failed, attempt, len(fetchBackoff))
+			return fmt.Errorf("%w\n%s attempt %d failed, and the fetch retries a %s at most %d times", failed, transfer.verb, attempt, transfer.verb, len(fetchBackoff))
 		}
 		wait := fetchBackoff[attempt-1]
 		if !request.Clock.Now().Add(wait).Before(deadline) {
-			return "", fmt.Errorf("%w\nclone attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, attempt, wait, FetchTimeout)
+			return fmt.Errorf("%w\n%s attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
 		}
-		request.Log(fmt.Sprintf("clone attempt %d failed; retrying in %s: %s", attempt, wait,
+		request.Log(fmt.Sprintf("%s attempt %d failed; retrying in %s: %s", transfer.verb, attempt, wait,
 			strings.ReplaceAll(strings.TrimSpace(result.Stderr), "\n", " | ")))
-		if err := os.RemoveAll(feed); err != nil {
-			return "", fmt.Errorf("remove what clone attempt %d left at %s: %w", attempt, feed, err)
+		if transfer.destination != "" {
+			if err := os.RemoveAll(transfer.destination); err != nil {
+				return fmt.Errorf("remove what %s attempt %d left at %s: %w", transfer.verb, attempt, transfer.destination, err)
+			}
 		}
 		if err := request.Clock.Sleep(ctx, wait); err != nil {
-			return "", fmt.Errorf("%w\nthe wait before clone attempt %d ended: %w", failed, attempt+1, err)
+			return fmt.Errorf("%w\nthe wait before %s attempt %d ended: %w", failed, transfer.verb, attempt+1, err)
 		}
 		if now = request.Clock.Now(); !now.Before(deadline) {
-			return "", fmt.Errorf("%w\nclone attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, attempt, wait, FetchTimeout)
+			return fmt.Errorf("%w\n%s attempt %d failed, and its retry after the %s wait would start past the fetch's %s bound", failed, transfer.verb, attempt, wait, FetchTimeout)
 		}
 	}
 }

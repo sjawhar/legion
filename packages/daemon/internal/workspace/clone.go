@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -117,12 +118,12 @@ func FromFeed(dir string) Source { return feedSource(dir) }
 type feedSource string
 
 func (dir feedSource) check(repository ghrepo.Repository) error {
-	_, err := feedRepository(string(dir), repository)
+	_, err := FeedRepository(string(dir), repository)
 	return err
 }
 
 func (dir feedSource) open(repository ghrepo.Repository, bookmark string) (remote, error) {
-	feed, err := feedRepository(string(dir), repository)
+	feed, err := FeedRepository(string(dir), repository)
 	if err != nil {
 		return remote{}, err
 	}
@@ -148,10 +149,11 @@ func (s gitHubSource) open(ghrepo.Repository, string) (remote, error) {
 	return newProvisioningCredential(s.credentialDir, s.token)
 }
 
-// feedRepository is where Fetch clones repository under a feed directory, and where a feed
-// Source clones and fetches it from. The zero repository is refused, as Location refuses it: it
-// names the feed's own `.git`.
-func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
+// FeedRepository is where Fetch clones repository under a feed directory, and where a feed
+// Source clones and fetches it from: <feed>/<owner>/<name>.git, the layout the repository cache's
+// volume shares. The zero repository is refused, as Location refuses it: it names the feed's own
+// `.git`.
+func FeedRepository(feed string, repository ghrepo.Repository) (string, error) {
 	if repository.IsZero() {
 		return "", errors.New("workspace repository is required")
 	}
@@ -159,6 +161,30 @@ func feedRepository(feed string, repository ghrepo.Repository) (string, error) {
 		return "", errors.New("workspace feed directory is required")
 	}
 	return filepath.Join(feed, repository.Owner(), repository.Name()+".git"), nil
+}
+
+// FeedEntry is whether name — a path inside a bare repository, slash-separated and relative to it,
+// a directory when dir is set — is part of the history and refs the repository cache streams and a
+// feed takes from it: HEAD, packed-refs, and what lies under refs/ and objects/. Never the
+// repository's own configuration, hooks, info or description, which a feed makes for itself, nor
+// objects/info/alternates or http-alternates, which would point the feed at objects elsewhere, nor
+// a file or directory git is still writing (tmp_*, incoming-*, *.lock).
+func FeedEntry(name string, dir bool) bool {
+	base := path.Base(name)
+	if strings.HasPrefix(base, "tmp_") || strings.HasPrefix(base, "incoming-") || strings.HasSuffix(base, ".lock") {
+		return false
+	}
+	if name == "objects/info/alternates" || name == "objects/info/http-alternates" {
+		return false
+	}
+	top, _, nested := strings.Cut(name, "/")
+	switch top {
+	case "refs", "objects":
+		return nested || dir
+	case "HEAD", "packed-refs":
+		return !nested && !dir
+	}
+	return false
 }
 
 // GitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
