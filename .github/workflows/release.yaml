@@ -57,6 +57,16 @@ on:
 # sha256sum, npm (view, and publish of the handed tarball) and the pinned actions below, with no
 # cache restored (`cache-mode: none`) and the deploy key in the env of the one or two steps that
 # push. release-push.sh handed checks what the build job handed over before anything acts on it.
+#
+# Every job condition downstream of a skippable job takes one shape: `always() &&
+# needs.<job>.result == 'success' && …` before it reads that job's outputs. GitHub gives an `if:`
+# that calls no status function an implicit `success()`, false whenever any job upstream through
+# `needs`, at any distance, was skipped (actions/runner#491), so a condition reading a build's
+# `skip` output without `always()` never decides anything once some plugin job upstream skipped:
+# that is what skipped legion_publish in the first run on this split (run 38822866387) while
+# legion_build had cut a version. `always()` turns that gating off, so each such condition tests
+# the result of every job whose outputs it reads, else a skipped or failed job is read through its
+# empty outputs. check-release-credentials.sh rule 6 pins it.
 permissions: {}
 
 concurrency:
@@ -224,6 +234,7 @@ jobs:
     needs: [changes, pi_envoy_build, pi_envoy_publish, pi_legion_build, pi_legion_publish]
     if: >-
       always() &&
+      needs.changes.result == 'success' &&
       github.ref == 'refs/heads/main' &&
       (needs.changes.outputs.legion == 'true' || github.event_name == 'workflow_dispatch') &&
       (needs.pi_envoy_build.result == 'success' || needs.pi_envoy_build.result == 'skipped') &&
@@ -356,10 +367,11 @@ jobs:
   # Checks what legion_build hands over, writes SHA256SUMS, tags the commit, attests legion_build's
   # archives and releases them. It runs no Go and no built binary, only release-push.sh, git, jq,
   # sha256sum and the pinned actions below, so the scopes and the deploy key it holds never meet the
-  # code legion_build runs.
+  # code legion_build runs. Its condition runs on `always()`, so a plugin job skipped upstream of
+  # legion_build does not skip this one, and tests legion_build's result before reading its skip.
   legion_publish:
     needs: legion_build
-    if: needs.legion_build.outputs.skip != 'true'
+    if: always() && needs.legion_build.result == 'success' && needs.legion_build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
@@ -460,6 +472,7 @@ jobs:
     needs: [changes, legion_build, legion_publish]
     if: >-
       always() &&
+      needs.changes.result == 'success' &&
       (needs.legion_build.result == 'success' || needs.legion_build.result == 'skipped') &&
       (needs.legion_publish.result == 'success' || needs.legion_publish.result == 'skipped') &&
       (needs.changes.outputs.legion == 'true' || needs.changes.outputs.pi_envoy == 'true' ||
@@ -484,7 +497,12 @@ jobs:
 
   worker_image_release_note:
     needs: [legion_publish, worker_image]
-    if: needs.worker_image.result == 'success' && needs.legion_publish.outputs.tag != ''
+    # On `always()`, so a plugin job skipped upstream does not skip this one; it tests the result of
+    # both jobs it reads.
+    if: >-
+      always() &&
+      needs.worker_image.result == 'success' &&
+      needs.legion_publish.result == 'success' && needs.legion_publish.outputs.tag != ''
     runs-on: ubuntu-24.04
     permissions:
       contents: write # gh release edit
@@ -596,7 +614,7 @@ jobs:
   # below, so the scopes and the deploy key it holds never meet the code envoy_plugin_build runs.
   envoy_plugin_publish:
     needs: envoy_plugin_build
-    if: needs.envoy_plugin_build.outputs.skip != 'true'
+    if: always() && needs.envoy_plugin_build.result == 'success' && needs.envoy_plugin_build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`release-push.sh release`, below); id-token: write
     # is the OIDC token npm trusted publishing exchanges for the publish credential (the registry

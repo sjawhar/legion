@@ -217,7 +217,10 @@ jobs:
   # code build runs.
   publish:
     needs: build
-    if: needs.build.outputs.skip != 'true'
+    # build carries an `if:` (main only), so this condition runs on `always()` and tests build's
+    # result, else GitHub's implicit `success()` would skip it with build whatever the skip output
+    # says; a skipped build gives `result == 'skipped'`, false.
+    if: always() && needs.build.result == 'success' && needs.build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     # contents: write creates the GitHub release (`release-push.sh release`, below); id-token and
     # attestations: write are for the archives' provenance attestation (id-token is the Sigstore
