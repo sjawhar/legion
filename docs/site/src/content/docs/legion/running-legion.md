@@ -37,8 +37,9 @@ one the daemon does not serve, is not admitted, and the daemon says why on the i
 The daemon reads the mapping at boot and again whenever it changes in Dispatch. It serves each
 mapped repository both GitHub Apps are installed on, and leaves out one either App is missing from:
 the boot logs it, `legion state --json` lists it under `repositories.refused` with the App it lacks,
-and an issue on it is not admitted until the App is installed. A project with no repository mapped,
-or none both Apps are installed on, does not boot.
+and an issue on it is not admitted until the App is installed, when moving the issue to `todo`
+again admits it. A project with no repository mapped does not boot; one whose every repository
+lacks an App boots serving none and admits nothing until an App is installed.
 
 ## The two GitHub Apps
 

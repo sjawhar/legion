@@ -17,6 +17,32 @@ type Installations interface {
 
 var _ Installations = (*Manager)(nil)
 
+// Logins answers each GitHub App's bot login under the App's own JWT, which needs no installation
+// on any repository: the review App's is the login the workflow judges a push's pusher and a
+// review's author by, known even while the daemon serves no repository.
+type Logins interface {
+	AppLogin(ctx context.Context, role AppRole) (string, error)
+}
+
+var _ Logins = (*Manager)(nil)
+
+// AppLogin is role's App's bot login, "<slug>[bot]", read from GET /app under the App's JWT.
+func (m *Manager) AppLogin(ctx context.Context, role AppRole) (string, error) {
+	app, err := m.app(role)
+	if err != nil {
+		return "", err
+	}
+	jwt, err := GenerateJWT(app.AppID, app.PrivateKey, m.now())
+	if err != nil {
+		return "", err
+	}
+	slug, err := m.appSlug(ctx, jwt)
+	if err != nil {
+		return "", fmt.Errorf("read the %s App's login: %w", role, err)
+	}
+	return slug + "[bot]", nil
+}
+
 // InstalledOn reads GET /repos/{owner}/{repo}/installation under role's App JWT: GitHub answers
 // the installation that covers the repository, 2xx, or 404 when the App has none there. An owner's
 // installation may cover only some of its repositories, so the read is per repository. Any other

@@ -452,8 +452,16 @@ func TestSetRepositoriesChangesTheRepositoriesGitHubIntakeHears(t *testing.T) {
 	if decoded, err := decodeMessage("notifications.github.acme.widgets.pr.42", spec.Project, consumers.repositories(), []byte(opened)); err != nil || decoded.Fact != nil {
 		t.Fatalf("decode of an unlisted repository's event = %#v, %v; want no fact", decoded.Fact, err)
 	}
-	if err := consumers.SetRepositories(context.Background(), nil); err == nil {
-		t.Fatal("SetRepositories accepted no repository")
+	// A daemon serving no repository hears none: the consumer filters on a subject no repository's
+	// events are published on, never on none, which would hear every subject of the stream.
+	if err := consumers.SetRepositories(context.Background(), nil); err != nil {
+		t.Fatalf("SetRepositories of none: %v", err)
+	}
+	if got := consumerInfo(t, stream, githubConsumerName(spec.Project)).Config.FilterSubjects; !slices.Equal(got, []string{"notifications.github.-.-"}) {
+		t.Fatalf("GitHub consumer filters hearing none = %v, want the one no repository publishes on", got)
+	}
+	if decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", spec.Project, consumers.repositories(), capturedGitHubEnvelope(t, "pr-opened.json")); err != nil || decoded.Fact != nil {
+		t.Fatalf("decode while hearing none = %#v, %v; want no fact", decoded.Fact, err)
 	}
 }
 

@@ -37,14 +37,13 @@ legion start --config legion.yaml --check-config
 **At boot, after the check passes**, the daemon reads the project's repositories and checks the
 cluster and the image:
 
-- **No repository to serve.** `project <PROJECT> has no repository mapped in Dispatch (Settings →
+- **No repository mapped.** `project <PROJECT> has no repository mapped in Dispatch (Settings →
   Repositories → Projects)`: map the project's repositories in Dispatch, one of them its default.
-  `no repository mapped to project <PROJECT> in Dispatch has both GitHub Apps installed (the
-  <role> App is not installed on <owner/name>; …)`: install both Apps on at least one of them.
-- **A repository is left out.** A mapped repository missing either App does not stop the boot: the
-  log's `legion workflow boot stage` line with `stage=repositories` lists it under `refused`,
-  `legion state --json | jq .repositories.refused` names it with the App it lacks, and its issues
-  are not admitted until the App is installed there.
+- **A repository is left out.** A mapped repository missing either App does not stop the boot,
+  even when it is the project's only one: the log's `legion workflow boot stage` line with
+  `stage=repositories` lists it under `refused`, `legion state --json | jq .repositories.refused`
+  names it with the App it lacks, and its issues are not admitted, each saying so, until the App
+  is installed there and the issue moves to `todo` again.
 - **Records with no repository.** `<n> issue records have no repository and Dispatch resolves none
   for them (<KEY>, …): set the project's default repository in Dispatch …`: the first boot of this
   release records each issue it already runs on the repository Dispatch resolves for it, and these

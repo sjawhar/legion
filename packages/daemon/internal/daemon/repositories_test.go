@@ -126,34 +126,37 @@ func TestTheMappingNamesEveryMissingAppAndFailsOnAFailedRead(t *testing.T) {
 	}
 }
 
-// The boot refuses a project with no repository mapped, and one none of whose mapped repositories
-// both Apps are installed on, naming the cause; a mapping with one served repository and one left
-// out boots, the left-out one reported.
-func TestTheBootRefusesAMappingItCannotServe(t *testing.T) {
+// The boot refuses only a project with no repository mapped. A mapping whose every repository
+// lacks an App boots serving none, each left out and reported; a mapping with one served
+// repository and one left out boots serving the one.
+func TestTheBootRefusesOnlyAnEmptyMapping(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		mappings []dispatch.RepoProject
-		missing  map[string]bool
-		want     string
+		name            string
+		mappings        []dispatch.RepoProject
+		missing         map[string]bool
+		want            string
+		served, leftOut int
 	}{
-		{"no repository mapped", []dispatch.RepoProject{{Repo: "other/thing", Project: "OTHER"}}, nil,
-			"project LEGION has no repository mapped in Dispatch (Settings → Repositories → Projects)"},
-		{"no repository with both Apps", []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}}, map[string]bool{"review acme/gadgets": true},
-			"no repository mapped to project LEGION in Dispatch has both GitHub Apps installed (the review App is not installed on acme/gadgets): install them, or map a repository they are installed on"},
-		{"one served, one left out", []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION"}, {Repo: "acme/gadgets", Project: "LEGION"}}, map[string]bool{"review acme/gadgets": true}, ""},
+		{name: "no repository mapped", mappings: []dispatch.RepoProject{{Repo: "other/thing", Project: "OTHER"}},
+			want: "project LEGION has no repository mapped in Dispatch (Settings → Repositories → Projects)"},
+		{name: "no repository with both Apps", mappings: []dispatch.RepoProject{{Repo: "acme/gadgets", Project: "LEGION"}},
+			missing: map[string]bool{"review acme/gadgets": true}, leftOut: 1},
+		{name: "one served, one left out", mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION"}, {Repo: "acme/gadgets", Project: "LEGION"}},
+			missing: map[string]bool{"review acme/gadgets": true}, served: 1, leftOut: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			w := &workflowRuntime{dispatch: &mappingDispatch{mappings: tc.mappings}, dispatchProject: "LEGION", installs: &installations{missing: tc.missing},
 				repositories: newRepositories("LEGION"), log: quietLogger()}
 			err := w.loadMapping(context.Background())
-			if tc.want == "" {
-				if err != nil || len(w.repositories.Refused()) != 1 || len(w.repositories.Accepted()) != 1 {
-					t.Fatalf("loadMapping = %v, accepted %v, refused %v; want it to boot with acme/gadgets left out", err, w.repositories.Accepted(), w.repositories.Refused())
+			if tc.want != "" {
+				if err == nil || err.Error() != tc.want {
+					t.Fatalf("loadMapping = %v, want %q", err, tc.want)
 				}
 				return
 			}
-			if err == nil || err.Error() != tc.want {
-				t.Fatalf("loadMapping = %v, want %q", err, tc.want)
+			if err != nil || len(w.repositories.Accepted()) != tc.served || len(w.repositories.Refused()) != tc.leftOut {
+				t.Fatalf("loadMapping = %v, served %v, left out %v; want it to boot serving %d with %d left out",
+					err, w.repositories.Accepted(), w.repositories.Refused(), tc.served, tc.leftOut)
 			}
 		})
 	}

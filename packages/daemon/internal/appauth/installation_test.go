@@ -63,3 +63,34 @@ func TestInstalledOnReadsTheRepositorysInstallationForEachApp(t *testing.T) {
 		})
 	}
 }
+
+// An App's bot login is its slug's, read under the App's own JWT (GET /app): it needs no
+// installation on any repository, so a daemon serving no repository yet still knows the review
+// App's login the engine judges pushes and reviews by. GitHub's trouble is transient.
+func TestAppLoginReadsTheAppsSlugUnderItsOwnJWT(t *testing.T) {
+	key, privatePEM := testAppKey(t)
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	status := http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/app" {
+			t.Errorf("GitHub was asked %s %s, want GET /app alone", r.Method, r.URL.Path)
+		}
+		verifyAppJWT(t, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "), &key.PublicKey, now, "67890")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(`{"slug":"legion-reviewer"}`))
+	}))
+	defer server.Close()
+	tokens := New(config.GitHubApps{
+		Implement: config.GitHubApp{AppID: "12345", PrivateKey: privatePEM},
+		Review:    config.GitHubApp{AppID: "67890", PrivateKey: privatePEM},
+	}, Options{BaseURL: server.URL, HTTPClient: server.Client(), Now: func() time.Time { return now }})
+
+	if login, err := tokens.AppLogin(context.Background(), Review); err != nil || login != "legion-reviewer[bot]" {
+		t.Fatalf("AppLogin = %q, %v; want legion-reviewer[bot]", login, err)
+	}
+	status = http.StatusBadGateway
+	var transient *TransientError
+	if _, err := tokens.AppLogin(context.Background(), Review); !errors.As(err, &transient) {
+		t.Fatalf("AppLogin on GitHub's 502 = %v, want a transient error", err)
+	}
+}

@@ -137,25 +137,23 @@ var appMintAttempt = 15 * time.Second
 // attempt inside the 180 s Stage 3 gives a daemon to answer /healthz.
 var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Second, Attempts: 5}
 
-// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
-// after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
-// refused at once. The token manager keeps a lease it minted, so an attempt after the implement
-// token passed asks GitHub only for the review token. It returns the review App's bot login from
-// its lease: the engine judges a push by its pusher against it, so one App configured for both
-// roles would make every implementer push the review App's and count no fix attempt, and is
-// refused, as is a review lease that names no login.
-func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (string, error) {
+// appLoginsAtBoot reads each App's bot login under its own JWT (appauth.Logins), which needs no
+// installation, so a daemon serving no repository yet still knows the review App's login, as one
+// attempt run again after a failure GitHub reports as its own trouble (appauth.TransientError); any
+// other failure is refused at once. It returns the review App's login: the engine judges a push by
+// its pusher against it, so one App configured for both roles would make every implementer push the
+// review App's and count no fix attempt, and is refused, as is a review App that names no login.
+func appLoginsAtBoot(ctx context.Context, apps appauth.Logins, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
-	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
+	err := bootprobe.Run(ctx, "GitHub App logins read", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
 		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
 		defer cancel()
 		for _, role := range appauth.Roles {
-			lease, err := tokens.Token(attempt, role, owner)
+			login, err := apps.AppLogin(attempt, role)
 			if err == nil {
-				logins[role] = lease.Identity.Name
+				logins[role] = login
 				continue
 			}
-			err = fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
 			var transient *appauth.TransientError
 			if errors.As(err, &transient) {
 				return bootprobe.Outcome{Detail: err.Error()}
@@ -168,16 +166,38 @@ func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *s
 		return "", err
 	}
 	if logins[appauth.Review] == "" || logins[appauth.Review] == logins[appauth.Implement] {
-		return "", fmt.Errorf("the review App's token lease names bot login %q and the implement App's %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
+		return "", fmt.Errorf("the review App names bot login %q and the implement App %q; the workflow needs two different Apps", logins[appauth.Review], logins[appauth.Implement])
 	}
 	return logins[appauth.Review], nil
+}
+
+// mintAtBoot mints the implement and then the review App token for owner, as one attempt run again
+// after a failure GitHub reports as its own trouble (appauth.TransientError); any other failure is
+// refused at once. The token manager keeps a lease it minted, so an attempt after the implement
+// token passed asks GitHub only for the review token.
+func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) error {
+	return bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
+		attempt, cancel := context.WithTimeout(ctx, appMintAttempt)
+		defer cancel()
+		for _, role := range appauth.Roles {
+			if _, err := tokens.Token(attempt, role, owner); err != nil {
+				err = fmt.Errorf("mint %s GitHub App token at boot: %w", role, err)
+				var transient *appauth.TransientError
+				if errors.As(err, &transient) {
+					return bootprobe.Outcome{Detail: err.Error()}
+				}
+				return bootprobe.Outcome{Refusal: err}
+			}
+		}
+		return bootprobe.Outcome{Passed: true}
+	})
 }
 
 // openWorkflow opens the workflow in the order a refusal names its cause: the configuration, the
 // Dispatch bearer prepare read, the project's repository mapping from Dispatch (each repository
 // checked for both GitHub Apps) into repos, the mapping every role's gh bundle reads its owners
-// from, the App tokens minted for every served owner, then the fill of any record written before
-// the record carried its repository.
+// from, the Apps' logins, the App tokens minted for every served owner, then the fill of any record
+// written before the record carried its repository.
 func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, projectID, dispatchToken string, repos *repositories, log *slog.Logger, suppliedTokens appauth.Tokens, githubAPI string) (*workflowRuntime, error) {
 	if cfg.DispatchURL == "" {
 		return nil, nil
@@ -191,6 +211,10 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if !ok {
 		return nil, fmt.Errorf("the GitHub App token source answers no App installation, which the repository mapping is checked against")
 	}
+	logins, ok := tokens.(appauth.Logins)
+	if !ok {
+		return nil, fmt.Errorf("the GitHub App token source answers no App login, which the workflow judges pushes and reviews by")
+	}
 	w := &workflowRuntime{
 		tokens: tokens, installs: installs, dispatch: dispatch.New(cfg.DispatchURL, dispatchToken), repositories: repos,
 		grants: credential.New(nil), projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
@@ -202,13 +226,14 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	if err := w.loadMapping(ctx); err != nil {
 		return nil, err
 	}
-	reviewAppLogin := ""
+	reviewAppLogin, err := appLoginsAtBoot(ctx, logins, log)
+	if err != nil {
+		return nil, err
+	}
 	for _, owner := range w.repositories.Owners() {
-		login, err := mintAtBoot(ctx, tokens, owner, log)
-		if err != nil {
+		if err := mintAtBoot(ctx, tokens, owner, log); err != nil {
 			return nil, err
 		}
-		reviewAppLogin = login
 	}
 	log.Info("legion workflow boot stage", "stage", "appauth")
 	if err := w.nameMapping(ctx); err != nil {

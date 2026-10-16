@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -49,9 +50,9 @@ func (s *faultyStore) PutIssue(ctx context.Context, tx pgx.Tx, issue record.Issu
 }
 
 // mappingRig is a workflow runtime over a fresh database and NATS whose project maps acme/widgets
-// (its default) and zeta/tools, the review App installed on zeta/tools unless leftOut, with GitHub
-// intake hearing what the boot's mapping serves.
-func mappingRig(t *testing.T, leftOut bool) (*workflowRuntime, *mappingDispatch, *installations, jetstream.Stream) {
+// (its default) and zeta/tools, each App installed on each but those missing names ("<role>
+// <owner/name>"), with GitHub intake hearing what the boot's mapping serves.
+func mappingRig(t *testing.T, missing map[string]bool) (*workflowRuntime, *mappingDispatch, *installations, jetstream.Stream) {
 	t.Helper()
 	ctx := context.Background()
 	conn, err := nats.Connect(workflowNATS(t))
@@ -69,7 +70,7 @@ func mappingRig(t *testing.T, leftOut bool) (*workflowRuntime, *mappingDispatch,
 	}
 	github := newNamedGitHub(t, map[string]string{"acme/widgets": "acme/widgets@main", "zeta/tools": "zeta/tools@main"})
 	client := &mappingDispatch{mappings: []dispatch.RepoProject{{Repo: "acme/widgets", Project: "LEGION", Default: true}, {Repo: "zeta/tools", Project: "LEGION"}}}
-	installs := &installations{missing: map[string]bool{"review zeta/tools": leftOut}}
+	installs := &installations{missing: missing}
 	w := &workflowRuntime{pool: isolatedOutboxPool(t), records: record.NewStore(), dispatch: client, dispatchProject: "LEGION", installs: installs,
 		repositories: newRepositories("LEGION"), defaultBranches: newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now), log: quietLogger()}
 	if err := w.loadMapping(ctx); err != nil {
@@ -128,7 +129,7 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			w, _, installs, stream := mappingRig(t, true)
+			w, _, installs, stream := mappingRig(t, map[string]bool{"review zeta/tools": true})
 			installs.missing["review zeta/tools"] = false
 			w.records = &faultyStore{Store: w.records, failIssues: tc.fail}
 			fact := intake.DispatchIssue{Key: "LEGION-301", Seq: 1, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "zeta/tools"}
@@ -170,7 +171,7 @@ func TestAFailedRefreshServesNothingUntilARetrySubscribesIt(t *testing.T) {
 // repository an admission is about to commit an issue on.
 func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing.T) {
 	ctx := context.Background()
-	w, client, _, stream := mappingRig(t, false)
+	w, client, _, stream := mappingRig(t, map[string]bool{})
 	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
 		if err := w.records.PutIssue(ctx, tx, record.Issue{Key: "LEGION-300", Tree: "LEGION-300", Project: "LEGION", Title: "root", Phase: phase.Planning,
 			Generation: 1, Status: "in_progress", Rank: "A", Repo: "acme/widgets", DefaultBranch: "main"}); err != nil {
@@ -227,7 +228,7 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 // mapping no longer serves is heard under the spelling GitHub last named for it.
 func TestGitHubIntakeHearsEachRepositoryAsGitHubSpellsIt(t *testing.T) {
 	ctx := context.Background()
-	w, _, _, _ := mappingRig(t, false)
+	w, _, _, _ := mappingRig(t, map[string]bool{})
 	github := newNamedGitHub(t, map[string]string{"orbit/gadgets": "Orbit/Gadgets@main"})
 	w.defaultBranches = newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
 	if _, err := w.defaultBranches.Named(ctx, ghrepo.MustParse("orbit/gadgets")); err != nil {
@@ -256,5 +257,62 @@ func TestGitHubIntakeHearsEachRepositoryAsGitHubSpellsIt(t *testing.T) {
 	}
 	if got, want := repositoryNames(heard), []string{"acme/widgets", "Orbit/Gadgets", "zeta/tools"}; !slices.Equal(got, want) {
 		t.Fatalf("heard %v, want %v", got, want)
+	}
+}
+
+// A project whose every mapped repository lacks an App boots serving none: GitHub intake hears no
+// repository's events, and an issue handed to Legion on one is not admitted, the daemon saying why
+// on it. Once the App is installed, the issue's next admission recheck serves the repository and
+// records the issue on it, which GitHub intake then hears.
+func TestAProjectServingNoRepositoryStartsServingOnceItsAppIsInstalled(t *testing.T) {
+	ctx := context.Background()
+	w, _, installs, stream := mappingRig(t, map[string]bool{"review acme/widgets": true, "review zeta/tools": true})
+	if served := w.repositories.Accepted(); len(served) != 0 {
+		t.Fatalf("served %v, want none", served)
+	}
+	if filters := githubFilterSubjects(t, stream); !slices.Equal(filters, []string{"notifications.github.-.-"}) {
+		t.Fatalf("GitHub filters = %v, want the one no repository publishes on", filters)
+	}
+	engine := workflow.New(w.records, workflow.Config{Project: "LEGION", Repositories: w, DesignGate: config.DesignGateOff}, quietLogger())
+	admission := admit.New(w.records, engine, 1, "LEGION", quietLogger())
+	handOver := func(seq int64) {
+		t.Helper()
+		fact := intake.DispatchIssue{Key: "LEGION-301", Seq: seq, Status: "todo", Title: "new", Rank: "A", HandedOver: true, ResolvedRepo: "acme/widgets"}
+		prepared, err := w.prepareRepository(ctx, fact)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := intake.ApplyFact(ctx, w.pool, "test", "todo-"+string(rune('0'+seq)), prepared, engine, admission); err != nil {
+			t.Fatal(err)
+		}
+	}
+	handOver(1)
+	if got := recordedIssue(t, w, "LEGION-301"); got != nil {
+		t.Fatalf("LEGION-301 recorded as %+v while no repository is served", got)
+	}
+	var notes []string
+	rows, err := w.pool.Query(ctx, "select payload->>'body' from outbox where issue = 'LEGION-301' and kind = 'dispatch_message'")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var note string
+		if err := rows.Scan(&note); err != nil {
+			t.Fatal(err)
+		}
+		notes = append(notes, note)
+	}
+	rows.Close()
+	if len(notes) != 1 || !strings.Contains(notes[0], "the review App is not installed on acme/widgets") {
+		t.Fatalf("notes on LEGION-301 = %q, want one naming the review App acme/widgets lacks", notes)
+	}
+
+	installs.missing["review acme/widgets"] = false
+	handOver(2)
+	if got := recordedIssue(t, w, "LEGION-301"); got == nil || got.Repo != "acme/widgets" {
+		t.Fatalf("LEGION-301 = %+v once the App is installed, want it recorded on acme/widgets", got)
+	}
+	if filters := githubFilterSubjects(t, stream); !slices.Equal(filters, []string{"notifications.github.acme.widgets.>"}) {
+		t.Fatalf("GitHub filters = %v, want acme/widgets heard", filters)
 	}
 }

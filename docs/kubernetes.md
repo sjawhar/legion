@@ -2568,8 +2568,9 @@ issue's pod (every role container of it alike) and the image probe's.
   project, and checks, per repository, that both GitHub Apps are installed on it (`GET
   /repos/{owner}/{repo}/installation` under each App's JWT): a repository either App is missing
   from is left out, not refused, and `legion state --json` names it under `repositories.refused`
-  with the App it lacks; a project with no repository mapped, or none both Apps are installed on,
-  does not boot. Every role's gh bundle holds a directory for each served repository's owner. An
+  with the App it lacks; a project with no repository mapped does not boot, and one whose every
+  repository lacks an App boots serving none, admitting nothing until an App is installed. Every
+  role's gh bundle holds a directory for each served repository's owner. An
   issue is recorded on the repository Dispatch resolves for it, with that repository's default
   branch as GitHub names it, when the daemon first records it, and keeps both. **Upgrade order:**
   Dispatch first (it resolves each issue's repository), then map the project's repositories there
