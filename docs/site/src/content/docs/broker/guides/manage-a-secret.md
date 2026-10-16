@@ -253,8 +253,9 @@ sets the secret's `expire_time` to 30 days out in one `UpdateSecret` call and pr
 and every version stay readable and restorable until that moment, and GCP deletes them for good,
 irreversibly, once it passes. `restore` clears `expire_time` the same way.
 
-`list` and `show` keep showing a deleted secret, with when it was deleted and the **earliest** it
-can be purged:
+`list` and `show` keep showing a deleted secret, with when it was deleted (AWS) or GCP's
+`expire_time`, the future moment it purges for good (GCP - no separate EARLIEST_PURGE there, since
+that moment is both), and the **earliest** it can be purged:
 
 ```console
 $ agent-secrets secret list

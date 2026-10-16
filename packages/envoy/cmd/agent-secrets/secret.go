@@ -571,7 +571,9 @@ type secretView struct {
 	// Created and LastChanged are absent when the secret store answers none.
 	Created     *time.Time `json:"created,omitempty"`
 	LastChanged *time.Time `json:"last_changed,omitempty"`
-	// Deleted is when its deletion was scheduled, set while it is scheduled for deletion.
+	// Deleted is set while the secret is scheduled for deletion: AWS, the moment the delete ran;
+	// GCP, the expire_time it set, the future moment GCP deletes it for good (GCP has no separate
+	// scheduling moment to report, so this is not "when its deletion was scheduled" there).
 	Deleted *time.Time `json:"deleted,omitempty"`
 	// EarliestPurge is the earliest Secrets Manager can purge it, set while it is scheduled for
 	// deletion (earliestPurge): restorable at least until then, perhaps longer.

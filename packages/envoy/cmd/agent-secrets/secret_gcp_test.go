@@ -476,8 +476,8 @@ func TestGCPSecretListShowsOwnerTierAndValue(t *testing.T) {
 	}
 }
 
-// TestGCPSecretReadsRefuseBadSettings: an invalid kms_key_name or a missing gcp_project is
-// refused before any GCP call.
+// TestGCPSecretReadsRefuseBadSettings: an invalid kms_key_name is refused before any GCP call.
+// TestCheckSettingsKMSKeyName covers the other checkSettingsKMSKeyName refusals directly.
 func TestGCPSecretReadsRefuseBadSettings(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
