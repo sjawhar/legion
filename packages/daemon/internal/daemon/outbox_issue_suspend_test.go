@@ -430,9 +430,10 @@ type issueLaunchSpecs struct{ prompt string }
 
 func (s issueLaunchSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {
 	return runtime.SpawnSpec{
-		Env:        map[string]string{"JJ_USER": "legion-implement[bot]"},
-		Prompt:     runtime.PromptParts{RolePromptPaths: []string{s.prompt}},
-		Repository: ghrepo.MustParse("acme/widgets"),
+		Env:           map[string]string{"JJ_USER": "legion-implement[bot]"},
+		Prompt:        runtime.PromptParts{RolePromptPaths: []string{s.prompt}},
+		Repository:    ghrepo.MustParse("acme/widgets"),
+		DefaultBranch: "main",
 	}, nil
 }
 
@@ -528,7 +529,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	engine := workflow.New(records, workflow.Config{Project: "legion", Linger: time.Hour}, logger)
 	admission := admit.New(records, engine, 2, "LEGION", logger)
 	runner := &outbox{pool: pool, records: records, project: "legion", dispatchProject: "LEGION", supervisor: sup, trees: st, tokens: outboxTokens{},
-		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), githubAPI: newBranchGitHub(t, nil, branchExists).url,
+		stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), githubAPI: newBranchGitHub(t, nil, branchExists).url, defaultBranch: mainBranch,
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: done.Key, Status: "todo"}}, notices: &outboxPublisher{},
 		handlers: []intake.Handler{engine, admission}, log: logger, now: func() time.Time { return clock },
 	}

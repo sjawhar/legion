@@ -308,10 +308,10 @@ type MergeQueuePublish struct {
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
 
-// IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at main, where GitHub does
-// not have it yet, before any role of the issue starts: GitHub can refuse the push that creates a
-// branch of a large repository, where it takes a push that moves one. A start of the issue waits
-// while the row is unfinished (Store.ClaimDue).
+// IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at the repository's default
+// branch, where GitHub does not have it yet, before any role of the issue starts: GitHub can refuse
+// the push that creates a branch of a large repository, where it takes a push that moves one. A
+// start of the issue waits while the row is unfinished (Store.ClaimDue).
 type IssueBranch struct {
 	// Generation is the issue generation the branch is created for. A row of an earlier generation,
 	// or of a tree that lingers, finishes without acting.

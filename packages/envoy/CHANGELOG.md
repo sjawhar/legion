@@ -766,6 +766,10 @@
 
 ### Fixed
 
+- A closed issue can give up an external link (a write whose links are a subset of what it already
+  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
+  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
+
 - A bus client whose NATS connection closes while a publish is in flight now replaces it once,
   and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close
   starts and the publish each dialled a replacement, and both were installed in turn, so the
