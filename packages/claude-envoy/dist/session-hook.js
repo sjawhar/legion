@@ -17504,9 +17504,10 @@ async function executeDispatchTool(input) {
           ...componentGuidance === undefined ? [] : [componentGuidance],
           ...renderSuggestions(created.advice?.suggestions, configUrl)
         ];
+        const href = new URL(`/issues/${encodeURIComponent(created.key)}`, configUrl).toString();
         return {
           text: [
-            `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            `Created ${created.key}: ${created.title} \u2192 ${href} ${notSubscribed(issueTopic(created.key))}`,
             ...adviceLines
           ].join(`
 `),
