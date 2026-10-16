@@ -164,7 +164,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	app := appauth.AppRoleFor(claim.RoleController)
-	lease, ok := s.appLease(w, r, app, string(claim.RoleController))
+	lease, ok := s.appLease(w, r, app, s.githubOwner, string(claim.RoleController))
 	if !ok {
 		return
 	}

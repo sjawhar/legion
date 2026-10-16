@@ -225,13 +225,11 @@ func (rig *initRig) sunk() []string {
 	return strings.Split(strings.TrimSpace(string(body)), "\n")
 }
 
-// launch is a pod of spec's claim, as the runtime would create it.
+// launch is a pod of spec's claim, as the runtime would create it: its gh bundles minted, so each
+// role's gh volume projects its owners' files.
 func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
 	rig.t.Helper()
-	l, err := rig.r.prepare(spec)
-	if err != nil {
-		rig.t.Fatal(err)
-	}
+	l := launchOf(rig.t, rig.r, spec)
 	return rig.r.podTemplate(l).Spec
 }
 
@@ -279,7 +277,11 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 				if item.Key == provisionTokenKey {
 					value = canaryToken
 				}
-				if err := os.WriteFile(filepath.Join(dir, item.Path), []byte(value), 0o600); err != nil {
+				path := filepath.Join(dir, item.Path)
+				if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+					return err
+				}
+				if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
 					return err
 				}
 			}

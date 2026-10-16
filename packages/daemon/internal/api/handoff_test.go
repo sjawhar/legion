@@ -31,12 +31,12 @@ import (
 // test names another.
 const headSHA = "c0de0000000000000000000000000000000000ff"
 
-// handoffTokens leases each App a token of its own, so a test can tell which App's token reached
-// GitHub.
+// handoffTokens leases each App a token of its own for each owner, so a test can tell which App's
+// token, minted for which owner, reached GitHub.
 type handoffTokens struct{}
 
-func (handoffTokens) Token(_ context.Context, role appauth.AppRole, _ string) (appauth.Lease, error) {
-	return appauth.Lease{Token: string(role) + "-token", ExpiresAt: time.Now().Add(time.Hour)}, nil
+func (handoffTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	return appauth.Lease{Token: string(role) + "-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
 func (t handoffTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
@@ -201,7 +201,8 @@ func acmeWidgets(project string) (ghrepo.Repository, bool) {
 
 // newHandoffHarness serves the daemon's routes over a real Postgres, reading GitHub at github as
 // the implement App for READY, with facts recording every fact the routes apply, refused as
-// refusal says.
+// refusal says. The issue's repository is acme/widgets, while the daemon's configured owner is
+// another, so a READY read minted for anyone but the repository's owner shows.
 func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.Grants, refusal *intake.Refusal) (*harness, *factRecorder) {
 	t.Helper()
 	h := newHarness(t)
@@ -213,7 +214,7 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
-		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
+		Tokens: handoffTokens{}, GitHubOwner: "sjawhar", GitHubAPI: github.url, Repository: acmeWidgets,
 		MergeRules: func(project string) config.MergeRules {
 			if project != testProject {
 				return config.MergeRules{}
@@ -429,8 +430,8 @@ func TestHandoffCompleteReadyRefusesAnIssueWhoseProjectHasNoRepository(t *testin
 
 // GitHub failing to answer a READY read is GitHub's failure, not the head's: the completion is
 // refused to complete again, nothing is recorded, and the same READY once GitHub answers is applied
-// rather than answered already received. The reads are made as the implement App, whose token never
-// leaves the daemon.
+// rather than answered already received. The reads are made as the implement App, minted for the
+// repository's owner, whose token never leaves the daemon.
 func TestHandoffCompleteReadyRefusesWhenGitHubFailsToAnswerAndAppliesTheRetry(t *testing.T) {
 	github := newHandoffGitHub(t)
 	h, facts, merger := newReadyHarness(t, github)
@@ -451,8 +452,8 @@ func TestHandoffCompleteReadyRefusesWhenGitHubFailsToAnswerAndAppliesTheRetry(t 
 	github.mu.Lock()
 	defer github.mu.Unlock()
 	for _, bearer := range github.bearers {
-		if bearer != "Bearer implement-token" {
-			t.Fatalf("GitHub was read with %q, want the implement App's token alone", bearer)
+		if bearer != "Bearer implement-token-for-acme" {
+			t.Fatalf("GitHub was read with %q, want the implement App's token for acme, the repository's owner, alone", bearer)
 		}
 	}
 }

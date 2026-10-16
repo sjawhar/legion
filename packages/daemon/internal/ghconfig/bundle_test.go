@@ -21,10 +21,11 @@ func twoOwnerBundle(acmeToken string) Bundle {
 	}
 }
 
-// WriteBundle writes each owner's two gh files under <root>/<owner>, reports the owners whose
-// hosts.yml changed (all of them on the first write, sorted), then only the owner whose token
-// turned, and removes every entry of root the bundle does not name: an owner dropped from the
-// mapping and a file of a directory written before bundles.
+// WriteBundle writes each owner's two gh files under <root>/<owner> and the default owner's name in
+// <root>/.default, which ReadDefault reads back, reports the owners whose hosts.yml changed (all of
+// them on the first write, sorted), then only the owner whose token turned, and removes every
+// other entry of root: an owner dropped from the mapping and a file of a directory written before
+// bundles.
 func TestWriteBundleWritesOneDirectoryPerOwnerAndRemovesTheRest(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "gh")
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -62,6 +63,9 @@ func TestWriteBundleWritesOneDirectoryPerOwnerAndRemovesTheRest(t *testing.T) {
 	if info, err := os.Stat(root); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("root = %v, %v, want a 0700 directory", info, err)
 	}
+	if got, err := ReadDefault(root); err != nil || got != "acme" {
+		t.Fatalf("ReadDefault = %q, %v, want acme", got, err)
+	}
 
 	changed, err = WriteBundle(root, twoOwnerBundle("ghs_acme_turned"))
 	if err != nil {
@@ -84,12 +88,27 @@ func TestWriteBundleWritesOneDirectoryPerOwnerAndRemovesTheRest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 || entries[0].Name() != "acme" {
-		names := make([]string, 0, len(entries))
-		for _, entry := range entries {
-			names = append(names, entry.Name())
-		}
-		t.Fatalf("root holds %q after sjawhar left the bundle, want acme alone", names)
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	if want := []string{DefaultFile, "acme"}; !slices.Equal(names, want) {
+		t.Fatalf("root holds %q after sjawhar left the bundle, want %q", names, want)
+	}
+}
+
+// ReadDefault refuses a root with no .default — one no WriteBundle wrote, a directory of one role's
+// files written before bundles included — and one whose .default names no lowercased GitHub login.
+func TestReadDefaultRefusesARootNoBundleWrote(t *testing.T) {
+	root := t.TempDir()
+	if _, err := ReadDefault(root); err == nil || !strings.Contains(err.Error(), DefaultFile) {
+		t.Fatalf("ReadDefault of an empty root = %v, want an error naming %s", err, DefaultFile)
+	}
+	if err := os.WriteFile(filepath.Join(root, DefaultFile), []byte("../x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadDefault(root); err == nil || !strings.Contains(err.Error(), `"../x"`) {
+		t.Fatalf("ReadDefault of a root naming ../x = %v, want an error naming it", err)
 	}
 }
 

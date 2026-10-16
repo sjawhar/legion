@@ -1847,15 +1847,20 @@ shape_problems() {
       ([$s.initContainers[]? | select(.name != "workspace-fetch") | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "the provision volume is mounted outside workspace-fetch" else empty end),
       ([$s | role_containers[] | .volumeMounts[]? | select(.mountPath == "/var/run/legion/provision")] | if length > 0 then "a role launcher mounts the provision volume" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init") | .volumeMounts[]? | select(.name == "feed" and .readOnly != true)] | if length > 0 then "workspace-init mounts the feed writable" else empty end),
-      # Each role holds its GitHub App token in a gh volume of its own (LEGION-631): gh-<role>
-      # projects the two gh keys of that role Secret, read-only at GH_CONFIG_DIR in that role
-      # container alone, so no container reads another role token; the clone helper is gh itself;
-      # and the containers share no process namespace, which would let one read another /proc.
+      # Each role holds its GitHub App tokens in a gh volume of its own (LEGION-631): gh-<role>
+      # projects the two gh keys of each owner in that role Secret as <owner>/hosts.yml and
+      # <owner>/config.yml, read-only at LEGION_GH_OWNERS_DIR in that role container alone, so no
+      # container reads another role token; the clone helper is legion git-credential; and the
+      # containers share no process namespace, which would let one read another /proc.
       ($roles[] | . as $role | ([$s.volumes[] | select(.name == "gh-\($role)")] | first) as $v
         | ([$s.volumes[] | select(.name == "launcher-\($role)")] | first | .secret.secretName) as $own
         | if $v == null then "no gh-\($role) volume" else
             (if $v.secret.secretName != $own then "gh-\($role) projects Secret \($v.secret.secretName), not the role Secret \($own) its launcher token comes from" else empty end),
-            (if (($v.secret.items // []) | map({(.key): .path}) | add) != {"github-hosts": "hosts.yml", "github-config": "config.yml"} then "gh-\($role) projects \($v.secret.items | tostring), not hosts.yml and config.yml" else empty end),
+            (($v.secret.items // []) as $items
+              | ([$items[] | .key | capture("^github-hosts-(?<o>[a-z0-9][a-z0-9-]*)$") | .o] | sort) as $owners
+              | if ($owners | length) == 0 or ($items | length) != 2 * ($owners | length)
+                  or ($items | map({(.key): .path}) | add) != ($owners | map({("github-hosts-" + .): (. + "/hosts.yml"), ("github-config-" + .): (. + "/config.yml")}) | add)
+                then "gh-\($role) projects \($items | tostring), not <owner>/hosts.yml and <owner>/config.yml for each owner" else empty end),
             (if $v.secret.defaultMode != 288 then "gh-\($role) has defaultMode \($v.secret.defaultMode), not 0440" else empty end)
           end),
       ($s | role_containers[] | .name as $role
@@ -1875,8 +1880,9 @@ shape_problems() {
 }
 # check_pod_shape SPEC prints the pod's shape problems, then whether any Secret value of the pod's
 # claim is in a container's command, args or environment: the provisioning token, each role's
-# launcher token, and each role's GitHub App token — the `oauth_token` lines of its `github-hosts`
-# key (gh's hosts.yml, two lines of which carry the token); `github-config` holds no secret.
+# launcher token, and each role's GitHub App tokens — the `oauth_token` lines of each owner's
+# `github-hosts-<owner>` key (gh's hosts.yml, two lines of which carry the token); the
+# `github-config-<owner>` keys and `github-default` hold no secret.
 check_pod_shape() {
   local spec=$1 tokens name role values
   shape_problems <<<"$spec"
@@ -1884,8 +1890,8 @@ check_pod_shape() {
   tokens=$(op get secret "$name-boot" -o json 2>/dev/null | jq -r '.data // {} | .[] | @base64d') || tokens=
   for role in architect planner implementer tester reviewer merger; do
     values=$(op get secret "$name-$role-boot" -o json 2>/dev/null | jq -r '.data // {} | to_entries[]
-      | if .key == "github-hosts" then (.value | @base64d | split("\n")[] | select(test("oauth_token: ")) | sub("^.*oauth_token: "; ""))
-        elif .key == "github-config" then empty
+      | if (.key | startswith("github-hosts-")) then (.value | @base64d | split("\n")[] | select(test("oauth_token: ")) | sub("^.*oauth_token: "; ""))
+        elif (.key | startswith("github-config-")) or .key == "github-default" then empty
         else (.value | @base64d) end') || values=
     tokens+="${tokens:+$'\n'}$values"
   done

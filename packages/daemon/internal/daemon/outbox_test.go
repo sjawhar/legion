@@ -1897,6 +1897,9 @@ func (t outboxTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner
 	return lease, err
 }
 
+// legionOwner is a project whose one repository's owner is legion, as the sandbox rigs here name it.
+func legionOwner() []string { return []string{"legion"} }
+
 type outboxSpecs struct{}
 
 func (outboxSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.SpawnSpec, error) {

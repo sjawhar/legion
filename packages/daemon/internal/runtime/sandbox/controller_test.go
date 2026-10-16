@@ -57,10 +57,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	}
 	spec := controllerSpec(t)
 	spec.Generation, spec.ResumeSessionFile = 2, controllerSession
-	l, err := r.prepare(spec)
-	if err != nil {
-		t.Fatalf("prepare the controller's launch: %v", err)
-	}
+	l := launchOf(t, r, spec)
 	s := r.sandboxManifest(l)
 	if s.Name != "legion-legion-controller" {
 		t.Errorf("the controller's Sandbox is %s, want legion-legion-controller", s.Name)
@@ -129,10 +126,13 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 		}
 	}
 	gh := volumes[roleVolume(ghVolume, claim.RoleController)].Secret
-	want := []corev1.KeyToPath{{Key: GitHubHostsKey, Path: ghconfig.HostsFile}, {Key: GitHubConfigKey, Path: ghconfig.ConfigFile}}
+	want := []corev1.KeyToPath{
+		{Key: GitHubHostsKey("acme"), Path: "acme/" + ghconfig.HostsFile}, {Key: GitHubConfigKey("acme"), Path: "acme/" + ghconfig.ConfigFile},
+		{Key: GitHubHostsKey("sjawhar"), Path: "sjawhar/" + ghconfig.HostsFile}, {Key: GitHubConfigKey("sjawhar"), Path: "sjawhar/" + ghconfig.ConfigFile},
+	}
 	if gh == nil || gh.SecretName != roleSecretName(s.Name, claim.RoleController) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
-		t.Errorf("the controller's gh volume projects %+v, want %s's %s as %s and %s as %s, read-only", gh, roleSecretName(s.Name, claim.RoleController),
-			GitHubHostsKey, ghconfig.HostsFile, GitHubConfigKey, ghconfig.ConfigFile)
+		t.Errorf("the controller's gh volume projects %+v, want %s's two gh files of each owner as <owner>/hosts.yml and <owner>/config.yml, read-only",
+			gh, roleSecretName(s.Name, claim.RoleController))
 	}
 	if mount := mountHolding(launcher, GHConfigDir); mount == nil || mount.Name != roleVolume(ghVolume, claim.RoleController) || mount.MountPath != GHConfigDir || !mount.ReadOnly {
 		t.Errorf("the controller's container mounts %+v at %s, want its gh volume read-only", mount, GHConfigDir)
@@ -180,7 +180,8 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 		"LEGION_DAEMON_URL": opts.DaemonURL, "LEGION_STATE_DIR": StateDir, "ENVOY_URL": opts.EnvoyURL,
 		"ENVOY_NATS_URL": opts.NATSURLs[0], "LEGION_BOOT_TOKEN_FILE": generationDir(2) + "/" + bootTokenKey,
 		"ENVOY_TOKEN_FILE": generationDir(2) + "/ENVOY_TOKEN", "LEGION_GENERATION": "2",
-		"GH_CONFIG_DIR": GHConfigDir, "GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_HOST": "",
+		"GH_CONFIG_DIR": GHConfigDir + "/sjawhar", "GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_HOST": "",
+		"LEGION_GH_OWNERS_DIR": GHConfigDir, "LEGION_GH_PATH": opts.Tools.GH,
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)
@@ -196,7 +197,8 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	if want := []string{
 		"DISPATCH_TOKEN_FILE", "DISPATCH_URL", "ENVOY_NATS_URL", "ENVOY_URL", "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN",
 		"GITHUB_TOKEN", "GIT_TERMINAL_PROMPT", "LEGION_BOOT_TOKEN_FILE", "LEGION_CONTROLLER", "LEGION_DAEMON_URL",
-		"LEGION_GENERATION", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID",
+		"LEGION_GENERATION", "LEGION_GH_OWNERS_DIR", "LEGION_GH_PATH", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_STATE_DIR",
+		"PATH", "PI_SHELL_PREFIX", "POD_UID",
 		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
 	}; !slices.Equal(told, want) {
 		t.Errorf("the controller is told the runtime's variables %v, want exactly %v", told, want)
@@ -224,9 +226,9 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 
 // A controller launch mints no provisioning token: it has no repository, so a GitHub token source
 // that would refuse every mint leaves it running. It writes no provisioning Secret, only its one
-// launcher's role Secret, which holds the review App's gh files beside the launcher token but no
-// provisioning token, and its boot token reaches its launcher in the start command, as every
-// role's does.
+// launcher's role Secret, which holds the review App's gh bundle (each owner's two files and the
+// default owner) beside the launcher token but no provisioning token, and its boot token reaches
+// its launcher in the start command, as every role's does.
 func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = refusingTokens{} }))
 	spec := controllerSpec(t)
@@ -235,8 +237,8 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	if secret := g.secret(secretName(name)); secret != nil {
 		t.Errorf("the controller's launch wrote the provisioning Secret %s: %v", secretName(name), secret.Data)
 	}
-	if secret := g.secret(roleSecretName(name, claim.RoleController)); secret == nil || len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 {
-		t.Fatalf("the controller's role Secret holds %+v, want the launcher token and the review App's two gh files, and nothing else", secret)
+	if secret := g.secret(roleSecretName(name, claim.RoleController)); secret == nil || len(secret.Data) != 2+2*len(staticOwners) || len(secret.Data[LauncherTokenFile]) == 0 {
+		t.Fatalf("the controller's role Secret holds %+v, want the launcher token, the default and the review App's gh files of each owner, and nothing else", secret)
 	}
 	for _, role := range claim.Roles {
 		if g.secret(roleSecretName(name, role)) != nil {
@@ -258,8 +260,8 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 // (writeLauncherSecrets): a credential source that refuses every mint fails the launch naming the
 // controller role, exactly as it would an issue pod's role.
 func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) {
-	credential := func(context.Context, claim.Role) (ghconfig.Rendered, error) {
-		return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+	credential := func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+		return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 	}
 	g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubCredential = credential }))
 	spec := controllerSpec(t)

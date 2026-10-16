@@ -14,24 +14,41 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // staticCredentialExpiry is the lease expiry every rendered test credential carries.
 var staticCredentialExpiry = time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
 
-// staticCredentialToken is the token staticCredential renders for role: one per App, so a review
-// role's files and an implement role's differ as the two Apps' tokens do.
+// staticCredentialToken is the write token staticCredential renders for role: one per App, so a
+// review role's files and an implement role's differ as the two Apps' tokens do.
 func staticCredentialToken(role claim.Role) string {
 	return "ghs_" + string(appauth.AppRoleFor(role)) + "_token"
 }
 
-// staticCredential is the runtime's GitHubCredential in every test that needs one: the role's
-// App's token (appauth.AppRoleFor) rendered as gh's files, with a fixed expiry.
-func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
-	app := appauth.AppRoleFor(role)
-	return ghconfig.Render(staticCredentialToken(role), string(app), staticCredentialExpiry), nil
+// staticReadToken is the read-only token staticCredential renders for role on owner.
+func staticReadToken(role claim.Role, owner string) string {
+	return "ghs_" + string(appauth.AppRoleFor(role)) + "_read_" + owner
+}
+
+// staticCredential is the runtime's GitHubCredential in every test that needs one: a bundle of the
+// two owners acme and sjawhar (and owner, when it is another), the role's App's write token
+// (appauth.AppRoleFor) for owner — acme when owner is empty — and its read token for every other,
+// rendered as gh's files with a fixed expiry.
+func staticCredential(_ context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+	app := string(appauth.AppRoleFor(role))
+	if owner == "" {
+		owner = "acme"
+	}
+	bundle := ghconfig.Bundle{Default: owner, Owners: map[string]ghconfig.Rendered{}}
+	for _, name := range []string{"acme", "sjawhar", owner} {
+		bundle.Owners[name] = ghconfig.Render(staticReadToken(role, name), app, staticCredentialExpiry)
+	}
+	bundle.Owners[owner] = ghconfig.Render(staticCredentialToken(role), app, staticCredentialExpiry)
+	return bundle, nil
 }
 
 // fakeServerRuntime is a runtime built by New over a tmux that is never run: its PATH names a stub
@@ -54,7 +71,7 @@ func newFakeServerRuntime(t *testing.T, credential runtime.GitHubCredential, log
 		Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 		EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
 		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + bin},
-		Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: credential, Log: log,
+		Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: credential, GH: fakeGH, Log: log,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -82,7 +99,11 @@ func newFakeServerRuntime(t *testing.T, credential runtime.GitHubCredential, log
 	return f
 }
 
-// spec is testSpec with a role prompt that exists, as a launch requires.
+// fakeGH is the real gh every fake server runtime is told, which a pane's LEGION_GH_PATH names.
+const fakeGH = "/usr/bin/gh"
+
+// spec is testSpec on acme/widgets, with the issue's workspace provisioned and a role prompt that
+// exists, as a launch requires.
 func (f *fakeServerRuntime) spec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 	t.Helper()
 	prompt := filepath.Join(t.TempDir(), "role.md")
@@ -96,6 +117,14 @@ func (f *fakeServerRuntime) spec(t *testing.T, role claim.Role) runtime.SpawnSpe
 	}
 	spec.Claim, spec.Role = token, role
 	spec.Prompt.RolePromptPaths = []string{prompt}
+	spec.Repository = ghrepo.MustParse("acme/widgets")
+	located, err := workspace.Location(f.stateDir, spec.Repository, spec.Issue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(located.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	return spec
 }
 
@@ -160,7 +189,7 @@ func logLines(logs string, what string) []string {
 
 // A daemon with no GitHub Apps (Stage 2's, which configures no workflow) hands the runtime no
 // credential function, and its panes still boot: New accepts the nil, a spawn writes no gh
-// directory under the claim's secrets and tells the pane none of the four gh variables, logs no
+// directory under the claim's secrets and tells the pane none of the six gh variables, logs no
 // written credential, and the refresher — started by Observe for every runtime — does nothing.
 func TestARuntimeWithoutACredentialFunctionSpawnsPanesWithNoGhFiles(t *testing.T) {
 	var logs strings.Builder
@@ -178,7 +207,7 @@ func TestARuntimeWithoutACredentialFunctionSpawnsPanesWithNoGhFiles(t *testing.T
 		t.Errorf("the launch made a gh directory with no credential to put in it (%v)", err)
 	}
 	for _, pair := range f.pairs(t) {
-		for _, name := range []string{"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST="} {
+		for _, name := range []string{"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=", "LEGION_GH_OWNERS_DIR=", "LEGION_GH_PATH="} {
 			if strings.HasPrefix(pair, name) {
 				t.Errorf("the pane was told %q with no credential function", pair)
 			}
@@ -194,15 +223,22 @@ func TestARuntimeWithoutACredentialFunctionSpawnsPanesWithNoGhFiles(t *testing.T
 	}
 }
 
-// A spawn writes the claim's gh files beside its other secret files, from the daemon's function
-// for the pane's role: a 0700 directory `<state_dir>/secrets/<claim>-gh` holding a 0600 hosts.yml
-// with the role's App token and a 0600 config.yml, named on the pane as GH_CONFIG_DIR with
-// GH_TOKEN, GITHUB_TOKEN and GH_HOST emptied and no tool path, and logged with the claim, role, App
-// and expiry. A mint that fails fails the launch before tmux is asked anything: a pane whose gh
-// holds no token would start unable to reach GitHub.
-func TestSpawnWritesTheClaimsGhFilesAndNamesTheDirectoryOnThePane(t *testing.T) {
+// A spawn writes the claim's gh bundle beside its other secret files, from the daemon's function
+// for the pane's role and its repository's owner: a 0700 root `<state_dir>/secrets/<claim>-gh`
+// holding one 0700 directory per owner — acme's with the role's App write token, sjawhar's with its
+// read token, each a 0600 hosts.yml and config.yml — and the default owner's name; the pane is told
+// GH_CONFIG_DIR, acme's directory, with GH_TOKEN, GITHUB_TOKEN and GH_HOST emptied,
+// LEGION_GH_OWNERS_DIR, the root, and LEGION_GH_PATH, the real gh, and no other tool path; the log
+// line names the claim, role, App, expiry and owners. A mint that fails fails the launch before
+// tmux is asked anything: a pane whose gh holds no token would start unable to reach GitHub.
+func TestSpawnWritesTheClaimsGhBundleAndNamesItOnThePane(t *testing.T) {
 	var logs strings.Builder
-	f := newFakeServerRuntime(t, staticCredential, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	var asked []string
+	credential := func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		asked = append(asked, owner)
+		return staticCredential(ctx, role, owner)
+	}
+	f := newFakeServerRuntime(t, credential, slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	spec := f.spec(t, claim.RoleTester)
 
 	loc, err := f.Spawn(context.Background(), spec)
@@ -212,55 +248,58 @@ func TestSpawnWritesTheClaimsGhFilesAndNamesTheDirectoryOnThePane(t *testing.T) 
 	if loc.Claim != spec.Claim || loc.Incarnation != "4242:1234567" {
 		t.Fatalf("Spawn returned %+v", loc)
 	}
-	dir := runtime.GHConfigDir(f.stateDir, spec.Claim)
-	if want := filepath.Join(f.stateDir, "secrets", string(spec.Claim)+"-gh"); dir != want {
-		t.Fatalf("the claim's gh directory is %s, want %s", dir, want)
+	if !slices.Equal(asked, []string{"acme"}) {
+		t.Errorf("the launch asked the credential for owners %q, want its repository's owner, acme", asked)
 	}
-	if info, err := os.Stat(dir); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		t.Fatalf("gh directory stat = %v, %v; want a 0700 directory", info, err)
+	root := runtime.GHConfigDir(f.stateDir, spec.Claim)
+	if want := filepath.Join(f.stateDir, "secrets", string(spec.Claim)+"-gh"); root != want {
+		t.Fatalf("the claim's gh root is %s, want %s", root, want)
 	}
-	for _, name := range []string{ghconfig.HostsFile, ghconfig.ConfigFile} {
-		if info, err := os.Stat(filepath.Join(dir, name)); err != nil || info.Mode().Perm() != 0o600 {
-			t.Errorf("%s stat = %v, %v; want mode 0600", name, info, err)
+	if info, err := os.Stat(root); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("gh root stat = %v, %v; want a 0700 directory", info, err)
+	}
+	if entries := ghDirEntries(t, root); !slices.Equal(entries, []string{ghconfig.DefaultFile, "acme", "sjawhar"}) {
+		t.Errorf("the gh root holds %v, want the default and one directory per owner", entries)
+	}
+	for owner, token := range map[string]string{"acme": staticCredentialToken(claim.RoleTester), "sjawhar": staticReadToken(claim.RoleTester, "sjawhar")} {
+		dir := ghconfig.OwnerDir(root, owner)
+		for _, name := range []string{ghconfig.HostsFile, ghconfig.ConfigFile} {
+			if info, err := os.Stat(filepath.Join(dir, name)); err != nil || info.Mode().Perm() != 0o600 {
+				t.Errorf("%s's %s stat = %v, %v; want mode 0600", owner, name, info, err)
+			}
+		}
+		if got := readHostsToken(t, dir); got != token {
+			t.Errorf("%s's hosts.yml holds %q, want %q", owner, got, token)
 		}
 	}
-	if token := readHostsToken(t, dir); token != staticCredentialToken(claim.RoleTester) {
-		t.Errorf("hosts.yml holds %q, want the review App's %q", token, staticCredentialToken(claim.RoleTester))
-	}
-	if config, err := os.ReadFile(filepath.Join(dir, ghconfig.ConfigFile)); err != nil || string(config) != ghconfig.Config {
-		t.Errorf("config.yml = %q (%v), want %q", config, err, ghconfig.Config)
-	}
-	if entries := ghDirEntries(t, dir); !slices.Equal(entries, []string{ghconfig.ConfigFile, ghconfig.HostsFile}) {
-		t.Errorf("the gh directory holds %v, want the two files alone", entries)
-	}
 	pairs := f.pairs(t)
-	for _, want := range []string{"GH_CONFIG_DIR=" + dir, "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST="} {
+	for _, want := range []string{"GH_CONFIG_DIR=" + filepath.Join(root, "acme"), "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST=", "LEGION_GH_OWNERS_DIR=" + root, "LEGION_GH_PATH=" + fakeGH} {
 		if !slices.Contains(pairs, want) {
 			t.Errorf("the pane's pairs %q lack %q", pairs, want)
 		}
 	}
 	for _, pair := range pairs {
 		name, value, _ := strings.Cut(pair, "=")
-		if strings.HasSuffix(name, "_PATH") {
+		if strings.HasSuffix(name, "_PATH") && name != "LEGION_GH_PATH" {
 			t.Errorf("the pane is told a tool path %q", pair)
 		}
-		if strings.Contains(value, staticCredentialToken(claim.RoleTester)) {
-			t.Errorf("the pane's %s carries the token", name)
+		if strings.Contains(value, staticCredentialToken(claim.RoleTester)) || strings.Contains(value, "_read_") {
+			t.Errorf("the pane's %s carries a token", name)
 		}
 	}
 	written := logLines(logs.String(), "github credential written")
 	if len(written) != 1 {
 		t.Fatalf("the runtime logged %d written credentials %q, want one", len(written), written)
 	}
-	for _, want := range []string{"claim=" + string(spec.Claim), "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00"} {
+	for _, want := range []string{"claim=" + string(spec.Claim), "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00", "owners=\"[acme sjawhar]\""} {
 		if !strings.Contains(written[0], want) {
 			t.Errorf("the runtime logged %q, want %q in it", written[0], want)
 		}
 	}
 
 	// A mint that fails fails the launch, naming the claim, and nothing reaches tmux.
-	refused := newFakeServerRuntime(t, func(context.Context, claim.Role) (ghconfig.Rendered, error) {
-		return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+	refused := newFakeServerRuntime(t, func(context.Context, claim.Role, string) (ghconfig.Bundle, error) {
+		return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
 	}, nil)
 	spec = refused.spec(t, claim.RoleImplementer)
 	_, err = refused.Spawn(context.Background(), spec)
@@ -275,13 +314,38 @@ func TestSpawnWritesTheClaimsGhFilesAndNamesTheDirectoryOnThePane(t *testing.T) 
 	}
 }
 
-// The refresher brings every tracked pane's hosts.yml to the current render of its role's
-// credential and touches nothing else: a stale file is replaced whole, by rename, and logged with
-// the claim, role, App and expiry; a file already at the render is not rewritten; a directory
-// that is gone is made again, including the controller's, whose render is the review App's
-// (appauth.AppRoleFor); only a token that names no role is skipped. A mint that fails is logged
-// and leaves the pane's last token in place until the next tick.
-func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
+// New refuses a credential function without the real gh the panes' `legion gh` runs: an absolute
+// path, which the daemon resolves at boot.
+func TestNewRefusesACredentialFunctionWithoutTheRealGh(t *testing.T) {
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "tmux"), []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, gh := range []string{"", "gh"} {
+		_, err := New(Options{
+			Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
+			EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
+			AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + bin},
+			Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: staticCredential, GH: gh,
+		})
+		if err == nil || !strings.Contains(err.Error(), "real gh") {
+			t.Errorf("New with GH %q = %v, want a refusal naming the real gh", gh, err)
+		}
+	}
+}
+
+// The refresher brings every tracked pane's gh bundle to the current render of its role's
+// credential for the pane's default owner — the one its launch recorded, or, for a pane adopted
+// after a restart, the bundle's own record of it (ghconfig.ReadDefault) — and touches nothing else:
+// a stale owner's hosts.yml is replaced whole, by rename, and logged with the claim, role, App,
+// expiry and the owners it rewrote; an owner already at the render is not rewritten; a root that
+// is gone is made again for a pane whose launch recorded its default, including the controller's,
+// whose render is the review App's (appauth.AppRoleFor); a token that names no role, and an adopted
+// pane whose root records no default, are skipped, the second logged. A mint that fails is logged
+// and leaves the pane's last tokens in place until the next tick, and so does a render whose
+// default is not the pane's, which would leave GH_CONFIG_DIR naming a directory the bundle no
+// longer holds.
+func TestTheRefresherRewritesOnlyTheOwnersWhoseHostsAreStale(t *testing.T) {
 	ctx := context.Background()
 	var logs strings.Builder
 	r := &Runtime{
@@ -299,55 +363,71 @@ func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 		return token
 	}
 	stale, current, gone := token("LEGION-43", claim.RoleTester), token("LEGION-44", claim.RoleImplementer), token("LEGION-45", claim.RoleReviewer)
+	unrecorded := token("LEGION-46", claim.RolePlanner)
 	controller, nameless := claim.ControllerToken("omp"), claim.Token("not-a-claim")
-	for i, token := range []claim.Token{stale, current, gone, controller, nameless} {
+	defaults := map[claim.Token]string{gone: "sjawhar", controller: "acme"}
+	for i, token := range []claim.Token{stale, current, gone, unrecorded, controller, nameless} {
+		issue := ""
+		if defaults[token] != "" {
+			issue = "LEGION-45"
+		}
 		r.track(runtime.Locator{
 			Runtime: runtime.RuntimeTmux, Claim: token, Incarnation: "4242:" + string(rune('1'+i)),
 			Tmux: &runtime.TmuxLocator{Window: "@1", Pane: "%" + string(rune('1'+i))},
-		}, "")
+		}, issue, defaults[token])
 	}
-	dir := func(token claim.Token) string { return runtime.GHConfigDir(r.stateDir, token) }
-	if _, err := ghconfig.Write(dir(stale), ghconfig.Render("ghs_stale_lease", string(appauth.Review), staticCredentialExpiry)); err != nil {
+	root := func(token claim.Token) string { return runtime.GHConfigDir(r.stateDir, token) }
+	staleBundle, _ := staticCredential(ctx, claim.RoleTester, "acme")
+	staleBundle.Owners["sjawhar"] = ghconfig.Render("ghs_stale_lease", string(appauth.Review), staticCredentialExpiry)
+	if _, err := ghconfig.WriteBundle(root(stale), staleBundle); err != nil {
 		t.Fatal(err)
 	}
-	rendered, _ := staticCredential(ctx, claim.RoleImplementer)
-	if _, err := ghconfig.Write(dir(current), rendered); err != nil {
+	currentBundle, _ := staticCredential(ctx, claim.RoleImplementer, "sjawhar")
+	if _, err := ghconfig.WriteBundle(root(current), currentBundle); err != nil {
 		t.Fatal(err)
 	}
 	past := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(filepath.Join(dir(current), ghconfig.HostsFile), past, past); err != nil {
+	for _, owner := range []string{"acme", "sjawhar"} {
+		if err := os.Chtimes(filepath.Join(root(current), owner, ghconfig.HostsFile), past, past); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A root a pane launched before bundles holds its role's two files at the top and no default.
+	if _, err := ghconfig.Write(root(unrecorded), ghconfig.Render("ghs_pre_bundle", string(appauth.Implement), staticCredentialExpiry)); err != nil {
 		t.Fatal(err)
 	}
 
 	r.refreshGitHubCredentials(ctx)
 
-	if got := readHostsToken(t, dir(stale)); got != staticCredentialToken(claim.RoleTester) {
-		t.Errorf("the stale pane's hosts.yml holds %q, want the review App's %q", got, staticCredentialToken(claim.RoleTester))
+	if got := readHostsToken(t, ghconfig.OwnerDir(root(stale), "sjawhar")); got != staticReadToken(claim.RoleTester, "sjawhar") {
+		t.Errorf("the stale owner's hosts.yml holds %q, want %q", got, staticReadToken(claim.RoleTester, "sjawhar"))
 	}
-	if info, err := os.Stat(filepath.Join(dir(stale), ghconfig.HostsFile)); err != nil || info.Mode().Perm() != 0o600 {
+	if info, err := os.Stat(filepath.Join(root(stale), "sjawhar", ghconfig.HostsFile)); err != nil || info.Mode().Perm() != 0o600 {
 		t.Errorf("the replaced hosts.yml stat = %v, %v; want mode 0600", info, err)
 	}
-	if info, err := os.Stat(filepath.Join(dir(current), ghconfig.HostsFile)); err != nil || !info.ModTime().Equal(past) {
-		t.Errorf("the current pane's hosts.yml was rewritten (mtime %v, %v), want it left as it was", info.ModTime(), err)
+	for _, owner := range []string{"acme", "sjawhar"} {
+		if info, err := os.Stat(filepath.Join(root(current), owner, ghconfig.HostsFile)); err != nil || !info.ModTime().Equal(past) {
+			t.Errorf("the current pane's %s hosts.yml was rewritten (mtime %v, %v), want it left as it was", owner, info.ModTime(), err)
+		}
 	}
-	if got := readHostsToken(t, dir(gone)); got != staticCredentialToken(claim.RoleReviewer) {
-		t.Errorf("the recreated directory's hosts.yml holds %q, want %q", got, staticCredentialToken(claim.RoleReviewer))
+	if got := readHostsToken(t, ghconfig.OwnerDir(root(gone), "sjawhar")); got != staticCredentialToken(claim.RoleReviewer) {
+		t.Errorf("the recreated root's sjawhar hosts.yml holds %q, want %q", got, staticCredentialToken(claim.RoleReviewer))
 	}
-	if info, err := os.Stat(dir(gone)); err != nil || info.Mode().Perm() != 0o700 {
-		t.Errorf("the recreated directory stat = %v, %v; want mode 0700", info, err)
+	if info, err := os.Stat(root(gone)); err != nil || info.Mode().Perm() != 0o700 {
+		t.Errorf("the recreated root stat = %v, %v; want mode 0700", info, err)
 	}
-	if got := readHostsToken(t, dir(controller)); got != staticCredentialToken(claim.RoleController) {
-		t.Errorf("the controller's hosts.yml holds %q, want the review App's %q", got, staticCredentialToken(claim.RoleController))
+	if got := readHostsToken(t, ghconfig.OwnerDir(root(controller), "acme")); got != staticCredentialToken(claim.RoleController) {
+		t.Errorf("the controller's acme hosts.yml holds %q, want the review App's %q", got, staticCredentialToken(claim.RoleController))
 	}
-	if info, err := os.Stat(dir(controller)); err != nil || info.Mode().Perm() != 0o700 {
-		t.Errorf("the controller's gh directory stat = %v, %v; want mode 0700", info, err)
+	if got := readHostsToken(t, root(unrecorded)); got != "ghs_pre_bundle" {
+		t.Errorf("the pre-bundle root's hosts.yml holds %q, want it left as it was", got)
 	}
-	if _, err := os.Stat(dir(nameless)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(root(nameless)); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("the refresher made a gh directory for %s (%v)", nameless, err)
 	}
 	for _, token := range []claim.Token{stale, current, gone, controller} {
-		if entries := ghDirEntries(t, dir(token)); !slices.Equal(entries, []string{ghconfig.ConfigFile, ghconfig.HostsFile}) {
-			t.Errorf("%s's gh directory holds %v, want the two files alone", token, entries)
+		if entries := ghDirEntries(t, root(token)); !slices.Equal(entries, []string{ghconfig.DefaultFile, "acme", "sjawhar"}) {
+			t.Errorf("%s's gh root holds %v, want the default and the two owners", token, entries)
 		}
 	}
 	refreshed := logLines(logs.String(), "github credential refreshed")
@@ -357,7 +437,7 @@ func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 	if !strings.Contains(refreshed[0], "claim="+string(controller)) {
 		t.Errorf("the runtime logged %q, want the controller's claim in it", refreshed[0])
 	}
-	for _, want := range []string{"claim=" + string(stale), "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00"} {
+	for _, want := range []string{"claim=" + string(stale), "role=" + string(claim.RoleTester), "app=" + string(appauth.Review), "expiresAt=2026-10-08T13:00:00", "owners=[sjawhar]"} {
 		if !strings.Contains(refreshed[1], want) {
 			t.Errorf("the runtime logged %q, want %q in it", refreshed[1], want)
 		}
@@ -365,34 +445,57 @@ func TestTheRefresherRewritesOnlyTheGhFilesWhoseHostsAreStale(t *testing.T) {
 	if !strings.Contains(refreshed[2], "claim="+string(gone)) {
 		t.Errorf("the runtime logged %q, want the recreated pane's claim in it", refreshed[2])
 	}
-	if failed := logLines(logs.String(), "refresh failed"); len(failed) != 0 {
-		t.Errorf("the runtime logged failures %q while every render succeeded", failed)
+	failed := logLines(logs.String(), "refresh failed")
+	if len(failed) != 1 || !strings.Contains(failed[0], "claim="+string(unrecorded)) || !strings.Contains(failed[0], ghconfig.DefaultFile) {
+		t.Errorf("the runtime logged failures %q, want the pre-bundle pane's alone, naming %s", failed, ghconfig.DefaultFile)
 	}
 
-	// A mint that fails leaves the pane's last token, logged; its siblings are still refreshed.
+	// A mint that fails leaves the pane's last tokens, logged; a render naming another default is
+	// refused the same way; their siblings are still refreshed, each only for the owner that turned.
 	logs.Reset()
-	r.gitHubCredential = func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
-		if role == claim.RoleTester {
-			return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+	r.gitHubCredential = func(ctx context.Context, role claim.Role, owner string) (ghconfig.Bundle, error) {
+		switch role {
+		case claim.RoleTester:
+			return ghconfig.Bundle{}, errors.New("no installation token: GitHub is down")
+		case claim.RoleController:
+			return staticCredential(ctx, role, "sjawhar")
 		}
-		return ghconfig.Render("ghs_"+string(appauth.AppRoleFor(role))+"_second", string(appauth.AppRoleFor(role)), staticCredentialExpiry), nil
+		bundle, err := staticCredential(ctx, role, owner)
+		bundle.Owners["acme"] = ghconfig.Render("ghs_acme_second", string(appauth.AppRoleFor(role)), staticCredentialExpiry)
+		return bundle, err
 	}
 	r.refreshGitHubCredentials(ctx)
-	if got := readHostsToken(t, dir(stale)); got != staticCredentialToken(claim.RoleTester) {
-		t.Errorf("after a failed mint the pane's hosts.yml holds %q, want its last token %q", got, staticCredentialToken(claim.RoleTester))
+	if got := readHostsToken(t, ghconfig.OwnerDir(root(stale), "sjawhar")); got != staticReadToken(claim.RoleTester, "sjawhar") {
+		t.Errorf("after a failed mint the pane's hosts.yml holds %q, want its last token %q", got, staticReadToken(claim.RoleTester, "sjawhar"))
 	}
-	for token, role := range map[claim.Token]claim.Role{current: claim.RoleImplementer, gone: claim.RoleReviewer} {
-		if got, want := readHostsToken(t, dir(token)), "ghs_"+string(appauth.AppRoleFor(role))+"_second"; got != want {
-			t.Errorf("%s's hosts.yml holds %q, want the re-minted %q", token, got, want)
+	if got := readHostsToken(t, ghconfig.OwnerDir(root(controller), "acme")); got != staticCredentialToken(claim.RoleController) {
+		t.Errorf("after a render naming another default the controller's hosts.yml holds %q, want its last token", got)
+	}
+	for _, token := range []claim.Token{current, gone} {
+		if got := readHostsToken(t, ghconfig.OwnerDir(root(token), "acme")); got != "ghs_acme_second" {
+			t.Errorf("%s's acme hosts.yml holds %q, want the re-minted ghs_acme_second", token, got)
 		}
 	}
-	failed := logLines(logs.String(), "github credential refresh failed")
-	if len(failed) != 1 {
-		t.Fatalf("the runtime logged %d failed refreshes %q, want the tester's alone", len(failed), failed)
+	if info, err := os.Stat(filepath.Join(root(current), "sjawhar", ghconfig.HostsFile)); err != nil || !info.ModTime().Equal(past) {
+		t.Errorf("the current pane's sjawhar hosts.yml was rewritten (mtime %v, %v), want only acme's", info.ModTime(), err)
 	}
-	for _, want := range []string{"claim=" + string(stale), "role=" + string(claim.RoleTester), "GitHub is down"} {
+	failed = logLines(logs.String(), "github credential refresh failed")
+	if len(failed) != 3 {
+		t.Fatalf("the runtime logged %d failed refreshes %q, want the tester's, the controller's and the pre-bundle pane's", len(failed), failed)
+	}
+	for _, want := range []string{"claim=" + string(controller), "default owner sjawhar is not the pane's acme"} {
 		if !strings.Contains(failed[0], want) {
 			t.Errorf("the runtime logged %q, want %q in it", failed[0], want)
+		}
+	}
+	for _, want := range []string{"claim=" + string(stale), "role=" + string(claim.RoleTester), "GitHub is down"} {
+		if !strings.Contains(failed[1], want) {
+			t.Errorf("the runtime logged %q, want %q in it", failed[1], want)
+		}
+	}
+	for _, line := range logLines(logs.String(), "github credential refreshed") {
+		if !strings.Contains(line, "owners=[acme]") {
+			t.Errorf("the runtime logged %q, want acme alone rewritten", line)
 		}
 	}
 }
