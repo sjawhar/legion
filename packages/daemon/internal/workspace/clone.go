@@ -297,7 +297,7 @@ func sharedClone(ctx context.Context, run Runner, temporary, remote, defaultBran
 	if present.ExitCode != 0 {
 		return nil
 	}
-	_, err = runCheckedOnClone(ctx, run, temporary, "bookmark", "track", defaultBranch+"@origin")
+	_, err = runCheckedOnClone(ctx, run, temporary, "bookmark", "track", originRow(defaultBranch))
 	return err
 }
 
