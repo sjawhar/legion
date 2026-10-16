@@ -574,7 +574,7 @@ function AgentRow({
   selected: boolean;
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
-  const machineAndDir = `${agent.machine_id} · ${agent.dir}`;
+  const machineAndDir = `${agent.host} · ${agent.dir}`;
   // The inbox query and the agent list are polled separately, so the two counts can briefly
   // disagree in either direction; a negative remainder renders nothing.
   const waitingOnAgent = agent.open_asks - needsYou;

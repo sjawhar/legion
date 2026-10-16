@@ -20,6 +20,7 @@ const agents: Agent[] = [
   {
     capabilities: ["aside", "btw", "steer"],
     dir: "/workspaces/planner",
+    host: "build-host",
     last_activity: null,
     last_seen: Date.now(),
     machine_id: "build-host",

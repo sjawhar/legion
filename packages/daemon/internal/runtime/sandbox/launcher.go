@@ -350,13 +350,14 @@ func (r *Runtime) bindLauncherSecrets(ctx context.Context, s *sandbox, l launch,
 // gh bundle's default owner (GitHubDefaultKey), which every role of one pod shares and l takes as
 // its gitHubDefault, every agent's GH_CONFIG_DIR. A running pod an older runtime made (one worker
 // container, no launchers, or one gh directory where a bundle now stands) or one whose binding
-// never landed is replaced rather than trusted. Any other failure to read a Secret, such as a
-// timeout, a throttled request or a server error, proves nothing about the pod: it is returned, so
-// only the launch that read it fails, and the caller stops that role's previous process
-// (runtime.Runtime's Spawn and Resume); the pod and every other role running in it are left as they
-// are. Each Secret it finds bound to pod, holding a launcher token, is held as its role's
-// credential (cacheLauncherCredential), so the launcher a kept pod's launch waits for is not
-// refused for a read of its own that failed earlier (credentialRetry).
+// never landed is replaced rather than trusted. Any other failure to read a Secret, such as the
+// client's timeout, or a throttled request or a server error the launch's deadline for it outlasted
+// (resend), proves nothing about the pod: it is returned, so only the launch that read it fails,
+// and the caller stops that role's previous process (runtime.Runtime's Spawn and Resume); the pod
+// and every other role running in it are left as they are. Each Secret it finds bound to pod,
+// holding a launcher token, is held as its role's credential (cacheLauncherCredential), so the
+// launcher a kept pod's launch waits for is not refused for a read of its own that failed earlier
+// (credentialRetry).
 func (r *Runtime) launcherBound(ctx context.Context, s *sandbox, pod *corev1.Pod, l *launch) (bool, error) {
 	for _, role := range l.roles {
 		name := roleSecretName(s.Name, role)

@@ -811,7 +811,7 @@ export async function executeEnvoyTool(
         ...(args.title === undefined ? {} : { title: args.title }),
       })
       return args.machine
-        ? sessions.filter((session) => session.machine_id === args.machine)
+        ? sessions.filter((session) => (session.host ?? session.machine_id) === args.machine)
         : sessions
     }
     case EnvoyToolOperation.setRole: {

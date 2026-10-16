@@ -9,6 +9,9 @@ export interface FakeSession {
   title: string;
   dir?: string;
   machine_id?: string;
+  // The session's real machine; the real listener falls back to machine_id when the session's
+  // plugin predates this field, which the fake Envoy's asSeen mirrors (fake-envoy.ts).
+  host?: string;
   roles?: string[];
   capabilities?: string[];
   last_seen?: number;

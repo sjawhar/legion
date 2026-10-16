@@ -15,6 +15,7 @@ function agent(sessionId: string, title: string): Agent {
   return {
     capabilities: [],
     dir: "/w",
+    host: "m",
     last_activity: null,
     last_seen: Date.now(),
     machine_id: "m",
