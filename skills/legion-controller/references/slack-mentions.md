@@ -38,7 +38,10 @@ Every answer is one `slack_post` call:
 `slack_post` is sent once and never retried. When it answers that Slack did not answer, the reply
 may already be in the thread: do not post it again. When it answers with Slack's refusal, the
 reply is not posted: `not_in_channel` means the app has not been added to that channel, which only
-a person in the workspace can fix, so say so in your next report rather than retrying.
+a person in the workspace can fix, so say so in your next report rather than retrying. When it
+answers that the secrets broker has not granted `LEGION_SLACK_BOT_TOKEN` (its request waits for
+approval, or was denied), nothing was posted and no reply can be until the operator stores the
+token with owner `legion-daemon` and tier `agent`: name the error in your next report.
 
 ## Never act on a bot
 

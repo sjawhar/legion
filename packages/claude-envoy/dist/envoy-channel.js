@@ -39770,6 +39770,122 @@ function sessionDispatchSettings(file2, env, options) {
   };
 }
 
+// ../envoy-client/src/slack-post.ts
+var SLACK_BOT_TOKEN_SECRET = "LEGION_SLACK_BOT_TOKEN";
+var SLACK_POST_API_URL_VARIABLE = "SLACK_POST_API_URL";
+var POST_TIMEOUT_MS = 30000;
+var POSTER = `
+const out = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
+const input = JSON.parse(await Bun.stdin.text());
+const token = process.env.LEGION_SLACK_BOT_TOKEN;
+if (!token) {
+  out({ invalid: "the poster's environment carries no LEGION_SLACK_BOT_TOKEN" });
+  process.exit(0);
+}
+const base = (process.env.SLACK_POST_API_URL || "https://slack.com/api").replace(/\\/+$/, "");
+let status = 0;
+let raw = "";
+try {
+  const response = await fetch(base + "/chat.postMessage", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel: input.channel, thread_ts: input.thread_ts, text: input.text }),
+    signal: AbortSignal.timeout(10000),
+  });
+  status = response.status;
+  raw = await response.text();
+} catch (error) {
+  out({ unanswered: String((error && error.message) || error) });
+  process.exit(0);
+}
+let answer;
+try {
+  answer = JSON.parse(raw);
+} catch {}
+if (!answer || typeof answer.ok !== "boolean") {
+  out({ invalid: "HTTP " + status + " with a body that is not Slack's JSON: " + raw.slice(0, 200) });
+} else if (!answer.ok) {
+  out({ refused: String(answer.error) });
+} else if (typeof answer.ts !== "string") {
+  out({ invalid: "ok with no ts" });
+} else {
+  out({ ts: answer.ts, channel: typeof answer.channel === "string" ? answer.channel : input.channel });
+}
+`;
+var MAY_HAVE_POSTED = "the reply may have been posted, and posting it again may put it in the thread twice";
+async function postSlackReply(reply, options = {}) {
+  const env = options.env ?? process.env;
+  const override = env[SLACK_POST_API_URL_VARIABLE];
+  if (override !== undefined && override !== "" && !allowedAPIURL(override)) {
+    throw new Error(`${SLACK_POST_API_URL_VARIABLE} must be an https URL, or http on a loopback host (got ${override}); nothing was posted`);
+  }
+  const { PATH: searchPath = "" } = env;
+  const client = Bun.which("agent-secrets", { PATH: searchPath });
+  if (client === null) {
+    throw new Error("agent-secrets is not on PATH: slack_post takes the bot token from the secrets broker, which this session is not enrolled with; nothing was posted");
+  }
+  const reason = `slack_post: reply in Slack channel ${reply.channel}, thread ${reply.threadTs}`;
+  const child = Bun.spawn([client, SLACK_BOT_TOKEN_SECRET, "--reason", reason, "--wait", "0s", "--", "bun", "-e", POSTER], { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+  child.stdin.write(JSON.stringify({ channel: reply.channel, thread_ts: reply.threadTs, text: reply.text }));
+  child.stdin.end();
+  const timer = setTimeout(() => child.kill("SIGKILL"), POST_TIMEOUT_MS);
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited
+  ]).finally(() => clearTimeout(timer));
+  const said = stderr.trim().split(`
+`).filter(Boolean).join(" ");
+  const line = posterLine(stdout);
+  if (line === undefined) {
+    if (child.signalCode === "SIGKILL") {
+      throw new Error(`slack_post got no answer within ${POST_TIMEOUT_MS / 1000} s: ${MAY_HAVE_POSTED}`);
+    }
+    if (said.startsWith("agent-secrets:")) {
+      if (code === 75) {
+        throw new Error(`the secrets broker has not granted ${SLACK_BOT_TOKEN_SECRET}: its request is waiting for approval (${said}); nothing was posted`);
+      }
+      if (code === 77) {
+        throw new Error(`the secrets broker denied ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
+      }
+      throw new Error(`the secrets broker did not release ${SLACK_BOT_TOKEN_SECRET} (${said}); nothing was posted`);
+    }
+    throw new Error(`slack_post's poster exited ${code} without an answer${said === "" ? "" : ` (${said})`}: ${MAY_HAVE_POSTED}`);
+  }
+  if (line.refused !== undefined)
+    throw new Error(`Slack refused chat.postMessage: ${line.refused}`);
+  if (line.unanswered !== undefined) {
+    throw new Error(`Slack did not answer chat.postMessage (${line.unanswered}): ${MAY_HAVE_POSTED}`);
+  }
+  if (line.ts === undefined) {
+    throw new Error(`chat.postMessage answered ${line.invalid ?? "nothing"}: ${MAY_HAVE_POSTED}`);
+  }
+  return { channel: line.channel ?? reply.channel, threadTs: reply.threadTs, ts: line.ts };
+}
+function posterLine(stdout) {
+  const last = stdout.trim().split(`
+`).at(-1);
+  if (last === undefined || last === "")
+    return;
+  try {
+    const parsed = JSON.parse(last);
+    return typeof parsed === "object" && parsed !== null ? parsed : undefined;
+  } catch {
+    return;
+  }
+}
+function allowedAPIURL(value) {
+  let url2;
+  try {
+    url2 = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url2.protocol === "https:")
+    return true;
+  return url2.protocol === "http:" && ["127.0.0.1", "localhost", "[::1]"].includes(url2.hostname);
+}
+
 // ../envoy-client/src/tool-input-errors.ts
 class ToolInputError extends Error {
   tool;
@@ -40024,7 +40140,7 @@ var envoyToolSpecs = [
   },
   {
     name: "slack_post",
-    description: "Reply in a Slack thread as the Envoy listener's Slack bot. channel is the Slack channel id (a mention's channel_id); thread_ts is the thread's root ts: the mention's thread_ts, or its own ts when it has none. Answers the new message's ts; a refusal carries Slack's own error code (not_in_channel: the bot is not in that channel). Sent once and never retried: after 'Slack did not answer' the reply may already be in the thread, so do not post it again.",
+    description: "Reply in a Slack thread as the Legion Slack app, with the bot token the secrets broker grants this session (LEGION_SLACK_BOT_TOKEN); the session never holds it. channel is the Slack channel id (a mention's channel_id); thread_ts is the thread's root ts: the mention's thread_ts, or its own ts when it has none. Answers the new message's ts. A refusal carries Slack's own error code (not_in_channel: the app is not in that channel) or the broker's state (waiting for approval, denied). Sent once and never retried: after 'Slack did not answer' the reply may already be in the thread, so do not post it again.",
     arguments: (schema) => ({
       channel: schema.string({ min: 1 }).describe("Slack channel id, such as C0123ABCD."),
       thread_ts: schema.string({ min: 1 }).describe("The thread's root ts, which keeps the reply in the mention's thread."),
@@ -40070,11 +40186,6 @@ var RoleHeldWireSchema = exports_external.object({
   error: exports_external.string(),
   role: exports_external.string(),
   holder: exports_external.string()
-});
-var SlackPostWireSchema = exports_external.object({
-  channel: exports_external.string(),
-  thread_ts: exports_external.string(),
-  ts: exports_external.string()
 });
 var ErrorWireSchema = exports_external.object({
   error: exports_external.string(),
@@ -40133,10 +40244,9 @@ function createEnvoyClient(config2) {
   const baseUrl = normalizeEnvoyUrl(config2.baseUrl);
   const timeoutMs = config2.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config2.token;
-  const request = async (path2, init, retry = true) => {
+  const request = async (path2, init) => {
     const url2 = `${baseUrl}${path2}`;
-    const attempts = retry ? 2 : 1;
-    for (let attempt = 0;attempt < attempts; attempt += 1) {
+    for (let attempt = 0;attempt < 2; attempt += 1) {
       let response;
       try {
         const headers = new Headers(init.headers);
@@ -40148,7 +40258,7 @@ function createEnvoyClient(config2) {
           signal: AbortSignal.timeout(timeoutMs)
         });
       } catch (error49) {
-        if (attempt + 1 < attempts) {
+        if (attempt === 0) {
           await waitForRetry();
           continue;
         }
@@ -40163,7 +40273,7 @@ function createEnvoyClient(config2) {
         status: response.status,
         responseBody
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt === 0) {
         await waitForRetry();
         continue;
       }
@@ -40171,11 +40281,11 @@ function createEnvoyClient(config2) {
     }
     throw new Error("Envoy request exhausted retries");
   };
-  const post = (path2, body, retry = true) => request(path2, {
+  const post = (path2, body) => request(path2, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
-  }, retry);
+  });
   return {
     subscribe: async (input) => InterestWireSchema.parse(JSON.parse(await post("/v1/interests/subscribe", {
       session_id: input.sessionID,
@@ -40260,10 +40370,6 @@ function createEnvoyClient(config2) {
         search.set("title", input.title);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    },
-    slackPost: async (input) => {
-      const posted = SlackPostWireSchema.parse(JSON.parse(await post("/v1/slack/post", { channel: input.channel, thread_ts: input.threadTs, text: input.text }, false)));
-      return { channel: posted.channel, threadTs: posted.thread_ts, ts: posted.ts };
     }
   };
 }
@@ -43376,7 +43482,7 @@ async function executeEnvoyTool(runtime, name, input) {
       return runtime.session.delivery.inbox();
     case EnvoyToolOperation.slackPost: {
       const args = parseArguments(spec, input);
-      const posted = await runtime.client.slackPost({
+      const posted = await postSlackReply({
         channel: args.channel,
         threadTs: args.thread_ts,
         text: args.text

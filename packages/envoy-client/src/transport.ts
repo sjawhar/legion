@@ -39,12 +39,6 @@ const RoleHeldWireSchema = z.object({
   holder: z.string(),
 });
 
-const SlackPostWireSchema = z.object({
-  channel: z.string(),
-  thread_ts: z.string(),
-  ts: z.string(),
-});
-
 const ErrorWireSchema = z.object({
   error: z.string(),
   expected: z.array(z.string()).optional(),
@@ -200,20 +194,6 @@ export type PublishResult = {
   readonly holder?: string;
 };
 
-/** One reply the listener posts into a Slack thread with its bot token (`POST /v1/slack/post`). */
-export type SlackPostInput = {
-  readonly channel: string;
-  readonly threadTs: string;
-  readonly text: string;
-};
-
-/** Where the listener posted a Slack reply, and the new message's ts. */
-export type SlackPostResult = {
-  readonly channel: string;
-  readonly threadTs: string;
-  readonly ts: string;
-};
-
 export class EnvoyApiError extends Error {
   readonly name = "EnvoyApiError";
   readonly expected: readonly string[] | undefined;
@@ -252,9 +232,6 @@ export type EnvoyClient = {
   readonly setRole: (input: SetRoleInput) => Promise<SetRoleResult>;
   readonly getRole: (role: string) => Promise<RoleInfo>;
   readonly listSessions: (input?: ListSessionsInput) => Promise<readonly SessionInfo[]>;
-  /** Posts one reply into a Slack thread. Sent once: a post is not idempotent, so neither a 5xx
-   * nor a request the client gave up on is retried, which could post the reply twice. */
-  readonly slackPost: (input: SlackPostInput) => Promise<SlackPostResult>;
 };
 
 export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
@@ -262,10 +239,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
   const timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const apiToken = config.token;
 
-  const request = async (path: string, init: RequestInit, retry = true): Promise<string> => {
+  const request = async (path: string, init: RequestInit): Promise<string> => {
     const url = `${baseUrl}${path}`;
-    const attempts = retry ? 2 : 1;
-    for (let attempt = 0; attempt < attempts; attempt += 1) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
       let response: Response;
       try {
         const headers = new Headers(init.headers);
@@ -276,7 +252,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
           signal: AbortSignal.timeout(timeoutMs),
         });
       } catch (error) {
-        if (attempt + 1 < attempts) {
+        if (attempt === 0) {
           await waitForRetry();
           continue;
         }
@@ -291,7 +267,7 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
         status: response.status,
         responseBody,
       });
-      if (response.status >= 500 && attempt + 1 < attempts) {
+      if (response.status >= 500 && attempt === 0) {
         await waitForRetry();
         continue;
       }
@@ -300,16 +276,12 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
     throw new Error("Envoy request exhausted retries");
   };
 
-  const post = (path: string, body: object, retry = true) =>
-    request(
-      path,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      },
-      retry
-    );
+  const post = (path: string, body: object) =>
+    request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
 
   return {
     subscribe: async (input) =>
@@ -416,18 +388,6 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
       if (input.title !== undefined) search.set("title", input.title);
       const query = search.size === 0 ? "" : `?${search.toString()}`;
       return SessionWireSchema.array().parse(JSON.parse(await request(`/v1/sessions${query}`, {})));
-    },
-    slackPost: async (input) => {
-      const posted = SlackPostWireSchema.parse(
-        JSON.parse(
-          await post(
-            "/v1/slack/post",
-            { channel: input.channel, thread_ts: input.threadTs, text: input.text },
-            false
-          )
-        )
-      );
-      return { channel: posted.channel, threadTs: posted.thread_ts, ts: posted.ts };
     },
   };
 }

@@ -206,11 +206,6 @@ const IssueTitleMax = 1000
 // Settings name field and the dispatch command cannot drift apart.
 const ProjectNameMax = 80
 
-// SlackPostTextMax is the longest reply, in UTF-16 units, that the listener's POST /v1/slack/post
-// sends to Slack's chat.postMessage. Generated from SLACK_POST_TEXT_MAX in packages/contracts so
-// the listener's refusal and the slack_post tool's cannot drift apart.
-const SlackPostTextMax = 4000
-
 // DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
 // outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and
 // DOCUMENT_SCHEMA_CLOSE_REASON in packages/contracts so the server's close and the dashboard's

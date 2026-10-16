@@ -52,6 +52,7 @@ import {
   sessionDispatchSettings,
   sessionSettings,
 } from "@legion/envoy-client/session-settings";
+import { postSlackReply } from "@legion/envoy-client/slack-post";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -2441,7 +2442,7 @@ export default function envoyExtension(pi: PiApi): void {
           });
         }
         case EnvoyToolOperation.slackPost: {
-          const posted = await client.slackPost({
+          const posted = await postSlackReply({
             channel: stringFor(parameters, "channel"),
             threadTs: stringFor(parameters, "thread_ts"),
             text: stringFor(parameters, "text"),

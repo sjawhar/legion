@@ -1,6 +1,6 @@
 ---
 title: "Envoy: how events reach Dispatch, Legion and the agents"
-description: The Envoy listener and NATS under it, how GitHub webhooks, Slack mentions and Dispatch events reach subscribers, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
+description: The Envoy listener and NATS under it, how GitHub webhooks, Slack mentions and Dispatch events reach subscribers, replying in Slack, topics, the NATS grant a Legion daemon needs, running the listener, and running Envoy on one machine.
 sidebar:
   label: Envoy
   order: 9
@@ -45,7 +45,7 @@ notifications.github.<owner>.<repo>.job.<run_id>.completed    a finished Actions
 A dot in an owner, repository, or ref name is written `_` in the subject, so `acme/site.io` is
 `notifications.github.acme.site_io`. A redelivered webhook is recognised and stored once.
 
-## How Slack mentions arrive
+## How Slack mentions arrive, and how an agent replies
 
 A Slack app sends its events to the listener's public route `/webhook/slack`, which the listener
 mounts when `ENVOY_WEBHOOKS` lists `slack`. Set the app's Event Subscriptions request URL to it, for
@@ -65,6 +65,20 @@ notifications.slack.<team>.<channel>.thread.<root ts>.mention  a mention inside 
 Its payload carries `channel_id`, `user_id`, `text`, `ts`, `thread_ts` (inside a thread) and
 `bot_id` (when a bot posted it). A Legion project's controller subscribes to
 `notifications.slack.*.<channel>.mention` for each channel its project's `slack_channels` names.
+
+An agent replies in a thread with the `slack_post` tool, as the same Slack app. The listener holds
+no Slack token: the tool asks the [Secrets Broker](/legion/broker/) for the agent secret
+`LEGION_SLACK_BOT_TOKEN`, the app's bot token (`xoxb-…`), through the broker's own client
+(`agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- <poster>`), which puts it in the
+environment of the one process that calls Slack's `chat.postMessage`, never the session's. Store
+the token with owner `legion-daemon` and tier `agent`, so the broker grants it at once to the pods
+the Legion daemon enrolls, its controller's included, and to no one else; the app needs the
+`chat:write` bot scope and must be added to each channel it answers in. A request still waiting
+for approval, or denied, posts nothing, and the tool says which; Slack's own refusal comes back as
+Slack's error code, such as `not_in_channel`. A reply is at most 4,000 characters, and the tool
+sends each one once, since a post whose answer was lost may already be in the thread. A session
+posts into any channel the app has been added to: the tool does not know which project a channel
+belongs to.
 
 ## How Dispatch's events arrive
 

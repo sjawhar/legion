@@ -143,8 +143,8 @@ What each part is for:
   it, the packet the daemon tells starts with the note, and a person merges it under the
   repository's rules. Its optional `slack_channels` lists Slack channel ids (`C…` or `G…`) whose
   mentions of the Legion Slack app reach the project's controller, which answers in the thread
-  ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive) says how the mentions reach the
-  listener). A channel belongs to one project: the loader refuses one named
+  ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive-and-how-an-agent-replies) says how
+  the mentions arrive and where the controller's reply token is stored). A channel belongs to one project: the loader refuses one named
   twice.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so

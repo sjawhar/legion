@@ -31,6 +31,10 @@
 
 ### Added
 
+- The `slack_post` tool (sjawhar/legion#1998): a reply in a Slack thread as the Legion Slack app,
+  with the bot token the secrets broker grants the session (`LEGION_SLACK_BOT_TOKEN`), which only
+  the posting process holds. The project's controller answers its Slack channels' mentions with
+  it.
 - A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
   runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
   registers on `/legion/v1/claims/register` with that boot token in place of a controller

@@ -97,6 +97,15 @@
 
 ### Added
 
+- `slack_post` joins `envoyToolSpecs` after the ten `envoy_*` tools (`channel`, `thread_ts`,
+  `text` at most `SLACK_POST_TEXT_MAX`), and `postSlackReply` (`@legion/envoy-client/slack-post`)
+  posts it with Slack's `chat.postMessage` (sjawhar/legion#1998). The bot token is the secrets
+  broker's agent secret `LEGION_SLACK_BOT_TOKEN`, released through the broker's exec form,
+  `agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- bun -e <poster>`, so it is in the
+  environment of the process that posts and never the session's. A request waiting for approval,
+  a denial or any other broker refusal posts nothing and names the state; a post is sent once and
+  never retried, since a post whose answer was lost may already be in the thread.
+  `SLACK_POST_API_URL` (https, or http on a loopback host) moves the Web API for a stand-in.
 - `envoy-config`: `envoyConfigPath` (a plugin's own harness directory, else `ENVOY_CONFIG_FILE`,
   else `${XDG_CONFIG_HOME:-$HOME/.config}/legion/envoy.json`; a script, harness `command`, tries
   `ENVOY_CONFIG_FILE` and then each harness's directory first, Claude Code's only under

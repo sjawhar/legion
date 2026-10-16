@@ -4,6 +4,8 @@
 
 ### Added
 
+- `SLACK_POST_TEXT_MAX` (4,000), the longest reply in UTF-16 units the `slack_post` tool posts
+  (sjawhar/legion#1998).
 - `LegionControllerSecretResponse` carries `slackChannels`, the project's `slack_channels` (never
   null, `[]` for none), which `legion controller start` tells the controller: daemon API contract
   26.

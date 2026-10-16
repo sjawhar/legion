@@ -238,9 +238,10 @@ This follows every message and mention in one thread. Channel-level topics end i
 `.mention`; thread timestamps replace dots with underscores.
 
 Reply in a thread with `slack_post(channel=<channel_id>, thread_ts=<the message's thread_ts, or
-its ts>, text=…)`, which posts as the Legion Slack app. A refusal carries Slack's own error code. The
-post is sent once; when the answer is that Slack did not answer, the reply may already be there, so
-do not post it again.
+its ts>, text=…)`, which posts as the Legion Slack app with the bot token the secrets broker grants
+the session (`LEGION_SLACK_BOT_TOKEN`). A refusal carries Slack's own error code, or the broker's
+state when it has not granted the token. The post is sent once; when the answer is that Slack did
+not answer, the reply may already be there, so do not post it again.
 
 ## Ghost Wispr
 

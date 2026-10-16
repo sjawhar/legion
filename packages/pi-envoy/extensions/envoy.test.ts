@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -2970,74 +2971,93 @@ describe("envoy OMP extension", () => {
     expect(result.content[0]?.text).toContain("no live session ses_missing");
   });
 
-  test("slack_post replies in the thread through the listener and names the posted ts", async () => {
-    const posts: unknown[] = [];
-    globalThis.fetch = async (input, init) => {
-      if (new URL(input.toString()).pathname === "/v1/slack/post") {
-        posts.push(JSON.parse(String(init?.body)));
-        return response({
-          channel: "C00000000",
-          thread_ts: "1700000000.000100",
-          ts: "1700000000.000200",
+  // slack_post's broker and Slack, as the session's process meets them: the broker's client on
+  // PATH (a stand-in that runs the poster with the granted token, as the exec form does once the
+  // broker grants LEGION_SLACK_BOT_TOKEN), and a fake Slack Web API at SLACK_POST_API_URL.
+  async function slackPostRig(answer: unknown) {
+    const dir = mkdtempSync(join(tmpdir(), "pi-envoy-slack-"));
+    const client = join(dir, "agent-secrets");
+    writeFileSync(
+      client,
+      '#!/bin/sh\nwhile [ "$1" != "--" ]; do shift; done\nshift\nLEGION_SLACK_BOT_TOKEN=xoxb-granted exec "$@"\n'
+    );
+    chmodSync(client, 0o755);
+    const posts: { authorization: string | null; body: unknown }[] = [];
+    const slack = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      async fetch(request) {
+        posts.push({
+          authorization: request.headers.get("authorization"),
+          body: await request.json(),
         });
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?slack-post");
+        return Response.json(answer);
+      },
+    });
+    process.env.PATH = `${dir}${delimiter}${process.env.PATH ?? ""}`;
+    process.env.SLACK_POST_API_URL = `http://127.0.0.1:${slack.port}/api`;
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+    const { default: envoyExtension } = await import(`./envoy.ts?slack-post-${slack.port}`);
     const fixture = createPi();
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, sessionContext());
-    const slackPost = fixture.tools.find((tool) => tool.name === "slack_post");
-    if (slackPost === undefined) throw new Error("slack_post was not registered");
+    const tool = fixture.tools.find((candidate) => candidate.name === "slack_post");
+    if (tool === undefined) throw new Error("slack_post was not registered");
+    return {
+      tool,
+      posts,
+      stop() {
+        slack.stop(true);
+        delete process.env.SLACK_POST_API_URL;
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+  }
 
-    const result = await slackPost.execute("", {
-      channel: "C00000000",
-      thread_ts: "1700000000.000100",
-      text: "Filed as ACME-12.",
-    });
+  test("slack_post replies in the thread with the broker's token and names the posted ts", async () => {
+    const rig = await slackPostRig({ ok: true, channel: "C00000000", ts: "1700000000.000200" });
+    try {
+      const result = await rig.tool.execute("", {
+        channel: "C00000000",
+        thread_ts: "1700000000.000100",
+        text: "Filed as ACME-12.",
+      });
 
-    expect(result.isError).not.toBe(true);
-    expect(result.content[0]?.text).toBe(
-      "posted 1700000000.000200 in C00000000, thread 1700000000.000100"
-    );
-    expect(result.details).toEqual({
-      channel: "C00000000",
-      thread_ts: "1700000000.000100",
-      ts: "1700000000.000200",
-    });
-    expect(posts).toEqual([
-      { channel: "C00000000", thread_ts: "1700000000.000100", text: "Filed as ACME-12." },
-    ]);
+      expect(result.isError).not.toBe(true);
+      expect(result.content[0]?.text).toBe(
+        "posted 1700000000.000200 in C00000000, thread 1700000000.000100"
+      );
+      expect(result.details).toEqual({
+        channel: "C00000000",
+        thread_ts: "1700000000.000100",
+        ts: "1700000000.000200",
+      });
+      expect(rig.posts).toEqual([
+        {
+          authorization: "Bearer xoxb-granted",
+          body: { channel: "C00000000", thread_ts: "1700000000.000100", text: "Filed as ACME-12." },
+        },
+      ]);
+    } finally {
+      rig.stop();
+    }
   });
 
   test("slack_post surfaces Slack's refusal verbatim and posts once", async () => {
-    let posts = 0;
-    globalThis.fetch = async (input, init) => {
-      if (new URL(input.toString()).pathname === "/v1/slack/post") {
-        posts += 1;
-        return new Response(
-          JSON.stringify({ error: "Slack refused chat.postMessage: not_in_channel" }),
-          { status: 502 }
-        );
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?slack-post-refused");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext());
-    const slackPost = fixture.tools.find((tool) => tool.name === "slack_post");
-    if (slackPost === undefined) throw new Error("slack_post was not registered");
+    const rig = await slackPostRig({ ok: false, error: "not_in_channel" });
+    try {
+      const result = await rig.tool.execute("", {
+        channel: "C00000000",
+        thread_ts: "1700000000.000100",
+        text: "hello",
+      });
 
-    const result = await slackPost.execute("", {
-      channel: "C00000000",
-      thread_ts: "1700000000.000100",
-      text: "hello",
-    });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0]?.text).toContain("Slack refused chat.postMessage: not_in_channel");
-    expect(posts).toBe(1);
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toContain("Slack refused chat.postMessage: not_in_channel");
+      expect(rig.posts).toHaveLength(1);
+    } finally {
+      rig.stop();
+    }
   });
 
   test("rejects malformed wildcard bases before opening subscriptions", async () => {

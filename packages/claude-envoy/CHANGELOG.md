@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- The MCP server lists `slack_post` beside the ten `envoy_*` tools (sjawhar/legion#1998), a reply
+  in a Slack thread with the bot token the secrets broker grants (`LEGION_SLACK_BOT_TOKEN`).
+
 ### Changed
 
 - `dispatch issue` prints the new issue's dashboard link on its `Created` line.

@@ -23,7 +23,6 @@ import {
   SEARCH_QUERY_MAX,
 } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
-import { SLACK_POST_TEXT_MAX } from "../src/slack";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
 type ScalarKind = "string" | "integer" | "boolean";
@@ -165,11 +164,6 @@ const IssueTitleMax = ${ISSUE_TITLE_MAX}
 // accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
 // Settings name field and the dispatch command cannot drift apart.
 const ProjectNameMax = ${PROJECT_NAME_MAX}
-
-// SlackPostTextMax is the longest reply, in UTF-16 units, that the listener's POST /v1/slack/post
-// sends to Slack's chat.postMessage. Generated from SLACK_POST_TEXT_MAX in packages/contracts so
-// the listener's refusal and the slack_post tool's cannot drift apart.
-const SlackPostTextMax = ${SLACK_POST_TEXT_MAX}
 
 // DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
 // outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and

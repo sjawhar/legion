@@ -45,9 +45,6 @@ type listenerDeps struct {
 	consumer   string
 	streamName string
 	streamInfo streamInfoLookup
-	// slack posts POST /v1/slack/post's replies; nil on a listener with no ENVOY_SLACK_BOT_TOKEN,
-	// whose route answers 503.
-	slack slackPoster
 }
 
 // kvCache is what the listener asks of each KV-backed cache it keeps.
@@ -489,17 +486,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// The Slack bot token POST /v1/slack/post posts with, on any listener, whatever webhooks it
-	// mounts: the route serves the listener a controller's ENVOY_URL names.
-	slack, err := slackPosterFromEnv(os.Getenv)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if slack == nil {
-		logger.Info("slack posting off: " + slackBotTokenVariable + " is not set")
-	} else {
-		logger.Info("slack posting on")
-	}
 
 	// Phase 2: Bind HTTP port deterministically in main goroutine before
 	// any NATS work begins. This guarantees /healthz is reachable as soon
@@ -746,7 +732,6 @@ func main() {
 		caches:     caches,
 		consumer:   consumer,
 		streamName: bus.Stream,
-		slack:      slack,
 	}
 	openV1Routes(v1Gate, ready, cfg.MachineID, logger, listeningAt)
 
