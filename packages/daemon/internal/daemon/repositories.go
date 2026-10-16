@@ -349,7 +349,10 @@ func (w *workflowRuntime) heardAtBoot(ctx context.Context) ([]ghrepo.Repository,
 }
 
 // heardRepositories is what GitHub intake hears: every repository of served and every repository
-// a record of a live tree names, as tx reads the records, once each, sorted.
+// a record of a live tree names, as tx reads the records, once each, sorted. Each is spelled as
+// GitHub spells it, which Envoy's subjects carry, whatever spelling a record keeps (a backfilled
+// record keeps its clone's): a served repository as the mapping names it, and any other in the
+// spelling GitHub last named for it, the record's own until the daemon has read it.
 func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, served []ghrepo.Repository) ([]ghrepo.Repository, error) {
 	heard := map[string]ghrepo.Repository{}
 	for _, repo := range served {
@@ -374,7 +377,11 @@ func (w *workflowRuntime) heardRepositories(ctx context.Context, tx pgx.Tx, serv
 		if !live {
 			continue
 		}
-		repo, err := ghrepo.Parse("the repository of "+issue.Key, issue.Repo)
+		spelling := issue.Repo
+		if read, ok := w.defaultBranches.Kept(issue.Repo); ok {
+			spelling = read.Name.String()
+		}
+		repo, err := ghrepo.Parse("the repository of "+issue.Key, spelling)
 		if err != nil {
 			return nil, err
 		}

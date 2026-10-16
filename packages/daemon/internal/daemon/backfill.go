@@ -20,7 +20,13 @@ import (
 // names it, read once per repository. One read of Dispatch's listing serves every record. A record
 // Dispatch resolves to no repository, or does not list, refuses the boot, naming each one, before
 // any is filled: the operator sets the project's default repository in Dispatch and restarts.
-func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.Store, client dispatch.Client, project string, named *defaultBranches, log *slog.Logger) error {
+//
+// The record keeps the spelling of the shared clone under stateDir that spells the repository
+// case-insensitively, since the issue's workspace and its sessions were made under that spelling
+// (a tmux daemon's; Kubernetes pods provision their own and leave none), and otherwise takes
+// GitHub's. Two clones that spell one repository leave no spelling to keep, and refuse the boot,
+// naming both.
+func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records record.Store, client dispatch.Client, project, stateDir string, named *defaultBranches, log *slog.Logger) error {
 	var unfilled []record.Issue
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		var err error
@@ -50,6 +56,10 @@ func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records recor
 		return fmt.Errorf("%d issue records have no repository and Dispatch resolves none for them (%s): set the project's default repository in Dispatch (Settings → Repositories → Projects) and restart",
 			len(none), strings.Join(none, ", "))
 	}
+	clones, err := sharedClones(stateDir)
+	if err != nil {
+		return err
+	}
 	type filled struct{ key, repo, branch string }
 	fills := make([]filled, 0, len(unfilled))
 	for _, issue := range unfilled {
@@ -61,7 +71,19 @@ func backfillRepositories(ctx context.Context, pool *pgxpool.Pool, records recor
 		if err != nil {
 			return fmt.Errorf("fill the repository of %s: %w", issue.Key, err)
 		}
-		fills = append(fills, filled{issue.Key, read.Name.String(), read.DefaultBranch})
+		spelling := read.Name.String()
+		var spelled []string
+		for _, clone := range clones {
+			if strings.EqualFold(clone.Repo.String(), repo.String()) {
+				spelling = clone.Repo.String()
+				spelled = append(spelled, clone.Clone)
+			}
+		}
+		if len(spelled) > 1 {
+			return fmt.Errorf("fill the repository of %s: two shared clones spell %s (%s); remove the one no issue works in and restart",
+				issue.Key, repo, strings.Join(spelled, ", "))
+		}
+		fills = append(fills, filled{issue.Key, spelling, read.DefaultBranch})
 	}
 	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
 		for _, fill := range fills {

@@ -222,7 +222,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 	w.admission = admit.New(w.records, w.engine, cfg.AdmissionCap, cfg.Project, log)
 	w.handlers, w.reviewAppLogin = []intake.Handler{w.engine, w.admission}, reviewAppLogin
 	w.pool = st.Pool()
-	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, w.defaultBranches, log); err != nil {
+	if err := backfillRepositories(ctx, w.pool, w.records, w.dispatch, cfg.Project, cfg.StateDir, w.defaultBranches, log); err != nil {
 		return nil, err
 	}
 	return w, nil

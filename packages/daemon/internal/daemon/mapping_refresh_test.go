@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/admit"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -217,5 +218,43 @@ func TestARefreshThatUnmapsARepositoryKeepsHearingAnIssueAdmittedOnIt(t *testing
 	}
 	if filters := githubFilterSubjects(t, stream); !slices.Contains(filters, "notifications.github.zeta.tools.>") {
 		t.Fatalf("GitHub filters = %v, want zeta/tools heard: a live child is recorded on it", filters)
+	}
+}
+
+// GitHub intake hears a repository as GitHub spells it, which Envoy's subjects carry, whatever
+// spelling an issue's record keeps: a record the backfill filled with a clone's spelling is heard
+// once, under the served repository's GitHub spelling, and a live record on a repository the
+// mapping no longer serves is heard under the spelling GitHub last named for it.
+func TestGitHubIntakeHearsEachRepositoryAsGitHubSpellsIt(t *testing.T) {
+	ctx := context.Background()
+	w, _, _, _ := mappingRig(t, false)
+	github := newNamedGitHub(t, map[string]string{"orbit/gadgets": "Orbit/Gadgets@main"})
+	w.defaultBranches = newDefaultBranches(roleTokens{}, github.url, defaultBranchTTL, time.Now)
+	if _, err := w.defaultBranches.Named(ctx, ghrepo.MustParse("orbit/gadgets")); err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(ctx, w.pool, func(tx pgx.Tx) error {
+		for index, issue := range []record.Issue{
+			{Key: "LEGION-300", Repo: "ACME/widgets", DefaultBranch: "main"},
+			{Key: "LEGION-301", Repo: "orbit/gadgets", DefaultBranch: "main"},
+		} {
+			issue.Tree, issue.Project, issue.Title, issue.Phase, issue.Generation, issue.Status, issue.Rank = issue.Key, "LEGION", issue.Key, phase.Planning, 1, "in_progress", "A"
+			if err := w.records.PutIssue(ctx, tx, issue); err != nil {
+				return err
+			}
+			if err := w.records.PutSlot(ctx, tx, record.Slot{Issue: issue.Key, Index: index, AdmittedAt: time.Now()}); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	heard, err := w.heardAtBoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := repositoryNames(heard), []string{"acme/widgets", "Orbit/Gadgets", "zeta/tools"}; !slices.Equal(got, want) {
+		t.Fatalf("heard %v, want %v", got, want)
 	}
 }

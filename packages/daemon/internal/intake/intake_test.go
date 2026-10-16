@@ -324,6 +324,21 @@ func TestADispatchIssueEventWithoutResolvedRepoDecodesWithItsRepositoryMissing(t
 	}
 }
 
+// GitHub owner and repository names are case-insensitive, so an event of a repository GitHub
+// intake hears in another spelling is the daemon's: the decoder matches its repository against the
+// heard set case-insensitively, and the fact names the heard repository.
+func TestAGitHubEventOfAHeardRepositoryInAnotherCaseIsDecoded(t *testing.T) {
+	heard := []ghrepo.Repository{ghrepo.MustParse("SJawhar/Legion")}
+	decoded, err := decodeMessage("notifications.github.sjawhar.legion.pr.42", "CAPTURE", heard, capturedGitHubEnvelope(t, "pr-opened.json"))
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	opened, ok := decoded.Fact.(PullRequestOpened)
+	if !ok || opened.Repo != "SJawhar/Legion" {
+		t.Fatalf("fact = %#v, want a PullRequestOpened on SJawhar/Legion", decoded.Fact)
+	}
+}
+
 // Dispatch publishes a mapping change on its project's subject, not the issue prefix: the decoder
 // reads the daemon's own project's as a mapping change, and another project's as nothing.
 func TestARepositoryMappingEventIsTheProjectsMappingChange(t *testing.T) {

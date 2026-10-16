@@ -52,7 +52,7 @@ func TestTheBootFillsRecordsWithNoRepository(t *testing.T) {
 	t.Run("Dispatch resolves none for some", func(t *testing.T) {
 		w := seed(t)
 		client := &listingDispatch{summaries: []dispatch.IssueSummary{{Key: "LEGION-7"}, {Key: "LEGION-9", ResolvedRepo: "acme/widgets"}}}
-		err := backfillRepositories(context.Background(), w.pool, w.records, client, "LEGION", w.defaultBranches, quietLogger())
+		err := backfillRepositories(context.Background(), w.pool, w.records, client, "LEGION", t.TempDir(), w.defaultBranches, quietLogger())
 		want := "2 issue records have no repository and Dispatch resolves none for them (LEGION-12, LEGION-7): set the project's default repository in Dispatch (Settings → Repositories → Projects) and restart"
 		if err == nil || err.Error() != want {
 			t.Fatalf("backfill = %v, want %q", err, want)
@@ -71,7 +71,7 @@ func TestTheBootFillsRecordsWithNoRepository(t *testing.T) {
 			{Key: "LEGION-7", ResolvedRepo: "acme/widgets"}, {Key: "LEGION-9", ResolvedRepo: "acme/widgets"}, {Key: "LEGION-12", ResolvedRepo: "acme/widgets"},
 		}}
 		var logs bytes.Buffer
-		if err := backfillRepositories(context.Background(), w.pool, w.records, client, "LEGION", w.defaultBranches, slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
+		if err := backfillRepositories(context.Background(), w.pool, w.records, client, "LEGION", t.TempDir(), w.defaultBranches, slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
 			t.Fatalf("backfill: %v", err)
 		}
 		if unfilled := unfilledKeys(t, w); len(unfilled) != 0 {
