@@ -67,9 +67,9 @@ the implementer by the daemon's table; a worker that reports no surface reaches 
 gets a child issue in this tree to build it, and waits, idle and not suspended, until you tell it
 to continue (`envoy_publish` to its role topic) once that child closes.
 
-A merge is never a human to-do: open no `dispatch ask` for it. The merger follows the project's
-merge policy after READY; a by-hand READY tells you that a person merges under the repository's
-rules, while the usual READY arms the pull request itself.
+A merge is never a human to-do: open no `dispatch ask` for it. The daemon submits the usual READY's
+merge itself once it accepts READY, under the repository's own rules; a by-hand READY tells you
+that a person merges under the repository's rules.
 
 ## Completion
 

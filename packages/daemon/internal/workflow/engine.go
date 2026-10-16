@@ -697,7 +697,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		if pr != nil && pr.State == record.PullRequestMerged {
 			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 		}
-		return e.ready(ctx, tx, issue, handoff)
+		return e.ready(ctx, tx, issue, handoff, pr)
 	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")
