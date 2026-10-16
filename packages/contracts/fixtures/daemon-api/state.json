@@ -267,17 +267,41 @@
     "mapped": [
       {
         "repo": "acme/widgets",
-        "default": true
+        "default": true,
+        "cache": {
+          "repo": "acme/widgets",
+          "sandbox": "legion-legion-cache-acme-widgets-d782c874",
+          "ready": true,
+          "address": "http://10.8.1.4:8418",
+          "head": "34a7ac80e9c3389ffbc1bbeece371ccacc043992",
+          "lastFetchAt": "2026-10-16T19:20:30Z",
+          "bytes": 6612345678
+        }
       },
       {
         "repo": "zeta/tools",
-        "default": false
+        "default": false,
+        "cache": {
+          "repo": "zeta/tools",
+          "sandbox": "legion-legion-cache-zeta-tools-1b2c3d4e",
+          "ready": true,
+          "address": "http://10.8.1.5:8418",
+          "healthError": "Get \"http://10.8.1.5:8418/healthz\": dial tcp 10.8.1.5:8418: connect: connection refused"
+        }
       }
     ],
     "refused": [
       {
         "repo": "acme/gadgets",
         "reason": "the review App is not installed on acme/gadgets"
+      }
+    ],
+    "caches": [
+      {
+        "repo": "acme/legacy",
+        "sandbox": "legion-legion-cache-acme-legacy-0a1b2c3d",
+        "ready": false,
+        "retainedUntil": "2026-10-23T09:00:00Z"
       }
     ]
   }

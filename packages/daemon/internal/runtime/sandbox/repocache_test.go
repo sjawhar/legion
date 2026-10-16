@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +24,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/repocache"
 )
 
 var cacheRepo = ghrepo.MustParse("acme/widgets")
@@ -793,5 +797,80 @@ func TestTheFetchIsToldTheCacheOnlyWhileItIsReady(t *testing.T) {
 	loc = g.spawn(rootSpec(t))
 	if url := g.fetchEnv(loc.Sandbox.Name)["LEGION_REPOSITORY_CACHE_URL"]; url != "http://10.0.0.5:8418" {
 		t.Fatalf("a launch while the cache is ready told the fetch %q, want http://10.0.0.5:8418", url)
+	}
+}
+
+// RepositoryCaches is every cache the stores hold, by repository, each with what its /healthz
+// answered at the last health read (on the gh refresher's tick): a Ready cache's head, bytes and
+// last fetch, a cache that could not be read with why, and one not Ready with nothing read. A cache
+// of a repository no longer mapped carries when the sweep retires it.
+func TestRepositoryCachesCarryTheirLastHealthRead(t *testing.T) {
+	fetched := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
+	served := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(repocache.Health{Ready: true, Repo: "acme/widgets", Head: "0123abcd", LastFetchAt: fetched, Bytes: 6612345678})
+	}))
+	t.Cleanup(served.Close)
+	port, err := strconv.Atoi(served.URL[strings.LastIndex(served.URL, ":")+1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gadgets := ghrepo.MustParse("acme/gadgets")
+	var mapped atomic.Bool
+	mapped.Store(true)
+	g := newRig(t, nil, withOptions(func(o *Options) {
+		o.Mapped = func() []ghrepo.Repository {
+			if mapped.Load() {
+				return []ghrepo.Repository{cacheRepo, gadgets}
+			}
+			return []ghrepo.Repository{cacheRepo}
+		}
+	}))
+	g.r.cachePort = port
+	for _, repo := range []ghrepo.Repository{cacheRepo, gadgets} {
+		if err := g.r.EnsureRepositoryCache(g.ctx, repo); err != nil {
+			t.Fatal(err)
+		}
+		name := CacheSandboxName(testProject, repo)
+		g.eventually("the cache pod of "+repo.String(), func() bool { return g.r.storedPod(name) != nil })
+	}
+	g.update(g.pod(CacheSandboxName(testProject, cacheRepo)), func(p *corev1.Pod) {
+		p.Status.PodIP = "127.0.0.1"
+		p.Status.Conditions = []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}
+	})
+	g.eventually("the cache ready", func() bool { status, _ := g.r.RepositoryCache(cacheRepo); return status.Ready })
+	mapped.Store(false)
+	if err := g.r.ReconcileOrphans(g.ctx, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	g.eventually("acme/gadgets marked", func() bool {
+		s, _ := g.r.storedSandbox(CacheSandboxName(testProject, gadgets))
+		return s != nil && s.Annotations[annotationCacheUnmappedAt] != ""
+	})
+
+	before := g.r.RepositoryCaches()
+	if len(before) != 2 || before[0].Health != nil || before[0].HealthError != "" {
+		t.Fatalf("RepositoryCaches before a health read = %+v, want two caches and nothing read", before)
+	}
+	g.r.readCacheHealth(g.ctx)
+	caches := g.r.RepositoryCaches()
+	if len(caches) != 2 || caches[0].Repo != gadgets || caches[1].Repo != cacheRepo {
+		t.Fatalf("RepositoryCaches = %+v, want acme/gadgets then acme/widgets", caches)
+	}
+	if gadgetsCache := caches[0]; gadgetsCache.Ready || gadgetsCache.Health != nil || gadgetsCache.HealthError != "" || gadgetsCache.RetainedUntil.IsZero() {
+		t.Errorf("the unmapped, not-Ready cache is %+v, want nothing read and its retention", gadgetsCache)
+	}
+	widgets := caches[1]
+	if !widgets.Ready || widgets.Health == nil || widgets.Health.Head != "0123abcd" || widgets.Health.Bytes != 6612345678 || !widgets.Health.LastFetchAt.Equal(fetched) || widgets.HealthError != "" {
+		t.Errorf("the Ready cache is %+v (health %+v), want its /healthz", widgets, widgets.Health)
+	}
+
+	served.Close()
+	g.r.readCacheHealth(g.ctx)
+	if widgets := g.r.RepositoryCaches()[1]; widgets.Health != nil || !strings.Contains(widgets.HealthError, "connection refused") {
+		t.Errorf("a cache whose /healthz cannot be read is %+v, want the read's failure and no health", widgets)
 	}
 }

@@ -47,6 +47,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -99,10 +100,12 @@ type Runtime struct {
 	launcherAuth                   launcherCredentials
 	now                            func() time.Time
 	log                            *slog.Logger
-	// cacheConfig is how each repository's cache is made, and mapped the repositories the project's
-	// mapping names now (Options.RepositoryCache, Options.Mapped).
+	// cacheConfig is how each repository's cache is made, mapped the repositories the project's
+	// mapping names now (Options.RepositoryCache, Options.Mapped), and cachePort the port a cache pod
+	// serves on (repocache.Port; a test serves its own).
 	cacheConfig RepositoryCache
 	mapped      func() []ghrepo.Repository
+	cachePort   int
 
 	// lifetime is the informers' context; a read no single caller waits for
 	// (readLauncherCredential) ends with it.
@@ -130,6 +133,8 @@ type Runtime struct {
 	// occupiedCaches are the cache names RepositoryCache found held by another repository's cache and
 	// has logged, so each is logged once.
 	occupiedCaches map[string]bool
+	// cacheHealth is each Ready cache's last health read (readCacheHealth), by its Sandbox's name.
+	cacheHealth map[string]cacheHealthRead
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -270,7 +275,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped, occupiedCaches: map[string]bool{},
+		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped, cachePort: repocache.Port, occupiedCaches: map[string]bool{},
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}

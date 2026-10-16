@@ -21,9 +21,9 @@ import (
 // (start); a test that must see a tick inside its run shortens it before starting one.
 var gitHubRefreshInterval = time.Minute
 
-// refreshGitHubCredentialsEvery runs refreshGitHubCredentials, then refreshCacheTokens, every
-// interval until ctx ends: the informers' lifetime (start), so the walk never reads a store nothing
-// feeds.
+// refreshGitHubCredentialsEvery runs refreshGitHubCredentials, then refreshCacheTokens, then
+// readCacheHealth, every interval until ctx ends: the informers' lifetime (start), so the walk never
+// reads a store nothing feeds.
 func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval time.Duration) {
 	tick := time.NewTicker(interval)
 	defer tick.Stop()
@@ -34,6 +34,7 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 		case <-tick.C:
 			r.refreshGitHubCredentials(ctx)
 			r.refreshCacheTokens(ctx)
+			r.readCacheHealth(ctx)
 		}
 	}
 }

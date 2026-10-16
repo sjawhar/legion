@@ -326,7 +326,6 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 	if err != nil {
 		return sandbox.Options{}, err
 	}
-	repository := cfg.Projects[cfg.Project].Repo
 	return sandbox.Options{
 		Namespace: k.Namespace, Project: project, Image: k.Image, StorageClass: k.StorageClass, IssueVolume: issueVolume,
 		Scheduling: sandbox.Scheduling{NodeSelector: k.Scheduling.NodeSelector, Tolerations: tolerations, PriorityClass: k.Scheduling.PriorityClass},
@@ -346,7 +345,6 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		AdoptTimeout:     cfg.SlowCommandTimeout,
 		AgentSecrets:     agentSecrets,
 		RepositoryCache:  cache,
-		Mapped:           func() []ghrepo.Repository { return []ghrepo.Repository{repository} },
 		Log:              log,
 	}, nil
 }
@@ -467,14 +465,15 @@ func requirements(key string, reservation config.RoleResources) (corev1.Resource
 // sandboxRuntime builds the Agent Sandbox runtime, whose informers run for ctx (supervision's
 // lifetime), over the worker stream and with the workflow's App tokens as every pod's provisioning
 // token source (the implement App's, minted for the repository's owner) and every tree role's gh
-// bundle (gitHubCredential, a directory for each of owners), and registers its launcher acceptor on
-// the stream listener. A daemon with no GitHub Apps hands it neither, and sandbox.New's own refusal
-// names what is missing. Boot has already run the cluster check (plan.clusterCheck): Agent Sandbox
-// is installed and no Sandbox of a layout before this one — per-claim pods, or issue pods on one
-// tree volume — remains.
+// bundle (gitHubCredential, a directory for each of owners), with the workflow's mapping as the
+// repositories its repository caches follow (mapped), and registers its launcher acceptor on the
+// stream listener. A daemon with no GitHub Apps hands it neither tokens nor a mapping, and
+// sandbox.New's own refusal names what is missing. Boot has already run the cluster check
+// (plan.clusterCheck): Agent Sandbox is installed and no Sandbox of a layout before this one —
+// per-claim pods, or issue pods on one tree volume — remains.
 func sandboxRuntime(rc *rest.Config, opts sandbox.Options, owners func() []string) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
-		opts.Conns, opts.StreamURL, opts.Store = listener, address, st
+	return func(ctx context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error) {
+		opts.Conns, opts.StreamURL, opts.Store, opts.Mapped = listener, address, st, mapped
 		if apps != nil {
 			opts.Tokens = implementTokens{apps}
 			opts.GitHubCredential = appauth.GitHubCredential(apps, owners)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -54,13 +55,17 @@ func (c RepositoryCache) check() error {
 
 // CacheStatus is a repository's cache as the runtime's stores show it: the repository, exactly as
 // the cache's annotation names it; its Sandbox; whether its pod has passed its readiness probe, and
-// its address then; and, once the repository has left the mapping, until when the sweep keeps it.
+// its address then; once the repository has left the mapping, until when the sweep keeps it; and,
+// from RepositoryCaches alone, the pod's last health read: what its /healthz answered (Health), or
+// why it could not be read (HealthError), both empty when it was not Ready to be read.
 type CacheStatus struct {
 	Repo          ghrepo.Repository
 	Sandbox       string
 	Ready         bool
 	Address       string
 	RetainedUntil time.Time
+	Health        *repocache.Health
+	HealthError   string
 }
 
 // cacheRepository is the repository a cache Sandbox, pod or Secret is for: its annotationCacheRepo,
@@ -397,7 +402,7 @@ func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 	status := CacheStatus{Repo: held, Sandbox: name}
 	if pod := r.storedPod(name); ownedBy(pod, s.UID) && pod.DeletionTimestamp == nil && pod.Status.PodIP != "" {
 		if ready := podCondition(pod, corev1.PodReady); ready != nil && ready.Status == corev1.ConditionTrue {
-			status.Ready, status.Address = true, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, repocache.Port)
+			status.Ready, status.Address = true, fmt.Sprintf("http://%s:%d", pod.Status.PodIP, r.cachePort)
 		}
 	}
 	if at, err := time.Parse(time.RFC3339, s.Annotations[annotationCacheUnmappedAt]); err == nil {
@@ -405,6 +410,95 @@ func (r *Runtime) RepositoryCache(repo ghrepo.Repository) (CacheStatus, bool) {
 	}
 	return status, true
 }
+
+// RepositoryCaches is every cache the stores hold whose repository parses, sorted by repository,
+// each as RepositoryCache answers it with the last health read (readCacheHealth) of the pod it
+// names: what `legion state` shows of the caches.
+func (r *Runtime) RepositoryCaches() []CacheStatus {
+	var caches []CacheStatus
+	for _, u := range r.storedCaches() {
+		repo, err := cacheRepository(u.GetAnnotations())
+		if err != nil {
+			continue
+		}
+		status, found := r.RepositoryCache(repo)
+		if !found {
+			continue
+		}
+		r.mu.Lock()
+		read, held := r.cacheHealth[status.Sandbox]
+		r.mu.Unlock()
+		if held && read.address == status.Address {
+			status.Health, status.HealthError = read.health, read.err
+		}
+		caches = append(caches, status)
+	}
+	slices.SortFunc(caches, func(a, b CacheStatus) int {
+		return strings.Compare(strings.ToLower(a.Repo.String()), strings.ToLower(b.Repo.String()))
+	})
+	return caches
+}
+
+// cacheHealthRead is one health read of a cache's pod at address: what its /healthz answered, or
+// why it could not be read.
+type cacheHealthRead struct {
+	address string
+	health  *repocache.Health
+	err     string
+}
+
+// readCacheHealth runs on the gh refresher's tick, after refreshCacheTokens: it asks every Ready
+// cache's /healthz, each bounded by a call's budget, and keeps the answer, or why there is none, as
+// that cache's last health read, which RepositoryCaches serves without asking again. A cache that
+// is not Ready has no read: the store already says it is not serving.
+func (r *Runtime) readCacheHealth(ctx context.Context) {
+	reads := map[string]cacheHealthRead{}
+	for _, u := range r.storedCaches() {
+		repo, err := cacheRepository(u.GetAnnotations())
+		if err != nil {
+			continue
+		}
+		status, found := r.RepositoryCache(repo)
+		if !found || !status.Ready {
+			continue
+		}
+		read := cacheHealthRead{address: status.Address}
+		health, err := cacheHealthOf(ctx, status.Address)
+		if err != nil {
+			read.err = err.Error()
+		} else {
+			read.health = &health
+		}
+		reads[status.Sandbox] = read
+	}
+	r.mu.Lock()
+	r.cacheHealth = reads
+	r.mu.Unlock()
+}
+
+// cacheHealthOf is GET <address>/healthz, decoded, within a call's budget.
+func cacheHealthOf(ctx context.Context, address string) (repocache.Health, error) {
+	bounded, cancel := call(ctx)
+	defer cancel()
+	request, err := http.NewRequestWithContext(bounded, http.MethodGet, address+"/healthz", nil)
+	if err != nil {
+		return repocache.Health{}, err
+	}
+	response, err := cacheHealthClient.Do(request)
+	if err != nil {
+		return repocache.Health{}, err
+	}
+	defer response.Body.Close()
+	var health repocache.Health
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		return repocache.Health{}, fmt.Errorf("GET %s/healthz answered %s with a body that is not the cache's health: %w", address, response.Status, err)
+	}
+	return health, nil
+}
+
+// cacheHealthClient reaches a cache pod directly, at its pod address: no proxy stands between the
+// daemon and a pod of its namespace.
+var cacheHealthClient = &http.Client{Transport: &http.Transport{Proxy: nil}}
 
 // storedCaches are the cache Sandboxes in the store that are not being deleted.
 func (r *Runtime) storedCaches() []*unstructured.Unstructured {

@@ -221,7 +221,8 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 
 // Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
 // itself, the one address the runtime hands every pod's shim, and the runtime is given the
-// workflow's App tokens. The host's own agent machinery never runs: no pane launcher is
+// workflow's App tokens and the repositories Dispatch's mapping names, which its repository caches
+// follow. The host's own agent machinery never runs: no pane launcher is
 // installed, no Dispatch token file is written, and the workflow's boot has no worker-bin stage.
 func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
@@ -244,8 +245,14 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 	awaitHealthz(t, cfg, done)
 
 	record.mu.Lock()
-	address, apps := record.address, record.apps
+	address, apps, mapped := record.address, record.apps, record.mapped
 	record.mu.Unlock()
+	if mapped == nil {
+		t.Fatal("the runtime was handed no mapping")
+	}
+	if got := mapped(); !slices.Equal(got, []ghrepo.Repository{ghrepo.MustParse("acme/widgets")}) {
+		t.Errorf("the runtime's repository caches follow %v, want the workflow's mapping, acme/widgets", got)
+	}
 	prefix := "tcp://" + cfg.Bind + ":"
 	if !strings.HasPrefix(address, prefix) || strings.HasSuffix(address, ":0") {
 		t.Fatalf("the runtime was told to have shims dial %q, want %s<bound port>", address, prefix)
@@ -489,7 +496,7 @@ func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T)
 }
 
 // runtime.kubernetes.repository_cache reaches the runtime's Options as its volume, its intervals and
-// its container's requirements, and the repositories the caches follow are the project's.
+// its container's requirements.
 func TestTheRepositoryCacheReachesTheSandboxRuntime(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	reservation := config.RoleResources{CPU: "2", Memory: "4Gi", EphemeralStorage: "2Gi", EphemeralStorageRequest: "1Gi"}
@@ -505,12 +512,6 @@ func TestTheRepositoryCacheReachesTheSandboxRuntime(t *testing.T) {
 	cache := opts.RepositoryCache
 	if cache.Volume.Cmp(resource.MustParse("50Gi")) != 0 || cache.Refresh != 5*time.Minute || cache.Retain != 24*time.Hour || !reflect.DeepEqual(cache.Resources, want) {
 		t.Errorf("RepositoryCache = %+v, want 50Gi, 5m, 24h and %+v", cache, want)
-	}
-	if opts.Mapped == nil {
-		t.Fatal("the runtime is handed no mapping")
-	}
-	if got, project := opts.Mapped(), cfg.Projects[cfg.Project].Repo; len(got) != 1 || got[0] != project {
-		t.Errorf("the caches follow %v, want the project's repository %s", got, project)
 	}
 }
 

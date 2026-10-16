@@ -1760,10 +1760,18 @@ as the daemon's own watch of the pod shows it when the issue pod is launched. Wi
 and with a cache it cannot reach or use, the fetch clones from GitHub as it always could, and says
 so ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so a cache that is not there yet, or
 down, makes a launch slower and never fails it. The issue pods reach the cache pods on port 8418
-inside the namespace: a NetworkPolicy that isolates the namespace's pods must admit that, or every
-fetch logs the cache it could not reach and clones from GitHub.
+inside the namespace, and so does the daemon, which reads each Ready cache's `/healthz` every
+minute: a NetworkPolicy that isolates the namespace's pods must admit both, or every fetch logs the
+cache it could not reach and clones from GitHub, and `legion state` shows the read's failure.
 
-The daemon makes each mapped repository's cache at boot and on the orphan sweep after it: a missing
+`legion state --json | jq .repositories` shows them: each `mapped[]` repository carries `cache`
+(`repo`, `sandbox`, `ready`, `address` while Ready, and from the last health read `head`,
+`lastFetchAt` and `bytes`, or `healthError`) once the cache exists, and `caches` lists the caches of
+repositories the mapping no longer names, each with `retainedUntil`.
+
+The daemon makes the cache of each repository Dispatch's mapping names (the repositories it serves)
+at boot and on every orphan sweep after it, once a minute, so a repository newly mapped has its
+cache within a minute: a missing
 cache is created (its Sandbox `Suspended`, then its Secret owned by that Sandbox, then its pod
 template and `Running`), and a cache whose pod runs another image than the daemon's, has ended, or
 was left `Suspended` gets a new pod while its Sandbox and volume stay, so a new release costs a pod,

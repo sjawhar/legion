@@ -42,6 +42,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/runtime/tmux"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -249,6 +250,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		defer cancelAfterMint()
 		plan.identity = workflow.identity
 		plan.defaultBranch = workflow.defaultBranches.Of
+		plan.mapped = workflow.repositories.Accepted
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -492,6 +494,9 @@ type plan struct {
 	// defaultBranch is a repository's default branch as GitHub names it, read with the workflow's
 	// token source (defaultBranches.Of); nil without one.
 	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
+	// mapped is the repositories Dispatch's mapping names now, as the workflow serves them
+	// (repositories.Accepted); nil without a workflow.
+	mapped func() []ghrepo.Repository
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
@@ -571,8 +576,10 @@ type plan struct {
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
 // listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
-// workflow's App tokens (nil without a workflow), and st the store the runtime reads.
-type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error)
+// workflow's App tokens (nil without a workflow), st the store the runtime reads, and mapped the
+// repositories Dispatch's mapping names now (the workflow's, nil without one), which the Sandbox
+// runtime's repository caches follow.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store, mapped func() []ghrepo.Repository) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -704,7 +711,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // the runtime none, and its panes hold no gh files. The private server's environment is scrubbed
 // before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store, _ func() []ghrepo.Repository) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
@@ -891,7 +898,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, st)
+	rt, err := p.newRuntime(supervising, listener, dial, apps, st, p.mapped)
 	if err != nil {
 		cancel()
 		endDrain()
@@ -1305,6 +1312,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
 			repositories: repos,
+			caches:       repositoryCachesOf(s.runtime),
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1424,6 +1432,9 @@ type source struct {
 	// repositories is the project's repository mapping as the workflow serves it; nil without a
 	// workflow, whose state serves no repository.
 	repositories *repositories
+	// caches is the Kubernetes runtime's repository caches with their last health reads
+	// (sandbox.Runtime.RepositoryCaches); nil under a runtime that keeps none.
+	caches func() []sandbox.CacheStatus
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1493,7 +1504,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
 	if s.repositories != nil {
-		state.Repositories = s.repositories.view()
+		var caches []sandbox.CacheStatus
+		if s.caches != nil {
+			caches = s.caches()
+		}
+		state.Repositories = s.repositories.view(caches)
 	}
 	return state, nil
 }
@@ -1540,4 +1555,13 @@ func projectMergeRules(cfg config.Config) func(project string) config.MergeRules
 	return func(project string) config.MergeRules {
 		return cfg.Projects[project].Merge
 	}
+}
+
+// repositoryCachesOf is rt's repository caches when rt is the Sandbox runtime, the one runtime that
+// keeps them, and nil under any other.
+func repositoryCachesOf(rt runtime.Runtime) func() []sandbox.CacheStatus {
+	if keeper, ok := rt.(*sandbox.Runtime); ok {
+		return keeper.RepositoryCaches
+	}
+	return nil
 }

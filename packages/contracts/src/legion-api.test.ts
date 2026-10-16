@@ -271,8 +271,10 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
 
 // Contract 29: every recorded issue carries the repository it targets and its default branch, its
 // pull request the repository it is in, and the state the project's repository mapping as the
-// daemon serves it, each left-out repository named with the App it lacks. A state without the
-// mapping is refused.
+// daemon serves it, each left-out repository named with the App it lacks. Contract 30: each mapped
+// repository carries its cache under the Kubernetes runtime, Ready with its last health read or
+// the read's failure, and the caches of repositories no longer mapped are listed with when they go.
+// A state without the mapping, or without its caches, is refused.
 test("the state golden carries each issue's repository and the project's mapping", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));
 
@@ -280,17 +282,40 @@ test("the state golden carries each issue's repository and the project's mapping
   expect(state.issues["LEGION-208"]?.pullRequest?.repo).toBe("acme/widgets");
   expect(state.issues["LEGION-210"]?.defaultBranch).toBe("release/v7.1");
   expect(state.repositories.owners).toEqual(["acme", "zeta"]);
-  expect(state.repositories.mapped).toEqual([
+  expect(
+    state.repositories.mapped.map(({ repo, default: isDefault }) => ({ repo, default: isDefault }))
+  ).toEqual([
     { repo: "acme/widgets", default: true },
     { repo: "zeta/tools", default: false },
   ]);
+  expect(state.repositories.mapped[0]?.cache).toEqual({
+    repo: "acme/widgets",
+    sandbox: "legion-legion-cache-acme-widgets-d782c874",
+    ready: true,
+    address: "http://10.8.1.4:8418",
+    head: "34a7ac80e9c3389ffbc1bbeece371ccacc043992",
+    lastFetchAt: "2026-10-16T19:20:30Z",
+    bytes: 6612345678,
+  });
+  expect(state.repositories.mapped[1]?.cache?.healthError).toContain("connection refused");
   expect(state.repositories.refused[0]?.reason).toBe(
     "the review App is not installed on acme/gadgets"
   );
+  expect(state.repositories.caches).toEqual([
+    {
+      repo: "acme/legacy",
+      sandbox: "legion-legion-cache-acme-legacy-0a1b2c3d",
+      ready: false,
+      retainedUntil: "2026-10-23T09:00:00Z",
+    },
+  ]);
 
   const dropped = fixture("state.json") as Record<string, unknown>;
   delete dropped.repositories;
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+  const noCaches = fixture("state.json") as { repositories: Record<string, unknown> };
+  delete noCaches.repositories.caches;
+  expect(LegionStateResponse.safeParse(noCaches).success).toBeFalse();
 });
 
 // The state's capability report (contract 16): the golden carries a decided row with the operator's
