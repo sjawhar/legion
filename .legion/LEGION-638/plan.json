@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-638",
+  "completed": "2026-10-16T01:08:10Z",
+  "plan": "dispatch://LEGION-638/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase contract, the push procedure, and references/pr-body.md for the PR body's proof entries (one per criterion, each with a negative control) and the simplify pass",
+      "ce-simplify-code: the simplify pass pr-body.md calls for once the change is settled, before the PR is called ready",
+      "dispatch: read before any Dispatch write (a message on LEGION-638, a comment)"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md says what the tester verifies and records (the E2E (tester) line and proof array); the tester re-runs the plan's named commands and the stop at the floor's edge",
+      "dispatch: read before any Dispatch write"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md (the review order and the approval of the head) and references/review-threads.md (one disposition per thread); the reviewer reads the plan beside the spec and its three recorded departures",
+      "dispatch: read before any Dispatch write"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Acceptance 1's 'smallest value the daemon accepts' is worker_stop_timeout_seconds: 1 (config.go:439-456 refuses only <= 0); at 1 s the release cannot fit any drain (codegraphStopGrace 2 s, DefaultGrace 5 s), so only the refusal branch, or clamping the agent's grace, meets it.",
+        "answer": "The plan takes the refusal branch at configuration load; clamping is not adopted (it still would not fit at 1 s and shortens Oh My Pi's exit window)."
+      },
+      {
+        "finding": "The spec does not say where the refusal lives or which deployments it binds: worker_stop_timeout_seconds also drives tmux, whose shim gets no --stop-grace or --warm-codegraph; sandbox/tmux Options set the grace directly in tests (50 ms-1 s).",
+        "answer": "The refusal lives in config.Load under the existing runtime: kubernetes branch beside checkPodReachable; kubernetes-only; the Options structs and the shim's flag reader are not given the floor (the shim keeps its non-positive refusal) and the reasons are recorded."
+      },
+      {
+        "finding": "The spec names no floor and no invariant; a floor below ~2 s does not prevent the lease being left, and a floor F implies a minimum stop grace of 6 s + F; warmUpDrain's comment promises 'waits not at all' for a grace that leaves nothing.",
+        "answer": "MinWarmUpDrain = 3 s (codegraphStopGrace 2 s + 1 s for reap and release), MinStopGrace = 9 s; the invariant is Grace + drainTimeout + drain <= stopGrace from MinStopGrace up, refused below; the comment is rewritten. The tighter (2 s, 8 s) pair is recorded for the architect."
+      },
+      {
+        "finding": "Neither 'the daemon's log' nor 'the pod watch' can carry the success line today: the warm-up writes to stderr (the role container's log), shimwire has no log frame, the daemon reads a container's log only when it has failed, and the pod watch records pod objects.",
+        "answer": "The line goes to the role container's log (pods/log) and stage 4b reads it with kubectl logs --all-containers --timestamps --prefix under its admin context (it already runs op logs). Recorded as spec departure 1; a wire frame is not added."
+      },
+      {
+        "finding": "'Elapsed time from launch' has three readings (pod creation, process start, agent's first frame) and warmCodegraphIndex holds no launch instant.",
+        "answer": "Launch is the shim's Run start (the role container's launcher starting this generation); WarmCodegraph and WarmCodegraphIndex gain a launched time.Time; the line carries the build's duration and the time since launch; stage 4b measures pod creation to the line's kubelet timestamp itself."
+      },
+      {
+        "finding": "A line logged only on a finished build leaves nothing to read when the index is already complete, on the second index attempt, or in the five containers that did not win the lease; the checkpoint reads the planner's container only.",
+        "answer": "The line is logged only on a build exiting 0 (no noise on relaunch); the checkpoint reads every container of tree 2's pod and runs at the pod's first launch, where one shim builds; it fails when no container logged one."
+      },
+      {
+        "finding": "warmLeaseHeartbeat is a 10 s const with no seam; the warmLeaseStep hook fires in acquireWarmLease, not in the ticker.",
+        "answer": "holdWarmLease gains the interval as a parameter (acquireWarmLease passes warmLeaseHeartbeat; the test passes 10 ms) and the tick is extracted as refreshWarmLease(path, token) bool, table-tested directly as well."
+      },
+      {
+        "finding": "drainWarmUp waits on real time.After; with a floor the bound-zero test either sleeps the floor or tests nothing.",
+        "answer": "drainWarmUp moves to s.clock.After; TestTheWaitForTheWarmUpIsBoundedByTheStopGrace becomes the floored wait driven by the fake clock (clock.next(t, MinWarmUpDrain).elapse())."
+      },
+      {
+        "finding": "Acceptance 3's command list omits ./internal/shim/... (where drain_test.go lives); bunx biome check covers neither Go nor the stage script; the e2e lib's bun tests are named nowhere.",
+        "answer": "The plan's checks add ./internal/shim/... and ./internal/config/..., bun test scripts/e2e/lib and bash -n on the stage script. Recorded as spec departure 2."
+      },
+      {
+        "finding": "'Fails against a deliberately wrong bound' names no runnable mutation; 'the drain bound' is both the returned value and the invariant.",
+        "answer": "Two named mutations through go test -overlay (drop '- drainTimeout'; floor 0), each failing a named invariant, their output quoted in the handoff; the test asserts both the values and the invariants."
+      },
+      {
+        "finding": "The spec's fourth bullet (the success line and stage 4b's read) has no acceptance criterion.",
+        "answer": "The plan adds criterion 4: the line's exact shape, a unit test that it is logged once on success and not on an already-complete index or a failed build, and the stage 4b checkpoint with its bun-tested parser. Recorded as spec departure 3."
+      },
+      {
+        "finding": "'The docs say which' names no documents; four places state the current behaviour.",
+        "answer": "docs/kubernetes.md's warm-up paragraph, root AGENTS.md:61, the troubleshooting table (one row for the refusal) and the LEGION-629 solution note's 'Known edge' bullet are each named in the plan."
+      },
+      {
+        "finding": "The spec does not say what a holder does once its lease was taken over: skip the refresh, stop the ticker, or end the build.",
+        "answer": "The heartbeat stops ticking on a foreign token or a missing lease; the build is left running (ending it is new behaviour outside 'guard it'); recorded for the architect."
+      },
+      {
+        "finding": "A deadline-based drain has no instant on the path where the agent exits by itself (no terminate ever happened).",
+        "answer": "The drain stays a duration with a floor; the deadline alternative is rejected for that reason in the plan."
+      },
+      {
+        "finding": "The pod's terminationGracePeriodSeconds is math.Ceil of the duration while the shim gets the exact value, so sub-second graces disagree.",
+        "answer": "The configured key is whole seconds and both are >= 9 after the refusal; noted in the plan."
+      },
+      {
+        "finding": "Two spec references do not resolve: docs/kubernetes.md 'around lines 859-863' (the paragraph is at 1615-1632) and packages/daemon/AGENTS.md (does not exist).",
+        "answer": "The plan names the paragraph by its text at its current lines and says the root AGENTS.md is the daemon's guide."
+      },
+      {
+        "finding": "Three statements are unverified from the tree: the review's text (quoted from gh api), the Stage 4b gap claim, and the LEGION-629 timing figures (prose in a solution note).",
+        "answer": "The review text was read with gh api and quoted in the context; the timing figures are cited as LEGION-629's measurements and the floor keeps a 1 s margin over the hard 2 s kill; the implementer's drives re-measure the stop and record the figures."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Log one success line with the elapsed time from launch, on a surface stage 4b can read (the daemon's log or the pod watch), and have stage 4b's checkpoint read it.",
+      "plan": "The success line goes to the process's stderr, which in a pod is the role container's log (pods/log); stage 4b's repository-tools checkpoint reads it with kubectl logs --all-containers --timestamps --prefix under its admin context and computes the time from the pod's creationTimestamp to the line's kubelet timestamp.",
+      "evidence": "packages/daemon/internal/workspace/codegraph.go:147-219 writes every warm-up line to os.Stderr; packages/daemon/internal/shimwire/frames.go:24-48 has no log frame, so the daemon's log would need a new shim-to-daemon frame (a pod-replacing change); the pod watch records pod objects; scripts/e2e/stage4b-sandbox-tree.sh:2971 already reads a pod's log with op logs.",
+      "outcome": { "kind": "changed", "scope": "summary: the fourth bullet's surface is the role container's log read by kubectl logs, not the daemon's log or the pod watch" }
+    },
+    {
+      "spec": "Acceptance 3: go test ./internal/workspace/... ./cmd/legion/... and bunx biome check pass.",
+      "plan": "The checks are go test ./internal/shim/... ./internal/workspace/... ./internal/config/... ./cmd/legion/..., bunx biome check ., bun test scripts/e2e/lib and bash -n scripts/e2e/stage4b-sandbox-tree.sh.",
+      "evidence": "drain_test.go is packages/daemon/internal/shim/drain_test.go, outside the spec's list; the configuration refusal lives in packages/daemon/internal/config; the stage script's new parser has a bun test under scripts/e2e/lib as the existing stage4b-*.test.ts do.",
+      "outcome": { "kind": "changed", "scope": "acceptance 3: the command list gains ./internal/shim/..., ./internal/config/..., bun test scripts/e2e/lib and bash -n on the stage script" }
+    },
+    {
+      "spec": "The spec's Acceptance lists three criteria; the fourth scope bullet (the success line and stage 4b's read) has none.",
+      "plan": "Criterion 4: after a build exits 0 the warm-up logs exactly one line '[legion] codegraph warm-up for <dir> built the index: codegraph <init|index> took <duration>, done <duration> after launch', not on an already-complete index or a failed build (unit test); stage 4b's repository-tools checkpoint waits for the line in any container, records the container, the line and the seconds from pod creation, requires index.state complete, fails when none logged it; bun test scripts/e2e/lib passes. The live stage 4b run is LEGION-578's operator lane.",
+      "evidence": "The spec's '# Acceptance' has exactly three items, none naming the log line, stage 4b or scripts/e2e; the bullet is in scope by the spec's own words.",
+      "outcome": { "kind": "changed", "scope": "acceptance: a fourth criterion is added for the success line and the stage 4b checkpoint" }
+    }
+  ]
+}
