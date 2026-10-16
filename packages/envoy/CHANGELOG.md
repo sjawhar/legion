@@ -332,6 +332,14 @@
   name every configured production job and a missing apply step, and the Pipeline card's `job`
   joins the names it follows with `or`.
 
+- **Breaking:** migration 0111 drops `delivery_settings.production_job_name`, with the trigger and
+  function 0109 added to keep it at the first of `production_job_names` through the rollout
+  (LEGION-761). No value is lost: the trigger kept the column equal to the list's first name, and
+  the migration's census counts any row where it did not, so such a row refuses the deploy.
+  Rollback floor: once 0111 has applied, a task older than legion-envoy v13.4.1, the release that
+  added 0109, cannot run against this schema, since it reads and writes `production_job_name`.
+  v13.4.1 and every later release read `production_job_names` alone.
+
 - **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
   `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the `dispatch` section of the checkout's
   `.envoy/envoy.json`, and take the NATS URLs from `envoy.natsUrls` (LEGION-707). A checkout's file
