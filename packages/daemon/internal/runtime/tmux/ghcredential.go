@@ -2,7 +2,6 @@ package tmux
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -38,18 +37,19 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 // role's GitHub credential, so the pane's gh (the `legion gh` wrapper's real gh) and the clone's
 // `legion git-credential` helper read the tokens the daemon holds now. It walks a snapshot of the
 // watch (trackedProcesses), takes each pane's role from its claim token (claim.Token.Role),
-// skipping a token that names no role, and renders the credential for the pane's default owner:
-// the one its launch recorded on the tracked entry. For a pane adopted after a restart, whose
-// launch the runtime never saw, the owner is the daemon's own record of the claim's repository
-// (Options.RepositoryOwner), since that owner holds the write token; an adopted controller holds
-// every owner read-only, so its render takes the first owner as its default and asks the record
-// nothing. Nothing under the pane's gh directory, which the pane's own user can write, decides an
-// owner. It rewrites only the owners whose hosts.yml differs (ghconfig.WriteBundle), recreating a
-// root that is gone. A record that cannot name the owner, a render that fails, or a render whose
-// default is not the pane's recorded one — which would leave the pane's GH_CONFIG_DIR naming a
-// directory the bundle no longer holds — is logged and the pane keeps its last tokens until the
-// next tick. A runtime with no credential function (Options.GitHubCredential nil: a daemon with no
-// GitHub Apps) wrote no pane any gh files, so it has nothing to refresh.
+// skipping a token that names no role, and renders the credential for the pane's write owner: the
+// one its launch minted the write token for, recorded on the tracked entry, which is empty for a
+// launch on no repository and for the controller, whose bundles are read-only for every owner. For
+// a tree pane adopted after a restart, whose launch the runtime never saw, the write owner is the
+// daemon's own record of the claim's repository (Options.RepositoryOwner), and an empty answer is a
+// claim with none, read-only as its launch was; an adopted controller asks the record nothing.
+// Nothing under the pane's gh directory, which the pane's own user can write, decides an owner, and
+// a bundle's default owner, the directory GH_CONFIG_DIR names, is never minting authority. It
+// rewrites only the owners whose hosts.yml differs (ghconfig.WriteBundle), recreating a root that is
+// gone. A record that cannot be read, a render that fails, or a render for a write owner whose
+// default is another owner is logged and the pane keeps its last tokens until the next tick. A
+// runtime with no credential function (Options.GitHubCredential nil: a daemon with no GitHub Apps)
+// wrote no pane any gh files, so it has nothing to refresh.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	if r.gitHubCredential == nil {
 		return
@@ -63,12 +63,9 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		failed := func(err error) {
 			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", err)
 		}
-		owner := entry.ghDefault
-		if owner == "" && role != claim.RoleController {
+		owner := entry.ghWriter
+		if entry.issue == "" && role != claim.RoleController {
 			recorded, err := r.repositoryOwner(ctx, token)
-			if err == nil && recorded == "" {
-				err = errors.New("the daemon records no repository owner for the claim")
-			}
 			if err != nil {
 				failed(fmt.Errorf("the owner of the claim's repository: %w", err))
 				continue
@@ -81,7 +78,7 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 			continue
 		}
 		if owner != "" && bundle.Default != owner {
-			failed(fmt.Errorf("the credential's default owner %s is not the pane's %s", bundle.Default, owner))
+			failed(fmt.Errorf("the credential's default owner %s is not the pane's write owner %s", bundle.Default, owner))
 			continue
 		}
 		root := runtime.GHConfigDir(r.stateDir, token)

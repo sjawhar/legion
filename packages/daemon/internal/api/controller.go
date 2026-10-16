@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -186,7 +187,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 	}
 	bundle, err := appauth.GitHubCredential(s.tokens, s.githubOwners)(r.Context(), claim.RoleController, req.Default)
 	switch {
-	case errors.Is(err, appauth.ErrNoOwner):
+	case errors.Is(err, runtime.ErrNoGitHubOwner):
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_OWNER_UNCONFIGURED", "no repository owner is configured for GitHub App tokens")
 		return
 	case errors.Is(err, appauth.ErrOwnerOutsideProject):

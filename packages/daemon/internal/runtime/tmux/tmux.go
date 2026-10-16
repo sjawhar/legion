@@ -177,13 +177,15 @@ type Runtime struct {
 }
 
 // trackedProcess is one watched process: its locator, the issue it works on when the runtime
-// opened it (empty for one it adopted, whose window is then not offered to later panes), and the
-// default owner of the gh bundle its launch wrote (empty for one it adopted, whose write owner the
-// daemon's record names: Options.RepositoryOwner).
+// opened it (empty for one it adopted, whose window is then not offered to later panes), and
+// ghWriter, the owner its launch minted the gh bundle's write token for, lowercased: its
+// repository's owner, or empty for a launch on no repository and for the controller, whose bundle
+// is read-only for every owner. An adopted tree pane's write owner is the daemon's record of its
+// claim (Options.RepositoryOwner).
 type trackedProcess struct {
-	locator   runtime.Locator
-	issue     string
-	ghDefault string
+	locator  runtime.Locator
+	issue    string
+	ghWriter string
 }
 
 // New builds a runtime from opts, resolving the tmux and legion binaries now so a daemon that
@@ -396,13 +398,13 @@ func paneOf(loc runtime.Locator) (string, incarnation, error) {
 	return loc.Tmux.Pane, inc, nil
 }
 
-func (r *Runtime) track(loc runtime.Locator, issue, ghDefault string) {
+func (r *Runtime) track(loc runtime.Locator, issue, ghWriter string) {
 	r.trackedMu.Lock()
 	defer r.trackedMu.Unlock()
 	if existing, ok := r.tracked[loc.Incarnation]; ok && existing.issue != "" {
-		issue, ghDefault = existing.issue, existing.ghDefault
+		issue, ghWriter = existing.issue, existing.ghWriter
 	}
-	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghDefault: ghDefault}
+	r.tracked[loc.Incarnation] = &trackedProcess{locator: loc, issue: issue, ghWriter: ghWriter}
 }
 
 func (r *Runtime) untrack(loc runtime.Locator) {
@@ -432,7 +434,7 @@ func (r *Runtime) adoptExactly(located []runtime.Locator) {
 	for _, loc := range located {
 		entry := &trackedProcess{locator: loc}
 		if existing, ok := r.tracked[loc.Incarnation]; ok {
-			entry.issue, entry.ghDefault = existing.issue, existing.ghDefault
+			entry.issue, entry.ghWriter = existing.issue, existing.ghWriter
 		}
 		r.tracked[loc.Incarnation] = entry
 	}

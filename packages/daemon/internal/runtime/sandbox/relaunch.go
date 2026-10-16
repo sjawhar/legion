@@ -523,6 +523,10 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 		}); err != nil {
 			return err
 		}
+		if bundle.Default == "" {
+			r.log.Info("sandbox runtime: no GitHub owner to act for; the role's gh acts as nobody", "sandbox", s.Name, "role", role)
+			continue
+		}
 		written := bundle.Owners[bundle.Default]
 		r.log.Info("sandbox runtime: github credential written", "sandbox", s.Name, "role", role, "app", written.App,
 			"expiresAt", written.ExpiresAt, "owners", l.gitHubOwners)
@@ -535,22 +539,28 @@ func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l *launc
 // volumes and every agent's GH_CONFIG_DIR are built from. Every role's bundle holds the same owners
 // and default, and one that does not fails the launch, as a mint that fails or a bundle Validate
 // refuses does, naming the role, since a pod whose gh holds no token would start every role unable
-// to reach GitHub.
+// to reach GitHub. The one exception is the controller of a project with no GitHub owner to mint
+// for (runtime.ErrNoGitHubOwner, every mapped repository without an App): it runs with gh acting as
+// nobody, as `legion controller start` does there, its bundle empty — no owner, no default — and
+// its gh directory an empty one (volumes).
 func (r *Runtime) gitHubBundles(ctx context.Context, l *launch) (map[claim.Role]ghconfig.Bundle, error) {
 	l.gitHubOwners, l.gitHubDefault = nil, ""
 	bundles := make(map[claim.Role]ghconfig.Bundle, len(l.roles))
-	for _, role := range l.roles {
+	for i, role := range l.roles {
 		minting, cancel := call(ctx)
 		bundle, err := r.gitHubCredential(minting, role, l.spec.Repository.Owner())
 		cancel()
-		if err == nil {
+		switch {
+		case role == claim.RoleController && errors.Is(err, runtime.ErrNoGitHubOwner):
+			bundle, err = ghconfig.Bundle{}, nil
+		case err == nil:
 			err = bundle.Validate()
 		}
 		if err != nil {
 			return nil, fmt.Errorf("write the github credential for %s: %w", role, err)
 		}
 		owners := bundle.OwnerNames()
-		if l.gitHubOwners == nil {
+		if i == 0 {
 			l.gitHubOwners, l.gitHubDefault = owners, bundle.Default
 		} else if !slices.Equal(owners, l.gitHubOwners) || bundle.Default != l.gitHubDefault {
 			return nil, fmt.Errorf("write the github credential for %s: its owners %v (default %s) are not the pod's %v (default %s)",
