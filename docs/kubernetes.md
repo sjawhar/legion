@@ -136,7 +136,11 @@ recorded here: the stage 4a launch below is where it is measured. The pull must 
 wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
-"Liveness rules" below); a launch whose launcher has not connected by then fails and is counted.
+"Liveness rules" below); a launch whose launcher has not connected by then fails and is counted. On
+GKE Autopilot, an issue or controller pod (below) usually lands on a freshly provisioned node of its
+own and pulls the image cold there, measured at about 2m15s to 2m25s before the first init
+container on a production-sized node; a GKE deployment needs a larger `worker_boot_timeout_seconds`
+(for example 300) to keep that provisioning-plus-pull time from being counted as a launch failure.
 Oh My Pi's boot after it fits the registration deadline,
 `worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals` (360 s by default). The
 stage 4a harness's `image-probe` and `root-ready` checks (`scripts/e2e/README.md`) are where a
@@ -1644,8 +1648,8 @@ Every pod runs:
   when it names none) and `automountServiceAccountToken: false`;
 - under Pod Security "restricted": non-root user 1000 on the pod, and on each container no
   privilege escalation, ALL capabilities dropped and the RuntimeDefault seccomp profile;
-- on the Legion pool, with its node selector and toleration, and nothing else of its placement: no
-  affinity;
+- on the Legion pool, with its node selector and toleration, and nothing else of its placement that
+  Legion itself sets: no affinity (GKE Autopilot adds its own to an annotated pod, below);
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
@@ -1656,8 +1660,11 @@ Every pod runs:
   protection from its own scale-down and node-upgrade eviction — not indefinitely, and not from node
   pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or an
   operator-initiated drain; Autopilot also places each such Pod on a node of its own whenever
-  possible. The image probe pod (below) carries only the first: a dedicated node per boot would cost
-  more than the eviction window buys a probe that is already short-lived and retried on failure.
+  possible, under a required node affinity it adds itself (`cloud.google.com/extended-duration-pods`),
+  and refuses the pod outright under a Spot node selector or toleration ([Image size and pull
+  time](#image-size-and-pull-time) has the dedicated node's boot-time cost). The
+  image probe pod (below) carries only the first: a dedicated node per boot would cost more than the
+  eviction window buys a probe that is already short-lived and retried on failure.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -1904,7 +1911,9 @@ implementer's and tester's 6Gi holds its agent, one lane and a browser with room
 the reviewer's 4Gi holds its agent, a browser and its review pair, and the pod's 19 GiB holds six
 agents beside them.
 
-No pod carries an affinity: each owns its volume and shares nothing with another pod, so the
+Legion sets no affinity itself (GKE Autopilot adds its own to an annotated pod, [Anatomy of a
+Sandbox pod](#anatomy-of-a-sandbox-pod)): each pod owns its volume and shares nothing with another
+pod, so the
 scheduler bin-packs it wherever the `legion` pool has room for its reservation, and Karpenter adds a
 node under the pool's limits when none has, of the smallest type the pool's requirements allow. In
 production (read 2026-10-08) those are `instance-cpu Gt 3` and `instance-memory Gt 65535`, so the
@@ -2986,8 +2995,9 @@ exits 3, which the daemon reads as a lost volume and answers with a fresh contro
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
-agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Like every Legion pod it carries no affinity,
-so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
+agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it itself (GKE
+Autopilot adds its own, [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so it lands wherever
+the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
 "true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
 or replaces for drift the node it runs on, though issue pods can still be scheduled onto that node;
 GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days
