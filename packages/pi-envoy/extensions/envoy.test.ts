@@ -2796,6 +2796,7 @@ describe("envoy OMP extension", () => {
           driving: false,
           self_subscribed: true,
           capabilities: ["aside", "steer"],
+          host: hostname(),
         },
       },
       { path: "/v1/roles/set", body: { session_id: "ses_omp", role: "controller" } },
@@ -4957,6 +4958,7 @@ describe("envoy OMP extension", () => {
         driving: false,
         self_subscribed: true,
         capabilities: ["aside", "steer"],
+        host: hostname(),
       },
     });
   });

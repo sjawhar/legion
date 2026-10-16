@@ -56,6 +56,45 @@ func TestAgentsListsLiveSessionsNewestFirstForHumans(t *testing.T) {
 	}
 }
 
+// GET /api/v1/agents carries each session's real machine (host) wherever the listener reported
+// it, and keeps machine_id (the listener that owns the session's delivery) untouched beside it.
+func TestAgentsReportsHostFromListener(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"session_id":"a","title":"planner","machine_id":"example-listener","host":"example-host-a","last_seen":100}]`))
+	}))
+	defer listener.Close()
+
+	response := dispatchRequest(t, agentsHandler(t, listener.URL), http.MethodGet, "/api/v1/agents", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", response.Code, response.Body.String())
+	}
+	rows := decodeBody[[]map[string]any](t, response)
+	if rows[0]["machine_id"] != "example-listener" {
+		t.Fatalf("machine_id = %v, want the routing listener's own machine unchanged", rows[0]["machine_id"])
+	}
+	if rows[0]["host"] != "example-host-a" {
+		t.Fatalf("host = %v, want the listener-reported host", rows[0]["host"])
+	}
+}
+
+// A listener that predates the "host" field answers with none; Dispatch must still show a
+// machine rather than an empty one during a partial rollout.
+func TestAgentsFallsBackToMachineIDWhenListenerReportsNoHost(t *testing.T) {
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`[{"session_id":"a","title":"planner","machine_id":"example-listener","last_seen":100}]`))
+	}))
+	defer listener.Close()
+
+	response := dispatchRequest(t, agentsHandler(t, listener.URL), http.MethodGet, "/api/v1/agents", nil, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", response.Code, response.Body.String())
+	}
+	rows := decodeBody[[]map[string]any](t, response)
+	if rows[0]["host"] != "example-listener" {
+		t.Fatalf("host = %v, want the machine_id fallback", rows[0]["host"])
+	}
+}
+
 func TestAgentsIncludeGroupedOpenAskCountsAndLastActivity(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`[

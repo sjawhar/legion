@@ -128,6 +128,12 @@ func (s *server) listAgents(w http.ResponseWriter, r *http.Request) {
 		if createdAt, ok := activity[session.SessionID]; ok {
 			lastActivity = timestampPtr(&createdAt)
 		}
+		// A listener that predates the "host" field (packages/envoy/internal/session's
+		// SessionEntry.Host) answers with none; fall back to the routing machine_id rather
+		// than showing an empty machine on the Agents page during a partial rollout.
+		if session.Host == "" {
+			session.Host = session.MachineID
+		}
 		rows = append(rows, agentResponse{
 			Session:      session,
 			OpenAsks:     openAsks[session.SessionID],

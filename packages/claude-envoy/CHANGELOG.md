@@ -4,6 +4,11 @@
 
 ### Changed
 
+- `envoy_sessions`' `machine` filter now matches a session's real `host` (falling back to
+  `machine_id` for a session whose plugin predates the field) rather than the listener that
+  registered it, so filtering by machine finds a session on its own machine again even when every
+  session shares one listener.
+
 - The `dispatch` command's approval texts, and the `dispatch` skill this plugin ships, state the
   carried approval (LEGION-573): a human's own answer to a decision block carries their approval
   to the version it writes when that answer is the whole change since the version they approved,
