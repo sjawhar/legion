@@ -14,6 +14,7 @@ import { SEND_DEADLINE_MS } from "./send-request";
 const planner: Agent = {
   capabilities: ["btw"],
   dir: "/workspaces/planner",
+  host: "host-a",
   last_activity: null,
   last_seen: 1_700_000_000_000,
   machine_id: "host-a",
@@ -26,6 +27,7 @@ const planner: Agent = {
 const worker: Agent = {
   capabilities: [],
   dir: "/workspaces/worker",
+  host: "host-b",
   last_activity: null,
   last_seen: 1_700_000_000_001,
   machine_id: "host-b",

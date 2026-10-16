@@ -183,11 +183,13 @@ type deliveryHub struct {
 // deliveryListenerConn is what the hub's dial returns: one connection of its own for LISTEN.
 type deliveryListenerConn = *pgx.Conn
 
-// hubClock is the hub's clock: what time it is, and a timer that calls f once d has passed. A test
-// moves it forward without waiting.
+// hubClock is the hub's clock: what time it is, and a timer that calls f once the clock reaches
+// at, at once when it already has. The timer names a moment rather than a wait, so a clock that
+// moves between the hub's read of it and the arm (a test's, which moves forward without waiting)
+// fires the timer all the same.
 type hubClock interface {
 	Now() time.Time
-	AfterFunc(d time.Duration, f func()) hubTimer
+	At(at time.Time, f func()) hubTimer
 }
 
 type hubTimer interface{ Stop() bool }
@@ -197,7 +199,9 @@ type deliveryHubClock struct{}
 
 func (deliveryHubClock) Now() time.Time { return time.Now().UTC() }
 
-func (deliveryHubClock) AfterFunc(d time.Duration, f func()) hubTimer { return time.AfterFunc(d, f) }
+func (deliveryHubClock) At(at time.Time, f func()) hubTimer {
+	return time.AfterFunc(time.Until(at), f)
+}
 
 // deliveryView is one view the open pages show, shared by every sub that names it.
 type deliveryView struct {

@@ -20,7 +20,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
-const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
+const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> --default-branch <name> [--root /legion] --credential-helper <git helper> --feed <dir>"
 
 const (
 	// workspaceLostExitCode reports an expected issue volume with neither its clone nor any
@@ -71,13 +71,14 @@ func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io
 	flags := newFlags("workspace-init provision", "usage: "+workspaceProvisionUsage, stderr)
 	issue := flags.String("issue", "", "Dispatch issue key, e.g. LEGION-1 (required)")
 	repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
+	defaultBranch := flags.String("default-branch", "", "the repository's default branch as GitHub names it, where an issue with no branch starts (required)")
 	root := flags.String("root", "/legion", "issue volume root directory")
 	credentialHelper := flags.String("credential-helper", "", "git credential helper written into the clone's config (required)")
 	feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
 	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
 		return code
 	}
-	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout), stderr)
+	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *defaultBranch, *root, *credentialHelper, *feed, stdout), stderr)
 }
 
 const workspaceControllerUsage = "legion workspace-init controller [--root /legion]"
@@ -154,11 +155,12 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 // run where the provisioning token is pointed at: this is the process that runs git and jj against
 // what every agent of the issue can write. Then it creates the directories the main container
 // mounts, holds a resume to the same agent, removes the git locks an interrupted git or jj left,
-// and provisions from the feed. No lock guards the clone: it is the issue's own, on the issue's own
-// volume, and no other pod mounts it. For the same reason, and because no role container of the
-// pod has started, no process holds a git lock on the volume while this runs, so every one there
-// is stale and would fail each later write of what it locks (LEGION-731).
-func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
+// and provisions from the feed, an issue with no branch at defaultBranch. No lock guards the
+// clone: it is the issue's own, on the issue's own volume, and no other pod mounts it. For the same
+// reason, and because no role container of the pod has started, no process holds a git lock on the
+// volume while this runs, so every one there is stale and would fail each later write of what it
+// locks (LEGION-731).
+func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
 		return err
@@ -174,6 +176,9 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	if !filepath.IsAbs(feed) {
 		return fmt.Errorf("--feed must be an absolute path (got %q)", feed)
+	}
+	if defaultBranch == "" {
+		return fmt.Errorf("--default-branch is required: %s", workspaceProvisionUsage)
 	}
 	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
 		return errors.New(provisionTokenFileEnv + " is set: provisioning runs without the provisioning token, which `workspace-init fetch` alone holds")
@@ -219,13 +224,13 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
-		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
-		Log: log,
+		StateDir: root, Repo: repository, Issue: issue, DefaultBranch: defaultBranch, CredentialHelper: credentialHelper,
+		Source: workspace.FromFeed(feed), Log: log,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "workspace-init: %s on %s\n", provisioned.Dir, provisioned.Bookmark)
+	fmt.Fprintf(stdout, "workspace-init: %s on %s from %s\n", provisioned.Dir, provisioned.Bookmark, provisioned.DefaultBranch)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
 		return writeRecoveryMarker(ctx, run, provisioned, issue, fromRef)
 	}

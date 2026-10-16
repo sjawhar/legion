@@ -26,6 +26,34 @@ func TestSessionEntryFromSubscribe_CarriesDrivingFlag(t *testing.T) {
 	}
 }
 
+// envoy-client's machineID() (ENVOY_MACHINE_ID, falling back to the kernel hostname) names
+// where the session process actually runs; it must reach the session entry as Host, kept
+// separate from MachineID (always the registering listener's own machine, never the caller's).
+func TestSessionEntryFromSubscribe_CarriesHost(t *testing.T) {
+	got := sessionEntryFromSubscribe(subscribeBody{
+		SessionID: "ses_z",
+		Port:      1,
+		Host:      "example-host-a",
+	}, "example-listener")
+
+	if got.Host != "example-host-a" {
+		t.Fatalf("expected Host to be carried from the subscribe body, got %+v", got)
+	}
+	if got.MachineID != "example-listener" {
+		t.Fatalf("expected MachineID to stay the registering listener's own machine, got %+v", got)
+	}
+}
+
+func TestSessionEntryFromSubscribe_DefaultsHostEmpty(t *testing.T) {
+	// An older plugin's subscribeBody has no "host" key; sessionEntryFromSubscribe must not
+	// invent one — HostOrMachine is where the fallback to MachineID happens, at read time.
+	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_old", Port: 1}, "example-listener")
+
+	if got.Host != "" {
+		t.Fatalf("expected Host to stay empty for a payload without the field, got %+v", got)
+	}
+}
+
 func TestSessionEntryFromSubscribe_DefaultsToNonDriving(t *testing.T) {
 	got := sessionEntryFromSubscribe(subscribeBody{SessionID: "ses_y", Port: 34751}, "devbox-sami")
 

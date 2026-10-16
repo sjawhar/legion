@@ -27,6 +27,14 @@ func schemaJSON(t *testing.T) string {
 	return resp.Schema
 }
 
+type property struct {
+	Secret bool   `json:"secret"`
+	Ref    string `json:"$ref"`
+	Items  struct {
+		Ref string `json:"$ref"`
+	} `json:"items"`
+}
+
 // schema is the part of the plugin's schema the tests read.
 type schema struct {
 	PluginDownloadURL string `json:"pluginDownloadURL"`
@@ -36,17 +44,14 @@ type schema struct {
 		} `json:"go"`
 	} `json:"language"`
 	Resources map[string]struct {
-		IsComponent     bool `json:"isComponent"`
-		InputProperties map[string]struct {
-			Secret bool   `json:"secret"`
-			Ref    string `json:"$ref"`
-		} `json:"inputProperties"`
-		RequiredInputs []string `json:"requiredInputs"`
+		IsComponent     bool                `json:"isComponent"`
+		InputProperties map[string]property `json:"inputProperties"`
+		RequiredInputs  []string            `json:"requiredInputs"`
+		Properties      map[string]property `json:"properties"`
 	} `json:"resources"`
 	Types map[string]struct {
-		Properties map[string]struct {
-			Ref string `json:"$ref"`
-		} `json:"properties"`
+		Properties map[string]property `json:"properties"`
+		Required   []string            `json:"required"`
 	} `json:"types"`
 }
 
@@ -87,28 +92,8 @@ func TestSchemaServesTheListenerComponentWithASecretSeed(t *testing.T) {
 }
 
 func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
-	type property struct {
-		Type   string `json:"type"`
-		Secret bool   `json:"secret"`
-		Ref    string `json:"$ref"`
-		Items  struct {
-			Ref string `json:"$ref"`
-		} `json:"items"`
-	}
-	var schema struct {
-		Resources map[string]struct {
-			IsComponent     bool                `json:"isComponent"`
-			InputProperties map[string]property `json:"inputProperties"`
-			RequiredInputs  []string            `json:"requiredInputs"`
-			Properties      map[string]property `json:"properties"`
-		} `json:"resources"`
-		Types map[string]struct {
-			Properties map[string]property `json:"properties"`
-			Required   []string            `json:"required"`
-		} `json:"types"`
-	}
-	require.NoError(t, json.Unmarshal([]byte(schemaJSON(t)), &schema))
-	hub, ok := schema.Resources["envoy-infra:gcp:NatsHub"]
+	s := servedSchema(t)
+	hub, ok := s.Resources["envoy-infra:gcp:NatsHub"]
 	require.True(t, ok, "the schema lists envoy-infra:gcp:NatsHub")
 	require.True(t, hub.IsComponent)
 	require.ElementsMatch(t, []string{
@@ -125,7 +110,7 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 
 	// Generated SDKs append Args to an object type's name for its input type, so the Go names
 	// NATSUserArgs, PermissionsArgs and RulesArgs would reach consumers doubled.
-	user := schema.Types["envoy-infra:gcp:NatsUser"]
+	user := s.Types["envoy-infra:gcp:NatsUser"]
 	require.Equal(t, "#/types/envoy-infra:gcp:Permissions", user.Properties["permissions"].Ref)
 	// One Rules type and one key field name for every NATS user input, the AWS components' and the
 	// hub's, so a consumer running both writes them alike.
@@ -134,10 +119,10 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	require.Contains(t, user.Properties, "dispatchMachineId")
 	for _, direction := range []string{"publish", "subscribe"} {
 		require.Equal(t, "#/types/envoy-infra:nats:Rules",
-			schema.Types["envoy-infra:gcp:Permissions"].Properties[direction].Ref)
+			s.Types["envoy-infra:gcp:Permissions"].Properties[direction].Ref)
 	}
 	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
-	require.ElementsMatch(t, []string{"allow"}, schema.Types["envoy-infra:nats:Rules"].Required)
+	require.ElementsMatch(t, []string{"allow"}, s.Types["envoy-infra:nats:Rules"].Required)
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {

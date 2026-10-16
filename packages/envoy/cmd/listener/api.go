@@ -653,6 +653,7 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 type sessionInfo struct {
 	SessionID      string   `json:"session_id"`
 	MachineID      string   `json:"machine_id"`
+	Host           string   `json:"host"`
 	Dir            string   `json:"dir"`
 	Port           int      `json:"port"`
 	Title          string   `json:"title"`
@@ -688,6 +689,7 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			info := sessionInfo{
 				SessionID:      entry.SessionID,
 				MachineID:      entry.MachineID,
+				Host:           entry.HostOrMachine(),
 				Dir:            entry.Dir,
 				Port:           entry.Port,
 				Title:          entry.Title,
@@ -863,6 +865,7 @@ func roleGetHandler(d *listenerDeps) http.HandlerFunc {
 			"title":        result.entry.Title,
 			"dir":          result.entry.Dir,
 			"machine_id":   result.entry.MachineID,
+			"host":         result.entry.HostOrMachine(),
 			"capabilities": append([]string{}, result.entry.Capabilities...),
 			"last_seen":    result.entry.UpdatedAt,
 		})

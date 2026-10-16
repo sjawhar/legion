@@ -566,7 +566,7 @@ func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
 		return slices.Clone(warmed)
 	}
 	cfg := config(t, path, child)
-	cfg.WarmCodegraph = func(_ context.Context, dir string) {
+	cfg.WarmCodegraph = func(_ context.Context, dir string, _ time.Time) {
 		mu.Lock()
 		defer mu.Unlock()
 		warmed = append(warmed, dir)
@@ -646,7 +646,7 @@ func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
 	var returned time.Time
 	ended := make(chan struct{})
 	cfg := config(t, path, child)
-	cfg.WarmCodegraph = func(ctx context.Context, _ string) {
+	cfg.WarmCodegraph = func(ctx context.Context, _ string, _ time.Time) {
 		<-ctx.Done()
 		close(ended)
 		// What a real warm-up does here: its codegraph child ends on the same context, it logs the
@@ -682,21 +682,23 @@ func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
 	}
 }
 
-// The wait for the warm-up is what the role's stop grace leaves once the child's own grace and the
-// stdout drain are spent (warmUpDrain, pinned in drain_test.go), so a warm-up that never returns
-// cannot hold the shim past the grace at which its launcher kills it (with the lease then left
-// behind, the failure the wait prevents): Run returns without it, saying so, and a runtime whose
-// stop grace leaves nothing gets no wait at all.
+// The wait for the warm-up is warmUpDrain (pinned in drain_test.go): what the role's stop grace
+// leaves once the child's own grace and the stdout drain are spent, never under MinWarmUpDrain, so
+// a warm-up that never returns cannot hold the shim past the grace at which its launcher kills it
+// (with the lease then left behind, the failure the wait prevents): Run returns without it,
+// saying so.
 func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
 	path := socketPath(t)
 	daemon := listen(t, path)
 	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7")
 	cfg := config(t, path, child)
 	// grace is the test's 3 s; a 3.5 s stop grace leaves half a second less the 1 s stdout drain:
-	// nothing, so Run returns at once without the warm-up, which never returns.
+	// nothing, so the wait is the floor, MinWarmUpDrain. No runtime produces a stop grace this
+	// small — the daemon refuses one under MinStopGrace at configuration load — so this is the
+	// floor exercised by hand, not a stop any launcher runs.
 	cfg.StopGrace = grace + 500*time.Millisecond
 	never := make(chan struct{})
-	cfg.WarmCodegraph = func(ctx context.Context, _ string) { <-never }
+	cfg.WarmCodegraph = func(ctx context.Context, _ string, _ time.Time) { <-never }
 	defer close(never)
 	clock := newClock()
 	sh := run(t, cfg, clock)
@@ -704,12 +706,14 @@ func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
 	p.open(t)
 
 	p.send(t, shimwire.Shutdown{})
+	// The kill timer is taken and never fired: the fake agent exits on its SIGTERM.
 	clock.next(t, grace)
+	clock.next(t, shim.MinWarmUpDrain).elapse()
 	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
 		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
 	}
-	if sh.log.count("the CodeGraph warm-up is still running") != 1 {
-		t.Fatalf("the shim left without saying the warm-up still ran; log:\n%s", sh.log)
+	if sh.log.count(fmt.Sprintf("the CodeGraph warm-up is still running %v", shim.MinWarmUpDrain)) != 1 {
+		t.Fatalf("the shim left without saying the warm-up still ran %v; log:\n%s", shim.MinWarmUpDrain, sh.log)
 	}
 }
 

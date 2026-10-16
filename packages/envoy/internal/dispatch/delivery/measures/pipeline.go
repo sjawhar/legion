@@ -314,9 +314,10 @@ func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Del
 			recent = append(recent, run)
 		}
 	}
-	// In completion order, so each job's last failure is its latest.
-	slices.SortStableFunc(recent, func(a, b delivery.DeliveryRun) int {
-		return a.CompletedAt.Compare(*b.CompletedAt)
+	// In completion order, runs completing together by run id, so each job's last failure is its
+	// latest whatever order runs holds them in.
+	slices.SortFunc(recent, func(a, b delivery.DeliveryRun) int {
+		return cmp.Or(a.CompletedAt.Compare(*b.CompletedAt), cmp.Compare(a.RunID, b.RunID))
 	})
 	tallies := map[string]*FailingJob{}
 	for _, run := range recent {

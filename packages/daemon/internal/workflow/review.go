@@ -219,7 +219,7 @@ const answerSkew = 10 * time.Second
 
 // byReviewer says whether review is the reviewer's own review-App session, not merely a review the
 // review App submitted: the controller now holds the review App's token too, so every role's
-// review arrives under the same bot login (`legion-reviewer[bot]`). What tells the reviewer's
+// review arrives under the same bot login (Config.ReviewAppLogin). What tells the reviewer's
 // review from any other review-App session's - the controller's, an architect's, a sibling tree's
 // role - is the Legion footer every Legion role appends to a pull-request review
 // (intake.PullRequestReview.LegionSession), matched against reviewerSession, the session recorded

@@ -45,8 +45,9 @@ type Limits struct {
 }
 
 // relaunchAfterFailure charges one launch failure for a process that did not survive, and
-// relaunches the same session after it — or fails the claim when the budget is spent. A relaunch
-// the tree lifecycle refuses (its cleanup reserved) is checked before the charge, so it costs none.
+// relaunches the same session after it, once the backoff for the failures charged so far has
+// passed (backOff) — or fails the claim when the budget is spent. A relaunch the tree lifecycle
+// refuses (its cleanup reserved) is checked before the charge, so it costs none.
 func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
@@ -55,7 +56,7 @@ func (m *Machine) relaunchAfterFailure(ctx context.Context) error {
 	if m.claim.Budgets.LaunchFailures >= m.deps.Limits.LaunchFailures {
 		return m.fail(ctx, "launch failures ran out")
 	}
-	return m.launch(ctx)
+	return m.launchAfter(ctx, true)
 }
 
 // chargeDeath counts a process that died after its agent was ready while it had work

@@ -1398,9 +1398,12 @@ subscribes to `notifications.>` and `agentstream.*.control`.
 
 `HostPermissions(machineID)` is the grant of a host's one NATS user, which its listener and every
 session on the host share: in each direction the listener's entries, then each of the session's
-the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. This repository's listener
-and a session, connected as one user holding it, are checked against real nats-server 2.10 and
-2.15.1 servers; `AGENTS.md` in this directory says how.
+the listener's lack. A `gcp:NatsHub` user with `machineId` holds it. Sharing one user makes the
+host one trust domain: any process that reaches the server as it, a listener's own process or
+any session on the host, holds the whole grant above, host sessions included, since sessions run
+as the Unix user that already reads the host's seed. This repository's listener and a session,
+connected as one user holding it, are checked against real nats-server 2.10 and 2.15.1 servers;
+`AGENTS.md` in this directory says how.
 
 `DispatchPermissions(machineID)` is the grant of Dispatch's one NATS user, shared by
 `envoy-dispatch` and the listener beside it. It adds to `HostPermissions(machineID)` the info,

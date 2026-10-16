@@ -90,14 +90,12 @@ ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6f
 # bump repeats both checks.
 ARG KUBECTL_VERSION=1.35.9
 ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
-# The language servers Oh My Pi's LSP tools start for TypeScript and Python, installed by the
-# toolchain stage as npm global packages into Node's own prefix (/opt/node); npm verifies each tarball
-# against the integrity the registry publishes for it. TypeScript is the version the repository's own
-# lockfile holds: typescript-language-server wraps tsserver, which TypeScript 7 no longer ships
-# (its npm package's bin is tsc alone).
-ARG TYPESCRIPT_VERSION=5.9.3
-ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION=6.0.1
-ARG PYRIGHT_VERSION=1.1.414
+# The language servers Oh My Pi's LSP tools start for TypeScript and Python install from the
+# committed lockfile at packages/daemon/docker/language-servers (COPY'd into the toolchain stage),
+# with scripts off (`npm ci --ignore-scripts`): a reproducible install off that lockfile, no ARG
+# pin to keep in step with it. The pin rule itself — TypeScript is the repository's own major
+# because typescript-language-server wraps tsserver, which TypeScript 7 no longer ships (its npm
+# package's bin is tsc alone) — lives in that package.json's description.
 # apt packages carry no version pin (hadolint DL3008, ignored at each `apt-get install`): Debian's
 # archive serves only a suite's current version of a package, so a pinned version stops resolving at
 # the suite's next update. The base image's suite is the pin.
@@ -110,8 +108,9 @@ ARG PI_CODEGRAPH_VERSION=0.1.1
 # plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
-# jq: the same omp.extensions rewrite release.yaml's pi_envoy and pi_legion jobs run. python3/make/g++:
-# native devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
+# jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
+# python3/make/g++: native devDependencies in the workspace lockfile (mirrors
+# packages/envoy/docker/Dockerfile).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -156,10 +155,10 @@ COPY skills skills
 COPY scripts/pi-plugin-prepack.sh scripts/pi-plugin-prepack.sh
 COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
-# Each plugin ships from this checkout with the steps release.yaml's pi_envoy and pi_legion jobs run
-# before `bun pm pack`: the manifest pointed at the one packed bundle (the prepack refuses to pack
-# with the source manifest). Each tarball is unpacked into a directory: `omp plugin install` links a
-# directory and rejects a tarball path (ENOTDIR).
+# Each plugin ships from this checkout with the steps release.yaml's pi_envoy_build and
+# pi_legion_build jobs run before `bun pm pack`: the manifest pointed at the one packed bundle (the
+# prepack refuses to pack with the source manifest). Each tarball is unpacked into a directory: `omp
+# plugin install` links a directory and rejects a tarball path (ENOTDIR).
 WORKDIR /repo/packages/pi-envoy
 RUN jq '.omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
@@ -267,15 +266,16 @@ RUN test -n "$LEGION_REVISION" \
 # writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
 # beside node, which the runtime user cannot: each runs the version a project's `packageManager`
 # names, or else the default this corepack ships (COREPACK_DEFAULT_TO_LATEST=0, the runtime stage's
-# ENV), fetched on first use into the user's own corepack cache. The language servers are npm global
-# installs into Node's own prefix (npm's default global prefix is the install prefix of the node it
-# runs on, /opt/node once /opt/node/bin leads PATH), so they land in /opt/node/lib/node_modules with
-# their launchers in /opt/node/bin, linked from /out/bin as node's are; each launcher is a
-# `#!/usr/bin/env node` script, which finds the image's node on PATH as npm's own does.
-# typescript-language-server ships no TypeScript: it resolves `typescript` by Node's module resolution
-# from its own directory, which reaches the TypeScript installed beside it under /opt/node/lib/
-# node_modules, so a worker's tsserver is TYPESCRIPT_VERSION unless the repository's own node_modules
-# holds one, which the server prefers. go finds its GOROOT, /opt/go, by resolving the /usr/local/bin/go
+# ENV), fetched on first use into the user's own corepack cache. The language servers install from
+# packages/daemon/docker/language-servers's committed lockfile (COPY'd below) with
+# `npm ci --ignore-scripts`, into their own prefix, /opt/language-servers, so they land in
+# /opt/language-servers/node_modules with their launchers in node_modules/.bin, linked from
+# /out/bin as node's are; each launcher is a `#!/usr/bin/env node` script, which finds the image's
+# node on PATH as npm's own does. typescript-language-server ships no TypeScript: it resolves
+# `typescript` by Node's module resolution from its own directory, which reaches the TypeScript
+# installed beside it under /opt/language-servers/node_modules, so a worker's tsserver is the
+# version that package.json pins unless the repository's own node_modules holds one, which the
+# server prefers. go finds its GOROOT, /opt/go, by resolving the /usr/local/bin/go
 # symlink (cmd/go's findGOROOT tries the executable's own path, then its symlink target), so the image
 # sets no GOROOT; the toolchain step below checks it.
 FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
@@ -289,12 +289,10 @@ ARG KUBECTL_VERSION
 ARG KUBECTL_SHA256
 ARG GO_VERSION
 ARG GO_SHA256
-ARG TYPESCRIPT_VERSION
-ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION
-ARG PYRIGHT_VERSION
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
+COPY packages/daemon/docker/language-servers/package.json packages/daemon/docker/language-servers/package-lock.json /opt/language-servers/
 RUN set -eu; \
     t=/tmp/toolchain; mkdir -p "$t" /out/bin /opt/node; \
     curl -fsSLo "$t/uv.tar.gz" \
@@ -315,12 +313,9 @@ RUN set -eu; \
     for shim in pnpm pnpx yarn yarnpkg; do \
       ln -s "/opt/node/lib/node_modules/corepack/dist/$shim.js" "/out/bin/$shim"; \
     done; \
-    PATH="/opt/node/bin:$PATH" npm install -g --no-audit --no-fund \
-      "typescript@${TYPESCRIPT_VERSION}" \
-      "typescript-language-server@${TYPESCRIPT_LANGUAGE_SERVER_VERSION}" \
-      "pyright@${PYRIGHT_VERSION}"; \
+    (cd /opt/language-servers && PATH="/opt/node/bin:$PATH" npm ci --ignore-scripts --omit=dev --no-audit --no-fund); \
     for tool in typescript-language-server tsc tsserver pyright pyright-langserver; do \
-      ln -s "/opt/node/bin/$tool" "/out/bin/$tool"; \
+      ln -s "/opt/language-servers/node_modules/.bin/$tool" "/out/bin/$tool"; \
     done; \
     tar -xzf "$t/go.tar.gz" -C /opt --no-same-owner; \
     for tool in go gofmt; do ln -s "/opt/go/bin/$tool" "/out/bin/$tool"; done; \
@@ -360,10 +355,8 @@ ARG KUBECTL_VERSION
 ARG CODEGRAPH_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
-ARG TYPESCRIPT_VERSION
-ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION
-ARG PYRIGHT_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
+COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
 # The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
@@ -375,8 +368,12 @@ RUN set -eu; \
     jj_repo="${JJ_TOOL#github:}"; jj_repo="${jj_repo%@*}"; jj_tag="v${JJ_TOOL##*@}"; \
     gh_tag="v${GH_TOOL#gh@}"; \
     codegraph_node_tag="$(cat /in/codegraph-node-version)"; \
-    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\n' \
-      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" > /in/tags.env; \
+    pin() { sed -n "s/^ *\"$1\": \"\([^\"]*\)\".*/\1/p" /in/language-servers/package.json; }; \
+    typescript_version=$(pin typescript); tsls_version=$(pin typescript-language-server); pyright_version=$(pin pyright); \
+    : "${typescript_version:?typescript pin not read from /in/language-servers/package.json}"; : "${tsls_version:?typescript-language-server pin not read from /in/language-servers/package.json}"; : "${pyright_version:?pyright pin not read from /in/language-servers/package.json}"; \
+    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
+      "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" \
+      "$typescript_version" "$tsls_version" "$pyright_version" > /in/tags.env; \
     gh_raw_url() { printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$2" "$3"; }; \
     fetch() { curl -fsSL "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
     fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
@@ -408,14 +405,14 @@ COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
 COPY --from=plugin /out/pi-legion/dist/THIRD_PARTY_NOTICES /in/pi-legion-notices
 COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
 COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
-COPY --from=toolchain /opt/node/lib/node_modules/typescript/LICENSE.txt /in/typescript-LICENSE.txt
-COPY --from=toolchain /opt/node/lib/node_modules/typescript/ThirdPartyNoticeText.txt /in/typescript-ThirdPartyNoticeText.txt
-COPY --from=toolchain /opt/node/lib/node_modules/typescript-language-server/LICENSE /in/typescript-language-server-LICENSE
-COPY --from=toolchain /opt/node/lib/node_modules/pyright/LICENSE.txt /in/pyright-LICENSE.txt
-COPY --from=toolchain /opt/node/lib/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
+COPY --from=toolchain /opt/language-servers/node_modules/typescript/LICENSE.txt /in/typescript-LICENSE.txt
+COPY --from=toolchain /opt/language-servers/node_modules/typescript/ThirdPartyNoticeText.txt /in/typescript-ThirdPartyNoticeText.txt
+COPY --from=toolchain /opt/language-servers/node_modules/typescript-language-server/LICENSE /in/typescript-language-server-LICENSE
+COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in/pyright-LICENSE.txt
+COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq and openssh-client of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/node/lib/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq and openssh-client of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
@@ -438,11 +435,11 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
       "gopls: the Go modules it links" /in/gopls-modules \
-      "TypeScript ${TYPESCRIPT_VERSION}, /opt/node/lib/node_modules/typescript (tsc and tsserver at /usr/local/bin): the LICENSE.txt its npm package ships" /in/typescript-LICENSE.txt \
+      "TypeScript ${typescript_version}, /opt/language-servers/node_modules/typescript (tsc and tsserver at /usr/local/bin): the LICENSE.txt its npm package ships" /in/typescript-LICENSE.txt \
       "TypeScript: the ThirdPartyNoticeText.txt its npm package ships" /in/typescript-ThirdPartyNoticeText.txt \
-      "typescript-language-server ${TYPESCRIPT_LANGUAGE_SERVER_VERSION}, /opt/node/lib/node_modules/typescript-language-server (/usr/local/bin/typescript-language-server): the LICENSE its npm package ships" /in/typescript-language-server-LICENSE \
-      "pyright ${PYRIGHT_VERSION}, /opt/node/lib/node_modules/pyright (pyright and pyright-langserver at /usr/local/bin): the LICENSE.txt its npm package ships" /in/pyright-LICENSE.txt \
-      "pyright: the LICENSE of the typeshed stubs it bundles, /opt/node/lib/node_modules/pyright/dist/typeshed-fallback" /in/pyright-typeshed-LICENSE
+      "typescript-language-server ${tsls_version}, /opt/language-servers/node_modules/typescript-language-server (/usr/local/bin/typescript-language-server): the LICENSE its npm package ships" /in/typescript-language-server-LICENSE \
+      "pyright ${pyright_version}, /opt/language-servers/node_modules/pyright (pyright and pyright-langserver at /usr/local/bin): the LICENSE.txt its npm package ships" /in/pyright-LICENSE.txt \
+      "pyright: the LICENSE of the typeshed stubs it bundles, /opt/language-servers/node_modules/pyright/dist/typeshed-fallback" /in/pyright-typeshed-LICENSE
 
 # ------------------------------------------------------------------------------------------------
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
@@ -461,8 +458,18 @@ ARG PI_CODEGRAPH_VERSION
 # --no-sandbox --disable-setuid-sandbox. jq and ssh-keygen are real binaries, not the harness's: the
 # harness bash's jq builtin reaches only the bash tool, while a worker's subprocesses (`bun test`, a
 # script, a subagent's shell) need /usr/bin/jq. openssh-client is the one apt route to ssh-keygen and
-# also brings ssh, scp, sftp, ssh-agent and ssh-add; whether they reach anything is the deployment's
-# NetworkPolicy, not the image's.
+# also brings ssh, scp, sftp, ssh-agent and ssh-add, which reach no host that curl, wget, git, python3
+# and socat on this line could not already reach (git's ssh transport is what they make runnable; a
+# pod's git speaks https with its role's App token through gh): what a pod may reach is Legion's
+# ruling, the capability table's withheld `network` row
+# (packages/daemon/internal/capabilities/capabilities.go, dispatch://LEGION-5: the pod is the
+# boundary), a declaration the report renders, not a network control this repository ships. The
+# package's two set-id files lose their bits in the RUN below: /usr/lib/openssh/ssh-keysign, setuid
+# root for host-based authentication, which nothing here uses, and /usr/bin/ssh-agent, setgid _ssh by
+# its postinst. A pod would ignore both anyway (allowPrivilegeEscalation false and every capability
+# dropped, packages/daemon/internal/runtime/sandbox/manifest.go), and the final step refuses an image
+# where any file under /usr/lib/openssh or /usr/bin/ssh-agent carries one, so a rebuild of this layer
+# (a new trixie-slim digest, a package update) cannot bring a bit back unnoticed.
 # socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
 # (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
 # bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
@@ -474,6 +481,8 @@ ARG PI_CODEGRAPH_VERSION
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git jq openssh-client python3 socat wget \
     && rm -rf /var/lib/apt/lists/* \
+    && chmod u-s /usr/lib/openssh/ssh-keysign \
+    && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
     && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
@@ -546,11 +555,12 @@ RUN set -eu; \
 # The toolchain goes in after the probe layer, so a new toolchain pin never rebuilds that layer and its
 # natives, and before `legion`, which changes on every commit. It lands outside HOME, in /opt and
 # /usr/local/bin, so no volume a pod mounts under HOME shadows it, and /usr/local/bin is on the image
-# PATH and on every pod's (imagePath, packages/daemon/internal/runtime/sandbox/names.go). /opt/node
-# carries the language servers with it (/opt/node/lib/node_modules), /opt/go is the Go toolchain, and
+# PATH and on every pod's (imagePath, packages/daemon/internal/runtime/sandbox/names.go). /opt/go
+# is the Go toolchain, /opt/language-servers carries the language servers (node_modules), and
 # /out/bin holds every launcher's link; gopls comes from the go stage, whose gopls layer precedes any
 # source, so its binary — and this layer — changes only with a pin.
 COPY --from=toolchain /opt/node /opt/node
+COPY --from=toolchain /opt/language-servers /opt/language-servers
 COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
@@ -605,7 +615,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 # Tools.AgentSecrets names this path.
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold.
+# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
+# ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
@@ -644,6 +656,8 @@ RUN set -eu; \
     for dir in /opt/legion /opt/legion/bin; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
+    setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \

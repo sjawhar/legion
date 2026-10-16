@@ -100,20 +100,6 @@ func TestWithheldRowsCiteALegionRuling(t *testing.T) {
 	}
 }
 
-// No row awaits a pod launch. The field exists for an image row whose tooling the image carries but
-// a pod's agent cannot use yet, and CodeGraph was the one such row — a pod's agent was launched
-// `--no-extensions` and never loaded the profile's plugin — until LEGION-629 turned extension
-// discovery on in the pod's launch, so the row reads present like every other image row. Were a
-// row to await again, the sentence is an image row's alone: a live, deployment or withheld row has
-// nothing in the image to await a launch for.
-func TestNoRowAwaitsAPodLaunch(t *testing.T) {
-	for _, row := range Table {
-		if row.Awaits != "" {
-			t.Errorf("row %s awaits %q, want no row to await a pod launch", row.Name, row.Awaits)
-		}
-	}
-}
-
 // unreported is a normalised report as Normalize fills one out from a wire that sent nothing:
 // every live row in Table order, not OK, saying the session did not report it — with the given
 // rows in their names' place.

@@ -280,6 +280,47 @@ func TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild(t *testing.T) {
 	}
 }
 
+// The launcher writes one line when the daemon acknowledges its hello, and one more at each later
+// acknowledgement, naming the daemon it reached and the launcher it is: a connected launcher's log
+// reads apart from one still dialing. A connection the daemon ends before acknowledging the hello
+// writes none.
+func TestTheLauncherLogsOneLineForEachAcknowledgedHello(t *testing.T) {
+	g := newRig(t)
+	connected := func() []string {
+		var lines []string
+		for _, line := range strings.Split(g.stderr.String(), "\n") {
+			if strings.HasPrefix(line, "launcher: connected to the daemon") {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+	address := g.listener.Addr().String()
+	if lines := connected(); len(lines) != 1 || !strings.Contains(lines[0], address) || !strings.Contains(lines[0], g.hello.LauncherID) {
+		t.Fatalf("after the first acknowledgement the launcher logged %q, want one line naming %s and launcher %s", lines, address, g.hello.LauncherID)
+	}
+
+	_ = g.conn.Close()
+	unacknowledged, err := g.listener.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unacknowledged.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bufio.NewReader(unacknowledged).ReadBytes('\n'); err != nil {
+		t.Fatalf("the hello of the connection the daemon ends unacknowledged: %v", err)
+	}
+	_ = unacknowledged.Close()
+	g.accept()
+	if lines := connected(); len(lines) != 2 {
+		t.Fatalf("after a dropped and an acknowledged hello the launcher logged %q, want a second line for the acknowledged one alone", lines)
+	}
+	if !strings.Contains(g.stderr.String(), "launcher: daemon connection: hello acknowledgement:") {
+		t.Fatalf("the launcher logged %q, want the unacknowledged hello's reconnect", g.stderr.String())
+	}
+}
+
 // Nothing already in the private directory is followed or kept: a symlink the previous agent
 // planted at the next generation's path toward the shared workspace receives no credential, and an
 // earlier generation's directory a crashed launcher left is removed.
