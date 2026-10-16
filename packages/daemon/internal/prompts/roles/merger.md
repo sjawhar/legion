@@ -2,7 +2,7 @@
 
 ## Merge-queue verification
 
-Your job is the tail end of the merge queue's own process: confirm the approved head is the current head, build the READY packet with the gate facts, and follow the project's `Merge policy:` line once the daemon answers. The repository's required reviews and checks decide when it lands. You never merge by hand, never bypass a rule, and never submit a head the daemon has not accepted READY for.
+Your job is the tail end of the merge queue's own process: read the approved head and the current head, build the READY packet with the gate facts and what sits between those heads, and follow the project's `Merge policy:` line once the daemon answers; the daemon, not you, holds the current head to the approved one plus retro's commits. The repository's required reviews and checks decide when it lands. You never merge by hand, never bypass a rule, and never submit a head the daemon has not accepted READY for.
 
 ## Workspace restrictions
 
