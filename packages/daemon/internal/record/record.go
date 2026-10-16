@@ -394,13 +394,14 @@ type Store interface {
 	// issue: a finished row is deleted, so any row of the kind is one still to run or retrying.
 	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
-	// DueRows is every row of project a lane may run at now — due, under no live lease, and in
-	// order behind none of its issue's older rows — oldest first, with no lease taken. Issue "" is
-	// every issue of project, kinds nil every kind.
+	// DueRows is every row of project a lane may run at now — due, under no live lease, in order
+	// behind none of its issue's older rows, and, for a lifecycle row, with no other lifecycle row
+	// of its issue under a live lease — oldest first, with no lease taken. Issue "" is every issue
+	// of project, kinds nil every kind.
 	DueRows(ctx context.Context, tx pgx.Tx, project, issue string, kinds []OutboxKind, now time.Time) ([]OutboxRow, error)
 	// ClaimRow leases row id for leaseFor from now if a lane may still run it at now, in one
-	// conditional update: false is another holder's lease, or a row no longer due, in order, or in
-	// the outbox. leaseFor must be positive.
+	// conditional update: false is another holder's lease, a lifecycle row of its issue since
+	// leased, or a row no longer due, in order, or in the outbox. leaseFor must be positive.
 	ClaimRow(ctx context.Context, tx pgx.Tx, id int64, now time.Time, leaseFor time.Duration) (OutboxRow, bool, error)
 	// RenewOutboxLease moves the lease on row id to until while leaseToken holds it; false is a
 	// lease no longer the caller's.
@@ -412,8 +413,9 @@ type Store interface {
 	// then lane.
 	UnfinishedLanes(ctx context.Context, tx pgx.Tx, project string) ([]LaneKey, error)
 	// HeldRows is every due, unleased lifecycle row of project held at now behind a lifecycle row
-	// of its issue under a live lease — the oldest such, or the issue_branch row a start waits for
-	// — by next_at then id. A start behind a branch row no one is running is not listed.
+	// of its issue under a live lease — the oldest such; for a start fenced by its issue_branch
+	// row, that row while it runs — by next_at then id. A start behind a branch row no one is
+	// running is not listed.
 	HeldRows(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]HeldRow, error)
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
