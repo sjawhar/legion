@@ -33,6 +33,21 @@
 #    push-main`, whose rebase repair handles one package's bump at a time.
 # 5. release-envoy-listener.yaml's release_publish runs in the concurrency group
 #    `release-envoy-listener` with `cancel-in-progress: false`.
+# 6. A job's `if:` that calls `always()` tests `needs.<X>.result` for every X whose
+#    `needs.<X>.outputs` it reads; one that calls no `always()` belongs to a job with no skippable
+#    ancestor — no job upstream of it through `needs`, at any distance, carrying an `if:` of its
+#    own. GitHub gives an `if:` that calls no status function an implicit `success()`, false
+#    whenever any job upstream through `needs`, at any distance, was skipped (actions/runner#491),
+#    so with a skippable ancestor that implicit `success()` decides, whatever the condition says
+#    (an explicit `success()` is the implicit one); `always()` turns that gating off, and then a
+#    failed or skipped X is read through its empty outputs (`'' != 'true'` is true) unless its
+#    result is tested. A job with no `if:` is not checked: skipped with its upstream is then
+#    GitHub's plain, visible behaviour. The job-level `if:` only: a step's implicit `success()` is
+#    over the job's own earlier steps, not over `needs`. A string literal is text (`'always()'`
+#    calls nothing), the context and functions are case-insensitive, and `needs['x'].outputs` is
+#    `needs.x.outputs`. This is what skipped legion_publish in the first run on the build/publish
+#    split: its `if:` read legion_build's outputs behind an implicit `success()` that
+#    envoy_plugin_publish, four jobs upstream, had already made false.
 #
 # "Runs dependency code" is a tripwire over named patterns, not a proof that no other code runs: a
 # step runs dependency code when its `uses:` starts with one of DEPENDENCY_USES, when the shell its
@@ -75,9 +90,10 @@
 # variable in command position, `xargs`, `nohup`, an unlisted program, a `bun` behind `docker -Dl
 # debug run`) is accepted on that ground.
 #
-# Scope: exactly the three release workflows named in WORKFLOWS, every job that has `steps:`. A job
-# that calls a reusable workflow (`uses:` and no steps, release.yaml's worker_image) is out of
-# scope: what it runs is that workflow's own jobs.
+# Scope: exactly the three release workflows named in WORKFLOWS. Rules 1-3 read every job that has
+# `steps:`; a job that calls a reusable workflow (`uses:` and no steps, release.yaml's
+# worker_image) is out of their scope, since what it runs is that workflow's own jobs. Rules 4-5
+# read the jobs they name. Rule 6 reads every job's `if:`, steps or not.
 #
 # Run from anywhere: .github/scripts/check-release-credentials.sh
 # CI runs it in the lint job of pr-and-main.yaml, and its tests in that workflow's test job.
@@ -436,6 +452,12 @@ def write_scopes(job: Mapping, workflow: Mapping) -> list[str]:
     return [scope for scope in WRITE_SCOPES if permissions.get(scope) == "write"]
 
 
+def needs_of(job: Mapping) -> list:
+    """The jobs a job needs, as GitHub reads `needs:`: one name, or a list of them."""
+    needs = job.get("needs")
+    return [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
+
+
 # The path of the workflow-level `env:` texts, which every job's scan takes in with its own: GitHub
 # gives those variables to every step of every job.
 WORKFLOW_ENV = ("workflow", "env")
@@ -642,6 +664,88 @@ def check_job(
                 )
 
 
+# A job-level `if:`, read as GitHub does. A string literal is text, not a call or a context read
+# (GitHub quotes with `'…'`, escaping a quote as `''`), so the strip removes each one first — but
+# for the quoted job id of an index (`needs['x']`), STRING_LITERAL's first alternative, which the
+# strip keeps for NEEDS_OUTPUTS and NEEDS_RESULT to read. Those take a job by dot
+# (`needs.x.outputs`) or by index (`needs['x'].result`), a job id being letters, digits, `_` and
+# `-`; the context and functions are case-insensitive, and whitespace may sit around `.`, `(`,
+# `)`, `[` and `]`.
+STRING_LITERAL = re.compile(r"(\bneeds\s*\[\s*'[\w-]+'\s*\])|'(?:[^']|'')*'", re.IGNORECASE)
+ALWAYS = re.compile(r"\balways\s*\(\s*\)", re.IGNORECASE)
+NEEDS_REF = r"\bneeds\s*(?:\.\s*([\w-]+)|\[\s*['\"]([\w-]+)['\"]\s*\])\s*\.\s*"
+NEEDS_OUTPUTS = re.compile(NEEDS_REF + r"outputs\b", re.IGNORECASE)
+NEEDS_RESULT = re.compile(NEEDS_REF + r"result\b", re.IGNORECASE)
+
+
+def ancestors(jobs: Mapping, name: str) -> list[str]:
+    """Every job upstream of the named one through `needs`, at any distance, in the file's job
+    order. A visited set keeps a cycle from looping the walk; a `needs` entry that names no job of
+    the file is ignored (GitHub refuses such a workflow at parse)."""
+    seen = {name}
+    pending = [name]
+    while pending:
+        for need in needs_of(jobs[pending.pop()]):
+            if need not in seen and isinstance(jobs.get(need), Mapping):
+                seen.add(need)
+                pending.append(need)
+    return [job for job in jobs if job != name and job in seen]
+
+
+def check_conditions(path: Path, jobs: Mapping) -> None:
+    """6. Each job-level `if:`, steps or not (a step's `if:` is never read: its implicit success()
+    is over the job's own earlier steps, not over `needs`). A non-string `if:` (`if: true`) calls
+    no always() and reads nothing."""
+    for name, job in jobs.items():
+        if not isinstance(job, Mapping) or "if" not in job:
+            continue
+        cond = job["if"]
+        cond = STRING_LITERAL.sub(r"\1", cond) if isinstance(cond, str) else ""
+        line = job.lines.get("if", jobs.lines.get(name, 1))
+        if ALWAYS.search(cond):
+            # 6a. always() turns GitHub's gating off, so every job whose outputs the condition
+            # reads must have its result tested, else a failed or skipped one is read through its
+            # empty outputs (`'' != 'true'` is true).
+            tested = {
+                (match.group(1) or match.group(2)).lower()
+                for match in NEEDS_RESULT.finditer(cond)
+            }
+            missing: list[str] = []
+            for match in NEEDS_OUTPUTS.finditer(cond):
+                read = match.group(1) or match.group(2)
+                if read not in missing and read.lower() not in tested:
+                    missing.append(read)
+            if missing:
+                reads = ", ".join(f"needs.{read}.outputs" for read in missing)
+                tests = ", ".join(f"needs.{read}.result" for read in missing)
+                problem(
+                    path, line,
+                    f"job '{name}' calls always() in its if: and reads {reads}, but does not test "
+                    f"{tests}; always() turns GitHub's own gating off, so a failed or skipped job "
+                    f"is read through its empty outputs",
+                )
+            continue
+        # 6b. Without always(), GitHub's implicit success() decides first (an explicit success()
+        # is the implicit one), and it is false whenever any job upstream through `needs`, at any
+        # distance, was skipped (actions/runner#491): a job upstream with an `if:` of its own can
+        # be, so the condition never decides anything.
+        skippable = [ancestor for ancestor in ancestors(jobs, name) if "if" in jobs[ancestor]]
+        if skippable:
+            upstream = ", ".join(f"'{ancestor}'" for ancestor in skippable)
+            carry = (
+                f"job {upstream} upstream of it through needs carries an if: of its own"
+                if len(skippable) == 1
+                else f"jobs {upstream} upstream of it through needs carry an if: of their own"
+            )
+            problem(
+                path, line,
+                f"job '{name}' has an if: that calls no always(), but {carry}; GitHub's implicit "
+                f"success() is then false whenever any job upstream was skipped, whatever this "
+                f"if: says, so the if: must call always() and test needs.<job>.result for each "
+                f"job it reads",
+            )
+
+
 loaded: dict[Path, tuple[Mapping, Mapping]] = {}
 for path in WORKFLOWS:
     try:
@@ -682,8 +786,7 @@ if RELEASE in loaded:
     if found := required_job(path, "pi_legion_publish", must):
         job, job_line = found
         needs = job.get("needs")
-        needs_list = [needs] if isinstance(needs, str) else needs if isinstance(needs, list) else []
-        if "pi_envoy_publish" not in needs_list:
+        if "pi_envoy_publish" not in needs_of(job):
             problem(
                 path, job.lines.get("needs", job_line),
                 f"job 'pi_legion_publish' {must} (found needs: {json.dumps(needs)})",
@@ -706,6 +809,11 @@ if LISTENER in loaded:
                 path, job.lines.get("concurrency", job_line),
                 f"job 'release_publish' {must} (found concurrency: {json.dumps(concurrency)})",
             )
+
+# 6. Every job-level `if:` either calls always() and tests the result of each job it reads, or
+# belongs to a job with no skippable ancestor, where GitHub's implicit success() can decide.
+for path, (_, jobs) in loaded.items():
+    check_conditions(path, jobs)
 
 if problems:
     for entry in problems:

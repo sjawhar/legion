@@ -9,8 +9,9 @@ import { scriptFunctions } from "./script-functions";
 // proof a tool ran and answered, where assistant_said only proves the model said so. Each test pins
 // one rule of lib/stage4b-tools.jq: a result is the tool's by the call it answers (a write to
 // xd://lsp records toolName write), an error result never counts, a tool that never ran has no
-// result, a result whose call the session no longer holds is no tool's, and a result carries its
-// call's arguments.
+// result, a result carries its call's arguments, and a call is bound on the argument that carries
+// its target (bash's command, read's path, the arguments without the intent otherwise), never on its
+// intent.
 const root = join(import.meta.dir, "..", "..", "..");
 const lib = import.meta.dir;
 const fn = scriptFunctions(join(root, "scripts", "e2e", "stage4b-sandbox-tree.sh"));
@@ -200,6 +201,175 @@ describe("the library", () => {
     expect(helper("tool_result_answered", "lsp", "liveDetail", "Language servers")).toBe(1);
   });
 
+  // excerpt is a session of one call of the tool NAME with ARGUMENTS, answered without error by
+  // TEXT.
+  const excerpt = (name: string, args: Record<string, unknown>, text: string) =>
+    [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "toolu_b", name, arguments: args }],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: name,
+          toolCallId: "toolu_b",
+          isError: false,
+          content: [{ type: "text", text }],
+        },
+      },
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
+
+  test("a bash call is bound on its command, not the model's intent", () => {
+    const author = '{"author":{"login":"legion-implementer[bot]"}}';
+    const intentOnly = excerpt(
+      "bash",
+      {
+        command: "gh pr view 1866 --json author",
+        i: "Running gh api graphql for the viewer login",
+      },
+      author
+    );
+    // The intent is in the arguments' JSON text, which a rule over the whole text would match.
+    expect(jqOver(intentOnly, 'tool_results("bash")[0].arguments')).toContain("gh api graphql");
+    expect(
+      jqOver(
+        intentOnly,
+        'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")'
+      )
+    ).toBe(false);
+    const ran = excerpt(
+      "bash",
+      {
+        command: "gh api graphql -f query='{ viewer { login } }' --jq .data.viewer.login",
+        i: "Running gh pr view",
+      },
+      author
+    );
+    expect(
+      jqOver(ran, 'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")')
+    ).toBe(true);
+    expect(
+      jqOver(ran, 'tool_result_answered("bash"; "gh pr view"; "legion-implementer[bot]")')
+    ).toBe(false);
+  });
+
+  test("a read is bound on its path, not the model's intent", () => {
+    const byFilePath = excerpt(
+      "read",
+      {
+        path: ".omp/skills/fixture-omp-skill/SKILL.md",
+        i: "Reading skill://fixture-omp-skill through its file path",
+      },
+      "FIXTURE-SKILL-OMP-12345"
+    );
+    // The intent is in the arguments' JSON text, which a rule over the whole text would match.
+    expect(jqOver(byFilePath, 'tool_results("read")[0].arguments')).toContain(
+      "skill://fixture-omp-skill"
+    );
+    expect(
+      jqOver(
+        byFilePath,
+        'tool_result_answered("read"; "skill://fixture-omp-skill"; "FIXTURE-SKILL-OMP-12345")'
+      )
+    ).toBe(false);
+    const bySkill = excerpt(
+      "read",
+      { path: "skill://fixture-omp-skill", i: "Reading the fixture skill file" },
+      "FIXTURE-SKILL-OMP-12345"
+    );
+    expect(
+      jqOver(
+        bySkill,
+        'tool_result_answered("read"; "skill://fixture-omp-skill"; "FIXTURE-SKILL-OMP-12345")'
+      )
+    ).toBe(true);
+  });
+
+  test("a tool called by name is bound on its arguments without the intent", () => {
+    const hover = excerpt(
+      "lsp",
+      { action: "hover", file: "greet.ts", i: "Hovering greet.go for Greet" },
+      "function greet"
+    );
+    expect(jqOver(hover, 'tool_result_answered("lsp"; "greet.go"; "function greet")')).toBe(false);
+    expect(jqOver(hover, 'tool_result_answered("lsp"; "greet.ts"; "function greet")')).toBe(true);
+    // codegraph_control's selector: the control is the call whose arguments name NoSuchSymbol.
+    const control =
+      '[tool_results("codegraph")[] | select(arguments_carry("codegraph"; "NoSuchSymbol"))] | length';
+    expect(
+      jqOver(
+        excerpt(
+          "codegraph",
+          { action: "search", query: "Greet", i: "The NoSuchSymbol control" },
+          "Greet found"
+        ),
+        control
+      )
+    ).toBe(0);
+    expect(
+      jqOver(
+        excerpt(
+          "codegraph",
+          { action: "search", query: "NoSuchSymbol", i: "The NoSuchSymbol control" },
+          "Greet found"
+        ),
+        control
+      )
+    ).toBe(1);
+  });
+
+  test("the real fixture's gh api graphql call through the lifted helper", () => {
+    expect(
+      helper("tool_result_answered", "bash", "gh api graphql", "legion-implementer[bot]")
+    ).toBe(0);
+    expect(helper("tool_result_answered", "bash", "gh pr view", "legion-implementer[bot]")).toBe(1);
+  });
+
+  test("the stated limit: a bash call dispatched through eval has no command", () => {
+    const text = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "toolu_e",
+              name: "eval",
+              arguments: {
+                language: "js",
+                code: "await tool.bash({ command: \"gh api graphql -f query='{ viewer { login } }'\" })",
+              },
+            },
+          ],
+        },
+      },
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolName: "eval",
+          toolCallId: "toolu_e",
+          isError: false,
+          content: [{ type: "text", text: "legion-implementer[bot]" }],
+        },
+      },
+    ]
+      .map((line) => `${JSON.stringify(line)}\n`)
+      .join("");
+    expect(jqOver(text, 'tool_result_said("bash"; "legion-implementer[bot]")')).toBe(true);
+    expect(
+      jqOver(text, 'tool_result_answered("bash"; "gh api graphql"; "legion-implementer[bot]")')
+    ).toBe(false);
+  });
+
   test("a result whose call the session no longer holds is no tool's", () => {
     const truncated = `${session
       .split("\n")
@@ -271,7 +441,9 @@ describe("the library", () => {
     ]
       .map((line) => `${JSON.stringify(line)}\n`)
       .join("");
-    // from_entries refuses a null key, which would exit 5 and throw here.
+    // What this guards: without tool_results' `select(.id | strings)`, from_entries on the null key
+    // exits 5 (`Cannot use null (null) as object key`) under jq 1.6, 1.7.1 and 1.8.2 alike, and
+    // jqOver would throw here; with it the call is dropped and the real call's result kept.
     expect(jqOver(text, 'tool_results("read")')).toEqual([
       {
         toolCallId: "toolu_9",

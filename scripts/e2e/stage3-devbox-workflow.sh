@@ -15,8 +15,9 @@
 # App), never a Legion App, so run the script from the operator's own Oh My Pi session, not a Legion
 # pane, with no personal GH_TOKEN in its environment: `prerequisites` refuses to start otherwise
 # (require_proof_human, lib/workflow.sh).
-# The App private keys are resolved by the daemon through private_key_command; they never enter
-# this shell, a pane, an argv, or this transcript.
+# The App private keys are resolved through private_key_command by the daemon, and by
+# lib/app-logins.ts once to read each App's bot login from GitHub (read_app_logins,
+# lib/workflow.sh); they never enter this shell, a pane, an argv, or this transcript.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -642,6 +643,7 @@ instruction precisely, use the Go-daemon Legion tools and handoffs, and do not c
 the issue's smoke branch.
 EOF
 start_daemon
+read_app_logins
 note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
 pane_watcher &
 watcher_pid=$!
@@ -699,11 +701,13 @@ primary_issue() {
   until_true 900 "implementer pull request on legion/$root_issue" sh -c \
     "gh -R '$repo' pr list --head 'legion/$root_issue' --state open --json number | jq -e 'length == 1' >/dev/null"
   pr_number=$(gh -R "$repo" pr list --head "legion/$root_issue" --state open --json number --jq '.[0].number')
-  # Each pane commits as its role's App: the planner's handoff as legion-reviewer[bot], the
-  # implementer's change as legion-implementer[bot], author and committer alike.
+  # Each pane commits as its role's App: the planner's handoff as the review App's bot, the
+  # implementer's change as the implement App's (role_app), author and committer alike.
   authors=$(gh api "repos/$repo/pulls/$pr_number/commits" --jq '[.[] | .commit.author.name + "|" + .commit.committer.name] | unique | join(",")')
-  [ "$authors" = "legion-implementer[bot]|legion-implementer[bot],legion-reviewer[bot]|legion-reviewer[bot]" ] ||
-    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both"
+  want_authors=$(jq -nr --arg implementer "$(role_app implementer)" --arg planner "$(role_app planner)" \
+    '[$implementer + "|" + $implementer, $planner + "|" + $planner] | unique | join(",")')
+  [ "$authors" = "$want_authors" ] ||
+    fail "$repo#$pr_number commits are authored|committed by $authors, want the implementer's and planner's App bots for both: $want_authors"
   wait_for_phase "$root_issue" testing
   assert_round_handoff "$root_issue" 0
   assert_handoff_committer "$root_issue" implementer implementing 0
@@ -768,11 +772,11 @@ primary_issue() {
     wait_for_phase "$root_issue" testing 1200
     until_true 120 "round $round's correction on pull request #$pr_number" round_correction_pushed "$round"
     if [ "$round" = 1 ]; then
-      until_true 120 "the implementer's answer on the bot's review thread, and its own resolution of it" bot_thread_resolved "$bot_thread" legion-implementer
+      until_true 120 "the implementer's answer on the bot's review thread, and its own resolution of it" bot_thread_resolved "$bot_thread" implementer
       note "the implementer answered the bot's review thread $bot_thread and resolved it with its own gh"
     fi
     if [ "$round" = 2 ]; then
-      until_true 120 "the Legion reviewer's reply on the bot's review thread, the thread resolved" bot_thread_resolved "$bot_thread" legion-reviewer
+      until_true 120 "the Legion reviewer's reply on the bot's review thread, the thread resolved" bot_thread_resolved "$bot_thread" reviewer
       note "the bot's review thread $bot_thread carries the Legion reviewer's reply and is resolved: the reviewer adjudicated it and named it to the implementer"
     fi
     assert_round_handoff "$root_issue" "$round"
@@ -1086,7 +1090,8 @@ restart_scenarios() {
   until_true 240 "the real Go pane bash tool to resolve the daemon's gh" session_contains "$restart_issue" implementer "CRED-GH=$real_gh"
   until_true 240 "the implementer pane to name its claim's gh directory" session_contains "$restart_issue" implementer "CRED-DIR=$state/secrets/"
   until_true 240 "the implementer pane to carry an empty GH_TOKEN" session_contains "$restart_issue" implementer "CRED-TOKEN=."
-  until_true 240 "the implementer pane to authenticate as its App" session_contains "$restart_issue" implementer "CRED-VIEWER=legion-implementer[bot]"
+  implement_app=$(role_app implementer)
+  until_true 240 "the implementer pane to authenticate as its App, $implement_app" session_contains "$restart_issue" implementer "CRED-VIEWER=$implement_app"
   until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
   # The directory the agent printed is the one its OMP process was launched with, named for its
   # claim, and holds the two gh files the daemon writes for the pane alone.
@@ -1107,7 +1112,7 @@ restart_scenarios() {
     fail "gh with an empty GH_CONFIG_DIR and no token still answered"
   fi
   grep -q GH_TOKEN "$evidence/cred-negative.txt" || fail "gh with an empty GH_CONFIG_DIR failed without naming GH_TOKEN: $(cat "$evidence/cred-negative.txt")"
-  note "real implementer pane ran $real_gh with GH_CONFIG_DIR=$cred_dir (0700; config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as legion-implementer[bot], and viewed pull request #$pr_number"
+  note "real implementer pane ran $real_gh with GH_CONFIG_DIR=$cred_dir (0700; config.yml and hosts.yml 0600) and an empty GH_TOKEN, authenticated as $implement_app, and viewed pull request #$pr_number"
   pass
 
   begin pending-dispatch-status-write

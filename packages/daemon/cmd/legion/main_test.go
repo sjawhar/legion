@@ -1047,6 +1047,52 @@ func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 	}
 }
 
+// --check-config prints one more plain line, after Config OK and the capability gaps and before
+// the plugins line, only when worker_boot_timeout_seconds pushes the image probe's attempt budget
+// above slow_command_timeout_seconds (daemon.ProbeBudget): a deployment whose
+// worker_boot_timeout_seconds reaches or exceeds slow_command_timeout_seconds prints it naming the
+// derived bound; the defaults, and a tmux configuration (which runs no probe), print nothing.
+func TestStartCheckConfigNamesTheDerivedProbeBudget(t *testing.T) {
+	legionState(t)
+	secretsGap := "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
+	pluginsGap := "plugins: none — set runtime.kubernetes.plugins or run a release build; a daemon that knows none relaunches no process on another plugin contract\n"
+	budgetLine := "image probe: each attempt waits 660s: worker_boot_timeout_seconds (600) + 60s is above slow_command_timeout_seconds (300)\n"
+
+	t.Run("worker_boot_timeout_seconds derives a bound above slow_command_timeout_seconds", func(t *testing.T) {
+		config := kubernetesCheckConfig(t, "")
+		body, err := os.ReadFile(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(config, append(body, []byte("worker_boot_timeout_seconds: 600\n")...), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+		if want := "Config OK: project=DEMO\n" + secretsGap + budgetLine + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+		}
+	})
+
+	t.Run("the defaults derive nothing", func(t *testing.T) {
+		config := kubernetesCheckConfig(t, "")
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+		if want := "Config OK: project=DEMO\n" + secretsGap + pluginsGap; code != 0 || out.String() != want || errb.Len() != 0 {
+			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+		}
+	})
+
+	t.Run("tmux runs no probe, and prints nothing", func(t *testing.T) {
+		config, _ := workflowConfig(t, 13370, "")
+		var out, errb bytes.Buffer
+		code := run(context.Background(), []string{"legion", "start", "--check-config", "--config", config}, &out, &errb)
+		if want := "Config OK: project=DEMO\n" + tmuxCapabilityGaps; code != 0 || out.String() != want || errb.Len() != 0 {
+			t.Fatalf("exit code = %d, stdout %q, stderr %q; want 0 and %q", code, out.String(), errb.String(), want)
+		}
+	})
+}
+
 // A decision may name only a capability the daemon measures from the deployment: anything else is
 // refused as an unknown key naming the four, and a blank reason records nothing, so it is refused
 // too — each with exit 1 and no Config OK.

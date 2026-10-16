@@ -10,18 +10,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
+	"github.com/sjawhar/legion/daemon/internal/capabilities/capabilitiestest"
 )
-
-// stubBinaries are the binaries the image rows look for, each a stub answering what the checks
-// run: `go version` and `chromium --version`.
-var stubBinaries = []string{"gopls", "typescript-language-server", "pyright-langserver", "codegraph", "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl", "jq", "ssh-keygen", "chromium"}
-
-const stubScript = `#!/bin/sh
-case "$1" in
-version) echo "go version go1.26.8 linux/amd64" ;;
---version) echo "Chromium 141.0.0.0" ;;
-esac
-`
 
 // fakeOmp answers the two Oh My Pi commands the checks run as this pod's omp answers them, by
 // the variables a test sets in the Image's Env: Python unavailable (exit 1, as omp exits) under
@@ -38,9 +28,6 @@ case "$*" in
 esac
 `
 
-// codeGraphLock is the lock `omp plugin install` writes in the worker image.
-const codeGraphLock = `{"plugins":{"@bopstack/pi-codegraph":{"version":"0.1.1","enabledFeatures":null,"enabled":true}}}`
-
 // stubs is a worker image in miniature: a bin directory first on PATH with a stub for every
 // binary the image rows look for, a HOME whose legion profile's plugin lock enables the CodeGraph
 // plugin, and an omp that answers the checks' commands.
@@ -52,14 +39,12 @@ type stubs struct {
 func newStubs(t *testing.T) stubs {
 	t.Helper()
 	s := stubs{t: t, bin: t.TempDir(), home: t.TempDir()}
-	for _, name := range stubBinaries {
-		s.install(name, stubScript)
-	}
+	capabilitiestest.InstallBinaries(t, s.bin)
 	s.omp = filepath.Join(t.TempDir(), "omp")
 	if err := os.WriteFile(s.omp, []byte(fakeOmp), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	s.writeLock(codeGraphLock)
+	s.writeLock(capabilitiestest.CodeGraphLock)
 	return s
 }
 
@@ -80,17 +65,11 @@ func (s stubs) remove(name string) {
 
 // lock is the legion profile's plugin lock.
 func (s stubs) lock() string {
-	return filepath.Join(s.home, ".omp", "profiles", "legion", "plugins", "omp-plugins.lock.json")
+	return capabilitiestest.LockPath(s.home)
 }
 
 func (s stubs) writeLock(content string) {
-	s.t.Helper()
-	if err := os.MkdirAll(filepath.Dir(s.lock()), 0o755); err != nil {
-		s.t.Fatal(err)
-	}
-	if err := os.WriteFile(s.lock(), []byte(content), 0o644); err != nil {
-		s.t.Fatal(err)
-	}
+	capabilitiestest.WriteLock(s.t, s.home, content)
 }
 
 // image is the Image the checks read: the stubs' PATH alone, never this process's, and the
@@ -103,11 +82,11 @@ func (s stubs) image(extra ...string) Image {
 	}
 }
 
-// byName is the lines by capability.
-func byName(lines []Line) map[Name]Line {
-	m := map[Name]Line{}
-	for _, line := range lines {
-		m[line.Name] = line
+// byName is the states by capability.
+func byName(states []State) map[Name]State {
+	m := map[Name]State{}
+	for _, state := range states {
+		m[state.Name] = state
 	}
 	return m
 }
@@ -119,34 +98,31 @@ func byName(lines []Line) map[Name]Line {
 func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 	s := newStubs(t)
 
-	lines, err := CheckImage(context.Background(), s.image())
+	states, err := CheckImage(context.Background(), s.image())
 
 	if err != nil {
 		t.Fatalf("CheckImage = %v, want every image row present", err)
 	}
-	if len(lines) != len(Table) {
-		t.Fatalf("CheckImage rendered %d lines, want one per row (%d)", len(lines), len(Table))
+	if len(states) != len(Table) {
+		t.Fatalf("CheckImage rendered %d states, want one per row (%d)", len(states), len(Table))
 	}
 	for i, row := range Table {
-		line := lines[i]
-		if line.Name != row.Name {
-			t.Errorf("line %d is %s, want %s: the table's order", i, line.Name, row.Name)
+		state := states[i]
+		if state.Name != row.Name {
+			t.Errorf("state %d is %s, want %s: the table's order", i, state.Name, row.Name)
 		}
-		want := map[Site]string{SiteImage: present, SiteLive: reported, SiteDeployment: reported, SiteWithheld: withheld}[row.Site]
-		if row.Awaits != "" {
-			want = installed
+		want := map[Site]string{SiteImage: StatusPresent, SiteLive: StatusReported, SiteDeployment: StatusReported, SiteWithheld: StatusWithheld}[row.Site]
+		if state.Status != want {
+			t.Errorf("%s: status %q, want %q", state.Name, state.Status, want)
 		}
-		if line.Status != want {
-			t.Errorf("%s: status %q, want %q", line.Name, line.Status, want)
+		if row.Site == SiteWithheld && !strings.HasPrefix(state.Detail, row.Ruling+": ") {
+			t.Errorf("%s: detail %q, want the ruling %s first", state.Name, state.Detail, row.Ruling)
 		}
-		if row.Site == SiteWithheld && !strings.HasPrefix(line.Detail, row.Ruling+": ") {
-			t.Errorf("%s: detail %q, want the ruling %s first", line.Name, line.Detail, row.Ruling)
-		}
-		if row.Site == SiteLive && line.Detail != "each session reports it at start; `legion state` renders it: "+row.Summary {
-			t.Errorf("%s: detail %q, want it to say each session reports the row, then the summary", line.Name, line.Detail)
+		if row.Site == SiteLive && state.Detail != "each session reports it at start; `legion state` renders it: "+row.Summary {
+			t.Errorf("%s: detail %q, want it to say each session reports the row, then the summary", state.Name, state.Detail)
 		}
 	}
-	got := byName(lines)
+	got := byName(states)
 	for name, want := range map[Name]string{
 		EvalPython:           "omp setup python --check reports available=true",
 		Browser:              filepath.Join(s.bin, "chromium") + " (chromium on PATH) --version: Chromium 141.0.0.0",
@@ -160,40 +136,40 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		}
 	}
 	if want := "probe-image: capability eval-python: present (omp setup python --check reports available=true)"; got[EvalPython].String() != want {
-		t.Errorf("Line.String() = %q, want %q", got[EvalPython].String(), want)
+		t.Errorf("State.String() = %q, want %q", got[EvalPython].String(), want)
 	}
-	if want := "probe-image: capability codegraph: present (" + got[CodeGraph].Detail + ")"; got[CodeGraph].Status != present || got[CodeGraph].String() != want {
-		t.Errorf("codegraph line = %q, want %q: present, with no sentence about a pod's launch", got[CodeGraph].String(), want)
+	if want := "probe-image: capability codegraph: present (" + got[CodeGraph].Detail + ")"; got[CodeGraph].Status != StatusPresent || got[CodeGraph].String() != want {
+		t.Errorf("codegraph state = %q, want %q: present, with no sentence about a pod's launch", got[CodeGraph].String(), want)
 	}
 }
 
 // Every missing image row is named, in the table's order, so one rebuild fixes them all; the
-// rendered line says missing with the same detail; and the rows that are present still render
+// rendered state says missing with the same detail; and the rows that are present still render
 // present.
 func TestCheckImageNamesEveryMissingRow(t *testing.T) {
 	s := newStubs(t)
 	s.remove("gopls")
 	s.remove("pyright-langserver")
 
-	lines, err := CheckImage(context.Background(), s.image("LEGION_TEST_NO_PYTHON=1"))
+	states, err := CheckImage(context.Background(), s.image("LEGION_TEST_NO_PYTHON=1"))
 
 	want := "capability eval-python is missing: omp setup python --check reports available=false; " +
 		"capability lsp is missing: gopls, pyright-langserver are not on PATH"
 	if err == nil || err.Error() != want {
 		t.Fatalf("CheckImage = %v, want %q", err, want)
 	}
-	got := byName(lines)
-	if got[EvalPython].Status != missing || got[EvalPython].Detail != "omp setup python --check reports available=false" {
-		t.Errorf("eval-python line = %+v, want missing with omp's answer", got[EvalPython])
+	got := byName(states)
+	if got[EvalPython].Status != StatusMissing || got[EvalPython].Detail != "omp setup python --check reports available=false" {
+		t.Errorf("eval-python state = %+v, want missing with omp's answer", got[EvalPython])
 	}
-	if got[LSP].Status != missing || got[LSP].Detail != "gopls, pyright-langserver are not on PATH" {
-		t.Errorf("lsp line = %+v, want missing naming both servers", got[LSP])
+	if got[LSP].Status != StatusMissing || got[LSP].Detail != "gopls, pyright-langserver are not on PATH" {
+		t.Errorf("lsp state = %+v, want missing naming both servers", got[LSP])
 	}
-	if got[Browser].Status != present || got[Toolchain].Status != present {
+	if got[Browser].Status != StatusPresent || got[Toolchain].Status != StatusPresent {
 		t.Errorf("browser and toolchain = %+v, %+v, want both present still", got[Browser], got[Toolchain])
 	}
-	if len(lines) != len(Table) {
-		t.Errorf("rendered %d lines, want the whole table (%d) however many rows are missing", len(lines), len(Table))
+	if len(states) != len(Table) {
+		t.Errorf("rendered %d states, want the whole table (%d) however many rows are missing", len(states), len(Table))
 	}
 }
 
@@ -205,14 +181,14 @@ func TestCheckImageNamesTheOneBinaryOffPATH(t *testing.T) {
 	s := newStubs(t)
 	s.remove("python3")
 
-	lines, err := CheckImage(context.Background(), s.image())
+	states, err := CheckImage(context.Background(), s.image())
 
 	want := "capability toolchain is missing: python3 is not on PATH"
 	if err == nil || err.Error() != want {
 		t.Fatalf("CheckImage = %v, want %q", err, want)
 	}
-	if got := byName(lines)[Toolchain]; got.Status != missing || got.Detail != "python3 is not on PATH" {
-		t.Errorf("toolchain line = %+v, want missing naming python3", got)
+	if got := byName(states)[Toolchain]; got.Status != StatusMissing || got.Detail != "python3 is not on PATH" {
+		t.Errorf("toolchain state = %+v, want missing naming python3", got)
 	}
 }
 
@@ -252,32 +228,32 @@ func TestToolchainSummaryNamesTheListToolchainChecks(t *testing.T) {
 // a chromium on PATH, which Oh My Pi would never launch under that variable.
 func TestCheckImageResolvesTheBrowserAsOhMyPiDoes(t *testing.T) {
 	s := newStubs(t)
-	s.install("my-chrome", stubScript)
+	s.install("my-chrome", capabilitiestest.BinaryScript)
 	for name, testCase := range map[string]struct {
 		env    []string
 		status string
 		detail string
 	}{
 		"PUPPETEER_EXECUTABLE_PATH naming nothing": {
-			[]string{"PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium"}, missing,
+			[]string{"PUPPETEER_EXECUTABLE_PATH=/nonexistent/chromium"}, StatusMissing,
 			"/nonexistent/chromium (PUPPETEER_EXECUTABLE_PATH) --version: fork/exec /nonexistent/chromium: no such file or directory",
 		},
 		"PUPPETEER_EXECUTABLE_PATH naming a browser": {
-			[]string{"PUPPETEER_EXECUTABLE_PATH=" + filepath.Join(s.bin, "my-chrome")}, present,
+			[]string{"PUPPETEER_EXECUTABLE_PATH=" + filepath.Join(s.bin, "my-chrome")}, StatusPresent,
 			filepath.Join(s.bin, "my-chrome") + " (PUPPETEER_EXECUTABLE_PATH) --version: Chromium 141.0.0.0",
 		},
 		"a bare name, looked up on PATH as a spawn does": {
-			[]string{"PUPPETEER_EXECUTABLE_PATH=my-chrome"}, present,
+			[]string{"PUPPETEER_EXECUTABLE_PATH=my-chrome"}, StatusPresent,
 			filepath.Join(s.bin, "my-chrome") + " (PUPPETEER_EXECUTABLE_PATH) --version: Chromium 141.0.0.0",
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			lines, err := CheckImage(context.Background(), s.image(testCase.env...))
-			got := byName(lines)[Browser]
+			states, err := CheckImage(context.Background(), s.image(testCase.env...))
+			got := byName(states)[Browser]
 			if got.Status != testCase.status || got.Detail != testCase.detail {
-				t.Errorf("browser line = %+v, want %s (%s)", got, testCase.status, testCase.detail)
+				t.Errorf("browser state = %+v, want %s (%s)", got, testCase.status, testCase.detail)
 			}
-			if (err != nil) != (testCase.status == missing) {
+			if (err != nil) != (testCase.status == StatusMissing) {
 				t.Errorf("CheckImage = %v, want an error exactly when the browser is missing", err)
 			}
 			if err != nil && !strings.Contains(err.Error(), "capability browser is missing") {
@@ -288,9 +264,9 @@ func TestCheckImageResolvesTheBrowserAsOhMyPiDoes(t *testing.T) {
 	t.Run("no chromium anywhere", func(t *testing.T) {
 		s := newStubs(t)
 		s.remove("chromium")
-		lines, _ := CheckImage(context.Background(), s.image())
-		if got := byName(lines)[Browser]; got.Status != missing || got.Detail != "chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable" {
-			t.Errorf("browser line = %+v, want missing naming both resolutions", got)
+		states, _ := CheckImage(context.Background(), s.image())
+		if got := byName(states)[Browser]; got.Status != StatusMissing || got.Detail != "chromium is not on PATH, and PUPPETEER_EXECUTABLE_PATH names no executable" {
+			t.Errorf("browser state = %+v, want missing naming both resolutions", got)
 		}
 	})
 }
@@ -316,11 +292,11 @@ func TestCheckImageNeedsTheCodeGraphCLIAndItsPluginEnabled(t *testing.T) {
 			s := newStubs(t)
 			testCase.setup(s)
 
-			lines, err := CheckImage(context.Background(), s.image())
+			states, err := CheckImage(context.Background(), s.image())
 
-			got := byName(lines)[CodeGraph]
-			if got.Status != missing || !strings.Contains(got.Detail, testCase.want) {
-				t.Errorf("codegraph line = %+v, want missing saying %q", got, testCase.want)
+			got := byName(states)[CodeGraph]
+			if got.Status != StatusMissing || !strings.Contains(got.Detail, testCase.want) {
+				t.Errorf("codegraph state = %+v, want missing saying %q", got, testCase.want)
 			}
 			if err == nil || !strings.HasPrefix(err.Error(), "capability codegraph is missing: ") {
 				t.Errorf("CheckImage = %v, want it to name codegraph", err)
@@ -349,11 +325,11 @@ func TestPluginLockFollowsTheProfile(t *testing.T) {
 func TestCheckImageReportsAProfileOhMyPiRefusesOnTheCodeGraphRow(t *testing.T) {
 	s := newStubs(t)
 
-	lines, err := CheckImage(context.Background(), s.image("OMP_PROFILE=Work"))
+	states, err := CheckImage(context.Background(), s.image("OMP_PROFILE=Work"))
 
-	got := byName(lines)[CodeGraph]
-	if got.Status != missing || !strings.HasPrefix(got.Detail, `Invalid OMP profile "Work" in the environment Oh My Pi starts under.`) {
-		t.Errorf("codegraph line = %+v, want missing with Oh My Pi's refusal of the profile", got)
+	got := byName(states)[CodeGraph]
+	if got.Status != StatusMissing || !strings.HasPrefix(got.Detail, `Invalid OMP profile "Work" in the environment Oh My Pi starts under.`) {
+		t.Errorf("codegraph state = %+v, want missing with Oh My Pi's refusal of the profile", got)
 	}
 	if err == nil || !strings.HasPrefix(err.Error(), `capability codegraph is missing: Invalid OMP profile "Work"`) {
 		t.Errorf("CheckImage = %v, want it to name codegraph with the refusal", err)
@@ -369,12 +345,12 @@ func TestCheckImageJudgesPythonByOhMyPisAnswer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	lines, err := CheckImage(context.Background(), s.image())
+	states, err := CheckImage(context.Background(), s.image())
 
-	got := byName(lines)[EvalPython]
+	got := byName(states)[EvalPython]
 	want := "omp setup python --check --json exited 2 without a JSON available field: setup: no such command"
-	if got.Status != missing || got.Detail != want {
-		t.Errorf("eval-python line = %+v, want missing with %q", got, want)
+	if got.Status != StatusMissing || got.Detail != want {
+		t.Errorf("eval-python state = %+v, want missing with %q", got, want)
 	}
 	if err == nil || !strings.Contains(err.Error(), "capability eval-python is missing") {
 		t.Errorf("CheckImage = %v, want it to name eval-python", err)
@@ -454,48 +430,26 @@ func TestReadModelFallback(t *testing.T) {
 	})
 }
 
-// lookPath walks the PATH it is given, not this process's, and finds only executables under
-// absolute elements.
-func TestLookPathReadsThePATHItIsGiven(t *testing.T) {
-	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "tool"), []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bin, "notes"), []byte("text"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Mkdir(filepath.Join(bin, "dir"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	env := []string{"PATH=relative/bin:" + bin}
-	if got, ok := lookPath(env, "tool"); !ok || got != filepath.Join(bin, "tool") {
-		t.Errorf("lookPath(tool) = %q, %t, want %s", got, ok, filepath.Join(bin, "tool"))
-	}
-	for _, name := range []string{"notes", "dir", "sh"} {
-		if got, ok := lookPath(env, name); ok {
-			t.Errorf("lookPath(%s) = %q, want none: not an executable on the given PATH", name, got)
-		}
-	}
-	if _, ok := lookPath([]string{"PATH="}, "tool"); ok {
-		t.Error("lookPath found tool on an empty PATH")
-	}
+// envValue is name's value in env, the last assignment winning as it does for the process env
+// starts.
+func TestEnvValueTakesTheLastAssignment(t *testing.T) {
 	if got := envValue([]string{"PATH=a", "PATH=b"}, "PATH"); got != "b" {
 		t.Errorf("envValue = %q, want the last assignment", got)
 	}
 }
 
-// The table's lines are one per row and print in order, so the probe pod's log reads as the list.
+// The table's states are one per row and print in order, so the probe pod's log reads as the list.
 func TestLinesPrintInTableOrder(t *testing.T) {
 	s := newStubs(t)
-	lines, err := CheckImage(context.Background(), s.image())
+	states, err := CheckImage(context.Background(), s.image())
 	if err != nil {
 		t.Fatal(err)
 	}
 	var names []Name
-	for _, line := range lines {
-		names = append(names, line.Name)
-		if !strings.HasPrefix(line.String(), "probe-image: capability "+string(line.Name)+": "+line.Status+" (") || !strings.HasSuffix(line.String(), ")") {
-			t.Errorf("Line.String() = %q, want the probe's row shape", line.String())
+	for _, state := range states {
+		names = append(names, state.Name)
+		if !strings.HasPrefix(state.String(), "probe-image: capability "+string(state.Name)+": "+state.Status+" (") || !strings.HasSuffix(state.String(), ")") {
+			t.Errorf("State.String() = %q, want the probe's row shape", state.String())
 		}
 	}
 	var want []Name
@@ -503,6 +457,14 @@ func TestLinesPrintInTableOrder(t *testing.T) {
 		want = append(want, row.Name)
 	}
 	if !slices.Equal(names, want) {
-		t.Errorf("lines name %v, want Table's order %v", names, want)
+		t.Errorf("states name %v, want Table's order %v", names, want)
+	}
+}
+
+// State.String() is the probe's line, pinned whole, so a reworded format is caught here.
+func TestStateStringIsTheProbeLine(t *testing.T) {
+	state := State{Name: Browser, Status: StatusPresent, Detail: "x"}
+	if want := "probe-image: capability browser: present (x)"; state.String() != want {
+		t.Errorf("State.String() = %q, want %q", state.String(), want)
 	}
 }

@@ -72,8 +72,9 @@ related_issues:
    someone editing the workflow to hide a command, who could remove the checker from CI; the
    pass-through class (a variable in command position, `xargs`, `nohup`, an unlisted program)
    is accepted on that ground.
-5. **A job that calls a reusable workflow is outside the checker.** The checker reads jobs with
-   `steps:`; a `uses:` job is checked, if at all, by the called workflow's own file. Before
+5. **A job that calls a reusable workflow is outside the checker.** The checker's credential
+   rules read jobs with `steps:`; its condition rule reads every job's `if:`. A `uses:` job's
+   credentials are checked, if at all, by the called workflow's own file. Before
    collapsing token-identical publish jobs into a reusable workflow (LEGION-772), teach the
    checker to follow `uses:` into the called file and to refuse `secrets: inherit`, or the
    dedupe moves those jobs out of coverage; today a comment alone keeps `secrets: inherit` off

@@ -966,7 +966,7 @@ record_pair() {
   printf '%s\n' "$(basename "$pair_session" .jsonl)" >"$evidence/review-pair/session-stem"
   pair_recorded=1
 }
-# reviewer_decision CHANGES writes `approve` to $work/review-decision once legion-reviewer[bot] has
+# reviewer_decision CHANGES writes `approve` to $work/review-decision once the review App has
 # approved the pull request's head, or `changes` once it has posted CHANGES reviews requesting
 # changes, and fails while it has done neither. The wait's own poll records what it saw, so a head
 # that moves after the approval (retro's commit) cannot change the answer.
@@ -2201,6 +2201,30 @@ session_jq() {
   shift
   jq -R -s -L "$root/scripts/e2e/lib" "$@" <"$session"
 }
+# included_jq_modules SCRIPT prints the sorted unique names of the lib/*.jq modules SCRIPT includes,
+# read from its own `include "…"` strings, so a module joins prerequisites' compile guard the day a
+# checkpoint first includes it. The name class covers every character an include name uses (letters
+# either case, digits, `_`, `.`, `/`, `-`) and excludes the function's own grep and sed text, whose
+# `[` and `;` sit where the class would have to continue, so the list is the script's includes and
+# nothing of the helper itself.
+included_jq_modules() {
+  grep -o 'include "[A-Za-z0-9_./-]*"' "$1" | sed 's/^include "//; s/"$//' | sort -u
+}
+# jq_modules_compile LIBDIR MODULE… fails, quoting jq's error, on the first MODULE the host's jq
+# cannot compile from LIBDIR, else notes them all. Including a module compiles its syntax (a module
+# that does not parse is refused with jq's syntax error) but reaches none of its defs, so jq 1.8.2's
+# abort on a def chain reached through a nested include (lib/omp-tool-calls.jq) is caught only by a
+# program that reaches the chain, which prerequisites' fixture run of stage4b-tools, the module whose
+# include met that abort, is. Reads nothing but its arguments, the jq on PATH, fail and note.
+jq_modules_compile() {
+  local libdir=$1 module out
+  shift
+  for module in "$@"; do
+    out=$(jq -n -L "$libdir" "include \"$module\"; true" 2>&1) ||
+      fail "the host's $(jq --version) cannot compile lib/$module.jq: $(tr '\n' ' ' <<<"$out")"
+  done
+  note "$(jq --version) compiles $(printf 'lib/%s.jq ' "$@" | sed 's/ $//')"
+}
 # tool_result_said SESSION TOOL TEXT: a tool call of the session for TOOL (by name, by its xd://
 # device, or by eval's tool.<name>) returned without error and its text carries TEXT: the proof a
 # tool ran and answered, where assistant_said only proves the model said so. An error result never
@@ -2215,28 +2239,36 @@ tool_ran() {
   session_jq "$1" -e --arg tool "$2" 'include "stage4b-tools"; tool_ran($tool)' >/dev/null
 }
 # tool_result_answered SESSION TOOL ARGS TEXT: tool_result_said for the calls of TOOL whose
-# arguments carry ARGS (lib/stage4b-tools.jq): the read of skill://<name> among the session's reads,
-# the hover of one file among its hovers.
+# arguments carry ARGS (lib/stage4b-tools.jq), judged on the argument that carries the call's
+# target and never on the model's `i` intent, which Oh My Pi puts in every tool's arguments (an
+# intent naming a command the call never ran, or skill://<name> on a read of the skill's file path,
+# proves nothing): for bash, ARGS must be in the call's command; for read, in its path; for every
+# other tool, in its arguments object with `i` removed, as JSON text (the hover of one file among
+# the lsp device's hovers, NoSuchSymbol among the codegraph calls, an edit's input). A bash call
+# dispatched through eval, or through a write to xd://bash whose content is no JSON object, has no
+# command, so a bound bash assertion does not see it, while `tool_result_said SESSION bash TEXT`
+# still counts it.
 tool_result_answered() {
   session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
 # tool_result_quotes SESSION TOOL [ARGS]: every result of TOOL in the session (of the calls whose
-# arguments carry ARGS, when given) on one line, each with its call's arguments, an error marked
-# and its text trimmed: what the tool did return, for the fail line of an expectation it did not
-# meet.
+# arguments carry ARGS, when given: arguments_carry, the command for bash, the path for read, the
+# arguments without the intent otherwise) on one line, each with its call's arguments, an error
+# marked and its text trimmed: what the tool did return, for the fail line of an expectation it did
+# not meet.
 tool_result_quotes() {
   session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
-    [tool_results($tool)[] | select(.arguments | contains($args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
+    [tool_results($tool)[] | select(arguments_carry($tool; $args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
     | join(" ; ")'
 }
-# codegraph_control SESSION: the session holds a codegraph call for NoSuchSymbol, a symbol the
-# fixture does not define, and every such call returned an error or a text naming none of the
-# fixture's test (greet_test.go), caller (GreetWorld) or caller's file (caller.go). An index that
-# names the fixture's test and caller proves nothing unless it also names nothing where there is
-# nothing.
+# codegraph_control SESSION: the session holds a codegraph call for NoSuchSymbol (by its arguments,
+# never its intent), a symbol the fixture does not define, and every such call returned an error or
+# a text naming none of the fixture's test (greet_test.go), caller (GreetWorld) or caller's file
+# (caller.go). An index that names the fixture's test and caller proves nothing unless it also
+# names nothing where there is nothing.
 codegraph_control() {
   session_jq "$1" -e 'include "stage4b-tools";
-    [tool_results("codegraph")[] | select(.arguments | contains("NoSuchSymbol"))]
+    [tool_results("codegraph")[] | select(arguments_carry("codegraph"; "NoSuchSymbol"))]
     | length > 0 and all(.[]; .isError or (.text | test("greet_test\\.go|GreetWorld|caller\\.go") | not))' >/dev/null
 }
 # full_agent_message ROLE NONCE prints the full-agent-tools instruction for ROLE: eight items, each
@@ -2296,6 +2328,22 @@ full_agent_summary() {
     tool_result_texts("bash") as $bash | tool_result_texts("eval") as $eval | tool_result_texts("web_search") as $search
     | "login \(said($bash; $app) | line); browser \(said($eval; "title: ") | line); toolchain \(said($bash; "go version") | gsub("\\s+"; " ") | .[0:200]); search \(said($search; "https://") | line)"'
 }
+# full_agent_common_asserts WHO EXCERPT NONCE APP OTHER: the four assertions the role loop and the
+# merger block of full-agent-tools share, WHO the fail lines' prefix: an edit result and a read
+# result carry `edited NONCE`, a bash call running gh api graphql answered APP, the role's own App,
+# and no bash result carries OTHER, the other App. The notebook negative stays in each block, after
+# its own further assertions, so neither block's order of fail lines moves.
+full_agent_common_asserts() {
+  local who=$1 excerpt=$2 nonce=$3 app=$4 other=$5
+  tool_result_said "$excerpt" edit "edited $nonce" ||
+    fail "$who: no edit result carries 'edited $nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
+  tool_result_said "$excerpt" read "edited $nonce" ||
+    fail "$who: no read result carries 'edited $nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
+  tool_result_answered "$excerpt" bash 'gh api graphql' "$app" ||
+    fail "$who: no result of a bash call running gh api graphql carries $app, so gh did not answer as $who's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  ! tool_result_said "$excerpt" bash "$other" ||
+    fail "$who: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+}
 # agent_pid POD ROLE prints the pid of ROLE's Oh My Pi in POD (agent_pid_sh).
 agent_pid() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
@@ -2309,9 +2357,14 @@ agent_pid() {
 agent_setting() {
   local pod=$1 role=$2 pid=$3 dir=$4 key=$5 script
   # The pod's shell runs this with $1 DIR, $2 KEY and $3 PID; the inner sh reads KEY from the
-  # environment xargs hands it, before env -i empties that environment for omp.
+  # environment xargs hands it, before env -i empties that environment for omp. `-x -n <count>`
+  # (the count of the process's variables, the NULs in its environ) runs `omp config get` once with
+  # every variable or exits with xargs's `argument list too long`, which agent_setting's caller
+  # prints with its fail line; `-x` alone would split an oversized environment over two runs, the
+  # second under a partial environment, and the proof would fail on the value with no diagnosis
+  # (GNU xargs's `-x` exits only when the `-n`/`-L` arguments do not fit `-s`).
   script=$(cat <<'EOF'
-cd "$1" && KEY=$2 xargs -0 sh -c 'exec env -i "$@" omp config get "$KEY" --json' agent-env <"/proc/$3/environ"
+cd "$1" && KEY=$2 xargs -0 -x -n "$(tr -cd '\0' <"/proc/$3/environ" | wc -c)" sh -c 'exec env -i "$@" omp config get "$KEY" --json' agent-env <"/proc/$3/environ"
 EOF
   )
   pod_exec "$pod" "$role" sh -c "$script" agent-setting "$dir" "$key" "$pid" | jq -c .value
@@ -2732,9 +2785,17 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 
 begin prerequisites
 for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-# The host's jq compiles and runs lib/stage4b-tools.jq over its fixture: repository-tools and
-# full-agent-tools read every tool result through it, and a jq that aborts compiling the library
-# (jq 1.8.2 did, on a def chain reached through an include) would otherwise fail the run an hour in.
+# The host's jq compiles every lib/*.jq module this script includes, read from the script itself: a
+# jq that cannot parse one would otherwise fail the run at the first checkpoint to include it, hours
+# in. The two fails keep the loop from passing vacuously over a list read wrong.
+mapfile -t modules < <(included_jq_modules "$root/scripts/e2e/stage4b-sandbox-tree.sh")
+[ "${#modules[@]}" -gt 0 ] || fail "the script includes no jq module, which it does: included_jq_modules read nothing"
+case " ${modules[*]} " in *" stage4b-tools "*) ;; *) fail "the script's included jq modules do not list stage4b-tools, which it includes: ${modules[*]}" ;; esac
+jq_modules_compile "$root/scripts/e2e/lib" "${modules[@]}"
+# The compile loop proves each included module parses on the host's jq; jq 1.8.2's abort at compile
+# (its expand_call_arglist assertion) surfaces only when a program reaches a def chain through a
+# nested include, so stage4b-tools, the module whose include of omp-tool-calls met it, is also run
+# over its fixture, which repository-tools and full-agent-tools read every tool result through.
 session_jq "$root/scripts/e2e/lib/testdata/stage4b-tools-session.jsonl" -e 'include "stage4b-tools"; tool_ran("eval") and tool_result_answered("lsp"; "hover"; "func") and (tool_ran("notebook") | not)' >/dev/null 2>"$work/jq-tools-check" ||
   fail "the host's $(jq --version) cannot run lib/stage4b-tools.jq over lib/testdata/stage4b-tools-session.jsonl: $(tr '\n' ' ' <"$work/jq-tools-check")"
 note "$(jq --version) runs lib/stage4b-tools.jq"
@@ -3056,6 +3117,9 @@ EOF
 write_legion_config
 out=$("$work/legion" start --check-config --config "$work/legion.yaml" 2>&1) || fail "legion start --check-config refused the proof's config: $out"
 note "$out"
+read_app_logins
+implement_app=$(role_app implementer)
+review_app=$(role_app reviewer)
 create_route_configmap
 create_providers_secret
 production_baseline
@@ -3066,7 +3130,7 @@ probe=$(log_lines "sandbox runtime: the worker image passed its probe" | tail -1
 note "image probe: $(jq -c '{image, model, sandbox}' <<<"$probe")"
 # The daemon's capability report (capabilities.Deployment.Report, `.capabilities` of `legion state
 # --json`), once the probe's verdict is in it: the probe logs its pass before the daemon records it,
-# so the read waits for no image row to be unchecked. Every image row is present and none installed,
+# so the read waits for no image row to be unchecked. Every image row is present,
 # codegraph included (a pod's agent loads the profile's plugins, as repository-tools holds). The
 # live rows render from the live sessions' reports (LEGION-663):
 # packages/daemon/internal/capabilities/deployment.go renders each unchecked, its detail "no session
@@ -3079,8 +3143,9 @@ note "image probe: $(jq -c '{image, model, sandbox}' <<<"$probe")"
 # fixture's overlay turns retry.modelFallback on and its pod gives every role a reservation.
 # pool-capacity is the pool's to decide, not the configuration's: the row is open when the image
 # probe pod was Unschedulable before a node came up for it, which a run that starts on an empty pool
-# meets, so it is recorded either way and the open set the controller's tick must name follows it. A
-# gap is reported, never refused: the daemon that reports secrets open is the one that runs the rest.
+# meets, so it is recorded either way, and the controller checkpoint holds every tick to the same two
+# lists, each tick on its own. A gap is reported, never refused: the daemon that reports secrets open
+# is the one that runs the rest.
 capabilities_probed() { daemon_state | jq -e '[.capabilities[] | select(.name | IN("eval-js", "eval-python", "browser", "lsp", "codegraph", "skills", "toolchain")) | select(.status == "unchecked")] | length == 0' >/dev/null; }
 until_true 60 "the capability report to carry the probe's verdict on every image row" capabilities_probed
 daemon_state | jq '.capabilities' >"$evidence/capabilities-at-boot.json"
@@ -3100,7 +3165,7 @@ case $open_rows in
   '["secrets"]' | '["secrets","pool-capacity"]') ;;
   *) fail "the open capabilities are $open_rows, not [\"secrets\"] with or without pool-capacity: $(jq -c '[.[] | select(.status == "open") | {name, detail, configLine}]' "$evidence/capabilities-at-boot.json")" ;;
 esac
-note "capabilities at boot ($evidence/capabilities-at-boot.json): every image row present, codegraph included, and none installed; every live row unchecked, awaiting the first session's report; open: $(jq -r '[.[] | select(.status == "open") | .name] | join(", ")' "$evidence/capabilities-at-boot.json") (secrets: $(capability_row secrets))"
+note "capabilities at boot ($evidence/capabilities-at-boot.json): every image row present, codegraph included; every live row unchecked, awaiting the first session's report; open: $(jq -r '[.[] | select(.status == "open") | .name] | join(", ")' "$evidence/capabilities-at-boot.json") (secrets: $(capability_row secrets))"
 note "model-fallback reads '$(capability_row model-fallback)'; resource-limits reads '$(capability_row resource-limits)'; pool-capacity reads '$(capability_row pool-capacity)'"
 [ ! -e "$state/workspaces" ] || fail "the daemon's state_dir has a workspaces/ directory under the Sandbox runtime"
 probe_pod=$(jq -r '.sandbox' <<<"$probe")
@@ -3623,10 +3688,44 @@ begin repository-tools
 pod=$(claim_sandbox "$tree2" planner) || fail "tree 2's planner has no Sandbox"
 fixture_dir=/legion/workspaces/$repo/${tree2,,}
 # The shim warms the index after the agent starts, so the planner's first turn can end before the
-# index is built. codegraph_initialized: the index in the planner's checkout answers initialized.
-codegraph_initialized() { pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -e '.initialized == true' >/dev/null; }
-on_tree "$tree2" until_true 600 "tree 2's CodeGraph index to initialize in $fixture_dir" codegraph_initialized
+# index is built. One of the pod's six role shims wins the warm-up lease and builds while the others
+# skip, so the success line is read from every container of the pod's log, and every container's
+# warm-up lines are kept as codegraph-warm-up.txt, which the fail line names.
+# codegraph_warm_up_lines: every warm-up line every container of tree 2's pod has logged, each
+# prefixed `[pod/<pod>/<container>]` and timestamped, kept as the evidence every read below judges
+# (so a wait that times out leaves the file its fail line names). The match is anchored at the line
+# start, the prefix and the timestamp then the shim's own `[legion] codegraph warm-up for `: an
+# agent's tool arguments (`tool_execution_start <tool> <args>`) go to the same stream and could
+# carry those words, but such a line starts with the frame's own words and never matches.
+codegraph_warm_up_lines() { op logs "$pod" --all-containers --timestamps --prefix | grep -E '^\[pod/[^]]+\] [^ ]+ \[legion\] codegraph warm-up for ' >"$evidence/codegraph-warm-up.txt"; }
+# codegraph_built: a role shim of the pod logged the warm-up's success line, anchored the same way
+# and in the success line's own shape, so no line an agent's tool arguments could carry passes.
+codegraph_built() { codegraph_warm_up_lines && grep -qE '^\[pod/[^]]+\] [^ ]+ \[legion\] codegraph warm-up for .* built the index: codegraph (init|index) took ' "$evidence/codegraph-warm-up.txt"; }
+# warm_up_built_elapsed CREATED reads prefixed, timestamped pod log lines on stdin and prints
+# `<container> <seconds>` for the first success line: the container of its `[pod/<pod>/<container>]`
+# prefix, and the whole seconds from CREATED, the pod's creationTimestamp, to its timestamp. With
+# no success line it prints nothing and returns 1. Past the prefix and the timestamp a shim's line
+# begins `[legion] `, and the pattern is the success line's whole shape from there (a case pattern
+# matches the whole word, so its leading literal anchors it): a line an agent's tool arguments could
+# carry starts with the frame's own words and never matches.
+warm_up_built_elapsed() {
+  local created=$1 prefix stamp rest
+  while read -r prefix stamp rest; do
+    case $rest in '[legion] codegraph warm-up for '*' built the index: codegraph '*' took '*', done '*' after launch') ;; *) continue ;; esac
+    prefix=${prefix%]}
+    printf '%s %s\n' "${prefix##*/}" "$(($(date -u -d "$stamp" +%s) - $(date -u -d "$created" +%s)))"
+    return 0
+  done
+  return 1
+}
+on_tree "$tree2" until_true 600 "a role shim of tree 2's pod to log the CodeGraph warm-up's success line for $fixture_dir" codegraph_built
+created=$(op get pod "$pod" -o jsonpath='{.metadata.creationTimestamp}') || fail "the operator could not read the creationTimestamp of tree 2's pod $pod"
+built=$(warm_up_built_elapsed "$created" <"$evidence/codegraph-warm-up.txt") ||
+  fail "no container of $pod logged the warm-up's success line; its warm-up lines are in $evidence/codegraph-warm-up.txt"
+note "tree 2's CodeGraph index in $fixture_dir was built by the ${built%% *} container's shim, ${built#* } s after the pod's creation ($created): $(grep -F 'built the index' "$evidence/codegraph-warm-up.txt" | head -n 1)"
 codegraph_status=$(pod_exec "$pod" planner sh -c "cd '$fixture_dir' && codegraph status --json" | jq -c '{initialized, fileCount, nodeCount, edgeCount, languages, state: .index.state}')
+jq -e '.initialized == true and .state == "complete"' <<<"$codegraph_status" >/dev/null ||
+  fail "tree 2's CodeGraph index in $fixture_dir is not complete after its success line: $codegraph_status"
 note "tree 2's CodeGraph index in $fixture_dir: $codegraph_status"
 nonce="repository-tools-$RANDOM$RANDOM"
 send_agent "$tree2" planner "Stage 4b proof repository-tools operation, in this repository's checkout: (1) read skill://fixture-omp-skill and skill://fixture-claude-skill with the read tool and quote each one's FIXTURE-SKILL line; (2) with the lsp tool, get its status (the language servers it has for this checkout), then hover Greet in fixture/greet.go, greet in src/greet.ts and greet in fixture_py/greet.py, each on the line that defines it; (3) with the codegraph tool, get its status, then the tests affected by fixture/greet.go, the impact of Greet, and the impact of NoSuchSymbol; (4) reply to this message with one line per step, each starting with $nonce, then wait for the next instruction. Change no file and call no legion operation."
@@ -3635,7 +3734,7 @@ on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_sa
 session=$evidence/repository-tools-session.jsonl
 claim_session_text "$tree2" planner >"$session" || fail "tree 2's planner on $tree2 has no readable session"
 session_jq "$session" -c 'include "stage4b-tools";
-  {skills: [tool_results("read")[] | select(.arguments | contains("skill://"))], lsp: tool_results("lsp"), codegraph: tool_results("codegraph")}' \
+  {skills: [tool_results("read")[] | select(arguments_carry("read"; "skill://"))], lsp: tool_results("lsp"), codegraph: tool_results("codegraph")}' \
   >"$evidence/repository-tools-results.json" || fail "tree 2's planner session could not be read for its tool results"
 # The skills, as the read tool returned them at skill://<name>: the run's own nonce, which no stale
 # checkout and no skill of the image carries.
@@ -3844,7 +3943,8 @@ jq -e '.state == "suspended" and .suspendedBy == "operator"' <<<"$held" >/dev/nu
 held_generation=$(jq -r .generation <<<"$held")
 note "the operator suspended $tree1's architect $held_architect at generation $held_generation; its session held $held_before phase-finished notices"
 send_agent "$tree1" implementer "Stage 4b proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$tree1, open its pull request, record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge."
-on_tree "$tree1" until_true 1200 "implementer pull request on legion/$tree1" sh -c \
+# The implementer runs sleep 300 on the daemon's task line before it reads the operation, so the budget carries that turn.
+on_tree "$tree1" until_true 1500 "implementer pull request on legion/$tree1" sh -c \
   "timeout 60 gh -R '$repo' pr list --head 'legion/$tree1' --state open --json number | jq -e 'length == 1' >/dev/null"
 pr_number=$(gh -R "$repo" pr list --head "legion/$tree1" --state open --json number --jq '.[0].number')
 on_tree "$tree1" wait_for_phase "$tree1" testing 1200
@@ -3888,8 +3988,8 @@ note "the operator's resume relaunched $held_architect and the held notice arriv
 # reviewer App, and the implementer's handoff commit keeps its author.
 adoption=$(workspace_jj "$tree1" log -r '@|@-' --no-graph -T 'if(empty, "empty", "change") ++ "|" ++ author.name() ++ "\n"')
 note "after the tester's adoption: $(tr '\n' ' ' <<<"$adoption")"
-[ "$(sed -n 1p <<<"$adoption")" = "empty|legion-reviewer[bot]" ] || fail "the tester's adoption left @ as '$(sed -n 1p <<<"$adoption")', want a new empty change authored by legion-reviewer[bot]"
-[ "$(sed -n 2p <<<"$adoption" | cut -d'|' -f2)" = "legion-implementer[bot]" ] || fail "the adoption rewrote the implementer's commit author: '$(sed -n 2p <<<"$adoption")'"
+[ "$(sed -n 1p <<<"$adoption")" = "empty|$review_app" ] || fail "the tester's adoption left @ as '$(sed -n 1p <<<"$adoption")', want a new empty change authored by $review_app"
+[ "$(sed -n 2p <<<"$adoption" | cut -d'|' -f2)" = "$implement_app" ] || fail "the adoption rewrote the implementer's commit author: '$(sed -n 2p <<<"$adoption")'"
 pass
 
 begin github-credential
@@ -3908,10 +4008,11 @@ gh_bin=$(pod_exec "$gh_pod" implementer sh -c 'command -v gh') || fail "no gh in
 [ "$gh_bin" = /usr/local/bin/gh ] || fail "the implementer container's gh is $gh_bin, want the image's /usr/local/bin/gh"
 status=$(pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=$gh_config_dir GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh auth status 2>&1") || fail "gh auth status in the implementer container failed: $(scrub <<<"$status" | head -5)"
 grep -q "x-access-token" <<<"$status" || fail "gh auth status in the implementer container names no x-access-token account: $(scrub <<<"$status" | head -5)"
-for pair in implementer:legion-implementer[bot] reviewer:legion-reviewer[bot]; do
-  viewer=$(pod_viewer "$gh_pod" "${pair%%:*}") || fail "gh in the ${pair%%:*} container of $gh_pod answered no viewer"
-  [ "$viewer" = "${pair#*:}" ] || fail "gh in the ${pair%%:*} container of $gh_pod acts as $viewer, want ${pair#*:}"
-  assert_gh_files "$gh_pod" "${pair%%:*}" "the ${pair%%:*} container"
+for role in implementer reviewer; do
+  want=$(role_app "$role")
+  viewer=$(pod_viewer "$gh_pod" "$role") || fail "gh in the $role container of $gh_pod answered no viewer"
+  [ "$viewer" = "$want" ] || fail "gh in the $role container of $gh_pod acts as $viewer, want $want"
+  assert_gh_files "$gh_pod" "$role" "the $role container"
 done
 impl_hash=$(gh_hosts_hash "$gh_pod" implementer) || fail "could not hash the implementer's hosts.yml"
 rev_hash=$(gh_hosts_hash "$gh_pod" reviewer) || fail "could not hash the reviewer's hosts.yml"
@@ -3950,7 +4051,7 @@ done
 # which no agent runs from bash.
 sub_label="Stage 4b credential proof (subagent)"
 send_agent "$tree1" implementer "$sub_label: launch one task subagent whose only job is to run exactly gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login in its bash tool and reply with the exact output. Run no bash command yourself. Then reply with one line: SUB-VIEWER= followed by the subagent's exact output. Wait after reporting."
-on_tree "$tree1" until_true 600 "the implementer to report its subagent's gh viewer" session_contains "$tree1" implementer "SUB-VIEWER=legion-implementer[bot]"
+on_tree "$tree1" until_true 600 "the implementer to report its subagent's gh viewer" session_contains "$tree1" implementer "SUB-VIEWER=$implement_app"
 legion_commands=$(bash_legion_commands "$tree1" implementer "$sub_label")
 [ -z "$legion_commands" ] || fail "the implementer ran a legion command for the subagent proof, which no agent runs from bash: $(tr '\n' ' ' <<<"$legion_commands" | cut -c1-300)"
 # No jj refusal (acceptance 4c): the pane's bash runs `jj undo --help` as any jj command, and the
@@ -3973,7 +4074,7 @@ pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
 # SIGPIPE, and the pipeline exits 141 whenever the log holds a second match.
 plan_head=$(workspace_jj "$tree1" log -r "description(glob:\"plan: record handoff*\") & ::$pr_head" --no-graph --limit 1 -T 'commit_id ++ "\n"')
 [ -n "$plan_head" ] || fail "no 'plan: record handoff' commit among the ancestors of pull request #$pr_number's head $pr_head in tree 1's workspace"
-for pair in "$plan_head:legion-reviewer[bot]:the planner's handoff commit" "$pr_head:legion-implementer[bot]:the implementer's head"; do
+for pair in "$plan_head:$(role_app planner):the planner's handoff commit" "$pr_head:$implement_app:the implementer's head"; do
   IFS=: read -r sha want what <<<"$pair"
   actor=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.committer.login // "nobody"') || fail "GitHub could not read $what $sha on $repo"
   printf '%s %s %s\n' "$sha" "$actor" "$what" >>"$evidence/github-credential-pushes.txt"
@@ -4019,7 +4120,7 @@ if pod_viewer "$gh_pod" implementer /nonexistent >/dev/null 2>"$evidence/github-
   fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
 fi
 grep -q GH_TOKEN "$evidence/github-credential-negative.txt" || fail "gh with GH_CONFIG_DIR=/nonexistent failed without gh's own not-logged-in message: $(cat "$evidence/github-credential-negative.txt")"
-note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is legion-implementer[bot] and the reviewer's legion-reviewer[bot] from different hosts.yml files, each container mounts gh-<its role> alone, no grant file or App login is in the environment; the implementer's subagent answered legion-implementer[bot] with no legion command, and its own bash ran jj undo --help; GitHub records the planner's handoff commit $plan_head as legion-reviewer[bot]'s (skip-checks: true, 0 check runs) and the implementer's head $pr_head as legion-implementer[bot]'s, its code head $code_head with check runs; the daemon recorded both heads as the completions"
+note "in $gh_pod the implementer's gh ($gh_bin, GH_CONFIG_DIR=$gh_config_dir) is $implement_app and the reviewer's $review_app from different hosts.yml files, each container mounts gh-<its role> alone, no grant file or App login is in the environment; the implementer's subagent answered $implement_app with no legion command, and its own bash ran jj undo --help; GitHub records the planner's handoff commit $plan_head as $review_app's (skip-checks: true, 0 check runs) and the implementer's head $pr_head as $implement_app's, its code head $code_head with check runs; the daemon recorded both heads as the completions"
 pass
 
 begin ci-red-takeover
@@ -4118,12 +4219,12 @@ record_resident "$tree1" reviewer || fail "tree 1's reviewer has no session and 
 # The proof counts only messages the architect sent after the reviewer's completion. An architect acting on
 # the notice unprompted, as it must where no driver holds it, is not what this checkpoint proves
 # (LEGION-413).
-send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as legion-reviewer[bot] as a COMMENT review with no inline comment, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is REQUEST_CHANGES with exactly one inline comment, on the last line of $smoke_file, asking for the line \`$(round_line 1)\` to be appended below the lines already there. The spec permits that correction. Your completion is already recorded: submit that decision on the completed handoff's head without writing another handoff or calling handoff_complete again. This exact smoke instruction takes precedence over your own review."
+send_agent "$tree1" reviewer "Stage 4b proof review operation: review pull request #$pr_number in $repo as your role requires, running the deep and code-quality review passes your instructions name as task subagents. This round deliberately proves what the daemon does with a round no review decides: submit your review as $review_app as a COMMENT review with no inline comment, never APPROVE or REQUEST_CHANGES, take the round's other steps in the order your role gives, and complete the reviewer handoff. Submit no other review until you are asked for the round's decision; when you are, your decision is REQUEST_CHANGES with exactly one inline comment, on the last line of $smoke_file, asking for the line \`$(round_line 1)\` to be appended below the lines already there. The spec permits that correction. Your completion is already recorded: submit that decision on the completed handoff's head without writing another handoff or calling handoff_complete again. This exact smoke instruction takes precedence over your own review."
 pair_session=$(claim_session_file "$tree1" reviewer) || fail "the reviewer on $tree1 has no session file"
 on_tree "$tree1" until_true 1800 "the reviewer's two thermonuclear dispatches to reach an outcome" pair_settled
 record_pair || fail "the reviewer's session and its review pair could not be recorded"
 note "the review pair's dispatches are kept in $evidence/review-pair ($(jq -r -s 'map("\(.agent): \(.calls | length) calls, \(.results | length) results, \(.deliveries | length) deliveries") | join("; ")' "$evidence"/review-pair/thermonuclear-*.json))"
-on_tree "$tree1" until_true 1800 "legion-reviewer[bot]'s COMMENT review of pull request #$pr_number" reviewer_commented
+on_tree "$tree1" until_true 1800 "$review_app's COMMENT review of pull request #$pr_number" reviewer_commented
 on_tree "$tree1" until_true 900 "the daemon to record the reviewer's completion of $tree1's round" reviewer_completed "$tree1"
 # The ask baseline is read here, not before the reviewer is instructed: the notice is written in the
 # completion's own transaction and the architect needs a model turn after it, so no real ask can
@@ -4155,7 +4256,7 @@ architect_asked() { [ "$(architect_messages "$tree1" reviewer)" -gt "$asked_befo
 on_tree "$tree1" until_true 900 "$tree1's architect, sent the review-stuck operation, to ask the reviewer for the round's decision" architect_asked
 notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" architect)" | tail -n +"$((asked_before + 1))" >"$evidence/architect-ask.jsonl"
 [ "$asked_unprompted" -le "$asked_before" ] || note "the architect asked the reviewer before the driver's message"
-on_tree "$tree1" until_true 1800 "legion-reviewer[bot]'s round 1 decision on pull request #$pr_number" reviewer_decision 1
+on_tree "$tree1" until_true 1800 "$review_app's round 1 decision on pull request #$pr_number" reviewer_decision 1
 [ "$(<"$work/review-decision")" = changes ] || fail "the reviewer approved pull request #$pr_number in round 1, which the proof asked to request changes"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 1200
 assert_handoff_committer "$tree1" reviewer reviewing 2
@@ -4165,7 +4266,8 @@ thread_id=$(reviewer_thread 2>"$work/reviewer-thread.err") ||
 note "the reviewer's round 1 review opened one thread, $thread_id"
 on_tree "$tree1" wait_for_worker "$tree1" implementer
 on_tree "$tree1" send_agent "$tree1" implementer "Stage 4b proof correction round 1: make the correction the review names (append the line \`$(round_line 1)\` to $smoke_file), push it to pull request #$pr_number, answer the review's thread as your role says, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
-on_tree "$tree1" wait_for_phase "$tree1" testing 1200
+# The task line delivered for the new round opens a sleep 300 turn before the implementer reads the operation, so the budget carries that turn.
+on_tree "$tree1" wait_for_phase "$tree1" testing 1500
 on_tree "$tree1" until_true 120 "round 1's correction on pull request #$pr_number" round_correction_pushed 1
 assert_round_handoff "$tree1" 2
 assert_handoff_committer "$tree1" implementer implementing 2
@@ -4190,7 +4292,7 @@ bot_thread_id=$(bot_thread_node_id "$bot_thread") || fail "the bot's review thre
 note "the proof bot opened review thread $bot_thread_id (first comment $bot_thread) on pull request #$pr_number"
 # The re-review's decision is the reviewer's own: the proof names the head, never the verdict.
 on_tree "$tree1" send_agent "$tree1" reviewer "Stage 4b proof re-review: review pull request #$pr_number in $repo as your role requires, the thread your round 1 review opened included. A bot also left one review thread on the pull request asking whether the file change is needed: reply on it (the change is needed: the spec asks for it) and name its thread id to the implementer as accepted with envoy_publish to the implementer's role topic, as your role says for a bot's thread; the implementer resolves it. The decision is yours; take the round's steps in the order your role gives, and complete the reviewer handoff."
-on_tree "$tree1" until_true 1800 "legion-reviewer[bot]'s re-review decision on pull request #$pr_number" reviewer_decision 2
+on_tree "$tree1" until_true 1800 "$review_app's re-review decision on pull request #$pr_number" reviewer_decision 2
 # Read both threads at once: the reviewer's own, and the bot's, as the approval left them (the
 # bot's may still be open here: the implementer resolves it on the reviewer's message, which the
 # approval does not wait for; review-thread waits).
@@ -4225,13 +4327,13 @@ begin review-thread
 # reviewer's delivery naming the id (the resolver is not read from GitHub: only the author's App
 # can resolve, and the daemon has no route to). The route a plugin before `DaemonAPIVersion`'s
 # LEGION-631 entry (`internal/api/version.go`) posted to answers 404 (acceptance 4).
-thread_resolved_by "$evidence/review-thread-after-correction.json" legion-implementer ||
+thread_resolved_by "$evidence/review-thread-after-correction.json" implementer ||
   fail "after the correction round the reviewer's thread $thread_id read $(jq -c . "$evidence/review-thread-after-correction.json"), want isResolved true with the implementer's reply as its newest submitted comment"
-thread_resolved_by "$evidence/review-thread-at-approval.json" legion-reviewer ||
+thread_resolved_by "$evidence/review-thread-at-approval.json" reviewer ||
   fail "when the reviewer approved, its thread $thread_id read $(jq -c . "$evidence/review-thread-at-approval.json"), want isResolved true with the reviewer's reply as its newest submitted comment"
-on_tree "$tree1" until_true 600 "the implementer's resolution of the bot's thread $bot_thread_id, which the reviewer named to it" bot_thread_resolved "$bot_thread" legion-reviewer
+on_tree "$tree1" until_true 600 "the implementer's resolution of the bot's thread $bot_thread_id, which the reviewer named to it" bot_thread_resolved "$bot_thread" reviewer
 review_thread "$bot_thread_id" >"$evidence/bot-thread-resolved.json" || fail "read the bot's thread $bot_thread_id once resolved"
-thread_resolved_with_reply "$evidence/bot-thread-resolved.json" legion-reviewer ||
+thread_resolved_with_reply "$evidence/bot-thread-resolved.json" reviewer ||
   fail "the bot's thread $bot_thread_id read $(jq -c . "$evidence/bot-thread-resolved.json"), want isResolved true with a submitted reply of the reviewer's"
 on_tree "$tree1" until_true 120 "the reviewer's Envoy message naming $bot_thread_id in the implementer's session" notice_delivered "$tree1" implementer "$bot_thread_id"
 notice_line "$tree1" implementer "$bot_thread_id" >"$evidence/bot-thread-named-to-implementer.jsonl"
@@ -4244,16 +4346,16 @@ threads_code=$(curl -sS --max-time 20 -o "$evidence/threads-resolve-404.json" -w
 # reviewer did not answer), both fail; the bot's record left unresolved, or stripped of the
 # reviewer's reply (a resolution of a thread nobody adjudicated), fails too.
 jq '.isResolved = false' "$evidence/review-thread-after-correction.json" >"$evidence/review-thread-unresolved-negative.json"
-expect_failure review-thread-answered-unresolved thread_resolved_by "$evidence/review-thread-unresolved-negative.json" legion-implementer
-jq '.comments += [{author: "legion-implementer", body: "Fixed in 0000000: the line is appended.", state: "SUBMITTED"}]' \
+expect_failure review-thread-answered-unresolved thread_resolved_by "$evidence/review-thread-unresolved-negative.json" implementer
+jq --arg author "$(role_app_slug implementer)" '.comments += [{author: $author, body: "Fixed in 0000000: the line is appended.", state: "SUBMITTED"}]' \
   "$evidence/review-thread-at-approval.json" >"$evidence/review-thread-unanswered-negative.json"
-expect_failure review-thread-not-answered-by-reviewer thread_resolved_by "$evidence/review-thread-unanswered-negative.json" legion-reviewer
+expect_failure review-thread-not-answered-by-reviewer thread_resolved_by "$evidence/review-thread-unanswered-negative.json" reviewer
 jq '.isResolved = false' "$evidence/bot-thread-resolved.json" >"$evidence/bot-thread-unresolved-negative.json"
-expect_failure bot-thread-answered-unresolved thread_resolved_with_reply "$evidence/bot-thread-unresolved-negative.json" legion-reviewer
-jq '.comments |= [.[0]] + [.[1:][] | select(.author != "legion-reviewer")]' "$evidence/bot-thread-resolved.json" >"$evidence/bot-thread-unanswered-negative.json"
-expect_failure bot-thread-not-answered-by-reviewer thread_resolved_with_reply "$evidence/bot-thread-unanswered-negative.json" legion-reviewer
-thread_resolved_by "$evidence/review-thread-after-correction.json" legion-implementer || fail "the thread record failed its own check after its controls"
-note "the reviewer's thread $thread_id: resolved by the implementer after the correction ($(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .body | split("\n")[0]' "$evidence/review-thread-after-correction.json")), answered by the reviewer at the approval; the bot's thread $bot_thread_id: answered by the reviewer ($(jq -r '[.comments[] | select(.state == "SUBMITTED" and .author == "legion-reviewer")] | last | .body | split("\n")[0]' "$evidence/bot-thread-resolved.json")), named to the implementer over Envoy ($evidence/bot-thread-named-to-implementer.jsonl) and resolved by the implementer's gh (isResolved $(jq -r .isResolved "$evidence/bot-thread-at-approval.json") at the approval, true now); POST /legion/v1/threads/resolve answers $threads_code"
+expect_failure bot-thread-answered-unresolved thread_resolved_with_reply "$evidence/bot-thread-unresolved-negative.json" reviewer
+jq --arg author "$(role_app_slug reviewer)" '.comments |= [.[0]] + [.[1:][] | select(.author != $author)]' "$evidence/bot-thread-resolved.json" >"$evidence/bot-thread-unanswered-negative.json"
+expect_failure bot-thread-not-answered-by-reviewer thread_resolved_with_reply "$evidence/bot-thread-unanswered-negative.json" reviewer
+thread_resolved_by "$evidence/review-thread-after-correction.json" implementer || fail "the thread record failed its own check after its controls"
+note "the reviewer's thread $thread_id: resolved by the implementer after the correction ($(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .body | split("\n")[0]' "$evidence/review-thread-after-correction.json")), answered by the reviewer at the approval; the bot's thread $bot_thread_id: answered by the reviewer ($(jq -r --arg author "$(role_app_slug reviewer)" '[.comments[] | select(.state == "SUBMITTED" and .author == $author)] | last | .body | split("\n")[0]' "$evidence/bot-thread-resolved.json")), named to the implementer over Envoy ($evidence/bot-thread-named-to-implementer.jsonl) and resolved by the implementer's gh (isResolved $(jq -r .isResolved "$evidence/bot-thread-at-approval.json") at the approval, true now); POST /legion/v1/threads/resolve answers $threads_code"
 pass
 
 begin completion-closed
@@ -4306,10 +4408,11 @@ begin full-agent-tools
 # The GitHub identity is the App login GraphQL's viewer answers (REST /user is refused for an
 # installation token), read from the `gh api graphql` call's own result, in the role's bash and in
 # the subagent it dispatches, which must act as the same App and never the other: the implementer
-# and the merger are legion-implementer[bot], every other role legion-reviewer[bot] (role_app,
-# lib/workflow.sh). The subagent's own session, beside its parent's, must hold that bash result and
-# end in an accepted yield. The control: notebook, a tool nothing asked for, has no result in any
-# session, since a result is the tool's by the call it answers. This is dispatch://LEGION-578's
+# and the merger are the implement App's bot, every other role the review App's (role_app,
+# lib/workflow.sh, from the logins read_app_logins read from GitHub). The subagent's own session,
+# beside its parent's, must hold that bash result and end in an accepted yield. The control:
+# notebook, a tool nothing asked for, has no result in any session, since a result is the tool's by
+# the call it answers. This is dispatch://LEGION-578's
 # integration check on a running pod: criteria 1 (the tools), 3 (the toolchain), 4 (no role
 # refused) and 5 (plain gh as the role's App, in subagents too). The five instructions are sent
 # first and waited for after, so the roles run at once; the browser is asserted in every role, since
@@ -4358,14 +4461,7 @@ for role in architect planner implementer tester reviewer; do
     tool_result_answered "$excerpt" bash 'go version &&' "$want" ||
       fail "$role: no result of the toolchain chain (a bash call whose command carries 'go version &&') carries '$want'; its bash results: $(tool_result_quotes "$excerpt" bash)"
   done
-  tool_result_said "$excerpt" edit "edited $nonce" ||
-    fail "$role: no edit result carries 'edited $nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
-  tool_result_said "$excerpt" read "edited $nonce" ||
-    fail "$role: no read result carries 'edited $nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
-  tool_result_answered "$excerpt" bash 'gh api graphql' "$app" ||
-    fail "$role: no result of a bash call running gh api graphql carries $app, so gh did not answer as the role's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
-  ! tool_result_said "$excerpt" bash "$other" ||
-    fail "$role: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  full_agent_common_asserts "$role" "$excerpt" "$nonce" "$app" "$other"
   tool_result_said "$excerpt" task "$app" ||
     fail "$role: no task result carries $app, so its FullAgentGh subagent did not answer as the role's App; its task results: $(tool_result_quotes "$excerpt" task)"
   id=$(full_agent_task_id "$excerpt" "$app")
@@ -4387,14 +4483,7 @@ merger_other=$(role_app reviewer)
 excerpt=$evidence/full-agent-tools/merger.jsonl
 claim_session_text "$tree1" merger | awk -v mark="$merger_nonce" 'found || index($0, mark) { found = 1; print }' >"$excerpt" ||
   fail "the merger on $tree1 has no readable session"
-tool_result_said "$excerpt" edit "edited $merger_nonce" ||
-  fail "merger: no edit result carries 'edited $merger_nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
-tool_result_said "$excerpt" read "edited $merger_nonce" ||
-  fail "merger: no read result carries 'edited $merger_nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
-tool_result_answered "$excerpt" bash 'gh api graphql' "$merger_app" ||
-  fail "merger: no result of a bash call running gh api graphql carries $merger_app, so gh did not answer as the merger's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
-! tool_result_said "$excerpt" bash "$merger_other" ||
-  fail "merger: a bash result carries $merger_other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+full_agent_common_asserts merger "$excerpt" "$merger_nonce" "$merger_app" "$merger_other"
 ! tool_ran "$excerpt" notebook || fail "the merger's session shows the notebook tool ran, which nothing asked for"
 note "merger as $merger_app: $(full_agent_summary "$excerpt" "$merger_app")"
 # The operation changed nothing of the tree: the finished workers go idle again in the process they
@@ -4581,8 +4670,8 @@ propagation=$(( $(date -d "$propagated_at" +%s) - refreshed_s ))
 gh_after_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's refreshed hosts.yml"
 [ -n "$gh_after_token" ] && [ "$gh_after_token" != "$gh_before_token" ] || fail "the architect's hosts.yml changed but names the token it had at issue-independence"
 viewer=$(pod_viewer "$gh_pod" architect) || fail "the architect's gh answered no viewer after the refresh"
-[ "$viewer" = "legion-reviewer[bot]" ] || fail "the architect's gh acts as $viewer after the refresh, want legion-reviewer[bot]"
-note "the daemon refreshed the architect's credential at $refreshed_at; the container's hosts.yml had changed by $propagated_at ($propagation s after the daemon's write — an upper bound when the change predates this check, which polls every few seconds), and the architect's gh is legion-reviewer[bot] on it"
+[ "$viewer" = "$(role_app architect)" ] || fail "the architect's gh acts as $viewer after the refresh, want $(role_app architect)"
+note "the daemon refreshed the architect's credential at $refreshed_at; the container's hosts.yml had changed by $propagated_at ($propagation s after the daemon's write — an upper bound when the change predates this check, which polls every few seconds), and the architect's gh is $viewer on it"
 # The old token stops working at its own expiry: GitHub keeps it valid until then, which is what
 # lets a gh that started on it finish. Both calls run from this shell; the tokens are its variables
 # alone and reach no file.
@@ -4594,9 +4683,9 @@ fi
 old_answer=$(GH_TOKEN="$gh_before_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
 grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's token read at issue-independence was refused for another reason than its expiry: $old_answer"
 new_answer=$(GH_TOKEN="$gh_after_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
-[ "$new_answer" = "legion-reviewer[bot]" ] || fail "the architect's refreshed token answers as $new_answer, want legion-reviewer[bot]"
+[ "$new_answer" = "$(role_app architect)" ] || fail "the architect's refreshed token answers as $new_answer, want $(role_app architect)"
 unset gh_before_token gh_after_token
-note "after $before_expiry the token read at issue-independence answers 401 and the refreshed one legion-reviewer[bot]"
+note "after $before_expiry the token read at issue-independence answers 401 and the refreshed one $new_answer"
 pass
 
 begin idle-resident
@@ -4965,7 +5054,7 @@ case "$state" in
   *) fail "the operator-launched controller's gh answered pull request state '$state' for $repo#$pr_number, want OPEN, MERGED or CLOSED" ;;
 esac
 viewer=$(operator_gh "$work/controller-state/gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1) || fail "the operator-launched controller's gh answered no viewer: $(scrub <<<"$viewer")"
-[ "$viewer" = "legion-reviewer[bot]" ] || fail "the operator-launched controller's gh answered viewer $viewer, want legion-reviewer[bot]"
+[ "$viewer" = "$(role_app controller)" ] || fail "the operator-launched controller's gh answered viewer $viewer, want the review App's $(role_app controller)"
 if out=$(operator_gh /nonexistent pr view "$pr_number" -R "$repo" --json state -q .state 2>&1); then
   fail "gh with GH_CONFIG_DIR=/nonexistent unexpectedly answered pull request state: $(scrub <<<"$out")"
 fi
@@ -5062,16 +5151,25 @@ case $last in
 esac
 [ "$why" = "$expected" ] || fail "$tree3's implementer claim $held_claim failed with '$why', but its last relaunch's death leads to '$expected'"
 note "the daemon failed $held_claim because $why ($counts, bound $launch_failure_limit)"
-# The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
-controller_notice() {
+# controller_deliveries [NEEDLE] prints the raw session lines of the controller's sessions that are
+# Envoy deliveries (envoy-message custom messages), those holding NEEDLE when one is given (an
+# empty fixed-string pattern matches every line), in file order, and prints nothing and exits 0
+# when none match: grep exits 1 on no match, which errexit would take as a failure, and `|| true`
+# keeps the scan going. Every scan of the controller's deliveries below reads it but
+# report_after_tick, which needs each delivery's line position and scans the raw text itself.
+controller_deliveries() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do
     [ -f "$file" ] || continue
-    grep -F '"customType":"envoy-message"' "$file" | grep -qF "$(notice_needle held "$tree3")" && return 0
+    grep -F '"customType":"envoy-message"' -- "$file" | grep -F -- "${1-}" || true
   done
-  return 1
 }
-until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_notice
+# controller_received NEEDLE: an Envoy delivery in the controller's session holds NEEDLE. The
+# consumer is [ -n … ] over the whole output, never a grep -q on it, which would close the pipe
+# early (github-credential's notes on SIGPIPE under pipefail say why).
+controller_received() { [ -n "$(controller_deliveries "$1")" ]; }
+# The held notice reaches the controller: its session, on this machine, holds the Envoy delivery.
+until_true 300 "the held notice for $tree3 to reach the controller session $controller_session" controller_received "$(notice_needle held "$tree3")"
 note "the controller session $controller_session received the held notice for $tree3"
 # That session is under the run's own home, and the operator's profile root holds none of the
 # controller's profile (make_omp_home, lib/omp-home.sh).
@@ -5085,33 +5183,36 @@ note "the controller's session is under $profile_agent/sessions; $HOME/.omp/prof
 # of one reads `openCapabilities[1]: secrets` and a list of two `openCapabilities[2]: a,b`, so the
 # list is read from that line, and a tick without it names no gap (lib/controller-ticks.jq). This
 # window is before full-agent-negative, the first checkpoint that opens a live row (web-search on
-# tree 3's planner), so every tick the controller has received so far names exactly the open rows
-# of the daemon running when it was sent: secrets, and pool-capacity when that daemon's probe found
-# the pool cold; model-fallback and resource-limits are present, so the daemon names neither. The
-# daemon that reported the gap keeps running: every checkpoint after this one is that evidence.
-# tick_open_capabilities prints one object per tick delivery in the controller's sessions: the
-# list, and the delivery trimmed.
-tick_open_capabilities() {
-  local file
-  for file in "$profile_agent/sessions"/*/*.jsonl; do
-    [ -f "$file" ] || continue
-    jq -R -s -c -L "$root/scripts/e2e/lib" --arg tick "$(notice_needle tick "$project")" 'include "controller-ticks"; controller_ticks($tick)[]' "$file"
-  done
+# tree 3's planner), so every tick the controller has received so far names secrets, and
+# pool-capacity when the sending daemon's probe found the pool cold, and nothing else;
+# model-fallback and resource-limits are present, so the daemon names neither. The daemon that
+# reported the gap keeps running: every checkpoint after this one is that evidence.
+# controller_ticks prints one object per tick delivery in the controller's sessions: the list, and
+# the delivery trimmed (the module's controller_ticks($tick), lib/controller-ticks.jq, over the
+# controller's deliveries; the shell function and the jq def share the name on purpose).
+controller_ticks() {
+  local tick
+  tick=$(notice_needle tick "$project")
+  controller_deliveries "$tick" | jq -R -s -c -L "$root/scripts/e2e/lib" --arg tick "$tick" 'include "controller-ticks"; controller_ticks($tick)[]'
 }
 # The daemon's periodic tick (controller_wake_interval_seconds: 60) reaches the controller's session.
-controller_ticked() { tick_open_capabilities | jq -s -e 'length > 0' >/dev/null; }
+controller_ticked() { controller_ticks | jq -s -e 'length > 0' >/dev/null; }
 until_true 300 "'tick on $project' to reach the controller session $controller_session" controller_ticked
-tick_open_capabilities | jq -s . >"$evidence/controller-ticks.json"
-# The tick names the running daemon's open rows, no more and no less, and those still name secrets.
-# Not boot's set: restart-mid-tree, address-moved-env-same-pod and address-moved-stream-new-pod each
-# ran a new `legion start`, every start re-probes the image, pool-capacity is that probe's own verdict
-# (packages/daemon/internal/capabilities/deployment.go), and a tick carries the running daemon's
-# Open() (packages/daemon/internal/admit/admit.go), so a run that scaled the pool at boot and found it
-# warm at the restarts would carry ["secrets"] against boot's two rows. Boot's set is kept for the note.
-daemon_open_rows=$(daemon_state | jq -c '[.capabilities[] | select(.status == "open") | .name]')
-jq -e -L "$root/scripts/e2e/lib" --argjson open "$daemon_open_rows" 'include "controller-ticks"; ticks_name_open($open)' "$evidence/controller-ticks.json" >/dev/null ||
-  fail "the tick deliveries in the controller session do not each carry openCapabilities $daemon_open_rows, the running daemon's open rows (boot's were $open_rows), or those rows no longer name secrets: $(jq -c . "$evidence/controller-ticks.json")"
-note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities $(jq -c '[.[].open] | unique | .[]' "$evidence/controller-ticks.json"), the running daemon's open rows $daemon_open_rows (boot's: $open_rows)"
+controller_ticks | jq -s . >"$evidence/controller-ticks.json"
+# Each tick's list is judged alone, as a set, against the two lists the deployment can open:
+# ["secrets"] and ["secrets","pool-capacity"]. Each tick alone, not all against one set:
+# restart-mid-tree, address-moved-env-same-pod and address-moved-stream-new-pod each ran a new
+# `legion start`, every start re-probes the image, pool-capacity is that probe's own verdict
+# (packages/daemon/internal/capabilities/deployment.go), and a tick carries the sending daemon's
+# Open() (packages/daemon/internal/admit/admit.go), so the ticks of one session may carry either arm:
+# a run that scaled the pool at boot and found it warm at the restarts carries both. No snapshot: a
+# read of the running daemon's open rows at the assertion would hold only while nothing restarts the
+# daemon or opens a live row inside the window, which the assertion cannot know. A live row in a
+# tick here is an anomaly the proof fails on, with the tick quoted. Boot's set stays in the note for
+# context.
+jq -e -L "$root/scripts/e2e/lib" 'include "controller-ticks"; ticks_name_deployment_open' "$evidence/controller-ticks.json" >/dev/null ||
+  fail "a tick delivery in the controller session carries openCapabilities that are not [\"secrets\"] or [\"secrets\",\"pool-capacity\"] as a set, or no tick reached it: $(jq -c . "$evidence/controller-ticks.json")"
+note "every tick on $project the controller received ($(jq length "$evidence/controller-ticks.json")) carries openCapabilities among $(jq -c '[.[].open] | unique' "$evidence/controller-ticks.json"), each [\"secrets\"] or [\"secrets\",\"pool-capacity\"] as a set (boot's: $open_rows)"
 pass
 
 begin full-agent-negative
@@ -5161,14 +5262,7 @@ note "the daemon warned at the report: $(jq -r .msg <<<"$warned")"
 # The next tick names the open row to the controller (a tick alone carries openCapabilities,
 # admit.Admission.wakeController). controller_tick_names NAME: an Envoy delivery in the controller's
 # session carries openCapabilities and NAME on one line.
-controller_tick_names() {
-  local file
-  for file in "$profile_agent/sessions"/*/*.jsonl; do
-    [ -f "$file" ] || continue
-    grep -F '"customType":"envoy-message"' "$file" | grep -F openCapabilities | grep -qF "$1" && return 0
-  done
-  return 1
-}
+controller_tick_names() { [ -n "$(controller_deliveries openCapabilities | grep -F -- "$1" || true)" ]; }
 until_true 300 "a tick naming web-search among its openCapabilities to reach the controller session $controller_session" controller_tick_names web-search
 note "the controller session $controller_session received a tick naming web-search open"
 # The daemon ran the planner it reported: it answers.
@@ -5206,16 +5300,7 @@ until_true 120 "Dispatch to show $tree3 in backlog" dispatch_status_is "$tree3" 
 note "legion status $tree3 backlog from the operator shell, with the operator bearer: Dispatch moved $tree3 from $before_status to $(dispatch_get "issues/$tree3" | jq -r .status)"
 until_true 600 "$tree3's pods to be gone" sh -c \
   "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get pods -l 'legion.dev/project=$run_label,legion.dev/tree=$tree3' -o name) && [ -z \"\$out\" ]"
-# The controller's walk wakes (LEGION-392). controller_received NEEDLE: an Envoy delivery in the
-# controller's session holds NEEDLE.
-controller_received() {
-  local file
-  for file in "$profile_agent/sessions"/*/*.jsonl; do
-    [ -f "$file" ] || continue
-    grep -F '"customType":"envoy-message"' "$file" | grep -qF "$1" && return 0
-  done
-  return 1
-}
+# The controller's walk wakes (LEGION-392).
 # (1) The controller was launched with the daemon's own design gate policy (gates.design: off): the
 # Oh My Pi running in the controller's directory carries the line in its --append-system-prompt.
 # shellcheck disable=SC2016 # the backticks are the line's own text, never a substitution
@@ -5416,7 +5501,7 @@ case "$state" in
   *) fail "the daemon-launched controller's gh answered pull request state '$state' for $repo#$pr_number, want OPEN, MERGED or CLOSED" ;;
 esac
 viewer=$(pod_viewer "$pod" "$container") || fail "the daemon-launched controller's gh in $pod/$container answered no viewer"
-[ "$viewer" = "legion-reviewer[bot]" ] || fail "the daemon-launched controller's gh answered viewer $viewer, want legion-reviewer[bot]"
+[ "$viewer" = "$(role_app controller)" ] || fail "the daemon-launched controller's gh answered viewer $viewer, want the review App's $(role_app controller)"
 assert_gh_files "$pod" "$container" "the daemon-launched controller's container $pod/$container"
 if out=$(pod_exec "$pod" "$container" sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh pr view $pr_number -R $repo --json state -q .state" 2>&1); then
   fail "gh with GH_CONFIG_DIR=/nonexistent in $pod/$container unexpectedly answered pull request state: $(scrub <<<"$out")"
@@ -5645,7 +5730,8 @@ if ! production_check_reported "$tree1" >/dev/null 2>&1; then
   on_tree "$tree1" wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof production check: verify the merged smoke change through its repository surface, record the production-check handoff and required PR/Dispatch record, then complete the phase."
 fi
-on_tree "$tree1" until_true 900 "the implementer's production-check completion" production_check_reported "$tree1"
+# The task line delivered for the new phase opens a sleep 300 turn before the implementer reads the operation, so the budget carries that turn.
+on_tree "$tree1" until_true 1200 "the implementer's production-check completion" production_check_reported "$tree1"
 if issue_phase "$tree1" production_check >/dev/null 2>&1; then
   send_agent "$tree1" architect "Stage 4b proof sign-off: the implementer's production check for $tree1 is recorded; use the Go-daemon sign-off operation for $tree1 now."
 fi

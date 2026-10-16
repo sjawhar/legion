@@ -399,7 +399,7 @@ func (r *liveRig) checkImageProbeRefusal() error {
 			return fmt.Errorf("the probe's refusal does not say %q: %v", want, refusal)
 		}
 	}
-	note("runtime", "refused: %s", firstLine(refusal.Error()))
+	note("runtime", "refused: %s", lineContaining(refusal.Error(), "role oracle is not configured"))
 	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
 	probe := probeName(r.env.project, digest, "")
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
@@ -445,7 +445,7 @@ func (r *liveRig) checkImageProbeCapabilityRefusal() error {
 	if want := "capability browser is missing"; !strings.Contains(refusal.Error(), want) {
 		return fmt.Errorf("the probe's refusal does not say %q: %v", want, refusal)
 	}
-	note("runtime", "refused: %s", firstLine(refusal.Error()))
+	note("runtime", "refused: %s", lineContaining(refusal.Error(), "capability browser is missing"))
 	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
 	probe := probeName(r.env.project, digest, "")
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {

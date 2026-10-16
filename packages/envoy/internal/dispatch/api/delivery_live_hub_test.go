@@ -50,16 +50,20 @@ func newClockedHubRig(t *testing.T, clock *fakeHubClock) *hubRig {
 
 // fakeHubClock is the real clock moved forward by Advance: Now is the wall clock plus every
 // advance so far, and a timer fires once the wall clock plus the advance reaches its moment, so a
-// test moves the hub past a threshold or a midnight without waiting for it. A clock from
-// newStillHubClock stands still between advances instead: Now is its start plus the advances. Its
-// timers still fire on the wall clock as well, but the hub's one timer only wakes its worker, which
-// compares each view's due moment with Now (deliveryHub.work, runDue), so how long the test's own
-// writes take decides nothing.
+// test moves the hub past a threshold or a midnight without waiting for it. A timer armed for a
+// moment the clock has already reached fires at once, however far an Advance moved it before the
+// arm. A clock from newStillHubClock stands still between advances instead: Now is its start plus
+// the advances. Its timers still fire on the wall clock as well, but the hub's one timer only wakes
+// its worker, which compares each view's due moment with Now (deliveryHub.work, runDue), so how
+// long the test's own writes take decides nothing.
 type fakeHubClock struct {
 	mu     sync.Mutex
 	still  time.Time
 	offset time.Duration
 	timers []*fakeHubTimer
+	// beforeArm, when set, runs at each arm, before the timer is placed, until it answers true: a
+	// test's Advance landing between the worker's read of the clock and its arm.
+	beforeArm func() bool
 }
 
 type fakeHubTimer struct {
@@ -86,13 +90,28 @@ func (c *fakeHubClock) Now() time.Time {
 	return c.nowLocked()
 }
 
-func (c *fakeHubClock) AfterFunc(d time.Duration, f func()) hubTimer {
+func (c *fakeHubClock) At(at time.Time, f func()) hubTimer {
+	c.mu.Lock()
+	hook := c.beforeArm
+	c.mu.Unlock()
+	cleared := hook != nil && hook()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	timer := &fakeHubTimer{clock: c, at: c.nowLocked().Add(d), f: f}
-	timer.real = time.AfterFunc(d, timer.fire)
+	if cleared {
+		c.beforeArm = nil
+	}
+	timer := &fakeHubTimer{clock: c, at: at, f: f}
+	timer.real = time.AfterFunc(at.Sub(c.nowLocked()), timer.fire)
 	c.timers = append(c.timers, timer)
 	return timer
+}
+
+// onArm runs f inside each of the hub's arms of its timer, before the timer is placed, until f
+// answers true.
+func (c *fakeHubClock) onArm(f func() bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.beforeArm = f
 }
 
 func (t *fakeHubTimer) fire() {
@@ -1186,6 +1205,52 @@ func TestAPipelineViewMovesItsDaysAtMidnightWithoutReadingTheDatabase(t *testing
 	if got := acquires(rig.database); got != before {
 		t.Fatalf("the shared pool handed out %d connections at midnight, want none", got-before)
 	}
+	var days []string
+	if err := json.Unmarshal(delta.Set["days"], &days); err != nil {
+		t.Fatalf("decode the delta's days %s: %v", delta.Set["days"], err)
+	}
+	var want struct {
+		Days []string `json:"days"`
+	}
+	if err := json.Unmarshal(getBody(t, rig.handler, "/api/v1/delivery/pipeline?at="+clock.Now().Format(time.RFC3339Nano)), &want); err != nil {
+		t.Fatalf("decode GET /pipeline: %v", err)
+	}
+	if !slices.Equal(days, want.Days) {
+		t.Fatalf("after midnight the delta's days = %v, GET /pipeline answers %v", days, want.Days)
+	}
+}
+
+// TestAHubClockMovedBetweenTheWorkersReadAndItsArmStillFiresItsTimer moves the clock past midnight
+// inside the worker's arm of its timer, after the worker has read the clock and before the timer is
+// placed, where a test's Advance can land when the race detector slows the worker. It moves it at
+// the first arm once the view holds its answer with no wake left pending (the subscribe's mark
+// leaves one the worker's first pass never takes), so only the timer can wake the worker: the
+// expiry the clock already passed is due, so the timer fires and the expiry's delta follows.
+func TestAHubClockMovedBetweenTheWorkersReadAndItsArmStillFiresItsTimer(t *testing.T) {
+	clock := &fakeHubClock{}
+	rig := newClockedHubRig(t, clock)
+	seedHubSettings(t, rig.database)
+	clock.onArm(func() bool {
+		rig.hub.mu.Lock()
+		ready := len(rig.hub.views) == 1 && len(rig.hub.wakeWork) == 0
+		for _, view := range rig.hub.views {
+			ready = ready && view.body != nil && !view.dirty && !view.computing && !view.expiry.IsZero()
+		}
+		rig.hub.mu.Unlock()
+		if ready {
+			now := clock.Now()
+			clock.Advance(nextUTCMidnight(now).Sub(now) + time.Second)
+		}
+		return ready
+	})
+	conn := newFakeLiveConn()
+	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
+	conn.snapshot(t, 5*time.Second, "p")
+
+	delta := conn.delta(t, 3*time.Second, "p")
+	rig.waitFor(t, 0, time.Second, "the expiry's recompute", func(note deliveryHubNote) bool {
+		return note.what == "recompute end" && note.cause == deliveryCauseExpiry
+	})
 	var days []string
 	if err := json.Unmarshal(delta.Set["days"], &days); err != nil {
 		t.Fatalf("decode the delta's days %s: %v", delta.Set["days"], err)

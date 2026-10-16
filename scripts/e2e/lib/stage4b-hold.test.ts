@@ -216,6 +216,17 @@ echo "MISSES $hold_misses"`;
     expect(script).toContain(`phase and is not that message. ${reading} and wait for`);
     expect(task).toContain(reading);
     expect(task).not.toMatch(/dispatch_\w+|handoff_read/);
+    // The hold loops rest on the two `sleep 300` clauses: the kill must land inside a turn, and
+    // the turn is held open by that sleep. The delivered task carries one for a relaunch, and the
+    // proof's instructions one for the daemon's own task line; both are pinned so a change to
+    // either is a change to this test. The instructions' clause wraps across two lines of the
+    // heredoc, so its whitespace is collapsed before the match.
+    expect(task).toContain(
+      "run `sleep 300` as one bash call (its timeout 600 seconds), so this turn stays open while the proof ends your process"
+    );
+    expect(script.replace(/\s+/g, " ")).toContain(
+      "runs `sleep 300` as one bash call (its timeout set to 600 seconds) before it replies WAITING"
+    );
   });
 
   test("a miss past the bound fails the loop loudly, and delivers nothing", () => {

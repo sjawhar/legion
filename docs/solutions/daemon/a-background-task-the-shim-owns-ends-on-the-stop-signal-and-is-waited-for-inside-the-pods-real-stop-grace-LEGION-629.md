@@ -45,16 +45,21 @@ minute. Rules:
   `worker_stop_timeout_seconds` (10 s by default), which it also receives as `--stop-grace`; the
   launcher's own 30 s is only its unset fallback and a pod never leaves it unset. The shim now
   receives the same value (`launcherCommand` passes `--stop-grace`, `Config.StopGrace`), and the
-  wait is what it leaves once the agent's grace and the stdout drain are spent:
-  `max(stopGrace − Grace − drainTimeout, 0)`, 10 − 5 − 1 = 4 s with the defaults. A bound reasoned
-  against a sibling component's constant was the reviewer's finding.
+  wait is what it leaves once the agent's grace and the stdout drain are spent, and never under
+  the floor LEGION-638 added: `max(stopGrace − Grace − DrainTimeout, MinWarmUpDrain)`,
+  10 − 5 − 1 = 4 s with the defaults. A bound reasoned against a sibling component's constant was
+  the reviewer's finding.
 - **Declare the defers so the drain runs after the loop is cancelled**, and say so in a comment:
   Go runs defers in reverse, and a reader should not need to prove `run()` returns only after the
   loop ended.
-- **Known edge, stated where the bound is derived:** at `worker_stop_timeout_seconds` ≤ 6 the
-  formula is 0 and a mid-build stop again leaves the lease for up to a minute (a delayed warm-up,
-  never a corrupt index). Clamping the agent grace to half the stop grace is the open fast-follow;
-  until it lands, a deployment that lowers the stop timeout that far should expect the minute.
+- **Known edge, closed where the bound is derived (LEGION-638):** at `worker_stop_timeout_seconds`
+  ≤ 6 the formula was 0 and a mid-build stop again left the lease for up to a minute (a delayed
+  warm-up, never a corrupt index). The fast-follow floored the wait at `MinWarmUpDrain` (3 s) and
+  had the daemon refuse `worker_stop_timeout_seconds` under `MinStopGrace` (9 s, the agent's 5 s
+  grace + the 1 s drain + the 3 s floor) for `runtime: kubernetes` at configuration load, so no pod
+  is given a grace the whole stop does not fit. Clamping the agent grace to half the stop grace was
+  not adopted: it would still not fit at the smallest value, and it would shorten the agent's exit
+  window.
 
 ## Evidence
 
