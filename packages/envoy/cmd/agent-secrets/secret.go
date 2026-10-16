@@ -462,7 +462,7 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 // openSecretBackend builds the backend settings.Store names: AWS Secrets Manager, pinned to the
 // key ARN's own account and region (checkSettingsKeyARN), for "" or secrets.StoreAWS - a
 // broker that predates `store` names neither - or GCP Secret Manager, pinned to the project
-// kms_key_name's shape and gcp_project agree on (checkSettingsKMSKeyName), for
+// secrets_prefix and kms_key_name's own shape agree on (checkSettingsKMSKeyName), for
 // secrets.StoreGCP. Any other value is refused before any cloud call.
 func openSecretBackend(ctx context.Context, profile string, settings Settings) (secretBackend, error) {
 	switch settings.Store {
@@ -494,6 +494,7 @@ func connectReader(ctx context.Context, profile string) (*secretSession, error) 
 		return nil, err
 	}
 	if err := s.backend.requireAccount(ctx); err != nil {
+		s.Close()
 		return nil, err
 	}
 	return s, nil
@@ -508,6 +509,7 @@ func connectWriter(ctx context.Context, profile string) (*secretSession, string,
 	}
 	email, err := s.backend.requireWriteSignIn(ctx)
 	if err != nil {
+		s.Close()
 		return nil, "", err
 	}
 	return s, email, nil
@@ -533,7 +535,7 @@ func displayName(prefix, id string) string {
 func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, wantServed bool, restorable *time.Time) int {
 	r, err := s.broker.RereadSecret(s.ctx, name)
 	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets %s: the write to Secrets Manager stands, but the broker could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, name, err)
+		fmt.Fprintf(stderr, "agent-secrets %s: the write to the secret store stands, but the broker could not be asked to reread %s, so it serves the change only from its next reload: %v\n", form, name, err)
 		return 1
 	}
 	switch {
@@ -557,15 +559,16 @@ func rereadAfter(s *secretSession, stdout, stderr io.Writer, form, name string, 
 
 // secretView is what list and show print of one secret: never its value.
 type secretView struct {
-	// Name is the NAME a session asks for it as (or its Secrets Manager name, when it maps to none).
+	// Name is the NAME a session asks for it as (or its name in the secret store, when it maps to none).
 	Name string `json:"name"`
-	// SecretName is its whole Secrets Manager name.
+	// SecretName is its whole name in the secret store.
 	SecretName string `json:"secret_name"`
 	Owner      string `json:"owner"`
 	Tier       string `json:"tier"`
-	// HasValue is whether a version carries AWSCURRENT, so the broker can release a value.
+	// HasValue is whether it holds a current, servable version (AWS: a version carries AWSCURRENT;
+	// GCP: versions/latest is ENABLED), so the broker can release a value.
 	HasValue bool `json:"has_value"`
-	// Created and LastChanged are absent when Secrets Manager answers none.
+	// Created and LastChanged are absent when the secret store answers none.
 	Created     *time.Time `json:"created,omitempty"`
 	LastChanged *time.Time `json:"last_changed,omitempty"`
 	// Deleted is when its deletion was scheduled, set while it is scheduled for deletion.
@@ -573,7 +576,8 @@ type secretView struct {
 	// EarliestPurge is the earliest Secrets Manager can purge it, set while it is scheduled for
 	// deletion (earliestPurge): restorable at least until then, perhaps longer.
 	EarliestPurge *time.Time `json:"earliest_purge,omitempty"`
-	// Versions maps each version id to its staging labels; only show answers it.
+	// Versions maps each version id to its AWS staging labels; GCP leaves it empty. Only show
+	// answers it.
 	Versions map[string][]string `json:"versions,omitempty"`
 }
 
