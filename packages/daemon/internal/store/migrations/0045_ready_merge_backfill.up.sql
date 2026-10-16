@@ -10,6 +10,10 @@
 -- ready_merge row does. It runs here rather than at every boot: a row that ended on GitHub's
 -- refusal or a stalled disagreement has told the architect once, and a boot that queued it again
 -- would tell them again.
+--
+-- A daemon still on 0043 or 0044 may enqueue the same READY merge while this runs, and its row,
+-- not committed yet, is one the check for an existing row cannot see. The insert then meets it at
+-- 0044's unique index, waits for it, and keeps it (do nothing), so the upgrade never fails on it.
 insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
 select 'ready_merge', issue.key, jsonb_build_object('number', pr.number, 'head', merger.handoff_commit), 0, now(), '', ''
 from issues issue
@@ -22,4 +26,5 @@ where issue.phase = 'awaiting_merge'
   and merger.merge_note = ''
   and merger.handoff_commit <> ''
   and pr.state = 'open'
-  and not exists (select 1 from outbox existing where existing.kind = 'ready_merge' and existing.issue = issue.key);
+  and not exists (select 1 from outbox existing where existing.kind = 'ready_merge' and existing.issue = issue.key)
+on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge' do nothing;

@@ -935,6 +935,47 @@ func TestTheUpgradeQueuesTheMergeOfAREADYAlreadyAwaitingIt(t *testing.T) {
 			t.Fatalf("READY merges after the upgrade %q, want the existing row alone, unchanged: %q", got, before)
 		}
 	})
+	// A daemon still on 0043 or 0044 can enqueue the same READY merge while 0045 runs. Its row, not
+	// committed yet, is one the backfill's check for an existing row cannot see, so the backfill's
+	// insert waits on it at the unique index; once the writer commits, the backfill keeps the
+	// writer's row and inserts nothing, and the upgrade succeeds.
+	t.Run("a live writer's uncommitted row", func(t *testing.T) {
+		ctx := context.Background()
+		store := emptyStore(t)
+		migrateThrough(t, store, 44)
+		seed(t, store)
+		writer, err := store.pool.Begin(ctx)
+		if err != nil {
+			t.Fatalf("begin the writer: %v", err)
+		}
+		defer func() { _ = writer.Rollback(ctx) }()
+		row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 208, Head: "ready-head"}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		row.Attempts = 2
+		if err := record.NewStore().Enqueue(ctx, writer, row); err != nil {
+			t.Fatalf("the writer's enqueue: %v", err)
+		}
+		migrated := make(chan error, 1)
+		go func() {
+			_, err := store.Migrate(ctx)
+			migrated <- err
+		}()
+		// pg_stat_activity keeps a statement's first kilobyte, so the migration is matched by its name.
+		if err := waitForALockWait(t, store, "0045_ready_merge_backfill", migrated); err != nil {
+			t.Fatalf("the backfill did not wait on the writer's row: %v", err)
+		}
+		if err := writer.Commit(ctx); err != nil {
+			t.Fatalf("commit the writer's row: %v", err)
+		}
+		if err := <-migrated; err != nil {
+			t.Fatalf("migrate while a writer enqueues: %v", err)
+		}
+		if got := readyMerges(t, store); len(got) != 1 || !strings.HasSuffix(got[0], " LEGION-208 #208 at ready-head attempts 2") {
+			t.Fatalf("READY merges after the upgrade %q, want the writer's row alone", got)
+		}
+	})
 }
 
 // waitForALockWait waits until another backend running a statement that contains marker waits on a
