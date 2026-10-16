@@ -12,8 +12,8 @@ its key and tagged with its owner and tier
 `agent-secrets secret` manages them. It reads and writes the store itself, under your own cloud
 sign-in, so that cloud's own IAM decides what you may do; the broker never writes a secret. After
 every write the CLI asks the broker to reread that one secret, so the change is served at once
-rather than at the broker's next read of the namespace. The examples on this page are AWS's;
-[GCP's backend](#aws-or-gcp) differs only where this page calls it out.
+rather than at the broker's next read of the namespace. The examples on this page are AWS's; GCP's
+backend differs only where this page calls it out.
 
 ## Before you start
 

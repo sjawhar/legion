@@ -57,6 +57,9 @@ type fakeSecretManager struct {
 
 	mu      sync.Mutex
 	secrets map[string]*fakeSecret // full resource name -> secret
+	// refuseAnnotationUpdates, when set, makes UpdateSecret refuse an annotations-field-mask
+	// request with PermissionDenied, as IAM refuses a person changing a shared secret's tags.
+	refuseAnnotationUpdates bool
 }
 
 func newFakeSecretManager() *fakeSecretManager {
@@ -89,6 +92,11 @@ func (f *fakeSecretManager) GetSecret(_ context.Context, req *secretmanagerpb.Ge
 func (f *fakeSecretManager) UpdateSecret(_ context.Context, req *secretmanagerpb.UpdateSecretRequest) (*secretmanagerpb.Secret, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	for _, path := range req.GetUpdateMask().GetPaths() {
+		if path == "annotations" && f.refuseAnnotationUpdates {
+			return nil, status.Error(codes.PermissionDenied, "caller does not have permission to update this secret's annotations")
+		}
+	}
 	entry, ok := f.secrets[req.GetSecret().GetName()]
 	if !ok {
 		return nil, status.Error(codes.NotFound, "not found")
@@ -446,6 +454,35 @@ func TestGCPSecretRetagOnlyNamedFieldReplacesHeldOne(t *testing.T) {
 	}
 	if !strings.Contains(stdout, "owner=shared, tier=human") {
 		t.Fatalf("stdout: %q", stdout)
+	}
+}
+
+// TestGCPSecretRetagOfASharedSecretSaysAnAdministratorChangesIt: IAM (PermissionDenied) refuses a
+// person's change to a shared secret's annotations; the CLI prints GCP's refusal and says whose
+// change it is.
+func TestGCPSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T) {
+	fake := newFakeSecretManager()
+	startFakeSecretManager(t, fake)
+	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
+	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	useStdin(t, "shh")
+
+	if _, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "shared", "--tier", "agent"); code != 0 {
+		t.Fatalf("create: exit %d, stderr %q", code, stderr)
+	}
+	fake.mu.Lock()
+	fake.refuseAnnotationUpdates = true
+	fake.mu.Unlock()
+
+	_, stderr, code := runSecret("retag", "SCRATCH_TEST", "--tier", "human")
+	if code != 1 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+	if !strings.Contains(stderr, "PermissionDenied") {
+		t.Fatalf("stderr does not show GCP's refusal: %q", stderr)
+	}
+	if !strings.Contains(stderr, "a shared secret's owner and tier are an administrator's to change") {
+		t.Fatalf("stderr does not say whose change it is: %q", stderr)
 	}
 }
 
