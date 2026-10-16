@@ -194,4 +194,13 @@ package api
 // `default` and answers `owners` (each owner's `hosts` and `config`), `default`, `app` and
 // `expiresAt` in place of one `hosts` and `config`. An image built at 27 has neither the wrapper
 // nor the two commands, so the image probe refuses it. (Taken above 27, sjawhar/legion#2000's.)
-const DaemonAPIVersion = 28
+//
+// 29: sjawhar/legion#1986 (the issue's repository) -- an issue's record carries the repository it
+// targets and that repository's default branch, taken from Dispatch's resolved_repo and GitHub
+// when the daemon first records it: `GET /legion/v1/state` and `read_record` answer `repo` and
+// `defaultBranch` on every issue and `repo` on its pull request, and the state answers
+// `repositories`, the project's mapping as the daemon serves it (`owners`, `mapped` with each
+// repository's `default`, and `refused`, each mapped repository left out with its `reason`). A
+// plugin at 28 reads the state with a strict schema that knows none of these fields, so it
+// refuses the state. (Taken above 28, the per-owner credentials'.)
+const DaemonAPIVersion = 29

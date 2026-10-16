@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
@@ -144,6 +145,18 @@ func (r *repositories) lookup(resolved string) (mapped mappedRepository, refusal
 		return mappedRepository{}, refused.Reason, true
 	}
 	return mappedRepository{}, fmt.Sprintf("%s is not mapped to project %s in Dispatch", resolved, r.project), false
+}
+
+// view is the mapping as the daemon's state shows it.
+func (r *repositories) view() api.RepositoriesView {
+	view := api.RepositoriesView{Owners: r.Owners()}
+	for _, mapped := range r.Mapped() {
+		view.Mapped = append(view.Mapped, api.MappedRepositoryView{Repo: mapped.Repo.String(), Default: mapped.Default})
+	}
+	for _, refused := range r.Refused() {
+		view.Refused = append(view.Refused, api.RefusedRepositoryView{Repo: refused.Repo, Reason: refused.Reason})
+	}
+	return view
 }
 
 // readMapping reads Dispatch's repository mapping of project and checks, for each repository, that

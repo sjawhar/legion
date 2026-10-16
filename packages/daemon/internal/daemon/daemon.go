@@ -1280,10 +1280,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var claimReady func(supervise.Claim)
 	var prepare func(context.Context, intake.DispatchIssue) error
 	var githubAPI string
+	var repos *repositories
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady, prepare = workflow.claimReady, workflow.prepareRepository
-		githubAPI = workflow.githubAPI
+		githubAPI, repos = workflow.githubAPI, workflow.repositories
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1303,6 +1304,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
 			reports:      s.capabilityReports,
+			repositories: repos,
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1419,6 +1421,9 @@ type source struct {
 	// reports is each claim's latest capability report (supervision.capabilityReports), which the
 	// projection shows on the claim's view whatever process reported it.
 	reports func() map[claim.Token]capabilities.Report
+	// repositories is the project's repository mapping as the workflow serves it; nil without a
+	// workflow, whose state serves no repository.
+	repositories *repositories
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1487,6 +1492,9 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: s.secretsLogin.LoginStatus().State}
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
+	if s.repositories != nil {
+		state.Repositories = s.repositories.view()
+	}
 	return state, nil
 }
 

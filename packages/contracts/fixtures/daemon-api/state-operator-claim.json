@@ -36,5 +36,10 @@
   },
   "pendingStatusWrites": [],
   "strandedClaims": [],
-  "capabilities": []
+  "capabilities": [],
+  "repositories": {
+    "owners": [],
+    "mapped": [],
+    "refused": []
+  }
 }
