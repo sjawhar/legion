@@ -789,6 +789,23 @@
   forward in that gap saw no timer fire at all, so its Pipeline view never moved past midnight. A
   timer armed for a moment the clock has already passed fires at once.
 
+- The delivery live hub no longer re-sends runs nothing in which changed (LEGION-690). Each item it
+  sends is revised by a hash of its JSON, and several store reads answered rows tied on their order
+  in whatever order Postgres's plan read them: a run's jobs (no order at all), the pull requests a
+  run shipped and the waiting list (merged in one second), and runs started in one instant. The
+  plan alternates between a sequential scan (the table's row order, where a reconcile pass's
+  unchanged rewrite moves a row last) and an index scan, so a recompute answered a run's
+  `failed_jobs`, `root_failing_job`, `production` or `prs` in another order and the hub sent the
+  run again, whole: in production deltas of 54 to 61 runs, about 110 KB each, whose one change was
+  the order of their `prs`. A run's jobs now come back by when each started, a job that never
+  started last, then by name (`ListRunJobs`, `ListRunJobsForRuns`, sorted in Go per run: an
+  `order by` sorts the whole 28-day read on disk, 82-93 ms against 43-52 ms for the unordered read
+  and 3 ms for the sort), the order `GET /api/v1/delivery/runs/{id}` already listed them in. Pull
+  requests merged together come back by id (`owner/repo#N` in byte order, the page's own order) and
+  runs started together by run id. A run's root failing job and its production job, among jobs
+  finishing together, are the first by name, and a run whose production jobs all failed falls back
+  to the first by start rather than the first listed.
+
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
   his approval only while the approved version holds a block under the same id whose stored

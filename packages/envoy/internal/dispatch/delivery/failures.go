@@ -5,10 +5,28 @@
 package delivery
 
 import (
+	"slices"
 	"strings"
 )
 
-// FailedJobs is every job in jobs with Conclusion == DeliveryJobConclusionFailure.
+// compareRunJobs is the order a run's jobs are read in (ListRunJobs, ListRunJobsForRuns): by when
+// each started, a job that never started last, then by name in byte order. A run never repeats a
+// name, so no two of its jobs compare equal, and the order is the run's whatever order GitHub listed
+// them in or a table scan answered them in. GET /api/v1/delivery/runs/{id} lists a run's jobs in it.
+func compareRunJobs(a, b DeliveryRunJob) int {
+	switch {
+	case a.StartedAt == nil && b.StartedAt != nil:
+		return 1
+	case a.StartedAt != nil && b.StartedAt == nil:
+		return -1
+	case a.StartedAt != nil && !a.StartedAt.Equal(*b.StartedAt):
+		return a.StartedAt.Compare(*b.StartedAt)
+	}
+	return strings.Compare(a.Name, b.Name)
+}
+
+// FailedJobs is every job in jobs with Conclusion == DeliveryJobConclusionFailure, in
+// compareRunJobs' order whatever order jobs holds them in.
 func FailedJobs(jobs []DeliveryRunJob) []DeliveryRunJob {
 	var failed []DeliveryRunJob
 	for _, job := range jobs {
@@ -16,6 +34,7 @@ func FailedJobs(jobs []DeliveryRunJob) []DeliveryRunJob {
 			failed = append(failed, job)
 		}
 	}
+	slices.SortFunc(failed, compareRunJobs)
 	return failed
 }
 
@@ -48,27 +67,33 @@ func IsSummaryOrGuardJob(name string) bool {
 }
 
 // earliestFinishing returns the earliest-finishing job among jobs (nil CompletedAt sorts last),
-// or nil when jobs is empty.
+// the first by name among jobs that finished together or never did, or nil when jobs is empty.
 func earliestFinishing(jobs []DeliveryRunJob) *DeliveryRunJob {
 	var best *DeliveryRunJob
-	for i, job := range jobs {
-		if best == nil {
-			best = &jobs[i]
-			continue
-		}
-		if job.CompletedAt == nil {
-			continue
-		}
-		if best.CompletedAt == nil || job.CompletedAt.Before(*best.CompletedAt) {
+	for i := range jobs {
+		if best == nil || finishesBefore(jobs[i], *best) {
 			best = &jobs[i]
 		}
 	}
 	return best
 }
 
-// RootFailingJob is the earliest-finishing (by CompletedAt; nil CompletedAt sorts last) job among
-// FailedJobs(jobs) that is not IsSummaryOrGuardJob, or, if every failed job is a guard job, the
-// earliest-finishing failed job overall. Returns nil when jobs has no failed job at all.
+// finishesBefore reports whether a finished before b (nil CompletedAt last), or, finishing
+// together or neither finished, whether a's name comes first.
+func finishesBefore(a, b DeliveryRunJob) bool {
+	if (a.CompletedAt == nil) != (b.CompletedAt == nil) {
+		return b.CompletedAt == nil
+	}
+	if a.CompletedAt != nil && !a.CompletedAt.Equal(*b.CompletedAt) {
+		return a.CompletedAt.Before(*b.CompletedAt)
+	}
+	return a.Name < b.Name
+}
+
+// RootFailingJob is the earliest-finishing (by CompletedAt; nil CompletedAt sorts last, ties by
+// name) job among FailedJobs(jobs) that is not IsSummaryOrGuardJob, or, if every failed job is a
+// guard job, the earliest-finishing failed job overall. Returns nil when jobs has no failed job at
+// all.
 func RootFailingJob(jobs []DeliveryRunJob) *DeliveryRunJob {
 	failed := FailedJobs(jobs)
 	if len(failed) == 0 {

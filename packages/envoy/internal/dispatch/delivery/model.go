@@ -52,8 +52,10 @@ func (s DeliverySettings) Production() Production {
 }
 
 // Job is the run's production job: among listed jobs, the earliest-completing one whose conclusion
-// as a production deploy is success. When no listed job qualifies, it falls back to the first
-// listed job so callers still read a failed, skipped, or incomplete production job.
+// as a production deploy is success, the first by name among those completing together. When no
+// listed job qualifies, it falls back to the first listed job in compareRunJobs' order, so callers
+// still read a failed, skipped, or incomplete production job. Neither depends on the order jobs
+// holds them in.
 func (p Production) Job(jobs []DeliveryRunJob) *DeliveryRunJob {
 	var first, selected *DeliveryRunJob
 	for i := range jobs {
@@ -61,14 +63,14 @@ func (p Production) Job(jobs []DeliveryRunJob) *DeliveryRunJob {
 		if !slices.Contains(p.JobNames, job.Name) {
 			continue
 		}
-		if first == nil {
+		if first == nil || compareRunJobs(*job, *first) < 0 {
 			first = job
 		}
 		conclusion := p.Conclusion(*job)
 		if conclusion == nil || *conclusion != DeliveryJobConclusionSuccess || job.CompletedAt == nil {
 			continue
 		}
-		if selected == nil || job.CompletedAt.Before(*selected.CompletedAt) {
+		if selected == nil || finishesBefore(*job, *selected) {
 			selected = job
 		}
 	}
