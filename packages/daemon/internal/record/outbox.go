@@ -38,9 +38,12 @@ const (
 // side. The lifecycle lane runs the rows that start, stop and tidy the issue's roles and their
 // resources, one at a time in the order they were queued: each assumes the state its predecessor
 // leaves (a start after the branch it waits for, a workspace removal after the suspend that
-// stopped the roles). The board lane runs the issue's Dispatch writes and notice publishes beside
-// them, so a status write or a notice never waits behind a start pulling an image, and a slow
-// publish never holds a stop back.
+// stopped the roles). It also carries the issue's pull-request mutations, the disarm
+// (auto_merge_disable) and the READY merge's submission (ready_merge), which must never run beside
+// each other: a disarm and a submit of one pull request at once would race on GitHub, and the lane
+// (with outboxLaneFree across daemons) is what keeps them apart. The board lane runs the issue's
+// Dispatch writes and notice publishes beside them, so a status write or a notice never waits
+// behind a start pulling an image, and a slow publish never holds a stop back.
 type OutboxLane string
 
 const (

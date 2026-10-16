@@ -265,12 +265,15 @@ func (r *outbox) finish(ctx context.Context, row record.OutboxRow) error {
 // lands, so no admission consumes the fence, and one left behind would keep naming the child's own
 // tree as its Sandbox's home (store.IssueSandboxHome) for good. The child stays where it is until
 // a person labels it, which admits it as an orphan. A READY merge row tells the issue's architect
-// why it ended without a merge (readyMergeEnded).
+// why it ended without a merge (readyMergeEnded): its notice row is written in the finish's own
+// transaction, which owns the commit hook that write registers (projectRecords, intake.OnCommit),
+// so the notice's lane is woken as the finish commits and the notice is published without a sweep.
 func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause error) error {
 	payload, err := record.DecodeOutboxPayload(row)
 	if err != nil {
 		return fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 	}
+	scoped, committed := intake.WithCommitHooks(ctx)
 	// follow is what the transaction does beside the finish, and told the line logged once it commits.
 	var follow func(pgx.Tx) error
 	var told func()
@@ -281,7 +284,7 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 			"row", row.ID, "issue", row.Issue, "status", refusal.Status, "code", refusal.Code, "error", cause)
 		if value.HandOver {
 			follow = func(tx pgx.Tx) error {
-				return r.records.DeleteHandoverAt(ctx, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
+				return r.records.DeleteHandoverAt(scoped, tx, row.Issue, value.HandOverTree, value.HandOverLinger)
 			}
 			told = func() {
 				r.log.Warn("outbox hand-over refused by Dispatch; its fence is dropped and the child is not handed to Legion",
@@ -293,21 +296,22 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow, cause 
 		if err != nil {
 			return err
 		}
-		follow = func(tx pgx.Tx) error { return r.records.Enqueue(ctx, tx, notice) }
+		follow = func(tx pgx.Tx) error { return r.records.Enqueue(scoped, tx, notice) }
 		told = func() {
 			r.log.Error("outbox READY merge ended without a merge; its architect is told", "row", row.ID, "issue", row.Issue, "error", cause)
 		}
 	}
-	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+	if err := pgx.BeginFunc(scoped, r.pool, func(tx pgx.Tx) error {
 		if follow != nil {
 			if err := follow(tx); err != nil {
 				return err
 			}
 		}
-		return r.records.FinishLeasedOutbox(ctx, tx, row.ID, row.LeaseToken)
+		return r.records.FinishLeasedOutbox(scoped, tx, row.ID, row.LeaseToken)
 	}); err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", row.ID, err)
 	}
+	committed()
 	if told != nil {
 		told()
 	}
