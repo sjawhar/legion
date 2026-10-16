@@ -319,7 +319,7 @@ func TestEnsureRepoCloneDoesNotDisarmTheCallersWorkingDirectory(t *testing.T) {
 	}
 	clone := filepath.Join(t.TempDir(), "clone")
 
-	if err := ensureRepoClone(context.Background(), run, clone, run.remote, nil); err != nil {
+	if err := ensureRepoClone(context.Background(), run, clone, run.remote, "main", remote{}); err != nil {
 		t.Fatalf("ensureRepoClone: %v", err)
 	}
 	if _, err := os.Stat(config); err != nil {
@@ -590,10 +590,11 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'init.templatedir'='"+template+"'")
 	req := fetchRequest(t)
 
-	feed, err := Fetch(context.Background(), run, req)
+	report, err := Fetch(context.Background(), run, req)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
+	feed := report.Feed
 	if want := filepath.Join(req.Feed, "acme", "widgets.git"); feed != want {
 		t.Fatalf("Fetch cloned into %s, want %s", feed, want)
 	}
@@ -617,16 +618,21 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 }
 
 // A pod's second init container provisions from the feed Fetch filled, which is read-only there,
-// and holds no credential: the shared clone's clone and fetch reach https://github.com/<repo> —
-// the remote its origin keeps naming — at the feed, and no command is handed a token file, an
-// askpass, or a credential helper. The next pod's fetch brings what the remote gained since.
+// and holds no credential: the shared clone is a `git clone --shared` of the feed, so its objects
+// stay in the feed (objects/info/alternates) and nothing of the history is copied into it, its
+// origin names https://github.com/<repo>, and the fetch that follows reaches that remote at the
+// feed. No command is handed a token file, an askpass, or a credential helper. The workspace starts
+// at the default branch, which the clone tracks. The next pod's fetch brings what the remote gained
+// since.
 func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	run := newLocalRunner(t)
+	pushRemoteBranch(t, run.remote, "main", "history.txt")
 	state := filepath.Join(t.TempDir(), "state")
-	provision := func(issue string) (Workspace, []Command) {
+	provision := func(issue string) (Workspace, []Command, string) {
 		t.Helper()
 		fetch := fetchRequest(t)
-		if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		fetched, err := Fetch(context.Background(), run, fetch)
+		if err != nil {
 			t.Fatalf("Fetch: %v", err)
 		}
 		readOnly(t, fetch.Feed)
@@ -638,28 +644,41 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		if err != nil {
 			t.Fatalf("provision %s from the feed: %v", issue, err)
 		}
-		return working, run.Calls()[before:]
+		return working, run.Calls()[before:], fetched.Feed
 	}
 
-	first, calls := provision("WIDGETS-42")
+	first, calls, feed := provision("WIDGETS-42")
 	for _, call := range calls {
 		for _, entry := range call.Env {
 			if key := environmentKey(entry); key == "LEGION_PROVISIONING_TOKEN_FILE" || key == "GIT_ASKPASS" || strings.HasPrefix(entry, "GIT_CONFIG_KEY_0=credential.") {
 				t.Errorf("%q was handed %s", call.Argv, entry)
 			}
 		}
+		if commandWith(call.Argv, "jj", "git", "clone") {
+			t.Errorf("the shared clone was cloned whole: %q", call.Argv)
+		}
 	}
-	if clone := findCall(t, calls, "jj", "git", "clone"); clone.Argv[3] != "https://github.com/acme/widgets" {
-		t.Errorf("the shared clone was cloned from %s", clone.Argv[3])
+	if clone := findCall(t, calls, "git", "clone", "--shared"); len(clone.Argv) != 6 || clone.Argv[4] != feed {
+		t.Errorf("the shared clone was cloned with %q, want a shared clone of the feed %s", clone.Argv, feed)
 	}
 	cloneDir := filepath.Join(state, "repos", "github.com", "acme", "widgets")
+	alternates, err := os.ReadFile(filepath.Join(cloneDir, ".git", "objects", "info", "alternates"))
+	if err != nil || strings.TrimSpace(string(alternates)) != filepath.Join(feed, "objects") {
+		t.Errorf("the shared clone's alternates = %q (%v), want the feed's objects %s", alternates, err, filepath.Join(feed, "objects"))
+	}
+	assertHistoryOnlyInFeed(t, filepath.Join(cloneDir, ".git"), feed)
 	if origin := strings.TrimSpace(runSetup(t, cloneDir, "git", "--git-dir="+filepath.Join(cloneDir, ".git"), "remote", "get-url", "origin")); origin != "https://github.com/acme/widgets" {
 		t.Errorf("the shared clone's origin is %s, want GitHub's", origin)
+	}
+	if tracked := runSetup(t, cloneDir, "jj", "bookmark", "list", "--tracked", "exact:main", "-T", `name ++ "@" ++ remote ++ "\n"`, "--ignore-working-copy", "-R", cloneDir); !strings.Contains(tracked, "main@origin") {
+		t.Errorf("the shared clone does not track main@origin: %q", tracked)
 	}
 	if _, err := os.Stat(first.Dir); err != nil {
 		t.Fatalf("the workspace was not created: %v", err)
 	}
-
+	if parent, main := commitOf(t, first.Dir, "@-"), strings.TrimSpace(runSetup(t, state, "git", "--git-dir="+run.remote, "rev-parse", "main")); parent != main {
+		t.Errorf("the workspace's @- is %s, want the default branch's %s", parent, main)
+	}
 	advanceRemote(t, run.remote)
 	head := strings.TrimSpace(runSetup(t, state, "git", "--git-dir="+run.remote, "rev-parse", "main"))
 	provision("WIDGETS-43")

@@ -650,3 +650,37 @@ func TestServeRefusesIncompleteOptions(t *testing.T) {
 		})
 	}
 }
+
+// What an issue pod's fetch container does with a running cache: workspace.Fetch, given the
+// cache's address, unpacks its tar into a feed every entry of which it accepts, then fetches from
+// GitHub only what the remote gained since the cache's last fetch, and clones nothing.
+func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	c := start(t, testOptions(t, run))
+	c.ready(t)
+	moved := advance(t, remote, "moved")
+	var logged []string
+	report, err := workspace.Fetch(context.Background(), run, workspace.FetchRequest{
+		Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+		Log: func(line string) { logged = append(logged, line) }, Clock: workspace.WallClock{}, CacheURL: c.url,
+	})
+	if err != nil {
+		t.Fatalf("Fetch from the cache: %v", err)
+	}
+	if report.Cloned || report.CacheBytes <= 0 || report.Refs != 1 || len(logged) != 0 {
+		t.Fatalf("Fetch reported %+v and logged %q, want the cache's tar then one ref from GitHub", report, logged)
+	}
+	if got := git(t, report.Feed, "--git-dir="+report.Feed, "rev-parse", "refs/heads/main"); got != moved {
+		t.Errorf("the feed's main is %s, want the remote's %s", got, moved)
+	}
+	git(t, report.Feed, "--git-dir="+report.Feed, "fsck", "--connectivity-only")
+	if transfers := run.transfers(); transfers[len(transfers)-1] != "--git-dir="+report.Feed+" fetch" && !strings.HasPrefix(transfers[len(transfers)-1], "--git-dir="+report.Feed+".clone-") {
+		t.Errorf("the pod's last transfer was %q, want a fetch of the delta", transfers[len(transfers)-1])
+	}
+	for _, transfer := range run.transfers()[1:] {
+		if strings.HasPrefix(transfer, "clone ") {
+			t.Errorf("the pod cloned from GitHub: %q", transfer)
+		}
+	}
+}

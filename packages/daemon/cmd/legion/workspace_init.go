@@ -64,10 +64,11 @@ func runWorkspaceFetch(ctx context.Context, args []string, stdout, stderr io.Wri
 	flags := newFlags("workspace-init fetch", "usage: "+workspaceFetchUsage, stderr)
 	repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
 	feed := flags.String("feed", "", "the pod's feed directory, the container's own (required)")
+	cacheURL := flags.String("cache-url", os.Getenv(cacheURLEnv), "the repository cache to fill the feed from before GitHub (default $"+cacheURLEnv+", set by the runtime while the cache is ready)")
 	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
 		return code
 	}
-	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, stdout), stderr)
+	return workspaceInitExit(flags, workspaceFetch(ctx, *repo, *feed, *cacheURL, stdout), stderr)
 }
 
 func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io.Writer) int {

@@ -34,11 +34,13 @@ printf 'username=x-access-token\npassword=%s\n' "$(cat "$LEGION_PROVISIONING_TOK
 
 // remote is how a clone or fetch reaches the repository: the environment it runs with, the
 // directory of the one-shot credential that environment names, if any, removed once it is done,
-// and the bookmarks a fetch brings (every one when empty).
+// the bookmarks a fetch brings (every one when empty), and, for a pod's feed, the feed repository
+// the shared clone keeps its objects in (ensureRepoClone).
 type remote struct {
 	env      []string
 	dir      string
 	branches []string
+	shared   string
 }
 
 // newProvisioningCredential ports workspace.ts's createProvisioningCredential, the one-shot
@@ -197,7 +199,8 @@ func GitHubURL(repository ghrepo.Repository) string {
 // instead, over git's file transport alone: no credential, and no network. The feed is GitHub as
 // it stood when the pod's workspace-fetch ran, and a tree agent may have pushed since, so a fetch
 // from it brings the repository's default branch and the issue's own bookmark alone, each by its
-// exact name: every other bookmark keeps its target and its tracking.
+// exact name: every other bookmark keeps its target and its tracking. The shared clone itself is
+// made shared with the feed (ensureRepoClone), so its history stays there.
 func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch string) remote {
 	return remote{
 		env: []string{
@@ -207,13 +210,15 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark, defaultBranch str
 			"GIT_CONFIG_VALUE_0=" + GitHubURL(repo),
 		},
 		branches: []string{defaultBranch, bookmark},
+		shared:   feed,
 	}
 }
 
 // ensureRepoClone ports workspace.ts's ensureRepoClone: clone into a temporary sibling, verify it
 // contains .jj, then rename it into place. A killed clone can therefore never appear to be a final
-// clone.
-func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, remoteEnv []string) error {
+// clone. From GitHub the clone is `jj git clone`; from a pod's feed (source.shared) it is a git
+// clone shared with the feed (sharedClone), which copies none of the history.
+func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote, defaultBranch string, source remote) error {
 	jjDir := filepath.Join(cloneDir, ".jj")
 	if exists, err := pathExists(cloneDir); err != nil {
 		return err
@@ -239,7 +244,11 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, r
 		_ = os.RemoveAll(temporary)
 	}()
 
-	if _, err := RunChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, remoteEnv, ""); err != nil {
+	if source.shared != "" {
+		if err := sharedClone(ctx, run, temporary, remote, defaultBranch, source); err != nil {
+			return err
+		}
+	} else if _, err := RunChecked(ctx, run, []string{"jj", "git", "clone", remote, temporary}, source.env, ""); err != nil {
 		return err
 	}
 	complete, err := pathExists(filepath.Join(temporary, ".jj"))
@@ -259,6 +268,37 @@ func ensureRepoClone(ctx context.Context, run Runner, cloneDir, remote string, r
 		return fmt.Errorf("rename cloned repository into place: %w", err)
 	}
 	return nil
+}
+
+// sharedClone makes the colocated clone at temporary from a pod's feed without copying its
+// history: `git clone --shared` writes objects/info/alternates naming the feed's objects, which
+// every container of the pod mounts at the same path; origin is then set to remote, GitHub, as a
+// `jj git clone` of it would leave it; `jj git init --colocate` makes it jj's; and the default
+// branch's bookmark tracks origin's, as jj's own clone tracks it, so a later fetch moves it. The
+// clone checks out the feed's HEAD, as `jj git clone` checks out GitHub's: on a clone with no
+// working tree jj's first snapshot would record every file deleted in the clone's own workspace. A
+// default branch the feed lacks is left untracked, for the base's own refusal to name
+// (baseCommit).
+func sharedClone(ctx context.Context, run Runner, temporary, remote, defaultBranch string, source remote) error {
+	if _, err := RunChecked(ctx, run, []string{"git", "clone", "--shared", "--quiet", source.shared, temporary}, source.env, ""); err != nil {
+		return err
+	}
+	gitDir := filepath.Join(temporary, ".git")
+	if _, err := RunChecked(ctx, run, []string{"git", "--git-dir=" + gitDir, "remote", "set-url", "origin", remote}, nil, ""); err != nil {
+		return err
+	}
+	if _, err := RunChecked(ctx, run, []string{"jj", "git", "init", "--colocate", temporary}, nil, ""); err != nil {
+		return err
+	}
+	present, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/" + defaultBranch}, nil, "")
+	if err != nil {
+		return fmt.Errorf("run git rev-parse refs/remotes/origin/%s: %w", defaultBranch, err)
+	}
+	if present.ExitCode != 0 {
+		return nil
+	}
+	_, err = runCheckedOnClone(ctx, run, temporary, "bookmark", "track", defaultBranch+"@origin")
+	return err
 }
 
 func pathExists(path string) (bool, error) {

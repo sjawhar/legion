@@ -11,14 +11,16 @@ import (
 // --shared, then jj git init --colocate) works for everything an issue does: jj reads the history,
 // a workspace is added at the default branch, a commit is made and pushed, a second provisioning
 // recovers the workspace from the pushed branch after the workspace directory is lost, and a fetch
-// into the feed is visible to jj. No pack is copied into the clone's own store.
+// into the feed is visible to jj. No pack is copied into the clone's own store. The clone checks
+// out the feed's HEAD, so jj's first snapshot of the clone's own workspace records no change: on a
+// --no-checkout clone it records every file deleted.
 func TestJJWorksOnACloneWhoseObjectsAreAnAlternate(t *testing.T) {
 	remote := seedRemote(t, t.TempDir(), "release/v7.1")
 	pushRemoteBranch(t, remote, "release/v7.1", "history.txt")
 	feed := filepath.Join(t.TempDir(), "feed", "acme", "widgets.git")
 	runSetup(t, t.TempDir(), "git", "clone", "--bare", "--quiet", remote, feed)
 	clone := filepath.Join(t.TempDir(), "repos", "github.com", "acme", "widgets")
-	runSetup(t, t.TempDir(), "git", "clone", "--shared", "--no-checkout", "--quiet", feed, clone)
+	runSetup(t, t.TempDir(), "git", "clone", "--shared", "--quiet", feed, clone)
 	runSetup(t, clone, "git", "remote", "set-url", "origin", remote)
 	runSetup(t, clone, "jj", "git", "init", "--colocate")
 	alternates, err := os.ReadFile(filepath.Join(clone, ".git", "objects", "info", "alternates"))
@@ -28,6 +30,9 @@ func TestJJWorksOnACloneWhoseObjectsAreAnAlternate(t *testing.T) {
 	runSetup(t, clone, "jj", "git", "fetch", "-R", clone)
 	if listed := strings.TrimSpace(runSetup(t, clone, "jj", "log", "-r", "release/v7.1@origin", "--no-graph", "-T", "commit_id", "-R", clone)); len(listed) != 40 {
 		t.Fatalf("jj cannot read the default branch through the alternate: %q", listed)
+	}
+	if diff := strings.TrimSpace(runSetup(t, clone, "jj", "diff", "--summary", "-r", "@", "-R", clone)); diff != "" {
+		t.Fatalf("jj's first snapshot of the shared clone's own workspace changed it:\n%s", diff)
 	}
 	working := filepath.Join(t.TempDir(), "workspaces", "widgets-42")
 	if err := os.MkdirAll(filepath.Dir(working), 0o700); err != nil {

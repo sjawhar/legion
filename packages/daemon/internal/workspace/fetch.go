@@ -1,10 +1,15 @@
 package workspace
 
 import (
+	"archive/tar"
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -21,8 +26,10 @@ import (
 var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
 
 // FetchRequest is a pod's first init container's: the repository, the provisioning token, the
-// directory its one-shot credential goes under, the feed directory, the log each retried clone
-// attempt is told to, and the clock the retries read and wait on.
+// directory its one-shot credential goes under, the feed directory, the log each retried transfer
+// and an unused cache are told to, the clock the retries read and wait on, and the repository
+// cache's address (http://<pod ip>:8418) when a ready cache serves the repository, empty when none
+// does.
 type FetchRequest struct {
 	Repo          ghrepo.Repository
 	Token         string
@@ -30,79 +37,283 @@ type FetchRequest struct {
 	Feed          string
 	Log           func(line string)
 	Clock         Clock
+	CacheURL      string
 }
 
-// Fetch fills the feed from GitHub with the provisioning token and no configuration but the
-// one-shot credential's and the pins: the process of a pod's first init container, the only one
-// that holds the token, whose feed is its own and which mounts nothing a tree agent can write, and
-// the repository cache's process (repocache), whose volume is its own. It reaches GitHub as the
-// tmux runtime's Source does, so the token's holders share one credential rule. A feed that does
-// not hold the repository yet has it cloned bare into a temporary sibling, its garbage collection
-// turned off (feedConfiguration), and renamed into place once all of that succeeded, so the feed's
-// repository is either whole or absent; a feed that holds it already — the issue volume's feed on
-// a relaunch, the cache's clone at each refresh — has every branch fetched into it, the ones GitHub
-// deleted pruned. Provision then clones and fetches the shared clone from the feed with no
-// credential. It returns the feed repository.
+// FetchReport is where Fetch filled the feed from and what each source brought: the feed
+// repository; whether it was cloned whole from GitHub; the repository cache's tar, its length and
+// how long it streamed, when the feed was unpacked from it; and how much the feed's objects grew
+// across the transfer from GitHub, with how many refs that transfer made, moved or deleted.
+type FetchReport struct {
+	Feed          string
+	Cloned        bool
+	CacheBytes    int64
+	CacheDuration time.Duration
+	GitHubBytes   int64
+	Refs          int
+}
+
+// Fetch fills the feed with the provisioning token and no configuration but the one-shot
+// credential's and the pins: the process of a pod's first init container, the only one that holds
+// the token, whose feed is its own and which mounts nothing a tree agent can write, and the
+// repository cache's process (repocache), whose volume is its own. It reaches GitHub as the tmux
+// runtime's Source does, so the token's holders share one credential rule.
 //
-// A transfer that fails transiently (transientCloneFailure) is run again after the next of
-// fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left removed
-// first, all within FetchTimeout from the first attempt's start: each attempt is bounded by what
-// remains of it, and no retry starts past it. A transfer still failing after the last wait, and
-// every other failure, is the answer at once. Each attempt's stderr has the token replaced by ***
-// as soon as the attempt returns, so nothing Fetch logs or returns carries it, wherever git echoed
-// it.
-func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
+// A feed that holds the repository already — the issue volume's feed on a relaunch, the cache's
+// clone at each refresh — has every branch fetched into it from GitHub, the ones GitHub deleted
+// pruned. A feed that does not is filled in a temporary sibling, its garbage collection turned off
+// (feedConfiguration), and renamed into place once all of that succeeded, so the feed's repository
+// is either whole or absent: from the repository cache's tar when the request names a cache, then
+// fetched from GitHub for what the cache lacks; or, with no cache, or a cache that does not answer
+// or streams what a feed does not take (unpackCache), cloned bare from GitHub, that cache's failure
+// logged first. Provision then clones the shared clone from the feed with no credential.
+//
+// A transfer from GitHub that fails transiently (transientCloneFailure) is run again after the
+// next of fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left
+// removed first, all within FetchTimeout from the first attempt's start: each attempt is bounded by
+// what remains of it, and no retry starts past it. A transfer still failing after the last wait,
+// and every other failure, is the answer at once. Each attempt's stderr has the token replaced by
+// *** as soon as the attempt returns, so nothing Fetch logs or returns carries it, wherever git
+// echoed it.
+func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, error) {
 	feed, err := FeedRepository(request.Feed, request.Repo)
 	if err != nil {
-		return "", err
+		return FetchReport{}, err
 	}
 	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
 	if err := github.check(request.Repo); err != nil {
-		return "", err
+		return FetchReport{}, err
 	}
 	if request.Log == nil {
-		return "", errors.New("workspace fetch log is required")
+		return FetchReport{}, errors.New("workspace fetch log is required")
 	}
 	if request.Clock == nil {
-		return "", errors.New("workspace fetch clock is required")
+		return FetchReport{}, errors.New("workspace fetch clock is required")
 	}
 	credential, err := github.open(request.Repo, "", "")
 	if err != nil {
-		return "", err
+		return FetchReport{}, err
 	}
 	defer func() {
 		_ = credential.remove()
 	}()
 	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
-		return "", fmt.Errorf("create feed parent: %w", err)
+		return FetchReport{}, fmt.Errorf("create feed parent: %w", err)
 	}
 	present, err := pathExists(feed)
 	if err != nil {
-		return "", err
+		return FetchReport{}, err
 	}
-	var transfer feedTransfer
+	env := merge(credential.env, isolatedGitConfig)
+	report := FetchReport{Feed: feed}
 	if present {
-		transfer = fetchInto(feed, request.Repo)
-	} else {
-		if transfer, err = cloneBeside(feed, request.Repo, request.Log); err != nil {
-			return "", err
+		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, env); err != nil {
+			return FetchReport{}, err
 		}
-		defer func() {
-			_ = os.RemoveAll(transfer.destination)
-		}()
+		return report, credential.remove()
 	}
-	if err := transferWithRetries(ctx, run, request, transfer, merge(credential.env, isolatedGitConfig)); err != nil {
-		return "", err
+
+	staging, err := stageBeside(feed, request.Log)
+	if err != nil {
+		return FetchReport{}, err
 	}
-	if !present {
-		if err := feedConfiguration(ctx, run, transfer.destination); err != nil {
-			return "", err
+	defer func() {
+		_ = os.RemoveAll(staging)
+	}()
+	transfer := feedTransfer{verb: "clone", argv: []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
+	if request.CacheURL != "" {
+		started := request.Clock.Now()
+		streamed, err := unpackCache(ctx, run, request.CacheURL, staging)
+		if err == nil {
+			report.CacheBytes, report.CacheDuration = streamed, request.Clock.Now().Sub(started)
+			transfer = fetchInto(staging, request.Repo)
+		} else {
+			request.Log(fmt.Sprintf("the repository cache %s was not used: %s; cloning from GitHub", request.CacheURL, strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " | ")))
+			if err := os.RemoveAll(staging); err != nil {
+				return FetchReport{}, fmt.Errorf("remove what the repository cache's tar left at %s: %w", staging, err)
+			}
 		}
-		if err := os.Rename(transfer.destination, feed); err != nil {
-			return "", fmt.Errorf("move the cloned repository into the feed at %s: %w", feed, err)
+	}
+	report.Cloned = transfer.verb == "clone"
+	if err := report.fromGitHub(ctx, run, request, transfer, staging, env); err != nil {
+		return FetchReport{}, err
+	}
+	if err := feedConfiguration(ctx, run, staging); err != nil {
+		return FetchReport{}, err
+	}
+	if err := os.Rename(staging, feed); err != nil {
+		return FetchReport{}, fmt.Errorf("move the fetched repository into the feed at %s: %w", feed, err)
+	}
+	return report, credential.remove()
+}
+
+// fromGitHub runs transfer into the bare repository gitDir under env, with Fetch's retries, and
+// records how much the repository's objects grew across it and how many refs it made, moved or
+// deleted. A clone's gitDir holds no repository before it runs: nothing, and no ref.
+func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, env []string) error {
+	refsBefore, err := feedRefs(ctx, run, gitDir, transfer.verb == "fetch")
+	if err != nil {
+		return err
+	}
+	sizeBefore, err := objectsSize(gitDir)
+	if err != nil {
+		return err
+	}
+	if err := transferWithRetries(ctx, run, request, transfer, env); err != nil {
+		return err
+	}
+	refsAfter, err := feedRefs(ctx, run, gitDir, true)
+	if err != nil {
+		return err
+	}
+	sizeAfter, err := objectsSize(gitDir)
+	if err != nil {
+		return err
+	}
+	r.GitHubBytes = sizeAfter - sizeBefore
+	for ref, id := range refsAfter {
+		if refsBefore[ref] != id {
+			r.Refs++
 		}
 	}
-	return feed, credential.remove()
+	for ref := range refsBefore {
+		if _, kept := refsAfter[ref]; !kept {
+			r.Refs++
+		}
+	}
+	return nil
+}
+
+// feedRefs is every ref of the bare repository gitDir with the object it names, or none when held
+// is unset: a repository a clone is yet to make.
+func feedRefs(ctx context.Context, run Runner, gitDir string, held bool) (map[string]string, error) {
+	refs := map[string]string{}
+	if !held {
+		return refs, nil
+	}
+	listed, err := FeedGit(ctx, run, gitDir, "for-each-ref", "--format=%(refname) %(objectname)")
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(listed.Stdout), "\n") {
+		if ref, id, ok := strings.Cut(line, " "); ok {
+			refs[ref] = id
+		}
+	}
+	return refs, nil
+}
+
+// objectsSize is how many bytes the regular files under gitDir's objects directory hold; none when
+// there is no such directory yet.
+func objectsSize(gitDir string) (int64, error) {
+	var size int64
+	err := filepath.WalkDir(filepath.Join(gitDir, "objects"), func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil || !entry.Type().IsRegular() {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		size += info.Size()
+		return nil
+	})
+	return size, err
+}
+
+// cacheClient reaches the repository cache directly, at the pod address it is given: no proxy the
+// container's environment names stands between an issue pod and a pod of its own namespace.
+var cacheClient = &http.Client{Transport: &http.Transport{Proxy: nil, ForceAttemptHTTP2: false}}
+
+// unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
+// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
+// returns the tar's length. Every entry must be a regular file or a directory whose cleaned name
+// stays inside staging and is part of a repository's history and refs (FeedEntry); the first that
+// is not ends the stream, refused by name, and the caller removes what was written. The stream is
+// read to its end, so a transfer the cache broke off is a failure, not a short repository.
+func unpackCache(ctx context.Context, run Runner, cache, staging string) (int64, error) {
+	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
+		return 0, err
+	}
+	bounded, cancel := context.WithTimeout(ctx, FetchTimeout)
+	defer cancel()
+	ask, err := http.NewRequestWithContext(bounded, http.MethodGet, strings.TrimSuffix(cache, "/")+"/tar", nil)
+	if err != nil {
+		return 0, err
+	}
+	response, err := cacheClient.Do(ask)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("GET %s answered %s", ask.URL, response.Status)
+	}
+	stream := &countingReader{reader: response.Body}
+	archive := tar.NewReader(stream)
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("read the repository cache's tar: %w", err)
+		}
+		if err := unpackEntry(staging, header, archive); err != nil {
+			return 0, err
+		}
+	}
+	if _, err := io.Copy(io.Discard, stream); err != nil {
+		return 0, fmt.Errorf("read the repository cache's tar: %w", err)
+	}
+	return stream.read, nil
+}
+
+// unpackEntry writes one entry of the repository cache's tar into staging, refusing one a feed does
+// not take.
+func unpackEntry(staging string, header *tar.Header, body io.Reader) error {
+	name := strings.TrimSuffix(header.Name, "/")
+	if !filepath.IsLocal(filepath.FromSlash(name)) || path.Clean(name) != name {
+		return fmt.Errorf("the repository cache's tar holds %q, which is not a path inside the feed", name)
+	}
+	dir := header.Typeflag == tar.TypeDir
+	if !dir && header.Typeflag != tar.TypeReg {
+		return fmt.Errorf("the repository cache's tar holds %q, which is neither a regular file nor a directory", name)
+	}
+	if !FeedEntry(name, dir) {
+		return fmt.Errorf("the repository cache's tar holds %q, which is not part of a repository's history and refs", name)
+	}
+	target := filepath.Join(staging, filepath.FromSlash(name))
+	if dir {
+		return os.MkdirAll(target, 0o755)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return err
+	}
+	file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(file, body); err != nil {
+		_ = file.Close()
+		return fmt.Errorf("read %s from the repository cache's tar: %w", name, err)
+	}
+	return file.Close()
+}
+
+// countingReader counts what it reads.
+type countingReader struct {
+	reader io.Reader
+	read   int64
+}
+
+func (r *countingReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.read += int64(n)
+	return n, err
 }
 
 // feedTransfer is how Fetch brings the repository from GitHub: verb names each attempt in the
@@ -121,29 +332,29 @@ func fetchInto(feed string, repo ghrepo.Repository) feedTransfer {
 	return feedTransfer{verb: "fetch", argv: []string{"git", "--git-dir=" + feed, "fetch", "--prune", "--quiet", GitHubURL(repo), "+refs/heads/*:refs/heads/*"}}
 }
 
-// cloneBeside is the transfer into a feed that lacks the repository: a bare clone into a temporary
-// sibling of feed. A sibling an earlier Fetch left — killed before it renamed or removed it — is
-// removed first and logged: only Fetch writes beside the feed's repository, and a killed clone of
-// a large repository left on a volume of fixed size would fill it.
-func cloneBeside(feed string, repo ghrepo.Repository, log func(string)) (feedTransfer, error) {
+// stageBeside is the temporary sibling of feed a feed that lacks the repository is filled in. A
+// sibling an earlier Fetch left — killed before it renamed or removed it — is removed first and
+// logged: only Fetch writes beside the feed's repository, and a killed clone of a large repository
+// left on a volume of fixed size would fill it.
+func stageBeside(feed string, log func(string)) (string, error) {
 	stale, err := filepath.Glob(feed + cloneSuffix + "*")
 	if err != nil {
-		return feedTransfer{}, err
+		return "", err
 	}
-	for _, path := range stale {
-		if err := os.RemoveAll(path); err != nil {
-			return feedTransfer{}, fmt.Errorf("remove the clone an earlier fetch left at %s: %w", path, err)
+	for _, left := range stale {
+		if err := os.RemoveAll(left); err != nil {
+			return "", fmt.Errorf("remove the clone an earlier fetch left at %s: %w", left, err)
 		}
-		log("removed the clone an earlier fetch left at " + path)
+		log("removed the clone an earlier fetch left at " + left)
 	}
-	destination, err := os.MkdirTemp(filepath.Dir(feed), filepath.Base(feed)+cloneSuffix)
+	staging, err := os.MkdirTemp(filepath.Dir(feed), filepath.Base(feed)+cloneSuffix)
 	if err != nil {
-		return feedTransfer{}, fmt.Errorf("create the clone's temporary directory beside %s: %w", feed, err)
+		return "", fmt.Errorf("create the clone's temporary directory beside %s: %w", feed, err)
 	}
-	return feedTransfer{verb: "clone", argv: []string{"git", "clone", "--bare", "--quiet", GitHubURL(repo), destination}, destination: destination}, nil
+	return staging, nil
 }
 
-// cloneSuffix follows the feed repository's name in the temporary directory its clone runs in.
+// cloneSuffix follows the feed repository's name in the temporary directory it is filled in.
 const cloneSuffix = ".clone-"
 
 // feedConfiguration is what the feed repository's own configuration sets: no automatic garbage
