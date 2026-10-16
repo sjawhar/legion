@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/goroutinetest"
 	"github.com/sjawhar/envoy/internal/testnats"
+	"github.com/sjawhar/envoy/internal/testsocks5"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
 
@@ -905,7 +906,35 @@ func TestJetStreamPublishRetainsLegionIssueNotices(t *testing.T) {
 // `envoy nats disconnected`, so each round's close logs each of those once and starts one
 // recovery. Not every close races (the publish can find the recovery's connection already
 // installed), so the test closes again until one does, and the discard's own line shows it did.
+//
+// It runs directly and through a SOCKS5 proxy (ENVOY_NATS_SOCKS5_PROXY). Through the proxy, every
+// connection goes through it: the first, and at least the two the raced close dials, each handed
+// the server's address as the URL spells it.
 func TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen(t *testing.T) {
+	t.Run("direct", func(t *testing.T) { closedConnectionIsReplacedOnce(t, nil) })
+	t.Run("through a SOCKS5 proxy", func(t *testing.T) {
+		var proxy *testsocks5.Server
+		var server string
+		closedConnectionIsReplacedOnce(t, func(uri string) []bus.ConnectOption {
+			server = hostOf(t, uri)
+			proxy = testsocks5.Start(t, server)
+			return []bus.ConnectOption{bus.WithEnvironment(proxied(proxy.Addr))}
+		})
+		requests := proxy.Requests()
+		if len(requests) < 3 {
+			t.Fatalf("the proxy received %d requests, want the first connection's and the two the raced close dialled", len(requests))
+		}
+		for _, request := range requests {
+			if request.Address != server {
+				t.Fatalf("the proxy received %+v, want every request for %s", requests, server)
+			}
+		}
+	})
+}
+
+// closedConnectionIsReplacedOnce is TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen's
+// body; through, when not nil, gives the client's connect options for the server at uri.
+func closedConnectionIsReplacedOnce(t *testing.T, through func(uri string) []bus.ConnectOption) {
 	unsetNkeyEnvironment(t)
 	ctr, uri := testnats.StartImageConfig(t, testnats.Image, "jetstream {}\nhttp_port: 8222\n", []string{"-js"}, true)
 	ctx := context.Background()
@@ -957,7 +986,11 @@ func TestAClosedConnectionIsReplacedOnceAndCloseLeavesNoneOpen(t *testing.T) {
 	}
 
 	logs := captureBusLogs(t)
-	client, err := bus.ConnectOwningStream([]string{uri}, bus.WithReplicas(1), bus.WithName(name))
+	options := []bus.ConnectOption{bus.WithReplicas(1), bus.WithName(name)}
+	if through != nil {
+		options = append(options, through(uri)...)
+	}
+	client, err := bus.ConnectOwningStream([]string{uri}, options...)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

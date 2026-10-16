@@ -1,12 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createVerify, generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appJWT, appKeySources } from "./app-logins";
 
 // lib/app-logins.ts run as the stage proofs run it, against a stand-in GitHub that answers GET /app
-// with the slug of the App whose key signed the JWT, and refuses any other request.
+// with the slug of the App whose key signed the JWT (no slug for an App that has none), and refuses
+// any other request.
 const dir = mkdtempSync(join(tmpdir(), "app-logins-test."));
 const script = join(import.meta.dir, "app-logins.ts");
 
@@ -17,9 +18,10 @@ function appKey(): { publicKey: string; privateKey: string } {
     privateKeyEncoding: { type: "pkcs1", format: "pem" },
   });
 }
-const apps: Record<string, { slug: string; key: { publicKey: string; privateKey: string } }> = {
+const apps: Record<string, { slug?: string; key: { publicKey: string; privateKey: string } }> = {
   "101": { slug: "example-implement", key: appKey() },
   "202": { slug: "example-review", key: appKey() },
+  "303": { key: appKey() },
 };
 for (const id of Object.keys(apps))
   writeFileSync(join(dir, `key-${id}.pem`), apps[id].key.privateKey);
@@ -45,6 +47,11 @@ const github = Bun.serve({
     return Response.json({ id: Number(decoded.iss), slug: app.slug });
   },
 });
+const standIn = `http://127.0.0.1:${github.port}/`;
+// A GitHub that never answers: the port of a server stopped before any run.
+const closed = Bun.serve({ port: 0, fetch: () => new Response() });
+const unreachable = `http://127.0.0.1:${closed.port}/`;
+await closed.stop(true);
 afterAll(() => {
   github.stop(true);
   rmSync(dir, { recursive: true, force: true });
@@ -65,8 +72,8 @@ const app = (id: string, command = `cat ${join(dir, `key-${id}.pem`)}`) =>
 // The run is asynchronous: the stand-in GitHub answers from this test's own event loop. `env` is
 // added to this test's own environment. The helper is given stdin, so a key command that inherited
 // it would read `stdin-leak` where the closed-stdin case expects nothing.
-async function run(path: string, env: Record<string, string> = {}) {
-  const child = Bun.spawn(["bun", script, path, `http://127.0.0.1:${github.port}/`], {
+async function run(path: string, env: Record<string, string> = {}, api = standIn) {
+  const child = Bun.spawn(["bun", script, path, api], {
     env: { ...process.env, ...env },
     stdin: new Blob(["stdin-leak"]),
     stdout: "pipe",
@@ -79,6 +86,37 @@ async function run(path: string, env: Record<string, string> = {}) {
   ]);
   return { code, stdout: stdout.trim(), stderr: stderr.trim() };
 }
+
+// read_app_logins as a stage proof calls it: lib/workflow.sh sourced under the stage scripts' shell
+// options and check helpers (the lib reads repo as it is sourced), with the config as
+// $work/legion.yaml, then `then`. The one seam is bun, which is handed `api` after the helper's own
+// arguments, the GitHub API URL the helper takes.
+async function readAppLogins(path: string, then: string, api = standIn) {
+  const work = mkdtempSync(join(dir, "work."));
+  copyFileSync(path, join(work, "legion.yaml"));
+  const shell = `set -Eeuo pipefail
+check=boot repo=sjawhar/legion-smoke
+note() { printf '   %s\\n' "$*"; }
+fail() { printf 'FAIL %s: %s\\n' "$check" "$*" >&2; exit 1; }
+bun() { command bun "$@" "$API"; }
+. "$LIB"
+read_app_logins
+${then}`;
+  const child = Bun.spawn(["bash", "-c", shell], {
+    env: { ...process.env, LIB: join(import.meta.dir, "workflow.sh"), work, API: api },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  return { code, stdout: stdout.trimEnd(), stderr: stderr.trim() };
+}
+
+// A failure names the App it could not read by its role and app id, on one line of stderr.
+const namesApp = (role: string, id: string) => new RegExp(`\\b${role} App\\b.*\\bapp_id ${id}\\b`);
 
 describe("app-logins.ts", () => {
   test("prints each App's bot login from the slug GET /app answers under that App's own JWT", async () => {
@@ -100,7 +138,22 @@ describe("app-logins.ts", () => {
     );
     expect(code).toBe(1);
     expect(stdout).toBe("");
-    expect(stderr).toContain("GET /app as the implement App (app_id 101) answered 401");
+    expect(stderr).toMatch(namesApp("implement", "101"));
+    expect(stderr).toContain("401");
+  });
+
+  test("an answer with no slug is named by the App's role and app id", async () => {
+    const { code, stdout, stderr } = await run(config(app("101"), app("303")));
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(namesApp("review", "303"));
+  });
+
+  test("a GitHub that never answers is named by the App's role and app id", async () => {
+    const { code, stdout, stderr } = await run(config(app("101"), app("202")), {}, unreachable);
+    expect(code).toBe(1);
+    expect(stdout).toBe("");
+    expect(stderr).toMatch(namesApp("implement", "101"));
   });
 
   test("a key command that fails is named by its field and exit code, its stdout never quoted", async () => {
@@ -148,5 +201,47 @@ describe("app-logins.ts", () => {
     const at = Date.parse("2026-10-16T06:00:00Z") / 1000;
     expect(header).toEqual({ alg: "RS256", typ: "JWT" });
     expect(claims).toEqual({ iss: "101", iat: at - 60, exp: at + 600 });
+  });
+});
+
+describe("read_app_logins", () => {
+  test("gives each role its App's login as GET /app answered it, and GraphQL the bare slug", async () => {
+    const roles = [
+      "implementer",
+      "merger",
+      "planner",
+      "tester",
+      "reviewer",
+      "architect",
+      "controller",
+    ];
+    const { code, stdout, stderr } = await readAppLogins(
+      config(app("101"), app("202")),
+      `for role in ${roles.join(" ")}; do echo "$role $(role_app "$role") $(role_app_slug "$role")"; done`
+    );
+    expect(stderr).toBe("");
+    expect(code).toBe(0);
+    const answers = stdout.split("\n").filter((line) => roles.includes(line.split(" ")[0]));
+    expect(answers).toEqual([
+      "implementer example-implement[bot] example-implement",
+      "merger example-implement[bot] example-implement",
+      "planner example-review[bot] example-review",
+      "tester example-review[bot] example-review",
+      "reviewer example-review[bot] example-review",
+      "architect example-review[bot] example-review",
+      "controller example-review[bot] example-review",
+    ]);
+  });
+
+  test("a GitHub that never answers fails the run, naming the App it could not read", async () => {
+    const { code, stdout, stderr } = await readAppLogins(
+      config(app("101"), app("202")),
+      "echo after-read",
+      unreachable
+    );
+    expect(code).toBe(1);
+    expect(stdout).not.toContain("after-read");
+    expect(stderr).toMatch(namesApp("implement", "101"));
+    expect(stderr).toMatch(/^FAIL boot: /m);
   });
 });

@@ -57,9 +57,9 @@ func WithReplicas(n int) ConnectOption {
 }
 
 // WithEnvironment names where a connect reads ENVOY_ALLOW_REMOTE_NATS (AllowRemoteEnvVar),
-// NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of the process environment (os.LookupEnv):
-// envoy-dispatch hands it the lookup over its settings table, which lists all three. Dial takes
-// the same lookup as its environment parameter.
+// ENVOY_NATS_SOCKS5_PROXY (SOCKS5ProxyEnvVar), NATS_NKEY_SEED_FILE and NATS_NKEY_SEED, in place of
+// the process environment (os.LookupEnv): envoy-dispatch hands it the lookup over its settings
+// table, which lists all four. Dial takes the same lookup as its environment parameter.
 func WithEnvironment(lookup func(string) (string, bool)) ConnectOption {
 	return func(o *connectOpts) { o.environment = lookup }
 }
@@ -121,6 +121,7 @@ type Client struct {
 	urls                        []string
 	name                        string
 	credential                  nats.Option
+	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
 	mu                          sync.Mutex
 
@@ -153,148 +154,14 @@ type Client struct {
 	closeOnce  sync.Once
 }
 
-// options starts from nats.GetDefaultOptions: Connect fills in only some zero fields, and the
-// defaults are what turn on reconnecting, the client's pings and the drain and flusher timeouts. A
-// lost server is reconnected in place, forever, so JetStream handles taken from the connection
-// keep working; ReconnectedCB re-subscribes and runs the reconnect hooks. ClosedCB fires on Close
-// or Drain, and also when nats.go gives up on the connection itself: the same authorization error
-// twice in a row, or a server -ERR it does not classify. Those two are why onClosed still starts a
-// recovery that dials a replacement. The reconnect buffer is off, so nothing is held and sent after its caller
-// saw an error: a publish while reconnecting waits for the reconnect instead
-// (ensureConnWithContext), and a publish that fails was not sent.
-func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB func()) nats.Options {
-	opts := nats.GetDefaultOptions()
-	opts.Servers = urls
-	opts.Name = name
-	opts.NoRandomize = true
-	opts.Timeout = 5 * time.Second
-	opts.MaxReconnect = -1
-	// A publish while reconnecting waits for the reconnect (ensureConnWithContext), so the wait
-	// between attempts is how long it waits after NATS is back.
-	opts.ReconnectWait = time.Second
-	opts.ReconnectBufSize = -1
-	opts.DisconnectedErrCB = func(_ *nats.Conn, err error) {
-		if err != nil {
-			slog.Info("envoy nats disconnected", slog.String("name", name), slog.String("error", err.Error()))
-			return
-		}
-		slog.Info("envoy nats disconnected", slog.String("name", name))
-	}
-	opts.ReconnectedCB = func(nc *nats.Conn) {
-		slog.Info("envoy nats reconnected", slog.String("name", name), slog.String("url", nc.ConnectedUrl()))
-		if reconnectCB != nil {
-			reconnectCB(nc)
-		}
-	}
-	opts.ClosedCB = func(_ *nats.Conn) {
-		slog.Info("envoy nats connection closed", slog.String("name", name))
-		if closedCB != nil {
-			closedCB()
-		}
-	}
-	opts.AsyncErrorCB = func(_ *nats.Conn, sub *nats.Subscription, err error) {
-		level := slog.LevelError
-		switch {
-		case err == nats.ErrConsumerNotFound:
-			// A drain ends each subscription whose consumer nats.go created, then deletes that
-			// consumer. At shutdown the listener leaves a KV watcher the last reconnect has not yet
-			// replaced for the drain to end, and that watcher's ordered consumer can already be gone:
-			// a NATS restart loses it outright (nats.go creates it with memory storage), and a
-			// disconnect longer than its inactive threshold lets the server delete it. So the delete
-			// finds it gone: the state the delete was for. At the pinned nats.go (v1.50.0) that
-			// delete, in checkDrained, is the only report of the bare sentinel, which
-			// DeleteConsumer returns; re-check that on a nats.go bump. The one other report of this
-			// error, an ordered consumer nats.go failed to recreate, wraps it and stays an ERROR.
-			level = slog.LevelWarn
-		case errors.Is(err, nats.ErrConsumerNotActive):
-			// Every consumer Envoy runs with idle heartbeats is a KV watcher's ordered consumer,
-			// which reports missed heartbeats only while the connection is not connected; once it
-			// is connected again, nats.go resets the consumer instead. The report restates the
-			// disconnect logged above, once per watcher. The listener's durable carries no heartbeat
-			// as long as cmd/listener's startListenerSubscription bound it, since that refuses one that
-			// does; a replaced connection binds the same durable again without that check.
-			level = slog.LevelWarn
-		}
-		if sub != nil {
-			slog.Log(context.Background(), level, "envoy nats async error", slog.String("name", name), slog.String("subject", sub.Subject), slog.String("error", err.Error()))
-			return
-		}
-		slog.Log(context.Background(), level, "envoy nats async error", slog.String("name", name), slog.String("error", err.Error()))
-	}
-	return opts
-}
-
-func connect(name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	return connectWithContext(context.Background(), name, urls, credential, reconnectCB, closedCB)
-}
-
-// connectWithContext dials urls with envoy's options and, when credential is not nil, as the NATS
-// user it names (nkeyCredential).
-func connectWithContext(ctx context.Context, name string, urls []string, credential nats.Option, reconnectCB func(*nats.Conn), closedCB func()) (*nats.Conn, error) {
-	var lastErr error
-	for range 10 {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		next := options(name, urls, reconnectCB, closedCB)
-		if credential != nil {
-			if err := credential(&next); err != nil {
-				return nil, err
-			}
-		}
-		if deadline, ok := ctx.Deadline(); ok {
-			remaining := time.Until(deadline)
-			if remaining <= 0 {
-				// Not ctx.Err(): the deadline can pass before the context's timer marks it done,
-				// and a nil error here would hand the caller a nil connection to use.
-				return nil, context.DeadlineExceeded
-			}
-			if remaining < next.Timeout {
-				next.Timeout = remaining
-			}
-		}
-		type connectionResult struct {
-			conn *nats.Conn
-			err  error
-		}
-		result := make(chan connectionResult, 1)
-		go func() {
-			conn, err := next.Connect()
-			result <- connectionResult{conn: conn, err: err}
-		}()
-		select {
-		case connected := <-result:
-			if connected.err == nil {
-				return connected.conn, nil
-			}
-			lastErr = connected.err
-		case <-ctx.Done():
-			go func() {
-				connected := <-result
-				if connected.conn != nil {
-					connected.conn.Close()
-				}
-			}()
-			return nil, ctx.Err()
-		}
-		timer := time.NewTimer(time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
-	}
-	return nil, lastErr
-}
-
 // Dial opens a tuned core NATS connection using envoy's standard options (5s connect timeout,
 // infinite reconnect every second, retry-loop for the initial 10 attempts), as the NATS user
-// environment names (nkeyCredential). A caller that needs core pub/sub on a connection of its own
-// uses it: nats.go re-subscribes core subscriptions on reconnect by itself, so it needs none of
-// Client's recovery, and it touches no stream. It refuses a NATS server that is not this machine's
-// on the same terms as Connect, reading ENVOY_ALLOW_REMOTE_NATS from environment too, which
-// answers as os.LookupEnv does (WithEnvironment).
+// environment names (nkeyCredential), through the SOCKS5 proxy it names (socks5Proxy). A caller
+// that needs core pub/sub on a connection of its own uses it: nats.go re-subscribes core
+// subscriptions on reconnect by itself, so it needs none of Client's recovery, and it touches no
+// stream. It refuses a NATS server that is not this machine's on the same terms as Connect,
+// reading ENVOY_ALLOW_REMOTE_NATS from environment too, which answers as os.LookupEnv does
+// (WithEnvironment).
 //
 // For JetStream-backed publishing or a durable consumer, use Connect; to reconcile the stream
 // this codebase owns, ConnectOwningStream.
@@ -306,7 +173,11 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
-	return connect(name, urls, credential, nil, nil)
+	dialer, err := socks5Proxy(environment)
+	if err != nil {
+		return nil, err
+	}
+	return connect(name, urls, credential, dialer, nil, nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -318,8 +189,10 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 //
 // Every client, from Connect or ConnectOwningStream, connects as the NATS user the environment
 // names: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED (nkeyCredential). An unusable seed is an error
-// before any dial; neither variable set connects without a credential. Every connection the client
-// dials later, to recover, is the same user's.
+// before any dial; neither variable set connects without a credential. It connects through the
+// SOCKS5 proxy the environment names (ENVOY_NATS_SOCKS5_PROXY, socks5Proxy), or directly when it
+// names none. Every connection the client dials later, to recover, is the same user's, through
+// the same proxy.
 //
 // For the JetStream stream this codebase owns, use ConnectOwningStream.
 func Connect(urls []string, options ...ConnectOption) (*Client, error) {
@@ -342,14 +215,19 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 	if err != nil {
 		return nil, err
 	}
+	dialer, err := socks5Proxy(opts.environment)
+	if err != nil {
+		return nil, err
+	}
 	c := &Client{
 		urls:                        urls,
 		name:                        opts.name,
 		credential:                  credential,
+		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect(c.name, urls, credential, c.onReconnect, c.onClosed)
+	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed)
 	if err != nil {
 		return nil, err
 	}
@@ -710,7 +588,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.onReconnect, c.onClosed)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed)
 		if err != nil {
 			return err
 		}

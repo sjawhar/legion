@@ -39,6 +39,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
+	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
 // storetestImport is the one package under internal/dispatch that reads the process environment
@@ -796,6 +797,29 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			if _, err := resolveBootConfig(devSignInEnvironment(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1"})); err == nil || !strings.Contains(err.Error(), "ENVOY_ALLOW_REMOTE_NATS") {
 				t.Errorf("dev sign-in with ENVOY_ALLOW_REMOTE_NATS=1: err = %v, want a refusal naming it", err)
+			}
+		},
+		"ENVOY_NATS_SOCKS5_PROXY": func(t *testing.T) {
+			// With the reach opted in, the refusal is the address check's: a URL is not host:port.
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": "socks5://127.0.0.1:1055"}, localNATS); err == nil || errors.Is(err, bus.ErrRemoteNATS) || !strings.Contains(err.Error(), "ENVOY_NATS_SOCKS5_PROXY") || !strings.Contains(err.Error(), "is a URL") {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=socks5://127.0.0.1:1055: err = %v, want the address refused as a URL, naming the setting", err)
+			}
+			// The connect dials the proxy and hands it localNATS's address. This proxy refuses
+			// every request (connection refused), so the connect makes the bus's ten attempts a
+			// second apart, about ten seconds, and fails.
+			proxy := testsocks5.StartRefusing(t, 0x05)
+			if err := natsConnect(map[string]string{"ENVOY_ALLOW_REMOTE_NATS": "1", "ENVOY_NATS_SOCKS5_PROXY": proxy.Addr}, localNATS); err == nil {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: a connect through a proxy that refuses it succeeded", proxy.Addr)
+			}
+			got := proxy.Requests()
+			if len(got) == 0 {
+				t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received no request", proxy.Addr)
+			}
+			for _, request := range got {
+				if request != (testsocks5.Request{AddressType: 0x01, Address: "127.0.0.1:1"}) {
+					t.Errorf("ENVOY_NATS_SOCKS5_PROXY=%s: the proxy received %+v, want every request for 127.0.0.1:1 as an IPv4 address (type 1)", proxy.Addr, got)
+					break
+				}
 			}
 		},
 		"NATS_NKEY_SEED": func(t *testing.T) {
