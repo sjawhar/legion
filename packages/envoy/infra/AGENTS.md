@@ -277,7 +277,8 @@ receives a send and a role message, and is refused a publish to another session'
 user holding `SessionPermissions` alone publishes a reply and is refused a subscribe to `_INBOX.>`).
 `core/dispatch_permissions_live_test.go`
 also starts `testpg.Image`, builds and runs the real `envoy-dispatch` against `DispatchPermissions`,
-and proves both delivery durables (each binds and acknowledges a message), the outbox, the agent stream relay and the redelivery bucket;
+and proves both delivery durables (each binds and acknowledges a message), the outbox, the agent
+stream relay and the redelivery bucket;
 its negative control removes the delivery durable's filtered create permission and receives that
 server violation alone. The `envoy-infra-go` job in
 `.github/workflows/envoy-and-contracts.yaml` runs, from `packages/envoy/infra`:
