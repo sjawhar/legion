@@ -102,8 +102,8 @@ landed, so read the issue's status first. A retry points its reason at the poste
 than repeating it.
 
 The three clears differ: `--clear-priority` sends null, `--parent ''`, `--route ''` and
-`--repo ''` clear with an empty string, and `--clear-external-links` / `--clear-blocked-by` send
-an empty list. Guessing the wrong shape is a refusal either way.
+`--repo ''` clear with an empty string, and `--clear-external-links` / `--clear-blocked-by` send an
+empty list. Guessing the wrong shape is a refusal either way.
 
 An issue targets one repository: its own `--repo`, else its nearest ancestor's, else the project's
 default (set on the Settings page), else none. A repository not mapped to the issue's project is

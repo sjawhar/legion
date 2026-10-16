@@ -204,7 +204,8 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		// does not already have (so a link can move to the issue that replaced it; a same-set
 		// resend or a kept URL's retyped kind rewrites the rows and emits issue.updated the same
 		// as any other accepted write here, it just adds nothing new) — alone or beside a
-		// reopening status; every other field, and closing it again, waits for a reopen.
+		// reopening status; every other field, its repository included, and closing it again,
+		// waits for a reopen.
 		addsLink := input.ExternalLinks != nil && !isExternalLinksSubset(*input.ExternalLinks, before.ExternalLinks)
 		others := input.Title != nil || input.Labels != nil || input.LabelsAdd != nil || priorityProvided || input.Route != nil || addsLink || assigneeProvided || parentProvided || input.BlockedBy != nil || repoProvided
 		reopening := input.Status != nil && status != "done"
