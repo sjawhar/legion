@@ -1,0 +1,82 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-636",
+  "completed": "2026-10-16T03:05:24Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1984",
+  "head": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+  "proof": [
+    {
+      "criterion": "Acceptance 2: the image's OK line and the 20-row table are unchanged in meaning (installed can no longer occur); the probe reports at contract 25.",
+      "surface": "This worker pod's own tree: /opt/omp/bin/omp, /opt/legion/pi-envoy, and the branch's pi-legion packed by scripts/e2e/lib/pack-plugin.sh exactly as the release and the worker image pack it (daemonApiVersion 25), probed by the branch's `legion` built with `go build -o /tmp/legion ./cmd/legion`.",
+      "command": "LEGION_OMP_PATH=/opt/omp/bin/omp /tmp/legion probe-image --plugin-root /tmp/pi-legion-25/package --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models; then `diff` of its `probe-image: capability` lines against the same run with a `legion` built from main (d0090f0d) on /opt/legion/pi-legion",
+      "observed": "exit 0; 20 `probe-image: capability …` lines in Table order, byte-identical to main's (diff empty), none `installed`; OK line `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=25`; nothing on stderr.",
+      "headSha": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+      "negativeControl": "The same command with /opt/codegraph/bin removed from PATH: stdout `probe-image: capability codegraph: missing (codegraph is not on PATH)`, stderr `legion probe-image: capability codegraph is missing: codegraph is not on PATH`, exit 1."
+    },
+    {
+      "criterion": "Item 7: a failed read of retry.modelFallback is reported, not refused — the OK line marks model-fallback=unread and the daemon's report shows the row open.",
+      "surface": "This pod's tree with `--omp /tmp/omp-unread.sh`, a wrapper that exits 1 on `config get retry.modelFallback` and execs /opt/omp/bin/omp otherwise.",
+      "command": "/tmp/legion probe-image --omp /tmp/omp-unread.sh --plugin-root /tmp/pi-legion-25/package --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models",
+      "observed": "exit 0; stderr `legion probe-image: model-fallback not read; the deployment's capability report shows the row open: /tmp/omp-unread.sh config get retry.modelFallback --json exited 1: omp-unread: config get retry.modelFallback failed`; OK line `probe-image: OK (/tmp/omp-unread.sh) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=unread daemon-api-version=25`. The daemon's row for that mark is pinned by TestDeploymentRowsArePresentDecidedOrOpen (open, source boot, `not read: the probe could not read retry.modelFallback under the pod's Oh My Pi settings (the probe pod's log says why)`).",
+      "headSha": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+      "negativeControl": "The same command with the real /opt/omp/bin/omp (proof 1): `model-fallback=on` and nothing on stderr; a main-built `legion` with the wrapper refuses on stderr with exit 1 (the pre-change behaviour the plan cites at cmd/legion/probe_image.go:179-183)."
+    },
+    {
+      "criterion": "First item (spec v7, the architect's ruling): the image probe's attempt is bounded by max(slow_command_timeout_seconds, worker_boot_timeout_seconds + 60 s); when that bound exceeds slow_command_timeout_seconds, `legion start --check-config` prints the derived bound after its OK line; nothing is refused.",
+      "surface": "The branch's `legion start --check-config` on a scratch copy of deploy/kubernetes/daemon/legion.yaml.example under /tmp/cc with every file it names present (tokens, two generated PEMs, a kubeconfig naming the legion-daemon context) and LEGION_POSTGRES_DSN set.",
+      "command": "LEGION_POSTGRES_DSN=postgres://legion@localhost:5432/legion /tmp/legion start --check-config --config run.yaml, three times: the example as is; with `worker_boot_timeout_seconds: 600` appended; with `worker_boot_timeout_seconds: 600` and `slow_command_timeout_seconds: 700` appended",
+      "observed": "Defaults: `Config OK: project=WIDGETS` then the plugins line, exit 0, no probe line. 600 over the default 300: `Config OK: project=WIDGETS`, `image probe: each attempt waits 660s: worker_boot_timeout_seconds (600) + 60s is above slow_command_timeout_seconds (300)`, then the plugins line, exit 0. 600 under 700: `Config OK: project=WIDGETS` and no probe line, exit 0. The capacity stop firing under that shape is driven by TestProbeImagesCapacityStopNeedsTheBudgetToOutliveTheBootTimeout (rig clock, boot timeout 600 ms, budget 900 ms → one capacity wait; budget 300 ms → `still Pending after 300ms`, no capacity wait), passing -count=20.",
+      "headSha": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+      "negativeControl": "A main-built `legion start --check-config` on the 600 file prints `Config OK` and the plugins line with no probe line (the relation is neither derived nor named before this change); `grep -rn 'must be below slow_command_timeout_seconds' packages` finds nothing — no refusal exists."
+    },
+    {
+      "criterion": "Item 5: the worker image's language servers install from a committed lockfile with scripts off, reproducibly.",
+      "surface": "This pod's npm (registry.npmjs.org reachable) in packages/daemon/docker/language-servers, the directory the Dockerfile COPYs and runs `npm ci --ignore-scripts --omit=dev --no-audit --no-fund` in; the image build itself runs in CI (Worker Image workflow run on the pull request).",
+      "command": "cd packages/daemon/docker/language-servers && npm ci --ignore-scripts --omit=dev --no-audit --no-fund --dry-run",
+      "observed": "`added 3 packages in 353ms` (typescript 5.9.3, typescript-language-server 6.0.1, pyright 1.1.414); a real `npm ci` into a scratch copy produced node_modules/.bin/{tsc,tsserver,typescript-language-server,pyright,pyright-langserver} and the five license files the notices stage copies (typescript/LICENSE.txt, typescript/ThirdPartyNoticeText.txt, typescript-language-server/LICENSE, pyright/LICENSE.txt, pyright/dist/typeshed-fallback/LICENSE); no node_modules is committed. The Worker Image workflow run at 53cb8bdf (38842753574) built and published the image with the lockfile install and its probe gate green; the run at 6b44560d is the one the PR body's CI line names.",
+      "headSha": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+      "negativeControl": "A copy of the two files with package.json's typescript edited to 5.9.2: `npm ci --dry-run` refuses with `npm error Invalid: lock file's typescript@5.9.3 does not satisfy typescript@5.9.2`."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/daemon/kubernetes.go (ProbeBudget, ProbeBudgetLine, logProbeBudget; imageProbe's Budget)",
+    "packages/daemon/internal/daemon/daemon.go (logProbeBudget call; Deployment/report store moved out)",
+    "packages/daemon/internal/daemon/capabilities.go (new: the moved deployment and report-store code)",
+    "packages/daemon/internal/daemon/kubernetes_test.go, plugin_test.go",
+    "packages/daemon/internal/config/config.go, capabilities.go (new: the moved Capabilities block), providerkeys.go, stage3.go",
+    "packages/daemon/internal/capabilities/capabilities.go, image.go, deployment.go and their tests; capabilitiestest/capabilitiestest.go (new)",
+    "packages/daemon/internal/lookpath/lookpath.go, lookpath_test.go (new)",
+    "packages/daemon/internal/bootprobe/bootprobe.go, bootprobe_test.go",
+    "packages/daemon/internal/runtime/sandbox/probe.go, probe_test.go, live_install_test.go, live_lifecycle_test.go",
+    "packages/daemon/internal/runtime/tmux/tmux.go",
+    "packages/daemon/internal/api/state.go, version.go",
+    "packages/daemon/cmd/legion/main.go, main_test.go, probe_image.go, probe_image_test.go, claims_test.go",
+    "packages/daemon/docker/worker.Dockerfile, docker/language-servers/package.json, package-lock.json (new)",
+    "packages/contracts/src/legion-api.ts, legion-api.test.ts, fixtures/daemon-api/state.json, version.json",
+    "packages/pi-legion/package.json, CHANGELOG.md",
+    "biome.json",
+    "docs/kubernetes.md, docs/site/src/content/docs/legion/troubleshooting.md, docs/solutions/daemon/a-capability-row-reports-what-a-worker-can-do-not-what-the-image-contains-LEGION-578.md",
+    "scripts/e2e/README.md, stage1-skeleton.sh, stage4b-sandbox-tree.sh"
+  ],
+  "trickyParts": [
+    "The capacity-stop test drives the rig's clock: a goroutine jumps g.now past the boot timeout after a real delay and nudges the pod so the attempt's await notices; the negative control runs the same ageing with the one attempt's budget (300 ms) already spent, so it ends `still Pending after 300ms` and logs no capacity wait.",
+    "render(ctx, renderer) is the one Table walk; a ctx that ends stops it after the row in flight and CheckImage returns the rows so far with an error wrapping ctx's, as before. Deployment.Report passes context.Background(), whose error is provably nil.",
+    "The probe table's byte-identity was checked by diff against a main-built binary on this pod's tree at every head; State.String() is Line.String() verbatim, and StatusMissing/StatusReported never reach api.CapabilityStatesOf (it consumes Deployment.Report alone).",
+    "The notices stage reads the three pins from the copied package.json with one `pin()` function whose sed is double-quoted; the earlier three single-quoted seds nested inside \"$(...)\" defeated check-image-trigger-paths.sh's shlex split of every RUN (the lint failure at 4035e7c0 and 53cb8bdf).",
+    "lastBytes keeps one 2×keep buffer compacted in place; the stream is bounded first by io.LimitReader at 1 MiB, then the last 64 KiB from a line boundary with a leading … when anything was dropped."
+  ],
+  "deviations": [
+    "Plan Task A (a configuration-load refusal of worker_boot_timeout_seconds ≥ slow_command_timeout_seconds) was replaced before it was built, by the architect's ruling (Envoy 6826e513, spec v7): the deploy holder read both live daemons' ConfigMaps at 2026-10-16 01:15Z and found one at 120 over the default 300 and the other at 600 over the default 300 (raised 2026-10-10 for cold issue pods), so the refusal would have stopped that daemon's next boot. Built instead: the attempt budget is max(slow_command_timeout_seconds, worker_boot_timeout_seconds + 60 s) (daemon.ProbeBudget), boot logs the derived bound with both keys, --check-config prints it under kubernetes, docs/kubernetes.md names the derivation, and a test drives the stop under the 600-over-300 shape. No legion.yaml of either deployment changes; legion.yaml.example stays; docs/solutions/testing/role-prompt-and-skill-changes-are-proven-on-a-two-leg-scratch-rig.md:96 keeps its 900 (it loads).",
+    "Plan Task C's `deployment(row)`: Report passes d.deployment directly (it takes the Capability row); render takes a ctx so CheckImage keeps returning the partial table on cancel rather than rendering rows after it.",
+    "Plan Task E: config's PATH read is a small `pathValue(env)` beside lookpath.On rather than an env-slice form on lookpath (the simplify reviewer's `lookpath.In` suggestion was skipped as new API surface for two callers)."
+  ],
+  "openQuestions": [
+    "The live deployments' timeout values are the deploy holder's reading relayed by the architect (120/300 and 600/300); nothing in-tree can read them, and with the refusal gone nothing now depends on them beyond the derived-bound log line each daemon will print at boot (the 600 one) or not (the 120 one)."
+  ],
+  "discoveredComplexity": [
+    "cmd/legion/claims_test.go and internal/daemon/plugin_test.go pinned the contract number by literal (24); both now read api.DaemonAPIVersion, so the next bump fails nothing there.",
+    "The simplify pass applied 8 of 11 findings (margin from the constant, stubs.writeLock through capabilitiestest.WriteLock, binaries unexported, SplitSeq in lineContaining, the dead firstLine fallback dropped twice, lastBytes compaction, the Dockerfile lockfile COPY after apt, the notices stage's package.json from the build context); skipped: lookpath.In (API surface), resolveTools in internal/daemon/tools.go (outside this diff), nothing else.",
+    "This pod has no Docker and no Postgres: internal/daemon's NATS-backed tests and internal/admit's Postgres-backed tests cannot run here (pre-existing; CI runs them), so each package was run with -run filters locally and the full module in CI."
+  ]
+}
