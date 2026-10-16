@@ -39910,9 +39910,14 @@ async function postSlackReply(reply, options = {}) {
     throw new Error("agent-secrets is not on PATH: slack_post takes the bot token from the secrets broker, which this session is not enrolled with; nothing was posted");
   }
   const reason = `slack_post: reply in Slack channel ${reply.channel}, thread ${reply.threadTs}`;
-  const child = Bun.spawn([client, SLACK_BOT_TOKEN_SECRET, "--reason", reason, "--wait", "0s", "--", "bun", "-e", POSTER], { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-  child.stdin.write(JSON.stringify({ channel: reply.channel, thread_ts: reply.threadTs, text: reply.text }));
-  child.stdin.end();
+  const child = Bun.spawn([client, SLACK_BOT_TOKEN_SECRET, "--reason", reason, "--wait", "0s", "--", "bun", "-e", POSTER], {
+    env,
+    stdin: new Blob([
+      JSON.stringify({ channel: reply.channel, thread_ts: reply.threadTs, text: reply.text })
+    ]),
+    stdout: "pipe",
+    stderr: "pipe"
+  });
   const timer = setTimeout(() => child.kill("SIGKILL"), POST_TIMEOUT_MS);
   const [stdout, stderr, code] = await Promise.all([
     new Response(child.stdout).text(),

@@ -150,6 +150,19 @@ describe("postSlackReply", () => {
     expect(slack.calls).toEqual([]);
   });
 
+  // The broker's client exits without reading the reply when it runs no poster, so a write to its
+  // stdin can meet a closed pipe. A reply larger than the pipe holds makes that certain; the
+  // outcome is still the broker's state, never a stray EPIPE.
+  test("a broker that exits before reading the reply reports its state, not a broken pipe", async () => {
+    const slack = fakeSlack({ ok: true, ts: "1.2" });
+    const { env } = brokerEnvironment("pending", slack.url);
+
+    await expect(postSlackReply({ ...reply, text: "x".repeat(1 << 20) }, { env })).rejects.toThrow(
+      "the secrets broker has not granted LEGION_SLACK_BOT_TOKEN: its request is waiting for approval"
+    );
+    expect(slack.calls).toEqual([]);
+  });
+
   test("a denied grant posts nothing and names the broker's state", async () => {
     const slack = fakeSlack({ ok: true, ts: "1.2" });
     const { env } = brokerEnvironment("denied", slack.url);

@@ -204,14 +204,21 @@ export async function postSlackReply(
     );
   }
   const reason = `slack_post: reply in Slack channel ${reply.channel}, thread ${reply.threadTs}`;
+  // The reply is the child's stdin as a Blob, which Bun writes itself. The broker's client reads it
+  // only once it runs the poster: one that refuses exits without reading it, and Bun drops the
+  // closed pipe that leaves, where a write of our own through a pipe would surface it as a stray
+  // EPIPE. A reply the poster could not read whole is its own answer.
   const child = Bun.spawn(
     [client, SLACK_BOT_TOKEN_SECRET, "--reason", reason, "--wait", "0s", "--", "bun", "-e", POSTER],
-    { env, stdin: "pipe", stdout: "pipe", stderr: "pipe" }
+    {
+      env,
+      stdin: new Blob([
+        JSON.stringify({ channel: reply.channel, thread_ts: reply.threadTs, text: reply.text }),
+      ]),
+      stdout: "pipe",
+      stderr: "pipe",
+    }
   );
-  child.stdin.write(
-    JSON.stringify({ channel: reply.channel, thread_ts: reply.threadTs, text: reply.text })
-  );
-  child.stdin.end();
   const timer = setTimeout(() => child.kill("SIGKILL"), POST_TIMEOUT_MS);
   const [stdout, stderr, code] = await Promise.all([
     new Response(child.stdout).text(),
