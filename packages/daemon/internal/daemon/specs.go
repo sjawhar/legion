@@ -136,10 +136,12 @@ func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
-// the headless part, the project's design gate policy and Slack channels as its addressing — what
-// `legion controller start` tells the operator's controller — the deployment instructions and the
-// launch secrets. It has no repository and no git identity: the controller works Dispatch, never a
-// checkout, and commits nothing.
+// the headless part, the project's design gate policy and Slack channels as its addressing, the
+// deployment instructions and the launch secrets. The channels also reach it as
+// LEGION_SLACK_CHANNELS, comma-separated, which its plugin subscribes to while the session holds
+// the controller role (pi-legion's controller-session.ts); a project with none sets no variable. It
+// has no repository and no git identity: the controller works Dispatch, never a checkout, and
+// commits nothing.
 func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if s.prompts == nil {
 		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
@@ -148,8 +150,12 @@ func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
 	if err != nil {
 		return runtime.SpawnSpec{}, err
 	}
+	env := map[string]string{}
+	if len(s.slackChannels) > 0 {
+		env["LEGION_SLACK_CHANNELS"] = strings.Join(s.slackChannels, ",")
+	}
 	return runtime.SpawnSpec{
-		Env:     map[string]string{},
+		Env:     env,
 		Secrets: maps.Clone(s.secrets),
 		Prompt: runtime.PromptParts{
 			RolePromptPaths:            paths,
@@ -194,16 +200,17 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 }
 
 // DesignGateFragment is the sentence a tree's root architect is told after its addressing, and the
-// operator's controller as its launch addressing (`legion controller start`): this project's design
-// gate policy, the "Design gate policy" line the shared role prompts read. What each policy asks of
-// the architect is in its Go role part (prompts/go/architect-root.md).
+// controller as its launch addressing: this project's design gate policy, the "Design gate policy"
+// line the shared role prompts read. What each policy asks of the architect is in its Go role part
+// (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
 }
 
-// ControllerAddressing is the controller's launch addressing under either launch: the daemon's
-// own (controllerSpawnSpec) and `legion controller start`'s. It is the design gate policy, then,
-// when the project names Slack channels, SlackChannelsFragment.
+// ControllerAddressing is the daemon-launched controller's addressing (controllerSpawnSpec): the
+// design gate policy, then, when the project names Slack channels, SlackChannelsFragment. The
+// operator's controller is told the policy alone (`legion controller start`), since only the
+// daemon's may have channels (config.checkSlackChannels).
 func ControllerAddressing(policy config.DesignGate, slackChannels []string) string {
 	addressing := DesignGateFragment(policy)
 	if len(slackChannels) > 0 {
@@ -212,23 +219,18 @@ func ControllerAddressing(policy config.DesignGate, slackChannels []string) stri
 	return addressing
 }
 
-// SlackChannelsFragment names each of the project's Slack channels with the one topic of its app
-// mentions the controller subscribes to, `notifications.slack.*.<channel>.mention`, spelled here so
-// the model never hand-encodes one; a thread's own copy of a mention is not subscribed, since the
-// channel's carries the same event. What the controller does with a mention is the skill's.
+// SlackChannelsFragment names the project's Slack channels, the list the controller answers
+// mentions from: its plugin subscribes to each one's mention topic itself, while the session holds
+// the controller role, so the model subscribes to nothing. What the controller does with a mention,
+// and with a delivery from a channel the list does not name, is the skill's.
 func SlackChannelsFragment(channels []string) string {
 	named := make([]string, 0, len(channels))
 	for _, channel := range channels {
-		named = append(named, fmt.Sprintf("`%s` (`%s`)", channel, SlackMentionTopic(channel)))
+		named = append(named, "`"+channel+"`")
 	}
 	return "Slack channels: " + strings.Join(named, ", ") +
-		"; subscribe to each topic at every start and answer each mention in its thread (skill://legion-controller/references/slack-mentions.md)."
-}
-
-// SlackMentionTopic is the Envoy topic of every app mention in channel, whatever the Slack team:
-// the channel copy Envoy's Slack webhook publishes (`notifications.slack.<team>.<channel>.mention`).
-func SlackMentionTopic(channel string) string {
-	return "notifications.slack.*." + channel + ".mention"
+		": your session hears each one's app mentions while it holds the controller role; answer each in its thread, " +
+		"and nothing from any other channel (skill://legion-controller/references/slack-mentions.md)."
 }
 
 // MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.

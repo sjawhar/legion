@@ -170,6 +170,7 @@ const environmentKeys = [
   "LEGION_ISSUE",
   "LEGION_WORKSPACE",
   "LEGION_STATE_DIR",
+  "LEGION_SLACK_CHANNELS",
   "HOME",
   "DISPATCH_URL",
   "DISPATCH_TOKEN",
@@ -3002,6 +3003,91 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
       "notifications.agent.ses_controller_first"
     );
     expect(resumedConnections.flatMap((connection) => connection.subjects)).not.toContain(topic);
+  });
+
+  // The daemon tells the controller it launches the project's Slack channels as
+  // LEGION_SLACK_CHANNELS. The session subscribes to each channel's mention topic for as long as it
+  // holds the controller role and registers none with the listener, so a resumed session takes the
+  // list it is launched with, never one an earlier launch had: a channel taken off the project, or
+  // given to another project's controller, is not heard here again.
+  describe("the project's Slack channels", () => {
+    const mention = (channel: string) => `notifications.slack.*.${channel}.mention`;
+    const slackSubjects = (connections: typeof natsConnections) =>
+      connections.flatMap((connection) =>
+        connection.subjects.filter(
+          (subject) =>
+            subject.startsWith("notifications.slack.") && !connection.unsubscribed.includes(subject)
+        )
+      );
+    const registeredSlack = (requests: DaemonRequest[]) =>
+      requests.filter(
+        (request) =>
+          request.path === "/v1/interests/subscribe" &&
+          JSON.stringify(request.body).includes("notifications.slack.")
+      );
+
+    test("a controller subscribes to each channel's mentions while it holds its role, and registers none", async () => {
+      process.env.LEGION_SLACK_CHANNELS = "C00000000,G00000001";
+      const before = natsConnections.length;
+      const controller = await launchedController({ sessionId: "ses_controller_slack" });
+      await controller.handlers.get("session_start")?.(
+        {},
+        controller.context("ses_controller_slack")
+      );
+
+      expect(slackSubjects(natsConnections.slice(before))).toEqual([
+        mention("C00000000"),
+        mention("G00000001"),
+      ]);
+      expect(registeredSlack(controller.requests)).toEqual([]);
+    });
+
+    test("a resumed controller takes the list it is launched with: a removed channel, and every channel of an emptied list, are no longer heard", async () => {
+      process.env.LEGION_SLACK_CHANNELS = "C00000000,G00000001";
+      const first = await launchedController({ sessionId: "ses_controller_slack_resume" });
+      await first.handlers.get("session_start")?.({}, first.context("ses_controller_slack_resume"));
+
+      for (const [channels, want] of [
+        ["G00000001", [mention("G00000001")]],
+        ["", []],
+      ] as const) {
+        envoyPluginInterface().bootstrappedSession.file = undefined;
+        process.env.LEGION_SLACK_CHANNELS = channels;
+        const before = natsConnections.length;
+        const resumed = createPi();
+        legionExtension(resumed.pi);
+        const context = first.context("ses_controller_slack_resume");
+        await resumed.handlers.get("session_start")?.(
+          {},
+          {
+            ...context,
+            sessionManager: {
+              ...context.sessionManager,
+              getBranch: () => [
+                { type: "custom", customType: "envoy-role-claim", data: { role: first.token } },
+              ],
+            },
+          }
+        );
+
+        expect(slackSubjects(natsConnections.slice(before))).toEqual([...want]);
+      }
+      expect(registeredSlack(first.requests)).toEqual([]);
+    });
+
+    test("a channel id that is not a Slack channel's is refused, naming the variable", async () => {
+      process.env.LEGION_SLACK_CHANNELS = "C00000000,general";
+      const controller = await launchedController({ sessionId: "ses_controller_slack_bad" });
+
+      await expect(
+        controller.handlers.get("session_start")?.(
+          {},
+          controller.context("ses_controller_slack_bad")
+        )
+      ).rejects.toThrow(
+        'LEGION_SLACK_CHANNELS entry "general" is not a Slack channel id (C or G, then capital letters and digits)'
+      );
+    });
   });
 
   test("a controller whose role ends while its topic subscription is opening does not keep it", async () => {

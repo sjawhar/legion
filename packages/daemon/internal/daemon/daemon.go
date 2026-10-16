@@ -1295,7 +1295,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		OperatorToken:      p.operatorToken,
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,
-		SlackChannels:      cfg.Projects[cfg.Project].SlackChannels,
 		ControllerLaunched: keeper != nil,
 		PluginRelaunchable: p.pluginRelaunchable,
 		Stopping:           s.stopping,

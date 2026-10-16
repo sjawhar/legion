@@ -2,6 +2,8 @@ import {
   controllerToken,
   legionControllerNoticeSubject,
   legionProjectToken,
+  SLACK_CHANNEL_ID_PATTERN,
+  slackMentionTopic,
 } from "@legion/contracts";
 import type { LegionGrant } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
@@ -139,6 +141,7 @@ export function createControllerSession(deps: {
     if (launched) recordBootstrappedSession(sessionFile);
 
     const project = requiredEnvironment(process.env, "LEGION_PROJECT");
+    const slackChannels = slackChannelsFrom(process.env);
     const client = daemon();
     const { daemon: served } = await client.state();
     const servedRole = controllerToken(legionProjectToken(served.project, "the daemon's project"));
@@ -185,6 +188,17 @@ export function createControllerSession(deps: {
       envoyContext,
       registration.claimToken
     );
+    // The project's Slack channels, as the daemon that launched this controller names them: each
+    // channel's app mentions, for as long as this session holds the controller role, never
+    // registered with the listener, so a resume hears the list it is launched with and no other.
+    for (const channel of slackChannels) {
+      await subscribeLegionNotice(
+        sessionID,
+        slackMentionTopic(channel),
+        envoyContext,
+        registration.claimToken
+      );
+    }
     if (supervised) {
       await client.ready({
         claimToken: registration.claimToken,
@@ -240,4 +254,23 @@ export function createControllerSession(deps: {
   };
 
   return { claim, handleSessionStart, reclaimAfterSessionChange, isClaimedSession, mintGrant };
+}
+
+/**
+ * LEGION_SLACK_CHANNELS, the comma-separated Slack channel ids the daemon tells the controller it
+ * launches (the project's `slack_channels`); none when it is unset or empty. An entry that is not
+ * a channel id is refused, naming it, rather than subscribed to as a topic no mention reaches.
+ */
+function slackChannelsFrom(env: NodeJS.ProcessEnv): readonly string[] {
+  const { LEGION_SLACK_CHANNELS: named = "" } = env;
+  if (named.trim() === "") return [];
+  return named.split(",").map((entry) => {
+    const channel = entry.trim();
+    if (!SLACK_CHANNEL_ID_PATTERN.test(channel)) {
+      throw new Error(
+        `LEGION_SLACK_CHANNELS entry ${JSON.stringify(channel)} is not a Slack channel id (C or G, then capital letters and digits)`
+      );
+    }
+    return channel;
+  });
 }

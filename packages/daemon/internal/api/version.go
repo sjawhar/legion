@@ -175,16 +175,15 @@ package api
 // A 24 plugin's strict reader refuses a state whose deployment rows carry `source`, so the boot
 // gate and `legion probe-image` refuse the mixed pair.
 //
-// 31: sjawhar/legion#1998 -- `slackChannels` on POST /legion/v1/controller/secret's answer
-// (ControllerSecretResponse), the project's `slack_channels`, always emitted, `[]` for none, which
-// `legion controller start` tells the controller as its addressing (daemon.ControllerAddressing),
-// as the daemon tells the controller it launches; and, under runtime.kubernetes.agent_secrets, the
-// controller pod's container carries AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR and its shim the
-// three agent-secrets flags, as every workflow role's does, so the controller's `slack_post` is
-// granted the Legion daemon's own LEGION_SLACK_BOT_TOKEN. A `legion` from before 31 against a 31
-// daemon would start a controller that never hears the project's Slack mentions, and a 31
-// `legion` refuses an older daemon's answer for want of the list; the secret route's contract
-// check refuses either pair before it mints, naming both. (Numbers 26 to 30 were claimed by other
-// open branches when this one took 31; contract numbers increase on main and need not be
-// consecutive.)
+// 31: sjawhar/legion#1998 -- under runtime.kubernetes.agent_secrets the daemon-launched
+// controller's pod carries AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR and its shim the three
+// agent-secrets flags, as every workflow role's does, so its `slack_post` is granted the Legion
+// daemon service's LEGION_SLACK_BOT_TOKEN; and a project's `slack_channels` (which only
+// `controller: daemon` with the broker may set) reach that controller as LEGION_SLACK_CHANNELS,
+// which the plugin subscribes to while the session holds the controller role, and as the
+// addressing's `Slack channels:` line, which cites the controller skill's Slack reference. A
+// plugin from before 31 subscribes to no channel and ships neither `slack_post` nor the reference,
+// so the boot gate and `legion probe-image` refuse the mixed pair. The controller secret's answer
+// is unchanged. (Numbers 26 to 30 were claimed by other open branches when this one took 31;
+// contract numbers increase on main and need not be consecutive.)
 const DaemonAPIVersion = 31

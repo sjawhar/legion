@@ -2,20 +2,30 @@
 
 A person who mentions the Legion Slack app in one of the project's Slack channels is talking to
 you, and you answer in that thread. The `Slack channels:` line of your system prompt names each
-channel `legion.yaml` gives the project (`projects.<KEY>.slack_channels`) and the one topic its
-mentions arrive on, `notifications.slack.*.<channel>.mention`. With no such line the project has no
-channel, and nothing here applies.
+channel `legion.yaml` gives the project (`projects.<KEY>.slack_channels`). Only the controller the
+daemon launches has one: the Slack bot token is the Legion daemon service's, which the secrets
+broker grants to that service's own pods alone. With no such line the project has no channel, and
+nothing here applies but the sweep below.
 
-## Subscribe at every start
+## Your session subscribes for you
 
-At every start, as the start procedure's last step, run `envoy_subscribe` with every topic the
-`Slack channels:` line names, exactly as it spells them. A topic you already hold is reported as
-already subscribed and costs nothing, so a resumed session runs it too. Subscribe to nothing else of
-Slack: a mention made inside a thread also arrives on a thread topic, but the channel's topic
-carries the same event, so each mention reaches you once.
+Your session hears each listed channel's mentions by itself, on
+`notifications.slack.*.<channel>.mention`, for as long as it holds the controller role, and keeps no
+record of them: a resumed or relaunched session hears the channels its launch names and no others.
+Never `envoy_subscribe` a Slack topic yourself: the listener keeps that one, and a resume restores
+it after the project stops naming its channel.
+
+At every start, whether or not the line is there, run `envoy_list` and `envoy_unsubscribe` every
+topic it lists that begins `notifications.slack.` and names a channel the line does not (every one
+of them when there is no line). Such a topic was subscribed by hand, and would bring you a channel
+the project no longer names, or one another project's controller now answers.
+
+A delivery from Slack whose `channel_id` the line does not name is not yours: do nothing with it,
+and unsubscribe its topic.
 
 A mention published while no controller ran never arrives: Envoy hands a session no copy of an
-event from before it subscribed. Nothing tells you about one, so there is nothing to catch up.
+event from before it subscribed. Nothing tells you about one, so there is nothing to catch up. A
+change to the project's `slack_channels` reaches you at your next launch.
 
 ## What a mention carries
 

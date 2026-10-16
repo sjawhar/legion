@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -135,35 +134,6 @@ type failingTokens struct{}
 
 func (failingTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
 	return appauth.Lease{}, errors.New("github is down")
-}
-
-// The controller secret answers the project's Slack channels, which `legion controller start` tells
-// the controller it subscribes to, and an empty list, never null, for a project with none: a
-// `legion` reads a missing list as a daemon from before it.
-func TestControllerSecretAnswersTheProjectsSlackChannels(t *testing.T) {
-	for _, tc := range []struct {
-		name     string
-		channels []string
-		want     string
-	}{
-		{name: "two channels", channels: []string{"C00000000", "G00000001"}, want: `"slackChannels":["C00000000","G00000001"]`},
-		{name: "none", channels: nil, want: `"slackChannels":[]`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			h := newHarness(t)
-			h.handler = NewServer("127.0.0.1", 8437, Options{
-				Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
-				Controller: h.store, Grants: credential.New(nil), SlackChannels: tc.channels,
-			}).Handler
-			recorder := h.controllerSecret(testOperatorToken)
-			if recorder.Code != http.StatusOK {
-				t.Fatalf("controller secret = %d, want 200; body %s", recorder.Code, recorder.Body)
-			}
-			if body := recorder.Body.String(); !strings.Contains(body, tc.want) {
-				t.Fatalf("controller secret body = %s, want it to carry %s", body, tc.want)
-			}
-		})
-	}
 }
 
 // The route that mints a controller capability answers only the operator's bearer, and a refusal

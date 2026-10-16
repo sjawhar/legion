@@ -87,9 +87,9 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 31 for contract 31's `slackChannels` on `POST /legion/v1/controller/secret`'s answer
-(sjawhar/legion#1998: the project's `slack_channels`, which `legion controller start` tells the
-controller as the daemon tells the one it launches), after contract 25's `source` on a deployment
+number is 31 for contract 31's daemon-launched controller (sjawhar/legion#1998: its pod enrolled
+with the secrets broker, and the project's `slack_channels` handed to it as
+`LEGION_SLACK_CHANNELS`, which the plugin subscribes to), after contract 25's `source` on a deployment
 capability row (LEGION-636) and contract 24's `pluginContract` on the claim views (LEGION-164),
 after contract 23's `strandedClaims` list on `GET /legion/v1/state` (LEGION-670: every
 claim nothing will wake, by issue, role and state), after contract 22's token login (LEGION-618: the
@@ -253,19 +253,23 @@ controller grant and posts `POST /legion/v1/issues/status` with it. The claim: `
 `api.ControllerRegisterResponse` (`LegionControllerRegisterResponse`), then the Envoy role
 `legion-<project>-controller`, then a subscription to the project's controller topic
 `notifications.legion.<project>.controller` (`legionControllerNoticeSubject`, the project from
-`LEGION_PROJECT`); each `set_status` then mints from the `/grants` controller-session form with
-the secret the registration was issued. What the daemon publishes
-on that topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
-subscription lasts while the session holds the controller role (`subscribeLegionNotice`'s
+`LEGION_PROJECT`), then one to each Slack channel `LEGION_SLACK_CHANNELS` names, on its mention
+topic (`slackMentionTopic`; the daemon sets the variable only for the controller it launches, from
+the project's `slack_channels`, and an entry that is not a channel id refuses the claim); each
+`set_status` then mints from the `/grants` controller-session form with the secret the
+registration was issued. What the daemon publishes
+on the controller topic is listed at `notify.ControllerTopic` (`packages/daemon/internal/notify`). The
+subscriptions last while the session holds the controller role (`subscribeLegionNotice`'s
 `whileHolding`): once another live session holds it, the heartbeat's refused re-assertion closes
-it, so a replaced controller stops taking wakes within one heartbeat, and a dropped connection's
-retries, each compared with the role's state when the connection dropped, do not reopen it once
-the role has ended. A `/new` or `/resume` keeps it open whichever extension handles the switch
-first: Oh My Pi runs the manifest's order but moves on from a handler that outlasts its 30-second
-budget, and the switch's drop of the outgoing role (`endOutgoingRole`) leaves a role already
-claimed under the new session id alone. It is never registered with
-the listener, so a replaced controller resumed later gets it back only by claiming the role, which
-the daemon refuses its replaced capability. It is a live wake that changes no
+them, so a replaced controller stops taking wakes and mentions within one heartbeat, and a dropped
+connection's retries, each compared with the role's state when the connection dropped, do not
+reopen them once the role has ended. A `/new` or `/resume` keeps them open whichever extension
+handles the switch first: Oh My Pi runs the manifest's order but moves on from a handler that
+outlasts its 30-second budget, and the switch's drop of the outgoing role (`endOutgoingRole`)
+leaves a role already claimed under the new session id alone. None is ever registered with the
+listener, so a replaced controller resumed later gets them back only by claiming the role, which
+the daemon refuses its replaced capability, and a resumed controller hears the channels its own
+launch names, never a list an earlier launch had. The controller topic is a live wake that changes no
 request, response or pane variable, and a daemon publishes to the topic whether anyone listens. A
 controller on an earlier plugin release never runs against this daemon: contract 7 ships with the
 subscription, `legion controller start` refuses to launch an Oh My Pi whose plugin speaks another

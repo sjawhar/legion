@@ -33,16 +33,12 @@ type ControllerSecretRequest struct {
 }
 
 // ControllerSecretResponse is `POST /legion/v1/controller/secret`'s answer: the capability the
-// controller's Oh My Pi registers with, the project's design gate policy (`gates.design`), which
-// `legion controller start` tells the controller so its take comment promises a design approval
-// only when the gate is armed, and the project's Slack channels (`slack_channels`), whose mention
-// topics it tells the controller to subscribe to. SlackChannels is never null, so a `legion` tells
-// a project with no channel from a daemon from before the field. `legion controller start` reads it;
-// the plugin never does.
+// controller's Oh My Pi registers with, and the project's design gate policy (`gates.design`),
+// which `legion controller start` tells the controller so its take comment promises a design
+// approval only when the gate is armed. `legion controller start` reads it; the plugin never does.
 type ControllerSecretResponse struct {
-	Secret        string            `json:"secret"`
-	DesignGate    config.DesignGate `json:"designGate"`
-	SlackChannels []string          `json:"slackChannels"`
+	Secret     string            `json:"secret"`
+	DesignGate config.DesignGate `json:"designGate"`
 }
 
 // ControllerCredentialRequest is `POST /legion/v1/controller/github-credential`'s body: the
@@ -127,7 +123,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	}
 	s.grants.RevokeControllers()
 	s.log.Info("api: minted a controller capability; the previous controller's registration and grants are revoked", "generation", generation)
-	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate, SlackChannels: s.slackChannels})
+	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
 }
 
 // controllerGitHubCredential is `legion controller start`'s refresh call: proving the current

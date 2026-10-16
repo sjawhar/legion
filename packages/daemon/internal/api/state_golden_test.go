@@ -348,9 +348,7 @@ func TestControllerRegisterResponseGolden(t *testing.T) {
 
 // What `legion controller start` fetches with the operator's bearer.
 func TestControllerSecretResponseGolden(t *testing.T) {
-	golden(t, "controller-secret.json", ControllerSecretResponse{
-		Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues, SlackChannels: []string{"C00000000"},
-	})
+	golden(t, "controller-secret.json", ControllerSecretResponse{Secret: "Q2FwYWJpbGl0eUZvclRoZUNvbnRyb2xsZXI", DesignGate: config.DesignGateRootIssues})
 }
 
 // What `legion controller start` fetches for the review App's token, rendered as the two files

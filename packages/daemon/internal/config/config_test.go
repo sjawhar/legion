@@ -296,16 +296,58 @@ func TestLoadReadsProjectMergeRules(t *testing.T) {
 }
 
 // A project's slack_channels are the Slack channel ids whose @-mentions reach its controller, kept
-// in the order the file writes them.
+// in the order the file writes them, on a deployment whose daemon launches that controller
+// enrolled with the secrets broker (slackChannelsFile).
 func TestLoadReadsProjectSlackChannels(t *testing.T) {
-	body := strings.Replace(minimalFile, "{ repo: acme/widgets }",
-		"{ repo: acme/widgets, slack_channels: [C00000000, G00000001] }", 1)
-	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	cfg, err := LoadForValidation(writeConfigFile(t, slackChannelsFile("[C00000000, G00000001]", true, true)), noEnv)
 	if err != nil {
 		t.Fatalf("Load project slack channels: %v", err)
 	}
-	if got, want := cfg.Projects["DEMO"].SlackChannels, []string{"C00000000", "G00000001"}; !reflect.DeepEqual(got, want) {
+	if got, want := cfg.Projects["LEGSMOKE"].SlackChannels, []string{"C00000000", "G00000001"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("SlackChannels = %q, want %q", got, want)
+	}
+}
+
+// slackChannelsFile is kubernetesFile with the project's slack_channels set to channels, under
+// `controller: daemon` when daemon is true and with an agent_secrets block when enrolled is.
+func slackChannelsFile(channels string, daemon, enrolled bool) string {
+	body := kubernetesWith("  LEGSMOKE: { repo: sjawhar/legion-smoke }\n",
+		"  LEGSMOKE: { repo: sjawhar/legion-smoke, slack_channels: "+channels+" }\n")
+	if daemon {
+		body = "controller: daemon\n" + body
+	}
+	if enrolled {
+		body += "    agent_secrets:\n      url: https://secrets.internal.example\n" + agentSecretsTokenFile
+	}
+	return body
+}
+
+// Only the controller the daemon launches, enrolled with the secrets broker, is granted the Slack
+// bot token (LEGION_SLACK_BOT_TOKEN, owned by the Legion daemon's service): the broker grants a
+// service's secret to that service's own pods and no one else. So a project names Slack channels
+// only where both hold, and anywhere else the loader refuses them, naming why, rather than start a
+// controller that hears mentions it can never answer. An empty list names no channel.
+func TestSlackChannelsNeedTheDaemonsControllerEnrolledWithTheBroker(t *testing.T) {
+	const why = "needs controller: daemon and runtime.kubernetes.agent_secrets: Slack replies need the daemon-launched controller enrolled with the secrets broker, which grants the Slack bot token (LEGION_SLACK_BOT_TOKEN) only to the Legion daemon service's own pods"
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"under tmux", strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, slack_channels: [C00000000] }", 1), "projects.DEMO.slack_channels " + why},
+		{"the operator's controller", slackChannelsFile("[C00000000]", false, true), "projects.LEGSMOKE.slack_channels " + why},
+		{"no broker", slackChannelsFile("[C00000000]", true, false), "projects.LEGSMOKE.slack_channels " + why},
+		{"neither", slackChannelsFile("[C00000000]", false, false), "projects.LEGSMOKE.slack_channels " + why},
+		{"an empty list", slackChannelsFile("[]", false, false), ""},
+		{"both", slackChannelsFile("[C00000000]", true, true), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("LoadForValidation: %v, want it to load", err)
+			case tc.want != "" && (err == nil || err.Error() != tc.want):
+				t.Fatalf("LoadForValidation = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }
 

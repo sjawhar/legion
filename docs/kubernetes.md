@@ -1744,7 +1744,8 @@ relaunched replaces the pod, under the pod's launch turn, and the others, whose 
 that turn, resume into the new pod, whose six launchers dial the current stream and mount the
 current enrollment. None of them is charged, and none is found gone when the pod is replaced under
 it. The controller's pod, whose one launcher dials a stale stream, is replaced the same way at its
-relaunch; it never enrolls, so the broker's settings never replace it. A role whose environment
+relaunch, and under `runtime.kubernetes.agent_secrets` it is handed the broker's address as a
+workflow role is, so a changed broker address replaces it as it does an issue pod. A role whose environment
 alone moved starts its next generation in the same pod, handed the current addresses, and the pod
 and its other roles are left as they are. The stale observation is never charged, since the
 process did nothing wrong; a relaunch the runtime refuses is charged as any launch failure is.
@@ -3011,7 +3012,11 @@ so it lands wherever the pool has room for it, and it is annotated `karpenter.sh
 "true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
 is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
-`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
+`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, `LEGION_SLACK_CHANNELS` when the project
+names Slack channels (comma-separated; its plugin subscribes to each channel's mention topic while
+the session holds the controller role, registered with no listener, so a resume or relaunch hears
+the channels the launch names and no others; a changed `slack_channels` reaches it at its next
+launch, which `legion claims stop` of the controller brings at once), the launch secrets' `<NAME>_FILE`
 pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
 (`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
 a tree, an issue or a checkout. Its system prompt is the controller's role
@@ -3180,8 +3185,7 @@ keeping nothing until the daemon has answered, the command:
    does;
 6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
-   and `Slack channels:` line (from the secret's answer: `designGate` and `slackChannels`) and the
-   deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
+   and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
    `LEGION_PROJECT`, `LEGION_STATE_DIR`, `LEGION_CONTROLLER_START_MESSAGE` (the pi-legion
    extension sends it as the session's first turn right after its role claim succeeds and before
