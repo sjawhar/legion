@@ -2609,6 +2609,8 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
     delete process.env.LEGION_CONTROLLER_START_MESSAGE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    // The daemon always names its controller's Slack channels; this project has none.
+    process.env.LEGION_SLACK_CHANNELS = "";
     try {
       await controller.handlers.get("session_start")?.(
         {},
@@ -2656,6 +2658,7 @@ describe("the operator-launched controller (LEGION_CONTROLLER=1)", () => {
     await writeFile(bootFile, "stale-boot-token\n", { mode: 0o600 });
     delete process.env.LEGION_CONTROLLER_SECRET_FILE;
     process.env.LEGION_BOOT_TOKEN_FILE = bootFile;
+    process.env.LEGION_SLACK_CHANNELS = "";
     try {
       // The test's exit hook throws in place of exiting; the throw ends the handler.
       await controller.handlers.get("session_start")?.(
