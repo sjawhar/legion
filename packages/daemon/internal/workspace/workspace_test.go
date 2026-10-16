@@ -550,7 +550,7 @@ func TestProvisionClonesThroughTemporarySiblingWithCredentialReset(t *testing.T)
 	if !strings.HasPrefix(clone.Argv[4], filepath.Join(req.StateDir, "repos", "github.com", "acme", "widgets")+".clone-") {
 		t.Errorf("clone target = %q, want temporary sibling", clone.Argv[4])
 	}
-	assertCredentialedEnvironment(t, clone)
+	assertCredentialedEnvironmentBounded(t, clone, CloneTimeout)
 	fetch := findCall(t, run.Calls(), "jj", "git", "fetch")
 	assertCredentialedEnvironment(t, fetch)
 
@@ -706,6 +706,36 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 	provision("WIDGETS-43")
 	if fetched := strings.TrimSpace(runSetup(t, cloneDir, "jj", "log", "-r", "main@origin", "--no-graph", "-T", "commit_id", "--ignore-working-copy", "-R", cloneDir)); fetched != head {
 		t.Errorf("after the next pod's fetch the shared clone's main@origin is %s, want the remote's %s", fetched, head)
+	}
+}
+
+// The shared clone's clone copies the whole repository, so its duration follows the repository's
+// size as the fetch's clone does: it runs under CloneTimeout, never the slow-command budget every
+// other provisioning command keeps. From a pod's feed it is the one command that copies and imports
+// every object: a 3.4 GB repository took 4.2 to 4.7 minutes on a 64-core devbox, past the
+// 5-minute budget once a sandbox slows it.
+func TestTheSharedClonesCloneIsBoundedByCloneTimeout(t *testing.T) {
+	run := newLocalRunner(t)
+	fetch := fetchRequest(t)
+	if _, err := Fetch(context.Background(), run, fetch); err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	before := len(run.Calls())
+	if _, err := Provision(context.Background(), run, Request{
+		StateDir: filepath.Join(t.TempDir(), "state"), Repo: ghrepo.MustParse("acme/widgets"), Issue: "WIDGETS-42", DefaultBranch: "main",
+		CredentialHelper: GitHubCredentialHelper, Source: FromFeed(fetch.Feed),
+		Log: func(line string) { t.Logf("provisioning logged: %s", line) },
+	}); err != nil {
+		t.Fatalf("provision from the feed: %v", err)
+	}
+	for _, call := range run.Calls()[before:] {
+		want := testTimeout
+		if isClone(call.Argv) {
+			want = CloneTimeout
+		}
+		if call.Timeout != want {
+			t.Errorf("%q ran under %s, want %s", call.Argv, call.Timeout, want)
+		}
 	}
 }
 
