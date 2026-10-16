@@ -31,7 +31,7 @@ func apiAuth(token string, verifier *oidc.Verifier, logger *logging.Logger, next
 		}
 		if r.Body != nil && r.Body != http.NoBody && r.ContentLength != 0 {
 			contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
-			if err != nil || !strings.EqualFold(contentType, "application/json") {
+			if err != nil || contentType != "application/json" {
 				writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 				return
 			}
