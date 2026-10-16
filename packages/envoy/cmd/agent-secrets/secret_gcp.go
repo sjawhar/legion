@@ -62,12 +62,12 @@ func checkSettingsKMSKeyName(settings Settings) error {
 }
 
 // gcpIdentityInfo is what the GCP backend knows about the signed-in Application Default
-// Credentials: the ADC JSON's own "type" (authorized_user for a person's `gcloud auth
-// application-default login`, service_account for a key file, "" when ADC carries no JSON at all,
-// such as a GCE/GKE metadata-server identity or workload identity), the signed-in email, and the
-// project ADC itself names (its quota project), "" when it names none.
+// Credentials: the ADC JSON's own "type" (google.AuthorizedUser for a person's `gcloud auth
+// application-default login`, google.ServiceAccount for a key file, "" when ADC carries no JSON at
+// all, such as a GCE/GKE metadata-server identity or workload identity), the signed-in email, and
+// the project ADC itself names (its quota project), "" when it names none.
 type gcpIdentityInfo struct {
-	Kind    string
+	Kind    google.CredentialsType
 	Email   string
 	Project string
 }
@@ -77,7 +77,7 @@ var gcpCredentials = func(ctx context.Context) (*google.Credentials, error) {
 	return google.FindDefaultCredentials(ctx, secretmanager.DefaultAuthScopes()...)
 }
 
-// gcpUserinfo reads the signed-in email behind creds from Google's userinfo endpoint, lowercased.
+// gcpUserinfo reads the signed-in email behind creds from Google's userinfo endpoint.
 // Tests replace it so no form makes a network call for it.
 var gcpUserinfo = func(ctx context.Context, creds *google.Credentials) (string, error) {
 	httpClient := oauth2.NewClient(ctx, creds.TokenSource)
@@ -96,7 +96,7 @@ var gcpUserinfo = func(ctx context.Context, creds *google.Credentials) (string, 
 	if err := json.NewDecoder(resp.Body).Decode(&userinfo); err != nil {
 		return "", fmt.Errorf("decode your Google sign-in's identity: %w", err)
 	}
-	return strings.ToLower(userinfo.Email), nil
+	return userinfo.Email, nil
 }
 
 // gcpClientDial builds the Secret Manager client for creds. Tests replace it to dial a local fake
@@ -118,7 +118,7 @@ func newGCPBackend(ctx context.Context, settings Settings) (*gcpBackend, error) 
 			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(creds.JSON, &parsed); err == nil {
-			identity.Kind = parsed.Type
+			identity.Kind = google.CredentialsType(parsed.Type)
 		}
 	}
 	email, err := gcpUserinfo(ctx, creds)
@@ -152,16 +152,7 @@ func (b *gcpBackend) secretID(slug string) string {
 	return strings.TrimPrefix(b.id(slug), b.parent()+"/secrets/")
 }
 
-// displayName is the NAME a session asks for the secret named id, or id itself when its name
-// under the prefix maps to none (the broker refuses such a secret as name-malformed).
-func (b *gcpBackend) displayName(id string) string {
-	slug := strings.TrimPrefix(id, b.settings.SecretsPrefix)
-	name := policy.SlugToName(slug)
-	if back, err := policy.NameToSlug(name); err != nil || back != slug {
-		return id
-	}
-	return name
-}
+func (b *gcpBackend) displayName(id string) string { return displayName(b.settings.SecretsPrefix, id) }
 
 // gcpProjectNumberPattern matches a GCP project NUMBER (digits only), the form the broker's
 // gcp_project setting takes (it is cut from the secrets' own resource-name prefix,
@@ -192,7 +183,7 @@ func (b *gcpBackend) requireWriteSignIn(ctx context.Context) (string, error) {
 	if err := b.requireAccount(ctx); err != nil {
 		return "", err
 	}
-	if b.identity.Kind != "authorized_user" {
+	if b.identity.Kind != google.AuthorizedUser {
 		return "", fmt.Errorf("your Google Cloud Application Default Credentials are not a person's sign-in (run `gcloud auth application-default login` instead of using a service account): a secret is written under your own sign-in, never a machine's")
 	}
 	if b.identity.Email == "" {

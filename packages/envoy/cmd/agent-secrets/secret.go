@@ -27,9 +27,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
-	"github.com/aws/smithy-go"
 	"golang.org/x/term"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
@@ -208,15 +205,6 @@ func ownerTag(owner, email string) (string, error) {
 	return owner, nil
 }
 
-// ownerTierTags is the owner and tier tags, which create and retag always send together
-// (cmdSecretRetag says why).
-func ownerTierTags(owner, tier string) []smtypes.Tag {
-	return []smtypes.Tag{
-		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
-		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
-	}
-}
-
 // secretStdin is where create and set read a secret's value from; tests replace it.
 var secretStdin io.Reader = os.Stdin
 
@@ -390,15 +378,6 @@ func formatTime(t *time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// tagMap is tags as a map.
-func tagMap(tags []smtypes.Tag) map[string]string {
-	m := make(map[string]string, len(tags))
-	for _, tag := range tags {
-		m[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
-	}
-	return m
-}
-
 // orDash is s, or "-" when it is empty.
 func orDash(s string) string {
 	if s == "" {
@@ -407,18 +386,11 @@ func orDash(s string) string {
 	return s
 }
 
-// isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
-// generic API error: secretsmanager's types declare no type for it.
-func isAccessDenied(err error) bool {
-	var apiErr smithy.APIError
-	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException"
-}
-
 // secretBackend is the per-store backend the secret forms call: AWS Secrets Manager
 // (storeAWSSecretsManager, or "" from a broker that predates the `store` setting) or GCP Secret
 // Manager (storeGCPSecretManager), chosen from the broker's GET /v1/settings `store` field. Every
 // method takes the secret's name under the prefix (secretName's slug); the full store-side name
-// (secretSession.id) is each backend's own concern.
+// (each backend's own id) is each backend's own concern.
 type secretBackend interface {
 	// requireAccount refuses, before any read, a sign-in whose account or project does not hold
 	// the agent secrets: a read there would list another account's secrets as if they were the
@@ -447,13 +419,12 @@ type secretBackend interface {
 	isAccessDenied(err error) bool
 }
 
-// secretSession is one secret form's connection: the broker, its settings, and the backend
-// (requireAccount, requireWriteSignIn) opened for them.
+// secretSession is one secret form's connection: the broker and the backend (requireAccount,
+// requireWriteSignIn) opened for it.
 type secretSession struct {
-	ctx      context.Context
-	broker   *client
-	settings Settings
-	backend  secretBackend
+	ctx     context.Context
+	broker  *client
+	backend secretBackend
 }
 
 // openSession reads the broker's settings from AGENT_SECRETS_URL and opens the backend its
@@ -476,7 +447,7 @@ func openSession(ctx context.Context, profile string) (*secretSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &secretSession{ctx: ctx, broker: broker, settings: settings, backend: backend}, nil
+	return &secretSession{ctx: ctx, broker: broker, backend: backend}, nil
 }
 
 // openSecretBackend builds the backend settings.Store names: AWS Secrets Manager, pinned to the
@@ -533,15 +504,12 @@ func connectWriter(ctx context.Context, profile string) (*secretSession, string,
 	return s, email, nil
 }
 
-// id is the Secrets Manager name of the secret whose name under the prefix is slug.
-func (s *secretSession) id(slug string) string {
-	return s.settings.SecretsPrefix + slug
-}
-
-// displayName is the NAME a session asks for the secret named id in Secrets Manager, or id itself
-// when its name under the prefix maps to none (the broker refuses such a secret as name-malformed).
-func (s *secretSession) displayName(id string) string {
-	slug := strings.TrimPrefix(id, s.settings.SecretsPrefix)
+// displayName is the NAME a session asks for the secret named id, or id itself when its name
+// under the prefix maps to none (the broker refuses such a secret as name-malformed). Both
+// backends share it (awsBackend.displayName, gcpBackend.displayName): their store-side name
+// differs, but it maps back to NAME the same way, from settings.SecretsPrefix alone.
+func displayName(prefix, id string) string {
+	slug := strings.TrimPrefix(id, prefix)
 	name := policy.SlugToName(slug)
 	if back, err := policy.NameToSlug(name); err != nil || back != slug {
 		return id

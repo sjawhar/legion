@@ -2,15 +2,13 @@
 //
 // The GCP secret forms run in-process here, against a fake Secret Manager gRPC server
 // (fakeSecretManager) standing in for the real API, with gcpCredentials and gcpUserinfo replaced
-// so no form makes a network call for its identity, and a fake broker (gcpSecretBroker) answering
-// GET /v1/settings with the GCP store's shape and the reread.
+// so no form makes a network call for its identity, and the shared fake broker (secretBroker,
+// secret_test.go) answering GET /v1/settings with the GCP store's shape and the reread.
 package main
 
 import (
 	"context"
 	"net"
-	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -237,45 +235,13 @@ func useGCPIdentity(t *testing.T, kind, email, project string) {
 	t.Cleanup(func() { gcpCredentials, gcpUserinfo = restoreCreds, restoreUserinfo })
 }
 
-// gcpSecretBroker is a fake broker for the GCP secret forms: GET /v1/settings answers settings,
-// and each reread is answered by answer.
-type gcpSecretBroker struct {
-	mu      sync.Mutex
-	rereads []string
-	answer  func(name string) Reread
-}
-
-// startGCPSecretBroker serves a gcpSecretBroker on AGENT_SECRETS_URL for the rest of t.
-func startGCPSecretBroker(t *testing.T, settings Settings, answer func(name string) Reread) *gcpSecretBroker {
-	t.Helper()
-	b := &gcpSecretBroker{answer: answer}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/settings":
-			writeJSON(w, settings)
-		case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/v1/secrets/") && strings.HasSuffix(r.URL.Path, "/reread"):
-			name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/secrets/"), "/reread")
-			reread := b.answer(name)
-			b.mu.Lock()
-			b.rereads = append(b.rereads, name)
-			b.mu.Unlock()
-			writeJSON(w, reread)
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	t.Setenv("AGENT_SECRETS_URL", srv.URL)
-	return b
-}
-
 func alwaysServed(name string) Reread { return Reread{Name: name, Served: true} }
 
 func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 	fake := newFakeSecretManager()
 	startFakeSecretManager(t, fake)
 	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), gcpServedBy(fake, gcpTestSettings()))
+	startSecretBrokerWith(t, gcpTestSettings(), gcpServedBy(fake, gcpTestSettings()))
 	useStdin(t, "shh")
 	stdout, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
 	if code != 0 {
@@ -349,7 +315,7 @@ func TestGCPSecretCreateShowSetRetagDeleteRestoreLifecycle(t *testing.T) {
 func TestGCPSecretCreateRefusesServiceAccount(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "service_account", "robot@acme-agent-infra.iam.gserviceaccount.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
 	_, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
@@ -366,7 +332,7 @@ func TestGCPSecretCreateRefusesServiceAccount(t *testing.T) {
 func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "", "robot@acme-agent-infra.iam.gserviceaccount.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
 	_, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
@@ -383,7 +349,7 @@ func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
 func TestGCPSecretReadRefusesAnotherProjectNumber(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", "999999999999")
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 
 	_, stderr, code := runSecret("list")
 	if code != 1 {
@@ -399,7 +365,7 @@ func TestGCPSecretReadRefusesAnotherProjectNumber(t *testing.T) {
 func TestGCPSecretReadAllowsNoQuotaProject(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", "")
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 
 	_, stderr, code := runSecret("list")
 	if code != 0 {
@@ -413,7 +379,7 @@ func TestGCPSecretReadAllowsNoQuotaProject(t *testing.T) {
 func TestGCPSecretReadAllowsAProjectIDQuotaProject(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", "acme-agent-infra")
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 
 	_, stderr, code := runSecret("list")
 	if code != 0 {
@@ -425,7 +391,7 @@ func TestGCPSecretReadAllowsAProjectIDQuotaProject(t *testing.T) {
 func TestGCPSecretOwnerMeIsTheSignInEmailLowercased(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "Ada@Example.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
 	stdout, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent")
@@ -442,7 +408,7 @@ func TestGCPSecretOwnerMeIsTheSignInEmailLowercased(t *testing.T) {
 func TestGCPSecretRetagOnlyNamedFieldReplacesHeldOne(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
 	if _, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "shared", "--tier", "agent"); code != 0 {
@@ -464,7 +430,7 @@ func TestGCPSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T)
 	fake := newFakeSecretManager()
 	startFakeSecretManager(t, fake)
 	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
 	if _, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "shared", "--tier", "agent"); code != 0 {
@@ -491,7 +457,7 @@ func TestGCPSecretRetagOfASharedSecretSaysAnAdministratorChangesIt(t *testing.T)
 func TestGCPSecretListShowsOwnerTierAndValue(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
-	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+	startSecretBrokerWith(t, gcpTestSettings(), alwaysServed)
 	useStdin(t, "shh")
 
 	if _, stderr, code := runSecret("create", "SCRATCH_TEST", "--owner", "me", "--tier", "agent"); code != 0 {
@@ -514,7 +480,7 @@ func TestGCPSecretListShowsOwnerTierAndValue(t *testing.T) {
 func TestGCPSecretReadsRefuseBadSettings(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", testGCPProject)
-	startGCPSecretBroker(t, Settings{
+	startSecretBrokerWith(t, Settings{
 		Store: storeGCPSecretManager, SecretsPrefix: testGCPPrefix, GCPProject: testGCPProject,
 		KMSKeyName: "not-a-key-name",
 	}, alwaysServed)
@@ -543,7 +509,7 @@ func TestCheckSettingsKMSKeyName(t *testing.T) {
 // TestOpenSecretBackendRefusesUnknownStore: a store name neither backend names is refused before
 // any cloud call.
 func TestOpenSecretBackendRefusesUnknownStore(t *testing.T) {
-	startGCPSecretBroker(t, Settings{Store: "azure-key-vault"}, alwaysServed)
+	startSecretBrokerWith(t, Settings{Store: "azure-key-vault"}, alwaysServed)
 	_, stderr, code := runSecret("list")
 	if code != 1 {
 		t.Fatalf("exit %d, stderr %q", code, stderr)

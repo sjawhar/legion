@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -17,6 +18,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	smtypes "github.com/aws/aws-sdk-go-v2/service/secretsmanager/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/aws/smithy-go"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 )
@@ -113,6 +115,31 @@ func checkSettingsKeyARN(settings Settings) error {
 	return nil
 }
 
+// ownerTierTags is the owner and tier tags, which create and retag always send together
+// (cmdSecretRetag says why).
+func ownerTierTags(owner, tier string) []smtypes.Tag {
+	return []smtypes.Tag{
+		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
+		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
+	}
+}
+
+// tagMap is tags as a map.
+func tagMap(tags []smtypes.Tag) map[string]string {
+	m := make(map[string]string, len(tags))
+	for _, tag := range tags {
+		m[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
+	}
+	return m
+}
+
+// isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
+// generic API error: secretsmanager's types declare no type for it.
+func isAccessDenied(err error) bool {
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && apiErr.ErrorCode() == "AccessDeniedException"
+}
+
 // awsBackend is the secretBackend for store "" or storeAWSSecretsManager: AWS Secrets Manager
 // under the person's own AWS sign-in, pinned to the key ARN's account and region.
 type awsBackend struct {
@@ -123,16 +150,7 @@ type awsBackend struct {
 
 func (b *awsBackend) id(slug string) string { return b.settings.SecretsPrefix + slug }
 
-// displayName is the NAME a session asks for the secret named id, or id itself when its name
-// under the prefix maps to none (the broker refuses such a secret as name-malformed).
-func (b *awsBackend) displayName(id string) string {
-	slug := strings.TrimPrefix(id, b.settings.SecretsPrefix)
-	name := policy.SlugToName(slug)
-	if back, err := policy.NameToSlug(name); err != nil || back != slug {
-		return id
-	}
-	return name
-}
+func (b *awsBackend) displayName(id string) string { return displayName(b.settings.SecretsPrefix, id) }
 
 func (b *awsBackend) requireAccount(ctx context.Context) error {
 	_, err := requireAccount(ctx, b.st, b.settings)
