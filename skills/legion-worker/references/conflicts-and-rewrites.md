@@ -11,7 +11,7 @@ Every path it cites is in sjawhar/legion.
   merge, never `jj rebase`.**
   The implementer merges the base into the issue branch only when GitHub reports it `CONFLICTING`, the controller asks
   because of a conflict, or after the pull request is retargeted to a new base. Otherwise, never reintegrate the base to
-  pick up `main` or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
+  pick up the default branch or refresh CI (a single failed CI job is re-run on its own: *A red CI job* in
   `skill://legion-worker`). A conflict-forced rebase that leaves the branch's diff unchanged is a
   confirmation, not a new round (see *The unchanged-diff check* below); that name is the event's,
   kept by the rules below and the learnings that cite it, and the operation it names is always
@@ -28,10 +28,12 @@ Every path it cites is in sjawhar/legion.
   `-r` all rewrite descendants; `-r` only re-parents them to fill the hole, which is worse).
   Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
   bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
-  built on your prior commits, in this tree or another, ever moves:
+  built on your prior commits, in this tree or another, ever moves. `<default branch>` is the
+  repository's default branch, the one tracked bookmark not under `legion/` in
+  `jj -R "$LEGION_WORKSPACE" bookmark list --tracked -T 'if(!remote, name ++ "\n")'`:
 
   ```bash
-  jj -R "$LEGION_WORKSPACE" new legion/<KEY> main@origin -m "merge: resolve conflict against main@origin"
+  jj -R "$LEGION_WORKSPACE" new legion/<KEY> '<default branch>@origin' -m "merge: resolve conflict against <default branch>@origin"
   ```
 
   Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
@@ -56,15 +58,15 @@ verified on jj 0.45.1):
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
-  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(main@origin | <head-sha>)" --to <head-sha> \
+  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(<default branch>@origin | <head-sha>)" --to <head-sha> \
     --git --context 0 '~(.legion | docs/solutions)' \
   | sed -e '/^@@/d' -e '/^index /d' | sha256sum
 ```
 
 - `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
-- `fork_point(main@origin | <head-sha>)` is the base the branch was cut from *at that head*:
-  the old base for the pre-rebase head, the new base for the rebased one, so one command
-  serves both sides. On a stacked PR substitute its base branch for `main`
+- `fork_point(<default branch>@origin | <head-sha>)` is the base the branch was cut from *at that
+  head*: the old base for the pre-rebase head, the new base for the rebased one, so one command
+  serves both sides. On a stacked PR substitute its base branch for the default branch
   (`gh pr view <n> --json baseRefName`).
 - A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
   workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a

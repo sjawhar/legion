@@ -23,9 +23,11 @@ section can use the words without stopping to explain them.
   never reads or writes a GitHub issue.
 - **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue. Legion acts
   there through two GitHub Apps, so the account that reviews a change is never the one that wrote
-  it. The daemon creates a root's branch at `main` when it admits the root, before its architect
+  it. The daemon creates a root's branch at the repository's default branch, as GitHub names it
+  (`main`, `develop` or `release/v7.1` alike), when it admits the root, before its architect
   starts, and a child's when the child starts planning in its tree, so no agent's push is the one
-  that creates a branch: GitHub can refuse that push on a large repository.
+  that creates a branch: GitHub can refuse that push on a large repository. An issue's workspace
+  with no branch to start from starts at that default branch too.
 
 ## The controller
 
