@@ -3900,7 +3900,8 @@ jq -e '.state == "suspended" and .suspendedBy == "operator"' <<<"$held" >/dev/nu
 held_generation=$(jq -r .generation <<<"$held")
 note "the operator suspended $tree1's architect $held_architect at generation $held_generation; its session held $held_before phase-finished notices"
 send_agent "$tree1" implementer "Stage 4b proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$tree1, open its pull request, record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge."
-on_tree "$tree1" until_true 1200 "implementer pull request on legion/$tree1" sh -c \
+# The implementer runs sleep 300 on the daemon's task line before it reads the operation, so the budget carries that turn.
+on_tree "$tree1" until_true 1500 "implementer pull request on legion/$tree1" sh -c \
   "timeout 60 gh -R '$repo' pr list --head 'legion/$tree1' --state open --json number | jq -e 'length == 1' >/dev/null"
 pr_number=$(gh -R "$repo" pr list --head "legion/$tree1" --state open --json number --jq '.[0].number')
 on_tree "$tree1" wait_for_phase "$tree1" testing 1200
@@ -4221,7 +4222,8 @@ thread_id=$(reviewer_thread 2>"$work/reviewer-thread.err") ||
 note "the reviewer's round 1 review opened one thread, $thread_id"
 on_tree "$tree1" wait_for_worker "$tree1" implementer
 on_tree "$tree1" send_agent "$tree1" implementer "Stage 4b proof correction round 1: make the correction the review names (append the line \`$(round_line 1)\` to $smoke_file), push it to pull request #$pr_number, answer the review's thread as your role says, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
-on_tree "$tree1" wait_for_phase "$tree1" testing 1200
+# The task line delivered for the new round opens a sleep 300 turn before the implementer reads the operation, so the budget carries that turn.
+on_tree "$tree1" wait_for_phase "$tree1" testing 1500
 on_tree "$tree1" until_true 120 "round 1's correction on pull request #$pr_number" round_correction_pushed 1
 assert_round_handoff "$tree1" 2
 assert_handoff_committer "$tree1" implementer implementing 2
@@ -5686,7 +5688,8 @@ if ! production_check_reported "$tree1" >/dev/null 2>&1; then
   on_tree "$tree1" wait_for_worker "$tree1" implementer
   send_agent "$tree1" implementer "Stage 4b proof production check: verify the merged smoke change through its repository surface, record the production-check handoff and required PR/Dispatch record, then complete the phase."
 fi
-on_tree "$tree1" until_true 900 "the implementer's production-check completion" production_check_reported "$tree1"
+# The task line delivered for the new phase opens a sleep 300 turn before the implementer reads the operation, so the budget carries that turn.
+on_tree "$tree1" until_true 1200 "the implementer's production-check completion" production_check_reported "$tree1"
 if issue_phase "$tree1" production_check >/dev/null 2>&1; then
   send_agent "$tree1" architect "Stage 4b proof sign-off: the implementer's production check for $tree1 is recorded; use the Go-daemon sign-off operation for $tree1 now."
 fi

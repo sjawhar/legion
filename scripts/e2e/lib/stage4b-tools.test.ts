@@ -363,7 +363,9 @@ describe("the library", () => {
     ]
       .map((line) => `${JSON.stringify(line)}\n`)
       .join("");
-    // from_entries refuses a null key, which would exit 5 and throw here.
+    // What this guards: without tool_results' `select(.id | strings)`, from_entries on the null key
+    // exits 5 (`Cannot use null (null) as object key`) under jq 1.6, 1.7.1 and 1.8.2 alike, and
+    // jqOver would throw here; with it the call is dropped and the real call's result kept.
     expect(jqOver(text, 'tool_results("read")')).toEqual([
       {
         toolCallId: "toolu_9",
