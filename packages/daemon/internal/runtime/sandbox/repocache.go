@@ -652,7 +652,8 @@ func (r *Runtime) refreshCacheTokens(ctx context.Context) {
 // schedule. Each runs under the cache's launch turn, fenced to the Sandbox as the store held it.
 // Every failure is logged, as a warning naming the cache, and tried at the next sweep; none is
 // ReconcileOrphans' error, which holds the claims' launches back at boot (reconcileBootOrphans):
-// an issue pod with no ready cache clones from GitHub, so no cache may stop one launching.
+// each launch ensures its own repository's cache and fails, naming why, when it cannot be made, so
+// one repository's cache never stops another's launches.
 func (r *Runtime) sweepCaches(ctx context.Context) {
 	mapped := r.mapped()
 	for _, u := range r.storedCaches() {

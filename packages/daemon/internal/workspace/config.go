@@ -22,20 +22,21 @@ import (
 
 // CommandTimeout is the slow-command budget both runtimes' provisioning gives every command it
 // runs — the shared clone's own clone, a fetch, a jj operation, or a git configuration edit —
-// each bounded independently. The fetch's clone is the exception, under FetchTimeout instead
-// (below).
+// each bounded independently. The fetch's transfers and the checks of what the repository cache
+// streamed are the exception, under FetchTimeout instead (below).
 const CommandTimeout = 5 * time.Minute
 
-// FetchTimeout is the outer bound for the fetch's clone, every attempt of it together: long
-// enough for a large repository's slow but steadily progressing transfer to finish. Every other
-// provisioning command keeps CommandTimeout: this widens the one command whose duration follows
-// the repository's size and the network's speed, not a fixed step in provisioning.
+// FetchTimeout is the one bound for everything whose duration follows the repository's size and
+// the network's speed in a fetch, once it may start: every attempt of a transfer from GitHub, and,
+// for a feed filled from the repository cache, the cache's stream and its verification too, all
+// together (Fetch). It is long enough for a large repository's slow but steadily progressing
+// transfer to finish. Every other provisioning command keeps CommandTimeout.
 const FetchTimeout = 30 * time.Minute
 
 // Command is one process the provisioner runs, each bounded independently of every other: most
-// hold the runner's own slow-command budget (RunChecked), and each attempt of the fetch's clone
-// holds what remains of FetchTimeout instead (Fetch) — never a budget shared across the whole
-// provisioning sequence.
+// hold the runner's own slow-command budget (RunChecked), and each of the fetch's transfers and
+// checks holds what remains of FetchTimeout instead (Fetch) — never a budget shared across the
+// whole provisioning sequence.
 type Command struct {
 	Argv    []string
 	Env     []string

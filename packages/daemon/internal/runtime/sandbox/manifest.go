@@ -753,12 +753,14 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 	return append(env, xdgEnvironment(xdgStateHome)...)
 }
 
-// ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
-// which is how much longer than the boot timeout a launch may wait for its pod's launcher, counted
-// from when it first sees one of the pod's init containers running (awaitRoleLauncher). The fetch
-// started no later than that, so it ends inside the bound; workspace-init's provisioning from the
-// feed onto the issue's own volume, local work that waits on no other pod, then has at least the
-// boot timeout. A test shortens it (provisionBound).
+// ProvisionBound satisfies runtime.Runtime: workspace.FetchBudget, the fetch's whole bound — its
+// wait for the repository cache, then the stream, verification and delta that share one
+// FetchTimeout — which is how much longer than the boot timeout a launch may wait for its pod's
+// launcher, counted from when it first sees one of the pod's init containers running
+// (awaitRoleLauncher). The fetch started no later than that, so it ends inside the bound, failing
+// on its own, naming why, when it runs out; workspace-init's provisioning from the feed onto the
+// issue's own volume, local work that waits on no other pod, then has at least the boot timeout.
+// A test shortens it (provisionBound).
 func (r *Runtime) ProvisionBound() time.Duration {
 	return r.provisionBound
 }

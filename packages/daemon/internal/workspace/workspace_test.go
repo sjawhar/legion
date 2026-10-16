@@ -638,6 +638,8 @@ func TestFetchClonesBareReadingNoConfigurationButItsOwn(t *testing.T) {
 	t.Setenv("GIT_CONFIG_SYSTEM", config)
 	t.Setenv("GIT_CONFIG_PARAMETERS", "'init.templatedir'='"+template+"'")
 	req := fetchRequest(t)
+	// The clock stands still, so the clone is given the whole bound it shares with the reads before.
+	req.Clock = newTestClock()
 
 	report, err := Fetch(context.Background(), run, req)
 	if err != nil {

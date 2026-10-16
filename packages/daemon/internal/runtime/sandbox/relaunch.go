@@ -254,7 +254,7 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 		}
 		now := time.Now()
 		if !now.Before(deadline) {
-			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+			return false, fmt.Errorf("timed out after %s waiting for %s%s", deadline.Sub(start), what, r.stillFetching(view.pod))
 		}
 		if provisioning(view.pod) {
 			if first.IsZero() {
@@ -276,6 +276,19 @@ func launcherDeadline(first, last time.Time, boot, bound time.Duration) time.Tim
 		return limit
 	}
 	return deadline
+}
+
+// stillFetching is what a launch that gives up on pod says of it while its workspace-fetch still
+// runs: so, with the state of the repository cache that fetch fills a fresh feed from
+// (fetchCacheState), since the fetch's own failure, which names why it ran so long, has not come.
+// Nothing for a pod past its fetch.
+func (r *Runtime) stillFetching(pod *corev1.Pod) string {
+	if !slices.ContainsFunc(pod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
+		return status.Name == fetchContainer && status.State.Running != nil
+	}) {
+		return ""
+	}
+	return "; its " + fetchContainer + " is still running" + r.fetchCacheState(pod)
 }
 
 // provisioning is whether pod is running one of its init containers, workspace-fetch or

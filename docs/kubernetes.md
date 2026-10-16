@@ -1541,8 +1541,12 @@ architect, planner, implementer, tester, reviewer, merger), named for its role:
    clone is the one full download of the repository ([The repository cache](#the-repository-cache)).
    A relaunch, whose volume already holds the feed, fetches the delta into it alone (`the feed
    holds <owner>/<repo> already: …`), after removing every git lock file a fetch killed mid-update
-   left in the feed, each logged with its age. Each transfer from GitHub is tried again up to four
-   times after a transient failure, within its 30-minute bound.
+   left in the feed, each logged with its age. Once the fetch may start — at once, or once the
+   cache is ready — the cache's stream, its verification and the delta from GitHub share one
+   30-minute bound (`workspace.FetchTimeout`), each given what remains of it, so the whole fetch
+   ends within 70 minutes (`workspace.FetchBudget`) however long it waited; a step with nothing
+   left fails the fetch, naming the bound. Each transfer from GitHub is tried again up to four
+   times after a transient failure, within that bound.
    It is the only process that holds the provisioning token
    ([Trust model](#trust-model-the-provisioning-token)).
 2. `workspace-init` provisions the issue's clone and its jj workspace on the issue's own volume from
@@ -2203,9 +2207,10 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   `Failed` pod the last 20 log lines of the failing container (the init container when it exited
   non-zero, else the main one) are quoted in the daemon log;
 - `Pending` with the `workspace-fetch` or `workspace-init` init container **running** → **alive**,
-  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s clone and
-  its retries of a transient failure, all within one `workspace.FetchTimeout` rather than
-  `workspace.CommandTimeout` ([Trust model](#trust-model-the-provisioning-token)), then
+  whatever the pod's age: the pod is provisioning its working copy (`workspace-fetch`'s wait for
+  the repository cache, then its stream, verification and delta under one
+  `workspace.FetchTimeout` rather than `workspace.CommandTimeout`, all within
+  `workspace.FetchBudget` ([Trust model](#trust-model-the-provisioning-token)), then
   `workspace-init`'s own commands, each up to `workspace.CommandTimeout`; it waits on no other pod
   and takes no lock, since the clone it provisions is the issue's own, on the issue's own volume),
   and a live initialiser is a live process — as the tmux runtime's own in-process provisioning is.
@@ -2213,24 +2218,27 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
   containers have finished. Until it first sees an init container running it waits
   `worker_boot_timeout_seconds`, the image pull's bound; from then on, `worker_boot_timeout_seconds`
   counted from the last moment it saw one running, and never longer than that plus
-  `workspace.FetchTimeout` (30 min; `sandbox.Runtime.ProvisionBound`) from the first
+  `workspace.FetchBudget` (70 min; `sandbox.Runtime.ProvisionBound`) from the first
   (`awaitRoleLauncher`, `internal/runtime/sandbox/relaunch.go`). The fetch started no later than
-  that first sighting, so it ends inside the bound, and `workspace-init` then has at least the boot
-  timeout. A pod that provisions for twenty minutes is one launch, not a launch failure per boot
-  timeout, and a launcher that has not connected the boot timeout after provisioning ended still
-  fails the launch. The wait runs inside whatever asked for the launch, and a start row asks from
-  the outbox, which runs one row at a time: the project's later rows wait behind it. During a
-  GitHub outage that is the fetch's five attempts and four waits, about 2 minutes when GitHub
-  refuses at once and about 12½ minutes when every connect times out (127 s each), after which the
-  fetch fails and the launch ends; each relaunch of the claim then holds its machine as long again,
-  and an outbox row that reads that claim waits on it. A transfer that keeps making progress can
-  hold the launch for the whole 30 minutes. Once the launch returns, the boot watchdog
+  that first sighting, so it ends inside the bound — failing on its own, naming why, when it runs
+  out of it, so the issue's failure names the repository cache's state — and `workspace-init` then
+  has at least the boot timeout. A launch that gives up while `workspace-fetch` still runs says so,
+  with the cache's state. A pod that provisions for twenty minutes is one launch, not a launch
+  failure per boot timeout, and a launcher that has not connected the boot timeout after
+  provisioning ended still fails the launch. The wait runs inside whatever asked for the launch,
+  and a start row asks from the outbox, which runs one row at a time: the project's later rows
+  wait behind it. During a GitHub outage that is the fetch's five attempts and four waits, about 2
+  minutes when GitHub refuses at once and about 12½ minutes when every connect times out (127 s
+  each), after which the fetch fails and the launch ends; each relaunch of the claim then holds its
+  machine as long again, and an outbox row that reads that claim waits on it. A repository cache
+  that is slow to become ready and a transfer that keeps making progress can hold the launch for
+  the whole 70 minutes. Once the launch returns, the boot watchdog
   re-arms on the claim, bounded by its registration deadline
   (`worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals`, default 360 s,
-  6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchTimeout` until
+  6 min): under Kubernetes, the deadline carries an added bound of `workspace.FetchBudget` until
   the shim's first hello, and from there the daemon re-arms the base deadline alone, the same one a
   tmux pane runs under throughout. A pod that never says hello is retired at the launch's return
-  plus the base deadline plus the bound, armed as one (36 min at the defaults); one that says hello
+  plus the base deadline plus the bound, armed as one (76 min at the defaults); one that says hello
   and never registers is retired at hello plus the base deadline alone (6 min from the hello); and
   one whose agent registers and never says it is ready is retired at its registration plus the base
   deadline alone (6 min from the registration, again from a daemon restart that finds it
@@ -2328,9 +2336,12 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   place once whole, with git's automatic garbage collection off and every fetch's objects kept as
   a pack, since the issue's clone keeps its objects there. It mounts no other part of the issue's volume and no
   config home. Every other provisioning command is
-  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer from GitHub's duration
-  follows the repository's size and the network's speed, not a fixed step in provisioning: it runs
-  under `workspace.FetchTimeout` (30 minutes) instead, one bound for every attempt of it. A transfer
+  bounded by `workspace.CommandTimeout` (5 minutes, fixed), but a transfer's duration follows the
+  repository's size and the network's speed, not a fixed step in provisioning: once the fetch may
+  start — at once, or once the repository cache is ready, after a wait of at most 40 minutes — the
+  cache's stream, its verification and every attempt of the transfer from GitHub run under one
+  `workspace.FetchTimeout` (30 minutes) instead, each given what remains of it, so the fetch ends
+  within `workspace.FetchBudget` (70 minutes). A transfer
   that fails transiently is run again: git's fatal exit (128) with a cause line — `RPC failed; …` for
   a request of the transfer, `unable to access '…': …` for the first request — naming 408, 429 or a
   5xx, or a connection that could not be made or broke (connect, DNS, reset, timeout, empty reply,
@@ -2338,18 +2349,18 @@ coordinator's pods (`packages/daemon`) keep to that with two init containers:
   pack stream that ended early. Each retry logs the attempt's error on stdout as one line, the
   token replaced by `***`, removes whatever a failed clone left beside the feed, and waits 5 s,
   15 s, 30 s, then a minute: four retries at most, so a transfer still failing after the fourth
-  fails the fetch. Each attempt is bounded by what remains of the 30 minutes from the first one's
-  start, and no retry starts past them. Any other failure — a token refused, a repository not found or not
+  fails the fetch. No retry starts past the bound. Any other failure — a token refused, a repository not found or not
   granted, a certificate that does not verify, a curl error the list does not name — fails the
   fetch at once (`transientCloneFailure`, `internal/workspace/fetch.go`). The launch waits for the
-  pod's launchers while either init container runs, up to the same 30 minutes plus its boot timeout
-  from when it first sees one running (above, "Liveness rules"), so the fetch, retries included,
-  spends no launch failure, and `workspace-init` has at least the boot timeout after a fetch that
-  ran its whole 30 minutes. The fetch reads the token once, and the daemon hands a pod the
+  pod's launchers while either init container runs, up to the same 70 minutes plus its boot timeout
+  from when it first sees one running (above, "Liveness rules"), so the fetch, its wait and retries
+  included, spends no launch failure, and `workspace-init` has at least the boot timeout after a
+  fetch that ran its whole budget. The fetch reads the token once, and the daemon hands a pod the
   implement App's cached lease while more than 20 minutes of it remain
-  (`internal/appauth/appauth.go`), so a retry late in a long fetch can outlast the token: an
-  attempt that starts after it expired fails with `Authentication failed`, which the fetch reads as
-  permanent, and the launch's next pod is handed a token afresh.
+  (`internal/appauth/appauth.go`), so a delta after a long wait on the repository cache, or a retry
+  late in a long fetch, can outlast the token: an attempt that starts after it expired fails with
+  `Authentication failed`, which the fetch reads as permanent, and the launch's next pod is handed
+  a token afresh, its cache by then ready.
 - **`workspace-init`** mounts the issue's volume, the feed read-only over it, and the config home —
   never the Secret — and runs `legion workspace-init provision --issue <KEY> --repo <owner>/<repo>
   --default-branch <name> --root /legion --credential-helper '!legion git-credential' --feed

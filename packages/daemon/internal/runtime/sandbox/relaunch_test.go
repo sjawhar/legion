@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 // steps names each write as the relaunch sequence reads: "create sandbox", "suspend", "run",
@@ -613,13 +614,14 @@ func TestAPodOfATreeLaunchesWhileAnotherIsStillInitializing(t *testing.T) {
 	}
 }
 
-// ProvisionBound is the fetch's own clone bound, workspace.FetchTimeout (30m), and nothing more:
+// ProvisionBound is the fetch's whole budget, workspace.FetchBudget — the wait for the repository
+// cache, then the one bound its stream, verification and delta share — and nothing more:
 // provisioning from the feed onto the issue's own volume waits on no other pod, so no lock wait is
-// added to it. Pinned to a literal, since no test can wait the real bound out.
-func TestProvisionBoundIsTheFetchTimeoutExactly(t *testing.T) {
+// added to it. Pinned to a literal, 70 minutes, since no test can wait the real bound out.
+func TestProvisionBoundIsTheFetchsWholeBudget(t *testing.T) {
 	g := newRig(t, nil)
-	if got := g.r.ProvisionBound(); got != 30*time.Minute {
-		t.Fatalf("ProvisionBound = %s, want %s", got, 30*time.Minute)
+	if got, want := g.r.ProvisionBound(), workspace.CacheWaitTimeout+workspace.FetchTimeout; got != 70*time.Minute || got != want {
+		t.Fatalf("ProvisionBound = %s, want %s: the cache wait and the fetch's bound after it", got, want)
 	}
 }
 

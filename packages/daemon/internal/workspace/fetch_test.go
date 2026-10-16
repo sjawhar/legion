@@ -16,6 +16,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -691,6 +692,8 @@ func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
 func TestFetchIntoAFeedThatHoldsTheRepositoryFetchesEveryBranch(t *testing.T) {
 	run := newLocalRunner(t)
 	req := fetchRequest(t)
+	// The clock stands still, so the fetch is given the whole bound it shares with the reads before.
+	req.Clock = newTestClock()
 	runSetup(t, t.TempDir(), "git", "--git-dir="+run.remote, "branch", "doomed", "main")
 	first, err := Fetch(context.Background(), run, req)
 	if err != nil {
@@ -1137,7 +1140,10 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	if fetch.Argv == nil {
 		t.Fatalf("Fetch fetched no delta from GitHub into the unpacked cache: %q", run.Calls())
 	}
-	assertCredentialedEnvironmentBounded(t, fetch, FetchTimeout)
+	assertCredentialedEnvironmentBounded(t, fetch, fetch.Timeout)
+	if left := FetchTimeout - report.CacheDuration - report.VerifyDuration; fetch.Timeout > left || fetch.Timeout < left-time.Minute {
+		t.Errorf("the delta was given %s, want what remained of the one %s bound after the stream and its verification: at most %s", fetch.Timeout, FetchTimeout, left)
+	}
 	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
 		if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "config", "--get", key)); got != want {
 			t.Errorf("the feed's %s is %q, want %q", key, got, want)
@@ -1211,6 +1217,99 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 			assertNothingFilledTheFeed(t, run, req)
 		})
 	}
+}
+
+// The cache's stream, its verification and the delta from GitHub share one FetchTimeout, counted
+// from when the cache is ready, so a fetch ends within FetchBudget however long it waited. A cache
+// ready 35 minutes in, whose pack takes 20 minutes to index and whose history takes 5 to check,
+// leaves the delta the last 5 minutes, and the fresh feed is filled. A cache ready on the wait's
+// last ask, 39 min 50 s in, whose pack takes the whole bound to index, leaves nothing to check its
+// history in: the fetch fails then, 69 min 50 s in, naming the bound, and fills nothing.
+func TestFetchGivesTheCachesStreamVerificationAndDeltaOneBound(t *testing.T) {
+	polls := func(d time.Duration) int { return int(d / CachePoll) }
+	for _, tc := range []struct {
+		name     string
+		notReady int
+		took     map[string]time.Duration
+		timeouts map[string][]time.Duration
+		fails    string
+		elapsed  time.Duration
+	}{
+		{
+			name: "a cache ready 35 minutes in", notReady: polls(35 * time.Minute),
+			took:     map[string]time.Duration{"index-pack": 20 * time.Minute, "fsck": 5 * time.Minute},
+			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}, "fsck": {FetchTimeout - 20*time.Minute}, "fetch": {FetchTimeout - 25*time.Minute}},
+			elapsed:  35*time.Minute + 25*time.Minute,
+		},
+		{
+			name: "a pack that takes the whole bound to index", notReady: polls(CacheWaitTimeout) - 1,
+			took:     map[string]time.Duration{"index-pack": FetchTimeout},
+			timeouts: map[string][]time.Duration{"index-pack": {FetchTimeout}},
+			fails:    "the fetch's " + FetchTimeout.String() + " bound ran out before checking the repository cache's history is whole",
+			elapsed:  CacheWaitTimeout - CachePoll + FetchTimeout,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			clock := newTestClock()
+			start := clock.Now()
+			slow := &slowFetch{recordingRunner: run, clock: clock, took: tc.took, timeouts: map[string][]time.Duration{}}
+			served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: tc.notReady}
+			req := fetchRequest(t)
+			req.CacheURL, req.CacheToken, req.Clock, req.Log = served.serve(t), testCacheToken, clock, func(string) {}
+
+			report, err := Fetch(context.Background(), slow, req)
+			if tc.fails == "" && err != nil {
+				t.Fatalf("Fetch: %v", err)
+			}
+			if tc.fails != "" && (err == nil || !strings.Contains(err.Error(), tc.fails)) {
+				t.Fatalf("Fetch = %+v, %v; want it failed: %q", report, err, tc.fails)
+			}
+			if !maps.EqualFunc(slow.timeouts, tc.timeouts, slices.Equal[[]time.Duration]) {
+				t.Errorf("the fetch's commands were given %v, want %v: what remained of one bound from the cache's readiness", slow.timeouts, tc.timeouts)
+			}
+			if elapsed := clock.Now().Sub(start); elapsed != tc.elapsed || elapsed > FetchBudget {
+				t.Errorf("the fetch ran %s, want %s, within FetchBudget %s", elapsed, tc.elapsed, FetchBudget)
+			}
+			if tc.fails != "" {
+				assertNothingFilledTheFeed(t, run, req)
+			}
+		})
+	}
+}
+
+// slowFetch is the local runner with the clock time a fetch from the cache takes: each of the
+// pack's indexing, the history's check and the delta from GitHub records the timeout it was given,
+// then takes took of the clock's time — or, given less than that, runs to its timeout and is
+// killed there — before it runs.
+type slowFetch struct {
+	*recordingRunner
+	clock    *testClock
+	took     map[string]time.Duration
+	timeouts map[string][]time.Duration
+}
+
+func (r *slowFetch) Run(ctx context.Context, command Command) (Result, error) {
+	step := ""
+	switch argv := command.Argv; {
+	case slices.Contains(argv, "index-pack"):
+		step = "index-pack"
+	case slices.Contains(argv, "fsck"):
+		step = "fsck"
+	case len(argv) > 2 && argv[0] == "git" && argv[2] == "fetch":
+		step = "fetch"
+	}
+	if step == "" {
+		return r.recordingRunner.Run(ctx, command)
+	}
+	r.timeouts[step] = append(r.timeouts[step], command.Timeout)
+	took := r.took[step]
+	if command.Timeout < took {
+		r.clock.advance(command.Timeout)
+		return Result{ExitCode: -1, TimedOut: true}, nil
+	}
+	r.clock.advance(took)
+	return r.recordingRunner.Run(ctx, command)
 }
 
 // assertNothingFilledTheFeed fails when Fetch cloned from GitHub or left anything at, or beside,

@@ -80,13 +80,15 @@ type FetchReport struct {
 // download of the repository. With none, the feed is cloned bare from GitHub: what the cache's own
 // process does. Provision then clones the shared clone from the feed with no credential.
 //
-// A transfer from GitHub that fails transiently (transientCloneFailure) is run again after the
-// next of fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left
-// removed first, all within FetchTimeout from the first attempt's start: each attempt is bounded by
-// what remains of it, and no retry starts past it. A transfer still failing after the last wait,
-// and every other failure, is the answer at once. Each attempt's stderr has the token replaced by
-// *** as soon as the attempt returns, so nothing Fetch logs or returns carries it, wherever git
-// echoed it.
+// What the fetch does once it may start — at once, or once the cache is ready — shares one
+// FetchTimeout: the cache's stream, its verification and the delta from GitHub, or a clone or fetch
+// from GitHub, each bounded by what remains of it, and none started past it. So a fetch ends within
+// FetchBudget, however long it waited on the cache. A transfer from GitHub that fails transiently
+// (transientCloneFailure) is run again after the next of fetchBackoff's waits, once per wait, its
+// failure logged and whatever a failed clone left removed first, and no retry starts past the
+// bound. A transfer still failing after the last wait, and every other failure, is the answer at
+// once. Each attempt's stderr has the token replaced by *** as soon as the attempt returns, so
+// nothing Fetch logs or returns carries it, wherever git echoed it.
 func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, error) {
 	feed, err := FeedRepository(request.Feed, request.Repo)
 	if err != nil {
@@ -125,7 +127,8 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		if err := RemoveStaleFeedLocks(feed, request.Clock.Now(), request.Log); err != nil {
 			return FetchReport{}, err
 		}
-		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, env); err != nil {
+		deadline := request.Clock.Now().Add(FetchTimeout)
+		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, env, deadline); err != nil {
 			return FetchReport{}, err
 		}
 		return report, credential.remove()
@@ -143,11 +146,14 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		if err := waitForCache(ctx, request); err != nil {
 			return FetchReport{}, err
 		}
+	}
+	deadline := request.Clock.Now().Add(FetchTimeout)
+	if request.CacheURL != "" {
 		started := request.Clock.Now()
-		streamed, err := unpackCache(ctx, run, request, staging)
+		streamed, err := unpackCache(ctx, run, request, staging, deadline)
 		verifying := request.Clock.Now()
 		if err == nil {
-			err = verifyCache(ctx, run, staging)
+			err = verifyCache(ctx, run, request, staging, deadline)
 		}
 		if err != nil {
 			return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
@@ -156,7 +162,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		transfer = fetchInto(staging, request.Repo)
 	}
 	report.Cloned = transfer.verb == "clone"
-	if err := report.fromGitHub(ctx, run, request, transfer, staging, env); err != nil {
+	if err := report.fromGitHub(ctx, run, request, transfer, staging, env, deadline); err != nil {
 		return FetchReport{}, err
 	}
 	if err := feedConfiguration(ctx, run, staging); err != nil {
@@ -168,10 +174,11 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	return report, credential.remove()
 }
 
-// fromGitHub runs transfer into the bare repository gitDir under env, with Fetch's retries, and
-// records how much the repository's objects grew across it and how many refs it made, moved or
-// deleted. A clone's gitDir holds no repository before it runs: nothing, and no ref.
-func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, env []string) error {
+// fromGitHub runs transfer into the bare repository gitDir under env, with Fetch's retries, all
+// before deadline, and records how much the repository's objects grew across it and how many refs
+// it made, moved or deleted. A clone's gitDir holds no repository before it runs: nothing, and no
+// ref.
+func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, gitDir string, env []string, deadline time.Time) error {
 	refsBefore, err := feedRefs(ctx, run, gitDir, transfer.verb == "fetch")
 	if err != nil {
 		return err
@@ -180,7 +187,7 @@ func (r *FetchReport) fromGitHub(ctx context.Context, run Runner, request FetchR
 	if err != nil {
 		return err
 	}
-	if err := transferWithRetries(ctx, run, request, transfer, env); err != nil {
+	if err := transferWithRetries(ctx, run, request, transfer, env, deadline); err != nil {
 		return err
 	}
 	refsAfter, err := feedRefs(ctx, run, gitDir, true)
@@ -245,8 +252,9 @@ func objectsSize(gitDir string) (int64, error) {
 	return size, err
 }
 
-// cacheClient reaches the repository cache directly, at the pod address it is given: no proxy the
-// container's environment names stands between an issue pod and a pod of its own namespace.
+// cacheClient reaches the repository cache directly, at the address it is given, the cache's
+// Service: no proxy the container's environment names stands between an issue pod and a pod of its
+// own namespace.
 var cacheClient = &http.Client{Transport: &http.Transport{Proxy: nil, ForceAttemptHTTP2: false}}
 
 // CachePoll is how long Fetch waits between two asks of a repository cache that is not ready.
@@ -256,16 +264,24 @@ const CachePoll = 10 * time.Second
 // first clone is bounded by FetchTimeout, and the rest is its pod's scheduling and volume.
 const CacheWaitTimeout = FetchTimeout + 10*time.Minute
 
+// FetchBudget is the whole of a fetch, end to end: at most CacheWaitTimeout waiting for the
+// repository cache, then FetchTimeout for the cache's stream, its verification and the delta from
+// GitHub together. The Sandbox runtime allows a launching pod's provisioning this much
+// (sandbox.Runtime.ProvisionBound), so a fetch that runs out of it fails, naming why, before the
+// launch would give up on it.
+const FetchBudget = CacheWaitTimeout + FetchTimeout
+
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
 // 200 ready, logging what it answered whenever that changes and at least once a minute, and fails
-// with the last answer once a further ask would start past CacheWaitTimeout. An answer that refuses
+// with the last answer once a further ask would start past CacheWaitTimeout. Each ask is bounded
+// by cacheAsk, and by what remains of the wait, so the wait ends within it. An answer that refuses
 // the token, or names another repository (askCache), fails it at once: no wait makes either right.
 func waitForCache(ctx context.Context, request FetchRequest) error {
 	deadline := request.Clock.Now().Add(CacheWaitTimeout)
 	var logged string
 	var loggedAt time.Time
 	for {
-		why, err := cacheNotReady(ctx, request)
+		why, err := cacheNotReady(ctx, request, min(cacheAsk, deadline.Sub(request.Clock.Now())))
 		if err != nil {
 			return err
 		}
@@ -286,10 +302,13 @@ func waitForCache(ctx context.Context, request FetchRequest) error {
 	}
 }
 
+// cacheAsk bounds one ask of a repository cache's /healthz.
+const cacheAsk = 30 * time.Second
+
 // cacheNotReady is why the repository cache is not ready to stream, or "" when its /healthz
-// answers 200 with ready set; an answer askCache refuses is the error.
-func cacheNotReady(ctx context.Context, request FetchRequest) (string, error) {
-	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+// answers 200 with ready set, within timeout; an answer askCache refuses is the error.
+func cacheNotReady(ctx context.Context, request FetchRequest, timeout time.Duration) (string, error) {
+	bounded, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	response, err := askCache(bounded, request, "/healthz")
 	if response == nil {
@@ -344,18 +363,22 @@ func askCache(ctx context.Context, request FetchRequest, path string) (*http.Res
 }
 
 // unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
-// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
-// returns the tar's length; Fetch then verifies what it wrote (verifyCache). The answer must be
-// the request's repository's (askCache) before any of it is read. Every entry must be a regular
-// file or a directory whose cleaned name stays inside staging and is one of a repository's refs or
-// packs (FeedEntry); the first that is not ends the stream, refused by name, and the caller removes
-// what was written. The stream is read to its end, so a transfer the cache broke off is a failure,
-// not a short repository.
-func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string) (int64, error) {
+// makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), before
+// deadline, and returns the tar's length; Fetch then verifies what it wrote (verifyCache). The
+// answer must be the request's repository's (askCache) before any of it is read. Every entry must
+// be a regular file or a directory whose cleaned name stays inside staging and is one of a
+// repository's refs or packs (FeedEntry); the first that is not ends the stream, refused by name,
+// and the caller removes what was written. The stream is read to its end, so a transfer the cache
+// broke off is a failure, not a short repository.
+func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) (int64, error) {
 	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
 		return 0, err
 	}
-	bounded, cancel := context.WithTimeout(ctx, FetchTimeout)
+	left, err := remaining(request, deadline, "the stream from the repository cache")
+	if err != nil {
+		return 0, err
+	}
+	bounded, cancel := context.WithTimeout(ctx, left)
 	defer cancel()
 	response, err := askCache(bounded, request, "/tar")
 	if response != nil {
@@ -392,26 +415,45 @@ func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging 
 // hashes every object in it, writing the index git then reads, so no index of the cache's is
 // trusted), and every object the refs reach must then be present (`git fsck --connectivity-only`).
 // A pack that does not index and a history that is not whole are refused, naming git's answer.
-// Each runs within FetchTimeout, as a transfer does, since both follow the repository's size.
-func verifyCache(ctx context.Context, run Runner, staging string) error {
+// Each runs within what remains before deadline, the bound the stream and the delta share, since
+// both follow the repository's size; one with nothing left fails the fetch, naming the bound.
+func verifyCache(ctx context.Context, run Runner, request FetchRequest, staging string, deadline time.Time) error {
 	packs, err := filepath.Glob(filepath.Join(staging, "objects", "pack", "pack-*.pack"))
 	if err != nil {
 		return err
 	}
-	verify := func(argv []string) error {
-		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", FetchTimeout)
+	verify := func(argv []string, left time.Duration) error {
+		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", left)
 		_, err = checkedResult(argv, result, err)
 		return err
 	}
 	for _, pack := range packs {
-		if err := verify([]string{"git", "--git-dir=" + staging, "index-pack", pack}); err != nil {
+		left, err := remaining(request, deadline, "indexing the repository cache's pack "+filepath.Base(pack))
+		if err != nil {
+			return err
+		}
+		if err := verify([]string{"git", "--git-dir=" + staging, "index-pack", pack}, left); err != nil {
 			return fmt.Errorf("the repository cache's pack %s, which does not verify: %w", filepath.Base(pack), err)
 		}
 	}
-	if err := verify([]string{"git", "--git-dir=" + staging, "fsck", "--connectivity-only", "--no-dangling", "--no-progress"}); err != nil {
+	left, err := remaining(request, deadline, "checking the repository cache's history is whole")
+	if err != nil {
+		return err
+	}
+	if err := verify([]string{"git", "--git-dir=" + staging, "fsck", "--connectivity-only", "--no-dangling", "--no-progress"}, left); err != nil {
 		return fmt.Errorf("the repository cache's history is not whole: %w", err)
 	}
 	return nil
+}
+
+// remaining is what is left before deadline, by request's clock, for what runs next, or the
+// fetch's failure naming it and the bound once nothing is.
+func remaining(request FetchRequest, deadline time.Time, what string) (time.Duration, error) {
+	left := deadline.Sub(request.Clock.Now())
+	if left <= 0 {
+		return 0, fmt.Errorf("the fetch's %s bound ran out before %s", FetchTimeout, what)
+	}
+	return left, nil
 }
 
 // unpackEntry writes one entry of the repository cache's tar into staging, refusing one a feed does
@@ -523,11 +565,13 @@ func FeedGit(ctx context.Context, run Runner, gitDir string, args ...string) (Re
 }
 
 // transferWithRetries runs transfer under env until it succeeds, retrying a transient failure as
-// Fetch says.
-func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, env []string) error {
+// Fetch says, each attempt bounded by what remains before deadline.
+func transferWithRetries(ctx context.Context, run Runner, request FetchRequest, transfer feedTransfer, env []string, deadline time.Time) error {
 	scrub := strings.NewReplacer(request.Token, "***")
 	now := request.Clock.Now()
-	deadline := now.Add(FetchTimeout)
+	if _, err := remaining(request, deadline, "the "+transfer.verb+" from GitHub"); err != nil {
+		return err
+	}
 	for attempt := 1; ; attempt++ {
 		result, runErr := runCommandTimeout(ctx, run, transfer.argv, env, "", deadline.Sub(now))
 		result.Stderr = scrub.Replace(result.Stderr)

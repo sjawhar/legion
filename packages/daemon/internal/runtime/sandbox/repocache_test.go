@@ -714,8 +714,8 @@ func TestReconcileOrphansKeepsAMappedCacheAndRetiresAnUnmappedOne(t *testing.T) 
 
 // A mapped repository whose cache cannot be made — its owner's token cannot be minted — is logged
 // as the sweep's warning naming the cache and tried at the next sweep; ReconcileOrphans answers
-// nil, since its error holds the claims' launches back at boot and an issue pod without a cache
-// clones from GitHub.
+// nil, since its error holds the claims' launches back at boot and each launch ensures its own
+// repository's cache.
 func TestACacheThatCannotBeMadeNeverFailsTheReconciliation(t *testing.T) {
 	logs := &logBuffer{}
 	g := newRig(t, nil, withLog(logs), withOptions(func(o *Options) {
