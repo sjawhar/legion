@@ -821,9 +821,9 @@ func TestNatsHubRefusesASeedInItsNetworkWhenItResolves(t *testing.T) {
 	}
 }
 
-// The hub's name reaches every child's registered name and quotes the name in its own refusals
-// (NewNatsHub's %s %s: %w wrapper), so a seed there is refused before anything registers, as
-// host:Listener and the AWS components refuse one in their own names.
+// NewNatsHub quotes the name in every refusal (its "%s %s: %w" wrapper) and registers the
+// component under it, so a seed there is refused before anything registers, as host:Listener and
+// the AWS components refuse one in their own names.
 func TestNatsHubRefusesASeedInTheComponentName(t *testing.T) {
 	seed, _ := testnats.User(t)
 	for _, row := range []struct {

@@ -97,7 +97,7 @@ versions. Never add the module to the root `go.work`.
   `Check`'s refusals of `machineId`, `port` and `hostBridge` through one call, so it has one row.
   A store's tests assert the store's own answers, and `seed_test.go` the modes' messages over them.
   The hub refuses a seed (`bus.HoldsSeed`) in its own name before anything else, as `NewNatsHub`
-  itself quotes the name in every refusal and every child's name does too
+  itself quotes the name in every refusal and registers the component under it
   (`TestNatsHubRefusesASeedInTheComponentName`). It reads none of its Inputs by value at
   construct: its resolver checks only that `tailnetAuthKey` is set and that `subnetwork` comes
   with `network`; `network`, `subnetwork` and the secret `tailnetAuthKey` are checked for a seed
