@@ -1049,7 +1049,8 @@ for absent in LEGION_GRANT_FILE LEGION_GRANT; do
   ! tr '\0' '\n' <"/proc/$merger_omp/environ" | grep -q "^$absent=" || fail "$root1's merger pane still carries $absent"
 done
 merger_gh_dir=$(pane_value "$merger_omp" GH_CONFIG_DIR)
-[[ $merger_gh_dir == *-merger-gh ]] || fail "$root1's merger pane carries GH_CONFIG_DIR=$merger_gh_dir, want its claim's gh directory"
+[[ $merger_gh_dir == *-merger-gh/* && $(pane_value "$merger_omp" LEGION_GH_OWNERS_DIR) == "${merger_gh_dir%/*}" ]] ||
+  fail "$root1's merger pane carries GH_CONFIG_DIR=$merger_gh_dir, want an owner's directory of its claim's gh bundle (LEGION_GH_OWNERS_DIR)"
 f=$(claim_session_file "$root1" merger)
 # A bash command invokes `legion` when a word of it is legion or ends in /legion (never a word that
 # only contains it, such as legion-worker).

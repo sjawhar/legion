@@ -105,22 +105,29 @@ daemon resolves its `mise` environment); under a login shell on the shared box t
 
 ## What a pane's `gh`, `git` and `jj` are
 
-A tmux pane's `PATH` is the daemon's own with the state directory's `bin/` (the `legion`
-launcher) put first, and nothing else of Legion's: the daemon installs no `gh` shim and pins no
-tool path on the pane, so the `gh`, `git` and `jj` a pane runs are whatever the daemon's `PATH`
-resolves. The daemon starts under a `PATH` that heads with the real `gh` and a jj of 0.38 or later
-— the jj bound the daemon itself refuses to boot below (`resolveTools`, naming `LEGION_JJ_PATH`,
-its own override for the jj it runs), and the `gh` because a pane's GitHub identity is a file that
-binary reads: the daemon writes gh's own `hosts.yml` (the role's App installation token, user
-`x-access-token`) and `config.yml` under `<state_dir>/secrets/<claim>-gh` (0700, files 0600) when
-it opens the pane, names the directory on the pane as `GH_CONFIG_DIR` with `GH_TOKEN`,
-`GITHUB_TOKEN` and `GH_HOST` set empty so nothing outranks the file, and rewrites `hosts.yml` in
-place every minute from its cached lease (the log lines `tmux runtime: github credential written`
-and `github credential refreshed`, with the claim, role, App and `expiresAt`). The shared clone's
-`credential.helper` is `!gh auth git-credential`, so a pane's `git` and `jj git push` read the same
-file through whichever `gh` the pane's `PATH` resolves. A box whose login `PATH` heads with a `gh`
-wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in the shell that starts
-the daemon, or every pane's `gh` and push act as whoever the wrapper routes to.
+A tmux pane's `PATH` is the daemon's own with the state directory's `bin/` put first: its `legion`
+launcher and its `gh`, a script that runs `legion gh`. Nothing else of Legion's is on it, so the
+`git` and `jj` a pane runs are whatever the daemon's `PATH` resolves. The daemon resolves at boot a
+jj of 0.38 or later — the jj bound it refuses to boot below (`resolveTools`, naming
+`LEGION_JJ_PATH`, its own override for the jj it runs) — and the real `gh` (`LEGION_GH_PATH`, or the
+first `gh` on its `PATH`), which every pane is told as `LEGION_GH_PATH`. A pane's GitHub identity is
+a set of files that binary reads, one directory per GitHub owner of the project: the daemon writes
+gh's own `hosts.yml` (an App installation token, user `x-access-token`) and `config.yml` under
+`<state_dir>/secrets/<claim>-gh/<owner>` (0700, files 0600) when it opens the pane — the role's App
+token for the issue's repository's owner, and that App's token narrowed to reading contents, pull
+requests and metadata for every other owner — names the issue owner's directory as `GH_CONFIG_DIR`
+and the bundle's root as `LEGION_GH_OWNERS_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set
+empty so nothing outranks the files, and rewrites each owner's `hosts.yml` in place every minute
+from its cached leases (the log lines `tmux runtime: github credential written` and `github
+credential refreshed`, with the claim, role, App, `expiresAt` and the owners written). `legion gh`
+runs the real gh with `GH_CONFIG_DIR` at the directory of the owner the command names (`GH_REPO`,
+`-R`/`--repo`, a `repos/<owner>/…` path of `gh api`, a `https://github.com/<owner>/…` URL, or `gh
+repo <command> <owner>/<repo>`), and at the issue owner's otherwise. The shared clone's
+`credential.helper` is `!legion git-credential` with `credential.useHttpPath` on, so a pane's `git`
+and `jj git push` read the hosts.yml of the owner in the path git asks about. A box whose login
+`PATH` heads with a `gh` wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in
+the shell that starts the daemon, or `LEGION_GH_PATH` naming it, or every pane's `gh` acts as whoever
+the wrapper routes to.
 
 ## Rotating the App keys
 

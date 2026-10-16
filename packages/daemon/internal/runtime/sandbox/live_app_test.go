@@ -16,7 +16,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // implementTokens is the harness's ProvisionTokens: the implement App's installation token,
@@ -64,8 +66,9 @@ func (t implementTokens) Credential(ctx context.Context, _ claim.Role, owner str
 
 // resolveApp reads the implement App's key from the secret store, handed to one child process
 // through the agent-tier `secrets <KEY> -- …` injection, mints the App's installation token for
-// the run's repository owner, and with it reads the repository's default branch as GitHub names
-// it, the base every launch of the run provisions at; the key stays in this process's memory.
+// each of the run's two repositories' owners, and with them reads each repository's default branch
+// as GitHub names it, the base every launch on it provisions at; the key stays in this process's
+// memory.
 func (r *liveRig) resolveApp() error {
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(r.ctx, "secrets", r.env.appKeyName, "--", "sh", "-c", `printf %s "$`+r.env.appKeyName+`"`)
@@ -78,15 +81,21 @@ func (r *liveRig) resolveApp() error {
 		return fmt.Errorf("%s: %w", r.env.appKeyName, err)
 	}
 	apps := appauth.New(config.GitHubApps{Implement: config.GitHubApp{AppID: r.env.appID, PrivateKey: pem}}, appauth.Options{})
-	owner := r.env.repo.Owner()
-	lease, err := apps.Token(r.ctx, appauth.Implement, owner)
-	if err != nil {
-		return fmt.Errorf("minting the implement App's installation token for %s: %w", owner, err)
+	branches := make([]string, 2)
+	var identity runtime.GitIdentity
+	for i, repo := range []ghrepo.Repository{r.env.repo, r.env.repoSecondOwner} {
+		lease, err := apps.Token(r.ctx, appauth.Implement, repo.Owner())
+		if err != nil {
+			return fmt.Errorf("minting the implement App's installation token for %s: %w", repo.Owner(), err)
+		}
+		if branches[i], err = ghbranch.DefaultBranch(r.ctx, githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI("", repo)}, repo); err != nil {
+			return err
+		}
+		if i == 0 {
+			identity = lease.Identity
+		}
 	}
-	branch, err := ghbranch.DefaultBranch(r.ctx, githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI("", r.env.repo)}, r.env.repo)
-	if err != nil {
-		return err
-	}
-	r.tokens, r.identity, r.defaultBranch = implementTokens{apps: apps, owners: []string{owner}}, lease.Identity, branch
+	r.tokens = implementTokens{apps: apps, owners: []string{r.env.repo.Owner(), r.env.repoSecondOwner.Owner()}}
+	r.identity, r.defaultBranch, r.secondDefaultBranch = identity, branches[0], branches[1]
 	return nil
 }
