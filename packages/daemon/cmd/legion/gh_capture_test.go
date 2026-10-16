@@ -133,8 +133,14 @@ func startCaptureProxy(t *testing.T) *captureProxy {
 	return p
 }
 
+// serve records and refuses a request for GitHub's API or its git host. A request for any other
+// host (gh's own telemetry) carries no credential of the bundle's and is answered empty, unrecorded.
 func (p *captureProxy) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
+	if r.Host != "api.github.com" && r.Host != "github.com" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	request := capturedRequest{host: r.Host, path: r.URL.Path, auth: r.Header.Get("Authorization")}
 	switch {
 	case capturedRESTOwner.MatchString(r.URL.Path):

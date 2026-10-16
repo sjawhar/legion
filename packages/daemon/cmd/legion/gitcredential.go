@@ -14,6 +14,13 @@ import (
 
 const gitCredentialUsage = "usage: legion git-credential get|store|erase  (git's credential helper for a shared clone; git runs it, never a person)"
 
+// gitCredentialOperationUsage is each operation's own usage, which its --help prints.
+var gitCredentialOperationUsage = map[string]string{
+	"get":   "usage: legion git-credential get  (reads git's request on stdin; answers the token of the owner its path names, or nothing, exit 1)",
+	"store": "usage: legion git-credential store  (reads git's request on stdin and writes nothing: the daemon is the one writer of the gh files)",
+	"erase": "usage: legion git-credential erase  (reads git's request on stdin and erases nothing: the daemon is the one writer of the gh files)",
+}
+
 // gitCredentialStdin is where `legion git-credential` reads git's credential request: the
 // process's stdin, which a test replaces.
 var gitCredentialStdin io.Reader = os.Stdin
@@ -32,6 +39,12 @@ func runGitCredential(_ context.Context, args []string, stdout, stderr io.Writer
 	if len(args) == 1 && helpRequested(args[0]) {
 		fmt.Fprintln(stderr, gitCredentialUsage)
 		return 0
+	}
+	if len(args) == 2 && helpRequested(args[1]) {
+		if usage, ok := gitCredentialOperationUsage[args[0]]; ok {
+			fmt.Fprintln(stderr, usage)
+			return 0
+		}
 	}
 	if len(args) != 1 {
 		fmt.Fprintln(stderr, gitCredentialUsage)
