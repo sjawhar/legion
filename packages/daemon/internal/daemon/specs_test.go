@@ -173,7 +173,7 @@ func TestTheControllersLaunchNamesTheProjectsSlackMentionTopics(t *testing.T) {
 	want := "Design gate policy: `gates.design: root-issues`. Slack channels: `C00000000` " +
 		"(`notifications.slack.*.C00000000.mention`), `G00000001` (`notifications.slack.*.G00000001.mention`); " +
 		"subscribe to each topic at every start and answer each mention in its thread " +
-		"(skill://legion-controller, \"Slack mentions\")."
+		"(skill://legion-controller/references/slack-mentions.md)."
 	if spec.Prompt.Addressing != want {
 		t.Errorf("addressing = %q, want %q", spec.Prompt.Addressing, want)
 	}

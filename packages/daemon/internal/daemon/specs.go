@@ -222,7 +222,7 @@ func SlackChannelsFragment(channels []string) string {
 		named = append(named, fmt.Sprintf("`%s` (`%s`)", channel, SlackMentionTopic(channel)))
 	}
 	return "Slack channels: " + strings.Join(named, ", ") +
-		"; subscribe to each topic at every start and answer each mention in its thread (skill://legion-controller, \"Slack mentions\")."
+		"; subscribe to each topic at every start and answer each mention in its thread (skill://legion-controller/references/slack-mentions.md)."
 }
 
 // SlackMentionTopic is the Envoy topic of every app mention in channel, whatever the Slack team:
