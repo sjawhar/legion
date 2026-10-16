@@ -691,7 +691,17 @@ type probeSpec struct {
 // secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
 // and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
 // requires. Its command and env are escaped against the kubelet's expansion as every worker
-// container's are (kubeletLiteral).
+// container's are (kubeletLiteral). It carries Karpenter's `do-not-disrupt` annotation alone, never
+// GKE's `safe-to-evict` (evictionProtectionAnnotations, used by podTemplate instead): GKE Autopilot
+// treats that annotation as a request for extended-duration protection and, whenever possible,
+// places the Pod on a node of its own for the request's whole window — a cost worth paying for a
+// multi-hour issue or controller pod, not for a probe that boots fresh at every daemon start and
+// restart. The probe is also short-lived, explicitly deleted by its own Sandbox at shutdown, and
+// already retried on a kubelet-initiated failure (kubeletFailure, imageProbeRetry), so it needs no
+// eviction protection the way a multi-hour issue pod does. Its node selector and toleration already
+// put it in GKE's higher workload-separation resource-request minimum regardless of this
+// annotation (probeReservation, "a probe sized as a role could keep the daemon from booting on a
+// full pool" — true on GKE too, since the minimum is already in force).
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
@@ -718,7 +728,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 			ShutdownPolicy: "Delete",
 			ShutdownTime:   metav1.NewTime(shutdown.UTC().Truncate(time.Second)),
 			PodTemplate: podTemplate{
-				Metadata: podMetadata{Labels: labels, Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"}},
+				Metadata: podMetadata{Labels: labels, Annotations: map[string]string{doNotDisruptAnnotation: "true"}},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					TerminationGracePeriodSeconds: new(int64(probeTerminationGrace)),
