@@ -95,6 +95,7 @@ func runDispatchPermissions(t *testing.T, dispatch, image string, removeDelivery
 
 	requireConsumerPushBound(t, js, bus.DispatchDeliveryDurable)
 	requireConsumerPushBound(t, js, bus.DispatchJobDurable)
+	requireDurablesAcknowledge(t, js)
 	requireIssueEventPublished(t, conn, port)
 	requireAgentStreamRelayed(t, conn, port)
 	requireWebhookRedeliveryBucket(t, js, process, github)
@@ -211,10 +212,34 @@ func requireConsumerMissing(t *testing.T, js natsgo.JetStreamContext, durable st
 		if err == nil {
 			t.Fatalf("consumer %s was created despite its missing permission", durable)
 		}
-		if err != nil && !strings.Contains(err.Error(), "consumer not found") {
+		if !strings.Contains(err.Error(), "consumer not found") {
 			t.Fatalf("read consumer %s: %v", durable, err)
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// requireDurablesAcknowledge publishes one message that both Dispatch durables' filters match and
+// waits until each has acknowledged it: an envelope that does not decode, which the delivery
+// intake acknowledges without calling GitHub and the job intake acknowledges on receipt. So each
+// durable's $JS.ACK grant is exercised, and a missing one leaves the message pending.
+func requireDurablesAcknowledge(t *testing.T, js natsgo.JetStreamContext) {
+	t.Helper()
+	ack, err := js.Publish("notifications.github.acme.widgets.job.1.completed", []byte("not an envelope"))
+	require.NoError(t, err)
+	for _, durable := range []string{bus.DispatchDeliveryDurable, bus.DispatchJobDurable} {
+		deadline := time.Now().Add(20 * time.Second)
+		var info *natsgo.ConsumerInfo
+		for time.Now().Before(deadline) {
+			info, err = js.ConsumerInfo(bus.Stream, durable)
+			if err == nil && info.AckFloor.Stream >= ack.Sequence && info.NumAckPending == 0 {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, info.AckFloor.Stream, ack.Sequence, "consumer %s did not acknowledge stream sequence %d", durable, ack.Sequence)
+		require.Zero(t, info.NumAckPending, "consumer %s holds unacknowledged messages", durable)
 	}
 }
 
@@ -231,6 +256,19 @@ func requireIssueEventPublished(t *testing.T, conn *natsgo.Conn, port int) {
 	var envelope contracts.Envelope
 	require.NoError(t, json.Unmarshal(message.Data, &envelope))
 	require.True(t, strings.HasSuffix(envelope.Topic, ".issue.created"), "event topic %q", envelope.Topic)
+}
+
+// nextControl is the next agent stream control message Dispatch sent, failing the test after 10s:
+// a refused control publish never arrives.
+func nextControl(t *testing.T, control <-chan *natsgo.Msg) *natsgo.Msg {
+	t.Helper()
+	select {
+	case msg := <-control:
+		return msg
+	case <-time.After(10 * time.Second):
+		t.Fatal("Dispatch sent no agent stream control message within 10s")
+		return nil
+	}
 }
 
 func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
@@ -263,9 +301,9 @@ func requireAgentStreamRelayed(t *testing.T, conn *natsgo.Conn, port int) {
 	t.Cleanup(func() { _ = stream.Body.Close() })
 	require.Equal(t, http.StatusOK, stream.StatusCode)
 
-	watch := <-control
+	watch := nextControl(t, control)
 	require.Equal(t, `{"v":1,"type":"watch"}`, string(watch.Data))
-	replay := <-control
+	replay := nextControl(t, control)
 	require.Equal(t, `{"v":1,"type":"replay"}`, string(replay.Data))
 	require.NoError(t, replay.Respond(nil))
 

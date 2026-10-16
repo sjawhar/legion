@@ -196,6 +196,7 @@ func TestNoSetRepeatsAnEntry(t *testing.T) {
 		"session":  core.SessionPermissions(),
 		"host":     core.HostPermissions("example-host-a"),
 		"daemon":   core.DaemonPermissions(),
+		"dispatch": core.DispatchPermissions("example-host-a"),
 	}
 	for name, p := range sets {
 		for direction, allow := range map[string][]string{"publish": p.Publish.Allow, "subscribe": p.Subscribe.Allow} {
@@ -225,6 +226,12 @@ func TestASetIsTheCallersToChange(t *testing.T) {
 	daemon.Subscribe.Allow[0] = "edited"
 	require.Equal(t, "$JS.API.STREAM.INFO.ENVOY_NOTIFICATIONS", core.DaemonPermissions().Publish.Allow[0])
 	require.Equal(t, "notifications.envoy.exceptions.notifications.role.>", core.DaemonPermissions().Subscribe.Allow[0])
+	dispatch := core.DispatchPermissions("example-host-a")
+	dispatch.Publish.Allow[0] = "edited"
+	dispatch.Subscribe.Allow[0] = "edited"
+	again := core.DispatchPermissions("example-host-a")
+	require.Equal(t, "notifications.agent.>", again.Publish.Allow[0])
+	require.Equal(t, "_INBOX.>", again.Subscribe.Allow[0])
 }
 
 // A set drops into a User as its rules, and the authorization renders it.
