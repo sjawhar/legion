@@ -94,11 +94,11 @@ func (s *PgPeopleStore) signInSubject(ctx context.Context, email, subject, refre
 	if _, err := tx.Exec(ctx, `insert into people (email) values ($1) on conflict (email) do nothing`, email); err != nil {
 		return fmt.Errorf("record sign-in of %q: %w", email, err)
 	}
-	var stored *string
-	if err := tx.QueryRow(ctx, `select sub from people where email = $1 for update`, email).Scan(&stored); err != nil {
+	var stored string
+	if err := tx.QueryRow(ctx, `select coalesce(sub, '') from people where email = $1 for update`, email).Scan(&stored); err != nil {
 		return fmt.Errorf("read the subject the sign-in of %q replaces: %w", email, err)
 	}
-	revoked := stored != nil && *stored != subject
+	revoked := stored != "" && stored != subject
 	if revoked {
 		if _, err := tx.Exec(ctx, revokeSessionsSQL, email); err != nil {
 			return fmt.Errorf("end the sessions of %q, which another Google account signs in to now: %w", email, err)
@@ -127,18 +127,15 @@ func (s *PgPeopleStore) signInSubject(ctx context.Context, email, subject, refre
 // text (RetirePlainRefreshTokens), and the person's next sign-in replaces whatever the row holds.
 // The subject is read whatever the refresh token holds.
 func (s *PgPeopleStore) Membership(ctx context.Context, email string) (auth.PersonMembership, bool, error) {
-	var sealed, subject *string
+	var sealed *string
 	var confirmedAt *time.Time
-	err := s.pool.QueryRow(ctx, `select refresh_token, confirmed_at, sub from people where email = $1`, email).Scan(&sealed, &confirmedAt, &subject)
+	membership := auth.PersonMembership{}
+	err := s.pool.QueryRow(ctx, `select refresh_token, confirmed_at, coalesce(sub, '') from people where email = $1`, email).Scan(&sealed, &confirmedAt, &membership.Subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return auth.PersonMembership{}, false, nil
 	}
 	if err != nil {
 		return auth.PersonMembership{}, false, fmt.Errorf("read membership of %q: %w", email, err)
-	}
-	membership := auth.PersonMembership{}
-	if subject != nil {
-		membership.Subject = *subject
 	}
 	// people's check pairs the two: a row holds both or neither.
 	if sealed == nil {
@@ -246,20 +243,15 @@ func (s *PgPeopleStore) EndSubject(ctx context.Context, email, subject string) (
 		return false, fmt.Errorf("end the sign-in of %q: %w", email, err)
 	}
 	defer tx.Rollback(ctx)
-	var stored *string
-	err = tx.QueryRow(ctx, `select sub from people where email = $1 for update`, email).Scan(&stored)
+	var stored string
+	err = tx.QueryRow(ctx, `select coalesce(sub, '') from people where email = $1 for update`, email).Scan(&stored)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
 	if err != nil {
 		return false, fmt.Errorf("read the subject the end of %q expects: %w", email, err)
 	}
-	if recorded := ""; stored != nil {
-		recorded = *stored
-		if recorded != subject {
-			return false, nil
-		}
-	} else if subject != "" {
+	if stored != subject {
 		return false, nil
 	}
 	if _, err := tx.Exec(ctx, revokeSessionsSQL, email); err != nil {

@@ -118,20 +118,19 @@ func (m *Membership) end(ctx context.Context, email, subject, reason string) err
 		if err != nil {
 			return err
 		}
-		if ended {
-			slog.Warn("dispatch: sign-in ended: the sign-in pool did not confirm the person's membership", "email", email, "reason", reason)
-		} else {
+		if !ended {
 			slog.Info("dispatch: a failed confirmation ended nothing: another Google account has signed in to the address since", "email", email, "reason", reason)
+			return ErrNoIdentity
 		}
-		return ErrNoIdentity
+	} else {
+		if err := m.Sessions.RevokeSessions(ctx, email); err != nil {
+			return err
+		}
+		if err := m.People.End(ctx, email); err != nil {
+			return err
+		}
 	}
 	slog.Warn("dispatch: sign-in ended: the sign-in pool did not confirm the person's membership", "email", email, "reason", reason)
-	if err := m.Sessions.RevokeSessions(ctx, email); err != nil {
-		return err
-	}
-	if err := m.People.End(ctx, email); err != nil {
-		return err
-	}
 	return ErrNoIdentity
 }
 
