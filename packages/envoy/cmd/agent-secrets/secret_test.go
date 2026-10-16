@@ -1143,7 +1143,7 @@ func TestSecretWriteExitsOneWhenTheBrokerCannotBeAsked(t *testing.T) {
 	useAWS(t, local, testAccount, adaSignIn)
 	useStdin(t, "v2")
 	_, stderr, code := runSecret("set", "SET_KEY")
-	if code != 1 || !strings.Contains(stderr, "the write to Secrets Manager stands") || !strings.Contains(stderr, "RATE_LIMITED") {
+	if code != 1 || !strings.Contains(stderr, "the write to the secret store stands") || !strings.Contains(stderr, "RATE_LIMITED") {
 		t.Fatalf("exit %d, stderr %q; want 1 saying the write stands and naming the refusal", code, stderr)
 	}
 	if v := valueOf(t, local, "SET_KEY"); v != "v2" {

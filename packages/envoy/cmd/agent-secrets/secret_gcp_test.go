@@ -499,11 +499,22 @@ func TestCheckSettingsKMSKeyName(t *testing.T) {
 	if err := checkSettingsKMSKeyName(gcpTestSettings()); err != nil {
 		t.Fatalf("valid settings refused: %v", err)
 	}
-	if err := checkSettingsKMSKeyName(Settings{GCPProject: testGCPProject, KMSKeyName: "bad"}); err == nil {
-		t.Fatal("an invalid key name was accepted")
+	bad := gcpTestSettings()
+	bad.SecretsPrefix = "not-a-prefix"
+	if err := checkSettingsKMSKeyName(bad); err == nil {
+		t.Fatal("an invalid secrets_prefix was accepted")
 	}
-	if err := checkSettingsKMSKeyName(Settings{KMSKeyName: testKMSKeyName}); err == nil {
-		t.Fatal("a missing gcp_project was accepted")
+	mismatched := gcpTestSettings()
+	mismatched.GCPProject = "999999999999"
+	if err := checkSettingsKMSKeyName(mismatched); err == nil {
+		t.Fatal("a gcp_project not matching secrets_prefix's project number was accepted")
+	} else if !strings.Contains(err.Error(), "999999999999") || !strings.Contains(err.Error(), testGCPProject) {
+		t.Fatalf("error does not name both projects: %v", err)
+	}
+	badKey := gcpTestSettings()
+	badKey.KMSKeyName = "bad"
+	if err := checkSettingsKMSKeyName(badKey); err == nil {
+		t.Fatal("an invalid key name was accepted")
 	}
 }
 

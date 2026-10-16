@@ -37,20 +37,27 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
-// gcpKMSKeyNamePattern matches a CMEK key name,
-// projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>.
-var gcpKMSKeyNamePattern = regexp.MustCompile(`^projects/[^/]+/locations/[^/]+/keyRings/[^/]+/cryptoKeys/[^/]+$`)
-
-// checkSettingsKMSKeyName refuses, before any GCP call, settings naming no gcp_project or a
-// kms_key_name that is not a CMEK key name: the GCP counterpart of checkSettingsKeyARN.
+// checkSettingsKMSKeyName refuses, before any GCP call, settings whose secrets_prefix is not a
+// Secret Manager prefix, whose gcp_project does not match the project number secrets_prefix
+// itself names (the broker derives gcp_project from secrets_prefix the same way,
+// internal/broker/api handlers_secrets.go, secrets.GCPProject), or whose kms_key_name is not a
+// global-location CMEK key name (secrets.ValidGCPKeyName: automatic replication, the only
+// replication the store serves, takes a global key). This is the GCP counterpart of
+// checkSettingsKeyARN: it ties the project a write lands in to the resource-name prefix the
+// broker itself derived it from, not to a separately-sent field a spoofed or plain-http broker
+// could set on its own to steer a write.
 func checkSettingsKMSKeyName(settings Settings) error {
-	if settings.GCPProject == "" {
-		return errors.New("the broker's settings name no gcp_project")
+	if err := secrets.ValidGCPPrefix(settings.SecretsPrefix); err != nil {
+		return fmt.Errorf("the broker's settings name an invalid secrets_prefix: %w", err)
 	}
-	if !gcpKMSKeyNamePattern.MatchString(settings.KMSKeyName) {
-		return fmt.Errorf("the broker's settings name an invalid KMS key name %q (expected projects/<project>/locations/<location>/keyRings/<ring>/cryptoKeys/<key>)", settings.KMSKeyName)
+	if project := secrets.GCPProject(settings.SecretsPrefix); settings.GCPProject != project {
+		return fmt.Errorf("the broker's settings name project %s, but its secrets prefix %s is in project %s: the broker's settings are inconsistent", settings.GCPProject, settings.SecretsPrefix, project)
+	}
+	if err := secrets.ValidGCPKeyName(settings.KMSKeyName); err != nil {
+		return fmt.Errorf("the broker's settings name an invalid KMS key name: %w", err)
 	}
 	return nil
 }
