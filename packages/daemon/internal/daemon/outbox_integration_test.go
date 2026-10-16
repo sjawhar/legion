@@ -167,6 +167,11 @@ func TestOutboxStaleLeaseFinishLeavesNewLeaseRowUntouched(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("finish stale lease: %v", err)
 	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		return records.FinishLeasedOutbox(context.Background(), tx, first.ID, first.LeaseToken)
+	}); !errors.Is(err, record.ErrOutboxLeaseLost) {
+		t.Fatalf("lease-owned finish of the stale lease = %v, want ErrOutboxLeaseLost", err)
+	}
 	if remaining := outboxRows(t, pool); remaining != 1 {
 		t.Fatalf("outbox rows after stale finish = %d, want one row under replacement lease", remaining)
 	}
@@ -527,17 +532,29 @@ func (s *flakyOutboxStore) ClaimDue(ctx context.Context, tx pgx.Tx, project stri
 }
 
 func (s *flakyOutboxStore) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
-	s.mu.Lock()
-	fail := s.finishFailures > 0
-	if fail {
-		s.finishFailures--
-		s.finishesFailed++
-	}
-	s.mu.Unlock()
-	if fail {
-		return errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
+	if err := s.failFinish(); err != nil {
+		return err
 	}
 	return s.Store.FinishOutbox(ctx, tx, id, leaseToken)
+}
+
+func (s *flakyOutboxStore) FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	if err := s.failFinish(); err != nil {
+		return err
+	}
+	return s.Store.FinishLeasedOutbox(ctx, tx, id, leaseToken)
+}
+
+// failFinish is the dropped connection a finish meets while finishFailures remain.
+func (s *flakyOutboxStore) failFinish() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.finishFailures == 0 {
+		return nil
+	}
+	s.finishFailures--
+	s.finishesFailed++
+	return errors.New("FATAL: terminating connection due to administrator command (SQLSTATE 57P01)")
 }
 
 func (s *flakyOutboxStore) failedFinishes() int {

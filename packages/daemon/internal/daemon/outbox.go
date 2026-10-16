@@ -46,16 +46,21 @@ const (
 	messageReadSkew      = 5 * time.Second
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
-	// operator should look.
+	// operator should look. A ready_merge waits normally for required checks and reviews, so it
+	// stays debug at every attempt.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
 	// effect behind it.
 	issueBranchTimeout = 30 * time.Second
-	// autoMergeDisableTimeout bounds one auto_merge_disable row's GitHub calls, its token's mint
-	// with them, for the same reason: one unanswered call would stall every effect behind it.
-	autoMergeDisableTimeout = 30 * time.Second
+	// autoMergeTimeout bounds one auto_merge_disable or ready_merge row's GitHub calls, its token's
+	// mint with them, for the same reason: one unanswered call would stall every effect behind it.
+	autoMergeTimeout = 30 * time.Second
 )
+
+// errReadyMergeRefusedFinished marks a ready_merge row whose permanent refusal and architect
+// notice committed with its finish. RunOnce must neither retry nor finish the row again.
+var errReadyMergeRefusedFinished = errors.New("READY merge refusal recorded and row finished")
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
 // separate transactions so a slow external service never holds an issue transition lock.
@@ -158,8 +163,15 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("claim due outbox rows: %w", err)
 	}
-	for _, row := range rows {
+	deferred := map[int64]bool{}
+	for index, row := range rows {
+		if deferred[row.ID] {
+			continue
+		}
 		if err := r.execute(ctx, row); err != nil {
+			if errors.Is(err, errReadyMergeRefusedFinished) {
+				continue
+			}
 			if errors.Is(err, wait.ErrWaiting) {
 				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
 				// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
@@ -169,7 +181,7 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 				switch {
 				case row.Attempts == 0:
 					level = slog.LevelInfo
-				case row.Attempts >= waitWarnAttempts:
+				case row.Attempts >= waitWarnAttempts && row.Kind != record.OutboxKindReadyMerge:
 					level = slog.LevelWarn
 				}
 				r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
@@ -190,6 +202,10 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			}
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
 				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
+				continue
+			}
+			if githubRetryAfter(err) > 0 {
+				r.deferGitHubRows(ctx, rows[index+1:], err, deferred)
 			}
 			continue
 		}
@@ -238,13 +254,47 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow) error 
 }
 
 func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) error {
-	nextAt := r.now().UTC().Add(retryBackoff(row.Attempts))
+	delay := retryBackoff(row.Attempts)
+	if after := githubRetryAfter(cause); after > delay {
+		delay = after
+	}
+	nextAt := r.now().UTC().Add(delay)
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		return r.records.RetryOutbox(ctx, tx, row.ID, row.LeaseToken, nextAt, cause.Error())
 	}); err != nil {
 		return fmt.Errorf("retry outbox row %d: %w", row.ID, err)
 	}
 	return nil
+}
+
+// deferGitHubRows returns the remaining GitHub effects already leased by this RunOnce to the
+// outbox at GitHub's rate-limit deadline. They share the implement App token that GitHub limited,
+// so executing another one immediately only burns the same token again.
+func (r *outbox) deferGitHubRows(ctx context.Context, rows []record.OutboxRow, cause error, deferred map[int64]bool) {
+	for _, row := range rows {
+		if row.Kind != record.OutboxKindAutoMergeDisable && row.Kind != record.OutboxKindReadyMerge {
+			continue
+		}
+		if err := r.retry(ctx, row, cause); err != nil {
+			r.log.Error("outbox rate-limited GitHub row retry not recorded; it runs when its lease expires", "row", row.ID, "kind", row.Kind, "error", err)
+			continue
+		}
+		deferred[row.ID] = true
+	}
+}
+
+// githubRetryAfter is GitHub's rate-limit delay when cause wraps either the REST or GraphQL API
+// error. It is zero for every other failure.
+func githubRetryAfter(cause error) time.Duration {
+	var graphql *githubrest.GraphQLError
+	if errors.As(cause, &graphql) && graphql.RateLimited {
+		return graphql.RetryAfter
+	}
+	var answer *githubrest.Answer
+	if errors.As(cause, &answer) && answer.RateLimited {
+		return answer.RetryAfter
+	}
+	return 0
 }
 
 func retryBackoff(attempts int) time.Duration {
@@ -308,6 +358,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.issueBranch(ctx, row, value)
 	case record.AutoMergeDisable:
 		return r.autoMergeDisable(ctx, row, value)
+	case record.ReadyMerge:
+		return r.readyMerge(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -1040,28 +1092,93 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
 }
 
-// autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
-// (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
+// autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's
+// merge (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
 // while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
 // any other head is disarmed. A row queued by a withdrawal the issue has since come back from so
 // leaves the READY that followed armed. The record is read after GitHub, so a READY recorded while
-// the row runs keeps the arm its merger made.
+// the row runs keeps the arm its ready_merge row made.
 func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
-	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
+	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	github, err := r.graphQL(ctx)
 	if err != nil {
-		return fmt.Errorf("mint implement App token: %w", err)
+		return err
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
-	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
-	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
+	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, r.keepFor(row.Issue))
 	if err != nil {
 		return err
 	}
 	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
 		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
 	return nil
+}
+
+// readyMerge submits the merge of an accepted READY's head as the implement App
+// (ghautomerge.Submit), deciding by GitHub and then the record when it runs: only while the issue
+// still awaits that READY head does it ask GitHub to enqueue, merge or arm it. GitHub's merge state
+// and rules decide which; a repository that allows no auto-merge leaves the row waiting until
+// GitHub reports the pull request mergeable, and a head moved since READY submits nothing. A
+// refusal a retry would meet again (ghautomerge.Refused) is told to the issue's architect as a
+// merge-refused notice, with GitHub's message, and finishes the row; every other failure retries.
+func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
+	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
+	defer cancel()
+	github, err := r.graphQL(ctx)
+	if err != nil {
+		return err
+	}
+	submitted, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, r.keepFor(row.Issue))
+	var refused *ghautomerge.Refused
+	if errors.As(err, &refused) {
+		if err := r.finishReadyMergeRefused(ctx, row, refused); err != nil {
+			return err
+		}
+		return errReadyMergeRefusedFinished
+	}
+	if err != nil {
+		return err
+	}
+	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head,
+		"missing", submitted.Missing, "stale", submitted.Stale, "already", submitted.Already, "autoMerge", submitted.AutoMerge, "merged", submitted.Merged)
+	return nil
+}
+
+// finishReadyMergeRefused tells the architect why GitHub will keep refusing row's submission and
+// finishes row in one transaction. A crash or database failure rolls both back, so a retry cannot
+// publish a second notice between a first notice's commit and the row's finish.
+func (r *outbox) finishReadyMergeRefused(ctx context.Context, row record.OutboxRow, refused *ghautomerge.Refused) error {
+	notice, err := record.NewOutboxRow(row.Issue, record.Notice{Kind: "merge-refused", Role: claim.RoleArchitect, Reason: refused.Error()}, r.now().UTC())
+	if err != nil {
+		return err
+	}
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		if err := r.records.Enqueue(ctx, tx, notice); err != nil {
+			return err
+		}
+		return r.records.FinishLeasedOutbox(ctx, tx, row.ID, row.LeaseToken)
+	}); err != nil {
+		return fmt.Errorf("record permanent READY merge refusal for row %d: %w", row.ID, err)
+	}
+	r.log.Error("outbox READY merge refused by GitHub for good; its architect is told and the row ends", "row", row.ID, "issue", row.Issue,
+		"number", refused.Number, "head", refused.Head, "error", refused)
+	return nil
+}
+
+// graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the
+// issue branch and submits or disarms its pull request's merge.
+func (r *outbox) graphQL(ctx context.Context) (githubrest.Client, error) {
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return githubrest.Client{}, fmt.Errorf("mint implement App token: %w", err)
+	}
+	return githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}, nil
+}
+
+// keepFor is issue's readyHeadToKeep as the ghautomerge.Keep that Disarm and Submit ask after
+// reading GitHub.
+func (r *outbox) keepFor(issue string) ghautomerge.Keep {
+	return func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, issue) }
 }
 
 // readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the

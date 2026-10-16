@@ -69,6 +69,9 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if err := e.headMoved(ctx, tx, *issue, &pr); err != nil {
 			return intake.Result{}, err
 		}
+		if err := e.resubmitReopenedReady(ctx, tx, *issue, &pr); err != nil {
+			return intake.Result{}, err
+		}
 	}
 	if issue.Phase != phase.Implementing {
 		return intake.Result{}, nil

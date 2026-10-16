@@ -67,14 +67,10 @@ test("every legion-worker reference is linked from a skill or a prompt", () => {
   expect(unlinked).toEqual([]);
 });
 
-// The merger submits the merge itself once READY is accepted (LEGION-631), and Legion enforces no
-// GitHub restriction the repository itself does not: the worker skill names the command, and no
-// skill a Legion pane loads, and no daemon prompt, says Legion never merges.
-test("the worker skill names the merger's merge command, and no skill or prompt says Legion never merges", () => {
-  const command = "`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`";
-  for (const file of ["legion-worker/references/merge-gate.md", "legion-worker/SKILL.md"]) {
-    expect(readFileSync(path.join(staged, file), "utf8")).toContain(command);
-  }
+// The daemon submits the merge itself once it accepts READY, and Legion enforces no GitHub
+// restriction the repository itself does not: no skill a Legion pane loads, and no daemon prompt,
+// says Legion never merges.
+test("no skill or prompt says Legion never merges", () => {
   const saying = [staged, promptsRoot]
     .flatMap(files)
     .filter(

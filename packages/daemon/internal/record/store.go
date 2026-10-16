@@ -521,7 +521,9 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 		return fmt.Errorf("enqueue %s for %s: payload is not JSON", row.Kind, row.Issue)
 	}
 	var err error
-	if row.CreatedAt.IsZero() {
+	if row.Kind == OutboxKindReadyMerge {
+		err = s.enqueueReadyMerge(ctx, tx, row)
+	} else if row.CreatedAt.IsZero() {
 		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
 			values ($1, $2, $3, $4, $5, $6, $7, $8)`,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
@@ -534,6 +536,26 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 		return fmt.Errorf("enqueue %s for %s: %w", row.Kind, row.Issue, err)
 	}
 	return nil
+}
+
+// enqueueReadyMerge adds one durable submission for a READY head. The unique partial index 0044
+// makes the race between a reopen and a retry one row. A duplicate enqueue preserves the row's
+// existing next_at, including a GitHub rate-limit deadline.
+func (s *Postgres) enqueueReadyMerge(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
+	if row.CreatedAt.IsZero() {
+		_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+			values ($1, $2, $3, $4, $5, $6, $7, $8)
+			on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge'
+			do nothing`,
+			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
+		return err
+	}
+	_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge'
+		do nothing`,
+		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.CreatedAt, row.LeaseToken, row.LeaseUntil)
+	return err
 }
 
 // ClaimDue leases project's due rows, oldest first. The database is shared by the daemons of
@@ -686,8 +708,24 @@ func (s *Postgres) EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, i
 	return earlier, nil
 }
 
+// ErrOutboxLeaseLost is FinishLeasedOutbox finding the row no longer held by the caller's lease:
+// another worker reclaimed it after this lease expired, or it is already gone.
+var ErrOutboxLeaseLost = errors.New("outbox row lease is no longer held")
+
 func (s *Postgres) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
 	if _, err := tx.Exec(ctx, "delete from outbox where id = $1 and lease_token = $2", id, leaseToken); err != nil {
+		return fmt.Errorf("finish outbox row %d: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Postgres) FinishLeasedOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
+	var finished int64
+	err := tx.QueryRow(ctx, "delete from outbox where id = $1 and lease_token = $2 returning id", id, leaseToken).Scan(&finished)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("finish outbox row %d: %w", id, ErrOutboxLeaseLost)
+	}
+	if err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", id, err)
 	}
 	return nil
