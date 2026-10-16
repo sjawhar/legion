@@ -337,7 +337,9 @@
   (LEGION-761). No value is lost: the trigger kept the column equal to the list's first name, and
   the migration's census counts any row where it did not, so such a row refuses the deploy.
   Rollback floor: once 0111 has applied, a task older than legion-envoy v13.4.1, the release that
-  added 0109, cannot run against this schema, since it reads and writes `production_job_name`.
+  added 0109, still boots, but its reads and writes of the delivery settings fail with SQLSTATE
+  42703 (undefined column), since they name `production_job_name`, and so does every delivery page
+  and job that reads the settings first.
   v13.4.1 and every later release read `production_job_names` alone.
 
 - **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
