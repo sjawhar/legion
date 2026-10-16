@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-780",
+  "completed": "2026-10-16T03:34:15Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1982",
+  "round": 1,
+  "codeHead": "a7c656749fd20f82156aaef1f40178eff1c5dedc",
+  "branchHeadReviewed": "4c650d75eaee32d9a7a3f65aed4bb056b7b87e24",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 1,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/e2e/lib/stage4b-tools.jq:56",
+      "description": "arguments_carry's else arm matches the arguments' JSON text with the model's `i` intent in it for every direct (non-device) tool, so the intent-only false PASS item 4 closes for bash stays open for the bound read at stage4b-sandbox-tree.sh:3702: a `read` of .omp/skills/fixture-omp-skill/SKILL.md (which carries the same FIXTURE-SKILL marker) whose intent names skill://fixture-omp-skill satisfies `tool_result_answered read \"skill://fixture-omp-skill\" \"FIXTURE-SKILL-OMP-<nonce>\"`, though the skill:// resolution the assertion exists to prove never ran. Reproduced at a7c65674 with jq 1.7 over a two-line session: true; false once the intent is reworded. Fix: drop the intent from the match for every tool (parse the stored arguments, `del(.i)` on an object, match the rest; keep the bash `command` arm or let the one rule cover it), with a unit case for the read shape; device content carries no `i`, so the device match is unchanged."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:5116",
+      "description": "The comment's \"Every scan of the controller's deliveries below reads it\" overstates: report_after_tick (:5347-5363) scans the sessions itself by raw text, since it needs each line's index. Wording; rides along with the fix, not gating."
+    }
+  ],
+  "ci": "Required set from the main ruleset: lint, typecheck, test, pr-title (branch protection names none). CI head a7c656749fd2 (the branch's newest pull_request runs): Tests run 38842450112 lint/typecheck/test success, PR Title run 38842450080 pr-title success (a later pr-title run 38842529039 cancelled, superseded by 38842538836 success); compare a7c65674...4c650d75 changes only .legion/LEGION-780/implement.json and test.json. The PR body's CI line names those runs at that commit.",
+  "threads": "None open at the round's start; no bot comment on the pull request.",
+  "proofLines": "E2E (implementer) and E2E (tester) both present: surface, command, observation, head sha and negative control each; the tester verified the implementer's proof by driving the same surfaces independently.",
+  "thermonuclear": "Pair run once at the reviewed head a7c65674: deep review 0 Critical / 0 Important / 3 Minor; code quality 3 Important / 8 Minor, one upheld as the round's correctness finding, the rest cleanup (one Fast-follow) or the plan's settled choices (solutions doc left as #1866's record per plan decision 9; the -f main programs outside the include guard per decision 4; the six-module pin per task 3).",
+  "notGating": [
+    "The compile guard parses include'd modules only; the three -f main programs are parsed by CI's runner jq through their unit tests (plan decision 4).",
+    "printf | grep -qx sentinel at :2790 is the pipe-closing pattern :5125 forbids; cannot fire at six names (measured 0/200), hardening only.",
+    "controller_deliveries restates lib/workflow.sh's notice_line grep pipeline and is defined inside the controller checkpoint though two later checkpoints read it; the three lifted-function test harnesses differ in shell options (set -euo vs set -Eeuo). Named as the round's Fast-follow.",
+    "docs/solutions/testing/*-LEGION-578.md names the removed ticks_name_open/daemon_open_rows as #1866's fix; the plan leaves it as the record, and retro may add the pointer to LEGION-780."
+  ],
+  "security": "Security[untrusted-input]: jq_modules_compile (stage4b-sandbox-tree.sh:2223) interpolates $module into a jq program; its only source is the script's own text filtered by [A-Za-z0-9_./-] at :2211, which excludes quote and backslash, and the later sed strips a fixed prefix/suffix, so no pass re-creates a quote; model text reaches jq only as --arg (:2250, :2257) and grep -F -- fixed strings (:5121, :5222). Security[secret]: agent_setting's xargs line (:2364) handles the pod process's environ as before — same pod_exec identity, same env -i argv, same lifetime; -x -n <count> changes batching only, nothing widened. No other row's surface is touched."
+}
