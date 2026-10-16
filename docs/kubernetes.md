@@ -994,7 +994,7 @@ every issue pod is relaunched onto the new image.
 
 ### Contract discipline
 
-`DaemonAPIVersion` (28) is the Go daemon's own contract number; each claim records the contract
+`DaemonAPIVersion` (29) is the Go daemon's own contract number; each claim records the contract
 its process registered with as `pluginContract`. A role's `pi-legion` declares the contract it was built against
 (`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass
 (`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path
@@ -2560,6 +2560,20 @@ The Go coordinator's. Legion holds no model, provider or route. Everything a pod
 reach a model is the operator's, and the daemon hands the same pieces to every pod it runs: each
 issue's pod (every role container of it alike) and the image probe's.
 
+- **The project's repositories** are Dispatch's mapping (Settings → Repositories → Projects), one of
+  them the project's default; `legion.yaml`'s `projects.<KEY>` names none and refuses `repo`. The
+  daemon reads the mapping at boot and on Dispatch's `settings.repo_project.updated` of its
+  project, and checks, per repository, that both GitHub Apps are installed on it (`GET
+  /repos/{owner}/{repo}/installation` under each App's JWT): a repository either App is missing
+  from is left out, not refused, and `legion state --json` names it under `repositories.refused`
+  with the App it lacks; a project with no repository mapped, or none both Apps are installed on,
+  does not boot. Every role's gh bundle holds a directory for each served repository's owner. An
+  issue is recorded on the repository Dispatch resolves for it, with that repository's default
+  branch as GitHub names it, when the daemon first records it, and keeps both. **Upgrade order:**
+  Dispatch first (it resolves each issue's repository), then map the project's repositories there
+  with the old `projects.<KEY>.repo` as the project's default, then delete the key and start this
+  daemon; its first boot fills every record written before the record carried its repository from
+  Dispatch's resolution, and refuses to boot, naming each record, while Dispatch resolves none.
 - **`runtime.kubernetes.pod`** has four keys. `env` is variables set in the agent's container.
   `volumes` are each one `secret`, `config_map`, or `projected` source; a projected
   `service_account_token` must last at least 600 s, the least the API server issues, and its

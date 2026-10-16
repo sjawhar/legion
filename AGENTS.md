@@ -78,9 +78,15 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@s
 
 ```yaml
 projects:
-  LEGION: { repo: sjawhar/legion }
-  WIDGETS: { repo: acme/widgets, merge_queue_role: merge-queue }
+  LEGION: {}
+  WIDGETS: { merge_queue_role: merge-queue }
 ```
+
+A project's repositories are Dispatch's mapping (Settings → Repositories → Projects), one of them
+the project's default; `legion.yaml` names none, and refuses `projects.<KEY>.repo`. The daemon
+reads the mapping at boot and on Dispatch's `settings.repo_project.updated`, serves each mapped
+repository both GitHub Apps are installed on, and leaves out, and reports in `legion state --json`
+(`repositories.refused`), one either App is missing from.
 
 ## Version Control
 
@@ -164,7 +170,11 @@ A root in `todo` without the label is never admitted, and a root in `triage` wit
 the controller. A child needs none: it runs under its tree's architect once its root is admitted,
 and its architect's `release_children` records it in the tree even when Dispatch already showed it
 `todo`. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
-label as any root does. A root that stays `done` through its linger hands every child still in the
+label as any root does. An issue is recorded on the repository Dispatch resolves for it (its own,
+else its nearest ancestor's, else the project's default) and keeps it: an issue whose repository
+resolves to none, or to one the daemon does not serve, is not admitted, and the daemon says why on
+the issue; a later change of an admitted issue's repository is not applied, which the daemon says
+too. A root that stays `done` through its linger hands every child still in the
 workflow to Legion as a root of its own: the daemon sets it `todo` with the label in one Dispatch
 write, and the write's event carries the child's phase, design gate, phase records and pull request
 into a new generation, then starts that phase's role. A child whose old root had no gate (cleared
