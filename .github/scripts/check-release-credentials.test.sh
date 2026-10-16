@@ -2,11 +2,12 @@
 # Tests for `check-release-credentials.sh`: a job of the three release workflows that holds a
 # credential runs no dependency code, uses only allow-listed actions, restores no cache and holds
 # the deploy key only in the env of a step that pushes; a job that runs dependency code holds no
-# credential and ends in the no-credential tripwire; every checkout persists no credential; and
-# the two release orderings (pi_legion_publish after pi_envoy_publish, release_publish in its
-# concurrency group) stay. The check is a tripwire over named patterns (the commands, actions and
-# paths its lists hold), not a proof that no other code runs, and these cases exercise those
-# patterns, on each side of each line.
+# credential and ends in the no-credential tripwire; every checkout persists no credential; the
+# two release orderings (pi_legion_publish after pi_envoy_publish, release_publish in its
+# concurrency group) stay; and a job condition downstream of a skippable job calls `always()` and
+# tests the result of every job whose outputs it reads. The check is a tripwire over named
+# patterns (the commands, actions and paths its lists hold), not a proof that no other code runs,
+# and these cases exercise those patterns, on each side of each line.
 #
 # Each case builds a miniature repository under a temporary directory, with the real script
 # symlinked into it and a green trio of release workflows written, and mutates one file.
@@ -77,12 +78,13 @@ LISTENER=.github/workflows/release-envoy-listener.yaml
 INFRA=.github/workflows/release-envoy-infra.yaml
 
 # write_green <workflows dir>: the trio in its intended shape. release.yaml: a build job (install,
-# setup-bun, a `go build` behind `&&`, upload, tripwire), two credentialed publish jobs (setup-node,
-# `npm publish` of the handed tarball, the tag push, a GitHub release and the bump push), a plain
-# job that runs no dependency code and a reusable-workflow call with no steps. The listener: a
-# docker build job (`packages: write`, a build-push) and release_publish in its concurrency group,
-# with `docker buildx imagetools create`. Infra: a build job (install-pulumi, `pulumi package
-# get-schema`, tripwire) and a publish job.
+# setup-bun, a `go build` behind `&&`, upload, tripwire) with an `if:` of its own, two credentialed
+# publish jobs (setup-node, `npm publish` of the handed tarball, the tag push, a GitHub release and
+# the bump push) whose `if:` calls `always()` and tests the result of the build whose outputs it
+# reads, a plain job that runs no dependency code and a reusable-workflow call with no steps and no
+# `if:`. The listener: a docker build job (`packages: write`, a build-push) and release_publish in
+# its concurrency group, with `docker buildx imagetools create`. Infra: a build job
+# (install-pulumi, `pulumi package get-schema`, tripwire) and a publish job.
 write_green() {
   local dir=$1
   cat > "$dir/release.yaml" <<'YAML'
@@ -96,6 +98,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -114,6 +117,7 @@ jobs:
         run: .github/scripts/release-push.sh no-credential
   pi_envoy_publish:
     needs: pi_envoy_build
+    if: always() && needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -162,6 +166,9 @@ jobs:
         run: .github/scripts/release-push.sh push-main packages/pi-envoy "$VERSION"
   pi_legion_publish:
     needs: [pi_legion_build, pi_envoy_build, pi_envoy_publish]
+    # pi_legion_build names no job of this fixture: the checker ignores a dangling needs name on
+    # purpose (GitHub refuses such a workflow at parse).
+    if: always() && needs.pi_legion_build.result == 'success' && needs.pi_legion_build.outputs.skip != 'true' && (needs.pi_envoy_publish.result == 'success' || needs.pi_envoy_publish.result == 'skipped')
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -365,6 +372,13 @@ check "a credentialed job runs release-push.sh handed" "$(contains "$green_relea
 check "a credentialed job runs npm publish" "$(contains "$green_release" 'run: npm publish')"
 check "a credentialed job runs docker buildx imagetools create" "$(contains "$green_listener" 'run: docker buildx imagetools create')"
 check "a build job holds packages: write" "$(contains "$green_listener" 'packages: write')"
+check "a build job carries an if: of its own, so the publish jobs downstream have a skippable ancestor" \
+  "$(contains "$green_release" "^    if: github.ref == 'refs/heads/main'$")"
+check "a publish job's if: calls always() and tests the result of the build whose outputs it reads" \
+  "$(contains "$green_release" "^    if: always() && needs.pi_envoy_build.result == 'success' && needs.pi_envoy_build.outputs.skip != 'true'$")"
+check "the green fixture needs a job it does not define, pi_legion_build (a dangling needs name is ignored on purpose)" \
+  "$(contains "$green_release" '^    needs: \[pi_legion_build, ')"
+check "no job pi_legion_build" "$(is "$(contains "$green_release" '^  pi_legion_build:$')" false)"
 
 echo "case: a credentialed job runs bun install"
 root=$(fixture bun-install)
@@ -645,6 +659,152 @@ mutate "$root/$LISTENER" $'  release_publish:\n' $'  publish:\n'
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the missing job" "$(contains "$out" "^::error::$LISTENER:$(line_of "$root/$LISTENER" '^jobs:$'): no job 'release_publish'")"
+
+# The green job-level conditions of the two publish jobs, for the rule-6 cases to replace.
+envoy_if=$'    if: always() && needs.pi_envoy_build.result == \'success\' && needs.pi_envoy_build.outputs.skip != \'true\'\n'
+legion_if=$'    if: always() && needs.pi_legion_build.result == \'success\' && needs.pi_legion_build.outputs.skip != \'true\' && (needs.pi_envoy_publish.result == \'success\' || needs.pi_envoy_publish.result == \'skipped\')\n'
+
+echo "case: a publish job's if: reads the build's outputs behind an implicit success() (the bug's shape)"
+root=$(fixture if-implicit-success)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: needs.pi_envoy_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job, the missing always() and the skippable ancestor at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: needs.pi_envoy_build.outputs.skip'): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own; GitHub's implicit success() is then false whenever any job upstream was skipped, whatever this if: says, so the if: must call always() and test needs.<job>.result for each job it reads")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: a publish job's if: calls success() explicitly"
+root=$(fixture if-explicit-success)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: success() && needs.pi_envoy_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "the explicit success() is the implicit one: names the job at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: success()'): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own")"
+
+echo "case: a publish job's if: tests the build's result, without always()"
+root=$(fixture if-result-no-always)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: needs.pi_envoy_build.result == \'success\' && needs.pi_envoy_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "the result test decides nothing behind the implicit success(): names the job at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: needs.pi_envoy_build.result'): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own")"
+
+echo "case: a publish job's if: tests the build's result only, reading no outputs"
+root=$(fixture if-result-only)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: needs.pi_envoy_build.result == \'success\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: needs.pi_envoy_build.result'): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own")"
+
+echo "case: a publish job's if: calls always() and reads the build's outputs without testing its result"
+root=$(fixture if-always-no-result)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: always() && needs.pi_envoy_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the outputs read and the result not tested at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: always() && needs.pi_envoy_build.outputs'): job 'pi_envoy_publish' calls always() in its if: and reads needs.pi_envoy_build.outputs, but does not test needs.pi_envoy_build.result; always() turns GitHub's own gating off, so a failed or skipped job is read through its empty outputs")"
+check "reports that one problem only" "$(contains "$out" '^1 release credential problem(s)$')"
+
+echo "case: an if: over two needs that tests one result and reads the other's outputs (the release note's shape)"
+root=$(fixture if-two-needs-one-result)
+mutate "$root/$RELEASE" "$legion_if" $'    if: always() && needs.pi_envoy_publish.result == \'success\' && needs.pi_legion_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names only the job whose outputs are read untested, not the one whose result is tested" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: always() && needs.pi_envoy_publish.result'): job 'pi_legion_publish' calls always() in its if: and reads needs.pi_legion_build.outputs, but does not test needs.pi_legion_build.result; always() turns")"
+
+echo "case: a steps-less job's if: reads a skippable job's outputs behind an implicit success()"
+root=$(fixture if-steps-less-job)
+mutate "$root/$RELEASE" $'    needs: [pi_legion_publish]\n    uses: ./.github/workflows/worker-image.yaml\n' $'    needs: [pi_legion_publish]\n    if: needs.pi_legion_publish.outputs.version != \'\'\n    uses: ./.github/workflows/worker-image.yaml\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job and every skippable ancestor, at any distance, at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: needs.pi_legion_publish.outputs.version'): job 'worker_image' has an if: that calls no always(), but jobs 'pi_envoy_build', 'pi_envoy_publish', 'pi_legion_publish' upstream of it through needs carry an if: of their own")"
+
+echo "case: the build named by index, needs['pi_envoy_build'], behind always()"
+root=$(fixture if-index-no-result)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: always() && needs[\'pi_envoy_build\'].outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job read by index as by dot" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: always() && needs\['): job 'pi_envoy_publish' calls always() in its if: and reads needs.pi_envoy_build.outputs, but does not test needs.pi_envoy_build.result;")"
+root=$(fixture if-index-with-result)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: always() && needs[\'pi_envoy_build\'].result == \'success\' && needs[\'pi_envoy_build\'].outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 0: the result tested by index is the result read by dot" "$(is "$status" 0)"
+
+echo "case: a boolean if: true"
+root=$(fixture if-boolean)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: true\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "a boolean calls no always(): names the job at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: true$'): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own")"
+
+echo "case: a folded if: >- carrying the bug (the production shape)"
+root=$(fixture if-folded)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: >-\n      needs.pi_envoy_build.result == \'success\' &&\n      needs.pi_envoy_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the job at the if: >- line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: >-$'): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own")"
+
+echo "case: Always() and the needs context in another casing"
+root=$(fixture if-casing)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: Always() && NEEDS.pi_envoy_build.Result == \'success\' && needs.pi_envoy_build.outputs.skip != \'true\'\n'
+run_check "$root"
+check "exits 0: the function and the context are case-insensitive" "$(is "$status" 0)"
+
+echo "case: 'always()' in a string literal is text (a YAML double-quoted scalar, since a plain one cannot start with a quote)"
+root=$(fixture if-quoted-always)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: "\'always()\' == needs.pi_envoy_build.outputs.skip"\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "the quoted always() calls nothing: names the job at the if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" "^    if: \"'always()' == "): job 'pi_envoy_publish' has an if: that calls no always(), but job 'pi_envoy_build' upstream of it through needs carries an if: of its own")"
+
+echo "case: the build's outputs read inside fromJSON(…), behind always()"
+root=$(fixture if-fromjson)
+mutate "$root/$RELEASE" "$envoy_if" $'    if: always() && fromJSON(needs.pi_envoy_build.outputs.skip) != true\n'
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the outputs read inside the call" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: always() && fromJSON('): job 'pi_envoy_publish' calls always() in its if: and reads needs.pi_envoy_build.outputs, but does not test needs.pi_envoy_build.result;")"
+
+echo "case: two jobs needing each other (one needs: a string, one a list), each with an if: reading the other's outputs"
+root=$(fixture if-needs-cycle)
+cat >> "$root/$RELEASE" <<'YAML'
+  cyc_a:
+    needs: cyc_b
+    if: needs.cyc_b.outputs.x != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - run: echo a
+  cyc_b:
+    needs: [cyc_a]
+    if: needs.cyc_a.outputs.x != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - run: echo b
+YAML
+run_check "$root"
+check "exits 1, the walk having ended" "$(is "$status" 1)"
+check "names cyc_a, whose string needs names cyc_b, at its if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: needs.cyc_b.outputs.x'): job 'cyc_a' has an if: that calls no always(), but job 'cyc_b' upstream of it through needs carries an if: of its own")"
+check "names cyc_b, whose list needs names cyc_a, at its if's line" \
+  "$(contains "$out" "^::error::$RELEASE:$(line_of "$root/$RELEASE" '^    if: needs.cyc_a.outputs.x'): job 'cyc_b' has an if: that calls no always(), but job 'cyc_a' upstream of it through needs carries an if: of its own")"
+check "reports those two problems only: each job once" "$(contains "$out" '^2 release credential problem(s)$')"
+
+echo "case: a step-level if: reading the build's outputs behind an implicit success()"
+root=$(fixture step-if)
+add_publish_step "$root" $'      - name: Step-level condition\n        if: needs.pi_envoy_build.outputs.skip != \'true\'\n        run: echo ok\n'
+run_check "$root"
+check "exits 0: a step's implicit success() is over the job's own earlier steps, not over needs" "$(is "$status" 0)"
 
 echo "case: a missing workflow"
 root=$(fixture missing-infra)
