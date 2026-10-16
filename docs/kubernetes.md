@@ -133,17 +133,18 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. How long a node takes to pull that is not
+tree with the two npm language servers is 66 MiB. On EKS, how long a node takes to pull that is not
 recorded here: the stage 4a launch below is where it is measured. The pull must fit the launch's
 wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
 (`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
 "Liveness rules" below); a launch whose launcher has not connected by then fails and is counted. On
-GKE Autopilot, an issue or controller pod (below) usually lands on a freshly provisioned node of its
-own and pulls the image cold there, measured at about 2m25s to 3m35s before the first init
-container on a production-sized node (provisioning 1m20s–2m25s, the cold pull itself 55s–2m15s); a
-GKE deployment needs a larger `worker_boot_timeout_seconds` (for example 300) to keep that
-provisioning-plus-pull time from being counted as a launch failure.
+GKE Autopilot (measured 2026-10-16), an issue or controller pod usually waits for a node of its own
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) and pulls the image cold there: 2m23s and
+3m33s from creation to the first init container in the two launches measured (1m19s and 2m25s of
+that waiting for the node, 56s and 58s pulling), and one cold pull of a new digest on an existing
+node took 2m14s by itself — so a GKE deployment needs a larger `worker_boot_timeout_seconds` (for
+example 300) to keep that provisioning-plus-pull time from being counted as a launch failure.
 The image probe's own wait is derived from the same key: each attempt's budget is
 `slow_command_timeout_seconds` (300 s by default), or, when `worker_boot_timeout_seconds` plus a
 60 s margin is larger, that instead (`ProbeBudget`, `packages/daemon/internal/daemon/kubernetes.go`)
@@ -1596,8 +1597,7 @@ ephemeral-storage limit over a smaller request: each role container its role's
 (`runtime.kubernetes.resources.<role>`, or the daemon's default), and both init containers the
 reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). So
 the pod is `Guaranteed`, each container is bounded on the node's disk, and Legion sets no affinity
-on it (GKE Autopilot adds its own, [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod);
-[Issue sizing](#issue-sizing-one-reservation-per-pod)).
+on it (GKE Autopilot adds its own, below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
 Every role container is told `GH_CONFIG_DIR=/var/run/legion/gh`, so the image's plain `gh` reads
 its App token from the files there, and `git` reads the same file through the shared clone's
@@ -1671,20 +1671,23 @@ Every pod runs:
 - `Guaranteed`: every container's cpu and memory request equal to its limit (the two quantities the
   kubelet's QoS class reads), and its ephemeral storage a 1Gi request under a per-role limit
   ([Issue sizing](#issue-sizing-one-reservation-per-pod), "The node-disk bound");
-- annotated `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own stop-eviction annotation, which
-  GKE's cluster-autoscaler ignores; the issue pod and the project controller's additionally carry
-  `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, the upstream Cluster Autoscaler's own
-  annotation, which GKE Autopilot honours as a request for up to seven days of extended-duration
-  protection from its own scale-down and node-upgrade eviction — not indefinitely, and not from node
-  pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or an
-  operator-initiated drain; Autopilot also places each such Pod on a node of its own whenever
-  possible, under a required node affinity it adds itself (`cloud.google.com/extended-duration-pods`),
-  and refuses the pod outright under the `cloud.google.com/gke-spot` node selector or toleration
-  (GKE offers no extended duration to a Spot Pod requested any other way, such as the
-  `autopilot-spot` compute class; [Image size and pull time](#image-size-and-pull-time) has the
-  dedicated node's boot-time cost). The
-  image probe pod (below) carries only the first: a dedicated node per boot would cost more than the
-  eviction window buys a probe that is already short-lived and retried on failure.
+- annotated with two stop-eviction annotations:
+  - `karpenter.sh/do-not-disrupt: "true"`, Karpenter's own, which GKE's cluster-autoscaler ignores;
+  - the issue pod and the project controller's additionally carry
+    `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`, the upstream Cluster Autoscaler's own
+    annotation, which GKE Autopilot honours as a request for up to seven days of extended-duration
+    protection from its own scale-down and node-upgrade eviction — not indefinitely, and not from
+    node pressure or an OOM, a higher-priority Pod, Compute Engine maintenance or node repair, or an
+    operator-initiated drain;
+  - on GKE Autopilot this second annotation also adds a required node affinity
+    (`cloud.google.com/extended-duration-pods`) and gives the pod a node of its own whenever
+    possible, which costs each launch a new node and a cold image pull ([Image size and pull
+    time](#image-size-and-pull-time));
+  - Autopilot refuses the pod outright under the `cloud.google.com/gke-spot` node selector or
+    toleration (it offers no extended duration to a Spot Pod requested any other way, such as the
+    `autopilot-spot` compute class);
+  - the image probe pod (below) carries only the first: a dedicated node per boot would cost more
+    than the eviction window buys a probe that is already short-lived and retried on failure.
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
@@ -3056,9 +3059,9 @@ exits 3, which the daemon reads as a lost volume and answers with a fresh contro
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. It is never enrolled with the secrets broker: it has no
-agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it itself (GKE
-Autopilot adds its own, [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so it lands wherever
-the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
+agent-secrets volume, shim flag or `AGENT_SECRETS_URL`. Legion sets no affinity on it, so under
+Karpenter it lands wherever the pool has room for it (on GKE Autopilot it gets a node of its own,
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and it is annotated `karpenter.sh/do-not-disrupt:
 "true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
 or replaces for drift the node it runs on, though issue pods can still be scheduled onto that node;
 GKE Autopilot holds off a scale-down or node-upgrade eviction of the pod for up to seven days

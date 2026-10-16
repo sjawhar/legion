@@ -694,7 +694,7 @@ type probeSpec struct {
 // container's are (kubeletLiteral). It carries Karpenter's `do-not-disrupt` alone, not the Cluster
 // Autoscaler's `safe-to-evict` (podTemplate sets both): GKE Autopilot places a pod carrying that
 // one on a node of its own whenever possible, so each boot's probe would ask for a node, and a
-// probe minutes long and already retried on failure (kubeletFailure, imageProbeRetry) gains nothing
+// probe minutes long and already retried on failure (kubeletFailure, ImageProbe.Retry) gains nothing
 // from a seven-day eviction window.
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
