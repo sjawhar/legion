@@ -247,9 +247,13 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow) error 
 
 func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) error {
 	delay := retryBackoff(row.Attempts)
-	var githubFailure *githubrest.GraphQLError
-	if errors.As(cause, &githubFailure) && githubFailure.RateLimited && githubFailure.RetryAfter > delay {
-		delay = githubFailure.RetryAfter
+	var graphql *githubrest.GraphQLError
+	if errors.As(cause, &graphql) && graphql.RateLimited && graphql.RetryAfter > delay {
+		delay = graphql.RetryAfter
+	}
+	var answer *githubrest.Answer
+	if errors.As(cause, &answer) && answer.RateLimited && answer.RetryAfter > delay {
+		delay = answer.RetryAfter
 	}
 	nextAt := r.now().UTC().Add(delay)
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
