@@ -25,6 +25,13 @@ func (tokenSource) Token(_ context.Context, role appauth.AppRole, _ string) (app
 	return appauth.Lease{Token: "installation-token", ExpiresAt: time.Now().Add(time.Hour), Identity: appauth.GitIdentity{Name: name}}, nil
 }
 
+// ReadToken is Token's lease with "-read" appended to the token text.
+func (s tokenSource) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := s.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 func newCredentialHarness(t *testing.T, tokens appauth.Tokens) *harness {
 	t.Helper()
 	h := newHarness(t)
@@ -36,7 +43,6 @@ func newCredentialHarness(t *testing.T, tokens appauth.Tokens) *harness {
 		Controller:    h.store,
 		Grants:        credential.New(nil),
 		Tokens:        tokens,
-		GitHubOwner:   "acme",
 	}).Handler
 	return h
 }

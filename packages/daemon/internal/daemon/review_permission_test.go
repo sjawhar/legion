@@ -275,6 +275,12 @@ func (t *transientOnceTokens) Token(context.Context, appauth.AppRole, string) (a
 	return appauth.Lease{Token: "token", ExpiresAt: time.Now().Add(time.Hour)}, nil
 }
 
+func (t *transientOnceTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // reviewPermissionPool is a store recording acme/widgets#42 for LEGION-208, and no other pull
 // request.
 func reviewPermissionPool(t *testing.T) *pgxpool.Pool {

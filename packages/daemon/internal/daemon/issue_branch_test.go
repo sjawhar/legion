@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -132,6 +133,12 @@ type roleTokens struct{}
 
 func (roleTokens) Token(_ context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
 	return appauth.Lease{Token: string(role) + "-app-token-for-" + owner, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+func (t roleTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
 }
 
 // branchAdmission is an outbox over a fresh database whose admission admits LEGION-208 when the
@@ -300,5 +307,32 @@ func TestAnIssueBranchRowOfALeftRunFinishesWithoutACreate(t *testing.T) {
 	}
 	if got := github.created(); len(got) != 0 {
 		t.Fatalf("GitHub creates = %+v, want none", got)
+	}
+}
+
+// refusingOwnerTokens refuses every mint, naming nothing, so a test reads what the caller names.
+type refusingOwnerTokens struct{}
+
+func (refusingOwnerTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	return appauth.Lease{}, errors.New("GitHub is down")
+}
+
+func (refusingOwnerTokens) ReadToken(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	return appauth.Lease{}, errors.New("GitHub is down")
+}
+
+// Branch creation and the disarm mint the implement App's token for the owner of the repository
+// they act on, and a mint that fails names that owner, so the outbox's failure line says whose
+// installation refused.
+func TestBranchCreationAndTheDisarmNameTheOwnerTheyMintFor(t *testing.T) {
+	runner := &outbox{log: quietLogger(), tokens: refusingOwnerTokens{}, repo: ghrepo.MustParse("acme/widgets"),
+		defaultBranch: func(context.Context, ghrepo.Repository) (string, error) { return "main", nil }}
+	want := "mint the implement App token for acme: GitHub is down"
+	if err := runner.createBranch(context.Background(), "LEGION-208"); err == nil || err.Error() != want {
+		t.Errorf("createBranch with a refused mint = %v, want %q", err, want)
+	}
+	row := mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 7}, time.Now())
+	if err := runner.autoMergeDisable(context.Background(), row, record.AutoMergeDisable{Number: 7}); err == nil || err.Error() != want {
+		t.Errorf("autoMergeDisable with a refused mint = %v, want %q", err, want)
 	}
 }

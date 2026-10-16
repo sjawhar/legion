@@ -47,6 +47,12 @@ func (loginTokens) InstalledOn(context.Context, appauth.AppRole, ghrepo.Reposito
 	return true, nil
 }
 
+func (t loginTokens) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := t.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 // The engine judges a push by its pusher against the review App's login, so a configuration whose
 // two roles resolve to one App would count no fix attempt at all: boot refuses it, and a review
 // lease with no login, before anything else opens.

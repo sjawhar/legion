@@ -125,7 +125,7 @@ func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 		stateDir: t.TempDir(), project: "s1", prompts: composer, designGate: config.DesignGateOff,
 		instructions: "/state/deployment-instructions.md", secrets: map[string]string{"ENVOY_TOKEN": "envoy-bearer"},
 		repo: ghrepo.MustParse("acme/widgets"),
-		identity: func(context.Context, claim.Role) (runtime.GitIdentity, error) {
+		identity: func(context.Context, claim.Role, string) (runtime.GitIdentity, error) {
 			t.Error("the controller's launch asked for a git identity")
 			return runtime.GitIdentity{}, nil
 		},

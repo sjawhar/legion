@@ -31,15 +31,18 @@ func (r *Runtime) refreshGitHubCredentialsEvery(ctx context.Context, interval ti
 	}
 }
 
-// refreshGitHubCredentials brings the gh files of every tracked pane to the current render of its
-// role's GitHub credential, so the pane's plain gh and the clone's `gh auth git-credential` helper
-// read the token the daemon holds now. It walks a snapshot of the watch (trackedProcesses), takes
-// each pane's role from its claim token (claim.Token.Role), skips only a token that names no
-// role, renders the credential, and rewrites hosts.yml only when it differs (ghconfig.Write),
-// recreating a directory that is gone. A render or a write that fails is logged and the pane
-// keeps its last token until the next tick. A runtime with no credential function
-// (Options.GitHubCredential nil: a daemon with no GitHub Apps) wrote no pane any gh files, so it
-// has nothing to refresh.
+// refreshGitHubCredentials brings the gh bundle of every tracked pane to the current render of its
+// role's GitHub credential, so the pane's gh (the `legion gh` wrapper's real gh) and the clone's
+// `legion git-credential` helper read the tokens the daemon holds now. It walks a snapshot of the
+// watch (trackedProcesses), takes each pane's role from its claim token (claim.Token.Role),
+// skipping a token that names no role, and renders the credential for the pane's default owner:
+// the one its launch recorded on the tracked entry, or, for a pane adopted after a restart, the one
+// its bundle root records (ghconfig.ReadDefault). It rewrites only the owners whose hosts.yml
+// differs (ghconfig.WriteBundle), recreating a root that is gone. A default it cannot read, a
+// render that fails, or a render whose default is not the pane's — which would leave the pane's
+// GH_CONFIG_DIR naming a directory the bundle no longer holds — is logged and the pane keeps its
+// last tokens until the next tick. A runtime with no credential function (Options.GitHubCredential
+// nil: a daemon with no GitHub Apps) wrote no pane any gh files, so it has nothing to refresh.
 func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 	if r.gitHubCredential == nil {
 		return
@@ -50,18 +53,37 @@ func (r *Runtime) refreshGitHubCredentials(ctx context.Context) {
 		if !ok {
 			continue
 		}
-		rendered, err := r.gitHubCredential(ctx, role)
-		if err != nil {
+		failed := func(err error) {
 			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", err)
-			continue
 		}
-		changed, err := ghconfig.Write(runtime.GHConfigDir(r.stateDir, token), rendered)
+		root := runtime.GHConfigDir(r.stateDir, token)
+		owner := entry.ghDefault
+		if owner == "" {
+			recorded, err := ghconfig.ReadDefault(root)
+			if err != nil {
+				failed(err)
+				continue
+			}
+			owner = recorded
+		}
+		bundle, err := r.gitHubCredential(ctx, role, owner)
 		if err != nil {
-			r.log.Warn("tmux runtime: github credential refresh failed", "claim", token, "role", role, "err", fmt.Errorf("write the github credential: %w", err))
+			failed(err)
 			continue
 		}
-		if changed {
-			r.log.Info("tmux runtime: github credential refreshed", "claim", token, "role", role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
+		if bundle.Default != owner {
+			failed(fmt.Errorf("the credential's default owner %s is not the pane's %s", bundle.Default, owner))
+			continue
+		}
+		changed, err := ghconfig.WriteBundle(root, bundle)
+		if err != nil {
+			failed(fmt.Errorf("write the github credential: %w", err))
+			continue
+		}
+		if len(changed) > 0 {
+			written := bundle.Owners[owner]
+			r.log.Info("tmux runtime: github credential refreshed", "claim", token, "role", role, "app", written.App,
+				"expiresAt", written.ExpiresAt, "owners", changed)
 		}
 	}
 }

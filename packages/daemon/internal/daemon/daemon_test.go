@@ -1106,6 +1106,12 @@ func servedMapping(t *testing.T, w http.ResponseWriter, r *http.Request, project
 	return true
 }
 
+func (r *workflowTokenRecorder) ReadToken(ctx context.Context, role appauth.AppRole, owner string) (appauth.Lease, error) {
+	lease, err := r.Token(ctx, role, owner)
+	lease.Token += "-read"
+	return lease, err
+}
+
 func (r *workflowTokenRecorder) Roles() []appauth.AppRole {
 	r.mu.Lock()
 	defer r.mu.Unlock()
