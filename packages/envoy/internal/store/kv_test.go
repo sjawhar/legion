@@ -336,7 +336,7 @@ func TestOpen_WatchPopulatesExistingKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestWatch_PropagatesDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
@@ -423,7 +423,7 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
@@ -458,7 +458,7 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
@@ -516,11 +516,11 @@ func coldRegistry(t *testing.T, conn *natsgo.Conn) (*Registry, natsgo.KeyValue) 
 	if err != nil {
 		t.Fatalf("failed to get JetStream: %v", err)
 	}
-	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	kv, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create KV bucket: %v", err)
 	}
-	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Replicas: 1, Storage: natsgo.FileStorage})
+	roleKV, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("failed to create role KV bucket: %v", err)
 	}
@@ -2003,10 +2003,10 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if err := js.DeleteKeyValue(Bucket); err != nil {
+	if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 		t.Fatalf("delete the interest bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Replicas: 1, Storage: natsgo.FileStorage})
+	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("recreate the interest bucket: %v", err)
 	}
@@ -2039,7 +2039,7 @@ func TestARewatchThatCannotOpenTheRoleBucketMovesNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	if err := js.DeleteKeyValue(RoleBucket); err != nil {
+	if err := js.DeleteKeyValue(bus.RoleClaimBucket); err != nil {
 		t.Fatalf("delete the role bucket: %v", err)
 	}
 	second, closeSecond := connectNATS(t)
@@ -2067,7 +2067,7 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2088,12 +2088,12 @@ func TestOpeningTheRegistryReadsEveryRoleRevisionWithoutAGetPerKey(t *testing.T)
 
 	// Every read of one key is a request the store sends on this connection: a direct get when the
 	// bucket allows one, a stream message get otherwise.
-	gets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", RoleBucket))
+	gets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.DIRECT.GET.KV_%s.>", bus.RoleClaimBucket))
 	if err != nil {
 		t.Fatalf("watch direct gets: %v", err)
 	}
 	defer func() { _ = gets.Unsubscribe() }()
-	legacyGets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", RoleBucket))
+	legacyGets, err := conn.SubscribeSync(fmt.Sprintf("$JS.API.STREAM.MSG.GET.KV_%s", bus.RoleClaimBucket))
 	if err != nil {
 		t.Fatalf("watch stream message gets: %v", err)
 	}
@@ -2169,7 +2169,7 @@ func TestOpeningTheRegistryLogsHowManyRoleClaimsItRestored(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2262,7 +2262,7 @@ func TestARoleRevisionScanThatEndsEarlyIsAnErrorNotAShortSnapshot(t *testing.T) 
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2446,7 +2446,7 @@ func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create the role bucket: %v", err)
 	}
@@ -2459,7 +2459,7 @@ func TestOpenFailsWhenTheRoleRevisionScanStalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the test's NATS URL: %v", err)
 	}
-	proxy, err := url.Parse(stallingProxy(t, account.Host, "$JS.API.CONSUMER.CREATE.KV_"+RoleBucket, 16*1024, 13*time.Second))
+	proxy, err := url.Parse(stallingProxy(t, account.Host, "$JS.API.CONSUMER.CREATE.KV_"+bus.RoleClaimBucket, 16*1024, 13*time.Second))
 	if err != nil {
 		t.Fatalf("read the proxy's URL: %v", err)
 	}

@@ -15,8 +15,6 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 )
 
-const SessionBucket = "envoy_sessions"
-
 type SessionEntry struct {
 	Port         int      `json:"port"`
 	MachineID    string   `json:"machine_id"`
@@ -108,7 +106,7 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 		return nil, err
 	}
 	kv, err := bus.EnsureKeyValue(js, &nats.KeyValueConfig{
-		Bucket:   SessionBucket,
+		Bucket:   bus.SessionBucket,
 		TTL:      opts.ttl,
 		Replicas: opts.replicas,
 		Storage:  nats.FileStorage,

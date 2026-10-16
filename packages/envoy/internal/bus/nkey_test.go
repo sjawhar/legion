@@ -394,8 +394,14 @@ func TestHoldsSeedCostIsLinear(t *testing.T) {
 
 // HoldsSeed allocates at most one decoded copy per decoding, at most three in all, and nothing for
 // the window check, so however deep a value's encoding its memory and its decoding work are
-// bounded. Allocations are counted, not timed, so this does not depend on the machine's load.
+// bounded. Allocations are counted, not timed, so this does not depend on the machine's load. It
+// is not parallel: testing.AllocsPerRun counts every malloc in the process. It skips under the race
+// detector, as the standard library's allocation tests do (race_test.go says why); its cost
+// counterpart, TestHoldsSeedCostIsLinear, still runs there.
 func TestHoldsSeedAllocatesAtMostOneCopyPerDecoding(t *testing.T) {
+	if raceEnabled {
+		t.Skip("skipping in -race mode: the race runtime's own allocations are counted too")
+	}
 	for _, row := range []struct {
 		name string
 		text string
