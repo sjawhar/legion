@@ -67,6 +67,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   name nobody, and never asks for approval to deploy. `legion-architect`'s sign-off step,
   `legion-worker`'s merge-gate reference, `legion-retro`'s `Production check:` line and the
   daemon's implementer prompt say so in place of a deploy ask to a human.
+- The merger's role prompt, `legion-worker`'s merge-gate reference and the `legion-architect` and
+  `legion-retro` skills say the daemon, not the merger, holds the commits above the reviewer's
+  approved head to retro's: READY reads GitHub's compare of the round's approved head with READY's
+  head and refuses `READY_UNREVIEWED_CHANGE` when it shows any path outside `docs/solutions/` and
+  `.legion/<issue>/` (a rename's old name included), lists 300 files, the most that compare lists,
+  or shows the approved head is not the head's ancestor, and `READY_NOT_APPROVED` when the round
+  recorded no approval; either goes back to `reviewing`. The merger no longer runs its own
+  `'~(docs/solutions | .legion/<issue>)'` check, and a READY a person merges is held to it too.
 
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the

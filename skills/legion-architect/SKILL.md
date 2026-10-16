@@ -309,10 +309,11 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    one final commit, the removal of `.legion/<issue>/`, so no merge carries a handoff onto the
    default branch (dispatch://LEGION-605); those commits do not void the approval and never return
    the tree to the tester or reviewer;
-4. the merger verifies the current head is the reviewer-approved head plus only retro's commits,
-   those that change `docs/solutions/` and that removal (`jj diff --from <approved-sha> --to
-   <tip-sha> --summary`, quoted in READY) and sends the READY packet with its completion, which
-   refuses a head that still carries `.legion/<issue>/`; the daemon posts
+4. the merger quotes what sits above the reviewer-approved head (`jj diff --from <approved-sha> --to
+   <tip-sha> --summary`) in READY and sends the READY packet with its completion, which refuses a
+   head carrying anything above the approved head but retro's commits, those that change
+   `docs/solutions/` and that removal (`READY_UNREVIEWED_CHANGE`; it goes back to `reviewing`), and a
+   head that still carries `.legion/<issue>/`; the daemon posts
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the Dispatch
    issue and publishes it to the project's merge queue role when one is set. The moment the daemon
    accepts READY, the merger submits the pull request with

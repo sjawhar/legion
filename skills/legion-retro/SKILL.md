@@ -26,9 +26,9 @@ retrospective's durable output.
    issue. Retro writes **no handoff**. The removal exists because a squash merge commits the head
    merged into the base, and nothing on the base reads a handoff; the handoffs stay on the issue
    branch below that commit.
-4. The merger verifies the tip is the approved head plus retro's commits, quotes their
-   `jj diff --from <approved-sha> --to <tip-sha> --summary` in READY, and sends the READY packet
-   with its completion, which refuses a head that still carries `.legion/<issue>/`; the daemon
+4. The merger quotes retro's commits (`jj diff --from <approved-sha> --to <tip-sha> --summary`) in
+   READY, and sends the READY packet with its completion, which refuses a head with anything above
+   the approved head but those commits, or still carrying `.legion/<issue>/`; the daemon
    posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
    configured. On READY's acceptance the merger submits the merge, and it lands under the
    repository's rules: its required reviews and checks, and its merge queue when it enables one.

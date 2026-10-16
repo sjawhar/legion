@@ -438,7 +438,12 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   repository permission`, naming the installation's owner: the review App's installation cannot
   read the repository's collaborators, so until it can, no review but the review App's decides a
   round.
-- **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
+- **`READY` refused.** The merger's `READY` is refused while the pull request's head carries
+  anything above the reviewer's approved head but retro's notes under `docs/solutions/` and its
+  removal of `.legion/<issue>/` (`READY_UNREVIEWED_CHANGE`, naming the paths; also when the head
+  is not built on the approved one, or GitHub's compare lists 300 files, the most it lists), or
+  the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
+  `reviewing`. It is refused while the head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
   to `retro`); until every check the base branch requires has succeeded on the head, and every
   workflow its rulesets require has a run on the head that succeeded; and while the design gate is

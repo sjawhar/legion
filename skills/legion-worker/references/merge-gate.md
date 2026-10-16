@@ -86,7 +86,8 @@ reviewing until you finish.
   head, its `docs/solutions/` learnings and its last commit removing `.legion/<issue>/`
   (`skill://legion-retro` gives the steps), leave the approval standing, and the tree goes to the
   merger — never back to the tester or reviewer. Anything else above the approved head does void
-  it, and the merger tells the architect the head must return to review instead of completing. A
+  it: READY is refused `READY_UNREVIEWED_CHANGE`, naming the paths, and the merger tells the
+  architect, who has it send the head back to review instead of completing. A
   conflict-forced rebase after retro moves those commits with the branch. Every approval moves the
   issue to retro again, so each retro ends with the removal again.
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
@@ -99,11 +100,12 @@ reviewing until you finish.
 ## The merger
 
 - The merger resolves no review thread: the reviewer's approval already judged them, and READY
-  requires no thread state beyond it. It proves the head is the approved head plus retro's commits
-  with two commands. First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
-  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
-  in READY; then the same with the one fileset `'~(docs/solutions | .legion/<issue>)'` appended,
-  which must print nothing (jj unions separate path arguments, so two of them leave nothing out).
+  requires no thread state beyond it. It quotes what sits above the approved head with
+  `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
+  "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary` in READY; the daemon,
+  not the merger, holds those commits to retro's: READY reads GitHub's compare of the round's
+  approved head with READY's head and refuses any other path (`READY_UNREVIEWED_CHANGE`), and a
+  round with no recorded approval (`READY_NOT_APPROVED`).
   *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's

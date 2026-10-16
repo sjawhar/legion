@@ -146,7 +146,10 @@ branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` f
 merges, and the merger's `READY` is refused while that head still carries it. The merge
 therefore brings no handoff onto the default branch, and no later branch starts with one. The
 removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
-round; the handoffs stay on the issue branch below it, where a worker still reads them.
+round; the handoffs stay on the issue branch below it, where a worker still reads them. Those two
+are all that may sit there: the daemon compares the approved head with the head `READY` names, on
+GitHub, and refuses `READY` (`READY_UNREVIEWED_CHANGE`) when anything else changed since the
+approval, so that change goes back to review.
 
 ## Review signalling
 
