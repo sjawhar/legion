@@ -249,12 +249,12 @@ against an `httptest` endpoint speaking Secrets Manager's JSON 1.1 and STS's que
 fails a test on any request it does not expect (`seed/awsfake_test.go`, the store's tests in
 `seed/awsstore_test.go`), the Secret Manager client against a gRPC fake of the service over TLS
 (`seed/gcpfake_test.go`), which fails a test on any call outside the mode's or any request it does
-not expect (`seed/gcpstore_test.go`), and the command built as the release job stamps it, for its
-`--version` (`cmd/envoy-infra/main_test.go`). The seed package has one `TestMain`
+not expect (`seed/gcpstore_test.go`), and the command built as the release workflow's `build` job
+stamps it, for its `--version` (`cmd/envoy-infra/main_test.go`). The seed package has one `TestMain`
 (`seed/main_test.go`), which makes the fake's certificate a root the whole test binary trusts,
 through `SSL_CERT_FILE`; setup any other seed test needs goes into it. The tests that start
 nats-server containers on this machine's Docker through `testnats` carry the `natslive` build
-tag, so a plain `go test ./...`, as the release job runs it, starts none. Each runs on
+tag, so a plain `go test ./...`, as that `build` job runs it, starts none. Each runs on
 `testnats.Image` and `testnats.HubImage`: `core/nats_auth_live_test.go` (the rendered authorization
 on a real server: its users connect, a client with no credential is refused, the grants hold),
 `seed/seed_live_test.go` (a generated seed connects, and a client without it is refused) and
