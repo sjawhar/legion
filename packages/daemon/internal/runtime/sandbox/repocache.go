@@ -297,7 +297,7 @@ func (r *Runtime) ensureCacheSandbox(ctx context.Context, name string, repo ghre
 			return decodeSandbox(u)
 		}
 		uid := u.GetUID()
-		gone := func() (bool, error) {
+		gone := func(ctx context.Context) (bool, error) {
 			current, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
 			if apierrors.IsNotFound(err) {
 				return true, nil
@@ -311,9 +311,10 @@ func (r *Runtime) ensureCacheSandbox(ctx context.Context, name string, repo ghre
 }
 
 // writeCacheSecret brings s's Secret, cacheSecretName, to the implement App's token for repo's
-// owner (Options.Tokens): created when absent, updated in place when s owns it, replaced when
-// another uid owns it (a Secret an earlier Sandbox of the name left), and left alone when it already
-// holds that token under the cache's labels, annotation and owner.
+// owner (Options.Tokens), left alone when it already holds that token under the cache's labels,
+// annotation and owner, and otherwise written through upsertSecret: created when absent, updated
+// in place when s owns it, replaced when another uid owns it (a Secret an earlier Sandbox of the
+// name left).
 func (r *Runtime) writeCacheSecret(ctx context.Context, s *sandbox, repo ghrepo.Repository) error {
 	minting, cancel := call(ctx)
 	token, err := r.tokens.Token(minting, repo.Owner())
@@ -327,12 +328,15 @@ func (r *Runtime) writeCacheSecret(ctx context.Context, s *sandbox, repo ghrepo.
 		Data:       map[string][]byte{provisionTokenKey: []byte(token)},
 	}
 	existing, err := r.kube.CoreV1().Secrets(r.namespace).Get(ctx, want.Name, metav1.GetOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
 	if err == nil && ownedBySandbox(existing.OwnerReferences, s.UID) && len(existing.OwnerReferences) == 1 &&
 		maps.EqualFunc(existing.Data, want.Data, func(a, b []byte) bool { return string(a) == string(b) }) &&
 		maps.Equal(existing.Labels, want.Labels) && existing.Annotations[annotationCacheRepo] == repo.String() {
 		return nil
 	}
-	return r.writeSecret(ctx, existing, err, want)
+	return r.upsertSecret(ctx, want)
 }
 
 // reconcileCachePod makes s's pod (again) when it must be: s is Suspended (a fresh create, or one a

@@ -256,6 +256,8 @@ func (stillClock) Now() time.Time { return time.Now() }
 
 func (stillClock) AfterFunc(time.Duration, func()) supervise.Cancel { return stopped{} }
 
+func (stillClock) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
 type stopped struct{}
 
 func (stopped) Stop() bool { return true }
