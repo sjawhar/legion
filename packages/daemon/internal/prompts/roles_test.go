@@ -218,9 +218,9 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 	}
 }
 
-// The merger submits the merge itself once READY is accepted (dispatch://LEGION-631), and Legion
-// enforces no GitHub restriction the repository itself does not: a part that says Legion never
-// merges, shared or the Go daemon's, contradicts the merger's own step. The phrases, in any case,
+// The daemon submits the merge itself once it accepts READY, and Legion enforces no GitHub
+// restriction the repository itself does not: a part that says Legion never merges, shared or the
+// Go daemon's, contradicts what the merger is told the daemon does. The phrases, in any case,
 // are a pattern rather than spelled out, so a grep for them over this directory finds only prompt
 // text.
 func TestNoPartSaysLegionNeverMerges(t *testing.T) {

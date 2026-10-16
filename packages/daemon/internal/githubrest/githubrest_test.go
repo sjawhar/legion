@@ -66,6 +66,11 @@ func TestGraphQLNamesItsRouteAndItsErrors(t *testing.T) {
 			w.Write([]byte(`{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 42."}]}`))
 			return
 		}
+		if strings.Contains(sent.Query, "limited") {
+			w.Header().Set("Retry-After", "17")
+			w.Write([]byte(`{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`))
+			return
+		}
 		http.Error(w, "Bad Gateway", http.StatusBadGateway)
 	}))
 	defer server.Close()
@@ -80,6 +85,10 @@ func TestGraphQLNamesItsRouteAndItsErrors(t *testing.T) {
 	var failed *GraphQLError
 	if !errors.As(err, &failed) || !failed.NotFoundAt("repository", "pullRequest") || failed.NotFoundAt("repository") {
 		t.Fatalf("GraphQL on a NOT_FOUND answer = %v, want a *GraphQLError NOT_FOUND at repository.pullRequest only", err)
+	}
+	err = client.GraphQL(context.Background(), "query { limited }", nil, nil)
+	if !errors.As(err, &failed) || !failed.RateLimited || failed.RetryAfter != 17*time.Second {
+		t.Fatalf("GraphQL RATE_LIMITED = %v; want a rate-limited error with retry-after 17s", err)
 	}
 }
 

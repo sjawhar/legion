@@ -45,6 +45,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
+  accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
+  merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
+  allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
+  reports it mergeable. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  once the gate opens, and ordinary READY no longer waits for a required check still running or an
+  unfinished disarm. A by-hand READY still waits for its pull request's unfinished disarm, so a
+  stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new
+  `merge-refused` row says what to do when GitHub refuses that submission in a way a retry would
+  meet again: the daemon stops submitting it, and a person fixes the repository setting or App
+  permission and merges the pull request.
 - Daemon API contract 25 (LEGION-636): a deployment row of `legion state`'s `capabilities` carries
   `source`, `configuration` (what legion.yaml alone decides) or `boot` (what boot measured);
   `installed` leaves the status set (nothing has emitted it since LEGION-629); the probe's OK line
