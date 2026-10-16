@@ -306,6 +306,8 @@ function createPi(
     nullable: property,
     describe: property,
     int: property,
+    min: property,
+    max: property,
   });
   const optional = property;
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";

@@ -186,6 +186,8 @@ test("keeps a Legion role claimant fresh regardless of extension initialization 
     nullable: property,
     describe: property,
     int: property,
+    min: property,
+    max: property,
   });
   const createPi = () => ({
     zod: {

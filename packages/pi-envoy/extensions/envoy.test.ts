@@ -2749,7 +2749,7 @@ describe("envoy OMP extension", () => {
 
     expect(
       fixture.tools
-        .filter((tool) => tool.name.startsWith("envoy_"))
+        .filter((tool) => tool.name.startsWith("envoy_") || tool.name === "slack_post")
         .map((tool) => ({ name: tool.name, description: tool.description }))
     ).toEqual(envoyToolSpecs.map((spec) => ({ name: spec.name, description: spec.description })));
 
