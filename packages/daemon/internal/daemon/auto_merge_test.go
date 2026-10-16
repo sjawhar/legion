@@ -14,7 +14,6 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -84,7 +83,7 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 				t.Fatalf("seed the merger's READY: %v", err)
 			}
 			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-				repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL}
+				githubAPI: server.URL}
 			if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())); err != nil {
 				t.Fatalf("execute the disarm: %v", err)
 			}
@@ -137,7 +136,7 @@ func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
-		repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL}
+		githubAPI: server.URL}
 	if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 42}, time.Now())); err != nil {
 		t.Fatalf("execute the disarm: %v", err)
 	}

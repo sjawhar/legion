@@ -20,7 +20,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -93,10 +92,6 @@ type Options struct {
 	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
 	GitHubAPI string
-	// Repository is the repository an issue's project works in (`projects.<KEY>.repo`), false for a
-	// project the configuration has no repository for; the handoff route reads the issue branch
-	// there. Nil answers no project.
-	Repository func(project string) (ghrepo.Repository, bool)
 	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
 	MergeRules func(project string) config.MergeRules
 	// Grants mints and redeems the daemon-local one-command credential handles.
@@ -156,7 +151,6 @@ type server struct {
 	tokens       appauth.Tokens
 	githubOwners func() []string
 	githubAPI    string
-	repository   func(project string) (ghrepo.Repository, bool)
 	mergeRules   func(project string) config.MergeRules
 	grants       *credential.Grants
 	releaser     store.TreeReleaser
@@ -199,7 +193,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		tokens:             opts.Tokens,
 		githubOwners:       opts.GitHubOwners,
 		githubAPI:          opts.GitHubAPI,
-		repository:         opts.Repository,
 		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,

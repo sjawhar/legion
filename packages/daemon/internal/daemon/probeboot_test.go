@@ -18,7 +18,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
 
@@ -42,7 +41,7 @@ func probeBootConfig(t *testing.T, server string) (config.Config, *atomic.Int32)
 		t.Fatal(err)
 	}
 	cfg.NatsURLs = []string{"nats://127.0.0.1:1"}
-	cfg.Projects = map[string]config.Project{cfg.Project: {Repo: ghrepo.MustParse("acme/widgets")}}
+	cfg.Projects = map[string]config.Project{cfg.Project: {}}
 	return cfg, &dispatched
 }
 
