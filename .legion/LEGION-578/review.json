@@ -2,66 +2,67 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-578",
-  "completed": "2026-10-15T23:12:14Z",
+  "completed": "2026-10-16T00:11:35Z",
   "generation": 3,
-  "round": 1,
-  "reviewedHead": "2830bd512564b5bf91883ed14d88a81de52c7159",
-  "codeHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
+  "round": 2,
+  "reviewedHead": "d8f9b83e8d1445c9e758b9d5d798fce76104bb57",
+  "codeHead": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+  "runOfRecordHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
   "pullRequest": 1866,
-  "verdict": "changes_requested",
+  "verdict": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 5,
+  "important": 0,
+  "minor": 4,
   "ci": {
     "required": ["lint", "typecheck", "test", "pr-title"],
-    "ciHead": "13cb9ce7110d77bfe46ca3213c5048ea38087dd5",
-    "checkRuns": "lint, typecheck, test success (Tests run 38758192010, attempt 2); pr-title success (38758191957, 38762224411, 38817783611); compare 13cb9ce7...2830bd51 touches only .legion/ (ahead_by 2)",
-    "bodyCiLine": "runs 38758192010 and 38758191957 both at 13cb9ce7, completed success — current"
+    "ciHead": "d25908b12085f1ec3decc56741b45fe78d2f0bbf",
+    "checkRuns": "lint, typecheck, test completed success (Tests run 38824478826); pr-title completed success (38824478827 and the handoff heads' runs); compare d25908b1...d8f9b83e touches only .legion/ (ahead_by 2)",
+    "bodyCiLine": "runs 38824478826 and 38824478827 both at d25908b1, completed success — current"
   },
   "e2e": {
-    "implementer": "present: coordinator lane (Stage 4a 2175 s PASS, Stage 4b 13294 s PASS at 13cb9ce7 on sha256:daf37085…, PR comment 6203340869, 14 named CHECK lines read there) and this tree's generation-3 pods; negative controls image-probe-capability-negative, full-agent-negative, NoSuchSymbol, notebook, GH_CONFIG_DIR=/nonexistent, the boot test",
-    "tester": "present: the coordinator record re-read against the plan's checkpoint map with the digest resolved independently; the tester's own container; the implementer's session over Envoy; negative controls the def-chain abort under jq 1.8.2, GH_CONFIG_DIR=/nonexistent, gh api user 403, NoSuchSymbol, notebook, the other App absent, capabilities_probed exit 1"
+    "implementer": "present: the coordinator lane at 13cb9ce7 (unchanged, the run of record) and a round-2 section at d25908b1 — lib/controller-ticks.test.ts over fixture ticks (warm, cold-healed true/false, both orders, divergent, no secrets, no ticks), the real daemon's GET /legion/v1/state from the implementer's pod (200, open [] → the helper refuses, the proof's arm → true), the tightened full-agent-tools assertions over two real sessions, bash -n; negative control: an echo-only excerpt the old tool_result_said accepted and the new tool_result_answered refuses",
+    "tester": "present: round-2 section — three tick deliveries rendered through the real renderInbound and read by the lifted tick_open_capabilities/controller_ticked under jq 1.6, 1.7.1, 1.8.2 and jaq; ticks_name_open's arms; the production state read; the lifted assertions over the round-1 real excerpts and a composed one; negative controls: the stale boot comparand → false, production's [] → false, an extra row → false, the composed echo excerpt refused by every bound form"
   },
+  "optionBScope": "the round-2 delta's five script hunks (:1583-1589, :4306-4316, :4356-4365, :4389-4394, :5085-5113) plus lib/controller-ticks.jq, lib/stage4b-tools.jq:21-26, two tests and a README row change how controller and full-agent-tools judge; the one driving-side change is hold_end_charged's re-arm task text (:1589), which the architect's ruling named among the four Minors; no kill, wait bound, budget, fixture or legion.yaml value changed",
   "thermonuclear": {
-    "head": "2830bd512564b5bf91883ed14d88a81de52c7159",
-    "deepReview": "one Medium, five Low, one hardening; traced clean: agent_pid_sh quoting, call_arguments consumers, tool_results pairing, full_agent_task_id, agent_setting quoting, boot's row names and case arms, the controller TOON regex, the admit test's claim, the prerequisites guard, README/script rows",
-    "codeQuality": "no blocker; six fast-follows (bind the bash assertions to their call; latest tick only; one controller-session scan helper; repository-configuration's unasserted markers; the merger's copied assertions; one-pass role verdict) and three nits"
+    "head": "d8f9b83e8d1445c9e758b9d5d798fce76104bb57",
+    "deepReview": "round-1 Medium fixed; no High/Important; four Minor: the bash bindings read the model's command text and exclude an eval-dispatched bash; the prerequisites guard compiles stage4b-tools.jq alone (controller-ticks.jq first compiled at the controller checkpoint); the tick-to-snapshot comparison rests on an unstated single-daemon invariant (controller registers after :4852, no restart before :5380); and a claim the null-id test is vacuous on jq >= 1.6, which the reviewer disproved (from_entries on a null key exits 5 on jq 1.7.1 and 1.8.2)",
+    "codeQuality": "no blocker; three fast-follows (per-tick shape assertion instead of the daemon snapshot; the eval-dispatched bash shape; the shell tick_open_capabilities sharing a name with the module's def) and three nits (TOON contract restated four times; the boot comment at :3081-3082; the renderer contract pinned to a hand-written card)"
   },
-  "threads": "none on the pull request (0 review threads, 0 reviews before this round); the three issue comments are the implementer's two rebase notes and the coordinator's run record",
-  "contractCensus": "not required: device_arguments had one caller (call_arguments, same file) and pod_env's two callers (:1050, :3918) and the stage4b-pods.test.ts fake keep its signature; the prerequisites guard is a precondition in the block that already holds the run's preconditions, not a boundary contract",
+  "reviewerChecks": "lib/controller-ticks.jq and lib/stage4b-tools.jq compiled and their arms evaluated under real jq 1.7.1 and 1.8.2 (the hazard version) in the reviewer's pod; the null-id guard drops the call on both; bash -n clean; shellcheck 0.10.0 at warning level: no finding in the changed regions (3 pre-existing elsewhere in the file)",
+  "threads": {
+    "mine": [
+      {"id": "PRRT_kwDORFy7ds6tAG7V", "answer": "fixed in d25908b1 — daemon_open_rows read from the running daemon at the assertion, ticks_name_open over it, secrets required; verified in the diff and under jq 1.7.1/1.8.2", "resolvedBy": "implementer"},
+      {"id": "PRRT_kwDORFy7ds6tAG7h", "answer": "fixed in d25908b1 — edit and read each a required assertion with its own fail line, role loop and merger", "resolvedBy": "implementer"},
+      {"id": "PRRT_kwDORFy7ds6tAG7q", "answer": "fixed in d25908b1 — tool_result_answered bound to 'gh api graphql' and 'go version &&'; the negatives stay tool-wide by design; residual eval/spelling risk recorded under Not proven / risk", "resolvedBy": "implementer"},
+      {"id": "PRRT_kwDORFy7ds6tAG7u", "answer": "fixed in d25908b1 — the re-arm task asks whichever role receives it for the sleep 300 directly; stage4b-hold.test.ts still pins the reading sentence", "resolvedBy": "implementer"},
+      {"id": "PRRT_kwDORFy7ds6tAG7z", "answer": "fixed in d25908b1 — select(.id | strings) before from_entries; the new test is meaningful on jq 1.7.1/1.8.2, where from_entries on a null key exits 5", "resolvedBy": "implementer"}
+    ],
+    "bots": "none",
+    "acceptedBotThreads": []
+  },
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:5106",
-      "description": "The controller tick assertion compares every tick against boot's open_rows (:3097), read from the first daemon's image probe; restart-mid-tree (:4734-4736), address-moved-env-same-pod (:4787-4792) and address-moved-stream-new-pod (:4841-4847) each run a full `legion start` before the controller starts (:4914), and every start re-runs the probe (daemon.go:297-310, :862-863), whose own CapacityWaits decides pool-capacity (deployment.go:312-321); the tick carries the current daemon's Open() at enqueue (admit.go:256-258). A run that starts on a cold pool — the case :3085-3089 names as the reason the [\"secrets\",\"pool-capacity\"] arm exists — gets [\"secrets\"] ticks from the fourth daemon against boot's two-row set and fails ~3.7 h in; the run of record had pool-capacity present at boot, so neither arm's divergence was exercised. Fix: read the open rows from the running daemon at controller and compare the ticks to that (keep boot's set for the note)."
+      "severity": "minor",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4357",
+      "description": "The toolchain and gh bindings read the model's command text ('go version &&', 'gh api graphql'); an eval-dispatched bash (arguments {}) or a respelled chain fails the checkpoint although the tool ran — spurious FAIL, never a false PASS; the instruction names bash: with the exact command and the two replayed real sessions pass. Recorded under Not proven / risk."
     },
     {
       "severity": "minor",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4359",
-      "description": "The edit assertion is `read 'edited $nonce' || edit 'edited $nonce'`: a role that rewrote the page with write and read it back passes, while the README (:1050) and the fail line claim the edit landed; the edit tool's result echoes the changed line (testdata line 19), so `edit` alone can be required with the read kept as a second assertion. The merger's copy at :4386 the same. The tester recorded the laxity."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:2738",
+      "description": "The prerequisites guard compiles lib/stage4b-tools.jq alone; lib/controller-ticks.jq (includes nothing; its chain is the singly-included shape) is first compiled at the controller checkpoint. The reviewer compiled it under jq 1.7.1 and 1.8.2. Fast-follow: one guard line."
     },
     {
       "severity": "minor",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4361",
-      "description": "The App-login and toolchain bash assertions use tool_result_said, bound to the tool and not to the call: a bash result the model composed (`echo <login>`) satisfies them. tool_result_answered \"$excerpt\" bash 'gh api graphql' \"$app\" (and the chain's text for the toolchain) is free and is what repository-tools already does for its reads and hovers (:3642, :3652-3655)."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:5110",
+      "description": "Every tick is compared to one read of the running daemon taken after the ticks file; this equals the daemon running at each tick only because the controller registers after the last start_daemon before the checkpoint (:4852) and nothing restarts before :5380, and a live row opening or closing in that window fails the run (never passes it wrongly). The per-tick shape form (deployment rows in {[secrets],[secrets,pool-capacity]}) is snapshot-free and restores the model-fallback/resource-limits pin; the named fast-follow."
     },
     {
       "severity": "minor",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:1589",
-      "description": "hold_end_charged's new task ends 'after the `sleep 300` the proof's instructions ask of an implementer on a new task', and deaths-with-work sends it to tree 4's planner (:5497), whose instructions carry no such clause: a planner that reads it as not addressed to it answers in seconds, the race the change fixed for implementers. Word it as a direct instruction to the receiving role."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/lib/stage4b-tools.jq:25",
-      "description": "A toolCall with id null makes from_entries exit 5, which reaches a checkpoint as an ordinary 'no result carries …' fail line with no diagnosis (the result side is guarded by `| strings` at :27, the call side is not); `select(.id | strings)` before the key. 0 such calls in the tester's 1,845 entries."
-    },
-    {
-      "severity": "minor",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:4345",
-      "description": "The two negatives (the other App in a bash result, notebook ran) are judged over the whole excerpt from the nonce on, so a role doing its own `gh` work in that window fails the run spuriously; and the implementer's `sleep 300` on every task line is not reflected in the fixed budgets at :3846, :4167 and :5642. Both recorded under Not proven / risk; no change asked this round."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:3081",
+      "description": "The boot comment still says 'the open set the controller's tick must name follows it'; the tick now follows the running daemon. Wording; fast-follow."
     }
   ],
-  "security": "secret — agent_setting (stage4b-sandbox-tree.sh:2314) passes the agent's /proc/<pid>/environ as argv to env inside the agent's own container and uid, where no second uid and no shared PID namespace exists (no shareProcessNamespace in deploy/ or runtime/sandbox), and only `jq -c .value` leaves the pod — hardening, no exploit path; untrusted-input — the new assertions decide pass/fail from model-authored session transcripts (lib/stage4b-tools.jq:22-54), and the pairing by toolCallId plus the nonces hold that boundary except for the bash assertions above (Minor); agent-def — the proof's instruction text to roles (:3017-3022, full_agent_message) steers the proof's own agents, not this review's; no authz, supply-chain, sandbox or transport surface changes.",
-  "fastFollow": "one `controller_deliveries [NEEDLE]` helper for the four controller-session scans (controller_notice, controller_received, controller_tick_names, tick_open_capabilities) and one shared function for the four assertions the merger block copies from the role loop (:4386-4391), in the next Stage 4b edit",
-  "proofRouteForTheFix": "the architect's call: a change to the controller assertion is a code push past the head the coordinator ran (plan v6 §3.3 kept the run's head the merging head); plan §3.7 repeats the request at the new head, or the architect rules a narrower re-proof of the changed line"
+  "security": "untrusted-input — the delta decides pass/fail from model-authored transcript text and plugin-rendered delivery text (lib/stage4b-tools.jq:26 arguments; lib/controller-ticks.jq:19-31); every match is contains/capture over data that reaches no shell, template or query and leaves only through note/fail; neutralization order holds (no later pass re-creates what was matched). No authz, secret, supply-chain, sandbox, agent-def or transport surface in the round-2 delta; round 1's hardening item (agent_setting's argv environ) is unchanged.",
+  "fastFollow": "per-tick snapshot-free controller verdict; the prerequisites guard for controller-ticks.jq; the boot comment; the shell tick_open_capabilities rename; one controller_deliveries helper; one shared function for the merger block's copied assertions — written into the PR body's Fast-follow line"
 }
