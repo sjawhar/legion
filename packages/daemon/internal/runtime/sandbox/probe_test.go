@@ -296,7 +296,7 @@ func TestProbeImagePassesOnTheOKLineConfirmingTheContract(t *testing.T) {
 // A passing probe reports what its OK line said of the image: the model-fallback mark, as the
 // line carries it, on the table the pod printed before it.
 func TestProbeImageReportsTheModelFallbackMark(t *testing.T) {
-	for _, mark := range []string{"off", "on"} {
+	for _, mark := range []string{"off", "on", bootprobe.ModelFallbackUnread} {
 		t.Run(mark, func(t *testing.T) {
 			g := newProbeRig(t, nil)
 			g.succeeds("probe-image: capability eval-js: present (Oh My Pi is its JavaScript runtime, and the launch probes ran it)\n" +
@@ -953,3 +953,81 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 
 // slogTo is a logger that records everything the runtime says into w.
 func slogTo(w io.Writer) *slog.Logger { return slog.New(slog.NewTextHandler(w, nil)) }
+
+// TestLastBytesKeepsTheEndOfTheTail: the probe log tail is kept from its end, not its start, so a
+// log whose OK line falls after lines longer than the keep bound still ends on that line.
+func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
+	const keep = 64 << 10
+	line := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for range 99 {
+		log.WriteString(line)
+		log.WriteByte('\n')
+	}
+	ok := okLine(3)
+	log.WriteString(ok)
+	log.WriteByte('\n')
+	full := log.String()
+
+	t.Run("keeps the end, dropping the partial first line", func(t *testing.T) {
+		got, err := lastBytes(strings.NewReader(full), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if !strings.HasSuffix(got, ok+"\n") {
+			t.Fatalf("lastBytes result does not end with the OK line: %q", got)
+		}
+		if want := keep + len("…"); len(got) > want {
+			t.Fatalf("len(lastBytes result) = %d, want at most %d", len(got), want)
+		}
+		if !strings.HasPrefix(got, "…") {
+			t.Fatalf("lastBytes result does not start with …: %q", got)
+		}
+		rest := strings.TrimPrefix(got, "…")
+		cut := len(full) - len(rest)
+		if cut == 0 || full[cut-1] != '\n' {
+			t.Fatalf("lastBytes kept a partial first line: cut at %d, preceding byte %q", cut, full[cut-1])
+		}
+	})
+
+	t.Run("a stream shorter than keep comes back unchanged", func(t *testing.T) {
+		short := "a short log\n"
+		got, err := lastBytes(strings.NewReader(short), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if got != short {
+			t.Fatalf("lastBytes = %q, want %q unchanged", got, short)
+		}
+	})
+
+	t.Run("a stream exactly keep long comes back unchanged", func(t *testing.T) {
+		exact := strings.Repeat("y", keep)
+		got, err := lastBytes(strings.NewReader(exact), keep)
+		if err != nil {
+			t.Fatalf("lastBytes = %v", err)
+		}
+		if got != exact {
+			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
+		}
+	})
+}
+
+// A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps
+// its tail from the end, so the OK line is read however much came before it.
+func TestProbeImagePassesOnALongLogWithTheOKLineLast(t *testing.T) {
+	g := newProbeRig(t, nil)
+	line := strings.Repeat("x", 1000)
+	var log strings.Builder
+	for range 99 {
+		log.WriteString(line)
+		log.WriteByte('\n')
+	}
+	log.WriteString(okLine(3))
+	log.WriteByte('\n')
+	g.succeeds(log.String())
+
+	if _, err := g.r.ProbeImage(g.ctx, probeOptions(t)); err != nil {
+		t.Fatalf("ProbeImage = %v, want a pass: the OK line was there to read", err)
+	}
+}

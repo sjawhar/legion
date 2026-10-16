@@ -216,6 +216,9 @@ func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
 	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved, ModelFallbackOff), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved capabilities=checked model-fallback=off daemon-api-version=3"; got != want {
 		t.Errorf("OKLine = %q, want %q", got, want)
 	}
+	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved, ModelFallbackUnread), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved capabilities=checked model-fallback=unread daemon-api-version=3"; got != want {
+		t.Errorf("OKLine = %q, want %q", got, want)
+	}
 }
 
 // oldOKLine is the line a CLI that predates the discovery-on pod lane and the capability check
@@ -280,6 +283,7 @@ func TestCapabilityMarksAreReadFromTheOKLine(t *testing.T) {
 	}{
 		{"fallback off, among other output", "probe-image: capability browser: present (chromium)\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOff) + "\n", true, ModelFallbackOff},
 		{"fallback on", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOn), true, ModelFallbackOn},
+		{"fallback unread", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackUnread), true, ModelFallbackUnread},
 		{"a CLI that predates the capability check", oldOKLine, false, ""},
 		{"the marks on a line that is not the OK line", "[legion] capabilities=checked model-fallback=on daemon-api-version=5", false, ""},
 		{"the marks after the contract", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=5 capabilities=checked model-fallback=on", false, ""},
