@@ -110,8 +110,9 @@ ARG PI_CODEGRAPH_VERSION=0.1.1
 # plugin: workspace install, the CodeGraph CLI, and the two packed plugins.
 FROM mirror.gcr.io/oven/bun:${BUN_VERSION}-slim AS plugin
 WORKDIR /repo
-# jq: the same omp.extensions rewrite release.yaml's pi_envoy and pi_legion jobs run. python3/make/g++:
-# native devDependencies in the workspace lockfile (mirrors packages/envoy/docker/Dockerfile).
+# jq: the same omp.extensions rewrite release.yaml's pi_envoy_build and pi_legion_build jobs run.
+# python3/make/g++: native devDependencies in the workspace lockfile (mirrors
+# packages/envoy/docker/Dockerfile).
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends jq python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -156,10 +157,10 @@ COPY skills skills
 COPY scripts/pi-plugin-prepack.sh scripts/pi-plugin-prepack.sh
 COPY scripts/third-party-notices.ts scripts/third-party-notices.ts
 
-# Each plugin ships from this checkout with the steps release.yaml's pi_envoy and pi_legion jobs run
-# before `bun pm pack`: the manifest pointed at the one packed bundle (the prepack refuses to pack
-# with the source manifest). Each tarball is unpacked into a directory: `omp plugin install` links a
-# directory and rejects a tarball path (ENOTDIR).
+# Each plugin ships from this checkout with the steps release.yaml's pi_envoy_build and
+# pi_legion_build jobs run before `bun pm pack`: the manifest pointed at the one packed bundle (the
+# prepack refuses to pack with the source manifest). Each tarball is unpacked into a directory: `omp
+# plugin install` links a directory and rejects a tarball path (ENOTDIR).
 WORKDIR /repo/packages/pi-envoy
 RUN jq '.omp.extensions = ["dist/envoy.js"]' package.json > tmp.json \
     && mv tmp.json package.json \
@@ -461,8 +462,18 @@ ARG PI_CODEGRAPH_VERSION
 # --no-sandbox --disable-setuid-sandbox. jq and ssh-keygen are real binaries, not the harness's: the
 # harness bash's jq builtin reaches only the bash tool, while a worker's subprocesses (`bun test`, a
 # script, a subagent's shell) need /usr/bin/jq. openssh-client is the one apt route to ssh-keygen and
-# also brings ssh, scp, sftp, ssh-agent and ssh-add; whether they reach anything is the deployment's
-# NetworkPolicy, not the image's.
+# also brings ssh, scp, sftp, ssh-agent and ssh-add, which reach no host that curl, wget, git, python3
+# and socat on this line could not already reach (git's ssh transport is what they make runnable; a
+# pod's git speaks https with its role's App token through gh): what a pod may reach is Legion's
+# ruling, the capability table's withheld `network` row
+# (packages/daemon/internal/capabilities/capabilities.go, dispatch://LEGION-5: the pod is the
+# boundary), a declaration the report renders, not a network control this repository ships. The
+# package's two set-id files lose their bits in the RUN below: /usr/lib/openssh/ssh-keysign, setuid
+# root for host-based authentication, which nothing here uses, and /usr/bin/ssh-agent, setgid _ssh by
+# its postinst. A pod would ignore both anyway (allowPrivilegeEscalation false and every capability
+# dropped, packages/daemon/internal/runtime/sandbox/manifest.go), and the final step refuses an image
+# where any file under /usr/lib/openssh or /usr/bin/ssh-agent carries one, so a rebuild of this layer
+# (a new trixie-slim digest, a package update) cannot bring a bit back unnoticed.
 # socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
 # (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
 # bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
@@ -474,6 +485,8 @@ ARG PI_CODEGRAPH_VERSION
 # hadolint ignore=DL3008
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git jq openssh-client python3 socat wget \
     && rm -rf /var/lib/apt/lists/* \
+    && chmod u-s /usr/lib/openssh/ssh-keysign \
+    && chmod g-s /usr/bin/ssh-agent \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
     && install -d -m 0755 -o root -g root /opt/legion /opt/legion/bin
@@ -605,7 +618,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 # Tools.AgentSecrets names this path.
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
-# neither rename nor replace what they hold.
+# neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
+# carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
+# ssh-agent's), so a rebuild of that layer that brings one back fails here.
 # Then the `legion` on the image PATH is this one, it runs on this base, and it names the
 # commit the workflow built. git resolves to /usr/bin/git on the image PATH and the step refuses any
 # other path, so git's absolute path is as fixed as gh's and jj's (/usr/local/bin, copied above) and a
@@ -644,6 +659,8 @@ RUN set -eu; \
     for dir in /opt/legion /opt/legion/bin; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
     done; \
+    stat -c '%a %n' /usr/lib/openssh/ssh-keysign /usr/bin/ssh-agent; \
+    setid="$(find /usr/lib/openssh /usr/bin/ssh-agent -perm /6000)"; echo "set-id bits: ${setid:-none}"; test -z "$setid"; \
     git="$(command -v git)"; echo "git: $git"; test "$git" = /usr/bin/git; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \

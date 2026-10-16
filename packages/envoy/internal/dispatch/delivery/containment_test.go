@@ -159,6 +159,36 @@ func TestProductionAppliesMatchesEveryListedName(t *testing.T) {
 	}
 }
 
+// TestProductionAppliesDoesNotSetApartASkippedCallerOfEverySuccessfulListedName proves each
+// successful listed job demonstrates its name is real, even when Production.Job selects another
+// listed job as the run's deploy.
+func TestProductionAppliesDoesNotSetApartASkippedCallerOfEverySuccessfulListedName(t *testing.T) {
+	const selectedName, otherName = "production / deploy", "production-apply / deploy"
+	base := time.Date(2026, 10, 15, 3, 0, 0, 0, time.UTC)
+	success := DeliveryRunConclusionSuccess
+	runs := []DeliveryRun{
+		{Repo: "acme/widgets", RunID: 1, HeadCommitAt: base, Conclusion: &success},
+		{Repo: "acme/widgets", RunID: 2, HeadCommitAt: base.Add(time.Hour), Conclusion: &success},
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		// Production.Job selects selectedName, but otherName still succeeded in this run.
+		1: {
+			{Name: selectedName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base)},
+			{Name: otherName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(time.Hour))},
+		},
+		// GitHub lists the skipped call to otherName under its bare caller name.
+		2: {{Name: "production-apply", Conclusion: new(DeliveryJobConclusionSkipped)}},
+	}
+
+	judged := ProductionApplies(runs, jobsByRun, Production{JobNames: []string{selectedName, otherName}})
+	if len(judged.Applies) != 1 || !judged.Applies[0].CompletedAt.Equal(base) {
+		t.Fatalf("applies = %+v, want selectedName's earlier apply", judged.Applies)
+	}
+	if len(judged.Unmatched) != 0 {
+		t.Fatalf("unmatched = %+v, want none: otherName was proven real by run 1", judged.Unmatched)
+	}
+}
+
 // TestProductionAppliesCountsOnlyAJobThatApplied proves the optional apply-step rule distinguishes
 // a stored historical job from a stood-down job and names a configured step that is absent.
 func TestProductionAppliesCountsOnlyAJobThatApplied(t *testing.T) {

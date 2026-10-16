@@ -48,10 +48,11 @@ type ProductionRuns struct {
 // ProductionApplies judges runs by production (Production.Job, Production.Conclusion). A run is a
 // deploy when its production job's conclusion as Production.Conclusion reads it is success and the
 // job has a CompletedAt. A successful run holding no listed job is unmatched unless it skipped the
-// caller of a listed name (skippedCaller) that some run of runs holds exactly: without that, a typo
-// whose first part names a job a run skipped would read as a skipped call in every run and never be
-// named. The cost is that a listing in which no run holds a listed job, such as a stretch with no
-// production deploy, sets apart each of its successful runs. Unmatched runs keep runs' order.
+// caller of a listed name (skippedCaller) that `real` records: every selected listed name and every
+// listed name a successful job holds in any run. Without that, a typo whose first part names a job a
+// run skipped would read as a skipped call in every run and never be named. The cost is that a
+// listing in which no run holds a listed job, such as a stretch with no production deploy, sets
+// apart each of its successful runs. Unmatched runs keep runs' order.
 func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, production Production) ProductionRuns {
 	var judged ProductionRuns
 	type missing struct {
@@ -62,6 +63,12 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 	real := map[string]bool{}
 	for _, run := range runs {
 		jobs := jobsByRun[run.RunID]
+		for _, job := range jobs {
+			if job.Conclusion != nil && *job.Conclusion == DeliveryJobConclusionSuccess &&
+				slices.Contains(production.JobNames, job.Name) {
+				real[job.Name] = true
+			}
+		}
 		match := production.Job(jobs)
 		if match == nil {
 			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
@@ -77,6 +84,7 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 			}
 			continue
 		}
+		// The selected fallback can be unsuccessful but still proves this listed name is not a typo.
 		real[match.Name] = true
 		if production.ApplyStep != nil && match.Conclusion != nil && *match.Conclusion == DeliveryJobConclusionSuccess &&
 			match.ApplyStep != nil && *match.ApplyStep == *production.ApplyStep && match.ApplyStepConclusion == nil {

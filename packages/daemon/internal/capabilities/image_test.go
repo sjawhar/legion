@@ -197,23 +197,53 @@ func TestCheckImageNamesEveryMissingRow(t *testing.T) {
 	}
 }
 
-// One binary off PATH names that binary alone. Each name is removed alone: a case removing two
-// would pass with one of them forgotten from toolchain()'s list.
+// One binary off PATH names that binary alone: onPath's single-absent branch (two absent is the lsp
+// case in TestCheckImageNamesEveryMissingRow). Which names toolchain() checks, and in what order, is
+// pinned by the Toolchain detail in TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent, so one
+// name is enough here.
 func TestCheckImageNamesTheOneBinaryOffPATH(t *testing.T) {
-	for _, name := range []string{"python3", "jq", "ssh-keygen"} {
-		t.Run(name, func(t *testing.T) {
-			s := newStubs(t)
-			s.remove(name)
+	s := newStubs(t)
+	s.remove("python3")
 
-			lines, err := CheckImage(context.Background(), s.image())
+	lines, err := CheckImage(context.Background(), s.image())
 
-			if want := "capability toolchain is missing: " + name + " is not on PATH"; err == nil || err.Error() != want {
-				t.Fatalf("CheckImage = %v, want %q", err, want)
-			}
-			if got := byName(lines)[Toolchain]; got.Status != missing || got.Detail != name+" is not on PATH" {
-				t.Errorf("toolchain line = %+v, want missing naming %s", got, name)
-			}
-		})
+	want := "capability toolchain is missing: python3 is not on PATH"
+	if err == nil || err.Error() != want {
+		t.Fatalf("CheckImage = %v, want %q", err, want)
+	}
+	if got := byName(lines)[Toolchain]; got.Status != missing || got.Detail != "python3 is not on PATH" {
+		t.Errorf("toolchain line = %+v, want missing naming python3", got)
+	}
+}
+
+// The Toolchain row's Summary is the one copy of the toolchain list no surface renders (the probe
+// prints the detail), so it is held to the list toolchain() checks: the names recovered from a
+// passing detail, joined as the Summary spells them.
+func TestToolchainSummaryNamesTheListToolchainChecks(t *testing.T) {
+	s := newStubs(t)
+
+	detail, ok := toolchain(context.Background(), s.image())
+
+	if !ok {
+		t.Fatalf("toolchain() = %q, not ok; the stubs must make it pass", detail)
+	}
+	const prefix = "on PATH: "
+	listed, ok := strings.CutPrefix(detail, prefix)
+	if !ok {
+		t.Fatalf("toolchain() = %q, want it to begin %q", detail, prefix)
+	}
+	paths, _, _ := strings.Cut(listed, "; ")
+	var names []string
+	for _, path := range strings.Split(paths, ", ") {
+		names = append(names, filepath.Base(path))
+	}
+	want := "builds and runs with the generic toolchain: " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+	i := slices.IndexFunc(Table, func(c Capability) bool { return c.Name == Toolchain })
+	if i < 0 {
+		t.Fatal("Table has no Toolchain row")
+	}
+	if row := Table[i]; row.Summary != want {
+		t.Errorf("Toolchain Summary %q, want %q (the list toolchain() checks)", row.Summary, want)
 	}
 }
 

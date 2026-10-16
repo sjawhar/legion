@@ -152,7 +152,7 @@ func TestDocumentSocketClosesOnceItsPersonNoLongerResolves(t *testing.T) {
 			if err != nil || !found {
 				t.Fatalf("the member's membership: found %t, %v", found, err)
 			}
-			if err := rig.people.Confirm(context.Background(), rig.email, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
+			if err := rig.people.Confirm(context.Background(), rig.email, membership.Subject, membership.RefreshToken, time.Now().Add(-2*time.Hour)); err != nil {
 				t.Fatalf("date the confirmation two hours back: %v", err)
 			}
 		},
@@ -235,7 +235,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	ctx := context.Background()
 	rig := &documentSocketRig{pool: oidctest.New(t), email: "alice@d.example"}
 	rig.pool.EnableCodeFlow(rig.pool.PublishKey(t, "signing-key"), "dispatch-client", "dispatch-secret")
-	flow, err := oidc.NewCodeFlow(ctx, rig.pool.URL(), "dispatch-client", "dispatch-secret")
+	flow, err := oidc.NewCodeFlow(ctx, rig.pool.URL(), "dispatch-client", "dispatch-secret", "")
 	if err != nil {
 		t.Fatalf("discover the sign-in pool: %v", err)
 	}
@@ -256,7 +256,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	rig.database = database
 	rig.people = store.NewPgPeopleStore(database.Pool, "signing-key", nil)
 	rig.sessions = store.NewPgSessionStore(database.Pool)
-	if err := rig.people.SignIn(ctx, rig.email, signIn.RefreshToken, time.Now()); err != nil {
+	if err := rig.people.SignIn(ctx, rig.email, "", signIn.RefreshToken, time.Now()); err != nil {
 		t.Fatalf("record the sign-in: %v", err)
 	}
 	if rig.generation, err = rig.sessions.EnsureSession(ctx, rig.email); err != nil {
@@ -268,7 +268,7 @@ func newDocumentSocketRig(t *testing.T, heartbeat time.Duration) *documentSocket
 	person := identity.CookieIdentity{
 		SigningKey: "signing-key",
 		Sessions:   rig.sessions,
-		Membership: &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Group: "dispatch-members"},
+		Membership: &identity.Membership{People: rig.people, Sessions: rig.sessions, SignIn: flow, Rule: identity.SignInRule{Group: "dispatch-members"}},
 	}
 	broker := events.NewBroker()
 	rig.documents = docs.New(docs.Deps{Store: database, Events: broker, Identity: person, Settle: time.Hour})
