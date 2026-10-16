@@ -90,16 +90,17 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
 }
 
-// headMoved answers a move of pr's head: a push, or a reopen, which can carry a head pushed while
-// the pull request was closed. Arming is legitimate only for an awaiting READY's head, so in
-// awaiting_merge the move withdraws a READY whose head it left (withdrawMovedReady), and in any
-// other phase it disarms whatever an earlier READY left armed, a child re-entered from
-// awaiting_merge, say. In merging it also voids a READY the design gate holds for another head
-// (voidMovedHeldReady), so the gate's approval never advances it.
-func (e *Engine) headMoved(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+// headMoved answers a move of pr's head: a push, or a reopen (reopened), which can carry a head
+// pushed while the pull request was closed. Arming is legitimate only for an awaiting READY's head,
+// so in awaiting_merge the move withdraws a READY whose head it left, and a reopen at that head
+// submits its merge again (withdrawMovedReady); in any other phase it disarms whatever an earlier
+// READY left armed, a child re-entered from awaiting_merge, say. In merging it also voids a READY
+// the design gate holds for another head (voidMovedHeldReady), so the gate's approval never
+// advances it.
+func (e *Engine) headMoved(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reopened bool) error {
 	switch issue.Phase {
 	case phase.AwaitingMerge:
-		return e.withdrawMovedReady(ctx, tx, issue, pr)
+		return e.withdrawMovedReady(ctx, tx, issue, pr, reopened)
 	case phase.Merging:
 		if err := e.voidMovedHeldReady(ctx, tx, issue, pr); err != nil {
 			return err
@@ -147,43 +148,33 @@ func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record
 // enabled, so the arm would otherwise merge a head no review approved. The issue goes back to
 // implementing with its implementer started and the architect told, and the new head comes back
 // through testing, review and a new READY. A tree that lingers takes no transition, as merged
-// leaves it, so its pull request is only disarmed. A push landing on the READY head changes nothing.
-func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+// leaves it, so its pull request is only disarmed. A push landing on the READY head changes
+// nothing. A reopen landing there queues READY's merge again (record.ReadyMerge): the close ended
+// the READY's merge row, which found the pull request closed, and the READY still stands, unless a
+// person merges it or the tree lingers, either of which submits nothing.
+func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reopened bool) error {
 	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 	if err != nil {
 		return err
 	}
-	if merger.HandoffCommit != "" && merger.HandoffCommit == pr.HeadSHA {
+	atReady := merger.HandoffCommit != "" && merger.HandoffCommit == pr.HeadSHA
+	if atReady && (!reopened || merger.MergeNote != "") {
 		return nil
 	}
 	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
 		return err
 	}
-	if lingers {
+	switch {
+	case atReady && lingers:
+		return nil
+	case atReady:
+		return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
+	case lingers:
 		return e.disarm(ctx, tx, issue.Key, pr)
 	}
 	reason := fmt.Sprintf("its head moved from %s, the head READY named, to %s, which no review approved", merger.HandoffCommit, pr.HeadSHA)
 	return e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
-}
-
-// resubmitReopenedReady queues the merge of an awaiting READY's head again (record.ReadyMerge) when
-// its pull request is reopened at that head: the close ended the READY's merge row, which found the
-// pull request closed, and the READY still stands. A reopen at another head has withdrawn the READY
-// (withdrawMovedReady), a READY a person merges is never submitted, and a tree that lingers submits
-// nothing.
-func (e *Engine) resubmitReopenedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
-	if issue.Phase != phase.AwaitingMerge {
-		return nil
-	}
-	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
-	if err != nil || merger.HandoffCommit == "" || merger.HandoffCommit != pr.HeadSHA || merger.MergeNote != "" {
-		return err
-	}
-	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
-		return err
-	}
-	return e.enqueue(ctx, tx, issue.Key, record.ReadyMerge{Number: pr.Number, Head: merger.HandoffCommit})
 }
 
 // disarm queues the disarm of pr's merge (record.AutoMergeDisable): arming is legitimate only for
