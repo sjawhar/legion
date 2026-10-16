@@ -17,7 +17,8 @@
   Migration `0112` adds the nullable `people.sub`: in domain mode a sign-in records the Google
   account's `sub`, and a sign-in under another account for the same address (a Workspace admin
   gave a deleted account's address to a new one) ends every session of the address in the
-  transaction that records it, as does a confirmation whose refreshed token names another account.
+  transaction that updates the locked person row, as does a confirmation whose refreshed token
+  names another account.
   Exactly one of the group and the domain is set: both, a domain under another issuer, a group
   under Google's, and a domain that is not a lowercase DNS name refuse the boot, and header identity
   and dev sign-in refuse the domain. A deployment with the four Cognito settings boots, signs in and

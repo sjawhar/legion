@@ -119,9 +119,9 @@ func (s *PgPeopleStore) SignInSubject(ctx context.Context, email, subject, refre
 		}
 	}
 	if _, err := tx.Exec(ctx, `
-		insert into people (email, refresh_token, confirmed_at, sub) values ($1, $2, $3, $4)
-		on conflict (email) do update
-		set signed_in_at = now(), refresh_token = excluded.refresh_token, confirmed_at = excluded.confirmed_at, sub = excluded.sub
+		update people
+		set signed_in_at = now(), refresh_token = $2, confirmed_at = $3, sub = $4
+		where email = $1
 	`, email, s.seal.seal(email, refreshToken), confirmedAt, subject); err != nil {
 		return fmt.Errorf("record sign-in of %q: %w", email, err)
 	}
