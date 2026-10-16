@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-779",
+  "completed": "2026-10-16T01:26:54Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1975",
+  "headSha": "bfacb40ee10c",
+  "filesChanged": [
+    ".github/scripts/check-release-credentials.sh: rule 6 (6a always() tests needs.<X>.result for every needs.<X>.outputs read; 6b no always() means no upstream job through needs carrying an if: of its own), as a check_conditions pass over every job of the three workflows, steps or not, job-level if: only; string literals stripped, case-insensitive, dot and index forms, visited-set ancestor walk, dangling needs names ignored; header rule 6 and the reworded Scope paragraph; needs_of shared with rule 4",
+    ".github/workflows/release.yaml: legion_publish, worker_image_release_note and envoy_plugin_publish run on always() and test the result of each job whose outputs they read; legion_build and worker_image add needs.changes.result == 'success'; a workflow-level comment paragraph names the shape and the cause (actions/runner#491, run 38822866387)",
+    ".github/workflows/release-envoy-infra.yaml: publish runs on always() && needs.build.result == 'success' && needs.build.outputs.skip != 'true'",
+    ".github/scripts/check-release-credentials.test.sh: the green fixture's pi_envoy_build carries an if: and both publish jobs the always()+result shape (pi_legion_publish's dangling pi_legion_build needs name pinned as ignored); fourteen red cases (the bug's shape, explicit success(), result without always(), result only, always() without the result, two needs with one result, a steps-less job, the index form, a boolean, a folded >-, a quoted always(), fromJSON, a needs cycle) and green cases (index form with the result, another casing, a step-level if:); 184 -> 221 checks",
+    "AGENTS.md: the release-jobs convention bullet names the condition rule",
+    "docs/solutions/github/a-credentialed-release-job-splits-…-LEGION-748.md: rule 5 says the credential rules read jobs with steps: and the condition rule every job's if:"
+  ],
+  "proof": [
+    {
+      "criterion": "A1 — the six conditions carry always() and the tested result, and the checker is green on the repository",
+      "surface": "the checker on the real workflows in the issue workspace (PyYAML from /tmp/pydeps, as CI's ubuntu-24.04 has it)",
+      "command": "cd $LEGION_WORKSPACE && PYTHONPATH=/tmp/pydeps .github/scripts/check-release-credentials.sh",
+      "observed": "exit 0; `check-release-credentials: 7 credentialed job(s) and 8 build job(s) across 3 release workflows keep credentials out of jobs that run dependency code` (counts unchanged). On the pre-change workflows the same checker exited 1 naming exactly six jobs: release.yaml:225 legion_build (6a, needs.changes.result), :362 legion_publish (6b), :461 worker_image (6a), :487 worker_image_release_note (6b), :599 envoy_plugin_publish (6b), release-envoy-infra.yaml:220 publish (6b) — the plan's prototype, no seventh.",
+      "headSha": "bfacb40ee10c",
+      "negativeControl": "A fixture directory (the three workflows copied, the script symlinked) with legion_publish's if: restored to `needs.legion_build.outputs.skip != 'true'` → exit 1, `::error::.github/workflows/release.yaml:374: job 'legion_publish' has an if: that calls no always(), but jobs 'legion_build', 'envoy_plugin_build', 'envoy_plugin_publish', 'pi_envoy_build', 'pi_envoy_publish', 'pi_legion_build', 'pi_legion_publish' upstream of it through needs carry an if: of their own; …`, `1 release credential problem(s)`; the same fixture with legion_build's `needs.changes.result == 'success' &&` line removed → exit 1, `::error::.github/workflows/release.yaml:235: job 'legion_build' calls always() in its if: and reads needs.changes.outputs, but does not test needs.changes.result; …`, `1 release credential problem(s)`."
+    },
+    {
+      "criterion": "A2 — the harness pins rule 6 red and green",
+      "surface": "the checker's harness in the issue workspace (the same harness CI's test job runs)",
+      "command": "cd $LEGION_WORKSPACE && PYTHONPATH=/tmp/pydeps .github/scripts/check-release-credentials.test.sh",
+      "observed": "`Results: 221 passed, 0 failed` / `PASS: check-release-credentials.sh` (184 before this change); the new cases are the fourteen red and the green ones listed in filesChanged, plus four checks in the first case pinning the fixture's shape.",
+      "headSha": "bfacb40ee10c",
+      "negativeControl": "The new harness run against main's checker (jj file show -r main@origin .github/scripts/check-release-credentials.sh copied beside copies of the new test file and test-lib.sh in a temporary tree) → exit 1, `Results: 191 passed, 30 failed`; every one of the 30 failures sits in the fourteen new red cases (2-4 per case) and no green case fails, so the cases are red for the rule and not by accident."
+    },
+    {
+      "criterion": "A3 — the condition shape runs downstream of a skipped job, and the shapes rule 6 refuses do not (GitHub Actions semantics, before merge)",
+      "surface": "GitHub Actions on the sandbox repository sjawhar/legion-smoke, throwaway branch legion-779-condition-probe (deleted after the run; the run stays), one push-triggered workflow with the plan's 13-job matrix",
+      "command": "gh run view 38833347317 -R sjawhar/legion-smoke --json jobs -q '.jobs[]|[.name,.conclusion]|@tsv'  (https://github.com/sjawhar/legion-smoke/actions/runs/38833347317, sandbox commit f8467f1dd35480d39c64982fab4c644c11870747)",
+      "observed": "root success; skipped_upstream (if: false) skipped; mid (always() && needs.root.result == 'success' && (skipped_upstream success||skipped); outputs skip=false, tag=v1) success; probe_new (always() && needs.mid.result == 'success' && needs.mid.outputs.skip != 'true') success, its log `probe_new ran with skip=false tag=v1`; other success; probe_two_needs (always() && needs.other.result == 'success' && needs.mid.result == 'success' && needs.mid.outputs.tag != '') success, log `probe_two_needs ran with tag=v1`; failing failure; probe_always_with_result (always() && needs.failing.result == 'success' && needs.failing.outputs.skip != 'true') skipped. Every row equals the plan's expected table. The conditions probed are byte-for-byte the shapes release.yaml's legion_publish, worker_image_release_note and envoy_plugin_publish and release-envoy-infra.yaml's publish now carry at this head.",
+      "headSha": "bfacb40ee10c",
+      "negativeControl": "In the same run: control_old (`needs.mid.outputs.skip != 'true'`, today's legion_publish shape) skipped; control_success (`success() && …`) skipped; control_result_only (`needs.mid.result == 'success' && needs.mid.outputs.skip != 'true'`) skipped; control_two_needs (`needs.other.result == 'success' && needs.mid.outputs.tag != ''`, today's worker_image_release_note shape) skipped — each behind the one skipped job upstream, with mid green and skip=false; and hazard_always_without_result (`always() && needs.failing.outputs.skip != 'true'`) ran to success on a FAILED upstream, its log `hazard ran on a failed upstream, skip read as ''` — the 6a hazard the checker forbids."
+    }
+  ],
+  "trickyParts": [
+    "Rule 6 is the two-clause hazard rule of the plan, not the spec's literal 'reads needs.<job>.outputs' trigger: the literal rule would flag the three correct *_build conditions and miss the result-only shape; the plan records this as spec departures 1 and 2 (six conditions change, not three).",
+    "6b counts any upstream job with an if: key as skippable, including one on always(); a job with no if: of its own is never checked, which is why the fixture's worker_image (needs a job with an if:, has none itself) stays green.",
+    "The string-literal strip keeps a quoted index key (needs['x']) so the index form stays readable after the strip; a YAML plain scalar cannot start with a quote, so the quoted-always() case uses a double-quoted YAML scalar.",
+    "The ce-simplify-code pass applied three findings on the checker (needs_of moved beside the other generic job readers, 6a collects the tested results once instead of rescanning per read, ancestors' name annotated) → head bfacb40e; A1/A2 and both negative controls were re-run there with identical output."
+  ],
+  "deviations": [
+    "T4 (the two documentation sentences) was edited directly rather than through a deep-worker: two one-sentence prose edits whose wording the plan gives verbatim."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "main moved past the branch's base (d0090f0d, #1866) while this phase ran; no conflict, the pull request's three-dot diff is the six files plus the plan handoff."
+  ],
+  "productionCheck": "After the merge: A4 (workflow_dispatch of release.yaml on main — legion_publish and worker_image_release_note success with at least one *_publish skipped, the legion-v<version> tag at the run's head, release assets + SHA256SUMS + attestation, the ## Worker image section; and the merge-started release-envoy-infra.yaml run's build/publish conclusions against build's skip output) and A5 (legion version of the linux/amd64 archive equal to the run's Smoke test lines). Route: neither dispatch-deploy nor legion-deploy — release.yaml is in neither image's path list; the change is GitHub Actions on main the moment it merges."
+}
