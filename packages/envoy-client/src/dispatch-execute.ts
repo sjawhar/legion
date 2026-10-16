@@ -2369,8 +2369,11 @@ export async function executeDispatchTool(
           throw withAccount(error, told);
         }
       }
-      // The server replaces the whole link set; the common call is "link the pull request
-      // I just opened", so merge by URL and keep every existing link (and its kind).
+      // The server replaces the whole link set. The common call is "link the pull request I just
+      // opened", so a non-empty list merges by URL and keeps every existing link (and its kind).
+      // An explicit empty list (only `--clear-external-links` sends one) is a genuine clear: it
+      // replaces the set with nothing rather than merging in zero new links, which would just
+      // re-send the issue's current links unchanged.
       const linked = before.external_links.map((link) => link.url);
       const newLinks = requestedLinks?.filter((url) => !linked.includes(url)) ?? [];
       let after: Advised<Issue>;
@@ -2386,7 +2389,11 @@ export async function executeDispatchTool(
           ...(components === undefined ? {} : { components }),
           ...(requestedLinks === undefined
             ? {}
-            : { external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))] }),
+            : requestedLinks.length === 0
+              ? { external_links: [] }
+              : {
+                  external_links: [...before.external_links, ...newLinks.map((url) => ({ url }))],
+                }),
           actor,
         });
       } catch (error) {
@@ -2428,9 +2435,11 @@ export async function executeDispatchTool(
         ...(requestedLinks === undefined
           ? []
           : [
-              newLinks.length === 0
-                ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
-                : `linked ${newLinks.join(", ")} ${linkCount}`,
+              requestedLinks.length === 0
+                ? "external links cleared"
+                : newLinks.length === 0
+                  ? `already linked ${requestedLinks.join(", ")} ${linkCount}`
+                  : `linked ${newLinks.join(", ")} ${linkCount}`,
             ]),
         ...(route === undefined
           ? []
