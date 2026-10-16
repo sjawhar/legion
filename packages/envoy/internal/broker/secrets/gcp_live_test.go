@@ -36,7 +36,9 @@ func TestGCPLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.Close()
+	// Registered before any secret's deletion, so it runs after every one of them: cleanups run
+	// last in, first out, and a deferred close would run before them, on the client they need.
+	t.Cleanup(func() { _ = client.Close() })
 
 	var nonce [4]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -71,7 +73,9 @@ func TestGCPLive(t *testing.T) {
 			t.Fatalf("create %s: %v", name, err)
 		}
 		t.Cleanup(func() {
-			_ = client.DeleteSecret(context.Background(), &secretmanagerpb.DeleteSecretRequest{Name: secret.GetName()})
+			if err := client.DeleteSecret(context.Background(), &secretmanagerpb.DeleteSecretRequest{Name: secret.GetName()}); err != nil {
+				t.Errorf("delete %s: %v (delete it by hand)", secret.GetName(), err)
+			}
 		})
 		if value != "" {
 			if _, err := client.AddSecretVersion(ctx, &secretmanagerpb.AddSecretVersionRequest{Parent: secret.GetName(), Payload: &secretmanagerpb.SecretPayload{Data: []byte(value)}}); err != nil {
