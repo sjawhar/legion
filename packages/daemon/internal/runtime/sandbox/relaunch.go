@@ -363,9 +363,9 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if refused != nil && s.ResourceVersion == refusedAt {
 				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, refused)
 			}
-			// Fenced to the resourceVersion read, beside the uid patch tests: a delete, a relabel or a
-			// mode change since that read fails the test, the server refuses the patch as invalid, and
-			// this launch reads the Sandbox again within its deadline.
+			// Fenced to the resourceVersion read, beside the uid patch tests: a relabel, a mode change,
+			// or a delete begun since that read fails the test (422), and this launch reads the Sandbox
+			// again within its deadline; a delete already completed answers 404 and fails the try.
 			ops := []jsonPatchOp{
 				{Op: "test", Path: "/metadata/resourceVersion", Value: s.ResourceVersion},
 				{Op: "add", Path: labelPatchPath(labelTree), Value: tree},

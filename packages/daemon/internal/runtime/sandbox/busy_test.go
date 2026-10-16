@@ -173,6 +173,16 @@ const burstImage = "ghcr.io/sjawhar/legion-worker@sha256:0ld00000000000000000000
 // store's feed is failing while the launches wait for their launchers. The burst converges: every
 // claim is launched, and none is charged a launch failure.
 func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *testing.T) {
+	for name, refusal := range map[string]error{
+		"the feeds refused with 429":        apierrors.NewTooManyRequests("the request has been limited by the API server's flow control", 1),
+		"the feeds refused with etcd's 500": apierrors.NewInternalError(errors.New(etcdThrottle)),
+	} {
+		t.Run(name, func(t *testing.T) { burstOfRelaunches(t, refusal) })
+	}
+}
+
+// burstOfRelaunches is the burst, the informers' lists and watches refused with feedRefusal.
+func burstOfRelaunches(t *testing.T, feedRefusal error) {
 	const issues = 8
 	roles := []claim.Role{claim.RoleImplementer, claim.RoleTester, claim.RoleReviewer}
 	g := newRig(t, nil, withBreakableFeeds(), withOptions(func(o *Options) { o.BootTimeout = 15 * time.Second }))
@@ -236,7 +246,7 @@ func TestABurstOfRelaunchesThroughAThrottlingAPIServerConvergesUncharged(t *test
 	g.kube.PrependReactor("*", "secrets", throttle)
 	g.kube.PrependReactor("*", "pods", throttle)
 	throttling.Store(true)
-	g.refuseFeeds(apierrors.NewInternalError(errors.New(etcdThrottle)))
+	g.refuseFeeds(feedRefusal)
 	testwait.Eventually(t, "the stores' feeds to fail", func() bool { return g.r.sandboxFeed.check() != nil && g.r.podFeed.check() != nil })
 	time.AfterFunc(500*time.Millisecond, func() { g.refuseFeeds(nil) })
 
