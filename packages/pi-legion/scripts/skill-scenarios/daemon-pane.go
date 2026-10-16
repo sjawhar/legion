@@ -6,8 +6,8 @@
 //
 //	phase <role>             prints the phase the role's worker runs in: the first phase
 //	                         workflow.RoleFor gives to the role
-//	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh files
-//	                         under its GH_CONFIG_DIR, and prints its paneResponse (JSON)
+//	pane                     reads a paneRequest (JSON) on stdin, writes the claim's gh bundle
+//	                         under its LEGION_GH_OWNERS_DIR, and prints its paneResponse (JSON)
 package main
 
 import (
@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -76,9 +77,10 @@ type paneRequest struct {
 	// BootTokenFile is the rig's boot token file, the one its stand-in daemon checks.
 	BootTokenFile string `json:"bootTokenFile"`
 	// GHToken is the GitHub token the rig stands in for the claim's App token: it is rendered
-	// into the claim's gh files (hosts.yml and config.yml under runtime.GHConfigDir), which the
-	// pane's GH_CONFIG_DIR names, as the daemon's tmux runtime writes them at spawn. "" is a
-	// daemon with no GitHub credential: no files, and no gh variable on the pane.
+	// into the claim's gh bundle (runtime.GHConfigDir), the one directory of rigOwner, which the
+	// pane's GH_CONFIG_DIR names, as the daemon's tmux runtime writes it at spawn; the pane's
+	// LEGION_GH_PATH is the first gh on Path, as the daemon resolves it at boot. "" is a daemon
+	// with no GitHub credential: no files, and no gh variable on the pane.
 	GHToken string `json:"ghToken"`
 	// Path is the PATH the daemon would start under; the pane's PATH is it behind the pane's
 	// launcher directory (workerbin.Path).
@@ -108,19 +110,23 @@ func pane() error {
 	if err != nil {
 		return err
 	}
-	ghConfigDir := ""
+	ghRoot, gh := "", ""
 	if req.GHToken != "" {
-		// ghconfig's one writer of a role's gh directory, so the rig's directory is the daemon's layout;
+		// ghconfig's one writer of a role's gh bundle, so the rig's directory is the daemon's layout;
 		// the App label and expiry only feed the runtime's log lines, which the rig does not write.
-		ghConfigDir = runtime.GHConfigDir(req.StateDir, token)
-		if _, err := ghconfig.Write(ghConfigDir, ghconfig.Render(req.GHToken, "", time.Time{})); err != nil {
+		ghRoot = runtime.GHConfigDir(req.StateDir, token)
+		bundle := ghconfig.Bundle{Default: rigOwner, Owners: map[string]ghconfig.Rendered{rigOwner: ghconfig.Render(req.GHToken, "", time.Time{})}}
+		if _, err := ghconfig.WriteBundle(ghRoot, bundle); err != nil {
 			return fmt.Errorf("write the claim's gh files: %w", err)
+		}
+		if gh, err = realGH(req.Path); err != nil {
+			return err
 		}
 	}
 	spec := runtime.SpawnSpec{Claim: token, Project: req.Project, Tree: req.Issue, Issue: req.Issue, Role: role, Generation: 1}
 	variables, err := tmux.PaneVariables(spec, tmux.PaneInputs{
 		StateDir: req.StateDir, Workspace: req.Workspace, DaemonURL: req.DaemonURL, EnvoyURL: req.EnvoyURL,
-		NATSURLs: req.NATSURLs, GHConfigDir: ghConfigDir,
+		NATSURLs: req.NATSURLs, GHOwnersDir: ghRoot, GHDefault: rigOwner, GH: gh,
 	}, []runtime.SecretFile{{Variable: "LEGION_BOOT_TOKEN", Path: req.BootTokenFile}})
 	if err != nil {
 		return err
@@ -136,6 +142,22 @@ func pane() error {
 		}
 	}
 	return json.NewEncoder(os.Stdout).Encode(res)
+}
+
+// rigOwner is the one GitHub owner of the rig's project, a placeholder whose directory of the gh
+// bundle holds the rig's token.
+const rigOwner = "skills-rig"
+
+// realGH is the first gh on path, which the daemon resolves at boot (LEGION_GH_PATH) and refuses
+// to boot without.
+func realGH(path string) (string, error) {
+	for _, dir := range filepath.SplitList(path) {
+		gh := filepath.Join(dir, "gh")
+		if info, err := os.Stat(gh); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0 {
+			return gh, nil
+		}
+	}
+	return "", fmt.Errorf("no gh on the daemon's PATH %q: the daemon resolves the real gh every pane's `legion gh` runs at boot", path)
 }
 
 // systemPromptArgument composes the pane's role prompt as the daemon does (specs.SpawnSpec): the
