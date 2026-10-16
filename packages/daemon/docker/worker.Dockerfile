@@ -617,12 +617,9 @@ COPY --from=go /out/legion /opt/legion/bin/legion
 COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # gh in a pod is `legion gh`, first on the image PATH, which runs the real gh at /usr/local/bin/gh
 # (LEGION_GH_PATH, which every agent container is told) with GH_CONFIG_DIR at the gh directory of
-# the owner the command names: the same script a tmux pane's launcher directory holds
-# (packages/daemon/internal/runtime/workerbin).
-COPY --chmod=0755 <<"EOF" /opt/legion/bin/gh
-#!/bin/sh
-exec '/opt/legion/bin/legion' gh "$@"
-EOF
+# the owner the command names: packages/daemon/docker/gh, the same script a tmux pane's launcher
+# directory holds (packages/daemon/internal/runtime/workerbin).
+COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # The final step: /opt/legion and /opt/legion/bin are root's with mode 0755, so the runtime user can
 # neither rename nor replace what they hold; and no file under /usr/lib/openssh or /usr/bin/ssh-agent
 # carries a setuid or setgid bit (the apt RUN drops the two openssh-client installs, ssh-keysign's and
