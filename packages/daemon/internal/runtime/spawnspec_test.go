@@ -9,17 +9,18 @@ import (
 
 func spawnSpec() SpawnSpec {
 	return SpawnSpec{
-		Claim:      claim.Token("legion-omp-legion-43-tester"),
-		Project:    "omp",
-		Tree:       "LEGION-42",
-		Issue:      "LEGION-43",
-		Role:       claim.RoleTester,
-		Generation: 2,
-		BootToken:  "boot-secret",
-		Env:        map[string]string{"JJ_USER": "legion-tester", "TZ": "UTC"},
-		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-secret"},
-		Prompt:     PromptParts{RolePromptPaths: []string{"/roles/tester.md"}},
-		Repository: ghrepo.MustParse("sjawhar/legion"),
+		Claim:         claim.Token("legion-omp-legion-43-tester"),
+		Project:       "omp",
+		Tree:          "LEGION-42",
+		Issue:         "LEGION-43",
+		Role:          claim.RoleTester,
+		Generation:    2,
+		BootToken:     "boot-secret",
+		Env:           map[string]string{"JJ_USER": "legion-tester", "TZ": "UTC"},
+		Secrets:       map[string]string{"ENVOY_TOKEN": "envoy-secret"},
+		Prompt:        PromptParts{RolePromptPaths: []string{"/roles/tester.md"}},
+		Repository:    ghrepo.MustParse("sjawhar/legion"),
+		DefaultBranch: "release/v7.1",
 	}
 }
 
@@ -62,6 +63,10 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		{"a resume of a workspace recovered after its volume was lost", func(s *SpawnSpec) {
 			s.ResumeSessionFile, s.WorkspaceRecoveredFrom = "/sessions/tester.jsonl", "legion/LEGION-43"
 		}, "spawn legion-omp-legion-43-tester: ResumeSessionFile /sessions/tester.jsonl and WorkspaceRecoveredFrom legion/LEGION-43 are both set: a workspace recovered after its volume was lost holds no session to resume"},
+		// Every runtime provisions the issue's workspace at the repository's default branch, by
+		// name: a launch on a repository that names none has no base to start a new branch at.
+		{"a repository with no default branch", func(s *SpawnSpec) { s.DefaultBranch = "" },
+			"spawn legion-omp-legion-43-tester: no default branch for repository sjawhar/legion"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			spec := spawnSpec()
@@ -73,7 +78,7 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 	}
 	for name, mutate := range map[string]func(*SpawnSpec){
 		"as it is":                    func(*SpawnSpec) {},
-		"with no repository":          func(s *SpawnSpec) { s.Repository = ghrepo.Repository{} },
+		"with no repository":          func(s *SpawnSpec) { s.Repository, s.DefaultBranch = ghrepo.Repository{}, "" },
 		"with a credential's pointer": func(s *SpawnSpec) { s.Env["GH_TOKEN_FILE"] = "/state/gh-token" },
 		"resuming a session":          func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/tester.jsonl" },
 		"recovering a lost workspace": func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
@@ -130,6 +135,8 @@ func TestValidateSpawnSpecHoldsTheControllersLaunchToItsOwnShape(t *testing.T) {
 			"spawn legion-omp-controller: the controller works no repository (got sjawhar/legion)"},
 		{"a recovered workspace", func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
 			"spawn legion-omp-controller: the controller has no workspace to recover (got legion/LEGION-43)"},
+		{"a default branch", func(s *SpawnSpec) { s.DefaultBranch = "main" },
+			"spawn legion-omp-controller: the controller works no repository, so it has no default branch (got main)"},
 		{"no role prompt", func(s *SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-controller: no role prompt"},
 		{"a credential as a value", func(s *SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "sk-x" },
 			"spawn legion-omp-controller: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},

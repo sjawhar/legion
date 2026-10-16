@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -383,7 +384,8 @@ type WaitingPullRequest struct {
 }
 
 // ListPullRequestsWaitingAt lists the deploy repository's pull requests merged before at that had
-// not shipped by then, oldest merge first, up to maxPullRequestsPerWindow, each with the run that
+// not shipped by then, oldest merge first and those merged in one instant by id (as
+// ListPullRequestsInWindow orders them), up to maxPullRequestsPerWindow, each with the run that
 // shipped it afterwards: what the timeline's waiting line starts its window from. A pull request
 // ships with the earliest-finishing successful production job of a run on main that GitHub created
 // after its merge (containment.go, with ListRuns' "main"), judged by Production.Conclusion. One
@@ -417,7 +419,7 @@ func ListPullRequestsWaitingAt(ctx context.Context, pool *store.Pool, deployRepo
 			order by `+runCreatedAt+` desc
 			limit 1
 		), '-infinity')
-		order by pr.merged_at
+		order by pr.merged_at, (pr.repo || '#' || pr.number) collate "C"
 		limit $4
 	`, deployRepo, production.JobNames, at, maxPullRequestsPerWindow, production.ApplyStep)
 	if err != nil {
@@ -828,9 +830,10 @@ func ListRunIDsSkippingJobs(ctx context.Context, pool *store.Pool, repo string, 
 	return skip, rows.Err()
 }
 
-// ListRunJobs lists every job of one run, in no particular order (callers that need the jobs in
-// a specific order, e.g. a workflow's declared sequence, sort client-side — GitHub's own job
-// listing order is not guaranteed either).
+// ListRunJobs lists every job of one run in compareRunJobs' order: by when each started, a job
+// that never started last, then by name. Every reader of a run's jobs reads them in that one
+// order, whatever order GitHub listed them in or the table's scan answers them in, so a run the
+// live Delivery hub already sent is not sent again only because its jobs came back reordered.
 func ListRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64) ([]DeliveryRunJob, error) {
 	rows, err := pool.Query(ctx, `select `+JobColumns+` from delivery_run_jobs where repo = $1 and run_id = $2`, repo, runID)
 	if err != nil {
@@ -845,13 +848,21 @@ func ListRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64
 		}
 		jobs = append(jobs, job)
 	}
-	return jobs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	slices.SortFunc(jobs, compareRunJobs)
+	return jobs, nil
 }
 
 // ListRunJobsForRuns lists every job of every run in runIDs on repo in one query (not one query
 // per run): the timeline handler's own lookback window can hold hundreds of runs, and
 // ResolveSessionTitles/resolveIssueFacetData already use this `= any($1)` shape for the same
-// reason. Returns a map keyed by run id for a caller to index directly.
+// reason. Returns a map keyed by run id for a caller to index directly, each run's jobs in
+// ListRunJobs' order. Each run's jobs are sorted here rather than by an order by: Postgres cannot
+// read delivery_run_jobs' primary key in (run_id, ...) order for `run_id = any($2)`, so an order by
+// sorts the whole 28-day read (about 50,000 rows), on disk past work_mem, where sorting each run's
+// few jobs costs a few milliseconds.
 func ListRunJobsForRuns(ctx context.Context, pool *store.Pool, repo string, runIDs []int64) (map[int64][]DeliveryRunJob, error) {
 	byRun := make(map[int64][]DeliveryRunJob, len(runIDs))
 	if len(runIDs) == 0 {
@@ -869,7 +880,13 @@ func ListRunJobsForRuns(ctx context.Context, pool *store.Pool, repo string, runI
 		}
 		byRun[job.RunID] = append(byRun[job.RunID], job)
 	}
-	return byRun, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, jobs := range byRun {
+		slices.SortFunc(jobs, compareRunJobs)
+	}
+	return byRun, nil
 }
 
 // ListRuns lists every run of kind on repo that GitHub created at since or later (runCreatedAt),
@@ -908,19 +925,20 @@ func ListRuns(ctx context.Context, pool *store.Pool, repo string, kind DeliveryR
 }
 
 // ListRunsStartedIn lists every run of kind on repo with started_at in [from, to), oldest start
-// first, narrowed to one head branch when branch is non-empty and to one GitHub event when event
-// is non-empty (a null head_branch or event never matches a non-empty filter: it is a row the
-// backfill has not rewritten yet). The measures' deploy population is ("main", ""), the
-// Pipeline's deploy cards ("main", "push"), PR checks ("", "pull_request"): the prototype's
-// `withinWindow(run.started_at)`, `branch=main` and `event=pull_request` listings. Bounded by
-// maxRunsPerWindow, as ListRuns is; delivery_runs_kind_started_at serves the filter and order.
+// first and runs started in one instant by run id, narrowed to one head branch when branch is
+// non-empty and to one GitHub event when event is non-empty (a null head_branch or event never
+// matches a non-empty filter: it is a row the backfill has not rewritten yet). The measures'
+// deploy population is ("main", ""), the Pipeline's deploy cards ("main", "push"), PR checks ("",
+// "pull_request"): the prototype's `withinWindow(run.started_at)`, `branch=main` and
+// `event=pull_request` listings. Bounded by maxRunsPerWindow, as ListRuns is;
+// delivery_runs_kind_started_at serves the filter and order.
 func ListRunsStartedIn(ctx context.Context, pool *store.Pool, repo string, kind DeliveryRunKind, branch, event string, from, to time.Time) ([]DeliveryRun, error) {
 	rows, err := pool.Query(ctx, `
 		select `+RunColumns+`
 		from delivery_runs
 		where repo = $1 and kind = $2 and started_at >= $3 and started_at < $4
 			and ($5 = '' or head_branch = $5) and ($6 = '' or event = $6)
-		order by started_at
+		order by started_at, run_id
 		limit $7
 	`, repo, string(kind), from, to, branch, event, maxRunsPerWindow)
 	if err != nil {
@@ -970,15 +988,17 @@ func ListRunsWithJobsStartedIn(ctx context.Context, pool *store.Pool, repo strin
 const maxPullRequestsPerWindow = 50_000
 
 // ListPullRequestsInWindow lists every population pull request merged in [from, to), oldest
-// merge first, up to maxPullRequestsPerWindow: the API's timeline window and the facet
-// computations that run over it. A partial row (merged_at still null) is never in range and so
-// never appears here — exactly right, since its lead time and shipped status are not yet knowable.
+// merge first and those merged in one instant by id ("owner/repo#N" in byte order, the order the
+// page's live merge keeps: applyDelta.ts's ORDERS.prs), up to maxPullRequestsPerWindow: the API's
+// timeline window and the facet computations that run over it. A partial row (merged_at still
+// null) is never in range and so never appears here — exactly right, since its lead time and
+// shipped status are not yet knowable.
 func ListPullRequestsInWindow(ctx context.Context, pool *store.Pool, from, to time.Time) ([]DeliveryPullRequest, error) {
 	rows, err := pool.Query(ctx, `
 		select `+PullRequestColumns+`
 		from delivery_pull_requests
 		where merged_at >= $1 and merged_at < $2
-		order by merged_at
+		order by merged_at, (repo || '#' || number) collate "C"
 		limit $3
 	`, from, to, maxPullRequestsPerWindow)
 	if err != nil {

@@ -29,10 +29,12 @@ pods -n legion` and `create pods/exec` both answer no). It can still prove what 
   printed. Fetch `/v2/sjawhar/legion-worker/manifests/sha-<12-char head sha>` with an `Accept` naming the OCI
   manifest type, and check `sha256sum` of the manifest file equals the `Worker Image` run's
   `containerimage.digest`: that is what ties the rootfs to the run you cite.
-- Unpack the layers in manifest order into one directory with `tar -x -z --no-same-owner --exclude='.wh.*'
-  --exclude='dev/*'`, after handling each layer's whiteouts (`.wh.<name>` removes `<name>`; `.wh..wh..opq`
-  empties the directory). 22 layers, about 1 GB downloaded, 2.8 GB unpacked, 90 seconds; `rm -rf` it afterwards
-  (the implementer's and tester's ephemeral-storage limit is 20Gi, the other roles' 10Gi).
+- Unpack the layers in manifest order into one directory with `tar -xp -z --no-same-owner --exclude='.wh.*'
+  --exclude='dev/*'` (`-p`: as uid 1000, tar otherwise strips setuid and setgid bits on extraction, so a
+  file-mode claim about the image would read 755 whatever the image holds), after handling each layer's
+  whiteouts (`.wh.<name>` removes `<name>`; `.wh..wh..opq` empties the directory). 22 layers, about 1 GB
+  downloaded, 2.8 GB unpacked, 90 seconds; `rm -rf` it afterwards (the implementer's and tester's
+  ephemeral-storage limit is 20Gi, the other roles' 10Gi).
 - Enter it with `unshare -r -m -p -f sh -c '…'`: mount `proc` at `<rootfs>/proc`, then `mount --rbind /dev
   <rootfs>/dev`, then `/usr/sbin/chroot <rootfs> /usr/bin/env -i PATH=/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin HOME=/home/legion OMP_PROFILE=legion LEGION_OMP_PATH=/opt/omp/bin/omp DO_NOT_TRACK=1 sh -c '…'`.
   Under gVisor a plain `mount --bind /dev <rootfs>/dev` is refused (`wrong fs type, bad option, bad superblock`);
@@ -83,7 +85,7 @@ for entry in "${layers[@]}"; do
     if [ "$base" = ".wh..wh..opq" ]; then rm -rf "${rootfs:?}/${dir:?}"/* 2>/dev/null || true
     else rm -rf "${rootfs:?}/${dir}/${base#.wh.}"; fi
   done || true
-  tar -x $comp -f "$f" -C "$rootfs" --no-same-owner --exclude='.wh.*' --exclude='dev/*' || echo "tar exit $? (continuing)"
+  tar -xp $comp -f "$f" -C "$rootfs" --no-same-owner --exclude='.wh.*' --exclude='dev/*' || echo "tar exit $? (continuing)"
   rm -f "$f"
 done
 ```

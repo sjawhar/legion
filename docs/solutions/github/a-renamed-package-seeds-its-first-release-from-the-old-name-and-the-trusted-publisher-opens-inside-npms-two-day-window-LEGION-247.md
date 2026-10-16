@@ -38,7 +38,8 @@ related_issues:
   follow inside the window; a release that runs before it fails at `npm publish` and is re-run
   with `workflow_dispatch`, which the job's `npm view` skip makes safe.
 - The committed manifest version is not the released version. Readers of the diff see the last
-  pre-split version in both manifests; the release job computes the next one.
+  pre-split version in both manifests; the build job computes the next one (`release-push.sh
+  version --first-npm`).
 
 ## Evidence
 

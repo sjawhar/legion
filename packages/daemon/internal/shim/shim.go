@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -49,23 +50,37 @@ const (
 	// pod's launcher gets as its own stop grace (internal/runtime/sandbox's launcherCommand passes
 	// both the same value, the pod's terminationGracePeriodSeconds).
 	DefaultStopGrace = 10 * time.Second
-	// drainTimeout bounds reading OMP's stdout after OMP has exited. What OMP wrote is in the pipe
+	// DrainTimeout bounds reading OMP's stdout after OMP has exited. What OMP wrote is in the pipe
 	// by then; only a process it started and left holding the pipe keeps it open past this.
-	drainTimeout = time.Second
+	// Exported so internal/config can name it in the message that refuses a stop grace under
+	// MinStopGrace.
+	DrainTimeout = time.Second
+	// MinWarmUpDrain is the least Run waits for an in-flight CodeGraph warm-up to return
+	// (warmUpDrain), whatever the stop grace leaves: the warm-up's own kill grace for its
+	// codegraph child (internal/workspace's codegraphStopGrace, 2 s) plus one second for reaping
+	// the child and releasing the lease, measured at 0.1–0.3 s in LEGION-629.
+	MinWarmUpDrain = 3 * time.Second
+	// MinStopGrace is the smallest stop grace the whole stop fits, 9 s: the agent SIGTERMed and,
+	// ignoring it, killed at DefaultGrace; its stdout drained for DrainTimeout; the warm-up given
+	// MinWarmUpDrain to release its lease. That is why the daemon refuses a smaller
+	// `worker_stop_timeout_seconds` under `runtime: kubernetes` at configuration load
+	// (internal/config).
+	MinStopGrace = DefaultGrace + DrainTimeout + MinWarmUpDrain
 	// adoptionWaitDelay bounds the wait for jj's stderr once jj has been killed at its budget.
 	adoptionWaitDelay = time.Second
 )
 
 // warmUpDrain is how long Run waits for an in-flight CodeGraph warm-up once the shim's loop has
 // ended, before it returns without it: what is left of the role's stop grace once the agent's own
-// grace and the stdout drain are spent, so the whole stop — the agent SIGTERMed and, ignoring it,
-// killed at Grace; its stdout drained for drainTimeout; the warm-up's codegraph child SIGTERMed
-// and, ignoring it, killed at workspace's codegraphStopGrace; the lease released — fits inside the
-// grace after which the launcher SIGKILLs the shim (endGeneration, internal/launcher/process.go),
-// which would leave the lease behind. With the defaults, 10 s − 5 s − 1 s = 4 s, against a measured
-// 0.1–0.3 s and a codegraph kill at 2 s. A runtime whose stop grace leaves nothing waits not at all.
+// grace and the stdout drain are spent, and never below MinWarmUpDrain. The whole stop — the agent
+// SIGTERMed and, ignoring it, killed at grace; its stdout drained for DrainTimeout; the warm-up's
+// codegraph child SIGTERMed and, ignoring it, killed at workspace's codegraphStopGrace; the lease
+// released — fits inside the stop grace exactly from MinStopGrace up, so a runtime that gives less
+// is refused by the daemon's configuration load (internal/config) rather than waited out here: the
+// launcher SIGKILLs the shim at the stop grace (endGeneration, internal/launcher/process.go),
+// which would leave the lease behind. With the defaults, 10 s − 5 s − 1 s = 4 s.
 func warmUpDrain(stopGrace, grace time.Duration) time.Duration {
-	return max(stopGrace-grace-drainTimeout, 0)
+	return max(stopGrace-grace-DrainTimeout, MinWarmUpDrain)
 }
 
 // Clock is the time the shim waits on: the backoff between dials and the grace before a kill.
@@ -102,9 +117,11 @@ type Config struct {
 	// when its loop ends — the wrapped process has exited — and it must return once that context
 	// ends, its build stopped and its lease released, since Run waits for it (bounded by
 	// warmUpDrain) before returning the agent's exit status: a stop mid-build then leaves no lease
-	// behind for the role's relaunch to read as a live build. Nil on a tmux pane, whose workspace
-	// the daemon warms itself, and on the controller, which has no workspace: nothing runs.
-	WarmCodegraph func(ctx context.Context, dir string)
+	// behind for the role's relaunch to read as a live build. `launched` is when the shim's Run
+	// began — the role container's launcher starting this generation — which the warm-up's success
+	// line reports its build against. Nil on a tmux pane, whose workspace the daemon warms itself,
+	// and on the controller, which has no workspace: nothing runs.
+	WarmCodegraph func(ctx context.Context, dir string, launched time.Time)
 	// Log receives the shim's own lines and its one-line frame summaries: what the pane shows.
 	Log io.Writer
 	// Grace is how long a SIGTERMed child has before it is killed; zero is DefaultGrace.
@@ -124,7 +141,7 @@ type Config struct {
 // the shim exits 143 as that signal would have. The error is the shim's own failure to start
 // the child, never the child's.
 func Run(ctx context.Context, cfg Config) (int, error) {
-	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, stopGrace: cfg.StopGrace, childExited: make(chan struct{})}
+	s := &shim{cfg: cfg, clock: cfg.Clock, grace: cfg.Grace, stopGrace: cfg.StopGrace, childExited: make(chan struct{}), started: time.Now()}
 	if s.clock == nil {
 		s.clock = realClock{}
 	}
@@ -174,6 +191,9 @@ type shim struct {
 	// the agent spends its own grace ignoring SIGTERM.
 	warm     context.Context
 	stopWarm context.CancelFunc
+	// started is when Run began: the launch the warm-up's success line reports its build against
+	// (Config.WarmCodegraph's launched).
+	started time.Time
 
 	mu          sync.Mutex
 	child       *exec.Cmd
@@ -190,9 +210,12 @@ type shim struct {
 
 	// warmed guards cfg.WarmCodegraph: called on the child's first line and never again, not for
 	// a later frame and not when a redialled connection finds the child already running. warmUps
-	// is that one goroutine, which Run waits for (drainWarmUp) before returning.
-	warmed  sync.Once
-	warmUps sync.WaitGroup
+	// is that one goroutine, which Run waits for (drainWarmUp) before returning. warmStarted is
+	// set once by warmCodegraph before its goroutine starts and read by drainWarmUp, which
+	// otherwise returns at once, so a shim that never warmed registers no wait on its clock.
+	warmed      sync.Once
+	warmUps     sync.WaitGroup
+	warmStarted atomic.Bool
 
 	once sync.Once
 	code int
@@ -448,19 +471,25 @@ func (s *shim) warmCodegraph() {
 		s.log.Printf("[worker-shim] no CodeGraph warm-up: LEGION_WORKSPACE is unset")
 		return
 	}
+	s.warmStarted.Store(true)
 	s.warmUps.Add(1)
 	go func() {
 		defer s.warmUps.Done()
-		s.cfg.WarmCodegraph(s.warm, dir)
+		s.cfg.WarmCodegraph(s.warm, dir, s.started)
 	}()
 }
 
 // drainWarmUp waits for the warm-up warmCodegraph started, if any, to return — its codegraph
 // child ended by s.warm's end, its lease released — before Run returns the agent's exit status,
 // so a role stopped mid-build leaves no lease its relaunch would read as a live build. The wait is
-// bounded by warmUpDrain, what the role's stop grace leaves: a warm-up still running past it is
-// logged and left, so the shim's exit still reaches the daemon before the launcher's kill.
+// bounded by warmUpDrain — what the role's stop grace leaves, never under MinWarmUpDrain: a
+// warm-up still running past it is logged and left, so the shim's exit still reaches the daemon
+// before the launcher's kill. A shim whose warm-up never started has nothing to drain and
+// registers no wait on its clock.
 func (s *shim) drainWarmUp() {
+	if !s.warmStarted.Load() {
+		return
+	}
 	drained := make(chan struct{})
 	go func() {
 		s.warmUps.Wait()
@@ -469,7 +498,7 @@ func (s *shim) drainWarmUp() {
 	bound := warmUpDrain(s.stopGrace, s.grace)
 	select {
 	case <-drained:
-	case <-time.After(bound):
+	case <-s.clock.After(bound):
 		s.log.Printf("[worker-shim] the CodeGraph warm-up is still running %v after the wrapped process exited; leaving it", bound)
 	}
 }
@@ -481,7 +510,7 @@ func (s *shim) reap(cmd *exec.Cmd, stdout *os.File, pumped <-chan struct{}) {
 	close(s.childExited)
 	select {
 	case <-pumped:
-	case <-time.After(drainTimeout):
+	case <-time.After(DrainTimeout):
 		s.log.Printf("[worker-shim] the wrapped process exited and something it started still holds its stdout; closing it")
 		_ = stdout.Close()
 		<-pumped

@@ -1158,7 +1158,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, nil)
-	if err := sessions.Put("ses_holder", session.SessionEntry{MachineID: "test-machine", SelfSubscribed: true}); err != nil {
+	if err := sessions.Put("ses_holder", session.SessionEntry{MachineID: "test-machine", Host: "example-host-a", SelfSubscribed: true}); err != nil {
 		t.Fatalf("register holder: %v", err)
 	}
 	if _, err := registry.SetRole("ses_holder", "test-machine", "reviewer", false); err != nil {
@@ -1175,15 +1175,23 @@ func TestRoleGetHandlerReturnsLiveHolder(t *testing.T) {
 			t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 		}
 		var response struct {
-			Role     string `json:"role"`
-			Holder   string `json:"holder"`
-			LastSeen int64  `json:"last_seen"`
+			Role      string `json:"role"`
+			Holder    string `json:"holder"`
+			MachineID string `json:"machine_id"`
+			Host      string `json:"host"`
+			LastSeen  int64  `json:"last_seen"`
 		}
 		if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 			t.Fatalf("decode role response: %v", err)
 		}
 		if response.Role != "reviewer" || response.Holder != "ses_holder" || response.LastSeen == 0 {
 			t.Fatalf("role response = %+v", response)
+		}
+		if response.MachineID != "test-machine" {
+			t.Fatalf("machine_id = %q, want the routing listener's own machine unchanged", response.MachineID)
+		}
+		if response.Host != "example-host-a" {
+			t.Fatalf("host = %q, want the holder's reported host", response.Host)
 		}
 	})
 
@@ -1761,6 +1769,46 @@ func TestSessionsHandlerFiltersAndReportsRoles(t *testing.T) {
 	}
 	if response[0].LastSeen == 0 || response[0].LastSeen != response[0].UpdatedAt {
 		t.Fatalf("last_seen = %d, updated_at = %d", response[0].LastSeen, response[0].UpdatedAt)
+	}
+}
+
+// GET /v1/sessions must report each session's real machine, not whichever listener happened to
+// handle its registration: a session whose plugin sent "host" shows that, and a session whose
+// plugin predates the field falls back to machine_id instead of an empty string.
+func TestSessionsHandlerReportsHostWithFallbackToMachineID(t *testing.T) {
+	registry, sessions := setupSessionsTest(t, nil, nil)
+	if err := sessions.Put("ses_reported", session.SessionEntry{Port: 1, MachineID: "example-listener", Host: "example-host-a"}); err != nil {
+		t.Fatalf("put reported-host session: %v", err)
+	}
+	if err := sessions.Put("ses_legacy", session.SessionEntry{Port: 1, MachineID: "example-listener"}); err != nil {
+		t.Fatalf("put legacy session: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	sessionsHandler(registry, sessions).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/v1/sessions", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
+	}
+	var response []struct {
+		SessionID string `json:"session_id"`
+		MachineID string `json:"machine_id"`
+		Host      string `json:"host"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode sessions response: %v", err)
+	}
+	byID := make(map[string]string, len(response))
+	for _, row := range response {
+		if row.MachineID != "example-listener" {
+			t.Fatalf("machine_id = %q, want the routing listener's own machine unchanged", row.MachineID)
+		}
+		byID[row.SessionID] = row.Host
+	}
+	if byID["ses_reported"] != "example-host-a" {
+		t.Fatalf("host for ses_reported = %q, want example-host-a", byID["ses_reported"])
+	}
+	if byID["ses_legacy"] != "example-listener" {
+		t.Fatalf("host for ses_legacy = %q, want the machine_id fallback", byID["ses_legacy"])
 	}
 }
 

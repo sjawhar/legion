@@ -18,7 +18,8 @@ import (
 
 // fakeJobClock is a jobClock the test moves: Advance fires, in due order and on the caller's
 // goroutine, every timer due by the new time, so a read a timer starts has finished when Advance
-// returns.
+// returns. A timer is placed at the moment it is armed for, so one armed for a moment the clock has
+// already reached fires at the next Advance.
 type fakeJobClock struct {
 	mu     sync.Mutex
 	now    time.Time
@@ -43,10 +44,10 @@ func (c *fakeJobClock) Now() time.Time {
 	return c.now
 }
 
-func (c *fakeJobClock) AfterFunc(d time.Duration, f func()) jobTimer {
+func (c *fakeJobClock) At(at time.Time, f func()) jobTimer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	timer := &fakeJobTimer{clock: c, at: c.now.Add(d), f: f}
+	timer := &fakeJobTimer{clock: c, at: at, f: f}
 	c.timers = append(c.timers, timer)
 	return timer
 }
@@ -500,7 +501,7 @@ func (unstoppableTimer) Stop() bool { return false }
 
 func (c *concurrentJobClock) Now() time.Time { return time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC) }
 
-func (c *concurrentJobClock) AfterFunc(_ time.Duration, f func()) jobTimer {
+func (c *concurrentJobClock) At(_ time.Time, f func()) jobTimer {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.timers = append(c.timers, f)

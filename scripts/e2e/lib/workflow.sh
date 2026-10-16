@@ -7,7 +7,8 @@
 # Sourced, never run. The caller sets
 #   work           the run's scratch directory, holding the files the lib reads: legion, the Go
 #                  daemon binary it asks for state; legion.yaml, the daemon's configuration, which
-#                  says where the daemon answers; dispatch-auth-header, the curl header line
+#                  says where the daemon answers and which GitHub Apps its roles act as
+#                  (read_app_logins); dispatch-auth-header, the curl header line
 #                  (`Authorization: Bearer …`) the agents' Dispatch bearer is sent as (dispatch_get's
 #                  reads, and dispatch_agent's writes in a stand-in session's name); and
 #                  dispatch-human-header, the one the proof human's writes (dispatch_human) are sent
@@ -271,6 +272,45 @@ drive_gate() {
   wait_for_worker "$issue" planner
 }
 
+# ---- Legion's role Apps ---------------------------------------------------------------------------
+
+workflow_lib=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+# read_app_logins sets implement_app_login and review_app_login to the bot login GitHub gives each
+# role App the run's $work/legion.yaml configures, `<slug>[bot]` as REST names it, read by
+# lib/app-logins.ts from GET /app under the App's own key, as the daemon reads its own at boot. A
+# proof names no App: an App renamed on GitHub changes what this reads and no script, and a name
+# another App takes over later is never mistaken for Legion's. A stage proof calls it once, after it
+# first writes legion.yaml and before any check reads role_app, and the check fails, naming what
+# lib/app-logins.ts could not read, rather than leave a login empty.
+implement_app_login=
+review_app_login=
+read_app_logins() {
+  local logins
+  logins=$(bun "$workflow_lib/app-logins.ts" "$work/legion.yaml") ||
+    fail "lib/app-logins.ts could not read the Legion role Apps' bot logins from GitHub (its reason is above)"
+  implement_app_login=$(jq -er .implement <<<"$logins") || fail "lib/app-logins.ts printed no implement App login: $logins"
+  review_app_login=$(jq -er .review <<<"$logins") || fail "lib/app-logins.ts printed no review App login: $logins"
+  note "the implement App acts on GitHub as $implement_app_login and the review App as $review_app_login (GET /app)"
+}
+# role_app ROLE prints the bot login of the App ROLE acts as, as REST names it: the implement App's
+# for the implementer and the merger, the review App's for every other role. role_app_slug ROLE
+# prints the bare slug GraphQL names that bot by (`author { login }` drops the `[bot]`). Each fails,
+# saying so, before read_app_logins has run.
+role_app() {
+  local login
+  case "$1" in implementer | merger) login=$implement_app_login ;; *) login=$review_app_login ;; esac
+  [ -n "$login" ] || {
+    echo "role_app: no App login for $1: read_app_logins has not run" >&2
+    return 1
+  }
+  printf '%s' "$login"
+}
+role_app_slug() {
+  local login
+  login=$(role_app "$1") || return 1
+  printf '%s' "${login%"[bot]"}"
+}
+
 # ---- the proof human on the smoke repository ------------------------------------------------------
 
 # The proof human is the devbox's ordinary gh acting as the sjawhar-agent App, which the dotfiles gh
@@ -311,9 +351,10 @@ pull_request_product_files() {
 # the reviewer's handoff is part of the phase — so the round is driven through the reviewer worker,
 # as the final approval is, rather than posted from the proof's own gh.
 request_changes_as_reviewer() {
-  local issue=$1 round=$2 body=$3
-  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as legion-reviewer[bot] with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
-  until_true 300 "legion-reviewer[bot]'s round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
+  local issue=$1 round=$2 body=$3 app
+  app=$(role_app reviewer) || return 1
+  send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
+  until_true 300 "$app's round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
 }
 # reviewer_requested_changes ROUND: the review App has posted at least ROUND changes-requested
 # reviews on the proof's pull request.
@@ -338,12 +379,14 @@ round_correction_pushed() {
 }
 
 # review_app_reviews FILTER FIELD prints FIELD of each review the review App posted on the proof's
-# pull request that FILTER, a jq condition, selects. REST names the review App's account
-# legion-reviewer[bot]; GraphQL (`gh pr view --json reviews`) drops the suffix, and a user could hold
-# the bare name.
+# pull request that FILTER, a jq condition, selects. REST names the review App's account by its bot
+# login, role_app's `<slug>[bot]`; GraphQL (`gh pr view --json reviews`) drops the suffix, and a
+# user could hold the bare name.
 review_app_reviews() {
+  local app
+  app=$(role_app reviewer) || return 1
   timeout 60 gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and ($1)) | .$2"
+    --jq ".[] | select(.user.login == \"$app\" and ($1)) | .$2"
 }
 # reviewer_approved_head: the review App approved the pull request's current head.
 reviewer_approved_head() {
@@ -366,9 +409,10 @@ reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].w
 # which retro's last commit then removes. The merge carries the run's retro learnings onto the
 # smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
-  local issue=$1
+  local issue=$1 app
+  app=$(role_app reviewer) || return 1
   send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo as your role says, taking the round's steps in the order it gives, and complete the reviewer handoff. This is the round's last review."
-  until_true 300 "legion-reviewer[bot] approval of pull request #$pr_number at its head" reviewer_approved_head
+  until_true 300 "$app approval of pull request #$pr_number at its head" reviewer_approved_head
 }
 # The smoke repository's main is shared by every proof on this box, and a proof merge leaves what it
 # carries there until clean_smoke_main removes it. Another run's merge in that window
@@ -421,22 +465,18 @@ smoke_main_leftovers() {
   gh api "repos/$repo/git/trees/main?recursive=1" \
     --jq '.tree[] | select(.type == "blob") | .path | select(startswith(".legion/") or startswith("docs/solutions/"))'
 }
-# merge_when_clean REPO PR MERGE_FLAG... sees the pull request merged and records who merged it:
-# merge_when_clean_by is "the merger's submission" or "the proof human", and
-# merge_when_clean_commit the merge commit GitHub records. It reads the pull request's state first,
-# in one GraphQL query (gh 2.98's `pr view --json` has no merge-queue field), because under the
-# merger prompt this branch ships (packages/daemon/internal/prompts/roles/merger.md, step 4) the
-# merger submits the merge itself the moment the daemon accepts its READY, with
-# `gh pr merge --auto --squash --match-head-commit <head>`: by the time the proof human reads the
-# pull request the merger's submission is the expected outcome — a repository with a merge queue
-# has enqueued it (mergeQueueEntry), one without has auto-merge armed (autoMergeRequest), and one
-# whose rules were already satisfied has merged it (state MERGED). A merged pull request is
-# asserted, MERGED with a merge commit, and merged no further: `gh pr merge` on a merged pull
-# request fails, and would fail the run. An armed one is never merged by hand: GitHub merges it the
-# moment the repository's rules are satisfied, and a hand merge would only race the submission
-# under proof for the same head; the step waits for the merge to land, and a timeout names what is
-# armed. Only an open pull request with nothing armed — a merger held at its assignment, as the
-# 4b.13b acceptance holds its — is merged by hand, as the proof human, and only once GitHub's own
+# merge_when_clean REPO PR MERGE_FLAG... is the proof human's merge of a pull request no accepted
+# READY covers — one merged before its READY, or one whose merger is held at its assignment, as the
+# 4b.13b acceptance holds its — and records who merged it: merge_when_clean_by is "the daemon's
+# submission" or "the proof human", and merge_when_clean_commit the merge commit GitHub records. A
+# pull request an accepted READY covers is await_ready_merge's: the daemon submits that merge
+# itself, and a hand merge would perform the product's own step. merge_when_clean reads the pull
+# request's state first, in one GraphQL query (gh 2.98's `pr view --json` has no merge-queue
+# field): a merged pull request is asserted, MERGED with a merge commit, and merged no further
+# (`gh pr merge` on a merged pull request fails, and would fail the run); an enqueued or auto-merge
+# armed one is never merged by hand, since GitHub merges it the moment the repository's rules are
+# satisfied, and the step waits for the merge to land, a timeout naming what is armed. Only an open
+# pull request with nothing armed is merged by hand, as the proof human, and only once GitHub's own
 # mergeStateStatus reads CLEAN under the repository's rulesets, rather than racing a required
 # status check that can still be queued well after review and CI otherwise read ready: GitHub
 # refuses the merge outright ("Repository rule violations found... Required status check \"gate\"
@@ -449,35 +489,32 @@ smoke_main_leftovers() {
 # request's head existing, and a timeout names the actual state, mergeStateStatus, what is armed
 # and every check that is not a completed success, not only that time ran out. --match-head-commit
 # holds the hand merge to the head this call last read, so a push between the poll and the merge
-# is refused by its own sha instead of silently merging a later one. The merger's submission can
-# land on the same CLEAN the hand merge acts on, and then refuses it ("Pull request #n is already
-# merged"), so a refused hand merge is followed by one re-read: MERGED with a merge commit is the
-# merger's outcome, not a failure; a hand merge that succeeds is re-read too, so the record is
-# GitHub's state, not gh's exit status. When --delete-branch is among the flags and the merge was
-# not the proof human's, the head branch is deleted here, as the hand merge's flag would have
-# deleted it, so the callers find the same repository either way; a 422 "Reference does not exist"
-# is fine, the repository's own auto-delete may have run. Each gh read carries its own timeout
-# (rig.sh's until_true house rule: a poll that never returns would hold the wait past its bound),
-# and a failed read counts as not yet rather than ending the whole run through the caller's ERR
-# trap. Two separate things to keep failing quietly: `mapfile` on an empty or truncated process
-# substitution (the poll's gh call failed or was killed by its own timeout) returns 0 with fewer
-# than the nine lines a whole answer has, so the count of lines read, not mapfile's status, says
-# whether the read succeeded (`read` there would return non-zero at the end of input, which
-# `set -e` does not exempt); and under `set -E` the process substitution's subshell inherits the
-# caller's ERR trap too, which would otherwise print a false "CHECK ... FAIL: line N exited ..."
-# line for every failed or timed-out poll even though the run carries on (and may still pass) —
-# the `|| true` inside the substitution keeps that subshell's own exit status 0, so nothing fires
-# there. The `|| echo` inside the timeout failure message's diagnostic read needs no such guard:
-# it is already the left side of a `||`, which is exempt whether or not it is in a process
-# substitution. The hand merge itself runs as an `if` test, where neither `set -e` nor the ERR
-# trap acts on its failure, so the re-read judges it.
+# is refused by its own sha instead of silently merging a later one. A merge the daemon submitted
+# can land on the same CLEAN the hand merge acts on, and then refuses it ("Pull request #n is
+# already merged"), so a refused hand merge is followed by one re-read: MERGED with a merge commit
+# is the daemon's outcome, not a failure; a hand merge that succeeds is re-read too, so the record
+# is GitHub's state, not gh's exit status; the hand merge runs as an `if` test, where neither
+# `set -e` nor the ERR trap acts on its failure, so the re-read judges it. When --delete-branch is
+# among the flags and the merge was not the proof human's, the head branch is deleted here, as the
+# hand merge's flag would have deleted it, so the callers find the same repository either way
+# (merge_when_clean_record).
 merge_when_clean_by=
 merge_when_clean_commit=
 # merge_when_clean_read REPO PR reads the pull request's merge record in one GraphQL query into
 # pull_request_state, pull_request_merge_state, pull_request_head, pull_request_head_ref,
-# pull_request_merge_commit and pull_request_armed, which names what the merger's submission armed
-# (`auto-merge enabled at <when> (<method>)`, `merge queue position <n>, <state>`, both, or
-# nothing). A read that fails or answers short leaves every one of them empty.
+# pull_request_merge_commit and pull_request_armed, which names what is armed (`auto-merge enabled
+# at <when> (<method>)`, `merge queue position <n>, <state>`, both, or nothing). A read that fails
+# or answers short leaves every one of them empty, and its caller counts it as not yet rather than
+# ending the whole run through the ERR trap. The read carries its own timeout (rig.sh's until_true
+# house rule: a poll that never returns would hold the wait past its bound). Two separate things
+# keep it failing quietly: `mapfile` on an empty or truncated process substitution (the gh call
+# failed or was killed by its own timeout) returns 0 with fewer than the nine lines a whole answer
+# has, so the count of lines read, not mapfile's status, says whether the read succeeded (`read`
+# there would return non-zero at the end of input, which `set -e` does not exempt); and under
+# `set -E` the process substitution's subshell inherits the caller's ERR trap too, which would
+# otherwise print a false "CHECK ... FAIL: line N exited ..." line for every failed or timed-out
+# poll even though the run carries on — the `|| true` inside the substitution keeps that subshell's
+# own exit status 0, so nothing fires there.
 merge_when_clean_read() {
   local fields
   # shellcheck disable=SC2016 # a GraphQL query: its $ are GraphQL's
@@ -499,10 +536,10 @@ merge_when_clean() {
   local repo_name=$1 pr=$2
   shift 2
   local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
-  local started=$SECONDS beat=$SECONDS polls=0 armed="" flag delete_branch="" out
+  local started=$SECONDS beat=$SECONDS polls=0 armed="" flag delete_branch=""
   for flag in "$@"; do [ "$flag" != --delete-branch ] || delete_branch=1; done
   merge_when_clean_by= merge_when_clean_commit=
-  note "waiting up to ${bound}s for $repo_name#$pr to merge: the merger submits it on its READY, so merged, enqueued or auto-merge armed is the expected read; the proof human merges by hand only once it reads CLEAN with nothing armed"
+  note "waiting up to ${bound}s for $repo_name#$pr to merge: merged, enqueued or auto-merge armed is left to land; the proof human merges by hand only once it reads CLEAN with nothing armed"
   while ((SECONDS - started < bound)); do
     polls=$((polls + 1))
     merge_when_clean_read "$repo_name" "$pr"
@@ -510,7 +547,7 @@ merge_when_clean() {
     [ "$pull_request_state" != CLOSED ] || fail "$repo_name#$pr was closed without a merge"
     if [ -n "$pull_request_armed" ] && [ "$armed" != "$pull_request_armed" ]; then
       armed=$pull_request_armed
-      note "$repo_name#$pr is armed by the merger's submission ($armed; mergeStateStatus $pull_request_merge_state): no hand merge, waiting for it to land"
+      note "$repo_name#$pr is armed by the daemon's submission ($armed; mergeStateStatus $pull_request_merge_state): no hand merge, waiting for it to land"
     fi
     [ -n "$pull_request_armed" ] || [ "$pull_request_merge_state" != CLEAN ] || break
     if ((SECONDS - beat >= 60)); then
@@ -520,19 +557,65 @@ merge_when_clean() {
     sleep "$poll"
   done
   if [ "$pull_request_state" = MERGED ]; then
-    merge_when_clean_by="the merger's submission"
+    merge_when_clean_by="the daemon's submission"
   elif [ -z "$pull_request_armed" ] && [ "$pull_request_merge_state" = CLEAN ]; then
     note "$repo_name#$pr reads CLEAN with nothing armed; the proof human merges it by hand at $pull_request_head"
     if gh -R "$repo_name" pr merge "$pr" --match-head-commit "$pull_request_head" "$@"; then
       merge_when_clean_by="the proof human"
     else
-      note "the hand merge of $repo_name#$pr was refused (gh's reason is above); re-reading it, since the merger's submission may have landed first"
-      merge_when_clean_by="the merger's submission"
+      note "the hand merge of $repo_name#$pr was refused (gh's reason is above); re-reading it, since the daemon's submission may have landed first"
+      merge_when_clean_by="the daemon's submission"
     fi
     merge_when_clean_read "$repo_name" "$pr"
   else
-    fail "timed out after $((SECONDS - started))s ($polls polls) waiting for $repo_name#$pr to merge: it reads ${pull_request_state:-unread}, mergeStateStatus ${pull_request_merge_state:-unknown}, ${pull_request_armed:-nothing armed}; unsettled checks: $(timeout 60 gh -R "$repo_name" pr view "$pr" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" or .status != "COMPLETED") | {name: (.name // .context), workflow: .workflowName, status, conclusion}]' || echo "(could not be read)")"
+    merge_when_clean_timeout "$repo_name" "$pr" "$started" "$polls"
   fi
+  merge_when_clean_record "$repo_name" "$pr" "$delete_branch"
+}
+# await_ready_merge REPO PR [--delete-branch] sees the merge the daemon submits for an accepted
+# READY land, and never merges by hand: the daemon submits READY's merge itself — a merge queue
+# enqueues it, a pull request GitHub reports mergeable merges at once, a repository that allows
+# auto-merge arms it, and in one that allows neither, as sjawhar/legion-smoke does, the daemon
+# merges it once GitHub reports it mergeable — so a hand merge here would perform the product's own
+# step and hide its failure. It polls merge_when_clean_read within merge_when_clean's bound and
+# poll, fails at once on a pull request closed without a merge, and on a timeout names the state,
+# what is armed and every unsettled check. merge_when_clean_by is "the daemon's submission", and
+# --delete-branch deletes the head branch once it has merged (merge_when_clean_record).
+await_ready_merge() {
+  local repo_name=$1 pr=$2 delete_branch=
+  [ "${3:-}" != --delete-branch ] || delete_branch=1
+  local bound=${MERGE_WHEN_CLEAN_BOUND:-300} poll=${MERGE_WHEN_CLEAN_POLL:-0.5}
+  local started=$SECONDS beat=$SECONDS polls=0
+  merge_when_clean_by='' merge_when_clean_commit=''
+  note "waiting up to ${bound}s for the daemon's submission of $repo_name#$pr to merge it; nothing merges it by hand"
+  while ((SECONDS - started < bound)); do
+    polls=$((polls + 1))
+    merge_when_clean_read "$repo_name" "$pr"
+    [ "$pull_request_state" != MERGED ] || break
+    [ "$pull_request_state" != CLOSED ] || fail "$repo_name#$pr was closed without a merge"
+    if ((SECONDS - beat >= 60)); then
+      beat=$SECONDS
+      note "still waiting for the daemon to merge $repo_name#$pr: poll $polls, $((SECONDS - started))s of ${bound}s, now ${pull_request_state:-unread}${pull_request_merge_state:+ $pull_request_merge_state}${pull_request_armed:+, $pull_request_armed}"
+    fi
+    sleep "$poll"
+  done
+  [ "$pull_request_state" = MERGED ] || merge_when_clean_timeout "$repo_name" "$pr" "$started" "$polls"
+  merge_when_clean_by="the daemon's submission"
+  merge_when_clean_record "$repo_name" "$pr" "$delete_branch"
+}
+# merge_when_clean_timeout REPO PR STARTED POLLS fails naming the pull request's last read and every
+# check that is not a completed success. The `|| echo` inside its diagnostic read needs no ERR-trap
+# guard: it is already the left side of a `||`, which is exempt whether or not it is in a process
+# substitution.
+merge_when_clean_timeout() {
+  fail "timed out after $((SECONDS - $3))s ($4 polls) waiting for $1#$2 to merge: it reads ${pull_request_state:-unread}, mergeStateStatus ${pull_request_merge_state:-unknown}, ${pull_request_armed:-nothing armed}; unsettled checks: $(timeout 60 gh -R "$1" pr view "$2" --json statusCheckRollup --jq '[.statusCheckRollup[]? | select(.conclusion != "SUCCESS" or .status != "COMPLETED") | {name: (.name // .context), workflow: .workflowName, status, conclusion}]' || echo "(could not be read)")"
+}
+# merge_when_clean_record REPO PR DELETE_BRANCH asserts the last read is MERGED with a merge commit,
+# records merge_when_clean_commit, and, when DELETE_BRANCH is set and the merge was not the proof
+# human's (whose gh flag deleted it), deletes the head branch; a 422 "Reference does not exist" is
+# fine, the repository's own auto-delete may have run.
+merge_when_clean_record() {
+  local repo_name=$1 pr=$2 delete_branch=$3 out
   [ "$pull_request_state" = MERGED ] && [ -n "$pull_request_merge_commit" ] ||
     fail "$repo_name#$pr is not merged: it reads ${pull_request_state:-unread}, mergeStateStatus ${pull_request_merge_state:-unknown}, merge commit ${pull_request_merge_commit:-none} (the hand merge's own outcome, if any, is above)"
   merge_when_clean_commit=$pull_request_merge_commit
@@ -742,7 +825,6 @@ handoff_fact_commit() {
   [ "$(review_round "$1")" = "$4" ] || return 0
   role_handoff "$1" "$2"
 }
-role_app() { case "$1" in implementer | merger) printf 'legion-implementer[bot]' ;; *) printf 'legion-reviewer[bot]' ;; esac; }
 # assert_handoff_committer ISSUE ROLE PHASE ROUND: the pushed commit carrying the handoff that the
 # role's `handoff_complete` reported is authored and committed by the role's own App, read from the
 # issue's workspace (the role pushed it from there, so its clone holds the commit), so no other
@@ -767,13 +849,14 @@ assert_handoff_committer() {
 # resolves it), so the thread's author is read back and anything but a bot outside Legion's Apps is
 # refused, naming it.
 post_bot_thread() {
-  local head posted id login type
+  local head posted id login type implement review
+  implement=$(role_app implementer) && review=$(role_app reviewer) || return 1
   head=$(timeout 60 gh api "repos/$repo/pulls/$pr_number" --jq .head.sha) || return 1
   posted=$(jq -cn --arg head "$head" --arg path "$smoke_file" \
     '{commit_id:$head, path:$path, subject_type:"file", body:"Stage 3 proof bot: is this file change needed?"}' |
     timeout 60 gh api --method POST "repos/$repo/pulls/$pr_number/comments" --input - --jq '"\(.node_id) \(.user.login) \(.user.type)"') || return 1
   read -r id login type <<<"$posted"
-  if [ "$type" != Bot ] || [ "$login" = "$(role_app implementer)" ] || [ "$login" = "$(role_app reviewer)" ]; then
+  if [ "$type" != Bot ] || [ "$login" = "$implement" ] || [ "$login" = "$review" ]; then
     echo "the thread was opened by $login ($type), not a bot account outside Legion's role Apps: the devbox gh is not acting as its App" >&2
     return 1
   fi
@@ -802,14 +885,15 @@ bot_thread_node_id() {
         reviewThreads(first: 100) { nodes { id comments(first: 1) { nodes { id } } } } } } }' \
     --jq ".data.repository.pullRequest.reviewThreads.nodes[] | select(.comments.nodes[0].id == \"$1\") | .id" | grep .
 }
-# bot_thread_resolved COMMENT AUTHOR: the bot's thread is resolved and carries a reply by AUTHOR
-# (legion-implementer, which answered it; legion-reviewer, which adjudicated it and named it to
-# the implementer). Only the pull request author's App resolves, so the resolver is not read; no
-# word of the reply is read either: nothing resolves a thread on a magic form.
+# bot_thread_resolved COMMENT ROLE: the bot's thread is resolved and carries a reply by ROLE's App
+# (role_app_slug: the implementer's, which answered it; the reviewer's, which adjudicated it and
+# named it to the implementer). Only the pull request author's App resolves, so the resolver is not
+# read; no word of the reply is read either: nothing resolves a thread on a magic form.
 bot_thread_resolved() {
-  local replies
+  local replies author
+  author=$(role_app_slug "$2") || return 1
   replies=$(bot_thread_replies "$1") || return 1
-  [ "$(head -1 <<<"$replies")" = true ] && grep -q "^$2"$'\t' <<<"$replies"
+  [ "$(head -1 <<<"$replies")" = true ] && grep -q "^$author"$'\t' <<<"$replies"
 }
 # review_threads prints every review thread on the proof's pull request as one JSON array: each
 # thread's node id, its isResolved, and each comment's author (GraphQL names an App by its bare
@@ -835,25 +919,31 @@ review_threads() {
 # selector does not rely on that) is never picked: only its requested-changes review names the
 # correction, so only the thread that review opened is the one a correction answers.
 reviewer_thread() {
-  local threads
+  local threads author
+  author=$(role_app_slug reviewer) || return 1
   threads=$(review_threads) || return 1
-  jq -er '[.[] | select(.comments[0].author == "legion-reviewer" and .comments[0].reviewState == "CHANGES_REQUESTED")] as $mine
+  jq -er --arg author "$author" '[.[] | select(.comments[0].author == $author and .comments[0].reviewState == "CHANGES_REQUESTED")] as $mine
     | if ($mine | length) == 1 then $mine[0].id else error("the Legion reviewer opened \($mine | length) CHANGES_REQUESTED review threads, want exactly one") end' <<<"$threads"
 }
 # review_thread ID prints that thread, as review_threads prints each.
 review_thread() { review_threads | jq -ce --arg id "$1" '.[] | select(.id == $id)'; }
-# thread_resolved_by FILE AUTHOR: the thread FILE holds (review_thread's output) is resolved and its
-# newest submitted comment is AUTHOR's: the implementer's `Fixed in <commit>` reply before its own
-# resolution, or the reviewer's answer on a re-review that left the resolution standing.
+# thread_resolved_by FILE ROLE: the thread FILE holds (review_thread's output) is resolved and its
+# newest submitted comment is ROLE's App's (role_app_slug): the implementer's `Fixed in <commit>`
+# reply before its own resolution, or the reviewer's answer on a re-review that left the resolution
+# standing.
 thread_resolved_by() {
-  jq -e --arg author "$2" '.isResolved == true
+  local author
+  author=$(role_app_slug "$2") || return 1
+  jq -e --arg author "$author" '.isResolved == true
     and ([.comments[] | select(.state == "SUBMITTED")] | last | .author == $author)' "$1" >/dev/null
 }
-# thread_resolved_with_reply FILE AUTHOR: the thread FILE holds is resolved and carries a submitted
-# reply by AUTHOR somewhere after its opening comment: the bot's thread the reviewer answered and
-# the implementer, told its id, resolved without a reply of its own.
+# thread_resolved_with_reply FILE ROLE: the thread FILE holds is resolved and carries a submitted
+# reply by ROLE's App (role_app_slug) somewhere after its opening comment: the bot's thread the
+# reviewer answered and the implementer, told its id, resolved without a reply of its own.
 thread_resolved_with_reply() {
-  jq -e --arg author "$2" '.isResolved == true
+  local author
+  author=$(role_app_slug "$2") || return 1
+  jq -e --arg author "$author" '.isResolved == true
     and any(.comments[1:][]; .state == "SUBMITTED" and .author == $author)' "$1" >/dev/null
 }
 # threads_all_resolved FILE ID: every review thread FILE holds (review_threads' output) is resolved,
@@ -866,11 +956,12 @@ threads_all_resolved() {
 # ROUND handoff, the head its own handoff push made. The Go reviewer prompt orders the round so: an
 # approval of a head the handoff push then replaces is of a head the pull request no longer has.
 assert_review_of_own_handoff() {
-  local handoff reviewed
+  local handoff reviewed app
+  app=$(role_app reviewer) || return 1
   handoff=$(handoff_fact_commit "$1" reviewer reviewing "$2")
   [ -n "$handoff" ] || fail "$1 has no reviewer reviewing round $2 handoff fact"
   reviewed=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \
-    --jq ".[] | select(.user.login == \"legion-reviewer[bot]\" and .state == \"$3\") | .commit_id" | tail -1) ||
+    --jq ".[] | select(.user.login == \"$app\" and .state == \"$3\") | .commit_id" | tail -1) ||
     fail "read the reviews on pull request #$pr_number"
   [ "$reviewed" = "$handoff" ] || fail "the reviewer's round $2 $3 review names $reviewed, not $handoff, the head its handoff push made"
   note "the reviewer's round $2 $3 review names $handoff, the head its own handoff push made"

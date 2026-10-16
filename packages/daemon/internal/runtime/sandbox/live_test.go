@@ -584,7 +584,10 @@ type liveRig struct {
 
 	tokens   implementTokens
 	identity runtime.GitIdentity
-	prompt   string
+	// defaultBranch is LEGION_E2E_REPO's default branch as GitHub names it (resolveApp), which
+	// every launch names and independent-provision holds each workspace to.
+	defaultBranch string
+	prompt        string
 	// pod is the operator's pod every launch carries: the fixture, as the daemon reads it.
 	pod  Pod
 	reg  *registry
@@ -794,7 +797,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
 		Store: r.trees,
 		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
-		Agent: stubAgent, BootTimeout: liveBootTimeout,
+		Agent: stubAgent, BootTimeout: liveBootTimeout, BusyBackoff: 250 * time.Millisecond,
 		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
 		Tokens: r.tokens, GitHubCredential: r.tokens.Credential, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
 	}
@@ -1003,7 +1006,8 @@ func (r *liveRig) spec(c *liveClaim, resume string) runtime.SpawnSpec {
 	return runtime.SpawnSpec{
 		Claim: c.token, Project: r.env.claimProject, Tree: c.tree, Issue: c.issue, Role: c.role,
 		Generation: c.gen, BootToken: c.bootToken, Env: map[string]string{"LEGION_E2E_MARKER": c.marker},
-		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: r.env.repo, ResumeSessionFile: resume,
+		Prompt: runtime.PromptParts{RolePromptPaths: []string{r.prompt}}, Repository: r.env.repo, DefaultBranch: r.defaultBranch,
+		ResumeSessionFile: resume,
 	}
 }
 

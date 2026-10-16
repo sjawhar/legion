@@ -26,12 +26,13 @@ legion start --config legion.yaml --check-config
 | `bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; …` | With `advertise_host` set, `bind` is where the daemon listens: `0.0.0.0`, or the daemon host's own address. |
 | `advertise_host must be an IP address or a DNS name, …` or `advertise_host is not used when runtime is tmux: …` | `advertise_host` is the host alone (no scheme, port, path or brackets), and only `runtime: kubernetes` reads it. |
 | `<key> is required when runtime is kubernetes: …` | Add the key; the message says why a pod needs it. |
+| `worker_stop_timeout_seconds must be at least 9 when runtime is kubernetes: …` | Raise it to 9 or more. A role's stop gives its agent 5 s to exit, drains its output for 1 s and waits at least 3 s for the CodeGraph warm-up to release its lease on the issue volume; a smaller grace would let the pod kill the shim with the lease held, and the role's relaunch would skip its own build for a minute. |
 | `projects must configure <PROJECT>, the daemon's own project` | `project` must also be a key of `projects`. |
 | `postgres_dsn is required (or set LEGION_POSTGRES_DSN)` | Give the daemon its database. |
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
-| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay or could not read it at all (the probe's OK line marks that `model-fallback=unread`, the probe pod's log says why), and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, each deployment row carrying `source` (`configuration` or `boot`), and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -170,20 +171,23 @@ Check, in order:
 
    `active` lists the running roots, `waiting` the ones in line, `cap` the slots (`admission_cap`).
 5. **GitHub refuses its branch.** Before the architect starts, the daemon creates the issue's
-   branch, `legion/<KEY>`, on GitHub at `main` as the implement App, and again before each tree
-   member's planner starts, so no agent's push is the one that creates it (GitHub can refuse that
-   push on a large repository). A branch GitHub already has is kept as it is. While GitHub refuses
-   the create, the architect or planner waiting for it does not start. The daemon retries the
-   create, backing off to about a minute, and logs each refusal as an error whose `msg` is
-   `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the ref,
-   GitHub's status and its body:
+   branch, `legion/<KEY>`, on GitHub at the repository's default branch, as GitHub names it
+   (`default_branch`, read again at most every ten minutes), as the implement App, and again before
+   each tree member's planner starts, so no agent's push is the one that creates it (GitHub can
+   refuse that push on a large repository). A branch GitHub already has is kept as it is. While
+   GitHub refuses the read or the create, the architect or planner waiting for it does not start.
+   The daemon retries, backing off to about a minute, and logs each refusal as an error whose `msg`
+   is `outbox row failed`, with `kind` `issue_branch` and an `error` naming the repository, the
+   ref, GitHub's status and its body:
 
    ```text
-   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <main's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
+   {"level":"ERROR","msg":"outbox row failed","row":81,"kind":"issue_branch","error":"create the branch of WIDGETS-12, which its roles' starts wait for: create refs/heads/legion/WIDGETS-12 on acme/widgets at <default branch's commit>: GitHub answered POST /git/refs with 403: {\"message\":\"Resource not accessible by integration\",…}"}
    ```
 
-   Fix what GitHub names, such as the implement App's permissions or a ruleset on `legion/*`
-   branches. The next attempt then creates the branch, and the tree starts.
+   A read GitHub refuses names it instead (`read the default branch of acme/widgets: GitHub
+   answered GET /repos/acme/widgets with 404: …`). Fix what GitHub names, such as the implement
+   App's permissions or a ruleset on `legion/*` branches. The next attempt then creates the branch,
+   and the tree starts.
 6. **Someone else holds it.** The architect's first act is to claim the issue in Dispatch. When a
    person or another session already holds the claim, the architect starts nothing and asks the
    holder, on the issue, to release it or take the issue back; the tree keeps its slot meanwhile.
@@ -212,8 +216,14 @@ says which budget ran out (`launch failures ran out`, `deaths with work outstand
 {"level":"ERROR","msg":"supervise: claim failed","why":"launch failures ran out","launchFailures":3,"deaths":0,…}
 ```
 
-Before it come `supervise: launch failed` or `supervise: process died` warnings, one per attempt.
-The state shows it too:
+Before it come `supervise: launch failed` or `supervise: process died` warnings, one per attempt,
+each but the last followed by `supervise: waiting before the next launch`: the tries are spaced by
+a backoff (1–2 s, then 2–4 s), so a fault that lasts a moment cannot spend the whole budget. Under
+the Kubernetes runtime, a launch whose requests the API server answers overloaded (a 429, or a 5xx
+such as `etcdserver: throttle: too many requests`) waits the server out and is charged nothing;
+its `sandbox runtime: the API server answered a launch's request overloaded` warning comes first,
+and the launch fails only when the server is still overloaded at the launch's own deadline. The
+state shows it too:
 
 ```sh
 legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, holdReason, architect, workers}'

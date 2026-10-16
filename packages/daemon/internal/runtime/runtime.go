@@ -152,7 +152,9 @@ func (k Known) Validate() error {
 //
 // Nothing in it is a place on one runtime's disk. Repository is the issue's repository, the zero
 // Repository for a configuration with none, and each runtime locates the issue's
-// workspace under its own root. Env is the agent's plain variables; Secrets never travel as
+// workspace under its own root. DefaultBranch is that repository's default branch as GitHub names
+// it, a branch name used verbatim (release/v7.1): the base each runtime provisions an issue with no
+// branch at; "" exactly when Repository is zero. Env is the agent's plain variables; Secrets never travel as
 // values — each is written to a 0600 file and reaches the process as a `<NAME>_FILE` pointer — and
 // carries only what is the claim's to carry: a credential every agent of the deployment shares,
 // like the Dispatch bearer, is a runtime option. ResumeSessionFile is set only by `Resume`, and it
@@ -176,6 +178,7 @@ type SpawnSpec struct {
 	Secrets                map[string]string
 	Prompt                 PromptParts
 	Repository             ghrepo.Repository
+	DefaultBranch          string
 	ResumeSessionFile      string
 	WorkspaceRecoveredFrom string
 	Plugins                *PluginInstall
