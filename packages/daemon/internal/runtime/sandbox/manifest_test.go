@@ -1079,9 +1079,11 @@ func operatorPod() Pod {
 }
 
 // The operator's pod (runtime.kubernetes.pod) reaches every pod Legion runs — the root's, a
-// worker's, and the image probe's — exactly as configured: its volumes beside Legion's, its
-// variables and mounts in the agent's container alone, never in an init container, and its account
-// as the pod's.
+// worker's, the daemon-launched controller's and the image probe's — exactly as configured: its
+// volumes beside Legion's, its variables and mounts in the agent's container alone, never in an
+// init container, and its account as the pod's. The controller's account being the issue pods'
+// is what makes it the Legion daemon service's own pod to the secrets broker, which binds one
+// account per service, so its slack_post is granted the service's LEGION_SLACK_BOT_TOKEN.
 func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	opts := testOptions()
 	opts.Pod = operatorPod()
@@ -1097,6 +1099,7 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	}{
 		{"root", podOf(t, r, rootSpec(t)), workerOf(t, r, rootSpec(t))},
 		{"worker", podOf(t, r, workerSpec(t)), workerOf(t, r, workerSpec(t))},
+		{"controller", podOf(t, r, controllerSpec(t)), workerOf(t, r, controllerSpec(t))},
 		{"probe", probeSpec, containerNamed(t, probeSpec, probeContainer)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -73,8 +73,9 @@ no Slack token: the tool asks the [Secrets Broker](/legion/broker/) for the agen
 `LEGION_SLACK_BOT_TOKEN`, the app's bot token (`xoxb-…`), through the broker's own client
 (`agent-secrets LEGION_SLACK_BOT_TOKEN --reason … --wait 0s -- <poster>`), which puts it in the
 environment of the one process that calls Slack's `chat.postMessage`, never the session's. Store
-the token with owner `legion-daemon` and tier `agent`, so the broker grants it at once to the pods
-the Legion daemon enrolls, its controller's included, and to no one else; the app needs the
+the token in the broker's store with owner `legion-daemon` and tier `agent`, so the broker grants it
+at once to the pods the Legion daemon enrolls under the account `BROKER_SERVICES` binds to
+`legion-daemon`, its controller's included, and to no one else; the app needs the
 `chat:write` bot scope and must be added to each channel it answers in. A request still waiting
 for approval, or denied, posts nothing, and the tool says which; Slack's own refusal comes back as
 Slack's error code, such as `not_in_channel`. A reply is at most 4,000 characters, and the tool

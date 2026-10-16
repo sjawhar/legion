@@ -2997,13 +2997,16 @@ keeper relaunches it. Its one init container, `legion workspace-init controller 
 exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
-name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is enrolled with the secrets broker as an issue pod's
-roles are: it projects the broker's token, has a key directory of its own, and its shim takes the
-three agent-secrets flags and its agent `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`. It runs
-as the operator's ServiceAccount (`runtime.kubernetes.pod`), the same account as every issue pod,
-so the binding `BROKER_SERVICES` gives that account for the `legion-daemon` service makes it that
-service's pod, and the broker grants it a secret the service owns at tier `agent`, such as
-`LEGION_SLACK_BOT_TOKEN`, with no person asked. Like every Legion pod it carries no affinity,
+name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is enrolled with the
+secrets broker as an issue pod's roles are: it projects the broker's token, has a key directory of
+its own, and its shim takes the three agent-secrets flags and its agent `AGENT_SECRETS_URL` and
+`AGENT_SECRETS_KEY_DIR`. It runs as the operator's ServiceAccount (`runtime.kubernetes.pod`), the
+same account as every issue pod. The broker binds one account to each service (`BROKER_SERVICES`),
+so this shared account is what makes the controller the `legion-daemon` service's own pod: a
+controller given an account of its own would no longer be granted that service's secrets. The
+broker grants it, with no person asked, an agent secret whose owner is `legion-daemon` and whose
+tier is `agent`, which is how the operator stores `LEGION_SLACK_BOT_TOKEN`, the Slack app's bot
+token its `slack_post` replies with. Like every Legion pod it carries no affinity,
 so it lands wherever the pool has room for it, and it is annotated `karpenter.sh/do-not-disrupt:
 "true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
 is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
