@@ -1,7 +1,7 @@
 # Dispatch HTTP server
 
-Go binary serving the Dispatch dashboard and API. People sign in with Google
-Workspace through the shared sign-in pool and are named by lowercase email; the
+Go binary serving the Dispatch dashboard and API. People sign in through a Cognito
+sign-in pool or with Google directly and are named by lowercase email; the
 web app's GitHub reads go to GitHub as the GitHub App. Dispatch keeps application
 state in Postgres.
 
@@ -184,15 +184,56 @@ bucket with an anonymous `PUT /<bucket>`.
 lowercase email:
 
 - `cookie` (the default) accepts signed `dsession` cookies, which a sign-in
-  through the shared sign-in pool issues (OpenID Connect authorization code).
-  The callback names the person by
-  the email in their pool username (`<provider>_<email>`, for a provider the ID
-  token's `identities` names), never by the `email` claim, which a person can
-  write, and signs in only a member of `DISPATCH_SIGNIN_GROUP`; anyone else gets
-  a 403 page naming them. Dispatch keeps the pool's refresh token and confirms
-  the person's membership with it at least hourly: a refresh the pool refuses,
-  or one whose ID token no longer puts them in the group, ends every session
-  they hold. Logout ends Dispatch's session only, not the pool's.
+  issues (OpenID Connect authorization code), through one of two issuers.
+  Beside `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID` and
+  `DISPATCH_SIGNIN_CLIENT_SECRET`, exactly one of `DISPATCH_SIGNIN_GROUP` and
+  `DISPATCH_SIGNIN_DOMAIN` is set; both, some without the others, a domain
+  under any issuer but `https://accounts.google.com`, a group under that one,
+  or a domain that is not a lowercase DNS name refuse the boot, each naming
+  what is wrong (`checkSignInSettings`).
+
+  Through a shared Cognito sign-in pool (`DISPATCH_SIGNIN_GROUP`), the callback
+  names the person by the email in their pool username (`<provider>_<email>`,
+  for a provider the ID token's `identities` names), never by the `email`
+  claim, which a person can write, and signs in only a member of
+  `DISPATCH_SIGNIN_GROUP`; anyone else gets a 403 page naming them.
+
+  With Google directly (`DISPATCH_SIGNIN_DOMAIN`, under Google's issuer and a
+  Google web client whose redirect URI is `<DISPATCH_SERVER_URL>/auth/callback`),
+  the authorization request asks for offline access with `prompt=consent`, so
+  every exchange returns a refresh token, and names the domain as `hd`, a hint
+  only. The callback signs in a person whose ID token's `hd` is the domain and
+  whose `email_verified` is true (the JSON `true` or the string `"true"`; any
+  other value is false), named by that `email`, lowercased; the token's `hd`
+  decides, never the email's own domain. Anyone else gets a 403 page with the
+  reason: not in the domain, email not verified, or no email. The code flow
+  reads those claims from the verified token in domain mode alone; the shared
+  verifier, which Cognito tokens, pods' tokens and the listener go through,
+  reads none of them. A refusal logs
+  `msg="dispatch: sign-in refused" email=<email> hd=<hd> reason=<reason>`, where
+  a pool refusal logs `username=<username>`.
+
+  Either way, Dispatch keeps the issuer's refresh token and confirms the person
+  with it at least hourly: a refresh the issuer refuses or cannot answer (an
+  outage included, so people are signed out as their hour lapses while it
+  lasts), or one whose ID token no longer passes the rule or names another
+  email, ends every session they hold. Logout ends Dispatch's session only, not
+  the issuer's.
+
+  A person is their email, so an address passed from one account to another is
+  one person. In domain mode `people.sub` records the Google account (`sub`,
+  never reused) that last signed in to the address: a sign-in under another
+  `sub` ends every session of the address in the transaction that records the
+  new one (a failed revoke records nothing, so the retry revokes again), logged
+  `msg="dispatch: a sign-in under another Google account ended every session of the address"`
+  at WARN with the email, and the hourly confirmation ends them when the
+  refreshed token's `sub` is not the recorded one. A sign-in whose address
+  another account signs in to between its record and its cookie gets
+  `409 SIGNIN_SUPERSEDED` and no cookie: after reading the session generation
+  the callback checks that the row still records its `sub`. Group mode neither reads nor
+  writes `sub`, so there the old holder of a reassigned address keeps the
+  cookies they have until their cookie expires, 30 days after it was issued,
+  unless the pool user is removed from `DISPATCH_SIGNIN_GROUP` or disabled.
 
   The refresh token is stored sealed (`people.refresh_token`): AES-256-GCM
   under a key derived from `DISPATCH_SIGNING_KEY` with HKDF and a fixed purpose
@@ -252,7 +293,7 @@ testing. Do not use it on an HTTPS deployment.
 
 `DISPATCH_DEV_SIGNIN=1` adds a second way to get the cookie on a local
 instance: `GET /auth/_dev/signin?login=<email>` records the lowercased person
-and issues the session cookie a pool sign-in does, with no pool exchange and no
+and issues the session cookie an issuer sign-in does, with no issuer exchange and no
 group check. The route serves only a loopback peer whose request carries no forwarding
 header, logs every mint at WARN, and boots only behind the fence the
 configuration table lists. A request that reaches the process looking local
@@ -778,11 +819,11 @@ Dispatch uses cookie identity through the sign-in pool.
 | Path | Method | Identity | Purpose |
 | --- | --- | --- | --- |
 | `/api/v1` | GET | none | List every `/api/v1` route with its auth and purpose. |
-| `/auth/start` | GET | none | Start Google sign-in through the sign-in pool. `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
-| `/auth/callback` | GET | sign-in state | Exchange the pool's code, name the person by the email in their username, refuse anyone outside `DISPATCH_SIGNIN_GROUP` with a 403 page naming them, record the person and the refresh token, issue the cookie. |
+| `/auth/start` | GET | none | Start Google sign-in at the sign-in issuer: the Cognito sign-in pool, or Google itself for `DISPATCH_SIGNIN_DOMAIN`, asking for offline access with `prompt=consent` and the domain as `hd`. `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
+| `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` admits: under a group, named by the email in their pool username, anyone outside the group refused with a 403 page naming them; under a domain, named by the verified `email` of a Google account whose `hd` is the domain, anyone else refused with a 403 page giving the reason. Record the person and the refresh token (and, under a domain, the account's `sub`, ending the address's sessions when another account held it), issue the cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie. |
 | `/auth/logout` | POST | cookie or trusted header | End the person's Dispatch sessions, forget their refresh token, and clear the session cookie. |
 | `/auth/whoami` | GET | cookie or trusted header | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
-| `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in pool: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
+| `/auth/_dev/signin` | GET | none; `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Sign in the person `login` names, lowercased, without the sign-in issuer: `302` to the sanitized `next` (default `/`) with the session cookie. `400 DEV_SIGNIN_INPUT` without `login`, `403 DEV_SIGNIN_FORBIDDEN` for a non-loopback peer or a request carrying `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Real-IP` or `Via`. Each mint logs at WARN with the email and the peer. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | cookie or trusted header | Read GitHub as the GitHub App installation that covers the repository: a pull request (`repos/{o}/{r}/pulls/{n}`), an issue (`repos/{o}/{r}/issues/{n}`) or a commit's check runs (`repos/{o}/{r}/commits/{sha}/check-runs`), the only reads the web app makes. Every person shares the App's credential, which reads far more of a repository than that, so any other method is `405 METHOD_NOT_ALLOWED`, any other path `404 GITHUB_PATH_REFUSED`, and a repository the App is not installed on, or no App key, `503 GITHUB_TOKEN_UNAVAILABLE`. |
 | `/healthz` | GET | none | Report that the process serves, Postgres answers within `store.healthProbeTimeout` (two seconds) on the health pool — a dedicated one-connection pool, never the shared one — NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where `DISPATCH_FILE_STORE_BUCKET` is set (`files`; null when it is not). A database that stops answering is `503` with `db: false` inside that bound, never silence, and the reason is logged. `files` is reported and never decides `ok` or the status: a bucket that stops answering is `200` with `files: false`, so a bucket outage fails uploads and downloads and nothing else, and a deploy check that wants the bucket asserts `files: true` itself. Two seconds fits the tightest prober here, the three-second compose healthcheck and deploy script, as well as the ALB's five. The body also names what is deployed: `commit`, the legion commit the image build stamped (the Dockerfile's `LEGION_COMMIT`; `null` in an unstamped build), and `schema_version`, the highest migration `schema_migrations` records, read by the same probe (`null` when `db` is false). |
 | `/api/v1/events` | GET | cookie, trusted header, or bearer | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |

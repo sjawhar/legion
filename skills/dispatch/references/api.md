@@ -27,8 +27,8 @@ The deployed Dispatch server's browser origin is configured separately with
 `DISPATCH_SERVER_URL` in the deployment `compose/.env`. Do not change an
 agent's `envoy.json` to set the sign-in callback origin: the value must be the
 exact URL humans type in their browser, and `<DISPATCH_SERVER_URL>/auth/callback`
-is the callback registered on the sign-in pool's app client
-(`DISPATCH_SIGNIN_CLIENT_ID`).
+is the callback registered on Dispatch's sign-in client (`DISPATCH_SIGNIN_CLIENT_ID`):
+the sign-in pool's app client, or the Google web client.
 
 ### Finding a route
 
