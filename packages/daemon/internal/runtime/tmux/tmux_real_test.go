@@ -515,6 +515,7 @@ func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 		Executable:       func() (string, error) { return r.legion, nil },
 		GitHubCredential: staticCredential,
 		GH:               fakeGH,
+		RepositoryOwner:  acmeOwner,
 	}
 	for _, f := range adjust {
 		f(&opts)
@@ -1671,7 +1672,11 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	ctx := context.Background()
 	realGH := filepath.Join(t.TempDir(), "gh")
-	if err := os.WriteFile(realGH, []byte("#!/bin/sh\nprintf 'real gh %s\\n' \"$GH_CONFIG_DIR\"\n"), 0o755); err != nil {
+	// The stand-in answers `legion gh`'s read of a command's options (`<command> --help`) as gh's
+	// help does, and every other run with the GH_CONFIG_DIR it was given.
+	stub := "#!/bin/sh\ncase \"$*\" in\n*--help) printf '%s\\n' FLAGS '  -q, --jq string   Query' '  --help   Show help' ;;\n" +
+		"*) printf 'real gh %s\\n' \"$GH_CONFIG_DIR\" ;;\nesac\n"
+	if err := os.WriteFile(realGH, []byte(stub), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	r := newRig(t, func(o *Options) { o.GH = realGH })

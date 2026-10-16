@@ -1237,8 +1237,8 @@ func TestControllerStartWritesTheControllersGitHubCredentialUnderGh(t *testing.T
 			t.Fatalf("%s's config.yml = %q, %v, want %q", owner, cfg, err, ghconfig.Config)
 		}
 	}
-	if got, err := ghconfig.ReadDefault(ghDir); err != nil || got != "acme" {
-		t.Errorf("the bundle's default = %q, %v, want acme", got, err)
+	if entries, err := os.ReadDir(ghDir); err != nil || len(entries) != 2 || entries[0].Name() != "acme" || entries[1].Name() != "sjawhar" {
+		t.Errorf("the gh directory holds %v (%v), want the two owners' directories alone", entries, err)
 	}
 	env := c.env()
 	if env["GH_CONFIG_DIR"] != filepath.Join(ghDir, "acme") || env["LEGION_GH_OWNERS_DIR"] != ghDir || env["LEGION_GH_PATH"] != c.gh {

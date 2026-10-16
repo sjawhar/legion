@@ -90,6 +90,12 @@ type Options struct {
 	// as LEGION_GH_PATH: the `legion gh` wrapper first on the pane's PATH runs it with the gh
 	// directory of the owner a command names. Required with GitHubCredential.
 	GH string
+	// RepositoryOwner is the owner of the repository a claim's issue works, from the daemon's own
+	// record: the owner whose directory of a pane's gh bundle holds the write token. The refresher
+	// asks it for a tree pane the runtime adopted after a restart, whose launch's owner it never
+	// saw, and never reads that from the pane's gh directory, which the pane's own user can write.
+	// Required with GitHubCredential.
+	RepositoryOwner func(ctx context.Context, token claim.Token) (string, error)
 	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.
 	OmpInvocation   string
@@ -135,6 +141,7 @@ type Runtime struct {
 	dispatchToken    string
 	gitHubCredential runtime.GitHubCredential
 	gh               string
+	repositoryOwner  func(ctx context.Context, token claim.Token) (string, error)
 	ompInvocation    string
 	ompPrefix        []string
 	stopGrace        time.Duration
@@ -171,8 +178,8 @@ type Runtime struct {
 
 // trackedProcess is one watched process: its locator, the issue it works on when the runtime
 // opened it (empty for one it adopted, whose window is then not offered to later panes), and the
-// default owner of the gh bundle its launch wrote (empty for one it adopted, whose bundle root
-// records it: ghconfig.ReadDefault).
+// default owner of the gh bundle its launch wrote (empty for one it adopted, whose write owner the
+// daemon's record names: Options.RepositoryOwner).
 type trackedProcess struct {
 	locator   runtime.Locator
 	issue     string
@@ -205,6 +212,8 @@ func New(opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("tmux runtime: Dispatch token file %q is not an absolute path", opts.DispatchTokenFile)
 	case opts.GitHubCredential != nil && !filepath.IsAbs(opts.GH):
 		return nil, fmt.Errorf("tmux runtime: the real gh a pane's `legion gh` runs is %q, not an absolute path", opts.GH)
+	case opts.GitHubCredential != nil && opts.RepositoryOwner == nil:
+		return nil, errors.New("tmux runtime: a GitHub credential function needs the daemon's record of each claim's repository owner (RepositoryOwner)")
 	}
 	environ := opts.Environ
 	if environ == nil {
@@ -240,6 +249,7 @@ func New(opts Options) (*Runtime, error) {
 		dispatchToken:    opts.DispatchTokenFile,
 		gitHubCredential: opts.GitHubCredential,
 		gh:               opts.GH,
+		repositoryOwner:  opts.RepositoryOwner,
 		ompInvocation:    opts.OmpInvocation,
 		ompPrefix:        opts.OmpLaunchPrefix,
 		stopGrace:        opts.StopGrace,

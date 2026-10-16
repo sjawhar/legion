@@ -1099,7 +1099,7 @@ restart_scenarios() {
   until_true 240 "the implementer pane to read the pull request" session_contains "$restart_issue" implementer "CRED-PR=https://github.com/$repo/pull/$pr_number"
   # The directory the agent printed is the one its OMP process was launched with: its repository's
   # owner's directory of the bundle named for its claim, which holds the two gh files the daemon
-  # writes for the pane alone beside the bundle's record of its default owner.
+  # writes for the pane alone, and nothing else beside it.
   cred_pane_pid=$(claim_pane_pid "$restart_issue" implementer) || fail "the implementer pane on $restart_issue has no process locator"
   cred_omp=$(omp_descendant "$cred_pane_pid") || fail "the implementer pane on $restart_issue has no OMP process"
   cred_root=$(pane_value "$cred_omp" LEGION_GH_OWNERS_DIR)
@@ -1111,7 +1111,7 @@ restart_scenarios() {
   for dir in "$cred_root" "$cred_dir"; do
     [ "$(stat -c %a "$dir")" = 700 ] || fail "$dir is mode $(stat -c %a "$dir"), want 700"
   done
-  [ "$(ls -A "$cred_root" | sort | tr '\n' ' ')" = ".default $owner " ] || fail "$cred_root holds $(ls -A "$cred_root" | tr '\n' ' '), want .default and $owner alone"
+  [ "$(ls -A "$cred_root" | tr '\n' ' ')" = "$owner " ] || fail "$cred_root holds $(ls -A "$cred_root" | tr '\n' ' '), want $owner's directory alone"
   [ "$(ls -A "$cred_dir" | sort | tr '\n' ' ')" = "config.yml hosts.yml " ] || fail "$cred_dir holds $(ls -A "$cred_dir" | tr '\n' ' '), want config.yml and hosts.yml alone"
   [ "$(stat -c %a "$cred_dir/hosts.yml")" = 600 ] || fail "$cred_dir/hosts.yml is mode $(stat -c %a "$cred_dir/hosts.yml"), want 600"
   jq -R -s -e '[split("\n")[] | fromjson? | select(.msg == "tmux runtime: github credential written" and .role == "implementer")] | length > 0' <"$evidence/logs/daemon.log" >/dev/null ||

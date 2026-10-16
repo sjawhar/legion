@@ -696,16 +696,18 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
 // providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
-// the daemon has them, are every tree pane's gh bundle (gitHubCredential), with gh, the real gh boot
-// resolved (daemonTools), the one each pane's `legion gh` runs; a daemon with no GitHub Apps hands
-// the runtime none, and its panes hold no gh files. The private server's environment is scrubbed
-// before anything is launched on it.
+// the daemon has them, are every tree pane's gh bundle (appauth.GitHubCredential), with gh, the
+// real gh boot resolved (daemonTools), the one each pane's `legion gh` runs, and the project's
+// configured repository's owner the record of every claim's owner (repositoryOwner); a daemon with
+// no GitHub Apps hands the runtime none, and its panes hold no gh files. The private server's
+// environment is scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile, gh string, log *slog.Logger) runtimeFactory {
 	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
 			opts.GitHubCredential, opts.GH = appauth.GitHubCredential(tokens, projectOwners(cfg)), gh
+			opts.RepositoryOwner = repositoryOwner(cfg)
 		}
 		rt, err := tmux.New(opts)
 		if err != nil {
@@ -1486,10 +1488,18 @@ func githubOwner(cfg config.Config) string {
 }
 
 // projectOwners is the GitHub owners of the project's repositories, every one of which a role's gh
-// bundle holds a directory for (gitHubCredential): the configured repository's owner.
+// bundle holds a directory for (appauth.GitHubCredential): the configured repository's owner.
 func projectOwners(cfg config.Config) func() []string {
 	owner := githubOwner(cfg)
 	return func() []string { return []string{owner} }
+}
+
+// repositoryOwner is the daemon's record of the owner of the repository a claim's issue works, the
+// owner a tmux pane adopted after a restart holds its write token for (tmux.Options.
+// RepositoryOwner): the configured repository's, the one every claim of the project works.
+func repositoryOwner(cfg config.Config) func(context.Context, claim.Token) (string, error) {
+	owner := githubOwner(cfg)
+	return func(context.Context, claim.Token) (string, error) { return owner, nil }
 }
 
 // adoptIdentity is the supervisor's identity for a working copy's adoption (supervise.Deps.Identity)
