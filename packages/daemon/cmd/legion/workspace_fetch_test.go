@@ -404,9 +404,9 @@ func TestWorkspaceInitFetchLogsNoToken(t *testing.T) {
 	}
 }
 
-// noCacheLine is the one line `fetch` prints when no ready repository cache serves the repository:
-// the clone from GitHub, with its bytes.
-var noCacheLine = regexp.MustCompile(`^workspace-init fetch: no ready repository cache for acme/widgets: cloning from GitHub \(([0-9,]+) bytes\)\n$`)
+// noCacheLine is the one line `fetch` prints when no repository cache is named: the clone from
+// GitHub, with its bytes.
+var noCacheLine = regexp.MustCompile(`^workspace-init fetch: no repository cache named: cloned acme/widgets from GitHub \(([0-9,]+) bytes\)\n$`)
 
 // printedBytes is a byte count as `fetch` prints it, digits grouped by commas.
 func printedBytes(t *testing.T, printed string) int64 {
@@ -457,12 +457,14 @@ func (v *issueVolume) advanceRemote(t *testing.T) string {
 	return v.git(t, "--git-dir="+v.env["WINIT_REMOTE"], "rev-parse", "main")
 }
 
-// cacheTarServer serves, as the repository cache's GET /tar, the history and refs of a bare clone of
-// the volume's remote as it is now, and returns its address and the tar's length.
+// cacheTarServer serves, as the repository cache's GET /healthz and GET /tar, a ready cache and the
+// history and refs of a bare clone of the volume's remote as it is now, and returns its address and
+// the tar's length. The clone runs over git's transport, so its history is one pack, as the cache's
+// is.
 func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	t.Helper()
 	cache := filepath.Join(t.TempDir(), "widgets.git")
-	if output, err := exec.Command(v.env["WINIT_REAL_GIT"], "clone", "--bare", "--quiet", v.env["WINIT_REMOTE"], cache).CombinedOutput(); err != nil {
+	if output, err := exec.Command(v.env["WINIT_REAL_GIT"], "clone", "--bare", "--quiet", "--no-local", v.env["WINIT_REMOTE"], cache).CombinedOutput(); err != nil {
 		t.Fatalf("clone the cache: %v\n%s", err, output)
 	}
 	var stream bytes.Buffer
@@ -512,7 +514,12 @@ func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	}
 	body := stream.Bytes()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/tar" {
+		switch r.URL.Path {
+		case "/healthz":
+			_, _ = w.Write([]byte(`{"ready":true,"repo":"acme/widgets","bytes":1}`))
+			return
+		case "/tar":
+		default:
 			http.NotFound(w, r)
 			return
 		}
@@ -568,8 +575,9 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	}
 }
 
-// A cache the fetch cannot use is logged, and the fetch clones from GitHub instead and says so.
-func TestWorkspaceInitFetchClonesWhenTheCacheFails(t *testing.T) {
+// A cache that never becomes ready fails the fetch, exit 1, naming the cache and its last answer,
+// after one waiting line per change of that answer: nothing is cloned from GitHub instead.
+func TestWorkspaceInitFetchFailsWhenTheCacheIsNeverReady(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t, "main")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
@@ -577,13 +585,16 @@ func TestWorkspaceInitFetchClonesWhenTheCacheFails(t *testing.T) {
 	defer server.Close()
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+	useInstantClock(t)
 
 	code, stdout, stderr := runWorkspaceInitHere(append(v.fetchArgs(), "--cache-url", server.URL))
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q", code, stderr)
+	if code != 1 || !strings.Contains(stderr, "the repository cache "+server.URL+" was not ready within "+workspace.CacheWaitTimeout.String()+": GET "+server.URL+"/healthz answered 503 Service Unavailable") {
+		t.Fatalf("exit %d, stderr %q; want 1 naming the cache and its answer", code, stderr)
 	}
-	want := regexp.MustCompile(`^workspace-init fetch: the repository cache ` + regexp.QuoteMeta(server.URL) + ` was not used: GET ` + regexp.QuoteMeta(server.URL) + `/tar answered 503 Service Unavailable; cloning from GitHub\nworkspace-init fetch: cloned acme/widgets from GitHub \([0-9,]+ bytes\)\n$`)
-	if !want.MatchString(stdout) {
-		t.Fatalf("stdout %q, want the cache's failure then the clone", stdout)
+	if !strings.HasPrefix(stdout, "workspace-init fetch: waiting for the repository cache "+server.URL+" to be ready: GET "+server.URL+"/healthz answered 503 Service Unavailable\n") {
+		t.Fatalf("stdout %q, want the wait logged", stdout)
+	}
+	if _, err := os.Stat(v.credentialLog); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("GitHub was reached while the cache was not ready (%v)", err)
 	}
 }

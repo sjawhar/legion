@@ -72,10 +72,8 @@ func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.
 	case report.CacheBytes > 0:
 		fmt.Fprintf(stdout, "workspace-init fetch: %s bytes from the repository cache %s in %s; %s bytes from GitHub for the delta (%s)\n",
 			groupedBytes(report.CacheBytes), cacheURL, report.CacheDuration.Round(time.Millisecond), groupedBytes(report.GitHubBytes), refCount(report.Refs))
-	case report.Cloned && cacheURL == "":
-		fmt.Fprintf(stdout, "workspace-init fetch: no ready repository cache for %s: cloning from GitHub (%s bytes)\n", repository, groupedBytes(report.GitHubBytes))
 	case report.Cloned:
-		fmt.Fprintf(stdout, "workspace-init fetch: cloned %s from GitHub (%s bytes)\n", repository, groupedBytes(report.GitHubBytes))
+		fmt.Fprintf(stdout, "workspace-init fetch: no repository cache named: cloned %s from GitHub (%s bytes)\n", repository, groupedBytes(report.GitHubBytes))
 	default:
 		fmt.Fprintf(stdout, "workspace-init fetch: the feed holds %s already: %s bytes from GitHub for the delta (%s)\n", repository, groupedBytes(report.GitHubBytes), refCount(report.Refs))
 	}

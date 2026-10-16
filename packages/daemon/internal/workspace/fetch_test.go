@@ -948,24 +948,44 @@ func tarOf(t *testing.T, entries ...[2]string) []byte {
 	return stream.Bytes()
 }
 
-// cacheServer serves body as the repository cache's GET /tar, and counts the requests it answers.
-func cacheServer(t *testing.T, body []byte) (*httptest.Server, *int) {
-	t.Helper()
-	var mu sync.Mutex
-	asked := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet || r.URL.Path != "/tar" {
-			http.NotFound(w, r)
+// fakeCache stands in for the repository cache's server: GET /healthz answers 503 for its first
+// notReady polls and then 200 ready, and GET /tar streams body. It counts each.
+type fakeCache struct {
+	body     []byte
+	notReady int
+
+	mu          sync.Mutex
+	healthAsked int
+	tarAsked    int
+}
+
+func (c *fakeCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
+		c.healthAsked++
+		if c.healthAsked <= c.notReady {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"ready":false,"repo":"acme/widgets","bytes":0}`))
 			return
 		}
-		mu.Lock()
-		asked++
-		mu.Unlock()
+		_, _ = w.Write([]byte(`{"ready":true,"repo":"acme/widgets","bytes":1}`))
+	case r.Method == http.MethodGet && r.URL.Path == "/tar":
+		c.tarAsked++
 		w.Header().Set("Content-Type", "application/x-tar")
-		_, _ = w.Write(body)
-	}))
+		_, _ = w.Write(c.body)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// serve starts c and returns its address, closed when the test ends.
+func (c *fakeCache) serve(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(c)
 	t.Cleanup(server.Close)
-	return server, &asked
+	return server.URL
 }
 
 // With a repository cache, a feed that does not hold the repository yet is unpacked from the
@@ -976,10 +996,10 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	run := newLocalRunner(t)
 	cache := cacheOf(t, run.remote)
 	body := cacheTar(t, cache)
-	server, _ := cacheServer(t, body)
+	served := &fakeCache{body: body}
 	moved := pushRemoteBranch(t, run.remote, "release/v7.1", "newer.txt")
 	req := fetchRequest(t)
-	req.CacheURL = server.URL
+	req.CacheURL = served.serve(t)
 
 	report, err := Fetch(context.Background(), run, req)
 	if err != nil {
@@ -1029,80 +1049,127 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	}
 }
 
-// A cache whose tar holds an entry a feed does not take — one whose name leaves the feed, one that
-// is not a regular file or directory, the cache's own configuration, an alternates file — is not
-// used: Fetch logs why, writes nothing of it, and clones from GitHub, which the report says. So
-// does a cache that does not answer, and one that answers not ready.
-func TestFetchClonesFromGitHubWhenTheCacheIsNotUsable(t *testing.T) {
-	served := func(body func(t *testing.T) []byte) func(t *testing.T) *httptest.Server {
-		return func(t *testing.T) *httptest.Server {
-			server, _ := cacheServer(t, body(t))
-			return server
+// A fresh feed comes from the repository cache alone: while the cache is not ready, Fetch waits on
+// it, asking its /healthz every CachePoll and logging what it answered, then streams it once it is
+// ready. Nothing is cloned from GitHub meanwhile.
+func TestFetchWaitsForTheRepositoryCacheToBeReady(t *testing.T) {
+	run := newLocalRunner(t)
+	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: 3}
+	req := fetchRequest(t)
+	req.CacheURL = served.serve(t)
+	clock := newTestClock()
+	req.Clock = clock
+	var logged []string
+	req.Log = func(line string) { logged = append(logged, line) }
+
+	report, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if report.Cloned || report.CacheBytes == 0 || served.tarAsked != 1 || served.healthAsked != 4 {
+		t.Fatalf("Fetch reported %+v after %d health polls and %d tars, want the cache streamed once after 4 polls", report, served.healthAsked, served.tarAsked)
+	}
+	if want := []time.Duration{CachePoll, CachePoll, CachePoll}; !slices.Equal(clock.waits, want) {
+		t.Errorf("Fetch waited %v between polls, want %v", clock.waits, want)
+	}
+	want := "waiting for the repository cache " + req.CacheURL + " to be ready: GET " + req.CacheURL + "/healthz answered 503 Service Unavailable"
+	if len(logged) == 0 || !strings.HasPrefix(logged[0], want) {
+		t.Errorf("Fetch logged %q, want the wait first: %q", logged, want)
+	}
+	for _, call := range run.Calls() {
+		if commandWith(call.Argv, "git", "clone") {
+			t.Errorf("Fetch cloned from GitHub while it waited on the cache: %q", call.Argv)
 		}
 	}
+}
+
+// A cache that never becomes ready within CacheWaitTimeout fails the fetch, naming the cache and
+// what it last answered: there is no full clone from GitHub instead, so a cache that is down never
+// costs each new issue a full download.
+func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		serve func(t *testing.T) *httptest.Server
-		says  string
+		name string
+		url  func(t *testing.T) string
+		says string
 	}{
-		{"an entry leaving the feed", served(func(t *testing.T) []byte {
-			return tarOf(t, [2]string{"HEAD", "ref: refs/heads/main\n"}, [2]string{"../x", "escaped\n"})
-		}), `the repository cache's tar holds "../x", which is not a path inside the feed`},
-		{"a symbolic link", served(func(t *testing.T) []byte { return tarOf(t, [2]string{"refs/heads/main@"}) }),
-			`the repository cache's tar holds "refs/heads/main", which is neither a regular file nor a directory`},
-		{"the cache's configuration", served(func(t *testing.T) []byte { return tarOf(t, [2]string{"config", "[core]\n\tfsmonitor = true\n"}) }),
-			`the repository cache's tar holds "config", which is not part of a repository's history and refs`},
-		{"an alternates file", served(func(t *testing.T) []byte { return tarOf(t, [2]string{"objects/info/alternates", "/elsewhere\n"}) }),
-			`the repository cache's tar holds "objects/info/alternates", which is not part of a repository's history and refs`},
-		{"a cache that does not answer", func(t *testing.T) *httptest.Server {
-			server, _ := cacheServer(t, nil)
+		{"a cache answering not ready", func(t *testing.T) string { return (&fakeCache{notReady: 1 << 30}).serve(t) }, "503 Service Unavailable"},
+		{"a cache that does not answer", func(t *testing.T) string {
+			server := httptest.NewServer(http.NotFoundHandler())
 			server.Close()
-			return server
+			return server.URL
 		}, "connection refused"},
-		{"a cache that answers not ready", func(t *testing.T) *httptest.Server {
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
-			}))
-			t.Cleanup(server.Close)
-			return server
-		}, "503 Service Unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
-			server := tc.serve(t)
 			req := fetchRequest(t)
-			req.CacheURL = server.URL
-			var logged []string
-			req.Log = func(line string) { logged = append(logged, line) }
+			req.CacheURL = tc.url(t)
+			req.Clock = newTestClock()
+			req.Log = func(string) {}
+			_, err := Fetch(context.Background(), run, req)
+			if err == nil || !strings.Contains(err.Error(), "the repository cache "+req.CacheURL+" was not ready within "+CacheWaitTimeout.String()) || !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("Fetch = %v, want the wait's failure naming %q", err, tc.says)
+			}
+			assertNothingFilledTheFeed(t, run, req)
+		})
+	}
+}
 
-			report, err := Fetch(context.Background(), run, req)
-			if err != nil {
-				t.Fatalf("Fetch: %v", err)
+// assertNothingFilledTheFeed fails when Fetch cloned from GitHub or left anything at, or beside,
+// the feed's repository.
+func assertNothingFilledTheFeed(t *testing.T, run *recordingRunner, req FetchRequest) {
+	t.Helper()
+	for _, call := range run.Calls() {
+		if commandWith(call.Argv, "git", "clone") {
+			t.Errorf("Fetch cloned from GitHub: %q", call.Argv)
+		}
+	}
+	if entries, err := os.ReadDir(filepath.Join(req.Feed, "acme")); err == nil && len(entries) != 0 {
+		names := []string{}
+		for _, entry := range entries {
+			names = append(names, entry.Name())
+		}
+		t.Errorf("Fetch left %v in the feed", names)
+	}
+}
+
+// A cache whose tar holds an entry a feed does not take — one whose name leaves the feed, one that
+// is not a regular file or directory, the cache's own configuration, an alternates file — fails the
+// fetch, naming the entry: nothing of it is written, and nothing is cloned from GitHub.
+func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body func(t *testing.T) []byte
+		says string
+	}{
+		{"an entry leaving the feed", func(t *testing.T) []byte {
+			return tarOf(t, [2]string{"HEAD", "ref: refs/heads/main\n"}, [2]string{"../x", "escaped\n"})
+		}, `the repository cache's tar holds "../x", which is not a path inside the feed`},
+		{"a symbolic link", func(t *testing.T) []byte { return tarOf(t, [2]string{"refs/heads/main@"}) },
+			`the repository cache's tar holds "refs/heads/main", which is neither a regular file nor a directory`},
+		{"the cache's configuration", func(t *testing.T) []byte { return tarOf(t, [2]string{"config", "[core]\n\tfsmonitor = true\n"}) },
+			`the repository cache's tar holds "config", which is not part of a repository's history and refs`},
+		{"an alternates file", func(t *testing.T) []byte { return tarOf(t, [2]string{"objects/info/alternates", "/elsewhere\n"}) },
+			`the repository cache's tar holds "objects/info/alternates", which is not part of a repository's history and refs`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			req := fetchRequest(t)
+			req.CacheURL = (&fakeCache{body: tc.body(t)}).serve(t)
+			_, err := Fetch(context.Background(), run, req)
+			if err == nil || !strings.Contains(err.Error(), "fill the feed from the repository cache "+req.CacheURL) || !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("Fetch = %v, want the cache refused naming %q", err, tc.says)
 			}
-			if !report.Cloned || report.CacheBytes != 0 {
-				t.Fatalf("Fetch reported %+v, want a clone from GitHub and nothing from the cache", report)
-			}
-			if len(logged) != 1 || !strings.HasPrefix(logged[0], "the repository cache "+server.URL+" was not used: ") || !strings.Contains(logged[0], tc.says) || !strings.HasSuffix(logged[0], "; cloning from GitHub") {
-				t.Fatalf("Fetch logged %q, want the cache's failure naming %q", logged, tc.says)
-			}
-			findCall(t, run.Calls(), "git", "clone", "--bare")
+			assertNothingFilledTheFeed(t, run, req)
 			if _, err := os.Stat(filepath.Join(req.Feed, "acme", "x")); !errors.Is(err, os.ErrNotExist) {
 				t.Errorf("the tar wrote outside the feed (%v)", err)
-			}
-			feed := report.Feed
-			if main := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")); main != strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+run.remote, "rev-parse", "main")) {
-				t.Errorf("the feed's main is %s, not the remote's", main)
-			}
-			if _, err := os.Stat(filepath.Join(feed, "objects", "info", "alternates")); !errors.Is(err, os.ErrNotExist) {
-				t.Errorf("the feed holds an alternates file (%v)", err)
 			}
 		})
 	}
 }
 
-// Without a cache, Fetch clones from GitHub and the report says how many bytes that brought; a
-// feed that holds the repository already is fetched into and asks no cache, whatever cache it is
-// given.
+// Without a cache, Fetch clones from GitHub and the report says how many bytes that brought: what
+// the repository cache's own process does. A feed that holds the repository already is fetched
+// into and asks no cache, whatever cache it is given.
 func TestFetchReportsWhereTheFeedCameFrom(t *testing.T) {
 	run := newLocalRunner(t)
 	req := fetchRequest(t)
@@ -1114,14 +1181,14 @@ func TestFetchReportsWhereTheFeedCameFrom(t *testing.T) {
 		t.Fatalf("Fetch without a cache reported %+v, want a clone from GitHub with its bytes", report)
 	}
 
-	server, asked := cacheServer(t, cacheTar(t, cacheOf(t, run.remote)))
-	req.CacheURL = server.URL
+	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
+	req.CacheURL = served.serve(t)
 	advanceRemote(t, run.remote)
 	again, err := Fetch(context.Background(), run, req)
 	if err != nil {
 		t.Fatalf("the second Fetch: %v", err)
 	}
-	if again.Cloned || again.CacheBytes != 0 || again.Refs != 1 || again.GitHubBytes <= 0 || *asked != 0 {
-		t.Fatalf("Fetch into a feed holding the repository reported %+v and asked the cache %d times, want a delta of one ref from GitHub and no cache", again, *asked)
+	if again.Cloned || again.CacheBytes != 0 || again.Refs != 1 || again.GitHubBytes <= 0 || served.healthAsked+served.tarAsked != 0 {
+		t.Fatalf("Fetch into a feed holding the repository reported %+v and asked the cache %d times, want a delta of one ref from GitHub and no cache", again, served.healthAsked+served.tarAsked)
 	}
 }

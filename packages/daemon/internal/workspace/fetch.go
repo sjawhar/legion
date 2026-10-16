@@ -3,6 +3,7 @@ package workspace
 import (
 	"archive/tar"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,9 +28,9 @@ var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSY
 
 // FetchRequest is a pod's first init container's: the repository, the provisioning token, the
 // directory its one-shot credential goes under, the feed directory, the log each retried transfer
-// and an unused cache are told to, the clock the retries read and wait on, and the repository
-// cache's address (http://<pod ip>:8418) when a ready cache serves the repository, empty when none
-// does.
+// and each wait on the cache are told to, the clock the retries and that wait read and wait on, and
+// the repository cache's address (an issue pod's, under the Kubernetes runtime), empty for the
+// cache's own process, which fills its clone from GitHub.
 type FetchRequest struct {
 	Repo          ghrepo.Repository
 	Token         string
@@ -61,12 +62,15 @@ type FetchReport struct {
 //
 // A feed that holds the repository already — the issue volume's feed on a relaunch, the cache's
 // clone at each refresh — has every branch fetched into it from GitHub, the ones GitHub deleted
-// pruned. A feed that does not is filled in a temporary sibling, its garbage collection turned off
-// (feedConfiguration), and renamed into place once all of that succeeded, so the feed's repository
-// is either whole or absent: from the repository cache's tar when the request names a cache, then
-// fetched from GitHub for what the cache lacks; or, with no cache, or a cache that does not answer
-// or streams what a feed does not take (unpackCache), cloned bare from GitHub, that cache's failure
-// logged first. Provision then clones the shared clone from the feed with no credential.
+// pruned, once the locks a killed fetch left are gone (RemoveStaleFeedLocks). A feed that does not
+// is filled in a temporary sibling, its garbage collection turned off (feedConfiguration), and
+// renamed into place once all of that succeeded, so the feed's repository is either whole or
+// absent. With a cache named, it comes from the cache alone: Fetch waits for the cache to be ready
+// (waitForCache), unpacks its tar (unpackCache), then fetches from GitHub what the cache lacks; a
+// cache that is not ready within CacheWaitTimeout, or whose tar a feed does not take, fails the
+// fetch, and nothing is cloned from GitHub instead, so the cache's own first clone is the one full
+// download of the repository. With none, the feed is cloned bare from GitHub: what the cache's own
+// process does. Provision then clones the shared clone from the feed with no credential.
 //
 // A transfer from GitHub that fails transiently (transientCloneFailure) is run again after the
 // next of fetchBackoff's waits, once per wait, its failure logged and whatever a failed clone left
@@ -125,17 +129,16 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	}()
 	transfer := feedTransfer{verb: "clone", argv: []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), staging}, destination: staging}
 	if request.CacheURL != "" {
+		if err := waitForCache(ctx, request); err != nil {
+			return FetchReport{}, err
+		}
 		started := request.Clock.Now()
 		streamed, err := unpackCache(ctx, run, request.CacheURL, staging)
-		if err == nil {
-			report.CacheBytes, report.CacheDuration = streamed, request.Clock.Now().Sub(started)
-			transfer = fetchInto(staging, request.Repo)
-		} else {
-			request.Log(fmt.Sprintf("the repository cache %s was not used: %s; cloning from GitHub", request.CacheURL, strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " | ")))
-			if err := os.RemoveAll(staging); err != nil {
-				return FetchReport{}, fmt.Errorf("remove what the repository cache's tar left at %s: %w", staging, err)
-			}
+		if err != nil {
+			return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
 		}
+		report.CacheBytes, report.CacheDuration = streamed, request.Clock.Now().Sub(started)
+		transfer = fetchInto(staging, request.Repo)
 	}
 	report.Cloned = transfer.verb == "clone"
 	if err := report.fromGitHub(ctx, run, request, transfer, staging, env); err != nil {
@@ -230,6 +233,69 @@ func objectsSize(gitDir string) (int64, error) {
 // cacheClient reaches the repository cache directly, at the pod address it is given: no proxy the
 // container's environment names stands between an issue pod and a pod of its own namespace.
 var cacheClient = &http.Client{Transport: &http.Transport{Proxy: nil, ForceAttemptHTTP2: false}}
+
+// CachePoll is how long Fetch waits between two asks of a repository cache that is not ready.
+const CachePoll = 10 * time.Second
+
+// CacheWaitTimeout bounds Fetch's wait on a repository cache that is not ready: the cache's own
+// first clone is bounded by FetchTimeout, and the rest is its pod's scheduling and volume.
+const CacheWaitTimeout = FetchTimeout + 10*time.Minute
+
+// waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
+// 200 ready, logging what it answered whenever that changes and at least once a minute, and fails
+// with the last answer once a further ask would start past CacheWaitTimeout.
+func waitForCache(ctx context.Context, request FetchRequest) error {
+	cache := strings.TrimSuffix(request.CacheURL, "/")
+	deadline := request.Clock.Now().Add(CacheWaitTimeout)
+	var logged string
+	var loggedAt time.Time
+	for {
+		why := cacheNotReady(ctx, cache)
+		if why == "" {
+			return nil
+		}
+		now := request.Clock.Now()
+		if !now.Add(CachePoll).Before(deadline) {
+			return fmt.Errorf("the repository cache %s was not ready within %s: %s", request.CacheURL, CacheWaitTimeout, why)
+		}
+		if why != logged || now.Sub(loggedAt) >= time.Minute {
+			request.Log(fmt.Sprintf("waiting for the repository cache %s to be ready: %s", request.CacheURL, why))
+			logged, loggedAt = why, now
+		}
+		if err := request.Clock.Sleep(ctx, CachePoll); err != nil {
+			return fmt.Errorf("the wait for the repository cache %s ended: %w", request.CacheURL, err)
+		}
+	}
+}
+
+// cacheNotReady is why the repository cache at cache is not ready to stream, or "" when its
+// /healthz answers 200 with ready set.
+func cacheNotReady(ctx context.Context, cache string) string {
+	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	ask, err := http.NewRequestWithContext(bounded, http.MethodGet, cache+"/healthz", nil)
+	if err != nil {
+		return err.Error()
+	}
+	response, err := cacheClient.Do(ask)
+	if err != nil {
+		return err.Error()
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Sprintf("GET %s/healthz answered %s", cache, response.Status)
+	}
+	var health struct {
+		Ready bool `json:"ready"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<16)).Decode(&health); err != nil {
+		return fmt.Sprintf("GET %s/healthz answered a body that is not the cache's health: %v", cache, err)
+	}
+	if !health.Ready {
+		return fmt.Sprintf("GET %s/healthz answered not ready", cache)
+	}
+	return ""
+}
 
 // unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
 // makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
