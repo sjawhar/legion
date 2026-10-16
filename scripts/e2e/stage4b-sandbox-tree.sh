@@ -2239,33 +2239,36 @@ tool_ran() {
   session_jq "$1" -e --arg tool "$2" 'include "stage4b-tools"; tool_ran($tool)' >/dev/null
 }
 # tool_result_answered SESSION TOOL ARGS TEXT: tool_result_said for the calls of TOOL whose
-# arguments carry ARGS (lib/stage4b-tools.jq): for bash, ARGS must be in the call's command alone
-# (Oh My Pi's bash arguments carry the model's intent beside the command, and an intent naming a
-# command the call never ran proves nothing); for every other tool, in its arguments' JSON text (the
-# read of skill://<name> among the session's reads, the hover of one file among its hovers). A bash
-# call dispatched through eval, or through a write to xd://bash whose content is no JSON object,
-# has no command, so a bound bash assertion does not see it, while `tool_result_said SESSION bash
-# TEXT` still counts it.
+# arguments carry ARGS (lib/stage4b-tools.jq), judged on the argument that carries the call's
+# target and never on the model's `i` intent, which Oh My Pi puts in every tool's arguments (an
+# intent naming a command the call never ran, or skill://<name> on a read of the skill's file path,
+# proves nothing): for bash, ARGS must be in the call's command; for read, in its path; for every
+# other tool, in its arguments object with `i` removed, as JSON text (the hover of one file among
+# the lsp device's hovers, NoSuchSymbol among the codegraph calls, an edit's input). A bash call
+# dispatched through eval, or through a write to xd://bash whose content is no JSON object, has no
+# command, so a bound bash assertion does not see it, while `tool_result_said SESSION bash TEXT`
+# still counts it.
 tool_result_answered() {
   session_jq "$1" -e --arg tool "$2" --arg args "$3" --arg want "$4" 'include "stage4b-tools"; tool_result_answered($tool; $args; $want)' >/dev/null
 }
 # tool_result_quotes SESSION TOOL [ARGS]: every result of TOOL in the session (of the calls whose
-# arguments carry ARGS, when given: arguments_carry, the command alone for bash) on one line, each
-# with its call's arguments, an error marked and its text trimmed: what the tool did return, for the
-# fail line of an expectation it did not meet.
+# arguments carry ARGS, when given: arguments_carry, the command for bash, the path for read, the
+# arguments without the intent otherwise) on one line, each with its call's arguments, an error
+# marked and its text trimmed: what the tool did return, for the fail line of an expectation it did
+# not meet.
 tool_result_quotes() {
   session_jq "$1" -r --arg tool "$2" --arg args "${3:-}" 'include "stage4b-tools";
     [tool_results($tool)[] | select(arguments_carry($tool; $args)) | tool_result_quote(.arguments[0:160] + " => "; 400)]
     | join(" ; ")'
 }
-# codegraph_control SESSION: the session holds a codegraph call for NoSuchSymbol, a symbol the
-# fixture does not define, and every such call returned an error or a text naming none of the
-# fixture's test (greet_test.go), caller (GreetWorld) or caller's file (caller.go). An index that
-# names the fixture's test and caller proves nothing unless it also names nothing where there is
-# nothing.
+# codegraph_control SESSION: the session holds a codegraph call for NoSuchSymbol (by its arguments,
+# never its intent), a symbol the fixture does not define, and every such call returned an error or
+# a text naming none of the fixture's test (greet_test.go), caller (GreetWorld) or caller's file
+# (caller.go). An index that names the fixture's test and caller proves nothing unless it also
+# names nothing where there is nothing.
 codegraph_control() {
   session_jq "$1" -e 'include "stage4b-tools";
-    [tool_results("codegraph")[] | select(.arguments | contains("NoSuchSymbol"))]
+    [tool_results("codegraph")[] | select(arguments_carry("codegraph"; "NoSuchSymbol"))]
     | length > 0 and all(.[]; .isError or (.text | test("greet_test\\.go|GreetWorld|caller\\.go") | not))' >/dev/null
 }
 # full_agent_message ROLE NONCE prints the full-agent-tools instruction for ROLE: eight items, each
@@ -2787,7 +2790,7 @@ for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets s
 # in. The two fails keep the loop from passing vacuously over a list read wrong.
 mapfile -t modules < <(included_jq_modules "$root/scripts/e2e/stage4b-sandbox-tree.sh")
 [ "${#modules[@]}" -gt 0 ] || fail "the script includes no jq module, which it does: included_jq_modules read nothing"
-printf '%s\n' "${modules[@]}" | grep -qx stage4b-tools || fail "the script's included jq modules do not list stage4b-tools, which it includes: ${modules[*]}"
+case " ${modules[*]} " in *" stage4b-tools "*) ;; *) fail "the script's included jq modules do not list stage4b-tools, which it includes: ${modules[*]}" ;; esac
 jq_modules_compile "$root/scripts/e2e/lib" "${modules[@]}"
 # The compile loop proves each included module parses on the host's jq; jq 1.8.2's abort at compile
 # (its expand_call_arglist assertion) surfaces only when a program reaches a def chain through a
@@ -3694,7 +3697,7 @@ on_tree "$tree2" until_true 900 "tree 2's planner to answer $nonce" assistant_sa
 session=$evidence/repository-tools-session.jsonl
 claim_session_text "$tree2" planner >"$session" || fail "tree 2's planner on $tree2 has no readable session"
 session_jq "$session" -c 'include "stage4b-tools";
-  {skills: [tool_results("read")[] | select(.arguments | contains("skill://"))], lsp: tool_results("lsp"), codegraph: tool_results("codegraph")}' \
+  {skills: [tool_results("read")[] | select(arguments_carry("read"; "skill://"))], lsp: tool_results("lsp"), codegraph: tool_results("codegraph")}' \
   >"$evidence/repository-tools-results.json" || fail "tree 2's planner session could not be read for its tool results"
 # The skills, as the read tool returned them at skill://<name>: the run's own nonce, which no stale
 # checkout and no skill of the image carries.
@@ -5113,7 +5116,8 @@ note "the daemon failed $held_claim because $why ($counts, bound $launch_failure
 # Envoy deliveries (envoy-message custom messages), those holding NEEDLE when one is given (an
 # empty fixed-string pattern matches every line), in file order, and prints nothing and exits 0
 # when none match: grep exits 1 on no match, which errexit would take as a failure, and `|| true`
-# keeps the scan going. Every scan of the controller's deliveries below reads it.
+# keeps the scan going. Every scan of the controller's deliveries below reads it but
+# report_after_tick, which needs each delivery's line position and scans the raw text itself.
 controller_deliveries() {
   local file
   for file in "$profile_agent/sessions"/*/*.jsonl; do

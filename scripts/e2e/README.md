@@ -2007,15 +2007,18 @@ session file a checkpoint fetched once (`claim_session_text`) and keeps as evide
 what every assertion judges and the bytes kept are the bytes judged: `tool_ran SESSION TOOL` holds
 when one call of TOOL in the session returned without error, `tool_result_said SESSION TOOL TEXT`
 when such a result's text carries TEXT, literally and case-sensitively, and `tool_result_answered
-SESSION TOOL ARGS TEXT` when such a result's call carried ARGS too: for `bash`, ARGS must be in the
-call's `command` alone, since Oh My Pi's bash arguments carry the model's `i` intent beside the
-command, and an intent could name a command the call never ran (`gh api graphql` in the intent of
-a `gh pr view`); for every other tool, in the arguments' JSON text, the hover of one file among the
-lsp tool's hovers, the read of one `skill://` among the session's reads. A bash call dispatched
-through `eval`, or through a write to `xd://bash` whose content is no JSON object, has no
-`command`, so a bound bash assertion does not see it, while `tool_result_said SESSION bash TEXT`
-still counts it. A result is TOOL's by the call it answers, never by the `toolName` it records: the
-model calls a tool by its name, by a `write` to its device `xd://<name>`, or by `eval` code calling
+SESSION TOOL ARGS TEXT` when such a result's call carried ARGS too, judged on the argument that
+carries the call's target and never on the model's `i` intent, which Oh My Pi puts in every tool's
+arguments (an intent could name a command the call never ran, `gh api graphql` in the intent of a
+`gh pr view`, or `skill://fixture-omp-skill` on a read of the skill's file path): for `bash`, ARGS
+must be in the call's `command`; for `read`, in its `path`; for every other tool, in its arguments
+object with `i` removed, as JSON text, which is the device's content for a write to `xd://<name>`
+(the hover of one file among the lsp tool's hovers, `NoSuchSymbol` among the codegraph calls, an
+edit's `input`, since Oh My Pi's edit has no path argument). A bash call dispatched through
+`eval`, or through a write to `xd://bash` whose content is no JSON object, has no `command`, so a
+bound bash assertion does not see it, while `tool_result_said SESSION bash TEXT` still counts it.
+A result is TOOL's by the call it answers, never by the `toolName` it records: the model calls a
+tool by its name, by a `write` to its device `xd://<name>`, or by `eval` code calling
 `tool.<name>(…)`, and a write to the device records `toolName: "write"`, the device's name only in
 the paired call's `arguments.path`. The library pairs each result with its call by `toolCallId`,
 judges the call with `lib/omp-tool-calls.jq`'s `calls`, the one rule every live proof uses for "the
@@ -2025,7 +2028,8 @@ wanted) never counts, and a result whose call the session no longer holds is no 
 `tool_results(name)` (each `{toolCallId, isError, text, arguments}`), `tool_result_texts(name)`
 (the non-error texts, for a checkpoint's note to quote), `tool_result_quote($lead; $max)` (one
 result on one line, for a fail line to quote), `arguments_carry(name; $args)` (whether a result's
-call carried `$args`, by the bash rule above), `tool_ran(name)`, `tool_result_said(name; $text)` and
+call carried `$args`: its `command` for bash, its `path` for read, its arguments without `i` as
+JSON text otherwise), `tool_ran(name)`, `tool_result_said(name; $text)` and
 `tool_result_answered(name; $args; $text)` take the session's text read with `jq -R -s` and are
 loaded with `jq -L scripts/e2e/lib 'include "stage4b-tools"; …'` (the script's `session_jq SESSION
 JQ-ARGS…`).
@@ -2039,5 +2043,11 @@ that exited 1 and the browser's refusal only in an `eval` that errored, and each
 which `assistant_said` accepts, is refused as a tool's answer; the hover's text is no answer of
 the status call; a composed `bash` call whose intent names `gh api graphql` beside a `gh pr view`
 command is refused for `gh api graphql`, where the fixture's real `gh api graphql` call, which
-answered `legion-implementer[bot]`, is accepted; and a `bash` call dispatched through `eval`,
-which has no `command`, is counted by `tool_result_said` and not by a bound `tool_result_answered`.
+answered `legion-implementer[bot]`, is accepted; a composed `read` of
+`.omp/skills/fixture-omp-skill/SKILL.md` whose intent names `skill://fixture-omp-skill` is refused
+for the `skill://`, where a read whose `path` is the `skill://` is accepted; a composed `lsp` hover
+called by name on `greet.ts` whose intent names `greet.go` is refused for `greet.go` and accepted
+for `greet.ts`, and a `codegraph` call whose intent alone names `NoSuchSymbol` is not the control
+(`codegraph_control`'s selector) where one whose `query` names it is; and a `bash` call dispatched
+through `eval`, which has no `command`, is counted by `tool_result_said` and not by a bound
+`tool_result_answered`.
