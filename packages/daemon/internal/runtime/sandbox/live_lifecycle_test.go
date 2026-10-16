@@ -783,6 +783,16 @@ func firstLine(s string) string {
 	return line
 }
 
+// lineContaining returns the first line of text that contains want, or "" when none does.
+func lineContaining(text, want string) string {
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, want) {
+			return line
+		}
+	}
+	return ""
+}
+
 // stale-incarnation: across the kill and the relaunch, nothing about the old process reaches the
 // new one.
 func (r *liveRig) checkStaleIncarnation() error {
