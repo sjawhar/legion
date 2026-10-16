@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -25,6 +26,15 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
 )
+
+// Image is the NATS server image the daemon's existing NATS tests use.
+const Image = "mirror.gcr.io/library/nats:2.10"
+
+// HubImage is the NATS server image gcp:NatsHub runs.
+const HubImage = "mirror.gcr.io/library/nats:2.15.1-alpine@sha256:2ae57dfba3063d5e25fecb75256118c0882a1a2d2cf7d0fba17a7c701df956f6"
+
+// Images are the NATS server images a grant must work against.
+var Images = []struct{ Name, Ref string }{{"2.10", Image}, {"hub", HubImage}}
 
 // readinessTimeout bounds the wait for the JetStream API once the container runs. The container
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
@@ -276,7 +286,7 @@ func retryStreamStoreFailure(create func() error) error {
 // no test's end would remove a container the package shares.
 func start(options ...testcontainers.ContainerCustomizer) (*tcnats.NATSContainer, error) {
 	options = append([]testcontainers.ContainerCustomizer{tcnats.WithArgument("http_port", "8222")}, options...)
-	started, err := tcnats.Run(context.Background(), "mirror.gcr.io/library/nats:2.10", options...)
+	started, err := tcnats.Run(context.Background(), Image, options...)
 	if err != nil {
 		return started, errors.Join(err, testcontainers.TerminateContainer(started))
 	}
@@ -324,12 +334,47 @@ func StartNkeyAuthorizedUsers(t testing.TB, users ...NkeyUser) string {
 	return url
 }
 
+// StartNkeyImageConfig runs image using config and serverArgs, returns its container for log
+// checks, and waits for the configuration's nkey authorization to refuse an anonymous connection.
+func StartNkeyImageConfig(t testing.TB, image, config string, serverArgs []string) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	const configPath = "/etc/nats/nats-server.conf"
+	ctr, err := tcnats.Run(context.Background(), image,
+		testcontainers.WithCmd(append([]string{"-c", configPath}, serverArgs...)...),
+		testcontainers.WithFiles(testcontainers.ContainerFile{
+			Reader:            strings.NewReader(config),
+			ContainerFilePath: configPath,
+			FileMode:          0o644,
+		}),
+	)
+	testcontainers.CleanupContainer(t, ctr)
+	if err != nil {
+		logs := ""
+		if ctr != nil {
+			if output, logErr := ctr.Logs(context.Background()); logErr == nil {
+				data, readErr := io.ReadAll(output)
+				_ = output.Close()
+				if readErr == nil {
+					logs = string(data)
+				}
+			}
+		}
+		t.Fatalf("start NATS on %s: %v\n%s", image, err, logs)
+	}
+	uri, err := ctr.ConnectionString(context.Background())
+	if err != nil {
+		t.Fatalf("NATS connection string: %v", err)
+	}
+	answering(t, uri)
+	return ctr, uri
+}
+
 // answering returns once the server at url refuses a connection with no credential with its own
 // authorization violation: the proof it speaks the client protocol and enforces its nkey users. The
 // log line the container's start waits for can come before a connection there is served, and until
 // then a dial ends in EOF or a refusal that says nothing about the server's users. A server that
-// admits the connection enforces no users, and every refusal a test expects of it would pass for
-// the wrong reason, so that fails the test.
+// admits the connection enforces no users, and every refusal a test expects would pass for the wrong
+// reason, so that fails the test.
 func answering(t testing.TB, url string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), readinessTimeout)
