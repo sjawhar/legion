@@ -497,9 +497,14 @@ func startDaemonLogging(t *testing.T, cfg config.Config, o overrides, log *slog.
 }
 
 // startDaemonWithin is startDaemonLogging failing the test unless the daemon answers /healthz
-// within the given time.
+// within the given time. A test that points its workflow at no GitHub of its own gets
+// repositoriesGitHub, so every launch on a repository reads its default branch from a stand-in
+// rather than from github.com.
 func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.Logger, within time.Duration) *daemon {
 	t.Helper()
+	if o.githubAPI == "" {
+		o.githubAPI = repositoriesGitHub(t)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
 	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
@@ -535,6 +540,25 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// repositoriesGitHub is GitHub's REST API answering the read of any repository with default
+// branch main, and every other request with 404, as github.com answers a token it never issued
+// with 401: a test daemon's launches read their repository's default branch, and nothing else the
+// test leaves unanswered reaches github.com.
+func repositoriesGitHub(t *testing.T) string {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/"), "/")
+		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/repos/") || len(parts) != 2 {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"full_name":"`+parts[0]+"/"+parts[1]+`","default_branch":"main"}`)
+	}))
+	t.Cleanup(server.Close)
+	return server.URL
 }
 
 // stop cancels the daemon and requires it to return cleanly.

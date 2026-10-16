@@ -82,6 +82,10 @@ type workflowRuntime struct {
 	// the outbox's issue_branch rows create branches under it. Empty, in production, is
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
+	// defaultBranches is each repository's default branch as GitHub names it, read under githubAPI
+	// and kept defaultBranchTTL: the base the outbox creates an issue's branch at and provisions
+	// its workspace from, and the one every launch names (specs.defaultBranch).
+	defaultBranches *defaultBranches
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
 	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
@@ -194,6 +198,7 @@ func openWorkflow(ctx context.Context, cfg config.Config, st *store.Store, proje
 		grants: credential.New(nil), project: project, projectID: projectID, dispatchProject: cfg.Project, stateDir: cfg.StateDir, log: log,
 		failed: make(chan error, 1), readied: map[claim.Token]bool{}, readyWake: make(chan struct{}, 1),
 		controllerWake: cfg.ControllerWakeInterval, githubAPI: githubAPI,
+		defaultBranches: newDefaultBranches(tokens, githubAPI, defaultBranchTTL, time.Now),
 	}, nil
 }
 
@@ -364,7 +369,8 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role, owner s
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, supervision.plan.tools, w.log)
+		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, w.defaultBranches.Of,
+		supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 
