@@ -2201,6 +2201,27 @@ session_jq() {
   shift
   jq -R -s -L "$root/scripts/e2e/lib" "$@" <"$session"
 }
+# included_jq_modules SCRIPT prints the sorted unique names of the lib/*.jq modules SCRIPT includes,
+# read from its own `include "…"` strings, so a module joins prerequisites' compile guard the day a
+# checkpoint first includes it.
+included_jq_modules() {
+  grep -o 'include "[a-z0-9-]*"' "$1" | sed 's/^include "//; s/"$//' | sort -u
+}
+# jq_modules_compile LIBDIR MODULE… fails, quoting jq's error, on the first MODULE the host's jq
+# cannot compile from LIBDIR, else notes them all. Including a module compiles its syntax (a module
+# that does not parse is refused with jq's syntax error) but reaches none of its defs, so jq 1.8.2's
+# abort on a def chain reached through a nested include (lib/omp-tool-calls.jq) is caught only by a
+# program that reaches the chain, which prerequisites' fixture run of stage4b-tools, the module whose
+# include met that abort, is. Reads nothing but its arguments, the jq on PATH, fail and note.
+jq_modules_compile() {
+  local libdir=$1 module out
+  shift
+  for module in "$@"; do
+    out=$(jq -n -L "$libdir" "include \"$module\"; true" 2>&1) ||
+      fail "the host's $(jq --version) cannot compile lib/$module.jq: $(tr '\n' ' ' <<<"$out")"
+  done
+  note "$(jq --version) compiles $(printf 'lib/%s.jq ' "$@" | sed 's/ $//')"
+}
 # tool_result_said SESSION TOOL TEXT: a tool call of the session for TOOL (by name, by its xd://
 # device, or by eval's tool.<name>) returned without error and its text carries TEXT: the proof a
 # tool ran and answered, where assistant_said only proves the model said so. An error result never
@@ -2737,9 +2758,17 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 
 begin prerequisites
 for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-# The host's jq compiles and runs lib/stage4b-tools.jq over its fixture: repository-tools and
-# full-agent-tools read every tool result through it, and a jq that aborts compiling the library
-# (jq 1.8.2 did, on a def chain reached through an include) would otherwise fail the run an hour in.
+# The host's jq compiles every lib/*.jq module this script includes, read from the script itself: a
+# jq that cannot parse one would otherwise fail the run at the first checkpoint to include it, hours
+# in. The two fails keep the loop from passing vacuously over a list read wrong.
+mapfile -t modules < <(included_jq_modules "$root/scripts/e2e/stage4b-sandbox-tree.sh")
+[ "${#modules[@]}" -gt 0 ] || fail "the script includes no jq module, which it does: included_jq_modules read nothing"
+printf '%s\n' "${modules[@]}" | grep -qx stage4b-tools || fail "the script's included jq modules do not list stage4b-tools, which it includes: ${modules[*]}"
+jq_modules_compile "$root/scripts/e2e/lib" "${modules[@]}"
+# The compile loop proves each included module parses on the host's jq; jq 1.8.2's abort at compile
+# (its expand_call_arglist assertion) surfaces only when a program reaches a def chain through a
+# nested include, so stage4b-tools, the module whose include of omp-tool-calls met it, is also run
+# over its fixture, which repository-tools and full-agent-tools read every tool result through.
 session_jq "$root/scripts/e2e/lib/testdata/stage4b-tools-session.jsonl" -e 'include "stage4b-tools"; tool_ran("eval") and tool_result_answered("lsp"; "hover"; "func") and (tool_ran("notebook") | not)' >/dev/null 2>"$work/jq-tools-check" ||
   fail "the host's $(jq --version) cannot run lib/stage4b-tools.jq over lib/testdata/stage4b-tools-session.jsonl: $(tr '\n' ' ' <"$work/jq-tools-check")"
 note "$(jq --version) runs lib/stage4b-tools.jq"
