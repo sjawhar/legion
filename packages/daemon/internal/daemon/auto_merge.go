@@ -51,10 +51,12 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 // (ghautomerge.Submit), deciding by GitHub and then the record when it runs: only while the issue
 // still awaits that READY head on an open pull request does it ask GitHub to enqueue, merge or arm
 // it, and GitHub's merge state and rules decide which. A repository that allows no auto-merge leaves
-// the row waiting until GitHub reports the pull request mergeable, and a READY the record has left
-// ends the row. A refusal a retry would meet again (ghautomerge.Refused) and a disagreement with the
-// record that has stood on GitHub longer than ghautomerge.LagBound (ghautomerge.Lagging.Stalled) end
-// it too, the architect told (permanentRefusal, finishRefused); every other failure retries.
+// the row waiting until GitHub reports the pull request mergeable, an arm or a queue entry leaves it
+// waiting until GitHub reports the merge (ghautomerge.Armed), submitted again if it disappears, and
+// a READY the record has left ends the row. A refusal a retry would meet again (ghautomerge.Refused)
+// and a disagreement with the record that has stood on GitHub longer than ghautomerge.LagBound
+// (ghautomerge.Lagging.Stalled) end it too, the architect told (permanentRefusal, finishRefused);
+// every other failure retries.
 func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
 	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()

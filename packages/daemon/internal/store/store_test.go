@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -735,18 +736,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
 	ctx := context.Background()
 	store := emptyStore(t)
-	all, err := migrations.All()
-	if err != nil {
-		t.Fatalf("read migrations: %v", err)
-	}
-	for _, migration := range all {
-		if migration.Version > 43 {
-			continue
-		}
-		if _, err := store.apply(ctx, migration); err != nil {
-			t.Fatalf("apply %s: %v", migration.Name, err)
-		}
-	}
+	migrateThrough(t, store, 43)
 	now := time.Now().UTC()
 	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
 		values ('ready_merge', 'LEGION-208', '{"number":42,"head":"ready-head"}', 0, $1, '', $2, $3) returning id`
@@ -771,6 +761,97 @@ func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
 	wantNext := now.Add(time.Minute).Truncate(time.Microsecond)
 	if id != earliest || !nextAt.Equal(wantNext) {
 		t.Fatalf("surviving READY merge = id %d at %s, want unleased earliest id %d at %s (later %d leased %d)", id, nextAt, earliest, wantNext, later, leased)
+	}
+}
+
+// 0044 can run while a daemon still on 0043 writes the outbox. A ready_merge row that writer commits
+// while the dedup waits on a row lock is one the dedup's snapshot never saw, and would fail the
+// unique index and with it the upgrade. The migration locks the outbox against writes before its
+// dedup, so the writer waits for the index and meets it (unique_violation) instead.
+func TestReadyMergeDedupMigrationHoldsOffAConcurrentEnqueue(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	migrateThrough(t, store, 43)
+	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token)
+		values ('ready_merge', 'LEGION-208', '{"number":42,"head":"ready-head"}', 0, $1, '', '') -- concurrent enqueue`
+	now := time.Now().UTC()
+	var duplicate int64
+	if _, err := store.pool.Exec(ctx, insert, now); err != nil {
+		t.Fatalf("insert the row the dedup keeps: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert+"\nreturning id", now.Add(time.Minute)).Scan(&duplicate); err != nil {
+		t.Fatalf("insert the duplicate the dedup deletes: %v", err)
+	}
+	// A worker holds the duplicate, so the dedup waits on its row lock.
+	worker, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the worker: %v", err)
+	}
+	defer func() { _ = worker.Rollback(ctx) }()
+	if _, err := worker.Exec(ctx, "select id from outbox where id = $1 for update", duplicate); err != nil {
+		t.Fatalf("lock the duplicate: %v", err)
+	}
+	migrated := make(chan error, 1)
+	go func() {
+		_, err := store.Migrate(ctx)
+		migrated <- err
+	}()
+	// pg_stat_activity keeps a statement's first kilobyte, so the migration is matched by its name.
+	waitForALockWait(t, store, "0044_ready_merge_dedup", nil)
+	enqueued := make(chan error, 1)
+	go func() {
+		_, err := store.pool.Exec(ctx, insert, now.Add(2*time.Minute))
+		enqueued <- err
+	}()
+	enqueue := waitForALockWait(t, store, "-- concurrent enqueue", enqueued)
+	if err := worker.Commit(ctx); err != nil {
+		t.Fatalf("release the duplicate: %v", err)
+	}
+	if err := <-migrated; err != nil {
+		t.Fatalf("migrate while a writer enqueues: %v", err)
+	}
+	if enqueue == nil {
+		enqueue = <-enqueued
+	}
+	var refused *pgconn.PgError
+	if !errors.As(enqueue, &refused) || refused.Code != "23505" {
+		t.Fatalf("the concurrent enqueue = %v, want it held off until the unique index refuses it", enqueue)
+	}
+	var rows int
+	if err := store.pool.QueryRow(ctx, `select count(*) from outbox where kind = 'ready_merge'`).Scan(&rows); err != nil {
+		t.Fatalf("count ready_merge rows: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("ready_merge rows %d, want one", rows)
+	}
+}
+
+// waitForALockWait waits until another backend running a statement that contains marker waits on a
+// lock, and returns nil; or, when done reports that statement's end first, returns its error.
+func waitForALockWait(t *testing.T, store *Store, marker string, done <-chan error) error {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case err := <-done:
+			if err == nil {
+				return errors.New("finished without waiting on a lock")
+			}
+			return err
+		default:
+		}
+		var waiting bool
+		if err := store.pool.QueryRow(context.Background(), `select exists (select 1 from pg_stat_activity
+			where pid <> pg_backend_pid() and wait_event_type = 'Lock' and strpos(query, $1) > 0)`, marker).Scan(&waiting); err != nil {
+			t.Fatalf("read pg_stat_activity: %v", err)
+		}
+		if waiting {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no statement containing %q waited on a lock", marker)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

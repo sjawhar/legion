@@ -45,8 +45,8 @@ const (
 	messageReadSkew      = 5 * time.Second
 	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
 	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
-	// operator should look. A READY merge only GitHub's own rules hold back
-	// (ghautomerge.Unmergeable.Routine) stays debug at every attempt.
+	// operator should look. A READY merge only GitHub's own rules hold back (routineWait) stays
+	// debug at every attempt.
 	waitWarnAttempts = 7
 	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
@@ -78,6 +78,10 @@ type outbox struct {
 	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
 	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
 	githubAPI string
+	// limits is every GitHub rate limit a row met, by the budget it exhausted, held across batches
+	// until its deadline: a row that spends one of those budgets waits for the latest deadline among
+	// them (standingLimit) rather than meet a limit again. Run's one goroutine owns it.
+	limits map[githubrest.Budget]rateLimit
 }
 
 // outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
@@ -146,6 +150,9 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	if r.pool == nil || r.records == nil {
 		return errors.New("outbox requires Postgres and its record store")
 	}
+	if r.limits == nil {
+		r.limits = map[githubrest.Budget]rateLimit{}
+	}
 	now := r.now().UTC()
 	var rows []record.OutboxRow
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
@@ -155,29 +162,27 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("claim due outbox rows: %w", err)
 	}
-	// limited is every GitHub rate limit a row of this batch met, by the budget it exhausted: the
-	// batch's later rows that spend one of those budgets wait it out (githubBudgets) rather than meet
-	// it again.
-	limited := map[githubrest.Budget]rateLimit{}
 	for _, row := range rows {
-		if limit, ok := exhausted(limited, row.Kind); ok {
-			if err := r.retry(ctx, row, fmt.Errorf("deferred behind row %d's GitHub rate limit: %w", limit.row, limit.err)); err != nil {
+		if limit, ok := standingLimit(r.limits, row.Kind, r.now().UTC()); ok {
+			cause := fmt.Errorf("deferred until %s behind row %d's GitHub rate limit: %w", limit.until.Format(time.RFC3339), limit.row, limit.err)
+			if err := r.retryAt(ctx, row, limit.until, cause); err != nil {
 				r.log.Error("outbox row deferral not recorded; it runs again when its lease expires", "row", row.ID, "error", err)
 			}
 			continue
 		}
 		if err := r.execute(ctx, row); err != nil {
 			if after, budget := githubrest.RetryAfter(err); after > 0 {
-				if _, met := limited[budget]; !met {
-					limited[budget] = rateLimit{row: row.ID, err: err}
+				until := r.now().UTC().Add(after)
+				if held, ok := r.limits[budget]; !ok || until.After(held.until) {
+					r.limits[budget] = rateLimit{row: row.ID, err: err, until: until}
 				}
 			}
 			if errors.Is(err, wait.ErrWaiting) {
 				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
 				// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
-				// a close waiting for its stops, or a READY merge GitHub does not allow yet. The row
-				// runs again on its backoff, logged when it first waits and as a warning once it has
-				// waited long, unless only GitHub's own rules hold it back.
+				// a close waiting for its stops, or a READY merge GitHub does not allow, or has not
+				// made, yet. The row runs again on its backoff, logged when it first waits and as a
+				// warning once it has waited long, unless only GitHub's own rules hold it back.
 				level := slog.LevelDebug
 				switch {
 				case row.Attempts == 0:
@@ -283,7 +288,11 @@ func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) e
 	if after, _ := githubrest.RetryAfter(cause); after > delay {
 		delay = after
 	}
-	nextAt := r.now().UTC().Add(delay)
+	return r.retryAt(ctx, row, r.now().UTC().Add(delay), cause)
+}
+
+// retryAt returns row to the outbox, due again at nextAt, with cause as its last error.
+func (r *outbox) retryAt(ctx context.Context, row record.OutboxRow, nextAt time.Time, cause error) error {
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		return r.records.RetryOutbox(ctx, tx, row.ID, row.LeaseToken, nextAt, cause.Error())
 	}); err != nil {
@@ -292,10 +301,11 @@ func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) e
 	return nil
 }
 
-// rateLimit is the GitHub rate limit a row of a batch met: the row and its error.
+// rateLimit is a GitHub rate limit a row met: the row, its error, and when the limit ends.
 type rateLimit struct {
-	row int64
-	err error
+	row   int64
+	err   error
+	until time.Time
 }
 
 // githubBudgets is the GitHub budgets a row of each kind spends, as the implement App: its REST
@@ -307,15 +317,16 @@ var githubBudgets = map[record.OutboxKind][]githubrest.Budget{
 	record.OutboxKindReadyMerge:       {githubrest.BudgetGraphQL, githubrest.BudgetSecondary},
 }
 
-// exhausted is the limit in limited of a budget a row of kind spends, and whether there is one: that
-// row would meet the same limit.
-func exhausted(limited map[githubrest.Budget]rateLimit, kind record.OutboxKind) (rateLimit, bool) {
+// standingLimit is the limit in limits, among the budgets a row of kind spends, that still stands
+// at now and ends last, and whether there is one: that row would meet a limit until then.
+func standingLimit(limits map[githubrest.Budget]rateLimit, kind record.OutboxKind, now time.Time) (rateLimit, bool) {
+	var latest rateLimit
 	for _, budget := range githubBudgets[kind] {
-		if limit, ok := limited[budget]; ok {
-			return limit, true
+		if limit, ok := limits[budget]; ok && limit.until.After(now) && limit.until.After(latest.until) {
+			latest = limit
 		}
 	}
-	return rateLimit{}, false
+	return latest, !latest.until.IsZero()
 }
 
 func retryBackoff(attempts int) time.Duration {
@@ -349,10 +360,11 @@ func permanentRefusal(row record.OutboxRow, err error, now time.Time) bool {
 }
 
 // routineWait is a wait only GitHub's own rules hold back, which ends without anyone acting for
-// Legion (ghautomerge.Unmergeable.Routine).
+// Legion: a pull request armed or queued at READY's head (ghautomerge.Armed), or one GitHub
+// reports not mergeable yet for a reason its rules end (ghautomerge.Unmergeable.Routine).
 func routineWait(err error) bool {
-	var unmergeable *ghautomerge.Unmergeable
-	return errors.As(err, &unmergeable) && unmergeable.Routine()
+	var routine interface{ Routine() bool }
+	return errors.As(err, &routine) && routine.Routine()
 }
 
 func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {

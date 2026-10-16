@@ -207,7 +207,10 @@ that row. Otherwise, on acceptance the daemon queues a
 `ready_merge` outbox row for READY's head, which submits the merge as the implement App with that head
 as GitHub's expected head: a merge queue enqueues it, a pull request GitHub reports mergeable merges
 at once, a repository that allows auto-merge arms it, and in one that allows neither the row waits
-until GitHub reports the pull request mergeable and then merges it. The repository's required reviews
+until GitHub reports the pull request mergeable and then merges it. An arm or queue entry is not the
+end: the row keeps reading GitHub until it reports the pull request merged at READY's head, and
+submits again when the arm or entry is gone while the record still awaits READY (a disarm sent
+before READY that GitHub applied late, a queue that dropped it). The repository's required reviews
 and checks decide when it merges; Legion bypasses none, and a review only a person can give is waited
 for. READY accepts a head whose required checks are still running, and refuses one whose required
 check failed or never reported. The row reads GitHub, then the record, and submits nothing once the

@@ -236,7 +236,10 @@ the merge itself, as the implement App, with the `READY` head as GitHub's expect
 a merge queue enqueues it; otherwise a pull request GitHub already reports mergeable merges at once,
 one in a repository that allows auto-merge is armed, and in a repository that allows neither the
 daemon waits until GitHub reports the pull request mergeable — a required check passing, a required
-review a person gives — and then merges it. The repository's own required reviews and checks decide
+review a person gives — and then merges it. An arm or a queue entry is not the end: the submission
+keeps reading GitHub until GitHub reports the pull request merged at the `READY` head, and submits
+again when the arm or entry is gone while the record still awaits that head, as when a disarm sent
+before `READY` lands late. The repository's own required reviews and checks decide
 when it merges, rules Legion neither reads nor changes nor bypasses, and a person may still merge it
 first. The submission reads GitHub, then the record, when it runs, and submits nothing once the
 record shows the issue left that `READY` or the pull request closed. While the record still awaits

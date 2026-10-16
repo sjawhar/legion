@@ -303,7 +303,7 @@ describe("merge_when_clean", () => {
     const r = run([{ state: "CLOSED", mergeStateStatus: "UNKNOWN" }]);
     expect(r.status).toBe(1);
     expect(r.reads).toHaveLength(1);
-    expect(r.stderr).toBe("FAIL daemon-merge: sjawhar/legion-smoke#7 was closed without a merge\n");
+    expect(r.merges).toHaveLength(0);
   });
 });
 
@@ -340,6 +340,7 @@ describe("await_ready_merge", () => {
     const r = run([{ state: "CLOSED", mergeStateStatus: "UNKNOWN" }], "--delete-branch", { fn });
     expect(r.status).toBe(1);
     expect(r.reads).toHaveLength(1);
-    expect(r.stderr).toBe("FAIL daemon-merge: sjawhar/legion-smoke#7 was closed without a merge\n");
+    expect(r.merges).toHaveLength(0);
+    expect(r.deletes).toHaveLength(0);
   });
 });

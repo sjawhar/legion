@@ -133,7 +133,10 @@ reviewing until you finish.
   allows auto-merge is armed. Every request carries READY's head as GitHub's expected head, so
   GitHub refuses it once the head has moved. In a repository that allows neither, the row waits,
   reading GitHub again on the outbox's backoff, until GitHub reports the pull request mergeable —
-  a required check finishing, a required review a person gives — and then merges it. GitHub's
+  a required check finishing, a required review a person gives — and then merges it. An arm or a
+  queue entry is not the end: the row keeps reading GitHub until GitHub reports the pull request
+  merged at READY's head, and submits again when the arm or entry is gone while the record still
+  awaits READY (a disarm sent before READY that GitHub applied late). GitHub's
   rules decide each answer: the daemon bypasses none, and a person may merge it first. A refusal a
   retry would meet again (squash merges disabled, a permission the App lacks) ends the row and is
   told to the architect once (`merge-refused`), with GitHub's message. While the record still

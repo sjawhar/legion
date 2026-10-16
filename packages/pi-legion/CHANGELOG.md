@@ -49,7 +49,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
   merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
   allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
-  reports it mergeable. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  reports it mergeable. An arm or queue entry is not the end: the daemon watches it until GitHub
+  reports the merge at READY's head, and submits again if it disappears while the issue still
+  awaits that READY. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
   once the gate opens, and ordinary READY no longer waits for a required check still running or an
   unfinished disarm. A by-hand READY still waits for its pull request's unfinished disarm, so a
   stale ordinary arm cannot merge the person-only head. The `legion-architect` skill's new

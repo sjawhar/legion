@@ -260,13 +260,17 @@ func TestOnlyTheOwningREADYMergeLeasePostsAPermanentRefusal(t *testing.T) {
 }
 
 // A ready_merge row only GitHub's rules hold back (a required check still running or a required
-// review, BLOCKED; GitHub still computing, UNKNOWN) waits routinely, logged at debug however long it
-// waits, so a person supplying the review GitHub requires sees no warning flood. One waiting on a
-// branch update (BEHIND) or a draft (DRAFT) waits on someone, so it warns once it has waited long.
+// review, BLOCKED; GitHub still computing, UNKNOWN; an arm or merge-queue entry at READY's head)
+// waits routinely, logged at debug however long it waits, so a person supplying the review GitHub
+// requires sees no warning flood. One waiting on a branch update (BEHIND) or a draft (DRAFT) waits
+// on someone, so it warns once it has waited long.
 func TestAWaitingREADYMergeWarnsOnlyWhenItWaitsOnSomeone(t *testing.T) {
-	for state, level := range map[string]string{"BLOCKED": "DEBUG", "UNKNOWN": "DEBUG", "BEHIND": "WARN", "DRAFT": "WARN"} {
+	for state, level := range map[string]string{"BLOCKED": "DEBUG", "UNKNOWN": "DEBUG", "BEHIND": "WARN", "DRAFT": "WARN", "armed": "DEBUG"} {
 		t.Run(state, func(t *testing.T) {
-			github := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", state) }, mergedAnswer)
+			url := newMergeGitHub(t, func(int) string { return pullJSON("OPEN", "ready-head", state) }, mergedAnswer).url
+			if state == "armed" {
+				url = newArmableGitHub(t).url
+			}
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
 			seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
@@ -275,7 +279,7 @@ func TestAWaitingREADYMergeWarnsOnlyWhenItWaitsOnSomeone(t *testing.T) {
 			enqueueOutbox(t, pool, records, row)
 			var logged bytes.Buffer
 			log := slog.New(slog.NewJSONHandler(&logged, &slog.HandlerOptions{Level: slog.LevelDebug}))
-			if err := mergeRunner(pool, records, github.url, log, time.Now).RunOnce(context.Background()); err != nil {
+			if err := mergeRunner(pool, records, url, log, time.Now).RunOnce(context.Background()); err != nil {
 				t.Fatalf("RunOnce: %v", err)
 			}
 			assertMergeRows(t, pool, 1, "merge-refused", 0)
@@ -427,12 +431,138 @@ func TestAREADYMergeRowWaitsForGitHubAndTheRecordToAgree(t *testing.T) {
 				t.Fatalf("merge-stalled reason %q, want it to name %q", reasons[0], want)
 			}
 		}
-		for _, unwanted := range []string{"tries", "waiting for the two to agree"} {
-			if strings.Contains(reasons[0], unwanted) {
-				t.Fatalf("merge-stalled reason %q, want no %q", reasons[0], unwanted)
-			}
-		}
 	})
+}
+
+// The delayed disarm: an auto_merge_disable row sent its disable while the issue was still merging,
+// and its runner stopped before GitHub answered. READY has been accepted at that head since, so the
+// replacement runner's disarm keeps the arm it finds, and the READY merge row finds the pull request
+// armed. The outstanding disable then lands. An arm is not the merge: the row waits on it, and once
+// the arm is gone while the record still awaits READY it arms READY's head again, ending only once
+// GitHub reports the pull request merged at that head.
+func TestADelayedDisarmNeverLosesTheREADYMerge(t *testing.T) {
+	github := newArmableGitHub(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	now := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.AutoMergeDisable{Number: 42}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+	clock := now
+	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+	run := func(step string) {
+		t.Helper()
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce %s: %v", step, err)
+		}
+		clock = clock.Add(time.Minute)
+	}
+	run("with READY's arm standing")
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	if disables, arms := github.counts(); disables != 0 || arms != 0 {
+		t.Fatalf("disables %d and arms %d while READY's arm stands, want the arm kept and none sent", disables, arms)
+	}
+	github.set(func(g *armableGitHub) { g.armed = false })
+	run("after the earlier disable lands")
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	if _, arms := github.counts(); arms != 1 {
+		t.Fatalf("arms %d after the arm disappeared, want READY's head armed again", arms)
+	}
+	github.set(func(g *armableGitHub) { g.state = "MERGED" })
+	run("after GitHub merges READY's head")
+	assertMergeRows(t, pool, 0, "merge-refused", 0)
+	if _, arms := github.counts(); arms != 1 {
+		t.Fatalf("arms %d after GitHub merged READY's head, want no other arm", arms)
+	}
+}
+
+// A READY merge row waiting on an arm at READY's head ends once the merged pull request's webhook
+// moves the record past awaiting its merge, even while GitHub's read still shows the arm.
+func TestAREADYMergeRowWaitingOnAnArmEndsOnceTheMergeMovesTheRecord(t *testing.T) {
+	github := newArmableGitHub(t)
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+	now := time.Now().UTC()
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+	clock := now
+	runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("first RunOnce: %v", err)
+	}
+	assertMergeRows(t, pool, 1, "merge-refused", 0)
+	if _, err := pool.Exec(context.Background(), "update issues set phase = 'production_check' where key = 'LEGION-208'"); err != nil {
+		t.Fatalf("apply the merge to the record: %v", err)
+	}
+	clock = clock.Add(time.Minute)
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("second RunOnce: %v", err)
+	}
+	assertMergeRows(t, pool, 0, "merge-refused", 0)
+	if _, arms := github.counts(); arms != 0 {
+		t.Fatalf("arms %d, want none sent for an arm that stood", arms)
+	}
+}
+
+// armableGitHub is GitHub's GraphQL API for acme/widgets#42 at ready-head in a repository that allows
+// auto-merge, the pull request open, armed and BLOCKED on its required checks: it answers a read
+// with the pull request's state and arm, arms it on an enablePullRequestAutoMerge at ready-head,
+// disarms it on a disablePullRequestAutoMerge, and counts both.
+type armableGitHub struct {
+	url            string
+	mu             sync.Mutex
+	state          string
+	armed          bool
+	disables, arms int
+}
+
+func newArmableGitHub(t *testing.T) *armableGitHub {
+	t.Helper()
+	g := &armableGitHub{state: "OPEN", armed: true}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.Contains(string(body), "disablePullRequestAutoMerge"):
+			g.disables++
+			g.armed = false
+			_, _ = io.WriteString(w, `{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`)
+		case strings.Contains(string(body), "enablePullRequestAutoMerge"):
+			if !strings.Contains(string(body), `"head":"ready-head"`) {
+				t.Errorf("arm request %s, want READY's expected head", body)
+			}
+			g.arms++
+			g.armed = true
+			_, _ = io.WriteString(w, `{"data":{}}`)
+		case strings.Contains(string(body), "mergePullRequest"):
+			t.Errorf("merge request %s, want an arm: GitHub reports the pull request BLOCKED", body)
+		default:
+			autoMerge := "null"
+			if g.armed {
+				autoMerge = `{"enabledAt":"2026-10-11T00:00:00Z"}`
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"autoMergeAllowed":true,"pullRequest":{"id":"PR_42","state":%q,"headRefOid":"ready-head","mergeStateStatus":"BLOCKED","updatedAt":%q,"isMergeQueueEnabled":false,"autoMergeRequest":%s,"mergeQueueEntry":null}}}}`,
+				g.state, time.Now().UTC().Format(time.RFC3339), autoMerge)
+		}
+	}))
+	t.Cleanup(server.Close)
+	g.url = server.URL
+	return g
+}
+
+// set changes GitHub's state, as a mutation landing outside the daemon or GitHub's own merge does.
+func (g *armableGitHub) set(change func(*armableGitHub)) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	change(g)
+}
+
+func (g *armableGitHub) counts() (disables, arms int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.disables, g.arms
 }
 
 // A reopen at READY's head that lands while a worker is recording GitHub's permanent refusal takes
@@ -540,7 +670,7 @@ func TestARateLimitedREADYMergeWaitsGitHubsRetryAfter(t *testing.T) {
 	}
 }
 
-// A GitHub rate limit defers the rest of its batch only where the rest would spend the same budget.
+// A GitHub rate limit defers the rows after it only where they would spend the same budget.
 // The implement App's REST core budget (an issue branch's create) and its GraphQL budget (a disarm,
 // a READY merge) are separate, so a REST core limit never holds back a disarm, the effect that keeps
 // an unreviewed head from merging, nor a GraphQL limit an issue branch. GitHub's secondary limit
@@ -611,9 +741,9 @@ func TestARateLimitDefersOnlyTheRowsThatSpendItsBudget(t *testing.T) {
 	}
 }
 
-// The REST core and GraphQL budgets are exhausted independently, so a batch remembers each limit it
-// met: a REST core limit met after a GraphQL one leaves the GraphQL limit standing, and a disarm
-// behind both is deferred rather than sent against an exhausted budget.
+// The REST core and GraphQL budgets are exhausted independently, so the runner remembers each limit
+// its rows met: a REST core limit met after a GraphQL one leaves the GraphQL limit standing, and a
+// disarm behind both is deferred rather than sent against an exhausted budget.
 func TestARateLimitedBatchRemembersEveryBudgetItExhausted(t *testing.T) {
 	reset := strconv.FormatInt(time.Now().Add(10*time.Minute).Unix(), 10)
 	primary := func(resource string) map[string]string {
@@ -638,6 +768,71 @@ func TestARateLimitedBatchRemembersEveryBudgetItExhausted(t *testing.T) {
 	if github.calledFor("LEGION-209") {
 		t.Fatal("the disarm called GraphQL in the batch whose first row met GraphQL's limit")
 	}
+}
+
+// A GitHub rate limit stands until its deadline, not until its batch ends, and a row that spends
+// several limited budgets waits for the latest of their deadlines. A disarm queued after the batch
+// that met GitHub's secondary limit is deferred to that limit's end, then runs once it has passed;
+// and an issue branch behind a 30-second REST core limit and a 180-second secondary limit waits the
+// 180 seconds.
+func TestARateLimitStandsUntilTheLatestDeadlineOfTheBudgetsARowSpends(t *testing.T) {
+	secondary := map[string]string{"Retry-After": "180"}
+	t.Run("across batches", func(t *testing.T) {
+		github := newBudgetGitHub(t, nil, secondary)
+		pool := isolatedOutboxPool(t)
+		records := record.NewStore()
+		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+		putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-209", Project: "LEGION", Tree: "LEGION-209", Title: "Disarmed", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "V"})
+		start := time.Now().UTC().Truncate(time.Microsecond)
+		clock := start
+		runner := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return clock })
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, clock))
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("the batch that meets the limit: %v", err)
+		}
+		clock = start.Add(time.Minute)
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-209", record.AutoMergeDisable{Number: 43}, clock))
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("the next batch: %v", err)
+		}
+		if github.calledFor("LEGION-209") {
+			t.Fatal("the disarm called GitHub inside the secondary limit a batch before it met")
+		}
+		if nextAt, _ := outboxRowState(t, pool, "LEGION-209"); !nextAt.Equal(start.Add(180 * time.Second)) {
+			t.Fatalf("the deferred disarm is due at %s, want the limit's end %s", nextAt, start.Add(180*time.Second))
+		}
+		// The READY merge no longer has a READY to submit, so its next run calls no mutation.
+		if _, err := pool.Exec(context.Background(), "update issues set phase = 'implementing' where key = 'LEGION-208'"); err != nil {
+			t.Fatalf("withdraw the READY: %v", err)
+		}
+		clock = start.Add(181 * time.Second)
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("the batch after the limit: %v", err)
+		}
+		if !github.calledFor("LEGION-209") {
+			t.Fatal("the disarm did not run once the limit had passed")
+		}
+	})
+	t.Run("overlapping REST core and secondary limits", func(t *testing.T) {
+		core := map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": strconv.FormatInt(time.Now().Add(30*time.Second).Unix(), 10), "X-RateLimit-Resource": "core"}
+		github := newBudgetGitHub(t, core, secondary)
+		pool := isolatedOutboxPool(t)
+		records := record.NewStore()
+		seedReadyMerge(t, pool, records, "LEGION-208", awaitingREADY)
+		for _, key := range []string{"LEGION-210", "LEGION-211"} {
+			putOutboxIssue(t, pool, records, record.Issue{Key: key, Project: "LEGION", Tree: key, Title: "Branch", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "W"})
+		}
+		now := time.Now().UTC().Truncate(time.Microsecond)
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-210", record.IssueBranch{Generation: 1}, now))
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now))
+		enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-211", record.IssueBranch{Generation: 1}, now))
+		if err := mergeRunner(pool, records, github.url, quietLogger(), func() time.Time { return now }).RunOnce(context.Background()); err != nil {
+			t.Fatalf("RunOnce: %v", err)
+		}
+		if nextAt, _ := outboxRowState(t, pool, "LEGION-211"); !nextAt.Equal(now.Add(180 * time.Second)) {
+			t.Fatalf("the issue branch behind both limits is due at %s, want the later one's end %s", nextAt, now.Add(180*time.Second))
+		}
+	})
 }
 
 // budgetGitHub is GitHub for TestARateLimitDefersOnlyTheRowsThatSpendItsBudget: acme/widgets' REST

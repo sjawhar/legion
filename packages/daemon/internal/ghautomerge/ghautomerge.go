@@ -48,7 +48,7 @@ const (
 }`
 )
 
-// Outcome is what Submit found or asked GitHub to do.
+// Outcome is how Submit ended: a submission it asks to run again is a wait it returns instead.
 type Outcome string
 
 const (
@@ -56,10 +56,8 @@ const (
 	Missing Outcome = "missing"
 	// Stale is a submission the record no longer covers: the issue no longer awaits READY's head.
 	Stale Outcome = "stale"
-	// Already is a pull request GitHub already merged, armed or queued.
+	// Already is a pull request GitHub already merged at READY's head.
 	Already Outcome = "already"
-	// Armed is GitHub accepting auto-merge, or a merge-queue entry, for READY's head.
-	Armed Outcome = "armed"
 	// Merged is GitHub merging READY's head now.
 	Merged Outcome = "merged"
 )
@@ -139,15 +137,19 @@ func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 // reports the pull request mergeable (Unmergeable). GitHub's own rules decide each answer; Submit
 // bypasses none.
 //
-// Only the record ends a submission as Stale. While it still awaits head, a pull request GitHub
-// shows closed or at another head is a wait (Lagging): the webhook that moves the record has not
-// been applied yet, or GitHub's read is the one behind, and the next run decides again. GitHub
+// Only GitHub merging the pull request at head ends a submission, or the record leaving that READY
+// (Stale). An arm or a merge-queue entry at head is a wait (Armed), not the end: a disarm sent
+// before READY can still land, or a merge queue drop the pull request, and the next run then
+// submits again. While the record still awaits head, a pull request GitHub shows closed, merged at
+// another head, or at another head is a wait too (Lagging): the webhook that moves the record has
+// not been applied yet, or GitHub's read is the one behind, and the next run decides again. GitHub
 // always answers updatedAt, so a read without it fails rather than leaving the wait unbounded.
 //
 // A mutation GitHub refuses is read again: when GitHub still stands where it refused it (the same
 // open pull request at head, nothing armed, the same submission chosen), a retry would meet the
-// same refusal, and Submit returns it as *Refused. Any other failure, an HTTP or network one
-// included, is returned as it is, for the row to retry.
+// same refusal, and Submit returns it as *Refused. When that read fails, its error is returned,
+// the refusal as its context, so a rate limit it meets reaches the caller (githubrest.RetryAfter).
+// Any other failure, an HTTP or network one included, is returned as it is, for the row to retry.
 func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, head string, keep Keep) (Outcome, error) {
 	answer, err := readRepository(ctx, github, repo, number)
 	if err != nil {
@@ -157,7 +159,7 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	switch {
 	case pull == nil:
 		return Missing, nil
-	case pull.State == "MERGED":
+	case pull.State == "MERGED" && pull.HeadRefOid == head:
 		return Already, nil
 	}
 	kept, err := keep(ctx)
@@ -172,15 +174,18 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	case !pull.openAt(head):
 		return "", &Lagging{Number: number, Head: head, State: pull.State, GitHubHead: pull.HeadRefOid, Since: pull.UpdatedAt}
 	case pull.armed():
-		return Already, nil
+		return "", &Armed{Number: number, Repo: repo, Head: head}
 	}
 	chosen, ok := choose(answer)
 	if !ok {
 		return "", &Unmergeable{Number: number, Repo: repo, Head: head, State: pull.MergeStateStatus}
 	}
 	sent := github.GraphQL(ctx, chosen.mutation, map[string]any{"id": pull.ID, "head": head, "method": "SQUASH"}, nil)
-	if sent == nil {
-		return chosen.outcome, nil
+	switch {
+	case sent == nil && chosen.merges:
+		return Merged, nil
+	case sent == nil:
+		return "", &Armed{Number: number, Repo: repo, Head: head}
 	}
 	failed := fmt.Errorf("%s pull request #%d of %s at READY's head %s: %w", chosen.action, number, repo, head, sent)
 	var refusal *githubrest.GraphQLError
@@ -188,7 +193,10 @@ func Submit(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 		return "", failed
 	}
 	after, err := readRepository(ctx, github, repo, number)
-	if err != nil || after.PullRequest == nil || !after.PullRequest.openAt(head) || after.PullRequest.armed() {
+	if err != nil {
+		return "", fmt.Errorf("read pull request #%d of %s again after GitHub's refusal to %v: %w", number, repo, failed, err)
+	}
+	if after.PullRequest == nil || !after.PullRequest.openAt(head) || after.PullRequest.armed() {
 		return "", failed
 	}
 	if again, ok := choose(after); !ok || again != chosen {
@@ -274,11 +282,31 @@ func (u *Unmergeable) Is(target error) bool { return target == wait.ErrWaiting }
 // someone.
 func (u *Unmergeable) Routine() bool { return u.State == "BLOCKED" || u.State == "UNKNOWN" }
 
-// submission is the mutation Submit sends for a pull request, what it asks GitHub to do, and what
-// GitHub's acceptance of it means.
+// Armed is pull request Number of Repo armed for auto-merge, or in its merge queue, at READY's
+// Head: GitHub merges it under the repository's own rules. It is a wait (wait.ErrWaiting) that
+// ends once GitHub reports the pull request merged at Head; an arm or entry that disappears
+// before then is submitted again.
+type Armed struct {
+	Number int
+	Repo   ghrepo.Repository
+	Head   string
+}
+
+func (a *Armed) Error() string {
+	return fmt.Sprintf("pull request #%d of %s is armed for auto-merge or in its merge queue at READY's head %s: the daemon waits for GitHub to merge it",
+		a.Number, a.Repo, a.Head)
+}
+
+func (a *Armed) Is(target error) bool { return target == wait.ErrWaiting }
+
+// Routine is always true: only the repository's own rules hold an armed pull request back.
+func (a *Armed) Routine() bool { return true }
+
+// submission is the mutation Submit sends for a pull request, what it asks GitHub to do, and
+// whether GitHub's acceptance of it merges the pull request now.
 type submission struct {
 	mutation, action string
-	outcome          Outcome
+	merges           bool
 }
 
 // choose is the submission GitHub's answer calls for: an enqueue on a base that requires a merge
@@ -287,11 +315,11 @@ type submission struct {
 func choose(answer repository) (submission, bool) {
 	switch {
 	case answer.PullRequest.IsMergeQueueEnabled:
-		return submission{enable, "enqueue", Armed}, true
+		return submission{enable, "enqueue", false}, true
 	case mergeableNow(answer.PullRequest.MergeStateStatus):
-		return submission{merge, "merge", Merged}, true
+		return submission{merge, "merge", true}, true
 	case answer.AutoMergeAllowed:
-		return submission{enable, "enable auto-merge for", Armed}, true
+		return submission{enable, "enable auto-merge for", false}, true
 	default:
 		return submission{}, false
 	}

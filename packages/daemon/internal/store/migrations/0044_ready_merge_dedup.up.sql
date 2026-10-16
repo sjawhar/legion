@@ -5,6 +5,12 @@
 -- lose the only unfinished merge. Reopening at that head reuses the surviving row without pulling
 -- its next_at before a GitHub rate-limit deadline; it never creates a duplicate mutation or
 -- architect notice.
+--
+-- A daemon still on 0043 may write the outbox while this runs, and a row it commits after the
+-- dedup's snapshot would fail the index. The lock holds every write off (a worker's row lock does
+-- not conflict with it) until the index exists, which a held-off duplicate then meets.
+lock table outbox in share row exclusive mode;
+
 with ranked as (
   select id, row_number() over (
     partition by issue, payload ->> 'head'
