@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-636",
+  "completed": "2026-10-16T03:58:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1984",
+  "round": 1,
+  "reviewedHead": "049658c23bb7d8ed9e9c6bf47b1deca212692ef0",
+  "codeHead": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 6,
+  "ci": {
+    "required": ["lint", "typecheck", "test", "pr-title"],
+    "ciHead": "6b44560d05a1c6dd19ccfcc7f29a14d04df00d82",
+    "checks": "lint, typecheck, test, pr-title all completed success at 6b44560d05a1 (Tests run 38843553198, PR Title runs 38843553261 and 38844274122, Worker Image run 38843553276 success, Docs 38843553222 success; Legion Envoy and Contracts 38843553271 in_progress on its non-required `dispatch` job only)",
+    "compareOnlyLegion": true
+  },
+  "proofLines": {
+    "implementer": "present: this pod's tree, probe-image at contract 25 with a byte-identical 20-row table against main's binary, the unread wrapper, --check-config on 600/default/600-under-700, at 6b44560d05a1; negative controls codegraph off PATH and the lockfile edited to typescript 5.9.2",
+    "tester": "present: the same surfaces re-run independently against a fork-point build, plus a real npm ci driven over LSP stdio and the Stage 1 run's log for the wire `source`; negative controls codegraph off PATH and an EINTEGRITY lockfile"
+  },
+  "thermonuclear": {
+    "head": "049658c23bb7d8ed9e9c6bf47b1deca212692ef0",
+    "deepReview": "no Critical; one Important (scripts/e2e/README.md:1031 truncated), three Minor, one hardening",
+    "codeQuality": "two Important correctness (worker.Dockerfile pin guard, docs/kubernetes.md:78-81 stale), the rest cleanup"
+  },
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "scripts/e2e/README.md:1031",
+      "description": "The Stage 4b `boot` checkpoint row was written back truncated: 2228 characters at the fork point, 771 at the head, ending in a literal `…` with no closing `|` — the documented contract of capabilities-at-boot.json (every image row present, every live row unchecked, open rows secrets plus pool-capacity when the pool scaled, model-fallback and resource-limits present) is gone and the table row is broken. Restore the fork-point row and re-apply only the intended edit (drop `and none installed`)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/daemon/docker/worker.Dockerfile:373",
+      "description": "The notices stage's pin guard `[ -n \"$typescript_version\" ] && [ -n \"$tsls_version\" ] && [ -n \"$pyright_version\" ];` fails the build only when the LAST pin is empty: under `set -e` a non-last member of an AND list is ignored (verified: `sh -c 'set -eu; a=\"\"; b=x; c=y; [ -n \"$a\" ] && [ -n \"$b\" ] && [ -n \"$c\" ]; echo REACHED'` prints REACHED, exit 0). An empty typescript or typescript-language-server pin ships THIRD_PARTY_NOTICES naming `TypeScript ,`. Check each pin on its own (`: \"${typescript_version:?...}\"` or `|| exit 1`)."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:78-81",
+      "description": "Still says the language servers are npm global packages under /opt/node/lib/node_modules and that TypeScript is pinned to the version this repository's lockfile holds; this diff moved them to /opt/language-servers/node_modules installed by `npm ci --ignore-scripts` from packages/daemon/docker/language-servers's own package.json and lockfile. The notices text and the Dockerfile comments were updated; this paragraph was missed."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/README.md:649",
+      "description": "The image-probe row now reads `model-fallback=<on|off|unread>`, but live_install_test.go:324 (unchanged) refuses any mark but on or off, and the PR body's census says Stage 4a stays strict by design. Keep `<on|off>` in the row."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/probe_test.go:816",
+      "description": "The capacity-stop test's positive case gives the attempt a 900 ms budget against a real 600 ms age-out with recheckInterval 500 ms: the informer must deliver the nudge within 300 ms or the case fails on a loaded runner. Widen the budget past the next recheck tick (e.g. bootTimeout + 1 s) so the tick is a second chance."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/probe.go:575",
+      "description": "lastBytes glues `…` onto the first retained line (`\"…\" + string(buf)`), so that line no longer starts at a line boundary for the `(?m)^`-anchored OK-line readers (bootprobe.markPattern); unreachable today since the OK line is last. `\"…\\n\"` keeps the retained lines intact. Hardening."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/probe.go:540",
+      "description": "The 1 MiB io.LimitReader is itself a from-the-start cut, so the body's \"the OK line is always in the quote\" holds only while the last 100 lines fit in 1 MiB; unreachable with today's probe output bounds. Recorded under Not proven / risk, not a change requested."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/lookpath/lookpath_test.go:24-37",
+      "description": "The relative-element case uses `relative/bin`, which does not exist, so it cannot tell `skipped as relative` from `absent`; create the executable under a cwd-relative directory to prove the skip. Fast-follow."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/config/providerkeys.go:161",
+      "description": "Cleanup bundle for the Fast-follow line: pathValue duplicates capabilities.envValue(env, \"PATH\") (a lookpath.In(env, name) would own the whole job); StatusMissing/StatusReported exported though the wire must never carry them; render's ctx and error exist for one caller and Report discards both; ProbeBudgetLine's bool duplicates line != \"\"; TestStateStringIsTheProbeLine pins the line format a third time; the PR body's census row for the lookpath relative-skip should name the hazard it closes (an executable resolved from a cwd-relative PATH element, Go's exec.LookPath ErrDot)."
+    }
+  ]
+}
