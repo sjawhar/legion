@@ -50,6 +50,8 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}
 	child := pulumi.Parent(comp)
 	project := organizations.LookupProjectOutput(ctx, organizations.LookupProjectOutputArgs{}, pulumi.Provider(gcpProvider))
+	// The cluster's Workload Identity pool; GKE accepts only the project's own, <project id>.svc.id.goog.
+	pool := project.ProjectId().Elem().ApplyT(func(id string) string { return id + ".svc.id.goog" }).(pulumi.StringOutput)
 
 	network, err := compute.NewNetwork(ctx, s.hostname+"-network", &compute.NetworkArgs{AutoCreateSubnetworks: pulumi.Bool(false)}, child)
 	if err != nil {
@@ -89,7 +91,7 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		PrivateClusterConfig:   &container.ClusterPrivateClusterConfigArgs{EnablePrivateNodes: pulumi.Bool(true), EnablePrivateEndpoint: pulumi.Bool(false)},
 		ReleaseChannel:         &container.ClusterReleaseChannelArgs{Channel: pulumi.String("REGULAR")},
 		SecretManagerConfig:    &container.ClusterSecretManagerConfigArgs{Enabled: pulumi.Bool(true)},
-		WorkloadIdentityConfig: &container.ClusterWorkloadIdentityConfigArgs{WorkloadPool: project.ProjectId().Elem()},
+		WorkloadIdentityConfig: &container.ClusterWorkloadIdentityConfigArgs{WorkloadPool: pool},
 		DeletionProtection:     pulumi.Bool(s.deletionProtection),
 	}, child)
 	if err != nil {
@@ -128,8 +130,8 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 	}
 	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
 	// cluster; IAM refuses a member of a pool that does not exist yet.
-	principal := pulumi.All(project.Number(), project.ProjectId().Elem()).ApplyT(func(values []interface{}) string {
-		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s.svc.id.goog/subject/ns/%s/sa/%s", values[0].(string), values[1].(string), s.namespace, s.hostname)
+	principal := pulumi.All(project.Number(), pool).ApplyT(func(values []interface{}) string {
+		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", values[0].(string), values[1].(string), s.namespace, s.hostname)
 	}).(pulumi.StringOutput)
 	_, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: args.NatsSeedSecret, Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 	if err != nil {

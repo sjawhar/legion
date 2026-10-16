@@ -186,6 +186,15 @@ func TestDispatchSeedAccessorWaitsForTheCluster(t *testing.T) {
 		"the seed accessor is granted after the cluster that creates its principal's pool")
 }
 
+// GKE accepts only the project's own pool, named <project id>.svc.id.goog.
+func TestDispatchClusterUsesTheProjectsWorkloadPool(t *testing.T) {
+	m, err := runDispatch(t, dispatchArgs(), true)
+	require.NoError(t, err)
+
+	config := m.One(t, "gcp:container/cluster:Cluster").Inputs.Mappable()["workloadIdentityConfig"].(map[string]any)
+	require.Equal(t, "example-project.svc.id.goog", config["workloadPool"])
+}
+
 func TestDispatchRegistersKubernetesResources(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
