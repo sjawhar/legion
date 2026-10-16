@@ -2322,6 +2322,22 @@ full_agent_summary() {
     tool_result_texts("bash") as $bash | tool_result_texts("eval") as $eval | tool_result_texts("web_search") as $search
     | "login \(said($bash; $app) | line); browser \(said($eval; "title: ") | line); toolchain \(said($bash; "go version") | gsub("\\s+"; " ") | .[0:200]); search \(said($search; "https://") | line)"'
 }
+# full_agent_common_asserts WHO EXCERPT NONCE APP OTHER: the four assertions the role loop and the
+# merger block of full-agent-tools share, WHO the fail lines' prefix: an edit result and a read
+# result carry `edited NONCE`, a bash call running gh api graphql answered APP, the role's own App,
+# and no bash result carries OTHER, the other App. The notebook negative stays in each block, after
+# its own further assertions, so neither block's order of fail lines moves.
+full_agent_common_asserts() {
+  local who=$1 excerpt=$2 nonce=$3 app=$4 other=$5
+  tool_result_said "$excerpt" edit "edited $nonce" ||
+    fail "$who: no edit result carries 'edited $nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
+  tool_result_said "$excerpt" read "edited $nonce" ||
+    fail "$who: no read result carries 'edited $nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
+  tool_result_answered "$excerpt" bash 'gh api graphql' "$app" ||
+    fail "$who: no result of a bash call running gh api graphql carries $app, so gh did not answer as $who's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  ! tool_result_said "$excerpt" bash "$other" ||
+    fail "$who: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+}
 # agent_pid POD ROLE prints the pid of ROLE's Oh My Pi in POD (agent_pid_sh).
 agent_pid() {
   # shellcheck disable=SC2016  # expanded by the pod's shell
@@ -2335,9 +2351,14 @@ agent_pid() {
 agent_setting() {
   local pod=$1 role=$2 pid=$3 dir=$4 key=$5 script
   # The pod's shell runs this with $1 DIR, $2 KEY and $3 PID; the inner sh reads KEY from the
-  # environment xargs hands it, before env -i empties that environment for omp.
+  # environment xargs hands it, before env -i empties that environment for omp. `-x -n <count>`
+  # (the count of the process's variables, the NULs in its environ) runs `omp config get` once with
+  # every variable or exits with xargs's `argument list too long`, which agent_setting's caller
+  # prints with its fail line; `-x` alone would split an oversized environment over two runs, the
+  # second under a partial environment, and the proof would fail on the value with no diagnosis
+  # (GNU xargs's `-x` exits only when the `-n`/`-L` arguments do not fit `-s`).
   script=$(cat <<'EOF'
-cd "$1" && KEY=$2 xargs -0 sh -c 'exec env -i "$@" omp config get "$KEY" --json' agent-env <"/proc/$3/environ"
+cd "$1" && KEY=$2 xargs -0 -x -n "$(tr -cd '\0' <"/proc/$3/environ" | wc -c)" sh -c 'exec env -i "$@" omp config get "$KEY" --json' agent-env <"/proc/$3/environ"
 EOF
   )
   pod_exec "$pod" "$role" sh -c "$script" agent-setting "$dir" "$key" "$pid" | jq -c .value
@@ -4393,14 +4414,7 @@ for role in architect planner implementer tester reviewer; do
     tool_result_answered "$excerpt" bash 'go version &&' "$want" ||
       fail "$role: no result of the toolchain chain (a bash call whose command carries 'go version &&') carries '$want'; its bash results: $(tool_result_quotes "$excerpt" bash)"
   done
-  tool_result_said "$excerpt" edit "edited $nonce" ||
-    fail "$role: no edit result carries 'edited $nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
-  tool_result_said "$excerpt" read "edited $nonce" ||
-    fail "$role: no read result carries 'edited $nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
-  tool_result_answered "$excerpt" bash 'gh api graphql' "$app" ||
-    fail "$role: no result of a bash call running gh api graphql carries $app, so gh did not answer as the role's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
-  ! tool_result_said "$excerpt" bash "$other" ||
-    fail "$role: a bash result carries $other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+  full_agent_common_asserts "$role" "$excerpt" "$nonce" "$app" "$other"
   tool_result_said "$excerpt" task "$app" ||
     fail "$role: no task result carries $app, so its FullAgentGh subagent did not answer as the role's App; its task results: $(tool_result_quotes "$excerpt" task)"
   id=$(full_agent_task_id "$excerpt" "$app")
@@ -4422,14 +4436,7 @@ merger_other=$(role_app reviewer)
 excerpt=$evidence/full-agent-tools/merger.jsonl
 claim_session_text "$tree1" merger | awk -v mark="$merger_nonce" 'found || index($0, mark) { found = 1; print }' >"$excerpt" ||
   fail "the merger on $tree1 has no readable session"
-tool_result_said "$excerpt" edit "edited $merger_nonce" ||
-  fail "merger: no edit result carries 'edited $merger_nonce', so the edit tool did not change the page; its edit results: $(tool_result_quotes "$excerpt" edit)"
-tool_result_said "$excerpt" read "edited $merger_nonce" ||
-  fail "merger: no read result carries 'edited $merger_nonce', so the edited page was not read back; its reads: $(tool_result_quotes "$excerpt" read /tmp/full-agent-tools)"
-tool_result_answered "$excerpt" bash 'gh api graphql' "$merger_app" ||
-  fail "merger: no result of a bash call running gh api graphql carries $merger_app, so gh did not answer as the merger's App; its bash results: $(tool_result_quotes "$excerpt" bash)"
-! tool_result_said "$excerpt" bash "$merger_other" ||
-  fail "merger: a bash result carries $merger_other, the other App; its bash results: $(tool_result_quotes "$excerpt" bash)"
+full_agent_common_asserts merger "$excerpt" "$merger_nonce" "$merger_app" "$merger_other"
 ! tool_ran "$excerpt" notebook || fail "the merger's session shows the notebook tool ran, which nothing asked for"
 note "merger as $merger_app: $(full_agent_summary "$excerpt" "$merger_app")"
 # The operation changed nothing of the tree: the finished workers go idle again in the process they
