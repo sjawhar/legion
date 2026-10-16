@@ -621,14 +621,14 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
-			err: []string{`users[0]`, "machineId", "permissions", "both set"},
+			err: []string{"users[0]: machineId and permissions are both set; name one"},
 		},
 		{
 			name: "a user naming both machine ids",
 			edit: func(a *gcp.NatsHubArgs) {
 				a.Users[0].DispatchMachineID = pulumi.StringRef("example-dispatch")
 			},
-			err: []string{`users[0]`, "machineId", "dispatchMachineId", "both set"},
+			err: []string{"users[0]: machineId and dispatchMachineId are both set; name one"},
 		},
 		{
 			name: "a user naming Dispatch and explicit permissions",
@@ -637,7 +637,7 @@ func TestNatsHubResolverRefusesInvalidInputs(t *testing.T) {
 					Publish: nats.RulesArgs{Allow: []string{">"}}, Subscribe: nats.RulesArgs{Allow: []string{">"}},
 				}
 			},
-			err: []string{`users[2]`, "dispatchMachineId", "permissions", "both set"},
+			err: []string{"users[2]: dispatchMachineId and permissions are both set; name one"},
 		},
 		{
 			name: "a user naming neither a machine id nor permissions",
