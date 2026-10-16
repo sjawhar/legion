@@ -565,6 +565,34 @@ func TestARestartOnAVolumeThatHoldsTheCloneFetchesIntoIt(t *testing.T) {
 	}
 }
 
+// A cache killed mid-fetch leaves git's lock files in its clone. Restarted on that volume, it is
+// the clone's only writer, so its first fetch removes them and brings what the remote gained.
+func TestACacheRestartedAfterAnInterruptedFetchClearsItsLocks(t *testing.T) {
+	remote := newRemote(t)
+	opts := testOptions(t, newTestRunner(t, remote))
+	first := start(t, opts)
+	first.ready(t)
+	first.cancel()
+	if err := <-first.done; err != nil {
+		t.Fatalf("the first Serve ended with %v", err)
+	}
+	first.done <- nil
+	for _, lock := range []string{"refs/heads/main.lock", "packed-refs.lock"} {
+		if err := os.WriteFile(filepath.Join(first.dir(), lock), []byte("interrupted\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	moved := advance(t, remote, "moved")
+
+	again := start(t, opts)
+	if health := again.ready(t); health.Head != moved || health.LastFetchAt.IsZero() {
+		t.Fatalf("the restarted cache serves %+v, want what its fetch brought, %s", health, moved)
+	}
+	if !logged(again.log.all(), "removed the stale git lock "+filepath.Join(again.dir(), "refs/heads/main.lock")) {
+		t.Errorf("the restart did not log the lock it removed: %q", again.log.all())
+	}
+}
+
 // A cache whose volume holds no clone and whose first clone fails has nothing to serve: Serve ends
 // with the clone's failure, so the container exits and the kubelet restarts it.
 func TestServeEndsWhenTheFirstCloneFails(t *testing.T) {

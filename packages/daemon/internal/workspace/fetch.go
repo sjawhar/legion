@@ -107,6 +107,9 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	env := merge(credential.env, isolatedGitConfig)
 	report := FetchReport{Feed: feed}
 	if present {
+		if err := RemoveStaleFeedLocks(feed, request.Clock.Now(), request.Log); err != nil {
+			return FetchReport{}, err
+		}
 		if err := report.fromGitHub(ctx, run, request, fetchInto(feed, request.Repo), feed, env); err != nil {
 			return FetchReport{}, err
 		}

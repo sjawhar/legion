@@ -637,6 +637,52 @@ func TestFetchFailsWhatARealGitPrintsForAPermanentFailureAtOnce(t *testing.T) {
 	}
 }
 
+// A fetch killed mid-update leaves git's lock files in the feed, which outlives it on the issue's
+// volume (or the cache's): the next Fetch, the feed's only writer, removes each and logs it with
+// its age before it fetches, so the feed is never blocked for good, and the objects the issue's
+// clone borrows through alternates are kept.
+func TestFetchRemovesTheLocksAnInterruptedFetchLeftInTheFeed(t *testing.T) {
+	run := newLocalRunner(t)
+	req := fetchRequest(t)
+	first, err := Fetch(context.Background(), run, req)
+	if err != nil {
+		t.Fatalf("the first Fetch: %v", err)
+	}
+	feed := first.Feed
+	objects := strings.Fields(runSetup(t, feed, "git", "--git-dir="+feed, "rev-list", "--objects", "--no-object-names", "--all"))
+	locks := []string{"refs/heads/main.lock", "packed-refs.lock", "HEAD.lock", "shallow.lock"}
+	for _, lock := range locks {
+		if err := os.WriteFile(filepath.Join(feed, lock), []byte("interrupted\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	moved := pushRemoteBranch(t, run.remote, "main", "after-the-interruption.txt")
+	var logged []string
+	req.Log = func(line string) { logged = append(logged, line) }
+
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the Fetch after an interrupted one: %v", err)
+	}
+	if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "rev-parse", "refs/heads/main")); got != moved {
+		t.Errorf("the feed's main is %s, want the remote's %s", got, moved)
+	}
+	for _, lock := range locks {
+		if _, err := os.Stat(filepath.Join(feed, lock)); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("%s is still in the feed (%v)", lock, err)
+		}
+		if !slices.ContainsFunc(logged, func(line string) bool {
+			return strings.HasPrefix(line, "removed the stale git lock "+filepath.Join(feed, lock)+", last written ")
+		}) {
+			t.Errorf("the removal of %s was not logged: %q", lock, logged)
+		}
+	}
+	for _, object := range objects {
+		if err := exec.Command("git", "--git-dir="+feed, "cat-file", "-e", object).Run(); err != nil {
+			t.Errorf("the feed lost %s, an object the clone may borrow", object)
+		}
+	}
+}
+
 // A feed that already holds the repository — the issue volume's feed on a relaunch, the repository
 // cache's clone at each refresh — is fetched into, not cloned again: every branch the remote has
 // moved, gained or lost reaches it, through the one-shot credential, bounded as the clone is, and
