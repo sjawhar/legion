@@ -42,16 +42,18 @@ type FetchRequest struct {
 }
 
 // FetchReport is where Fetch filled the feed from and what each source brought: the feed
-// repository; whether it was cloned whole from GitHub; the repository cache's tar, its length and
-// how long it streamed, when the feed was unpacked from it; and how much the feed's objects grew
-// across the transfer from GitHub, with how many refs that transfer made, moved or deleted.
+// repository; whether it was cloned whole from GitHub; the repository cache's tar, its length, how
+// long it streamed and how long its history took to verify, when the feed was unpacked from it;
+// and how much the feed's objects grew across the transfer from GitHub, with how many refs that
+// transfer made, moved or deleted.
 type FetchReport struct {
-	Feed          string
-	Cloned        bool
-	CacheBytes    int64
-	CacheDuration time.Duration
-	GitHubBytes   int64
-	Refs          int
+	Feed           string
+	Cloned         bool
+	CacheBytes     int64
+	CacheDuration  time.Duration
+	VerifyDuration time.Duration
+	GitHubBytes    int64
+	Refs           int
 }
 
 // Fetch fills the feed with the provisioning token and no configuration but the one-shot
@@ -134,10 +136,14 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 		}
 		started := request.Clock.Now()
 		streamed, err := unpackCache(ctx, run, request.CacheURL, staging)
+		verifying := request.Clock.Now()
+		if err == nil {
+			err = verifyCache(ctx, run, staging)
+		}
 		if err != nil {
 			return FetchReport{}, fmt.Errorf("fill the feed from the repository cache %s: %w", request.CacheURL, err)
 		}
-		report.CacheBytes, report.CacheDuration = streamed, request.Clock.Now().Sub(started)
+		report.CacheBytes, report.CacheDuration, report.VerifyDuration = streamed, verifying.Sub(started), request.Clock.Now().Sub(verifying)
 		transfer = fetchInto(staging, request.Repo)
 	}
 	report.Cloned = transfer.verb == "clone"
@@ -299,10 +305,11 @@ func cacheNotReady(ctx context.Context, cache string) string {
 
 // unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
 // makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
-// returns the tar's length. Every entry must be a regular file or a directory whose cleaned name
-// stays inside staging and is part of a repository's history and refs (FeedEntry); the first that
-// is not ends the stream, refused by name, and the caller removes what was written. The stream is
-// read to its end, so a transfer the cache broke off is a failure, not a short repository.
+// returns the tar's length; Fetch then verifies what it wrote (verifyCache). Every entry must be a
+// regular file or a directory whose cleaned name stays inside staging and is one of a repository's
+// refs or packs (FeedEntry); the first that is not ends the stream, refused by name, and the caller
+// removes what was written. The stream is read to its end, so a transfer the cache broke off is a
+// failure, not a short repository.
 func unpackCache(ctx context.Context, run Runner, cache, staging string) (int64, error) {
 	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
 		return 0, err
@@ -341,6 +348,33 @@ func unpackCache(ctx context.Context, run Runner, cache, staging string) (int64,
 	return stream.read, nil
 }
 
+// verifyCache holds the history the cache streamed into staging to what git takes from a remote:
+// each pack is indexed afresh (`git index-pack`, which checks the pack's checksum and inflates and
+// hashes every object in it, writing the index git then reads, so no index of the cache's is
+// trusted), and every object the refs reach must then be present (`git fsck --connectivity-only`).
+// A pack that does not index and a history that is not whole are refused, naming git's answer.
+// Each runs within FetchTimeout, as a transfer does, since both follow the repository's size.
+func verifyCache(ctx context.Context, run Runner, staging string) error {
+	packs, err := filepath.Glob(filepath.Join(staging, "objects", "pack", "pack-*.pack"))
+	if err != nil {
+		return err
+	}
+	verify := func(argv []string) error {
+		result, err := runCommandTimeout(ctx, run, argv, isolatedGitConfig, "", FetchTimeout)
+		_, err = checkedResult(argv, result, err)
+		return err
+	}
+	for _, pack := range packs {
+		if err := verify([]string{"git", "--git-dir=" + staging, "index-pack", pack}); err != nil {
+			return fmt.Errorf("the repository cache's pack %s, which does not verify: %w", filepath.Base(pack), err)
+		}
+	}
+	if err := verify([]string{"git", "--git-dir=" + staging, "fsck", "--connectivity-only", "--no-dangling", "--no-progress"}); err != nil {
+		return fmt.Errorf("the repository cache's history is not whole: %w", err)
+	}
+	return nil
+}
+
 // unpackEntry writes one entry of the repository cache's tar into staging, refusing one a feed does
 // not take.
 func unpackEntry(staging string, header *tar.Header, body io.Reader) error {
@@ -353,7 +387,7 @@ func unpackEntry(staging string, header *tar.Header, body io.Reader) error {
 		return fmt.Errorf("the repository cache's tar holds %q, which is neither a regular file nor a directory", name)
 	}
 	if !FeedEntry(name, dir) {
-		return fmt.Errorf("the repository cache's tar holds %q, which is not part of a repository's history and refs", name)
+		return fmt.Errorf("the repository cache's tar holds %q, which is not one of a repository's refs or packs", name)
 	}
 	target := filepath.Join(staging, filepath.FromSlash(name))
 	if dir {
@@ -427,11 +461,14 @@ func stageBeside(feed string, log func(string)) (string, error) {
 const cloneSuffix = ".clone-"
 
 // feedConfiguration is what the feed repository's own configuration sets: no automatic garbage
-// collection or maintenance, ever. The issue's clone keeps its objects in the feed
+// collection or maintenance, ever, and every fetch's objects kept as the pack they arrived in
+// (`fetch.unpackLimit=1`). The issue's clone keeps its objects in the feed
 // (objects/info/alternates), so an object a gc dropped from the feed — one reachable only from a
 // branch GitHub deleted and the fetch pruned — would be gone from the clone that still names it.
+// And the repository cache streams its clone's packs alone (FeedEntry), so a fetch that exploded a
+// small pack into loose objects would leave the history it brought out of every issue's feed.
 func feedConfiguration(ctx context.Context, run Runner, gitDir string) error {
-	for _, pair := range [][2]string{{"gc.auto", "0"}, {"maintenance.auto", "false"}} {
+	for _, pair := range [][2]string{{"gc.auto", "0"}, {"maintenance.auto", "false"}, {"fetch.unpackLimit", "1"}} {
 		if _, err := FeedGit(ctx, run, gitDir, "config", pair[0], pair[1]); err != nil {
 			return err
 		}

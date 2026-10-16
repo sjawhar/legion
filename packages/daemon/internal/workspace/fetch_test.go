@@ -800,25 +800,38 @@ func (r *killedClone) Run(ctx context.Context, command Command) (Result, error) 
 
 // Nothing ever collects the feed's garbage: provisioning clones the issue's clone with its objects
 // in the feed (objects/info/alternates), so an object the feed dropped — one only a branch GitHub
-// deleted reached — would be gone from the clone too. The feed's own configuration turns git's
-// automatic gc and maintenance off before the feed is in place.
-func TestFetchTurnsTheFeedsGarbageCollectionOff(t *testing.T) {
+// deleted reached — would be gone from the clone too. And every fetch into the feed keeps what it
+// brings as a pack, never loose objects, so the repository cache's clone streams packs alone. The
+// feed's own configuration says both before the feed is in place, and a later fetch into it
+// writes no loose object.
+func TestFetchTurnsTheFeedsGarbageCollectionOffAndKeepsPacks(t *testing.T) {
 	run := newLocalRunner(t)
-	report, err := Fetch(context.Background(), run, fetchRequest(t))
+	req := fetchRequest(t)
+	report, err := Fetch(context.Background(), run, req)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
 	feed := report.Feed
-	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false"} {
+	for key, want := range map[string]string{"gc.auto": "0", "maintenance.auto": "false", "fetch.unpackLimit": "1"} {
 		if got := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "config", "--get", key)); got != want {
 			t.Errorf("the feed's %s is %q, want %q", key, got, want)
 		}
 	}
+	runSetup(t, feed, "git", "--git-dir="+feed, "repack", "-a", "-d", "--quiet")
+	pushRemoteBranch(t, run.remote, "main", "one-small-change.txt")
+	if _, err := Fetch(context.Background(), run, req); err != nil {
+		t.Fatalf("the second Fetch: %v", err)
+	}
+	if loose := strings.TrimSpace(runSetup(t, feed, "git", "--git-dir="+feed, "count-objects")); !strings.HasPrefix(loose, "0 objects") {
+		t.Errorf("the fetch into the feed left %s", loose)
+	}
 }
 
-// What of a bare repository the cache streams and a feed takes: its history and refs, and nothing
-// of its own, nothing that would point it at objects elsewhere, and nothing git is still writing.
-func TestFeedEntryIsTheRepositorysHistoryAndRefsAlone(t *testing.T) {
+// What of a bare repository the cache streams and a feed takes: its refs and its packs, nothing
+// the feed rebuilds itself from them (an index, a reverse index, a bitmap, a commit-graph), no
+// loose object, nothing of its own, nothing that would point it at objects elsewhere, and nothing
+// git is still writing.
+func TestFeedEntryIsTheRepositorysRefsAndPacksAlone(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		dir  bool
@@ -830,11 +843,21 @@ func TestFeedEntryIsTheRepositorysHistoryAndRefsAlone(t *testing.T) {
 		{"refs/heads", true, true},
 		{"refs/heads/release/v7.1", false, true},
 		{"objects", true, true},
-		{"objects/pack/pack-1a.pack", false, true},
-		{"objects/pack/pack-1a.idx", false, true},
-		{"objects/ab/cdef", false, true},
-		{"objects/info/packs", false, true},
+		{"objects/pack", true, true},
+		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.pack", false, true},
 
+		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.idx", false, false},
+		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.rev", false, false},
+		{"objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d.bitmap", false, false},
+		{"objects/pack/multi-pack-index", false, false},
+		{"objects/pack/pack-x.pack", false, false},
+		{"objects/ab", true, false},
+		{"objects/ab/cdef", false, false},
+		{"objects/info", true, false},
+		{"objects/info/packs", false, false},
+		{"objects/info/commit-graph", false, false},
+		{"objects/info/alternates", false, false},
+		{"objects/info/http-alternates", false, false},
 		{"config", false, false},
 		{"description", false, false},
 		{"hooks", true, false},
@@ -844,8 +867,6 @@ func TestFeedEntryIsTheRepositorysHistoryAndRefsAlone(t *testing.T) {
 		{"FETCH_HEAD", false, false},
 		{"HEAD", true, false},
 		{"refs", false, false},
-		{"objects/info/alternates", false, false},
-		{"objects/info/http-alternates", false, false},
 		{"objects/pack/tmp_pack_x", false, false},
 		{"objects/incoming-x", true, false},
 		{"refs/heads/main.lock", false, false},
@@ -857,12 +878,75 @@ func TestFeedEntryIsTheRepositorysHistoryAndRefsAlone(t *testing.T) {
 	}
 }
 
-// cacheOf is the repository cache's clone of remote as the cache keeps it: bare, its own
-// configuration turned to Fetch's (gc off), holding every branch remote has now.
+// cacheOf is the repository cache's clone of remote as the cache keeps it: bare, holding every
+// branch remote has now in one pack, as a clone over git's transport keeps it.
 func cacheOf(t *testing.T, remote string) string {
 	t.Helper()
 	cache := filepath.Join(t.TempDir(), "acme", "widgets.git")
-	runSetup(t, t.TempDir(), "git", "clone", "--bare", "--quiet", remote, cache)
+	runSetup(t, t.TempDir(), "git", "clone", "--bare", "--quiet", "--no-local", remote, cache)
+	return cache
+}
+
+// packOf is the one pack of the bare repository dir.
+func packOf(t *testing.T, dir string) string {
+	t.Helper()
+	packs, err := filepath.Glob(filepath.Join(dir, "objects", "pack", "pack-*.pack"))
+	if err != nil || len(packs) != 1 {
+		t.Fatalf("%s holds packs %v (%v), want one", dir, packs, err)
+	}
+	return packs[0]
+}
+
+// corruptCacheOf is cacheOf with one byte of its pack flipped, inside an object's compressed data:
+// a disk or a transfer that damaged the cache's history.
+func corruptCacheOf(t *testing.T, remote string) string {
+	t.Helper()
+	cache := cacheOf(t, remote)
+	pack := packOf(t, cache)
+	body, err := os.ReadFile(pack)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body[len(body)/2] ^= 0xff
+	if err := os.Chmod(pack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pack, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return cache
+}
+
+// incompleteCacheOf is cacheOf whose pack lacks one blob its history reaches: a cache that lost an
+// object.
+func incompleteCacheOf(t *testing.T, remote string) string {
+	t.Helper()
+	cache := cacheOf(t, remote)
+	var kept []string
+	dropped := ""
+	for _, line := range strings.Split(strings.TrimSpace(runSetup(t, cache, "git", "--git-dir="+cache, "rev-list", "--objects", "--all")), "\n") {
+		id, _, _ := strings.Cut(line, " ")
+		kind := strings.TrimSpace(runSetup(t, cache, "git", "--git-dir="+cache, "cat-file", "-t", id))
+		if kind == "blob" && dropped == "" {
+			dropped = id
+			continue
+		}
+		kept = append(kept, id)
+	}
+	if dropped == "" {
+		t.Fatal("the remote's history holds no blob to drop")
+	}
+	old := packOf(t, cache)
+	command := exec.Command("git", "--git-dir="+cache, "pack-objects", "--quiet", filepath.Join(cache, "objects", "pack", "pack"))
+	command.Stdin = strings.NewReader(strings.Join(kept, "\n") + "\n")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("pack the cache without %s: %v\n%s", dropped, err, output)
+	}
+	for _, suffix := range []string{".pack", ".idx", ".rev"} {
+		if err := os.Remove(strings.TrimSuffix(old, ".pack") + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+	}
 	return cache
 }
 
@@ -1009,8 +1093,8 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	if report.Feed != feed || report.Cloned {
 		t.Fatalf("Fetch reported %+v, want the feed %s filled from the cache", report, feed)
 	}
-	if report.CacheBytes != int64(len(body)) || report.CacheDuration <= 0 {
-		t.Errorf("the report counts %d bytes in %s from the cache, want the tar's %d", report.CacheBytes, report.CacheDuration, len(body))
+	if report.CacheBytes != int64(len(body)) || report.CacheDuration <= 0 || report.VerifyDuration <= 0 {
+		t.Errorf("the report counts %d bytes in %s from the cache, verified in %s, want the tar's %d and both times", report.CacheBytes, report.CacheDuration, report.VerifyDuration, len(body))
 	}
 	if report.GitHubBytes <= 0 || report.GitHubBytes >= 64<<10 || report.Refs != 1 {
 		t.Errorf("the report counts %d bytes and %d refs from GitHub, want the one new branch's few", report.GitHubBytes, report.Refs)
@@ -1133,28 +1217,45 @@ func assertNothingFilledTheFeed(t *testing.T, run *recordingRunner, req FetchReq
 }
 
 // A cache whose tar holds an entry a feed does not take — one whose name leaves the feed, one that
-// is not a regular file or directory, the cache's own configuration, an alternates file — fails the
-// fetch, naming the entry: nothing of it is written, and nothing is cloned from GitHub.
+// is not a regular file or directory, the cache's own configuration, an alternates file, a loose
+// object, a pack's index — or whose history does not verify — a pack with a damaged object, a
+// history missing an object it reaches — fails the fetch, naming the entry or the check: nothing of
+// it reaches the feed, and nothing is cloned from GitHub.
 func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
+	const pack = "objects/pack/pack-1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"
 	for _, tc := range []struct {
 		name string
-		body func(t *testing.T) []byte
+		body func(t *testing.T, remote string) []byte
 		says string
 	}{
-		{"an entry leaving the feed", func(t *testing.T) []byte {
+		{"an entry leaving the feed", func(t *testing.T, _ string) []byte {
 			return tarOf(t, [2]string{"HEAD", "ref: refs/heads/main\n"}, [2]string{"../x", "escaped\n"})
 		}, `the repository cache's tar holds "../x", which is not a path inside the feed`},
-		{"a symbolic link", func(t *testing.T) []byte { return tarOf(t, [2]string{"refs/heads/main@"}) },
+		{"a symbolic link", func(t *testing.T, _ string) []byte { return tarOf(t, [2]string{"refs/heads/main@"}) },
 			`the repository cache's tar holds "refs/heads/main", which is neither a regular file nor a directory`},
-		{"the cache's configuration", func(t *testing.T) []byte { return tarOf(t, [2]string{"config", "[core]\n\tfsmonitor = true\n"}) },
-			`the repository cache's tar holds "config", which is not part of a repository's history and refs`},
-		{"an alternates file", func(t *testing.T) []byte { return tarOf(t, [2]string{"objects/info/alternates", "/elsewhere\n"}) },
-			`the repository cache's tar holds "objects/info/alternates", which is not part of a repository's history and refs`},
+		{"the cache's configuration", func(t *testing.T, _ string) []byte {
+			return tarOf(t, [2]string{"config", "[core]\n\tfsmonitor = true\n"})
+		},
+			`the repository cache's tar holds "config", which is not one of a repository's refs or packs`},
+		{"an alternates file", func(t *testing.T, _ string) []byte {
+			return tarOf(t, [2]string{"objects/info/alternates", "/elsewhere\n"})
+		},
+			`the repository cache's tar holds "objects/info/alternates", which is not one of a repository's refs or packs`},
+		{"a loose object", func(t *testing.T, _ string) []byte {
+			return tarOf(t, [2]string{"objects/ab/cdef0123456789abcdef0123456789abcdef01", "x"})
+		}, `the repository cache's tar holds "objects/ab/cdef0123456789abcdef0123456789abcdef01", which is not one of a repository's refs or packs`},
+		{"a pack's index", func(t *testing.T, _ string) []byte { return tarOf(t, [2]string{pack + ".idx", "x"}) },
+			`the repository cache's tar holds "` + pack + `.idx", which is not one of a repository's refs or packs`},
+		{"a pack with a damaged object", func(t *testing.T, remote string) []byte { return cacheTar(t, corruptCacheOf(t, remote)) },
+			"which does not verify"},
+		{"a history missing an object", func(t *testing.T, remote string) []byte { return cacheTar(t, incompleteCacheOf(t, remote)) },
+			"the repository cache's history is not whole"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
+			pushRemoteBranch(t, run.remote, "main", "history.txt")
 			req := fetchRequest(t)
-			req.CacheURL = (&fakeCache{body: tc.body(t)}).serve(t)
+			req.CacheURL = (&fakeCache{body: tc.body(t, run.remote)}).serve(t)
 			_, err := Fetch(context.Background(), run, req)
 			if err == nil || !strings.Contains(err.Error(), "fill the feed from the repository cache "+req.CacheURL) || !strings.Contains(err.Error(), tc.says) {
 				t.Fatalf("Fetch = %v, want the cache refused naming %q", err, tc.says)

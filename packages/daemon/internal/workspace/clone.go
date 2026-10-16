@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 
@@ -166,28 +167,31 @@ func FeedRepository(feed string, repository ghrepo.Repository) (string, error) {
 }
 
 // FeedEntry is whether name — a path inside a bare repository, slash-separated and relative to it,
-// a directory when dir is set — is part of the history and refs the repository cache streams and a
-// feed takes from it: HEAD, packed-refs, and what lies under refs/ and objects/. Never the
+// a directory when dir is set — is one of the refs and packs the repository cache streams and a
+// feed takes from it: HEAD, packed-refs, what lies under refs/, and objects/pack/pack-<id>.pack.
+// Never a loose object, nor a pack's index, reverse index or bitmap, a multi-pack index or a
+// commit-graph, which the feed builds itself from the packs it verifies (unpackCache); never the
 // repository's own configuration, hooks, info or description, which a feed makes for itself, nor
-// objects/info/alternates or http-alternates, which would point the feed at objects elsewhere, nor
-// a file or directory git is still writing (tmp_*, incoming-*, *.lock).
+// objects/info/alternates or http-alternates, which would point the feed at objects elsewhere; and
+// never a file or directory git is still writing (tmp_*, incoming-*, *.lock).
 func FeedEntry(name string, dir bool) bool {
 	base := path.Base(name)
 	if strings.HasPrefix(base, "tmp_") || strings.HasPrefix(base, "incoming-") || strings.HasSuffix(base, ".lock") {
 		return false
 	}
-	if name == "objects/info/alternates" || name == "objects/info/http-alternates" {
-		return false
-	}
-	top, _, nested := strings.Cut(name, "/")
-	switch top {
-	case "refs", "objects":
-		return nested || dir
-	case "HEAD", "packed-refs":
-		return !nested && !dir
+	switch {
+	case dir:
+		return name == "refs" || strings.HasPrefix(name, "refs/") || name == "objects" || name == "objects/pack"
+	case name == "HEAD" || name == "packed-refs" || strings.HasPrefix(name, "refs/"):
+		return true
+	case path.Dir(name) == "objects/pack":
+		return packFile.MatchString(base)
 	}
 	return false
 }
+
+// packFile is the name git gives a pack: its SHA-1 or SHA-256 id.
+var packFile = regexp.MustCompile(`^pack-([0-9a-f]{40}|[0-9a-f]{64})\.pack$`)
 
 // GitHubURL is the repository's GitHub remote: the URL the shared clone is cloned from and Fetch
 // clones into the feed, and so the URL feedRemote rewrites to the feed.

@@ -546,7 +546,7 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d, stderr %q, stdout %q", code, stderr, stdout)
 	}
-	line := regexp.MustCompile(`^workspace-init fetch: ([0-9,]+) bytes from the repository cache ` + regexp.QuoteMeta(cache) + ` in [0-9.]+(µs|ms|s); ([0-9,]+) bytes from GitHub for the delta \(1 ref\)\n$`)
+	line := regexp.MustCompile(`^workspace-init fetch: ([0-9,]+) bytes from the repository cache ` + regexp.QuoteMeta(cache) + ` in [0-9.]+(?:µs|ms|s), its history verified in [0-9.]+(?:µs|ms|s); ([0-9,]+) bytes from GitHub for the delta \(1 ref\)\n$`)
 	match := line.FindStringSubmatch(stdout)
 	if match == nil {
 		t.Fatalf("stdout %q, want the cache's stream and GitHub's delta", stdout)
@@ -554,7 +554,7 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	if printed := printedBytes(t, match[1]); printed != int64(length) {
 		t.Fatalf("the line counts %d bytes from the cache, want the tar's %d", printed, length)
 	}
-	if delta := printedBytes(t, match[3]); delta <= 0 || delta >= 64<<10 {
+	if delta := printedBytes(t, match[2]); delta <= 0 || delta >= 64<<10 {
 		t.Fatalf("the line counts %d bytes from GitHub, want the one commit's few", delta)
 	}
 	feed := filepath.Join(v.feed, "acme", "widgets.git")

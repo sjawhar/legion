@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -67,7 +68,7 @@ func (r *testRunner) Run(ctx context.Context, command workspace.Command) (worksp
 	actual.Argv = append([]string(nil), command.Argv...)
 	for i, arg := range actual.Argv {
 		if arg == gitHub {
-			actual.Argv[i] = r.remote
+			actual.Argv[i] = "file://" + r.remote
 			transfer = true
 		}
 	}
@@ -373,12 +374,12 @@ func TestHealthzIsUnavailableUntilTheFirstCloneFinishes(t *testing.T) {
 	}
 }
 
-// /tar streams the bare clone's history and refs alone — HEAD, packed-refs, refs/ and objects/ —
-// and nothing of its own configuration, hooks or descriptions, which an issue pod's feed makes for
-// itself: unpacked, it is a repository whose connectivity git checks and whose default branch is
-// the remote's, holding regular files and directories alone and no temporary pack or lock file git
-// was writing.
-func TestTarStreamsTheBareRepository(t *testing.T) {
+// /tar streams the bare clone's refs and packs alone — HEAD, packed-refs, refs/ and
+// objects/pack/pack-<id>.pack — and nothing the feed builds itself (a pack's index), no loose
+// object, and nothing of the clone's own configuration, hooks or descriptions: indexed, it is a
+// repository whose connectivity git checks and whose default branch is the remote's, holding
+// regular files and directories alone and no temporary pack or lock file git was writing.
+func TestTarStreamsTheBareRepositorysRefsAndPacks(t *testing.T) {
 	remote := newRemote(t)
 	c := start(t, testOptions(t, newTestRunner(t, remote)))
 	c.ready(t)
@@ -398,18 +399,51 @@ func TestTarStreamsTheBareRepository(t *testing.T) {
 		t.Fatalf("/tar answers %d", status)
 	}
 	unpacked, names := unpack(t, bytes.NewReader(body))
+	packs := 0
 	for _, name := range names {
-		if base := filepath.Base(name); strings.HasPrefix(base, "tmp_") || strings.HasSuffix(base, ".lock") {
-			t.Errorf("the tar holds %s, a file git was still writing", name)
-		}
-		top, _, _ := strings.Cut(name, "/")
-		if top != "HEAD" && top != "packed-refs" && top != "refs" && top != "objects" {
-			t.Errorf("the tar holds %s, which is the clone's own, not its history or refs", name)
+		switch {
+		case name == "HEAD" || name == "packed-refs" || strings.HasPrefix(name, "refs/") || name == "objects/" || name == "objects/pack/":
+		case regexp.MustCompile(`^objects/pack/pack-[0-9a-f]{40}\.pack$`).MatchString(name):
+			packs++
+		default:
+			t.Errorf("the tar holds %s, which is neither a ref nor a pack", name)
 		}
 	}
-	git(t, unpacked, "--git-dir="+unpacked, "fsck", "--connectivity-only")
+	if packs == 0 {
+		t.Fatalf("the tar holds no pack: %q", names)
+	}
+	indexed(t, unpacked)
 	if got, want := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"), git(t, remote, "--git-dir="+remote, "rev-parse", "main"); got != want {
 		t.Errorf("the unpacked main is %s, want the remote's %s", got, want)
+	}
+}
+
+// indexed indexes each pack of the unpacked bare repository dir, as an issue pod's fetch does, and
+// checks its connectivity.
+func indexed(t *testing.T, dir string) {
+	t.Helper()
+	packs, err := filepath.Glob(filepath.Join(dir, "objects", "pack", "pack-*.pack"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pack := range packs {
+		git(t, dir, "--git-dir="+dir, "index-pack", pack)
+	}
+	git(t, dir, "--git-dir="+dir, "fsck", "--connectivity-only")
+}
+
+// Every fetch the cache makes keeps what it brings as a pack: its clone never holds a loose
+// object, which its tar would leave out of every issue's feed.
+func TestTheCachesClonesHistoryStaysPacked(t *testing.T) {
+	remote := newRemote(t)
+	opts := testOptions(t, newTestRunner(t, remote))
+	opts.Refresh = 50 * time.Millisecond
+	c := start(t, opts)
+	c.ready(t)
+	moved := advance(t, remote, "moved")
+	c.waitFor(t, "at the moved head", func(_ int, h Health) bool { return h.Head == moved })
+	if loose := git(t, c.dir(), "--git-dir="+c.dir(), "count-objects"); !strings.HasPrefix(loose, "0 objects") {
+		t.Errorf("the cache's clone holds %s after a fetch", loose)
 	}
 }
 
@@ -455,7 +489,7 @@ func TestATarAskedForDuringAFetchWaitsForIt(t *testing.T) {
 		t.Fatal("the tar never streamed once the fetch ended")
 	}
 	unpacked, _ := unpack(t, bytes.NewReader(body))
-	git(t, unpacked, "--git-dir="+unpacked, "fsck", "--connectivity-only")
+	indexed(t, unpacked)
 	if got := git(t, unpacked, "--git-dir="+unpacked, "rev-parse", "refs/heads/main"); got != moved {
 		t.Errorf("the tar's main is %s, want what the fetch brought, %s", got, moved)
 	}
