@@ -141,6 +141,9 @@ func TestGCPLive(t *testing.T) {
 	if ls := byID[expiring]; !ls.Deleted {
 		t.Fatalf("expiring = %+v; want Deleted", ls)
 	}
+	if _, err := store.Read(ctx, expiring); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(expiring) = %v, want ErrNotFound: Secret Manager still holds its value, and the store must not release it", err)
+	}
 
 	if ls, err := store.Describe(ctx, served); err != nil || !onKey(ls) || !ls.HasCurrentValue {
 		t.Fatalf("Describe(served) = %+v, %v", ls, err)

@@ -273,6 +273,7 @@ func TestGCPDescribeAndRead(t *testing.T) {
 		fakePrefix + "disabled": {annotations: map[string]string{}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_DISABLED, value: []byte("v")},
 		fakePrefix + "empty":    {annotations: map[string]string{}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, value: nil},
 		fakePrefix + "binary":   {annotations: map[string]string{}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, value: []byte{0xff, 0xfe}},
+		fakePrefix + "expiring": {annotations: map[string]string{}, replicationKey: fakeKey, versionKey: fakeKey, state: secretmanagerpb.SecretVersion_ENABLED, expires: time.Now().Add(30 * 24 * time.Hour), value: []byte("v")},
 	}}
 	store := GCP{Client: startFake(t, f), KeyName: fakeKey}
 	ctx := context.Background()
@@ -295,6 +296,11 @@ func TestGCPDescribeAndRead(t *testing.T) {
 	}
 	if _, err := store.Read(ctx, fakePrefix+"disabled"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("Read(disabled) = %v, want ErrNotFound (FAILED_PRECONDITION)", err)
+	}
+	// Secret Manager would still answer its value; the store refuses it as Secrets Manager refuses
+	// a secret in its recovery window, so a grant made before the delete reads nothing after it.
+	if _, err := store.Read(ctx, fakePrefix+"expiring"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Read(expiring) = %v, want ErrNotFound: a secret scheduled for deletion is not readable", err)
 	}
 	for _, name := range []string{"empty", "binary"} {
 		_, err := store.Read(ctx, fakePrefix+name)

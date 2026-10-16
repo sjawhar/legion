@@ -70,6 +70,8 @@ func main() {
 	// on each of those calls, so an edit to it is a write as Secrets Manager would see one. A secret
 	// with no "value" is one created without a value, which the broker refuses as no-current-value;
 	// one with a "deleted_at" (RFC 3339) is scheduled for deletion, which the broker no longer lists.
+	// Its "kms_key_id" names the agent-secrets key as the selected store configures it:
+	// BROKER_SECRETS_KMS_KEY_ARN, or BROKER_SECRETS_KMS_KEY_NAME under gcp-secret-manager.
 	fakeSecrets := os.Getenv("BROKER_FAKE_SECRETS_FILE")
 	fatal(refusePortZeroPublicURLInProduction(cfg.PublicURL, fakeSecrets))
 	// How the broker signs in to its database, logged before anything reaches for AWS or the
@@ -110,7 +112,13 @@ func main() {
 	case fakeSecrets != "":
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
-		secretStore, credentials = secrets.AWS{Client: local, KMS: local, KeyARN: cfg.SecretsKMSKeyARN}, "fake secrets file"
+		// The file's kms_key_id names the agent-secrets key as the selected store configures it:
+		// its ARN, or under the GCP store its Cloud KMS key name.
+		key := cfg.SecretsKMSKeyARN
+		if cfg.SecretsStore == secrets.StoreGCP {
+			key = cfg.SecretsKMSKeyName
+		}
+		secretStore, credentials = secrets.AWS{Client: local, KMS: local, KeyARN: key}, "fake secrets file"
 	case cfg.SecretsStore == secrets.StoreGCP:
 		client, err := secrets.NewGCPClient(ctx)
 		fatal(err)

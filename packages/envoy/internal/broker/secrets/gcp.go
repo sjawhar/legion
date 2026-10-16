@@ -180,12 +180,27 @@ func (g GCP) onKey(keyVersion string) bool {
 	return gcpKeyVersionSuffix.ReplaceAllString(keyVersion, "") == g.KeyName
 }
 
-// Read answers the secret's current value with AccessSecretVersion on versions/latest: ErrNotFound
-// when Secret Manager holds no such secret or no version (NOT_FOUND) or when the latest version is
-// disabled or destroyed (FAILED_PRECONDITION), both the same answer to the caller: the secret is
-// not readable. The value must be non-empty UTF-8, since the broker injects it into an
-// environment; an error names the secret and never the bytes.
+// Read answers the secret's current value with AccessSecretVersion on versions/latest, after a
+// GetSecret that refuses one scheduled for deletion: Secret Manager reads a secret until its
+// expire_time, so without that check a grant made before `agent-secrets secret delete` would keep
+// reading it until the policy drops it, where Secrets Manager refuses a secret in its recovery
+// window at once. ErrNotFound when Secret Manager holds no such secret or no version (NOT_FOUND),
+// when the secret has an expire_time, or when the latest version is disabled or destroyed
+// (FAILED_PRECONDITION), all the same answer to the caller: the secret is not readable. The value
+// must be non-empty UTF-8, since the broker injects it into an environment; an error names the
+// secret and never the bytes.
 func (g GCP) Read(ctx context.Context, source string) (string, error) {
+	secret, err := g.Client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: source})
+	switch status.Code(err) {
+	case codes.OK:
+		if secret.GetExpireTime() != nil {
+			return "", ErrNotFound
+		}
+	case codes.NotFound:
+		return "", ErrNotFound
+	default:
+		return "", fmt.Errorf("secret manager %s: %w", source, gcpErr(err))
+	}
 	latest := source + "/versions/" + gcpLatest
 	out, err := g.Client.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{Name: latest})
 	switch status.Code(err) {
