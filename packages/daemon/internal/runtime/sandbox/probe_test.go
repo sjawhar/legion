@@ -873,14 +873,13 @@ func TestProbeManifestGoldenAndSchema(t *testing.T) {
 	}
 }
 
-// The image probe's pod carries Karpenter's `do-not-disrupt` annotation alone, never GKE
-// Autopilot's `safe-to-evict` that a worker or controller pod does
-// (TestEveryIssueAndControllerPodIsProtectedFromAutoscalerEviction): GKE treats that annotation as
-// a request for extended-duration protection, which raises its enforced minimum CPU and memory
-// past the probe's deliberately low fixed reservation (probeReservation, 250m/1Gi) — exactly the
-// reservation that lets the probe boot on a pool too full for a role-sized pod. A regression that
-// adds the GKE annotation here would silently cost the probe that low-capacity boot property on a
-// real GKE Autopilot cluster.
+// The image probe's pod carries Karpenter's `do-not-disrupt` annotation alone, never GKE's
+// `safe-to-evict` that a worker or controller pod does
+// (TestEveryIssueAndControllerPodIsProtectedFromAutoscalerEviction): GKE Autopilot treats that
+// annotation as a request for extended-duration protection and, whenever possible, places the Pod
+// on a node of its own for the request's window — worth it for a multi-hour issue pod, not for a
+// probe that boots fresh at every daemon start and restart and is already retried on failure (see
+// probeManifest's comment).
 func TestTheProbePodCarriesNoGKEExtendedDurationAnnotation(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
