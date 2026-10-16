@@ -728,3 +728,81 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 		})
 	}
 }
+
+// A database can have ready_merge rows from 0043 when 0044 arrives. Its dedup index must migrate
+// those rows instead of refusing the upgrade: it keeps the earliest unleased next_at, breaking a
+// tie on id, and drops any leased duplicate when an unleased row exists.
+func TestReadyMergeDedupMigrationCollapsesExistingRows(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	all, err := migrations.All()
+	if err != nil {
+		t.Fatalf("read migrations: %v", err)
+	}
+	for _, migration := range all {
+		if migration.Version > 43 {
+			continue
+		}
+		if _, err := store.apply(ctx, migration); err != nil {
+			t.Fatalf("apply %s: %v", migration.Name, err)
+		}
+	}
+	now := time.Now().UTC()
+	insert := `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
+		values ('ready_merge', 'LEGION-208', '{"number":42,"head":"ready-head"}', 0, $1, '', $2, $3) returning id`
+	var later, earliest, leased int64
+	if err := store.pool.QueryRow(ctx, insert, now.Add(2*time.Minute), "", nil).Scan(&later); err != nil {
+		t.Fatalf("insert later row: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert, now.Add(time.Minute), "", nil).Scan(&earliest); err != nil {
+		t.Fatalf("insert earliest row: %v", err)
+	}
+	if err := store.pool.QueryRow(ctx, insert, now, "mid-lease", now.Add(time.Hour)).Scan(&leased); err != nil {
+		t.Fatalf("insert leased row: %v", err)
+	}
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate through ready-merge dedup: %v", err)
+	}
+	var id int64
+	var nextAt time.Time
+	if err := store.pool.QueryRow(ctx, `select id, next_at from outbox where kind = 'ready_merge'`).Scan(&id, &nextAt); err != nil {
+		t.Fatalf("read surviving READY merge: %v", err)
+	}
+	wantNext := now.Add(time.Minute).Truncate(time.Microsecond)
+	if id != earliest || !nextAt.Equal(wantNext) {
+		t.Fatalf("surviving READY merge = id %d at %s, want unleased earliest id %d at %s (later %d leased %d)", id, nextAt, earliest, wantNext, later, leased)
+	}
+}
+
+// Reopening a pull request must not pull a ready_merge row forward past GitHub's rate-limit
+// deadline. A duplicate enqueue reuses the durable row and leaves its next_at unchanged.
+func TestReadyMergeEnqueueDoesNotExpediteAnExistingRow(t *testing.T) {
+	ctx := context.Background()
+	store := emptyStore(t)
+	if _, err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	now := time.Now().UTC()
+	row, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.LastError = "GitHub GraphQL: API rate limit exceeded"
+	if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, row) }); err != nil {
+		t.Fatalf("enqueue rate-limited row: %v", err)
+	}
+	reopened, err := record.NewOutboxRow("LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pgx.BeginFunc(ctx, store.pool, func(tx pgx.Tx) error { return record.NewStore().Enqueue(ctx, tx, reopened) }); err != nil {
+		t.Fatalf("enqueue reopen: %v", err)
+	}
+	var nextAt time.Time
+	if err := store.pool.QueryRow(ctx, `select next_at from outbox where kind = 'ready_merge'`).Scan(&nextAt); err != nil {
+		t.Fatalf("read ready merge: %v", err)
+	}
+	if want := row.NextAt.Truncate(time.Microsecond); !nextAt.Equal(want) {
+		t.Fatalf("reopened READY merge next_at = %s, want preserved rate-limit deadline %s", nextAt, want)
+	}
+}

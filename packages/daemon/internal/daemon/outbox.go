@@ -163,7 +163,11 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}); err != nil {
 		return fmt.Errorf("claim due outbox rows: %w", err)
 	}
-	for _, row := range rows {
+	deferred := map[int64]bool{}
+	for index, row := range rows {
+		if deferred[row.ID] {
+			continue
+		}
 		if err := r.execute(ctx, row); err != nil {
 			if errors.Is(err, errReadyMergeRefusedFinished) {
 				continue
@@ -198,6 +202,10 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 			}
 			if retryErr := r.retry(ctx, row, err); retryErr != nil {
 				r.log.Error("outbox row retry not recorded; it runs again when its lease expires", "row", row.ID, "error", retryErr)
+				continue
+			}
+			if githubRetryAfter(err) > 0 {
+				r.deferGitHubRows(ctx, rows[index+1:], err, deferred)
 			}
 			continue
 		}
@@ -247,13 +255,8 @@ func (r *outbox) finishRefused(ctx context.Context, row record.OutboxRow) error 
 
 func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) error {
 	delay := retryBackoff(row.Attempts)
-	var graphql *githubrest.GraphQLError
-	if errors.As(cause, &graphql) && graphql.RateLimited && graphql.RetryAfter > delay {
-		delay = graphql.RetryAfter
-	}
-	var answer *githubrest.Answer
-	if errors.As(cause, &answer) && answer.RateLimited && answer.RetryAfter > delay {
-		delay = answer.RetryAfter
+	if after := githubRetryAfter(cause); after > delay {
+		delay = after
 	}
 	nextAt := r.now().UTC().Add(delay)
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
@@ -262,6 +265,36 @@ func (r *outbox) retry(ctx context.Context, row record.OutboxRow, cause error) e
 		return fmt.Errorf("retry outbox row %d: %w", row.ID, err)
 	}
 	return nil
+}
+
+// deferGitHubRows returns the remaining GitHub effects already leased by this RunOnce to the
+// outbox at GitHub's rate-limit deadline. They share the implement App token that GitHub limited,
+// so executing another one immediately only burns the same token again.
+func (r *outbox) deferGitHubRows(ctx context.Context, rows []record.OutboxRow, cause error, deferred map[int64]bool) {
+	for _, row := range rows {
+		if row.Kind != record.OutboxKindAutoMergeDisable && row.Kind != record.OutboxKindReadyMerge {
+			continue
+		}
+		if err := r.retry(ctx, row, cause); err != nil {
+			r.log.Error("outbox rate-limited GitHub row retry not recorded; it runs when its lease expires", "row", row.ID, "kind", row.Kind, "error", err)
+			continue
+		}
+		deferred[row.ID] = true
+	}
+}
+
+// githubRetryAfter is GitHub's rate-limit delay when cause wraps either the REST or GraphQL API
+// error. It is zero for every other failure.
+func githubRetryAfter(cause error) time.Duration {
+	var graphql *githubrest.GraphQLError
+	if errors.As(cause, &graphql) && graphql.RateLimited {
+		return graphql.RetryAfter
+	}
+	var answer *githubrest.Answer
+	if errors.As(cause, &answer) && answer.RateLimited {
+		return answer.RetryAfter
+	}
+	return 0
 }
 
 func retryBackoff(attempts int) time.Duration {

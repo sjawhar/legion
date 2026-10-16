@@ -538,22 +538,22 @@ func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error 
 	return nil
 }
 
-// enqueueReadyMerge adds one durable submission for a READY head, or expedites its still unfinished
-// one. The unique partial index 0044 makes the race between a reopen and a retry one row, and the
-// upsert leaves an in-flight lease alone while making a backoff row due now.
+// enqueueReadyMerge adds one durable submission for a READY head. The unique partial index 0044
+// makes the race between a reopen and a retry one row. A duplicate enqueue preserves the row's
+// existing next_at, including a GitHub rate-limit deadline.
 func (s *Postgres) enqueueReadyMerge(ctx context.Context, tx pgx.Tx, row OutboxRow) error {
 	if row.CreatedAt.IsZero() {
 		_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, lease_token, lease_until)
 			values ($1, $2, $3, $4, $5, $6, $7, $8)
 			on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge'
-			do update set next_at = least(outbox.next_at, excluded.next_at)`,
+			do nothing`,
 			string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.LeaseToken, row.LeaseUntil)
 		return err
 	}
 	_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until)
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		on conflict (issue, (payload ->> 'head')) where kind = 'ready_merge'
-		do update set next_at = least(outbox.next_at, excluded.next_at)`,
+		do nothing`,
 		string(row.Kind), row.Issue, string(row.Payload), row.Attempts, row.NextAt, row.LastError, row.CreatedAt, row.LeaseToken, row.LeaseUntil)
 	return err
 }
@@ -708,8 +708,16 @@ func (s *Postgres) EarlierNotices(ctx context.Context, tx pgx.Tx, tree string, i
 	return earlier, nil
 }
 
+// FinishOutbox deletes a row only while leaseToken still owns it. A stale worker must get an error:
+// a compound effect that writes another row and finishes this one rolls its whole transaction back
+// rather than committing the other effect after another worker reclaimed the lease.
 func (s *Postgres) FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error {
-	if _, err := tx.Exec(ctx, "delete from outbox where id = $1 and lease_token = $2", id, leaseToken); err != nil {
+	var finished int64
+	err := tx.QueryRow(ctx, "delete from outbox where id = $1 and lease_token = $2 returning id", id, leaseToken).Scan(&finished)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("finish outbox row %d: lease is no longer held", id)
+	}
+	if err != nil {
 		return fmt.Errorf("finish outbox row %d: %w", id, err)
 	}
 	return nil
