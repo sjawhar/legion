@@ -118,8 +118,8 @@ function publishStateDelta(delta: StateDelta): void {
 ```
 
 Key traits: `void` return, no `await`, `.then().catch()` chains,
-`console.warn` with `(non-fatal)` suffix. Matches `subscribeWorkerToEnvoy`
-and `detachWorkerFromEnvoy`.
+`console.warn` with `(non-fatal)` suffix, and `Content-Type: application/json` on every
+body-bearing listener request. Matches `subscribeWorkerToEnvoy` and `detachWorkerFromEnvoy`.
 
 ## Files
 

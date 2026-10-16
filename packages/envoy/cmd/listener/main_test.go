@@ -214,6 +214,41 @@ func TestFullMux_StartingState(t *testing.T) {
 	})
 }
 
+func TestV1API_RefusesTextPlainPublish(t *testing.T) {
+	client := setupPublishTestClient(t)
+	handler := apiAuth(
+		"",
+		nil,
+		logging.NewWithWriter("test", io.Discard),
+		publishHandler(&listenerDeps{client: client}),
+	)
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/v1/messages/publish",
+		strings.NewReader(`{"topic":"notifications.github.example-org.example-repo.test","message":"cross-site publish"}`),
+	)
+	request.Header.Set("Content-Type", "text/plain")
+	recorder := httptest.NewRecorder()
+
+	handler.ServeHTTP(recorder, request)
+
+	if recorder.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status = %d, want %d; body = %s", recorder.Code, http.StatusUnsupportedMediaType, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want application/json", got)
+	}
+	var response struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.Error != "Content-Type must be application/json" {
+		t.Fatalf("error = %q, want Content-Type requirement", response.Error)
+	}
+}
+
 func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 	// publishHandler validation runs before deps.client is used, so a
 	// minimal non-nil deps (with nil inner fields) is enough to test the
