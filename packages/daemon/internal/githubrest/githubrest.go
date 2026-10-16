@@ -71,8 +71,12 @@ type GraphQLFailure struct {
 }
 
 // GraphQLError is a GraphQL answer that carries errors, which GitHub sends with HTTP status 200.
+// RateLimited and RetryAfter carry GitHub's GraphQL rate-limit answer and its requested retry
+// delay, when one of its failures has type RATE_LIMITED.
 type GraphQLError struct {
-	Failures []GraphQLFailure
+	Failures    []GraphQLFailure
+	RateLimited bool
+	RetryAfter  time.Duration
 }
 
 func (e *GraphQLError) Error() string {
@@ -100,19 +104,33 @@ func (e *GraphQLError) NotFoundAt(path ...string) bool {
 	return len(e.Failures) != 0
 }
 
-// GraphQL sends query and variables to the client's API, a GraphQL route (GraphQLAPI), and reads
-// the answer's data into into when into is not nil. An answer that carries errors is a
-// *GraphQLError, and one other than 2xx an *Answer.
+// GraphQL sends query and variables to the client's API, and reads the answer's data into into when
+// into is not nil. An answer that carries errors is a *GraphQLError, and one other than 2xx an
+// *Answer. A GraphQL RATE_LIMITED answer is HTTP 200, so its retry headers are preserved on the
+// error rather than lost with the successful transport status.
 func (c Client) GraphQL(ctx context.Context, query string, variables map[string]any, into any) error {
 	var response struct {
 		Data   json.RawMessage  `json:"data"`
 		Errors []GraphQLFailure `json:"errors"`
 	}
-	if err := c.Post(ctx, "", map[string]any{"query": query, "variables": variables}, &response); err != nil {
+	encoded, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		return fmt.Errorf("encode GraphQL request: %w", err)
+	}
+	_, headers, err := c.callHeaders(ctx, http.MethodPost, c.API, encoded, &response)
+	if err != nil {
 		return err
 	}
 	if len(response.Errors) != 0 {
-		return &GraphQLError{Failures: response.Errors}
+		failed := &GraphQLError{Failures: response.Errors}
+		for _, failure := range failed.Failures {
+			if failure.Type == "RATE_LIMITED" {
+				failed.RateLimited = true
+				failed.RetryAfter = rateLimitRetryAfter(headers, time.Now())
+				break
+			}
+		}
+		return failed
 	}
 	if len(response.Data) == 0 || string(response.Data) == "null" {
 		return errors.New("GitHub GraphQL answered without data")
@@ -187,13 +205,20 @@ func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, er
 // call sends method to target, with body as JSON when it is not nil, reads a 2xx answer into into
 // when into is not nil, and returns the next page's URL its Link header names, "" for none.
 func (c Client) call(ctx context.Context, method, target string, body []byte, into any) (string, error) {
+	next, _, err := c.callHeaders(ctx, method, target, body, into)
+	return next, err
+}
+
+// callHeaders is call with the response headers. GraphQL needs them when GitHub reports an error
+// within a successful HTTP response, specifically to honor a RATE_LIMITED retry-after.
+func (c Client) callHeaders(ctx context.Context, method, target string, body []byte, into any) (string, http.Header, error) {
 	var payload io.Reader
 	if body != nil {
 		payload = bytes.NewReader(body)
 	}
 	request, err := http.NewRequestWithContext(ctx, method, target, payload)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	request.Header.Set("Authorization", "Bearer "+c.Token)
 	request.Header.Set("Accept", "application/vnd.github+json")
@@ -202,22 +227,22 @@ func (c Client) call(ctx context.Context, method, target string, body []byte, in
 	}
 	response, err := http.DefaultClient.Do(request)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer response.Body.Close()
 	answer, err := io.ReadAll(response.Body)
 	if err != nil {
-		return "", err
+		return "", response.Header, err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
 		path := c.answerPath(request.URL)
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
+		return "", response.Header, &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
 			RateLimited: RateLimited(response, answer), RetryAfter: retryAfter(response, answer, time.Now())}
 	}
 	if into == nil {
-		return nextPage(response.Header.Get("Link")), nil
+		return nextPage(response.Header.Get("Link")), response.Header, nil
 	}
-	return nextPage(response.Header.Get("Link")), json.Unmarshal(answer, into)
+	return nextPage(response.Header.Get("Link")), response.Header, json.Unmarshal(answer, into)
 }
 
 // answerPath is the path an Answer names for target, its query left out: the path under the
@@ -270,11 +295,18 @@ func retryAfter(response *http.Response, body []byte, now time.Time) time.Durati
 	if !RateLimited(response, body) {
 		return 0
 	}
-	if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
+	return rateLimitRetryAfter(response.Header, now)
+}
+
+// rateLimitRetryAfter is GitHub's requested rate-limit delay from its headers, or the documented
+// one-minute fallback when GitHub names a limit but no delay. GraphQL RATE_LIMITED answers are HTTP
+// 200, so they use the same headers directly.
+func rateLimitRetryAfter(headers http.Header, now time.Time) time.Duration {
+	if seconds, err := strconv.Atoi(headers.Get("Retry-After")); err == nil && seconds > 0 {
 		return time.Duration(seconds) * time.Second
 	}
-	if response.Header.Get("X-RateLimit-Remaining") == "0" {
-		if reset, err := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+	if headers.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(headers.Get("X-RateLimit-Reset"), 10, 64); err == nil {
 			if wait := time.Unix(reset, 0).Sub(now); wait > 0 {
 				if wait > time.Hour {
 					return time.Hour

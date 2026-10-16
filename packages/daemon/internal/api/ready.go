@@ -72,7 +72,7 @@ func githubReadFailed(err error) *refusal {
 // would refuse a lagging record's READY until the webhook arrived. A pull request closed without
 // merging is refused by GitHub's own state, since its close's webhook can arrive after the READY's
 // advance of the record, which would then drop it as older (READY_PULL_REQUEST_CLOSED).
-func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest) (readyAnswer, *refusal) {
+func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest, disarmPending bool) (readyAnswer, *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return readyAnswer{}, &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}
 	}
@@ -127,10 +127,15 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_CONFLICTS", fmt.Sprintf("head %s of pull request #%d conflicts with its base %s, which GitHub cannot merge and starts no pull_request CI for: the implementer brings %s into the branch with a forward merge; tell the architect", head, number, pull.Base.Ref, pull.Base.Ref)}
 	}
 	// The project's merge policy is read once, before the checks: a by_hand pull request is READY
-	// for a person to merge however its base branch's checks are configured.
+	// for a person to merge however its base branch's checks are configured. Unlike ordinary READY,
+	// a by-hand READY waits for an unfinished disarm: it must not leave an arm from an earlier
+	// ordinary READY standing at this new head.
 	mergeNote, refused := mergeReadyPolicy(ctx, github, rules, number)
 	if refused != nil {
 		return readyAnswer{}, refused
+	}
+	if mergeNote != "" && disarmPending {
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_DISARM_PENDING", fmt.Sprintf("pull request #%d matches a by_hand merge rule, and an earlier auto-merge disarm is unfinished: complete again once it finishes, so no stale arm can merge this head", number)}
 	}
 	answer.note, answer.mergeNote = mergeNote, mergeNote
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)

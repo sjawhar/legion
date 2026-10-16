@@ -228,7 +228,10 @@ role (`merge_queue_role`) that gets the same packet. Its optional `merge.by_hand
 paths keep matching pull requests out of auto-merge: the daemon accepts their `READY` and tells the
 merger that a person merges it under the repository's rules, and the packet it posts on the issue,
 and publishes to that role, starts with that `MANUAL_MERGE_REQUIRED:` note, its `Merge:` line
-replaced, so nobody it reaches arms it. Otherwise, the moment the daemon accepts READY it submits
+replaced, so nobody it reaches arms it. A by-hand READY refuses `READY_DISARM_PENDING` while an
+earlier auto-merge disarm remains unfinished, preventing a stale ordinary arm from merging this
+person-only head. Ordinary READY does not wait for the disarm. Otherwise, the moment the daemon
+accepts READY it submits
 the merge itself, as the implement App, with the `READY` head as GitHub's expected head: a base with
 a merge queue enqueues it; otherwise a pull request GitHub already reports mergeable merges at once,
 one in a repository that allows auto-merge is armed, and in a repository that allows neither the

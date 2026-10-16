@@ -200,7 +200,10 @@ own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. Th
 `projects.<KEY>.merge.by_hand` regular-expression paths: a matching pull request completes READY
 without auto-arming, the daemon tells that READY with its `MANUAL_MERGE_REQUIRED:` note at the head
 of the packet and the packet's `Merge:` line replaced, so neither the issue nor that role is asked to
-arm it, and the repository's authorized person merges it. Otherwise, on acceptance the daemon queues a
+arm it, and the repository's authorized person merges it. A by-hand READY refuses
+`READY_DISARM_PENDING` while an earlier auto-merge disarm for that pull request remains unfinished:
+the stale arm must be gone before the person-only head is accepted. Ordinary READY does not wait for
+that row. Otherwise, on acceptance the daemon queues a
 `ready_merge` outbox row for READY's head, which submits the merge as the implement App with that head
 as GitHub's expected head: a merge queue enqueues it, a pull request GitHub reports mergeable merges
 at once, a repository that allows auto-merge arms it, and in one that allows neither the row waits
