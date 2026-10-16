@@ -132,23 +132,24 @@ func githubConsumerConfig(spec ConsumerSpec, repositories []ghrepo.Repository) j
 	}
 }
 
-// SetRepositories replaces the repositories GitHub intake hears: the set the decoder accepts an
-// event's repository from, then the GitHub consumer's filters, so an event of a repository added
-// here is decoded from the moment the consumer delivers it. An event of a repository taken out is
-// acknowledged untouched once the set changes. An empty or zero repository is refused, since a
-// consumer with no filter would hear every subject.
+// SetRepositories replaces the repositories GitHub intake hears: the GitHub consumer's filters,
+// then, once JetStream has taken them, the set the decoder accepts an event's repository from. Both
+// change under one lock every decode reads the set under, so no event is decoded against the one
+// while the consumer filters on the other: an event of a repository added here is decoded from the
+// moment the consumer delivers it, and one of a repository taken out is acknowledged untouched. An
+// update JetStream refuses changes neither, so the caller can retry it. An empty or zero repository
+// is refused, since a consumer with no filter would hear every subject.
 func (c *Consumers) SetRepositories(ctx context.Context, repositories []ghrepo.Repository) error {
 	if len(repositories) == 0 || slices.ContainsFunc(repositories, ghrepo.Repository.IsZero) {
 		return fmt.Errorf("GitHub intake needs at least one repository to hear")
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.repos = slices.Clone(repositories)
 	github, err := openConsumer(ctx, c.stream, githubConsumerConfig(c.spec, repositories))
 	if err != nil {
 		return fmt.Errorf("update the GitHub durable consumer's repositories: %w", err)
 	}
-	c.github = github
+	c.repos, c.github = slices.Clone(repositories), github
 	return nil
 }
 
