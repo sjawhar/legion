@@ -315,12 +315,14 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    refuses a head that still carries `.legion/<issue>/`; the daemon posts
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the Dispatch
    issue and publishes it to the project's merge queue role when one is set. The moment the daemon
-   accepts READY, the merger submits the pull request with
-   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` and tells you what
-   the command answered; the repository's required reviews and checks decide when it lands, and
-   Legion neither reads nor writes those rules. A READY the design gate refused is submitted later:
-   the merger submits nothing on a refusal, so once that spec version is approved and the daemon
-   posts the packet, tell the merger to submit it. If the merger reports a failed verification,
+   accepts READY, it submits the merge of that head itself, as the implement App and with GitHub's
+   expected-head check: a merge queue enqueues it, a pull request already mergeable merges at once,
+   a repository that allows auto-merge arms it, and in one that allows neither the daemon merges it
+   once GitHub reports it mergeable. The repository's required reviews and checks decide when it
+   lands, and Legion neither reads nor writes those rules; a review only a person can give is
+   waited for, never bypassed, and once given the daemon merges or the person does. A READY the
+   design gate refused is submitted by the daemon once that spec version is approved; nobody is
+   told to submit it. If the merger reports a failed verification,
    treat it like `pr-blocked`: the merger holds the phase, so tell it to move the issue back with
    `request_backward_move`, naming what failed; never bypass. A READY refused because the head
    still carries `.legion/<issue>/` goes back to `retro`, so the implementer's retro removes it.

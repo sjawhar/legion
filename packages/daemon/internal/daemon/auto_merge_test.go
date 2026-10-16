@@ -102,9 +102,9 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 	}
 }
 
-// The row reads GitHub before the record. The merger arms only after its READY commits, so an arm
+// The row reads GitHub before the record. The daemon arms only after the READY commits, so an arm
 // the row's GitHub read finds is already covered by the record it reads next. Read the other way
-// round, a READY committing and its merger arming between the two reads would leave the row
+// round, a READY committing and its merge being armed between the two reads would leave the row
 // keeping nothing and disabling that legitimate arm. Here the READY commits while GitHub answers
 // the row's read, and the arm it reports is kept.
 func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
@@ -124,7 +124,7 @@ func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 			_, _ = w.Write([]byte(`{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`))
 			return
 		}
-		// The READY commits, and its merger arms, as GitHub answers this read.
+		// The READY commits, and its merge is armed, as GitHub answers this read.
 		if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(context.Background(), "update issues set phase = 'awaiting_merge' where key = 'LEGION-208'"); err != nil {
 				return err
@@ -145,5 +145,79 @@ func TestAnAutoMergeDisableRowReadsGitHubBeforeTheRecord(t *testing.T) {
 	defer mu.Unlock()
 	if disables != 0 {
 		t.Fatalf("auto-merge disables %d, want the READY's arm kept", disables)
+	}
+}
+
+// A ready_merge row submits the merge as the implement App only while the record still awaits that
+// exact READY head. A READY a person merges, a READY the issue has left, and a tree that lingers are
+// stale; GitHub's expected-head check guards the head between the row's read and its mutation.
+func TestAREADYMergeRowSubmitsOnlyTheAwaitedREADYHead(t *testing.T) {
+	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	for _, tc := range []struct {
+		name      string
+		at        phase.Phase
+		ready     string
+		mergeNote string
+		lingers   bool
+		merges    int
+	}{
+		{"awaiting its merge at the READY head", phase.AwaitingMerge, "ready-head", "", false, 1},
+		{"awaiting another READY head", phase.AwaitingMerge, "older-head", "", false, 0},
+		{"back in implementing", phase.Implementing, "ready-head", "", false, 0},
+		{"awaiting a person's merge", phase.AwaitingMerge, "ready-head", byHand, false, 0},
+		{"awaiting its merge in a lingering tree", phase.AwaitingMerge, "ready-head", "", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var bearers []string
+			merges := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				bearers = append(bearers, r.Header.Get("Authorization"))
+				body, _ := io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(string(body), "mergePullRequest") {
+					merges++
+					if !strings.Contains(string(body), `"head":"ready-head"`) {
+						t.Errorf("merge request %s, want READY's expected head", body)
+					}
+					_, _ = w.Write([]byte(`{"data":{}}`))
+					return
+				}
+				_, _ = w.Write([]byte(`{"data":{"repository":{"autoMergeAllowed":false,"pullRequest":{"id":"PR_42","state":"OPEN","headRefOid":"ready-head","mergeStateStatus":"CLEAN","isMergeQueueEnabled":false,"autoMergeRequest":null,"mergeQueueEntry":null}}}}`))
+			}))
+			t.Cleanup(server.Close)
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			child := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
+			if tc.lingers {
+				until, parent := time.Now().Add(time.Hour), "LEGION-207"
+				putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
+					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
+				child.Tree, child.Parent = "LEGION-207", &parent
+			}
+			putOutboxIssue(t, pool, records, child)
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: tc.ready, MergeNote: tc.mergeNote})
+			}); err != nil {
+				t.Fatalf("seed the merger's READY: %v", err)
+			}
+			runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, tokens: roleTokens{}, project: "legion",
+				repo: ghrepo.MustParse("acme/widgets"), githubAPI: server.URL}
+			if err := runner.execute(context.Background(), mustOutboxRow(t, "LEGION-208", record.ReadyMerge{Number: 42, Head: "ready-head"}, time.Now())); err != nil {
+				t.Fatalf("execute the READY merge: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if merges != tc.merges {
+				t.Fatalf("merges %d, want %d", merges, tc.merges)
+			}
+			for _, bearer := range bearers {
+				if bearer != "Bearer implement-app-token-for-acme" {
+					t.Fatalf("a GitHub call carried %q, want the implement App's token", bearer)
+				}
+			}
+		})
 	}
 }

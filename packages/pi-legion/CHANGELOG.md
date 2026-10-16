@@ -45,6 +45,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-worker`, `legion-architect` and `legion-retro` skills say the daemon submits an
+  accepted READY's merge itself, at the head READY named and with GitHub's expected-head check: a
+  merge queue enqueues it, a pull request GitHub reports mergeable merges at once, a repository that
+  allows auto-merge arms it, and in one that allows neither the daemon merges it once GitHub
+  reports it mergeable. No role runs `gh pr merge`, a design-gate READY needs nobody to submit it
+  once the gate opens, and READY no longer waits for a required check still running or for an
+  unfinished disarm.
 - The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
   human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
   whole change since the version they approved, Dispatch carries their approval to the new version,

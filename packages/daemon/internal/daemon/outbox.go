@@ -52,9 +52,9 @@ const (
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
 	// effect behind it.
 	issueBranchTimeout = 30 * time.Second
-	// autoMergeDisableTimeout bounds one auto_merge_disable row's GitHub calls, its token's mint
-	// with them, for the same reason: one unanswered call would stall every effect behind it.
-	autoMergeDisableTimeout = 30 * time.Second
+	// autoMergeTimeout bounds one auto_merge_disable or ready_merge row's GitHub calls, its token's
+	// mint with them, for the same reason: one unanswered call would stall every effect behind it.
+	autoMergeTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -308,6 +308,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.issueBranch(ctx, row, value)
 	case record.AutoMergeDisable:
 		return r.autoMergeDisable(ctx, row, value)
+	case record.ReadyMerge:
+		return r.readyMerge(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -1040,20 +1042,19 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
 }
 
-// autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
-// (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
+// autoMergeDisable disarms pull request payload.Number as the implement App, which submits READY's
+// merge (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
 // while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
 // any other head is disarmed. A row queued by a withdrawal the issue has since come back from so
 // leaves the READY that followed armed. The record is read after GitHub, so a READY recorded while
-// the row runs keeps the arm its merger made.
+// the row runs keeps the arm its ready_merge row made.
 func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
-	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
+	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
 	defer cancel()
-	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	github, err := r.graphQL(ctx)
 	if err != nil {
-		return fmt.Errorf("mint implement App token: %w", err)
+		return err
 	}
-	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
 	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
 	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
 	if err != nil {
@@ -1062,6 +1063,38 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
 		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
 	return nil
+}
+
+// readyMerge submits the merge of an accepted READY's head as the implement App
+// (ghautomerge.Submit), deciding by GitHub and then the record when it runs: only while the issue
+// still awaits that READY head does it ask GitHub to enqueue, merge or arm it. GitHub's merge state
+// and rules decide which; a repository that allows no auto-merge leaves the row waiting until
+// GitHub reports the pull request mergeable, and a head moved since READY submits nothing.
+func (r *outbox) readyMerge(ctx context.Context, row record.OutboxRow, payload record.ReadyMerge) error {
+	ctx, cancel := context.WithTimeout(ctx, autoMergeTimeout)
+	defer cancel()
+	github, err := r.graphQL(ctx)
+	if err != nil {
+		return err
+	}
+	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
+	submitted, err := ghautomerge.Submit(ctx, github, r.repo, payload.Number, payload.Head, keep)
+	if err != nil {
+		return err
+	}
+	r.log.Info("outbox submitted a READY merge", "row", row.ID, "issue", row.Issue, "number", payload.Number, "head", payload.Head,
+		"missing", submitted.Missing, "stale", submitted.Stale, "already", submitted.Already, "autoMerge", submitted.AutoMerge, "merged", submitted.Merged)
+	return nil
+}
+
+// graphQL is a GitHub GraphQL client carrying the implement App's token, the App that writes the
+// issue branch and submits or disarms its pull request's merge.
+func (r *outbox) graphQL(ctx context.Context) (githubrest.Client, error) {
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return githubrest.Client{}, fmt.Errorf("mint implement App token: %w", err)
+	}
+	return githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}, nil
 }
 
 // readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the

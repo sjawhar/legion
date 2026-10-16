@@ -13,7 +13,7 @@ import (
 
 const (
 	byHandNote    = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
-	armedPacket   = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\nMerge: submit on normal acceptance with gh pr merge 42 -R sjawhar/legion --auto --squash --match-head-commit head\n\nA docs/solutions/legion/retro-LEGION-208.md"
+	armedPacket   = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\nMerge: the daemon submits pull request #42 at head once READY is accepted\n\nA docs/solutions/legion/retro-LEGION-208.md"
 	armedPacketL1 = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"
 )
 
@@ -57,7 +57,7 @@ func TestAByHandREADYIsToldWithItsNoteAndNoSubmitLine(t *testing.T) {
 			if !strings.HasPrefix(packet, byHandNote+"\n\n") || !strings.Contains(packet, armedPacketL1) || !strings.Contains(packet, "A docs/solutions/legion/retro-LEGION-208.md") {
 				t.Fatalf("told READY %q, want the by-hand note first, then the merger's packet", packet)
 			}
-			if strings.Contains(packet, "gh pr merge") || strings.Contains(packet, "--auto") {
+			if strings.Contains(packet, "the daemon submits") {
 				t.Fatalf("told READY %q still asks for the merge to be submitted", packet)
 			}
 			if published := mergeQueuePublishes(t, pool); len(published) != 1 || published[0].Packet != packet {

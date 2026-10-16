@@ -15,14 +15,15 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-// A READY names the head the merger arms with --match-head-commit, and GitHub checks that head
-// only when auto-merge is enabled: a later push by anyone with write access leaves it armed for a
-// head nobody reviewed. Arming is legitimate only for the READY head of an awaiting_merge pull
-// request, so every head move but one landing on that head queues a disarm, whether a push moved
-// the head or a closed pull request was reopened at a new one. In awaiting_merge the move withdraws
-// the READY as a red or a conflict does: the issue goes back to implementing with its implementer
-// started, and the architect hears a checks-red naming the move, so the new head comes back
-// through testing, review and a new READY. Elsewhere the issue stays where it is.
+// A READY names the head the daemon submits with GitHub's expected-head check, and GitHub checks
+// that head only when auto-merge is enabled: a later push by anyone with write access leaves it
+// armed for a head nobody reviewed. Arming is legitimate only for the READY head of an
+// awaiting_merge pull request, so every head move but one landing on that head queues a disarm,
+// whether a push moved the head or a closed pull request was reopened at a new one. In
+// awaiting_merge the move withdraws the READY as a red or a conflict does: the issue goes back to
+// implementing with its implementer started, and the architect hears a checks-red naming the move,
+// so the new head comes back through testing, review and a new READY. Elsewhere the issue stays
+// where it is.
 func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
 	for _, move := range []struct {
 		name  string
