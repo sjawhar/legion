@@ -3,24 +3,36 @@ module github.com/sjawhar/envoy/infra
 go 1.26.8
 
 require (
+	cloud.google.com/go/secretmanager v1.22.0
 	github.com/aws/aws-sdk-go-v2 v1.47.3
 	github.com/aws/aws-sdk-go-v2/config v1.33.9
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.4
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.4
 	github.com/aws/smithy-go v1.28.5
 	github.com/blang/semver v3.5.1+incompatible
+	github.com/googleapis/gax-go/v2 v2.23.0
 	github.com/nats-io/nats.go v1.50.0
 	github.com/nats-io/nkeys v0.4.15
 	github.com/pulumi/pulumi-aws/sdk/v7 v7.50.0
 	github.com/pulumi/pulumi-command/sdk v1.2.1
 	github.com/pulumi/pulumi-docker/sdk/v5 v5.2.0
+	github.com/pulumi/pulumi-gcp/sdk/v10 v10.1.0
 	github.com/pulumi/pulumi-go-provider v1.7.0
 	github.com/pulumi/pulumi/sdk/v3 v3.265.0
 	github.com/sjawhar/envoy v0.0.0
 	github.com/stretchr/testify v1.12.1
+	golang.org/x/oauth2 v0.36.0
+	google.golang.org/api v0.290.0
+	google.golang.org/grpc v1.84.0
+	google.golang.org/protobuf v1.36.12
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
+	cloud.google.com/go/auth v0.22.0 // indirect
+	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
+	cloud.google.com/go/compute/metadata v0.9.0 // indirect
+	cloud.google.com/go/iam v1.12.0 // indirect
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
@@ -81,7 +93,9 @@ require (
 	github.com/golang/glog v1.2.5 // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
+	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/googleapis/enterprise-certificate-proxy v0.3.19 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
 	github.com/grpc-ecosystem/grpc-opentracing v0.0.0-20180507213350-8e809c8a8645 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
@@ -156,6 +170,7 @@ require (
 	go.opentelemetry.io/collector/featuregate v1.67.0 // indirect
 	go.opentelemetry.io/collector/pdata v1.67.0 // indirect
 	go.opentelemetry.io/contrib/bridges/otelslog v0.20.1 // indirect
+	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.71.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.71.0 // indirect
 	go.opentelemetry.io/otel v1.46.0 // indirect
 	go.opentelemetry.io/otel/bridge/opentracing v1.45.0 // indirect
@@ -179,12 +194,11 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/term v0.46.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
 	golang.org/x/tools v0.50.0 // indirect
+	google.golang.org/genproto v0.0.0-20260724162435-b2f20204f0df // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260921155816-b14227669459 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260921155816-b14227669459 // indirect
-	google.golang.org/grpc v1.84.0 // indirect
-	google.golang.org/protobuf v1.36.12 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	lukechampine.com/frand v1.5.1 // indirect
 )
 

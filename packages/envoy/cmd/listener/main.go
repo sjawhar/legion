@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -578,7 +577,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	consumer := "listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
+	consumer := bus.ListenerDurable(cfg.MachineID)
 	// The durable is checked here, before the cache warm-ups below (up to 30 s each), so a refused
 	// one ends the start within the NATS connect. No retry can bind it, and while this listener
 	// starts, /healthz answers 200 "starting", so a rolling deploy waiting on it would take the task
@@ -681,7 +680,7 @@ func main() {
 	// cannot catch this slow-204 case. See #389.
 	attemptCache := dedupe.New(5 * time.Minute)
 
-	roleQueue := "envoy-listener-" + strings.ReplaceAll(cfg.MachineID, " ", "-")
+	roleQueue := bus.ListenerQueue(cfg.MachineID)
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 

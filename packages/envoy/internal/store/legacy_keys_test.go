@@ -10,6 +10,7 @@ import (
 
 	natsgo "github.com/nats-io/nats.go"
 
+	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
@@ -20,9 +21,9 @@ import (
 // cannot, whose holders no build can reach any more. An entry past even a delete's bound, which only
 // another writer could store (testnats.RawOnlyKey), is skipped, and the sweeps go on.
 func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T) {
-	readableRole, unreadableRole := testnats.LegacyKeys(RoleBucket, "r")
-	readableSession, unreadableSession := testnats.LegacyKeys(Bucket, "s")
-	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(RoleBucket, "o"), testnats.RawOnlyKey(Bucket, "o")
+	readableRole, unreadableRole := testnats.LegacyKeys(bus.RoleClaimBucket, "r")
+	readableSession, unreadableSession := testnats.LegacyKeys(bus.InterestBucket, "s")
+	rawOnlyRole, rawOnlySession := testnats.RawOnlyKey(bus.RoleClaimBucket, "o"), testnats.RawOnlyKey(bus.InterestBucket, "o")
 	stale := time.Now().Add(-time.Hour).UnixMilli()
 	registry, rawInterests, rawRoles := openRegistryOver(t, func(_ natsgo.JetStreamContext, rawInterests, rawRoles natsgo.KeyValue) {
 		for role, holder := range map[string]string{"reviewer": "ses_live", readableRole: readableSession, unreadableRole: unreadableSession, rawOnlyRole: "ses_gone"} {
@@ -76,7 +77,7 @@ func TestARegistryOverKeysAnEarlierListenerStoredOpensAndReapsThem(t *testing.T)
 // check: the caller named nothing too long, and its claim is written. The old holder's interest
 // keeps the topic until the interest reaper removes it.
 func TestAClaimOfARoleAnEarlierListenersSessionHeldSucceeds(t *testing.T) {
-	readable, unreadable := testnats.LegacyKeys(Bucket, "s")
+	readable, unreadable := testnats.LegacyKeys(bus.InterestBucket, "s")
 	roles := map[string]string{"legacy-readable": readable, "legacy-unreadable": unreadable}
 	registry, _, _ := openRegistryOver(t, func(_ natsgo.JetStreamContext, rawInterests, rawRoles natsgo.KeyValue) {
 		for role, holder := range roles {
@@ -134,10 +135,10 @@ func TestARegistryOverKeysOutsideTheNATSKeyAlphabetGoesOn(t *testing.T) {
 	}
 	stale := time.Now().Add(-time.Hour).UnixMilli()
 	interest := func(sessionID string) stored {
-		return stored{Bucket, sessionID, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID}, UpdatedAt: stale}}
+		return stored{bus.InterestBucket, sessionID, Interest{SessionID: sessionID, MachineID: "earlier", Topics: []string{"notifications.agent." + sessionID}, UpdatedAt: stale}}
 	}
 	claim := func(role, holder string) stored {
-		return stored{RoleBucket, role, RoleClaim{HolderSessionID: holder, ClaimedAt: stale}}
+		return stored{bus.RoleClaimBucket, role, RoleClaim{HolderSessionID: holder, ClaimedAt: stale}}
 	}
 	keys := func(t *testing.T, bucket natsgo.KeyValue) []string {
 		t.Helper()
@@ -196,11 +197,11 @@ func openRegistryOver(t *testing.T, seed func(js natsgo.JetStreamContext, rawInt
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
-	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: Bucket, Storage: natsgo.FileStorage})
+	rawInterests, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create interest bucket: %v", err)
 	}
-	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: RoleBucket, Storage: natsgo.FileStorage})
+	rawRoles, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.RoleClaimBucket, Storage: natsgo.FileStorage})
 	if err != nil {
 		t.Fatalf("create role bucket: %v", err)
 	}

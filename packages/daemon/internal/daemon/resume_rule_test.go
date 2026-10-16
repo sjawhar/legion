@@ -321,7 +321,7 @@ func readmissionRig(t *testing.T, suspend func(*supervisor, claim.Token)) (rt *f
 	var clock time.Time
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), defaultBranch: mainBranch,
 		githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch:  &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: quietLogger(),

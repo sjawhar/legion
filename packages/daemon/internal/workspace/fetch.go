@@ -60,7 +60,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error
 	if request.Clock == nil {
 		return "", errors.New("workspace fetch clock is required")
 	}
-	credential, err := github.open(request.Repo, "")
+	credential, err := github.open(request.Repo, "", "")
 	if err != nil {
 		return "", err
 	}

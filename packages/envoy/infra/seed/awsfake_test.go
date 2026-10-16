@@ -431,7 +431,7 @@ func runAWS(t *testing.T, f *fakeAWS, args ...string) (code int, stdout, stderr 
 	f.generating = len(args) > 0 && args[0] == "generate"
 	f.mu.Unlock()
 	code = Command(context.Background(), append(args, "--store", AWSSecretsManager, "--name", awsSecret, "--region", awsRegion),
-		&out, &errs, Stores{AWSSecretsManager: OpenAWS})
+		&out, &errs, Stores{AWSSecretsManager: AWS})
 	stdout, stderr = out.String(), errs.String()
 	for _, value := range f.values() {
 		require.NotContains(t, stdout+stderr, value, "a seed reached an output")

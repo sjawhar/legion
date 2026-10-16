@@ -12,6 +12,42 @@ import (
 
 const Stream = "ENVOY_NOTIFICATIONS"
 
+// The JetStream KV buckets Envoy's stores keep, each named for what it holds.
+const (
+	// InterestBucket holds each session's interests, the topics it subscribes to, keyed by session
+	// id (internal/store).
+	InterestBucket = "envoy_interests"
+	// RoleClaimBucket holds each role lane's claim, its holder session, keyed by role
+	// (internal/store).
+	RoleClaimBucket = "envoy_roles"
+	// SessionBucket holds each live session's registration, keyed by session id
+	// (internal/session).
+	SessionBucket = "envoy_sessions"
+	// CIStateBucket holds the CI state of each commit of a pull request (internal/cistore).
+	CIStateBucket = "envoy_ci_state"
+)
+
+// NotificationTopicPrefix begins every notification topic: the subjects the stream carries, the
+// role lanes and the exception lanes.
+const NotificationTopicPrefix = "notifications."
+
+// ExceptionTopicPrefix begins a delivery's exception lane: a failed or refused delivery is reported
+// on ExceptionTopicPrefix followed by its original topic.
+const ExceptionTopicPrefix = NotificationTopicPrefix + "envoy.exceptions."
+
+// ListenerDurable is the durable consumer of the stream that the listener of machine machineID
+// binds. A space in the machine id is a hyphen in the name.
+func ListenerDurable(machineID string) string {
+	return "listener-" + strings.ReplaceAll(machineID, " ", "-")
+}
+
+// ListenerQueue is the queue group the listener of machine machineID subscribes the role lanes in,
+// so NATS hands each role message to one of the machine's listeners while a rolling deploy runs two.
+// A space in the machine id is a hyphen in the name.
+func ListenerQueue(machineID string) string {
+	return "envoy-listener-" + strings.ReplaceAll(machineID, " ", "-")
+}
+
 // streamDuplicateWindow covers the entire retained notification lifetime, so
 // an outbox retry after a crash before published_at is recorded cannot create a
 // second retained Dispatch event while the original remains observable, and a
@@ -37,7 +73,7 @@ var streamSubjects = []string{
 	"notifications.legion.>",
 	"notifications.ghostwispr.>",
 	"notifications.whatsapp.>",
-	"notifications.envoy.exceptions.notifications.agent.>",
+	ExceptionTopicPrefix + contracts.AgentTopicPrefix + ">",
 }
 
 // StreamSubjects reports the durable notification subjects, excluding role lanes.
@@ -61,8 +97,8 @@ var streamCfg = &nats.StreamConfig{
 // roleLaneSubjects are the role lanes and their exceptions twin. They travel over core NATS and
 // the stream must never retain them.
 var roleLaneSubjects = []string{
-	"notifications.role.>",
-	"notifications.envoy.exceptions.notifications.role.>",
+	contracts.RoleTopicPrefix + ">",
+	ExceptionTopicPrefix + contracts.RoleTopicPrefix + ">",
 }
 
 // subjectCapturesRoleLanes reports whether some role-lane subject would land in a stream carrying

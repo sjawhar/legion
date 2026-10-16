@@ -341,8 +341,9 @@ adds aliases or descriptions of its own.
 `dispatch issue-update` reads the issue first and sends `PATCH /api/v1/issues/{key}` as the
 session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacing the set),
 `priority` (`0` for P0 down to `3` for P3, or `null` to clear it), `route`,
-and `external_links`, which it merges into the issue's existing links by URL rather than replacing
-them; `rank`, the board's own order, is not exposed. Closing an issue (`status: "done"`)
+and `external_links`: a non-empty list merges into the issue's existing links by URL rather than
+replacing them, and an explicit empty list (`--clear-external-links`) clears every link instead;
+`rank`, the board's own order, is not exposed. Closing an issue (`status: "done"`)
 requires `reason`, which it posts as an issue message before the PATCH, since a closed issue
 refuses messages; a failed post sends no PATCH, and a PATCH that fails after the post names the
 posted message. The result is one line —

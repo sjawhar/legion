@@ -16,7 +16,8 @@ import (
 // worker commits before every fetch, resolves a bookmark before adding, and leaves pane credentials
 // on the clone.
 // The clone and the fetch reach the repository through request.Source: a pod's feed with no
-// credential, or GitHub with the one-shot credential.
+// credential, or GitHub with the one-shot credential. An issue with no branch starts at
+// request.DefaultBranch, which the request must name.
 func Provision(ctx context.Context, run Runner, request Request) (Workspace, error) {
 	workspace, err := Location(request.StateDir, request.Repo, request.Issue)
 	if err != nil {
@@ -31,6 +32,10 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 	if request.Log == nil {
 		return Workspace{}, errors.New("workspace request names no log")
 	}
+	if request.DefaultBranch == "" {
+		return Workspace{}, errors.New("workspace default branch is required")
+	}
+	workspace.DefaultBranch = request.DefaultBranch
 	if request.Source == nil {
 		return Workspace{}, errors.New("workspace request names no way to the repository: FromFeed or FromGitHub")
 	}
@@ -47,7 +52,7 @@ func Provision(ctx context.Context, run Runner, request Request) (Workspace, err
 			return Workspace{}, err
 		}
 	}
-	source, err := request.Source.open(request.Repo, workspace.Bookmark)
+	source, err := request.Source.open(request.Repo, workspace.Bookmark, request.DefaultBranch)
 	if err != nil {
 		return Workspace{}, err
 	}
