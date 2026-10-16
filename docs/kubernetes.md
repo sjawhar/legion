@@ -994,7 +994,7 @@ every issue pod is relaunched onto the new image.
 
 ### Contract discipline
 
-`DaemonAPIVersion` (24) is the Go daemon's own contract number; each claim records the contract
+`DaemonAPIVersion` (27) is the Go daemon's own contract number; each claim records the contract
 its process registered with as `pluginContract`. A role's `pi-legion` declares the contract it was built against
 (`legion.daemonApiVersion`, `packages/pi-legion/AGENTS.md`), and the daemon's boot pass
 (`refreshStalePlugins` in `packages/daemon/internal/daemon/daemon.go`) and its registration path

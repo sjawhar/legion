@@ -212,6 +212,27 @@ func TestProbeImageHoldsThePluginToTheContractItIsAskedFor(t *testing.T) {
 	}
 }
 
+// lastContractWithoutDefaultBranch is the last daemon API contract whose pod `workspace-init
+// provision` took no `--default-branch`: the `legion` of an image built at it exits 2 on the flag
+// every issue pod's init container now passes.
+const lastContractWithoutDefaultBranch = 25
+
+// An image built before the init container named the repository's default branch carries a
+// pi-legion declaring that older contract, so the daemon's probe Sandbox, asking for this binary's
+// own, refuses it by both numbers before any issue pod runs that image's `workspace-init`.
+func TestProbeImageRefusesAnImageWhoseWorkspaceInitTakesNoDefaultBranch(t *testing.T) {
+	if api.DaemonAPIVersion <= lastContractWithoutDefaultBranch {
+		t.Fatalf("DaemonAPIVersion is %d: the pod's --default-branch needs a contract above %d, or an image whose workspace-init rejects the flag passes the probe",
+			api.DaemonAPIVersion, lastContractWithoutDefaultBranch)
+	}
+	old := strconv.Itoa(lastContractWithoutDefaultBranch)
+	img := inImage(t, old, imageOmp(t))
+	code, stdout, stderr := probeImage(img.flags("--daemon-api-version", thisBinarysContract)...)
+	if want := "speaks daemon API contract " + old + "; this daemon requires " + thisBinarysContract; code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+		t.Fatalf("probe-image --daemon-api-version %s over an image at %s = %d %q %q, want exit 1 with %q and no OK line", thisBinarysContract, old, code, stdout, stderr, want)
+	}
+}
+
 func TestProbeImageProbesTheOmpItIsGiven(t *testing.T) {
 	omp := imageOmp(t)
 	img := inImage(t, thisBinarysContract, "/nonexistent/omp")
