@@ -11,11 +11,12 @@
 //     could not read on stderr and exits 1; without <legion.yaml> it exits 2 with its usage. The
 //     API URL defaults to https://api.github.com, the one the daemon calls.
 //
-// Each App's key comes from its `github_apps.<role>.private_key_command`, run with `sh -c` as the
-// daemon runs it (internal/config, executePrivateKeyCommand), and stays in this process's memory:
-// it is never printed, written to a file, or handed to another process, and neither is the JWT. An
-// App configured with any other key source is refused, since every stage proof's file names a
-// command.
+// Each App's key comes from its `github_apps.<role>.private_key_command`, run as the daemon runs it
+// (internal/config, executePrivateKeyCommand): `sh -c`, stdin closed, the environment less the NATS
+// seed variables (internal/runtime, WithoutNATSSeeds), stdout trimmed as the key, and stderr kept
+// for a failure's message alone. The key stays in this process's memory: it is never printed,
+// written to a file, or handed to another process, and neither is the JWT. An App configured with
+// any other key source is refused, since every stage proof's file names a command.
 import { spawnSync } from "node:child_process";
 import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -74,17 +75,27 @@ export function appJWT(appId: string, privateKeyPEM: string, now: Date): string 
   return `${input}.${base64url(signature)}`;
 }
 
-/** Runs one App's private_key_command and returns the key it printed, trimmed, as the daemon
- * does; a failed or silent command is an error naming its field and never quoting its output. */
+/** The variables holding a NATS nkey seed's value, which no key command the daemon starts sees
+ * (internal/runtime, natsSeedVariables). */
+const natsSeedVariables = ["NATS_NKEY_SEED", "NATS_DAEMON_NKEY_SEED"];
+
+/** Runs one App's private_key_command and returns the key it printed, trimmed, as the daemon does.
+ * A failure is named as the daemon names it (internal/config, commandError): its field and exit
+ * code, then the command's stderr when it wrote any; its stdout is never quoted. */
 function runKeyCommand(role: AppRole, command: string): string {
   const field = `github_apps.${role}.private_key_command`;
+  const env = { ...process.env };
+  for (const name of natsSeedVariables) delete env[name];
   const run = spawnSync("sh", ["-c", command], {
     encoding: "utf8",
-    stdio: ["ignore", "pipe", "inherit"],
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
   });
   if (run.error !== undefined) throw new Error(`${field} could not run: ${run.error.message}`);
   if (run.status !== 0) {
-    throw new Error(`${field} failed (${run.signal ?? `exit ${run.status}`})`);
+    const stderr = run.stderr.trim();
+    const failed = `${field} failed (exit ${run.status ?? -1})`;
+    throw new Error(stderr === "" ? failed : `${failed}: ${stderr}`);
   }
   const key = run.stdout.trim();
   if (key === "") throw new Error(`${field} produced empty output`);

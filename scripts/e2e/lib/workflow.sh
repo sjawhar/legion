@@ -352,7 +352,7 @@ pull_request_product_files() {
 # as the final approval is, rather than posted from the proof's own gh.
 request_changes_as_reviewer() {
   local issue=$1 round=$2 body=$3 app
-  app=$(role_app reviewer)
+  app=$(role_app reviewer) || return 1
   send_agent "$issue" reviewer "Stage 3 proof review round $round: your decision on pull request #$pr_number in $repo is REQUEST_CHANGES, submitted as $app with exactly this body: $body Take the round's steps in the order your role gives, and complete the reviewer handoff. This exact smoke instruction takes precedence over your own review."
   until_true 300 "$app's round $round changes-requested review on pull request #$pr_number" reviewer_requested_changes "$round"
 }
@@ -410,7 +410,7 @@ reviewer_completed() { daemon_state | jq -e --arg issue "$1" '(.issues[$issue].w
 # smoke main, and clean_smoke_main removes them.
 approve_as_reviewer() {
   local issue=$1 app
-  app=$(role_app reviewer)
+  app=$(role_app reviewer) || return 1
   send_agent "$issue" reviewer "Stage 3 proof final review: review pull request #$pr_number in $repo as your role says, taking the round's steps in the order it gives, and complete the reviewer handoff. This is the round's last review."
   until_true 300 "$app approval of pull request #$pr_number at its head" reviewer_approved_head
 }
@@ -918,7 +918,7 @@ threads_all_resolved() {
 # approval of a head the handoff push then replaces is of a head the pull request no longer has.
 assert_review_of_own_handoff() {
   local handoff reviewed app
-  app=$(role_app reviewer)
+  app=$(role_app reviewer) || return 1
   handoff=$(handoff_fact_commit "$1" reviewer reviewing "$2")
   [ -n "$handoff" ] || fail "$1 has no reviewer reviewing round $2 handoff fact"
   reviewed=$(gh api --paginate "repos/$repo/pulls/$pr_number/reviews" \

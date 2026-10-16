@@ -62,9 +62,11 @@ function config(implement: string, review: string): string {
 const app = (id: string, command = `cat ${join(dir, `key-${id}.pem`)}`) =>
   `    app_id: "${id}"\n    private_key_command: ${JSON.stringify(command)}`;
 
-// The run is asynchronous: the stand-in GitHub answers from this test's own event loop.
-async function run(path: string) {
+// The run is asynchronous: the stand-in GitHub answers from this test's own event loop. `env` is
+// added to this test's own environment.
+async function run(path: string, env: Record<string, string> = {}) {
   const child = Bun.spawn(["bun", script, path, `http://127.0.0.1:${github.port}/`], {
+    env: { ...process.env, ...env },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -99,10 +101,25 @@ describe("app-logins.ts", () => {
     expect(stderr).toContain("GET /app as the implement App (app_id 101) answered 401");
   });
 
-  test("a key command that fails is named by its field, and nothing it printed is quoted", async () => {
+  test("a key command that fails is named by its field and exit code, its stdout never quoted", async () => {
     const { code, stderr } = await run(config(app("101", "echo not-a-key; exit 3"), app("202")));
     expect(code).toBe(1);
     expect(stderr).toBe("app-logins: github_apps.implement.private_key_command failed (exit 3)");
+  });
+
+  test("a key command runs as the daemon runs it: no NATS seed, stdin closed, stderr in the failure", async () => {
+    // An unset variable prints empty, so the two seeds read `||` and the _FILE pointer stays.
+    const probe =
+      'printf "%s|%s|%s|%s" "$NATS_NKEY_SEED" "$NATS_DAEMON_NKEY_SEED" "$NATS_NKEY_SEED_FILE" "$(cat)" >&2; exit 4';
+    const { code, stderr } = await run(config(app("101", probe), app("202")), {
+      NATS_NKEY_SEED: "pane-seed",
+      NATS_DAEMON_NKEY_SEED: "daemon-seed",
+      NATS_NKEY_SEED_FILE: "/seed-file",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toBe(
+      "app-logins: github_apps.implement.private_key_command failed (exit 4): ||/seed-file|"
+    );
   });
 
   test("two roles on one App are refused, as the daemon refuses them at boot", async () => {
