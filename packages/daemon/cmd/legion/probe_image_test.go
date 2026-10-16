@@ -179,16 +179,6 @@ func tableLines(stdout string) []string {
 	return lines
 }
 
-// imageStatus is the status an image row the image carries prints: present, or installed where
-// the row awaits a pod launch that loads what the image carries (capabilities.Capability.Awaits;
-// no row does at present).
-func imageStatus(row capabilities.Capability) string {
-	if row.Awaits != "" {
-		return capabilities.StatusInstalled
-	}
-	return capabilities.StatusPresent
-}
-
 // As the worker image's build runs it, with no contract named, the command holds the image's plugin
 // to the contract this binary speaks, prints the capability table — one line per row of the
 // declared list, in its order, every image row present, codegraph with the CLI on PATH and the
@@ -211,8 +201,8 @@ func TestProbeImagePrintsTheTableAndTheOKLineWithThisBinarysContract(t *testing.
 		if prefix := "probe-image: capability " + string(row.Name) + ": "; !strings.HasPrefix(table[i], prefix) {
 			t.Errorf("capability line %d = %q, want row %s: the table's order", i, table[i], row.Name)
 		}
-		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": "+imageStatus(row)+" (") {
-			t.Errorf("capability line %d = %q, want %s %s", i, table[i], row.Name, imageStatus(row))
+		if row.Site == capabilities.SiteImage && !strings.HasPrefix(table[i], "probe-image: capability "+string(row.Name)+": "+capabilities.StatusPresent+" (") {
+			t.Errorf("capability line %d = %q, want %s %s", i, table[i], row.Name, capabilities.StatusPresent)
 		}
 	}
 	codegraph := "probe-image: capability codegraph: present (" + filepath.Join(img.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + img.lock + ")"
@@ -329,8 +319,8 @@ func TestProbeImageRefusesAnImageMissingACapability(t *testing.T) {
 				t.Errorf("stdout carries %d capability lines, want the whole table (%d) however many rows are missing", len(tableLines(stdout)), len(capabilities.Table))
 			}
 			for _, row := range capabilities.Table {
-				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": "+imageStatus(row)+" (") {
-					t.Errorf("stdout = %q, want the %s row still %s", stdout, row.Name, imageStatus(row))
+				if row.Site == capabilities.SiteImage && !slices.Contains(testCase.missing, string(row.Name)) && !strings.Contains(stdout, "probe-image: capability "+string(row.Name)+": "+capabilities.StatusPresent+" (") {
+					t.Errorf("stdout = %q, want the %s row still %s", stdout, row.Name, capabilities.StatusPresent)
 				}
 			}
 		})
