@@ -1,0 +1,10 @@
+{
+  "name": "legion-worker-language-servers",
+  "private": true,
+  "description": "TypeScript is the repository's own major because typescript-language-server wraps tsserver, which TypeScript 7 no longer ships (its npm package's bin is tsc alone); typescript-language-server and pyright are pinned to the versions this lockfile installed them at.",
+  "dependencies": {
+    "pyright": "1.1.414",
+    "typescript": "5.9.3",
+    "typescript-language-server": "6.0.1"
+  }
+}

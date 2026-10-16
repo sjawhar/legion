@@ -23,9 +23,11 @@ section can use the words without stopping to explain them.
   never reads or writes a GitHub issue.
 - **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue. Legion acts
   there through two GitHub Apps, so the account that reviews a change is never the one that wrote
-  it. The daemon creates a root's branch at `main` when it admits the root, before its architect
+  it. The daemon creates a root's branch at the repository's default branch, as GitHub names it
+  (`main`, `develop` or `release/v7.1` alike), when it admits the root, before its architect
   starts, and a child's when the child starts planning in its tree, so no agent's push is the one
-  that creates a branch: GitHub can refuse that push on a large repository.
+  that creates a branch: GitHub can refuse that push on a large repository. An issue's workspace
+  with no branch to start from starts at that default branch too.
 
 ## The controller
 
@@ -265,3 +267,11 @@ that. When a budget runs out (`launch_failure_limit`, `prompt_failure_limit` and
 the issue. A held phase worker is its architect's to retry or escalate to the controller; an
 architect that runs out goes to the controller, which can re-admit the tree.
 [Troubleshooting](/legion/legion/troubleshooting/) shows how to see each of these.
+
+A launch failure that is charged is spaced from the next try by a backoff: 2 s after the first,
+doubling after each further one, each wait drawn between half its step and the whole of it. A
+launch the runtime refused is tried again after it, and so is a process that died or was retired at
+its registration deadline, so the three tries of `launch_failure_limit`'s default span three
+seconds at least, never the moment one fault lasts. The wait logs `supervise: waiting before the
+next launch` with its length. The try it waits for is stored, with the charge, before the wait
+begins, so a daemon stop during it forgives nothing; the next boot launches the claim again.

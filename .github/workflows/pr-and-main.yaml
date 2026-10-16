@@ -62,6 +62,9 @@ jobs:
       - name: Check no current file names the pre-split Oh My Pi plugin
         run: .github/scripts/check-plugin-names.sh
 
+      - name: Check the release workflows keep credentials out of jobs that run dependency code
+        run: .github/scripts/check-release-credentials.sh
+
       # A pull request's title, body and commit messages reach main's squash commit, the
       # generated release notes and GitHub's pages, and its comments and reviews are public on its
       # page, so this required job checks them at every push. pr-title.yaml checks them again when
@@ -115,7 +118,7 @@ jobs:
           key: go-notices-${{ runner.os }}-${{ hashFiles('go.work.sum', 'packages/daemon/go.sum', 'packages/envoy/go.sum', 'packages/envoy/infra/go.sum', 'scripts/go-third-party-notices.sh') }}
 
       # Every Go archive a release ships carries THIRD_PARTY_NOTICES, written at build time with
-      # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
+      # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion_build job and
       # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
       # them, and release-envoy-infra.yaml, whose targets .github/envoy-infra-targets.json lists).
       # Writing them here for each of those builds fails the pull request that brings in a module
@@ -246,6 +249,9 @@ jobs:
 
       - name: Test the plugin-name check
         run: .github/scripts/check-plugin-names.test.sh
+
+      - name: Test the release credential check
+        run: .github/scripts/check-release-credentials.test.sh
 
       - name: Test the session import pods script (a stand-in kubectl)
         run: bash scripts/sessions-import-pods.test.sh

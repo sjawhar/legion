@@ -44,6 +44,8 @@ func (stillTime) Now() time.Time { return time.Date(2026, 9, 22, 12, 0, 0, 0, ti
 
 func (stillTime) AfterFunc(time.Duration, func()) supervise.Cancel { return neverFires{} }
 
+func (stillTime) Sleep(ctx context.Context, _ time.Duration) error { return ctx.Err() }
+
 type neverFires struct{}
 
 func (neverFires) Stop() bool { return true }
@@ -186,9 +188,9 @@ func newOperatorDaemon(t *testing.T) *operatorDaemon {
 		Runtime: rt, Conns: fake.NewConns(), Store: tokens.Recording(claims), Specs: anyLaunch{}, Clock: stillTime{}, Log: quiet,
 		Limits: supervise.Limits{LaunchFailures: 3, PromptFailures: 3, PromptRetires: 2},
 		Timeouts: supervise.Timeouts{
-			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second,
+			Boot: time.Minute, RegistrationIntervals: 3, RPC: 5 * time.Second, Probe: 30 * time.Second, Stop: 10 * time.Second, LaunchBackoff: time.Millisecond,
 		},
-		PluginContract: 24,
+		PluginContract: api.DaemonAPIVersion,
 	}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Supervisor: claims, Trees: claims, Releaser: rt, BootTokens: tokens, Project: claimsProject, OperatorToken: claimsOperatorToken, Log: quiet,
@@ -471,8 +473,8 @@ func TestClaimsSuspendResumeAndStopDriveTheClaim(t *testing.T) {
 		action, method, want string
 		claim                legionclaim.Token
 	}{
-		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 24\n", architectClaim},
-		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 24\n", architectClaim},
+		{"suspend", "Suspend", "legion-legion-legion-208-architect architect LEGION-208 suspended 1 " + thisBinarysContract + "\n", architectClaim},
+		{"resume", "Resume", "legion-legion-legion-208-architect architect LEGION-208 launching 2 " + thisBinarysContract + "\n", architectClaim},
 		{"stop", "Release", "legion-legion-legion-209-implementer implementer LEGION-209 retired 1 0\n", workerClaim},
 	} {
 		out := d.succeed(append(append([]string{step.action}, d.reach()...), "--claim", string(step.claim))...)
@@ -552,7 +554,7 @@ func TestClaimsListPrintsOneLinePerClaim(t *testing.T) {
 	out := d.succeed(append([]string{"list"}, d.reach()...)...)
 
 	wantOperatorRequest(t, d.lastOperatorRequest(), http.MethodGet, "/legion/v1/operator/claims")
-	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 24\n" +
+	want := "legion-legion-legion-208-architect architect LEGION-208 ready 1 " + thisBinarysContract + "\n" +
 		"legion-legion-legion-209-implementer implementer LEGION-209 launching 1 0\n"
 	if out != want {
 		t.Fatalf("stdout = %q, want %q", out, want)

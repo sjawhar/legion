@@ -107,6 +107,12 @@ func children(m *pulumitest.Mocks) []pulumitest.Registration {
 // hub inside the program.
 func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProvider bool) (*pulumitest.Mocks, error) {
 	t.Helper()
+	return runNamed(t, "example-hub", args, check, withProvider)
+}
+
+// runNamed is run with the hub's name as a parameter, for the tests that refuse a seed there.
+func runNamed(t *testing.T, name string, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProvider bool) (*pulumitest.Mocks, error) {
+	t.Helper()
 	m := newMocks()
 	err := m.Run(func(ctx *pulumi.Context) error {
 		var opts []pulumi.ResourceOption
@@ -117,7 +123,7 @@ func run(t *testing.T, args *gcp.NatsHubArgs, check func(*gcp.NatsHub), withProv
 			}
 			opts = append(opts, pulumi.Providers(prov))
 		}
-		hub, err := gcp.NewNatsHub(ctx, "example-hub", args, opts...)
+		hub, err := gcp.NewNatsHub(ctx, name, args, opts...)
 		if err != nil {
 			return err
 		}
@@ -888,6 +894,29 @@ func TestNatsHubRefusesASeedInItsNetworkWhenItResolves(t *testing.T) {
 					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
 				}
 			}
+		})
+	}
+}
+
+// NewNatsHub quotes the name in every refusal (its "%s %s: %w" wrapper) and registers the
+// component under it, so a seed there is refused before anything registers, as host:Listener and
+// the AWS components refuse one in their own names.
+func TestNatsHubRefusesASeedInTheComponentName(t *testing.T) {
+	seed, _ := testnats.User(t)
+	for _, row := range []struct {
+		name string
+		hub  string
+	}{
+		{"a whole seed", seed},
+		{"a seed inside a longer name", "hub-" + seed},
+		{"a lowercase seed", strings.ToLower(seed)},
+		{"a seed split by a hyphen", splitSeed(seed, "-")},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			m, err := runNamed(t, row.hub, exampleArgs(), nil, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:NatsHub: the component's name holds an nkey seed (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			require.Equal(t, []string{gcpProviderType}, m.Types(), "nothing registered beyond the test's provider")
 		})
 	}
 }

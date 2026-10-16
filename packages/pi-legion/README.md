@@ -51,11 +51,13 @@ of them is written `skill://dispatch/...`, which resolves by name once both are 
 
 `scripts/pi-plugin-prepack.sh` at the repository root is both plugins' `prepack`: it builds the one
 entry, writes the notices and stages this package's partition of `skills/`. It refuses to pack with
-the committed manifest, whose `omp.extensions` names `extensions/legion.ts`; the release workflow
-(`.github/workflows/release.yaml`, job `pi_legion`), the worker image and the e2e pack step rewrite
-it to `["dist/legion.js"]` before `bun pm pack` and restore it afterwards. The manifest's `legion`
-key carries the daemon API contract the plugin was built against; `src/daemon-api-version.test.ts`
-pins it to the daemon's golden fixture.
+the committed manifest, whose `omp.extensions` names `extensions/legion.ts`; the release workflow's
+`pi_legion_build` job (`.github/workflows/release.yaml`), the worker image and the e2e pack step
+rewrite it to `["dist/legion.js"]` before `bun pm pack`. Only the e2e pack step restores it
+afterwards: the build job's tree is discarded, and `pi_legion_publish` commits the version bump to
+the committed manifest, touching `.version` alone. The manifest's `legion` key carries the daemon
+API contract the plugin was built against; `src/daemon-api-version.test.ts` pins it to the daemon's
+golden fixture.
 
 ## Development install
 

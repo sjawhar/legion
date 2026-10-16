@@ -52,6 +52,7 @@ test("models Agent activity and open-ask aggregates", () => {
   const agent = {
     capabilities: ["btw"],
     dir: "/workspaces/planner",
+    host: "example-host-a",
     last_activity: "2026-09-13T13:00:00Z",
     last_seen: 1_726_231_200_000,
     machine_id: "host-a",

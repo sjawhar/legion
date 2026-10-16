@@ -1,6 +1,7 @@
 package capabilities
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -22,8 +23,7 @@ type Deployment struct {
 	// Runtime is the daemon's runtime, "tmux" or "kubernetes".
 	Runtime string
 	// Probed is whether the worker image passed the daemon's probe (kubernetes), whose log carries
-	// every image row's evidence; the image rows then read present, or installed where the row
-	// awaits a pod launch that loads what the image carries (Capability.Awaits).
+	// every image row's evidence; the image rows then read present.
 	Probed bool
 	// AgentSecrets is whether runtime.kubernetes.agent_secrets is configured.
 	AgentSecrets bool
@@ -36,8 +36,8 @@ type Deployment struct {
 	RolesWithoutResources []claim.Role
 	// ModelFallback is whether the pod's Oh My Pi falls back to another model,
 	// bootprobe.ModelFallbackOn or bootprobe.ModelFallbackOff as the probe's OK line reports it
-	// (bootprobe.ImageReport) or the plugin gate read it under tmux, and "" when nothing has read
-	// it.
+	// (bootprobe.ImageReport) or the plugin gate read it under tmux, bootprobe.ModelFallbackUnread
+	// when the probe could not read it, and "" when nothing has read it.
 	ModelFallback string
 	// ProbeCapacityWaits is how many of the image probe's attempts at boot ended with its pod
 	// Unschedulable — the pool had no room for the probe's reservation — before one scheduled
@@ -52,19 +52,35 @@ type Deployment struct {
 	Sessions []Session
 }
 
-// The statuses a State carries: an image row is present or installed (as a Line is) or unchecked,
-// a withheld row withheld, a deployment row present, decided or open, and a live row present, open
-// or unchecked by what the live sessions reported.
+// The statuses a State carries: an image row is present or missing, a live or a deployment row
+// present, reported, decided or open, a withheld row withheld, and an unmeasured row unchecked.
+// StatusMissing and StatusReported are the probe table's alone (CheckImage): a deployment row
+// `legion state` carries (api.CapabilityState) is never missing or reported, since the daemon
+// either measures it or has nothing yet to measure it with.
 const (
-	StatusPresent   = present
-	StatusInstalled = installed
+	StatusPresent   = "present"
+	StatusMissing   = "missing"
+	StatusReported  = "reported"
+	StatusWithheld  = "withheld"
 	StatusUnchecked = "unchecked"
-	StatusWithheld  = withheld
 	StatusDecided   = "decided"
 	StatusOpen      = "open"
 )
 
-// State is one row of the deployment's report, as `legion state` carries it (api.CapabilityState).
+// Source is where a deployment row's measurement came from.
+type Source string
+
+const (
+	// SourceConfiguration is what legion.yaml alone decides: runtime.kubernetes.resources, and
+	// whether a broker is configured at all (runtime.kubernetes.agent_secrets).
+	SourceConfiguration Source = "configuration"
+	// SourceBoot is what boot measured: the probe's OK line, the plugin gate's read under tmux,
+	// the broker login, and the pool's room for the probe at boot.
+	SourceBoot Source = "boot"
+)
+
+// State is one row of the deployment's report, as `legion state` carries it (api.CapabilityState),
+// and of the probe's table (CheckImage): one row type on every surface.
 type State struct {
 	Name   Name
 	Status string
@@ -76,6 +92,13 @@ type State struct {
 	// ConfigLine is, on an open row, the legion.yaml line that records a decision:
 	// `capabilities.decided.<name>: "<reason>"`; "" otherwise.
 	ConfigLine string
+	// Source is, on a deployment row, where its measurement came from; "" on every other row.
+	Source Source
+}
+
+// String is the line as the probe prints it, and as the probe pod's log then carries it.
+func (s State) String() string {
+	return fmt.Sprintf("probe-image: capability %s: %s (%s)", s.Name, s.Status, s.Detail)
 }
 
 // OpenLine is the sentence an open row is logged with (Log) and `legion start --check-config`
@@ -89,28 +112,14 @@ func (s State) OpenLine() string {
 }
 
 // Report renders every row of Table, in its order. An image row is present once the image passed
-// the probe — installed where the row awaits a pod launch that loads what the image carries, the
-// sentence that says so after the probe's — else unchecked; a live row is open when a live
-// session's check of it failed, present when none failed and one proved it, and unchecked when no
-// session has reported; a withheld row carries its ruling (as CheckImage renders it); a deployment
-// row is present when the deployment satisfies it, decided when legion.yaml records a decision on
-// it, and open otherwise, with the line that records one.
+// the probe, else unchecked; a live row is open when a live session's check of it failed, present
+// when none failed and one proved it, and unchecked when no session has reported; a withheld row
+// carries its ruling (as CheckImage renders it); a deployment row is present when the deployment
+// satisfies it, decided when legion.yaml records a decision on it, and open otherwise, with the
+// line that records one.
 func (d Deployment) Report() []State {
-	states := make([]State, 0, len(Table))
-	for _, row := range Table {
-		state := State{Name: row.Name}
-		switch row.Site {
-		case SiteImage:
-			state.Status, state.Detail = d.image(row)
-		case SiteLive:
-			state = d.live(row)
-		case SiteWithheld:
-			state.Status, state.Detail = StatusWithheld, withheldDetail(row)
-		case SiteDeployment:
-			state = d.deployment(row.Name)
-		}
-		states = append(states, state)
-	}
+	// The renderers run no command, so the walk under a context that never ends cannot fail.
+	states, _ := render(context.Background(), renderer{image: d.image, live: d.live, deployment: d.deployment})
 	return states
 }
 
@@ -124,15 +133,14 @@ func (d Deployment) Open() []Name {
 	return open
 }
 
-// OpenFromConfiguration is the open rows the configuration alone decides, in Table order, which
-// `legion start --check-config` prints: resource-limits, and secrets where no broker is configured.
-// The rest is boot's to measure — a configured broker's login, model fallback, which the probe or
-// the plugin gate reads, and pool capacity, which the probe's run measures — so the check says
-// nothing of them.
+// OpenFromConfiguration is the open rows whose Source is SourceConfiguration, in Table order: the
+// configuration's own gaps, whatever row they fall on, which `legion start --check-config` prints.
+// Boot's measurements are not its to say — a configured broker's login, model fallback, which the
+// probe or the plugin gate reads, and pool capacity, which the probe's run measures.
 func (d Deployment) OpenFromConfiguration() []State {
 	var open []State
 	for _, state := range d.openStates() {
-		if state.Name == ResourceLimits || (state.Name == Secrets && !d.AgentSecrets) {
+		if state.Source == SourceConfiguration {
 			open = append(open, state)
 		}
 	}
@@ -143,7 +151,7 @@ func (d Deployment) OpenFromConfiguration() []State {
 // records a decision; a live row's configLine is "".
 func (d Deployment) Log(log *slog.Logger) {
 	for _, state := range d.openStates() {
-		log.Warn(state.OpenLine(), "capability", string(state.Name), "detail", state.Detail, "configLine", state.ConfigLine)
+		log.Warn(state.OpenLine(), "capability", string(state.Name), "detail", state.Detail, "configLine", state.ConfigLine, "source", string(state.Source))
 	}
 }
 
@@ -159,21 +167,17 @@ func (d Deployment) openStates() []State {
 	return open
 }
 
-// image is one image row's status: present once the probe passed, which checked each — installed
-// where the row awaits a pod launch that loads what the probe proved the image carries, since the
-// report names what a worker lacks and no pod's agent has that tool yet; unchecked where nothing
-// has checked — the tmux runtime runs the host's tools, which no probe checks, and a kubernetes
-// daemon's probe may not have reported yet.
-func (d Deployment) image(row Capability) (string, string) {
+// image is one image row's state: present once the probe passed, which checked each; unchecked
+// where nothing has checked — the tmux runtime runs the host's tools, which no probe checks, and a
+// kubernetes daemon's probe may not have reported yet.
+func (d Deployment) image(row Capability) State {
 	switch {
-	case d.Probed && row.Awaits != "":
-		return StatusInstalled, "the image carries it (checked by the daemon's probe of the worker image, which passed); " + row.Awaits
 	case d.Probed:
-		return StatusPresent, "checked by the daemon's probe of the worker image, which passed"
+		return State{Name: row.Name, Status: StatusPresent, Detail: "checked by the daemon's probe of the worker image, which passed"}
 	case d.Runtime == "tmux":
-		return StatusUnchecked, "the tmux runtime runs the host's tools, which no probe checks"
+		return State{Name: row.Name, Status: StatusUnchecked, Detail: "the tmux runtime runs the host's tools, which no probe checks"}
 	default:
-		return StatusUnchecked, "no probe has reported yet"
+		return State{Name: row.Name, Status: StatusUnchecked, Detail: "no probe has reported yet"}
 	}
 }
 
@@ -248,16 +252,16 @@ func withheldDetail(row Capability) string { return row.Ruling + ": " + row.Summ
 
 // deployment is one deployment row: its measurement, and the status that follows. A decision on a
 // row the deployment satisfies is moot — the measurement stands, and the row reads present.
-func (d Deployment) deployment(name Name) State {
-	satisfied, detail := d.measure(name)
-	state := State{Name: name, Detail: detail}
+func (d Deployment) deployment(row Capability) State {
+	satisfied, source, detail := d.measure(row.Name)
+	state := State{Name: row.Name, Detail: detail, Source: source}
 	switch {
 	case satisfied:
 		state.Status = StatusPresent
-	case d.Decided[name] != "":
-		state.Status, state.Decision = StatusDecided, d.Decided[name]
+	case d.Decided[row.Name] != "":
+		state.Status, state.Decision = StatusDecided, d.Decided[row.Name]
 	default:
-		state.Status, state.ConfigLine = StatusOpen, configLine(name)
+		state.Status, state.ConfigLine = StatusOpen, configLine(row.Name)
 	}
 	return state
 }
@@ -267,21 +271,21 @@ func configLine(name Name) string {
 	return fmt.Sprintf("capabilities.decided.%s: \"<reason>\"", name)
 }
 
-// measure is one deployment row's measurement: whether the deployment satisfies it, and the detail
-// that says how.
-func (d Deployment) measure(name Name) (bool, string) {
+// measure is one deployment row's measurement: whether the deployment satisfies it, where that
+// measurement came from, and the detail that says how.
+func (d Deployment) measure(name Name) (bool, Source, string) {
 	tmux := d.Runtime == "tmux"
 	switch name {
 	case Secrets:
 		switch {
 		case tmux:
-			return false, "the tmux runtime enrolls no process with the secrets broker"
+			return false, SourceConfiguration, "the tmux runtime enrolls no process with the secrets broker"
 		case !d.AgentSecrets:
-			return false, "runtime.kubernetes.agent_secrets is not configured"
+			return false, SourceConfiguration, "runtime.kubernetes.agent_secrets is not configured"
 		case d.SecretsLogin == "issued":
-			return true, "every pod is enrolled with the agent-secrets broker runtime.kubernetes.agent_secrets names, and the daemon's login is issued"
+			return true, SourceBoot, "every pod is enrolled with the agent-secrets broker runtime.kubernetes.agent_secrets names, and the daemon's login is issued"
 		default:
-			return false, fmt.Sprintf("the agent-secrets login is %s, not issued", d.SecretsLogin)
+			return false, SourceBoot, fmt.Sprintf("the agent-secrets login is %s, not issued", d.SecretsLogin)
 		}
 	case ModelFallback:
 		where, reader := "the pod's Oh My Pi settings (read by the probe)", "no probe has reported"
@@ -290,36 +294,38 @@ func (d Deployment) measure(name Name) (bool, string) {
 		}
 		switch d.ModelFallback {
 		case bootprobe.ModelFallbackOn:
-			return true, "retry.modelFallback is true under " + where
+			return true, SourceBoot, "retry.modelFallback is true under " + where
 		case bootprobe.ModelFallbackOff:
-			return false, "retry.modelFallback is false under " + where
+			return false, SourceBoot, "retry.modelFallback is false under " + where
+		case bootprobe.ModelFallbackUnread:
+			return false, SourceBoot, "not read: the probe could not read retry.modelFallback under the pod's Oh My Pi settings (the probe pod's log says why)"
 		default:
-			return false, "not read: " + reader + " retry.modelFallback"
+			return false, SourceBoot, "not read: " + reader + " retry.modelFallback"
 		}
 	case ResourceLimits:
 		switch {
 		case tmux:
-			return false, "the tmux runtime sets no requests or limits on a pane"
+			return false, SourceConfiguration, "the tmux runtime sets no requests or limits on a pane"
 		case len(d.RolesWithoutResources) == 0:
-			return true, "every role has CPU and memory requests and limits under runtime.kubernetes.resources"
+			return true, SourceConfiguration, "every role has CPU and memory requests and limits under runtime.kubernetes.resources"
 		default:
 			roles := make([]string, len(d.RolesWithoutResources))
 			for i, role := range d.RolesWithoutResources {
 				roles[i] = string(role)
 			}
-			return false, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: " + strings.Join(roles, ", ")
+			return false, SourceConfiguration, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: " + strings.Join(roles, ", ")
 		}
 	case PoolCapacity:
 		switch {
 		case tmux:
-			return true, "the tmux runtime runs no probe pod"
+			return true, SourceConfiguration, "the tmux runtime runs no probe pod"
 		case d.ProbeCapacityWaits == 0:
-			return true, "the image probe pod scheduled at its first attempt"
+			return true, SourceBoot, "the image probe pod scheduled at its first attempt"
 		default:
-			return false, fmt.Sprintf("the image probe pod was Unschedulable %d time(s) at boot before it scheduled: %s; the pool had no room for its 250m / 1Gi reservation",
+			return false, SourceBoot, fmt.Sprintf("the image probe pod was Unschedulable %d time(s) at boot before it scheduled: %s; the pool had no room for its 250m / 1Gi reservation",
 				d.ProbeCapacityWaits, d.ProbeCapacityReason)
 		}
 	}
 	// Table names no other deployment row; TestEveryDeploymentRowIsMeasured holds it to this switch.
-	return false, "no measurement"
+	return false, "", "no measurement"
 }

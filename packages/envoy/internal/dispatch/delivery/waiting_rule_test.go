@@ -208,8 +208,9 @@ func TestTheWaitingSQLAgreesWithTheShippingRuleOverMergeQueueHistories(t *testin
 			case 5:
 				run.stoodDown = true
 			}
-			// Distinct per run: the two rules order applies by completion alone, and break a tie
-			// each its own way.
+			// Distinct per run: the Go rule breaks a tie by run id (compareApplies) and the SQL's
+			// lateral by whichever row it reads first. Tied applies share the completion, the one
+			// time the waiting view carries, so the two differ only in a run id nothing shows.
 			run.done = run.started.Add(minutes(5, 6*60) + time.Duration(i)*time.Millisecond)
 			runs = append(runs, run)
 			gaps = append(gaps, [2]time.Time{run.head, created})

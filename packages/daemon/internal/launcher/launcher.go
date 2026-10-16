@@ -93,7 +93,8 @@ func Run(ctx context.Context, cfg Config) error {
 }
 
 // serve is one authenticated daemon connection: hello, acknowledgement, the launcher's actual
-// state, then start and stop commands until the connection ends.
+// state, then start and stop commands until the connection ends. The acknowledgement is logged as
+// one line, so a launcher the daemon accepted reads apart from one still dialing.
 func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", address)
 	if err != nil {
@@ -115,6 +116,10 @@ func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 	}
 	if _, ok := frame.(shimwire.LauncherHelloAck); !ok {
 		return fmt.Errorf("hello acknowledgement: got %T, want launcher_hello_ack", frame)
+	}
+	if m.cfg.Stderr != nil {
+		fmt.Fprintf(m.cfg.Stderr, "launcher: connected to the daemon at %s as launcher %s (sandbox %s, role %s, pod %s)\n",
+			address, launcherID, m.cfg.Sandbox, m.cfg.Role, m.cfg.PodUID)
 	}
 	m.mu.Lock()
 	m.writer = writer
