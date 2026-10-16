@@ -2203,9 +2203,12 @@ session_jq() {
 }
 # included_jq_modules SCRIPT prints the sorted unique names of the lib/*.jq modules SCRIPT includes,
 # read from its own `include "…"` strings, so a module joins prerequisites' compile guard the day a
-# checkpoint first includes it.
+# checkpoint first includes it. The name class covers every character an include name uses (letters
+# either case, digits, `_`, `.`, `/`, `-`) and excludes the function's own grep and sed text, whose
+# `[` and `;` sit where the class would have to continue, so the list is the script's includes and
+# nothing of the helper itself.
 included_jq_modules() {
-  grep -o 'include "[a-z0-9-]*"' "$1" | sed 's/^include "//; s/"$//' | sort -u
+  grep -o 'include "[A-Za-z0-9_./-]*"' "$1" | sed 's/^include "//; s/"$//' | sort -u
 }
 # jq_modules_compile LIBDIR MODULE… fails, quoting jq's error, on the first MODULE the host's jq
 # cannot compile from LIBDIR, else notes them all. Including a module compiles its syntax (a module
