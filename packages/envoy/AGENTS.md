@@ -2325,11 +2325,13 @@ name lowercased; create and retag refuse it before writing unless it matches the
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
 (`gcloud auth application-default login`) and calls Secret Manager itself under
 `cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
-write. A read refuses Application Default Credentials naming a quota project other than the
-broker's `gcp_project`, naming both (`gcpBackend.requireAccount`; ADC with no quota project set
-names none and is not refused); a write also refuses an identity whose ADC JSON is not a person's
-`authorized_user` type - a service account key file, or a GCE/GKE metadata-server or workload
-identity, whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
+write. A read refuses Application Default Credentials whose quota project is itself a project
+NUMBER that disagrees with the broker's `gcp_project` (also a number, cut from the secrets'
+resource-name prefix), naming both (`gcpBackend.requireAccount`); ADC's quota project is ordinarily
+a project ID string, which this check cannot compare against a number without another API call, so
+it is silent for a project-ID quota project or none at all. A write also refuses an identity whose
+ADC JSON is not a person's `authorized_user` type - a service account key file, or a GCE/GKE
+metadata-server or workload identity, whose ADC carries no JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
 the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
 lowercased.
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line

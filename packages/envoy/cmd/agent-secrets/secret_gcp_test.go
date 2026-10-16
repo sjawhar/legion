@@ -30,9 +30,11 @@ import (
 )
 
 const (
-	testGCPProject = "acme-agent-infra"
+	// testGCPProject is a project NUMBER, the form the broker's gcp_project setting and the
+	// secrets' own resource-name prefix take.
+	testGCPProject = "100000000001"
 	testKMSKeyName = "projects/acme-agent-infra/locations/global/keyRings/agent-secrets/cryptoKeys/agent-secrets"
-	testGCPPrefix  = "projects/acme-agent-infra/secrets/agent-secrets-"
+	testGCPPrefix  = "projects/100000000001/secrets/agent-secrets-"
 )
 
 func gcpTestSettings() Settings {
@@ -368,18 +370,18 @@ func TestGCPSecretCreateRefusesMetadataIdentity(t *testing.T) {
 	}
 }
 
-// TestGCPSecretReadRefusesAnotherProject: a read under Application Default Credentials naming a
-// quota project other than the broker's is refused, naming both.
-func TestGCPSecretReadRefusesAnotherProject(t *testing.T) {
+// TestGCPSecretReadRefusesAnotherProjectNumber: a read under Application Default Credentials
+// whose quota project is a NUMBER other than the broker's is refused, naming both.
+func TestGCPSecretReadRefusesAnotherProjectNumber(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
-	useGCPIdentity(t, "authorized_user", "ada@example.com", "another-project")
+	useGCPIdentity(t, "authorized_user", "ada@example.com", "999999999999")
 	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
 
 	_, stderr, code := runSecret("list")
 	if code != 1 {
 		t.Fatalf("exit %d, stderr %q", code, stderr)
 	}
-	if !strings.Contains(stderr, "another-project") || !strings.Contains(stderr, testGCPProject) {
+	if !strings.Contains(stderr, "999999999999") || !strings.Contains(stderr, testGCPProject) {
 		t.Fatalf("stderr does not name both projects: %q", stderr)
 	}
 }
@@ -389,6 +391,20 @@ func TestGCPSecretReadRefusesAnotherProject(t *testing.T) {
 func TestGCPSecretReadAllowsNoQuotaProject(t *testing.T) {
 	startFakeSecretManager(t, newFakeSecretManager())
 	useGCPIdentity(t, "authorized_user", "ada@example.com", "")
+	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
+
+	_, stderr, code := runSecret("list")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, stderr)
+	}
+}
+
+// TestGCPSecretReadAllowsAProjectIDQuotaProject: ADC naming a project-ID-shaped (non-numeric)
+// quota project is not refused, even though it is textually unequal to the broker's project
+// NUMBER: this CLI cannot resolve one from the other without another API call, so it does not try.
+func TestGCPSecretReadAllowsAProjectIDQuotaProject(t *testing.T) {
+	startFakeSecretManager(t, newFakeSecretManager())
+	useGCPIdentity(t, "authorized_user", "ada@example.com", "acme-agent-infra")
 	startGCPSecretBroker(t, gcpTestSettings(), alwaysServed)
 
 	_, stderr, code := runSecret("list")

@@ -163,13 +163,20 @@ func (b *gcpBackend) displayName(id string) string {
 	return name
 }
 
-// requireAccount refuses, before any read, Application Default Credentials naming a project other
-// than the broker's: a read there would list another project's secrets as if they were the agent
-// secrets. ADC for a person's `gcloud auth application-default login` with no quota project set
-// names none, so this is silent then; the write check (requireWriteSignIn) still refuses a
-// non-person identity.
+// gcpProjectNumberPattern matches a GCP project NUMBER (digits only), the form the broker's
+// gcp_project setting takes (it is cut from the secrets' own resource-name prefix,
+// projects/<number>/secrets/<id>).
+var gcpProjectNumberPattern = regexp.MustCompile(`^[0-9]+$`)
+
+// requireAccount refuses, before any read, Application Default Credentials naming a project
+// NUMBER other than the broker's: a read there would list another project's secrets as if they
+// were the agent secrets. ADC's own project (its quota project, when one is set) is ordinarily a
+// project ID string, not a number, and resolving one from the other needs a Resource Manager call
+// this CLI does not make, so the check only fires when ADC's project is itself numeric and
+// disagrees with the broker's; a project ID quota project, or none at all, is silent here (the
+// write check, requireWriteSignIn, still refuses a non-person identity regardless).
 func (b *gcpBackend) requireAccount(context.Context) error {
-	if b.identity.Project != "" && b.identity.Project != b.settings.GCPProject {
+	if gcpProjectNumberPattern.MatchString(b.identity.Project) && b.identity.Project != b.settings.GCPProject {
 		return fmt.Errorf("your Google Cloud Application Default Credentials are for project %s, but the agent secrets are in project %s: run `gcloud auth application-default login` for the right account, or `gcloud auth application-default set-quota-project %s`",
 			b.identity.Project, b.settings.GCPProject, b.settings.GCPProject)
 	}
