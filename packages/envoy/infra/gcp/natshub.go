@@ -457,20 +457,56 @@ func authorization(hostname string, users []NATSUserArgs, l *HubListenerArgs, se
 // nameAddedUsers is core's refusal of the authorization authorization built from n users, with the
 // listener's user and the session user, when given, named by their own inputs rather than by the
 // index core gives each after users, which no input of the hub has.
+type addedUser struct {
+	index int
+	name  string
+}
+
 func nameAddedUsers(err error, n int, withListener, withSession bool) error {
 	text := err.Error()
-	next := n
+	var added [2]addedUser
+	count := 0
 	if withListener {
-		text = strings.ReplaceAll(text, fmt.Sprintf("users[%d]", next), "listener")
-		next++
+		added[count] = addedUser{index: n, name: "listener"}
+		count++
+		n++
 	}
 	if withSession {
-		text = strings.ReplaceAll(text, fmt.Sprintf("users[%d]", next), "sessionUser")
+		added[count] = addedUser{index: n, name: "sessionUser"}
+		count++
 	}
-	if text == err.Error() {
-		return err
+	for _, user := range added[:count] {
+		quotedPrefix := fmt.Sprintf(`users[%d] "`, user.index)
+		if strings.HasPrefix(text, quotedPrefix) {
+			text = user.name + ` "` + strings.TrimPrefix(text, quotedPrefix)
+			return errors.New(nameAddedUserReference(text, added[:count]))
+		}
+		seedPrefix := fmt.Sprintf("users[%d]:", user.index)
+		if strings.HasPrefix(text, seedPrefix) {
+			return errors.New(user.name + ":" + strings.TrimPrefix(text, seedPrefix))
+		}
 	}
-	return errors.New(text)
+	return err
+}
+
+// nameAddedUserReference replaces an added user's index only when core emits it as the target of
+// the leading user's name or nkey duplicate refusal. It leaves quoted rule entries untouched.
+func nameAddedUserReference(text string, added []addedUser) string {
+	head, detail, found := strings.Cut(text, ": ")
+	if !found {
+		return text
+	}
+	for _, user := range added {
+		nkeyPrefix := fmt.Sprintf(`nkey repeats users[%d] "`, user.index)
+		if strings.HasPrefix(detail, nkeyPrefix) {
+			return head + ": nkey repeats " + user.name + ` "` + strings.TrimPrefix(detail, nkeyPrefix)
+		}
+		namePrefix := fmt.Sprintf("name repeats users[%d]", user.index)
+		if strings.HasPrefix(detail, namePrefix) {
+			return head + ": name repeats " + user.name + strings.TrimPrefix(detail, namePrefix)
+		}
+	}
+	return text
 }
 
 // NewNatsHub registers a hub: its service account, the secret holding the tailnet auth key and

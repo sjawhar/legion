@@ -203,6 +203,7 @@ func TestCloudConfigRunsTheListenerBehindTailscaleServe(t *testing.T) {
 	require.NotContains(t, listener, "ENVOY_ALLOW_REMOTE_NATS")
 	require.NotContains(t, listener, "NATS_NKEY_SEED", "the seed reaches the listener through the env file alone")
 	require.Contains(t, listener, "\nAfter=docker.service network-online.target nats.service\n")
+	require.Contains(t, listener, "\nTimeoutStartSec=600\n")
 	require.Equal(t, "systemctl start envoy-listener.service", doc.Runcmd[len(doc.Runcmd)-1],
 		"the listener starts after NATS")
 
@@ -212,9 +213,10 @@ func TestCloudConfigRunsTheListenerBehindTailscaleServe(t *testing.T) {
 	require.Contains(t, tailscaled, " -e TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json ")
 }
 
-// A hub without a listener runs none, writes neither the seed script nor Serve's configuration,
-// and gives the Tailscale container no Serve configuration to apply.
-func TestCloudConfigWithoutAListenerRunsNone(t *testing.T) {
+// A hub without a listener starts none and writes an empty Serve configuration. Tailscale keeps
+// its state on the data disk, so TS_SERVE_CONFIG must name that empty configuration to clear a
+// forward a prior listener rendered.
+func TestCloudConfigWithoutAListenerClearsTailscaleServe(t *testing.T) {
 	args := exampleArgs()
 	args.Listener = nil
 	doc, _, err := gcp.CloudConfigOf(args)
@@ -222,9 +224,12 @@ func TestCloudConfigWithoutAListenerRunsNone(t *testing.T) {
 
 	for _, f := range doc.WriteFiles {
 		require.NotContains(t, []string{
-			"/etc/systemd/system/envoy-listener.service", "/etc/envoy/listener-seed-env", "/etc/tailscale-serve/serve.json",
+			"/etc/systemd/system/envoy-listener.service", "/etc/envoy/listener-seed-env",
 		}, f.Path)
 	}
 	require.NotContains(t, doc.Runcmd, "systemctl start envoy-listener.service")
-	require.NotContains(t, fileOf(t, doc, "/etc/systemd/system/tailscaled.service"), "TS_SERVE_CONFIG")
+	require.JSONEq(t, `{}`, fileOf(t, doc, "/etc/tailscale-serve/serve.json"))
+	tailscaled := fileOf(t, doc, "/etc/systemd/system/tailscaled.service")
+	require.Contains(t, tailscaled, " -v /etc/tailscale-serve:/etc/tailscale-serve:ro ")
+	require.Contains(t, tailscaled, " -e TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json ")
 }

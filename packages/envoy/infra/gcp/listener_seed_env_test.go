@@ -6,7 +6,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -112,4 +114,38 @@ func TestListenerSeedEnvFailsWhenTheFetchFails(t *testing.T) {
 	entries, err := os.ReadDir(run.dir)
 	require.NoError(t, err)
 	require.Empty(t, entries)
+}
+
+// A start timeout sends TERM while fetch-secret holds the raw seed. The handler must delete it:
+// dash does not run an EXIT trap for that signal.
+func TestListenerSeedEnvRemovesTheRawSeedWhenTerminatedDuringFetch(t *testing.T) {
+	t.Parallel()
+	var golden gcp.CloudConfig
+	require.NoError(t, yamlUnmarshalGolden(t, &golden))
+	scriptDir := t.TempDir()
+	script := filepath.Join(scriptDir, "listener-seed-env")
+	require.NoError(t, os.WriteFile(script, []byte(fileOf(t, golden, "/etc/envoy/listener-seed-env")), 0o700))
+	started := filepath.Join(scriptDir, "fetch-started")
+	require.NoError(t, os.WriteFile(filepath.Join(scriptDir, "fetch-secret"), []byte(`#!/bin/sh
+printf seed >"$1"
+: >"$FETCH_STARTED"
+while :; do sleep 1; done
+`), 0o700))
+	dir := t.TempDir()
+
+	cmd := shellCommand(t, script, filepath.Join(dir, "listener.env"), fetchSecret)
+	cmd.Env = []string{"FETCH_STARTED=" + started, "PATH=" + os.Getenv("PATH")}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) })
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(started)
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+	require.NoError(t, syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM))
+	require.Error(t, cmd.Wait())
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	require.Empty(t, entries, "the raw seed is removed when the start is terminated")
 }

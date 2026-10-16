@@ -142,11 +142,14 @@ listener's user's name.
 
 With `listener`, the VM runs Envoy's listener beside NATS, as machine `<h>`. It listens on the
 VM's loopback, `127.0.0.1:9020`, and reaches NATS there too, on `nats://127.0.0.1:4222`. Tailscale
-Serve forwards the tailnet's connections to the hub's port 9020 to that address, so a session on
-any device that reaches the hub registers and sends through `http://<h>.<tailnet>:9020` and
-receives over NATS itself, with no listener of its own. The listener's `/v1` API takes no bearer,
-which the listener allows only on a loopback address (`packages/envoy/cmd/listener/apiauth.go`),
-so the tailnet's policy for port 9020 decides who may call it.
+Serve forwards the tailnet's connections to the hub's port 9020 to that address. A self-subscribed
+client such as pi-envoy or claude-envoy registers and sends through
+`http://<h>.<tailnet>:9020`; it receives directly from NATS, with no listener of its own. A client
+that registers a serving port, including the OpenCode plugin, cannot receive delivery through this
+hub listener: its registration is the hub's machine, and the hub has no host bridge to reach the
+client's port. Run a listener beside that client instead. The listener's `/v1` API takes no bearer,
+which the listener allows only on a loopback address (`packages/envoy/cmd/listener/apiauth.go`), so
+the tailnet's policy for port 9020 decides who may call it.
 
 The listener connects as the listener's user (see [The hub's users](#the-hubs-users)) with the
 seed `listener.seedSecret` holds. The hub's service account gets
@@ -191,20 +194,21 @@ so cloud-init applies the hub's cloud-config at every boot. The whole document, 
    is always of a file.
 
 `write_files` then writes the authorization to `/etc/nats/nats-server.conf`, the secret fetcher to
-`/etc/envoy/fetch-secret`, the joined script to `/etc/envoy/tailnet-joined`, with a `listener` the
-seed script to `/etc/envoy/listener-seed-env` and Tailscale Serve's configuration to
-`/etc/tailscale-serve/serve.json`, and the systemd units to `/etc/systemd/system/`, and `runcmd`
-reloads systemd and starts the units in this order. They are started and never enabled, since
-`/etc` does not outlive the boot.
+`/etc/envoy/fetch-secret`, the joined script to `/etc/envoy/tailnet-joined`, and Tailscale Serve's
+configuration to `/etc/tailscale-serve/serve.json`. With a `listener`, it also writes the seed
+script to `/etc/envoy/listener-seed-env`, and the Serve configuration forwards port 9020; without
+one, the configuration is `{}`, which clears a forward from a previous VM. It then writes the
+systemd units to `/etc/systemd/system/`, and `runcmd` reloads systemd and starts the units in this
+order. They are started and never enabled, since `/etc` does not outlive the boot.
 
 | Unit | What it does |
 | --- | --- |
 | `fetch-tailnet-key.service` | A oneshot, after `network-online.target`, that stays active once it exits: `/etc/envoy/fetch-secret /run/envoy/tailnet-auth-key <h>-tailnet-auth-key`. It runs only on a mounted data disk without `/mnt/disks/data/tailnet-joined`, so no boot after the node has joined fetches the key. |
-| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. With a `listener` it also mounts `/etc/tailscale-serve` read-only and sets `TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json`: containerboot applies that configuration once the node is up, and again whenever the file changes, watching its directory (tailscale v1.104.1 `cmd/containerboot/serve.go`), which is why the file has a directory of its own. It wants the fetch and starts after it ends, but does not require it. |
+| `tailscaled.service` | `docker run --name tailscaled` of `tailscaleImage` on the host's network, with `NET_ADMIN` and `/dev/net/tun`, its state in `/mnt/disks/data/tailscale`, the key file mounted read-only, `TS_AUTHKEY=file:/run/envoy/tailnet-auth-key`, `TS_AUTH_ONCE=true`, kernel networking (`TS_USERSPACE=false`), `TS_HOSTNAME=<h>` and `--advertise-tags` with `tags`. It mounts `/etc/tailscale-serve` read-only and sets `TS_SERVE_CONFIG=/etc/tailscale-serve/serve.json`: containerboot applies that configuration once the node is up, and again whenever the file changes, watching its directory (tailscale v1.104.1 `cmd/containerboot/serve.go`). With a `listener`, the configuration forwards port 9020; without one it is `{}`, which clears a prior forward. It wants the fetch and starts after it ends, but does not require it. |
 | `tailnet-joined.service` | Started after `tailscaled`, on a mounted data disk without the marker: `/etc/envoy/tailnet-joined /mnt/disks/data/tailnet-joined /run/envoy/tailnet-auth-key`. Every 5 seconds the script asks the Tailscale container's CLI for `status --json`, and once its `BackendState` is `Running` it empties the key file, which stays for the container's bind mount, and only once that has succeeded writes the marker. A simple service, so its start returns at once; a run that fails, as one whose key drop fails does, is run again 10 seconds later. |
 | `nats-firewall.service` | A oneshot that stays active once it exits: it adds `INPUT -p tcp -s 130.211.0.0/22,35.191.0.0/16 --dport 8222 -j ACCEPT` and `INPUT -i tailscale0 -p tcp --dport 4222 -j ACCEPT` to the host's iptables, each unless it is there. COS's host firewall accepts incoming connections for SSH alone ([COS firewall](https://cloud.google.com/container-optimized-os/docs/how-to/firewall)), so without them the health check never reaches NATS, and the tailnet reaches NATS only through the accept rule Tailscale's image writes for `tailscale0`, which a host filtering with another iptables backend overrides. |
 | `nats.service` | `docker run --name nats` of `natsImage` on the host's network, with `/mnt/disks/data/nats` as `/data` and the configuration file mounted read-only, and the arguments `-c /etc/nats/nats-server.conf -js --store_dir /data -m 8222 --server_name <h>`. It is stopped with `docker stop -t 30`. It wants `nats-firewall` and starts after it. |
-| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
+| `envoy-listener.service` | Only with a `listener`. Before each start, `/etc/envoy/listener-seed-env /run/envoy/listener.env <seedSecret>` writes the seed to that env file; then `docker run --name envoy-listener` of `listener.image` on the host's network, with `--env-file /run/envoy/listener.env`, `PORT=9020`, `ENVOY_LISTEN_HOST=127.0.0.1`, `ENVOY_MACHINE_ID=<h>` and `NATS_URLS=nats://127.0.0.1:4222`. `TimeoutStartSec=600` exceeds the fetcher's 590-second maximum: six attempts, each with three 30-second curl limits, separated by five 10-second waits. A seed that cannot be fetched fails the start, and the restart fetches again. It is stopped with `docker stop -t 30`, since the listener's own shutdown takes up to about 20 seconds. It wants `nats` and starts after it. |
 
 The container units require `docker.service`, refuse to start unless `/mnt/disks/data` is a mount
 point, so that their state never lands on the tmpfs beneath, and restart 10 seconds after their

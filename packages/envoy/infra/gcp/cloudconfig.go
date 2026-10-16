@@ -90,8 +90,9 @@ type writeFile struct {
 // that tailscaled's bind mount is always of a file.
 //
 // write_files holds the NATS configuration, the secret fetcher and the units; runcmd loads the
-// units and starts them in order. They are started, never enabled: /etc does not outlive the boot.
-// A hub with a listener also gets the listener's seed script and Tailscale Serve's configuration.
+// units and starts them in order. Every hub gets a Tailscale Serve configuration, empty without a
+// listener; a hub with a listener also gets its seed script. They are started, never enabled: /etc
+// does not outlive the boot.
 func (v vm) document() cloudConfig {
 	files := []writeFile{
 		{Path: natsConfPath, Permissions: "0644", Content: v.natsConf},
@@ -99,11 +100,9 @@ func (v vm) document() cloudConfig {
 		{Path: joinedPath, Permissions: "0755", Content: joinedScript},
 	}
 	if v.listener != nil {
-		files = append(files,
-			writeFile{Path: seedEnvPath, Permissions: "0755", Content: seedEnvScript},
-			writeFile{Path: servePath, Permissions: "0644", Content: serveConfig()},
-		)
+		files = append(files, writeFile{Path: seedEnvPath, Permissions: "0755", Content: seedEnvScript})
 	}
+	files = append(files, writeFile{Path: servePath, Permissions: "0644", Content: serveConfig(v.listener != nil)})
 	runcmd := []string{"systemctl daemon-reload"}
 	for _, u := range v.units() {
 		files = append(files, writeFile{Path: unitDir + u.name, Permissions: "0644", Content: u.text})
@@ -254,6 +253,7 @@ env_file=$1
 secret=$2
 raw=$(mktemp "$env_file.raw.XXXXXX") || exit 1
 trap 'rm -f "$raw"' EXIT
+trap 'rm -f "$raw"; exit 1' INT TERM
 "$(dirname "$0")/fetch-secret" "$raw" "$secret" || exit 1
 seed=$(cat "$raw") || exit 1
 case $seed in
@@ -271,10 +271,12 @@ rm -f "$tmp"
 exit 1
 `
 
-// serveConfig is Tailscale Serve's configuration for the hub's listener: the listener's port on
-// the tailnet, forwarded as TCP to the same port on the VM's loopback, where the listener listens.
-// It is the form `tailscale serve --tcp` leaves and `tailscale serve status --json` prints.
-func serveConfig() string {
+// serveConfig is Tailscale Serve's configuration. With no listener it is an empty object, so
+// containerboot clears a prior Serve configuration held on the data disk.
+func serveConfig(withListener bool) string {
+	if !withListener {
+		return "{}\n"
+	}
 	port := strconv.Itoa(core.DefaultListenerPort)
 	return `{"TCP":{"` + port + `":{"TCPForward":"127.0.0.1:` + port + `"}}}` + "\n"
 }
@@ -347,18 +349,15 @@ func joinedUnit() string {
 // fetched, and starts after the fetch ends, but does not require it: a node whose tailnet state
 // is on the disk never reads the key (TS_AUTH_ONCE), so a failed fetch must not keep it down.
 // containerboot hands the key file's path to the tailscale CLI, which reads it (tailscale v1.104.1
-// cmd/containerboot/tailscaled.go:120-121). A hub with a listener gives containerboot Serve's
-// configuration, which it applies once the node is up and again whenever the file changes
-// (cmd/containerboot/serve.go).
+// cmd/containerboot/tailscaled.go:120-121). Every hub gives containerboot a Serve configuration:
+// the empty one clears a prior forward, while the listener's forwards its port.
 func (v vm) tailscaledUnit() string {
 	run := []string{
 		"--cap-add", "NET_ADMIN", "--device", "/dev/net/tun",
 		"-v", dataMount + "/tailscale:/var/lib/tailscale",
 		"-v", keyPath + ":" + keyPath + ":ro",
 	}
-	if v.listener != nil {
-		run = append(run, "-v", serveDir+":"+serveDir+":ro", "-e", "TS_SERVE_CONFIG="+servePath)
-	}
+	run = append(run, "-v", serveDir+":"+serveDir+":ro", "-e", "TS_SERVE_CONFIG="+servePath)
 	run = append(run,
 		"-e", "TS_AUTHKEY=file:"+keyPath,
 		"-e", "TS_AUTH_ONCE=true",
@@ -419,6 +418,7 @@ func (v vm) listenerUnit() string {
 	return containerUnit("Envoy's listener, which the tailnet reaches through Tailscale Serve", natsService, "envoy-listener",
 		append(run, v.listener.image),
 		"ExecStartPre="+seedEnvPath+" "+listenerEnvPath+" "+v.listener.seedSecret,
+		"TimeoutStartSec=600",
 		"ExecStop=/usr/bin/docker stop -t 30 envoy-listener")
 }
 
