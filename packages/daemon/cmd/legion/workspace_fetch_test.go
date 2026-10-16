@@ -141,6 +141,23 @@ func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
 			says: func(*issueVolume) string { return `--cache-url must be an http:// URL (got "10.0.0.5:8418")` },
 		},
 		{
+			name: "a --cache-url with no LEGION_REPOSITORY_CACHE_TOKEN_FILE",
+			args: func(v *issueVolume) []string { return append(v.fetchArgs(), "--cache-url", "http://10.0.0.5:8418") },
+			code: 1,
+			says: func(*issueVolume) string {
+				return "LEGION_REPOSITORY_CACHE_TOKEN_FILE is not set: a repository cache needs its token"
+			},
+		},
+		{
+			name: "a cache token file that is blank",
+			args: func(v *issueVolume) []string { return append(v.fetchArgs(), "--cache-url", "http://10.0.0.5:8418") },
+			env: func(t *testing.T, _ *issueVolume) {
+				t.Setenv("LEGION_REPOSITORY_CACHE_TOKEN_FILE", writeCacheToken(t, "\n"))
+			},
+			code: 1,
+			says: func(*issueVolume) string { return "LEGION_REPOSITORY_CACHE_TOKEN_FILE names " },
+		},
+		{
 			name: "an unknown flag",
 			args: func(v *issueVolume) []string { return append(v.fetchArgs(), "--root", v.root) },
 			code: 2,
@@ -514,6 +531,11 @@ func (v *issueVolume) cacheTarServer(t *testing.T) (string, int) {
 	}
 	body := stream.Bytes()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+cmdCacheToken {
+			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set(workspace.CacheRepositoryHeader, "acme/widgets")
 		switch r.URL.Path {
 		case "/healthz":
 			_, _ = w.Write([]byte(`{"ready":true,"repo":"acme/widgets","bytes":1}`))
@@ -541,6 +563,7 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 	t.Setenv("LEGION_REPOSITORY_CACHE_URL", cache)
+	t.Setenv("LEGION_REPOSITORY_CACHE_TOKEN_FILE", writeCacheToken(t, cmdCacheToken))
 
 	code, stdout, stderr := runWorkspaceInitHere(v.fetchArgs())
 	if code != 0 {
@@ -579,7 +602,12 @@ func TestWorkspaceInitFetchStreamsTheRepositoryCache(t *testing.T) {
 // after one waiting line per change of that answer: nothing is cloned from GitHub instead.
 func TestWorkspaceInitFetchFailsWhenTheCacheIsNeverReady(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t, "main")
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+cmdCacheToken {
+			http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set(workspace.CacheRepositoryHeader, "acme/widgets")
 		http.Error(w, "the repository cache holds no clone yet", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
@@ -587,6 +615,7 @@ func TestWorkspaceInitFetchFailsWhenTheCacheIsNeverReady(t *testing.T) {
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 	useInstantClock(t)
 
+	t.Setenv("LEGION_REPOSITORY_CACHE_TOKEN_FILE", writeCacheToken(t, cmdCacheToken))
 	code, stdout, stderr := runWorkspaceInitHere(append(v.fetchArgs(), "--cache-url", server.URL))
 	if code != 1 || !strings.Contains(stderr, "the repository cache "+server.URL+" was not ready within "+workspace.CacheWaitTimeout.String()+": GET "+server.URL+"/healthz answered 503 Service Unavailable") {
 		t.Fatalf("exit %d, stderr %q; want 1 naming the cache and its answer", code, stderr)

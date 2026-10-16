@@ -34,6 +34,7 @@ const gitHub = "https://github.com/acme/widgets"
 // started and wait for release before it runs.
 type testRunner struct {
 	remote string
+	others map[string]string
 	runner workspace.Runner
 
 	mu      sync.Mutex
@@ -57,7 +58,14 @@ func newTestRunner(t *testing.T, remote string) *testRunner {
 		t.Fatal(err)
 	}
 	tools["git"] = wrapper
-	return &testRunner{remote: remote, runner: workspace.NewRunner(testTimeout, tools)}
+	return &testRunner{remote: remote, others: map[string]string{}, runner: workspace.NewRunner(testTimeout, tools)}
+}
+
+// serves has the runner's git reach repo's GitHub URL at the local bare remote too.
+func (r *testRunner) serves(repo, remote string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.others[workspace.GitHubURL(ghrepo.MustParse(repo))] = remote
 }
 
 func (r *testRunner) Timeout() time.Duration { return testTimeout }
@@ -66,12 +74,17 @@ func (r *testRunner) Run(ctx context.Context, command workspace.Command) (worksp
 	transfer := false
 	actual := command
 	actual.Argv = append([]string(nil), command.Argv...)
+	r.mu.Lock()
 	for i, arg := range actual.Argv {
 		if arg == gitHub {
 			actual.Argv[i] = "file://" + r.remote
 			transfer = true
+		} else if other, ok := r.others[arg]; ok {
+			actual.Argv[i] = "file://" + other
+			transfer = true
 		}
 	}
+	r.mu.Unlock()
 	r.mu.Lock()
 	r.argv = append(r.argv, command.Argv)
 	var held, release chan struct{}
@@ -201,17 +214,58 @@ type running struct {
 	done   chan error
 }
 
-// testOptions are a cache's options on a fresh volume, its token file holding token.
+// testCacheToken is the bearer a test cache of acme/widgets takes.
+const testCacheToken = "cache-token-of-acme-widgets"
+
+// testOptions are a cache of acme/widgets's options on a fresh volume: its provisioning token file
+// holding ghs_first, and its bearer token file testCacheToken.
 func testOptions(t *testing.T, run *testRunner) Options {
 	t.Helper()
-	tokenFile := filepath.Join(t.TempDir(), "token")
+	return repoOptions(t, run, "acme/widgets", testCacheToken)
+}
+
+// repoOptions are the options of a cache of repo on a fresh volume, taking bearer.
+func repoOptions(t *testing.T, run *testRunner, repo, bearer string) Options {
+	t.Helper()
+	dir := t.TempDir()
+	tokenFile, bearerFile := filepath.Join(dir, "token"), filepath.Join(dir, "cache-token")
 	if err := os.WriteFile(tokenFile, []byte("ghs_first"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(bearerFile, []byte(bearer+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	return Options{
-		Repo: ghrepo.MustParse("acme/widgets"), Root: t.TempDir(), TokenFile: tokenFile, CredentialDir: t.TempDir(),
+		Repo: ghrepo.MustParse(repo), Root: t.TempDir(), TokenFile: tokenFile, CacheTokenFile: bearerFile, CredentialDir: t.TempDir(),
 		Refresh: time.Hour, Listen: "127.0.0.1:0", Run: run,
 	}
+}
+
+// get is GET path of the cache, presenting bearer when it is not empty.
+func (c *running) get(t *testing.T, path, bearer string) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodGet, c.url+path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bearer != "" {
+		request.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response
+}
+
+// bearer is the token the cache takes, as its file holds it.
+func (c *running) bearer(t *testing.T) string {
+	t.Helper()
+	body, err := os.ReadFile(c.opts.CacheTokenFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(body))
 }
 
 // start runs Serve with opts until the test ends, and returns once it serves.
@@ -236,7 +290,7 @@ func start(t *testing.T, opts Options) *running {
 	deadline := time.Now().Add(testTimeout)
 	for time.Now().Before(deadline) {
 		for _, line := range log.all() {
-			if address, ok := strings.CutPrefix(line, "serving acme/widgets on "); ok {
+			if address, ok := strings.CutPrefix(line, "serving "+opts.Repo.String()+" on "); ok {
 				c.url = "http://" + address
 				return c
 			}
@@ -247,13 +301,10 @@ func start(t *testing.T, opts Options) *running {
 	return nil
 }
 
-// health is GET /healthz: its status and its body.
+// health is GET /healthz, with the cache's bearer: its status and its body.
 func (c *running) health(t *testing.T) (int, Health) {
 	t.Helper()
-	response, err := http.Get(c.url + "/healthz")
-	if err != nil {
-		t.Fatal(err)
-	}
+	response := c.get(t, "/healthz", c.bearer(t))
 	defer response.Body.Close()
 	var health Health
 	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
@@ -327,13 +378,10 @@ func unpack(t *testing.T, stream io.Reader) (string, []string) {
 	}
 }
 
-// getTar is GET /tar, read whole.
+// getTar is GET /tar with the cache's bearer, read whole.
 func (c *running) getTar(t *testing.T) (int, []byte) {
 	t.Helper()
-	response, err := http.Get(c.url + "/tar")
-	if err != nil {
-		t.Fatal(err)
-	}
+	response := c.get(t, "/tar", c.bearer(t))
 	defer response.Body.Close()
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -462,8 +510,13 @@ func TestATarAskedForDuringAFetchWaitsForIt(t *testing.T) {
 	<-started
 
 	streamed := make(chan []byte, 1)
+	request, err := http.NewRequest(http.MethodGet, c.url+"/tar", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+c.bearer(t))
 	go func() {
-		response, err := http.Get(c.url + "/tar")
+		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Error(err)
 			streamed <- nil
@@ -689,6 +742,12 @@ func TestServeRefusesIncompleteOptions(t *testing.T) {
 		{"no repository", func(o *Options) { o.Repo = ghrepo.Repository{} }, "repository cache repository is required"},
 		{"a relative root", func(o *Options) { o.Root = "cache" }, `repository cache root must be an absolute path (got "cache")`},
 		{"no token file", func(o *Options) { o.TokenFile = "" }, "repository cache token file is required"},
+		{"no bearer token file", func(o *Options) { o.CacheTokenFile = "" }, "repository cache bearer token file is required"},
+		{"a blank bearer token file", func(o *Options) {
+			if err := os.WriteFile(o.CacheTokenFile, []byte(" \n"), 0o600); err != nil {
+				panic(err)
+			}
+		}, "LEGION_REPOSITORY_CACHE_TOKEN_FILE names "},
 		{"no credential directory", func(o *Options) { o.CredentialDir = "" }, "repository cache credential directory is required"},
 		{"no refresh", func(o *Options) { o.Refresh = 0 }, "repository cache refresh must be positive (got 0s)"},
 		{"no listen address", func(o *Options) { o.Listen = "" }, "repository cache listen address is required"},
@@ -700,7 +759,7 @@ func TestServeRefusesIncompleteOptions(t *testing.T) {
 			opts := testOptions(t, run)
 			opts.Log = func(string) {}
 			tc.edit(&opts)
-			if err := Serve(context.Background(), opts); err == nil || err.Error() != tc.want {
+			if err := Serve(context.Background(), opts); err == nil || !strings.HasPrefix(err.Error(), tc.want) {
 				t.Fatalf("Serve = %v, want %q", err, tc.want)
 			}
 			if transfers := run.transfers(); len(transfers) != 0 {
@@ -725,7 +784,7 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 	var logged []string
 	report, err := workspace.Fetch(context.Background(), run, workspace.FetchRequest{
 		Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
-		Log: func(line string) { logged = append(logged, line) }, Clock: workspace.WallClock{}, CacheURL: c.url,
+		Log: func(line string) { logged = append(logged, line) }, Clock: workspace.WallClock{}, CacheURL: c.url, CacheToken: testCacheToken,
 	})
 	if err != nil {
 		t.Fatalf("Fetch from the cache: %v", err)
@@ -744,5 +803,92 @@ func TestAnIssuePodsFetchFillsItsFeedFromTheCache(t *testing.T) {
 		if strings.HasPrefix(transfer, "clone ") {
 			t.Errorf("the pod cloned from GitHub: %q", transfer)
 		}
+	}
+}
+
+// /healthz and /tar answer only a request carrying the cache's own token: none, or another, is
+// 401, and says nothing of the repository. An answered one names the repository in
+// workspace.CacheRepositoryHeader. /readyz, the kubelet's readiness probe, which carries no
+// token, answers 503 then 200 with nothing but its status.
+func TestEveryAnswerButReadinessNeedsTheCachesToken(t *testing.T) {
+	remote := newRemote(t)
+	run := newTestRunner(t, remote)
+	started, release := run.hold()
+	defer release()
+	c := start(t, testOptions(t, run))
+	<-started
+	if response := c.get(t, "/readyz", ""); response.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz during the first clone answers %d, want 503", response.StatusCode)
+	}
+	release()
+	c.ready(t)
+	for _, path := range []string{"/healthz", "/tar"} {
+		for _, bearer := range []string{"", "cache-token-of-acme-gadgets"} {
+			response := c.get(t, path, bearer)
+			body, _ := io.ReadAll(response.Body)
+			response.Body.Close()
+			if response.StatusCode != http.StatusUnauthorized || response.Header.Get(workspace.CacheRepositoryHeader) != "" || strings.Contains(string(body), "acme/widgets") {
+				t.Errorf("%s with bearer %q answers %d %q naming %q, want 401 naming nothing", path, bearer, response.StatusCode, body, response.Header.Get(workspace.CacheRepositoryHeader))
+			}
+		}
+		response := c.get(t, path, testCacheToken)
+		response.Body.Close()
+		if response.StatusCode != http.StatusOK || response.Header.Get(workspace.CacheRepositoryHeader) != "acme/widgets" {
+			t.Errorf("%s with its token answers %d naming %q, want 200 naming acme/widgets", path, response.StatusCode, response.Header.Get(workspace.CacheRepositoryHeader))
+		}
+	}
+	response := c.get(t, "/readyz", "")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || len(body) != 0 || response.Header.Get(workspace.CacheRepositoryHeader) != "" {
+		t.Errorf("/readyz once ready answers %d %q naming %q, want 200 and nothing else", response.StatusCode, body, response.Header.Get(workspace.CacheRepositoryHeader))
+	}
+}
+
+// Two caches of two repositories, each with its own token: an issue pod of acme/widgets that is
+// handed acme/gadgets's cache — a cache pod replaced and its address reused — takes nothing from
+// it. Its own token is refused there, and even with acme/gadgets's token the answer names another
+// repository: no ref, tag or object of acme/gadgets reaches its feed. Its own cache fills the feed.
+func TestAnIssuePodTakesNothingFromAnotherRepositorysCache(t *testing.T) {
+	widgets, gadgets := newRemote(t), newRemote(t)
+	tagged := advance(t, gadgets, "gadgets-only")
+	git(t, gadgets, "--git-dir="+gadgets, "tag", "gadgets-only", tagged)
+	run := newTestRunner(t, widgets)
+	run.serves("acme/gadgets", gadgets)
+	ownCache := start(t, testOptions(t, run))
+	otherCache := start(t, repoOptions(t, run, "acme/gadgets", "cache-token-of-acme-gadgets"))
+	ownCache.ready(t)
+	otherCache.ready(t)
+	fetch := func(cache *running, bearer string) (workspace.FetchReport, string, error) {
+		request := workspace.FetchRequest{
+			Repo: ghrepo.MustParse("acme/widgets"), Token: "ghs_pod", CredentialDir: t.TempDir(), Feed: filepath.Join(t.TempDir(), "feed"),
+			Log: func(string) {}, Clock: workspace.WallClock{}, CacheURL: cache.url, CacheToken: bearer,
+		}
+		report, err := workspace.Fetch(context.Background(), run, request)
+		return report, request.Feed, err
+	}
+	for _, tc := range []struct {
+		bearer, says string
+	}{
+		{testCacheToken, "/healthz answered 401 Unauthorized"},
+		{"cache-token-of-acme-gadgets", "is the repository cache of acme/gadgets, not of acme/widgets"},
+	} {
+		_, feed, err := fetch(otherCache, tc.bearer)
+		if err == nil || !strings.Contains(err.Error(), tc.says) {
+			t.Fatalf("Fetch of acme/widgets from acme/gadgets's cache with %q = %v, want a refusal naming %q", tc.bearer, err, tc.says)
+		}
+		if entries, err := os.ReadDir(filepath.Join(feed, "acme")); err == nil && len(entries) != 0 {
+			t.Errorf("the refused fetch left %d entries in the feed", len(entries))
+		}
+	}
+	report, _, err := fetch(ownCache, testCacheToken)
+	if err != nil {
+		t.Fatalf("Fetch from its own cache: %v", err)
+	}
+	if tags := git(t, report.Feed, "--git-dir="+report.Feed, "tag", "--list"); tags != "" {
+		t.Errorf("the feed holds tags %q", tags)
+	}
+	if err := exec.Command("git", "--git-dir="+report.Feed, "cat-file", "-e", tagged).Run(); err == nil {
+		t.Errorf("the feed holds acme/gadgets's commit %s", tagged)
 	}
 }

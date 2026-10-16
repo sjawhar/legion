@@ -176,7 +176,7 @@ func (v *issueVolume) args(issue string) []string {
 
 // runtimeOptionalEnv are the variables a runtime sets on an init container only for some
 // launches; no run in these tests inherits them from whoever runs the tests.
-var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_EXPECT_ISSUE_VOLUME", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_REPOSITORY_CACHE_URL"}
+var runtimeOptionalEnv = []string{"LEGION_PROVISION_TOKEN_FILE", "LEGION_EXPECT_ISSUE_VOLUME", "LEGION_WORKSPACE_RECOVERED_FROM", "LEGION_REPOSITORY_CACHE_URL", "LEGION_REPOSITORY_CACHE_TOKEN_FILE"}
 
 // setenv is the volume's environment for an in-process run of `provision`.
 func (v *issueVolume) setenv(t *testing.T) {

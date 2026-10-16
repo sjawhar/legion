@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/ecdsa"
@@ -1032,11 +1033,18 @@ func tarOf(t *testing.T, entries ...[2]string) []byte {
 	return stream.Bytes()
 }
 
-// fakeCache stands in for the repository cache's server: GET /healthz answers 503 for its first
-// notReady polls and then 200 ready, and GET /tar streams body. It counts each.
+// testCacheToken is the bearer the fake cache takes and fetchRequest's cache requests present.
+const testCacheToken = "cache-token-of-acme-widgets"
+
+// fakeCache stands in for the repository cache's server: every request must carry the bearer
+// testCacheToken, or it is answered 401; an answered one names the cache's repository, acme/widgets
+// unless repo or tarRepo says otherwise, in CacheRepositoryHeader. GET /healthz answers 503 for its
+// first notReady polls and then 200 ready, and GET /tar streams body. It counts each.
 type fakeCache struct {
 	body     []byte
 	notReady int
+	repo     string
+	tarRepo  string
 
 	mu          sync.Mutex
 	healthAsked int
@@ -1046,17 +1054,24 @@ type fakeCache struct {
 func (c *fakeCache) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if r.Header.Get("Authorization") != "Bearer "+testCacheToken {
+		http.Error(w, "the repository cache's token is required", http.StatusUnauthorized)
+		return
+	}
+	repo := cmp.Or(c.repo, "acme/widgets")
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/healthz":
 		c.healthAsked++
+		w.Header().Set(CacheRepositoryHeader, repo)
 		if c.healthAsked <= c.notReady {
 			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = w.Write([]byte(`{"ready":false,"repo":"acme/widgets","bytes":0}`))
+			_, _ = w.Write([]byte(`{"ready":false,"repo":"` + repo + `","bytes":0}`))
 			return
 		}
-		_, _ = w.Write([]byte(`{"ready":true,"repo":"acme/widgets","bytes":1}`))
+		_, _ = w.Write([]byte(`{"ready":true,"repo":"` + repo + `","bytes":1}`))
 	case r.Method == http.MethodGet && r.URL.Path == "/tar":
 		c.tarAsked++
+		w.Header().Set(CacheRepositoryHeader, cmp.Or(c.tarRepo, repo))
 		w.Header().Set("Content-Type", "application/x-tar")
 		_, _ = w.Write(c.body)
 	default:
@@ -1083,7 +1098,7 @@ func TestFetchStreamsTheRepositoryCacheThenFetchesTheDeltaFromGitHub(t *testing.
 	served := &fakeCache{body: body}
 	moved := pushRemoteBranch(t, run.remote, "release/v7.1", "newer.txt")
 	req := fetchRequest(t)
-	req.CacheURL = served.serve(t)
+	req.CacheURL, req.CacheToken = served.serve(t), testCacheToken
 
 	report, err := Fetch(context.Background(), run, req)
 	if err != nil {
@@ -1140,7 +1155,7 @@ func TestFetchWaitsForTheRepositoryCacheToBeReady(t *testing.T) {
 	run := newLocalRunner(t)
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote)), notReady: 3}
 	req := fetchRequest(t)
-	req.CacheURL = served.serve(t)
+	req.CacheURL, req.CacheToken = served.serve(t), testCacheToken
 	clock := newTestClock()
 	req.Clock = clock
 	var logged []string
@@ -1186,7 +1201,7 @@ func TestFetchFailsWhenTheRepositoryCacheIsNeverReady(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			run := newLocalRunner(t)
 			req := fetchRequest(t)
-			req.CacheURL = tc.url(t)
+			req.CacheURL, req.CacheToken = tc.url(t), testCacheToken
 			req.Clock = newTestClock()
 			req.Log = func(string) {}
 			_, err := Fetch(context.Background(), run, req)
@@ -1255,7 +1270,7 @@ func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
 			run := newLocalRunner(t)
 			pushRemoteBranch(t, run.remote, "main", "history.txt")
 			req := fetchRequest(t)
-			req.CacheURL = (&fakeCache{body: tc.body(t, run.remote)}).serve(t)
+			req.CacheURL, req.CacheToken = (&fakeCache{body: tc.body(t, run.remote)}).serve(t), testCacheToken
 			_, err := Fetch(context.Background(), run, req)
 			if err == nil || !strings.Contains(err.Error(), "fill the feed from the repository cache "+req.CacheURL) || !strings.Contains(err.Error(), tc.says) {
 				t.Fatalf("Fetch = %v, want the cache refused naming %q", err, tc.says)
@@ -1265,6 +1280,53 @@ func TestFetchRefusesARepositoryCacheItCannotUse(t *testing.T) {
 				t.Errorf("the tar wrote outside the feed (%v)", err)
 			}
 		})
+	}
+}
+
+// A fetch asks only its own repository's cache, which it proves twice: it presents that cache's
+// token, which another repository's cache refuses with 401, and it takes nothing from a cache whose
+// answer names another repository — its /healthz, or the /tar itself, read before any of the
+// tar's content. Each is refused at once, without waiting, and nothing reaches the feed. A cache
+// named without its token is refused before anything is asked.
+func TestFetchTakesNothingFromAnotherRepositorysCache(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cache  *fakeCache
+		token  string
+		says   string
+		health int
+		tars   int
+	}{
+		{"a cache that refuses the token", &fakeCache{}, "another-cache's-token", "/healthz answered 401 Unauthorized", 0, 0},
+		{"a cache whose health names another repository", &fakeCache{repo: "acme/gadgets"}, testCacheToken,
+			"is the repository cache of acme/gadgets, not of acme/widgets", 1, 0},
+		{"a cache whose tar names another repository", &fakeCache{tarRepo: "acme/gadgets"}, testCacheToken,
+			"is the repository cache of acme/gadgets, not of acme/widgets", 1, 1},
+		{"a cache that names no repository", &fakeCache{tarRepo: " "}, testCacheToken,
+			`is the repository cache of "", not of acme/widgets`, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			run := newLocalRunner(t)
+			tc.cache.body = cacheTar(t, cacheOf(t, run.remote))
+			req := fetchRequest(t)
+			req.CacheURL, req.CacheToken = tc.cache.serve(t), tc.token
+			clock := newTestClock()
+			req.Clock = clock
+			_, err := Fetch(context.Background(), run, req)
+			if err == nil || !strings.Contains(err.Error(), req.CacheURL) || !strings.Contains(err.Error(), tc.says) {
+				t.Fatalf("Fetch = %v, want a refusal naming %q", err, tc.says)
+			}
+			if tc.cache.healthAsked != tc.health || tc.cache.tarAsked != tc.tars || len(clock.waits) != 0 {
+				t.Errorf("Fetch asked /healthz %d and /tar %d times and waited %v, want %d, %d and no wait", tc.cache.healthAsked, tc.cache.tarAsked, clock.waits, tc.health, tc.tars)
+			}
+			assertNothingFilledTheFeed(t, run, req)
+		})
+	}
+
+	req := fetchRequest(t)
+	req.CacheURL = "http://127.0.0.1:1"
+	if _, err := Fetch(context.Background(), newLocalRunner(t), req); err == nil || err.Error() != "workspace fetch: a repository cache needs its token" {
+		t.Fatalf("Fetch with a cache and no token = %v", err)
 	}
 }
 
@@ -1283,7 +1345,7 @@ func TestFetchReportsWhereTheFeedCameFrom(t *testing.T) {
 	}
 
 	served := &fakeCache{body: cacheTar(t, cacheOf(t, run.remote))}
-	req.CacheURL = served.serve(t)
+	req.CacheURL, req.CacheToken = served.serve(t), testCacheToken
 	advanceRemote(t, run.remote)
 	again, err := Fetch(context.Background(), run, req)
 	if err != nil {

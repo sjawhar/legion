@@ -14,6 +14,20 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/repocache"
 )
 
+// cmdCacheToken is the bearer token the cache command's tests hand the cache, and the fetch's
+// present.
+const cmdCacheToken = "cache-token-of-acme-widgets"
+
+// writeCacheToken is a file, outside the issue volume and TMPDIR, holding body.
+func writeCacheToken(t *testing.T, body string) string {
+	t.Helper()
+	file := filepath.Join(t.TempDir(), "cache-token")
+	if err := os.WriteFile(file, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return file
+}
+
 // cacheArgs are a cache pod's container's: the volume's root, and an address of the test's own.
 func (v *issueVolume) cacheArgs() []string {
 	return []string{"cache", "--repo", winitRepo, "--root", v.root, "--listen", "127.0.0.1:0"}
@@ -60,6 +74,20 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 			args: func(v *issueVolume) []string { return append(v.cacheArgs(), "--refresh", "0s") },
 			code: 1,
 			says: func(*issueVolume) string { return "--refresh must be positive (got 0s)" },
+		},
+		{
+			name: "LEGION_REPOSITORY_CACHE_TOKEN_FILE unset",
+			env:  func(t *testing.T, _ *issueVolume) { unsetenv(t, "LEGION_REPOSITORY_CACHE_TOKEN_FILE") },
+			code: 1,
+			says: func(*issueVolume) string { return "LEGION_REPOSITORY_CACHE_TOKEN_FILE is not set" },
+		},
+		{
+			name: "a bearer token file that is blank",
+			env: func(t *testing.T, _ *issueVolume) {
+				t.Setenv("LEGION_REPOSITORY_CACHE_TOKEN_FILE", writeCacheToken(t, " \n"))
+			},
+			code: 1,
+			says: func(*issueVolume) string { return "LEGION_REPOSITORY_CACHE_TOKEN_FILE names " },
 		},
 		{
 			name: "LEGION_PROVISION_TOKEN_FILE unset",
@@ -110,6 +138,7 @@ func TestWorkspaceInitCacheRefusesBeforeServing(t *testing.T) {
 			v := newIssueVolume(t).withRemote(t, "main")
 			v.setenv(t)
 			t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+			t.Setenv("LEGION_REPOSITORY_CACHE_TOKEN_FILE", writeCacheToken(t, cmdCacheToken))
 			if tc.env != nil {
 				tc.env(t, v)
 			}
@@ -145,6 +174,7 @@ func TestWorkspaceInitCacheServesTheRepositoryUntilStopped(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t, "main")
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+	t.Setenv("LEGION_REPOSITORY_CACHE_TOKEN_FILE", writeCacheToken(t, cmdCacheToken+"\n"))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var stdout, stderr lockedBuffer
@@ -170,7 +200,12 @@ func TestWorkspaceInitCacheServesTheRepositoryUntilStopped(t *testing.T) {
 	}
 	var health repocache.Health
 	for !health.Ready {
-		response, err := http.Get("http://" + address + "/healthz")
+		request, err := http.NewRequest(http.MethodGet, "http://"+address+"/healthz", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Authorization", "Bearer "+cmdCacheToken)
+		response, err := http.DefaultClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -13,25 +13,27 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/repocache"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const workspaceFetchUsage = "legion workspace-init fetch --repo <owner>/<repo> --feed <dir> [--cache-url http://<cache>:8418]"
 
-// cacheURLEnv is where the runtime names the repository's cache to the fetch container, set only
-// while that cache's pod is Ready; --cache-url defaults to it.
+// cacheURLEnv is where the runtime names the repository's cache to the fetch container, beside its
+// token's file (LEGION_REPOSITORY_CACHE_TOKEN_FILE); --cache-url defaults to it.
 const cacheURLEnv = "LEGION_REPOSITORY_CACHE_URL"
 
 // fetchClock is the time the fetch's clone retries read and wait on; a test replaces it.
 var fetchClock workspace.Clock = workspace.WallClock{}
 
 // workspaceFetch reads the provisioning token and fills the feed, the container's own directory
-// on the issue's volume: from the repository cache when one is named, then from GitHub for what it
-// lacks; or from GitHub alone. It reads --repo before anything else, resolves git alone, and
-// refuses before it ever touches the feed or its own TMPDIR, where the one-shot credential goes —
-// every check (--repo, --feed, --cache-url, the token, git on PATH) runs first, so a refusal here
-// leaves neither behind. A transfer that fails transiently is run again (workspace.Fetch), each
-// retried failure one line on stdout, and the last line says where the feed came from and the
+// on the issue's volume: from the repository cache when one is named, presenting the token
+// LEGION_REPOSITORY_CACHE_TOKEN_FILE holds, then from GitHub for what it lacks; or from GitHub
+// alone. It reads --repo before anything else, resolves git alone, and refuses before it ever
+// touches the feed or its own TMPDIR, where the one-shot credential goes — every check (--repo,
+// --feed, --cache-url and its token, the provisioning token, git on PATH) runs first, so a refusal
+// here leaves neither behind. A transfer that fails transiently is run again (workspace.Fetch),
+// each retried failure one line on stdout, and the last line says where the feed came from and the
 // bytes each source brought.
 func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
@@ -41,9 +43,17 @@ func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.
 	if !filepath.IsAbs(feed) {
 		return fmt.Errorf("--feed must be an absolute path (got %q)", feed)
 	}
+	cacheToken := ""
 	if cacheURL != "" {
 		if parsed, err := url.Parse(cacheURL); err != nil || parsed.Scheme != "http" || parsed.Host == "" {
 			return fmt.Errorf("--cache-url must be an http:// URL (got %q)", cacheURL)
+		}
+		tokenFile, set := os.LookupEnv(repocache.CacheTokenFileEnv)
+		if !set {
+			return errors.New(repocache.CacheTokenFileEnv + " is not set: a repository cache needs its token")
+		}
+		if cacheToken, err = config.ReadSecretPointer(repocache.CacheTokenFileEnv, tokenFile); err != nil {
+			return err
 		}
 	}
 	tokenFile, set := os.LookupEnv(provisionTokenFileEnv)
@@ -63,7 +73,7 @@ func workspaceFetch(ctx context.Context, repo, feed, cacheURL string, stdout io.
 	}
 	report, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
 		Repo: repository, Token: token, CredentialDir: os.TempDir(), Feed: feed,
-		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init fetch: "+line) }, Clock: fetchClock, CacheURL: cacheURL,
+		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init fetch: "+line) }, Clock: fetchClock, CacheURL: cacheURL, CacheToken: cacheToken,
 	})
 	if err != nil {
 		return err

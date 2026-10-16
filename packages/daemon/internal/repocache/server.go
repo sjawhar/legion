@@ -7,6 +7,7 @@ package repocache
 import (
 	"archive/tar"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -34,19 +35,28 @@ const Port = 8418
 // the repository's owner, projected from the cache's Secret: what a token file's refusal names.
 const tokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
 
+// CacheTokenFileEnv names the variable that points at the cache's bearer token: in the cache's
+// container the token every request but /readyz must present, and in an issue pod's fetch container
+// the token it presents. Both are projected from Secrets the daemon writes, never an environment
+// literal.
+const CacheTokenFileEnv = "LEGION_REPOSITORY_CACHE_TOKEN_FILE"
+
 // Options is one cache's: the repository, the volume its bare clone lives on (at
-// <Root>/<owner>/<repo>.git, workspace.FeedRepository's layout), the token file, where each
-// fetch's one-shot credential goes (the container's TMPDIR), how long between fetches, the address
-// it serves on, its log, and the runner its git runs under.
+// <Root>/<owner>/<repo>.git, workspace.FeedRepository's layout), the provisioning token's file, the
+// file holding the bearer token its clients present (read again for every request, so a token the
+// Secret's projection rewrote is the one taken), where each fetch's one-shot credential goes (the
+// container's TMPDIR), how long between fetches, the address it serves on, its log, and the runner
+// its git runs under.
 type Options struct {
-	Repo          ghrepo.Repository
-	Root          string
-	TokenFile     string
-	CredentialDir string
-	Refresh       time.Duration
-	Listen        string
-	Log           func(line string)
-	Run           workspace.Runner
+	Repo           ghrepo.Repository
+	Root           string
+	TokenFile      string
+	CacheTokenFile string
+	CredentialDir  string
+	Refresh        time.Duration
+	Listen         string
+	Log            func(line string)
+	Run            workspace.Runner
 }
 
 // Health is what GET /healthz answers: whether the cache has a clone to serve, its repository, the
@@ -66,22 +76,33 @@ var repackEvery = 24 * time.Hour
 // Serve listens, then clones the repository onto the volume — or, when the volume holds it, fetches
 // into it — then serves until ctx ends:
 //
+//	GET /readyz   the kubelet's readiness probe, which carries no token: 200 once the clone is
+//	              there to serve, 503 before, and nothing else.
 //	GET /healthz  200 {"ready":true,"repo":"acme/widgets","head":"<default branch sha>","lastFetchAt":"…","bytes":N}
 //	              once the clone is there to serve; 503 {"ready":false,…} before.
-//	GET /tar      a tar stream of the bare clone (its regular files and directories; tmp_* and
-//	              *.lock skipped), taken under the read lock, so no fetch moves refs or packs while
-//	              it streams; 503 before the clone is there.
+//	GET /tar      a tar stream of the bare clone's refs and packs (workspace.FeedEntry), taken under
+//	              the read lock, so no fetch moves refs or packs while it streams; 503 before the
+//	              clone is there.
+//
+// /healthz and /tar answer only a request whose `Authorization: Bearer` is the token CacheTokenFile
+// holds now, compared in constant time; any other is 401 and names nothing. Each answer they give
+// names the repository in workspace.CacheRepositoryHeader, which an issue pod's fetch checks is its
+// own before it takes anything.
 //
 // Every fetch holds the write lock for workspace.Fetch, which reaches GitHub with the one-shot
 // credential, the isolated git configuration and the pins every holder of a provisioning token
 // uses, fetching every branch and pruning the deleted ones, and turned the clone's automatic gc
 // off when it cloned; a repack (`git repack -a -d`) runs under the same lock once repackEvery has
-// passed. /healthz takes no lock, so the readiness probe never waits on a fetch. A fetch that fails
+// passed. /readyz and /healthz take no lock, so neither the readiness probe nor a health read ever
+// waits on a fetch. A fetch that fails
 // is logged and tried at the next tick; the cache stays ready on its last good state, a restart's
 // clone on the volume included. A first clone that fails ends Serve with its failure: there is
 // nothing to serve, and the kubelet restarts the container.
 func Serve(ctx context.Context, opts Options) error {
 	if err := opts.check(); err != nil {
+		return err
+	}
+	if _, err := config.ReadSecretPointer(CacheTokenFileEnv, opts.CacheTokenFile); err != nil {
 		return err
 	}
 	dir, err := workspace.FeedRepository(opts.Root, opts.Repo)
@@ -144,6 +165,8 @@ func (opts Options) check() error {
 		return fmt.Errorf("repository cache root must be an absolute path (got %q)", opts.Root)
 	case opts.TokenFile == "":
 		return errors.New("repository cache token file is required")
+	case opts.CacheTokenFile == "":
+		return errors.New("repository cache bearer token file is required")
 	case opts.CredentialDir == "":
 		return errors.New("repository cache credential directory is required")
 	case opts.Refresh <= 0:
@@ -257,16 +280,42 @@ func (c *cache) walk(visit func(name string, entry fs.DirEntry, info fs.FileInfo
 
 func (c *cache) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if !c.health.Load().Ready {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}
+	})
+	mux.HandleFunc("GET /healthz", c.authorized(func(w http.ResponseWriter, _ *http.Request) {
 		health := c.health.Load()
 		w.Header().Set("Content-Type", "application/json")
 		if !health.Ready {
 			w.WriteHeader(http.StatusServiceUnavailable)
 		}
 		_ = json.NewEncoder(w).Encode(health)
-	})
-	mux.HandleFunc("GET /tar", c.serveTar)
+	}))
+	mux.HandleFunc("GET /tar", c.authorized(c.serveTar))
 	return mux
+}
+
+// authorized serves next only for a request whose bearer token is the one CacheTokenFile holds
+// now, naming the repository in workspace.CacheRepositoryHeader; any other request is 401 and
+// names nothing. A token file it cannot read is 500, logged.
+func (c *cache) authorized(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		want, err := config.ReadSecretPointer(CacheTokenFileEnv, c.opts.CacheTokenFile)
+		if err != nil {
+			c.opts.Log("read the bearer token: " + oneLine(err))
+			http.Error(w, "the repository cache cannot read its token", http.StatusInternalServerError)
+			return
+		}
+		presented, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || subtle.ConstantTimeCompare([]byte(presented), []byte(want)) != 1 {
+			http.Error(w, "this repository cache's token is required", http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set(workspace.CacheRepositoryHeader, c.opts.Repo.String())
+		next(w, r)
+	}
 }
 
 // serveTar streams the clone under the read lock. Before the first clone is there it answers 503

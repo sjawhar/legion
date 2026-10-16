@@ -30,9 +30,10 @@ func runWorkspaceCache(ctx context.Context, args []string, stdout, stderr io.Wri
 }
 
 // workspaceCache is a cache pod's one process (repocache.Serve): it reads --repo before anything
-// else, then checks the rest of its input — the root, the refresh, the provisioning token, git on
-// PATH — before it listens, runs git or touches its root, so a refusal leaves the volume as it was.
-// It runs until its context ends, each log line on stdout.
+// else, then checks the rest of its input — the root, the refresh, the provisioning token, the
+// bearer token its clients present (LEGION_REPOSITORY_CACHE_TOKEN_FILE), git on PATH — before it
+// listens, runs git or touches its root, so a refusal leaves the volume as it was. It runs until
+// its context ends, each log line on stdout.
 func workspaceCache(ctx context.Context, repo, root, listen string, refresh time.Duration, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
@@ -51,12 +52,19 @@ func workspaceCache(ctx context.Context, repo, root, listen string, refresh time
 	if _, err := config.ReadSecretPointer(provisionTokenFileEnv, tokenFile); err != nil {
 		return err
 	}
+	bearerFile, set := os.LookupEnv(repocache.CacheTokenFileEnv)
+	if !set {
+		return errors.New(repocache.CacheTokenFileEnv + " is not set")
+	}
+	if _, err := config.ReadSecretPointer(repocache.CacheTokenFileEnv, bearerFile); err != nil {
+		return err
+	}
 	tools, err := provisioningTools("git")
 	if err != nil {
 		return err
 	}
 	return repocache.Serve(ctx, repocache.Options{
-		Repo: repository, Root: root, TokenFile: tokenFile, CredentialDir: os.TempDir(), Refresh: refresh, Listen: listen,
+		Repo: repository, Root: root, TokenFile: tokenFile, CacheTokenFile: bearerFile, CredentialDir: os.TempDir(), Refresh: refresh, Listen: listen,
 		Log: func(line string) { fmt.Fprintln(stdout, "workspace-init cache: "+line) },
 		Run: workspace.NewRunner(workspace.CommandTimeout, tools),
 	})

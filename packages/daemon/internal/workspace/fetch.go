@@ -29,8 +29,8 @@ var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSY
 // FetchRequest is a pod's first init container's: the repository, the provisioning token, the
 // directory its one-shot credential goes under, the feed directory, the log each retried transfer
 // and each wait on the cache are told to, the clock the retries and that wait read and wait on, and
-// the repository cache's address (an issue pod's, under the Kubernetes runtime), empty for the
-// cache's own process, which fills its clone from GitHub.
+// the repository cache's address and the bearer token it takes (an issue pod's, under the
+// Kubernetes runtime), both empty for the cache's own process, which fills its clone from GitHub.
 type FetchRequest struct {
 	Repo          ghrepo.Repository
 	Token         string
@@ -39,7 +39,13 @@ type FetchRequest struct {
 	Log           func(line string)
 	Clock         Clock
 	CacheURL      string
+	CacheToken    string
 }
+
+// CacheRepositoryHeader names, on every answer the repository cache gives a request its token
+// authorizes, the repository it caches (owner/name), which Fetch checks is its own before it takes
+// anything the answer carries.
+const CacheRepositoryHeader = "Legion-Repository"
 
 // FetchReport is where Fetch filled the feed from and what each source brought: the feed
 // repository; whether it was cloned whole from GitHub; the repository cache's tar, its length, how
@@ -96,6 +102,9 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 	if request.Clock == nil {
 		return FetchReport{}, errors.New("workspace fetch clock is required")
 	}
+	if request.CacheURL != "" && request.CacheToken == "" {
+		return FetchReport{}, errors.New("workspace fetch: a repository cache needs its token")
+	}
 	credential, err := github.open(request.Repo, "", "")
 	if err != nil {
 		return FetchReport{}, err
@@ -135,7 +144,7 @@ func Fetch(ctx context.Context, run Runner, request FetchRequest) (FetchReport, 
 			return FetchReport{}, err
 		}
 		started := request.Clock.Now()
-		streamed, err := unpackCache(ctx, run, request.CacheURL, staging)
+		streamed, err := unpackCache(ctx, run, request, staging)
 		verifying := request.Clock.Now()
 		if err == nil {
 			err = verifyCache(ctx, run, staging)
@@ -249,14 +258,17 @@ const CacheWaitTimeout = FetchTimeout + 10*time.Minute
 
 // waitForCache asks the repository cache's GET <cache>/healthz every CachePoll until it answers
 // 200 ready, logging what it answered whenever that changes and at least once a minute, and fails
-// with the last answer once a further ask would start past CacheWaitTimeout.
+// with the last answer once a further ask would start past CacheWaitTimeout. An answer that refuses
+// the token, or names another repository (askCache), fails it at once: no wait makes either right.
 func waitForCache(ctx context.Context, request FetchRequest) error {
-	cache := strings.TrimSuffix(request.CacheURL, "/")
 	deadline := request.Clock.Now().Add(CacheWaitTimeout)
 	var logged string
 	var loggedAt time.Time
 	for {
-		why := cacheNotReady(ctx, cache)
+		why, err := cacheNotReady(ctx, request)
+		if err != nil {
+			return err
+		}
 		if why == "" {
 			return nil
 		}
@@ -274,59 +286,86 @@ func waitForCache(ctx context.Context, request FetchRequest) error {
 	}
 }
 
-// cacheNotReady is why the repository cache at cache is not ready to stream, or "" when its
-// /healthz answers 200 with ready set.
-func cacheNotReady(ctx context.Context, cache string) string {
+// cacheNotReady is why the repository cache is not ready to stream, or "" when its /healthz
+// answers 200 with ready set; an answer askCache refuses is the error.
+func cacheNotReady(ctx context.Context, request FetchRequest) (string, error) {
 	bounded, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	ask, err := http.NewRequestWithContext(bounded, http.MethodGet, cache+"/healthz", nil)
-	if err != nil {
-		return err.Error()
-	}
-	response, err := cacheClient.Do(ask)
-	if err != nil {
-		return err.Error()
+	response, err := askCache(bounded, request, "/healthz")
+	if response == nil {
+		return err.Error(), nil
 	}
 	defer response.Body.Close()
+	if err != nil {
+		return "", err
+	}
+	cache := strings.TrimSuffix(request.CacheURL, "/")
 	if response.StatusCode != http.StatusOK {
-		return fmt.Sprintf("GET %s/healthz answered %s", cache, response.Status)
+		return fmt.Sprintf("GET %s/healthz answered %s", cache, response.Status), nil
 	}
 	var health struct {
 		Ready bool `json:"ready"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<16)).Decode(&health); err != nil {
-		return fmt.Sprintf("GET %s/healthz answered a body that is not the cache's health: %v", cache, err)
+		return fmt.Sprintf("GET %s/healthz answered a body that is not the cache's health: %v", cache, err), nil
 	}
 	if !health.Ready {
-		return fmt.Sprintf("GET %s/healthz answered not ready", cache)
+		return fmt.Sprintf("GET %s/healthz answered not ready", cache), nil
 	}
-	return ""
+	return "", nil
+}
+
+// askCache is GET <cache><path> with the cache's bearer token. It answers (nil, the transport's
+// failure) when the cache could not be reached, which is worth another ask. An answer that refuses
+// the token (401), or whose CacheRepositoryHeader is not the request's repository, comes back with
+// the refusal as its error: the caller closes the body and takes nothing it carries.
+func askCache(ctx context.Context, request FetchRequest, path string) (*http.Response, error) {
+	cache := strings.TrimSuffix(request.CacheURL, "/")
+	ask, err := http.NewRequestWithContext(ctx, http.MethodGet, cache+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	ask.Header.Set("Authorization", "Bearer "+request.CacheToken)
+	response, err := cacheClient.Do(ask)
+	if err != nil {
+		return nil, err
+	}
+	if response.StatusCode == http.StatusUnauthorized {
+		return response, fmt.Errorf("ask the repository cache %s: GET %s%s answered %s: it is not the cache whose token this pod holds", request.CacheURL, cache, path, response.Status)
+	}
+	if named := strings.TrimSpace(response.Header.Get(CacheRepositoryHeader)); !strings.EqualFold(named, request.Repo.String()) {
+		shown := named
+		if shown == "" {
+			shown = `""`
+		}
+		return response, fmt.Errorf("the repository cache %s is the repository cache of %s, not of %s", request.CacheURL, shown, request.Repo)
+	}
+	return response, nil
 }
 
 // unpackCache streams the repository cache's GET <cache>/tar into staging, a bare repository it
 // makes first (`git init --bare`, whose configuration, hooks and info are the feed's own), and
-// returns the tar's length; Fetch then verifies what it wrote (verifyCache). Every entry must be a
-// regular file or a directory whose cleaned name stays inside staging and is one of a repository's
-// refs or packs (FeedEntry); the first that is not ends the stream, refused by name, and the caller
-// removes what was written. The stream is read to its end, so a transfer the cache broke off is a
-// failure, not a short repository.
-func unpackCache(ctx context.Context, run Runner, cache, staging string) (int64, error) {
+// returns the tar's length; Fetch then verifies what it wrote (verifyCache). The answer must be
+// the request's repository's (askCache) before any of it is read. Every entry must be a regular
+// file or a directory whose cleaned name stays inside staging and is one of a repository's refs or
+// packs (FeedEntry); the first that is not ends the stream, refused by name, and the caller removes
+// what was written. The stream is read to its end, so a transfer the cache broke off is a failure,
+// not a short repository.
+func unpackCache(ctx context.Context, run Runner, request FetchRequest, staging string) (int64, error) {
 	if _, err := RunChecked(ctx, run, []string{"git", "init", "--bare", "--quiet", staging}, isolatedGitConfig, ""); err != nil {
 		return 0, err
 	}
 	bounded, cancel := context.WithTimeout(ctx, FetchTimeout)
 	defer cancel()
-	ask, err := http.NewRequestWithContext(bounded, http.MethodGet, strings.TrimSuffix(cache, "/")+"/tar", nil)
+	response, err := askCache(bounded, request, "/tar")
+	if response != nil {
+		defer response.Body.Close()
+	}
 	if err != nil {
 		return 0, err
 	}
-	response, err := cacheClient.Do(ask)
-	if err != nil {
-		return 0, err
-	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("GET %s answered %s", ask.URL, response.Status)
+		return 0, fmt.Errorf("GET %s answered %s", response.Request.URL, response.Status)
 	}
 	stream := &countingReader{reader: response.Body}
 	archive := tar.NewReader(stream)
