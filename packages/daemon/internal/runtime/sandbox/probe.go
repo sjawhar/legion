@@ -672,7 +672,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 			ShutdownPolicy: "Delete",
 			ShutdownTime:   metav1.NewTime(shutdown.UTC().Truncate(time.Second)),
 			PodTemplate: podTemplate{
-				Metadata: podMetadata{Labels: labels, Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"}},
+				Metadata: podMetadata{Labels: labels, Annotations: evictionProtectionAnnotations()},
 				Spec: corev1.PodSpec{
 					RestartPolicy:                 corev1.RestartPolicyNever,
 					TerminationGracePeriodSeconds: new(int64(probeTerminationGrace)),

@@ -63,6 +63,23 @@ const (
 	gvisor    = "gvisor"
 )
 
+// evictionProtectionAnnotations are the autoscaler annotations every Legion pod carries so no
+// autoscaler evicts it mid-turn: Karpenter's own (AWS) and GKE Autopilot's cluster-autoscaler
+// equivalent (an autoscaler that reads neither ignores both). Both are unconditional, like every
+// other placement decision the runtime makes for itself (NodeSelector, Tolerations,
+// PriorityClass): a protection every pod needs is the default, not an operator opt-in.
+const (
+	karpenterNoDisruptAnnotation    = "karpenter.sh/do-not-disrupt"
+	autoscalerSafeToEvictAnnotation = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+)
+
+func evictionProtectionAnnotations() map[string]string {
+	return map[string]string{
+		karpenterNoDisruptAnnotation:    "true",
+		autoscalerSafeToEvictAnnotation: "false",
+	}
+}
+
 // The pod runs as the image's legion user.
 const podUser = 1000
 
@@ -395,7 +412,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	return podTemplate{
 		Metadata: podMetadata{
 			Labels:      r.labels(l),
-			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+			Annotations: evictionProtectionAnnotations(),
 		},
 		Spec: spec,
 	}
