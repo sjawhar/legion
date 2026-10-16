@@ -63,6 +63,26 @@ const (
 	gvisor    = "gvisor"
 )
 
+// doNotDisruptAnnotation and safeToEvictAnnotation are the autoscaler stop-eviction annotation
+// keys a long-running Legion pod carries unconditionally: Karpenter's own (AWS) and GKE
+// Autopilot's cluster-autoscaler equivalent (an autoscaler that reads neither ignores both).
+const (
+	doNotDisruptAnnotation = "karpenter.sh/do-not-disrupt"
+	safeToEvictAnnotation  = "cluster-autoscaler.kubernetes.io/safe-to-evict"
+)
+
+// evictionProtectionAnnotations are both stop-eviction annotations, unconditional: a protection
+// every long-running pod needs is the default, not an operator opt-in. Used by podTemplate (an
+// issue's worker pod, and the project controller's) alone: the short-lived, explicitly-deleted
+// image-probe pod (probeManifest) carries the Karpenter annotation only, never GKE's — see
+// probeManifest's comment.
+func evictionProtectionAnnotations() map[string]string {
+	return map[string]string{
+		doNotDisruptAnnotation: "true",
+		safeToEvictAnnotation:  "false",
+	}
+}
+
 // The pod runs as the image's legion user.
 const podUser = 1000
 
@@ -395,7 +415,7 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 	return podTemplate{
 		Metadata: podMetadata{
 			Labels:      r.labels(l),
-			Annotations: map[string]string{"karpenter.sh/do-not-disrupt": "true"},
+			Annotations: evictionProtectionAnnotations(),
 		},
 		Spec: spec,
 	}
