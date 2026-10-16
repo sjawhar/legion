@@ -28,12 +28,14 @@ Every path it cites is in sjawhar/legion.
   `-r` all rewrite descendants; `-r` only re-parents them to fill the hole, which is worse).
   Resolve the conflict with a forward merge instead of a rewrite — merge the branch's own
   bookmark with the destination in one new commit, so nothing existing is rewritten and nothing
-  built on your prior commits, in this tree or another, ever moves. `<default branch>` is the
-  repository's default branch, the one tracked bookmark not under `legion/` in
-  `jj -R "$LEGION_WORKSPACE" bookmark list --tracked -T 'if(!remote, name ++ "\n")'`:
+  built on your prior commits, in this tree or another, ever moves. `<base>` is the pull request's
+  base branch (`gh pr view <n> -R <owner>/<repo> --json baseRefName -q .baseRefName`), the
+  repository's default branch unless the pull request is stacked; it stays in double quotes inside
+  the revset, since jj parses a bare bookmark name as an expression (`release#stable` fails, and
+  `release|stable` names two bookmarks):
 
   ```bash
-  jj -R "$LEGION_WORKSPACE" new legion/<KEY> '<default branch>@origin' -m "merge: resolve conflict against <default branch>@origin"
+  jj -R "$LEGION_WORKSPACE" new legion/<KEY> '"<base>"@origin' -m "merge: resolve conflict against <base>@origin"
   ```
 
   Merge from the bookmark, never from `@`: a handoff split leaves `@` an empty, undescribed
@@ -58,16 +60,15 @@ verified on jj 0.45.1):
 
 ```bash
 cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && \
-  jj -R "$LEGION_WORKSPACE" diff --from "fork_point(<default branch>@origin | <head-sha>)" --to <head-sha> \
+  jj -R "$LEGION_WORKSPACE" diff --from 'fork_point("<base>"@origin | <head-sha>)' --to <head-sha> \
     --git --context 0 '~(.legion | docs/solutions)' \
   | sed -e '/^@@/d' -e '/^index /d' | sha256sum
 ```
 
 - `<head-sha>` is a full commit SHA; a jj commit id is the git SHA GitHub shows.
-- `fork_point(<default branch>@origin | <head-sha>)` is the base the branch was cut from *at that
-  head*: the old base for the pre-rebase head, the new base for the rebased one, so one command
-  serves both sides. On a stacked PR substitute its base branch for the default branch
-  (`gh pr view <n> --json baseRefName`).
+- `fork_point("<base>"@origin | <head-sha>)` is the base the branch was cut from *at that head*:
+  the old base for the pre-rebase head, the new base for the rebased one, so one command serves
+  both sides. `<base>` is the pull request's base branch, as in the merge above.
 - A head the rebase hid is still addressable by its SHA in the shared workspace. A SHA the
   workspace cannot resolve (`jj -R "$LEGION_WORKSPACE" log -r <sha>` errors) counts as a
   changed diff — never as unchanged.
