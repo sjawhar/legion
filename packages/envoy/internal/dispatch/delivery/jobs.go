@@ -63,7 +63,7 @@ type pendingRun struct {
 }
 
 const (
-	jobConsumerName = bus.DispatchJobDurable
+	jobConsumerName  = bus.DispatchJobDurable
 	jobSubject       = "notifications.github.*.*.job.>"
 	jobQuiet         = 2 * time.Second
 	jobMaxWait       = 10 * time.Second
