@@ -752,7 +752,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 
 func usesCoreTransport(topic string) bool {
 	return strings.HasPrefix(topic, contracts.RoleTopicPrefix) ||
-		strings.HasPrefix(topic, "notifications.envoy.exceptions."+contracts.RoleTopicPrefix)
+		strings.HasPrefix(topic, ExceptionTopicPrefix+contracts.RoleTopicPrefix)
 }
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is

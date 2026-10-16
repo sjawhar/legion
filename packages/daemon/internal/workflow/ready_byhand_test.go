@@ -12,9 +12,10 @@ import (
 )
 
 const (
-	byHandNote    = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
-	armedPacket   = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\nMerge: submit on normal acceptance with gh pr merge 42 -R sjawhar/legion --auto --squash --match-head-commit head\n\nA docs/solutions/legion/retro-LEGION-208.md"
-	armedPacketL1 = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"
+	byHandNote     = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	armedPacketL1  = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"
+	armedMergeLine = "Merge: the daemon submits pull request #42 at head once READY is accepted"
+	armedPacket    = armedPacketL1 + "\n" + armedMergeLine + "\n\nA docs/solutions/legion/retro-LEGION-208.md"
 )
 
 // A READY a person merges is told as one: the packet the daemon posts on the issue and publishes to
@@ -57,8 +58,14 @@ func TestAByHandREADYIsToldWithItsNoteAndNoSubmitLine(t *testing.T) {
 			if !strings.HasPrefix(packet, byHandNote+"\n\n") || !strings.Contains(packet, armedPacketL1) || !strings.Contains(packet, "A docs/solutions/legion/retro-LEGION-208.md") {
 				t.Fatalf("told READY %q, want the by-hand note first, then the merger's packet", packet)
 			}
-			if strings.Contains(packet, "gh pr merge") || strings.Contains(packet, "--auto") {
-				t.Fatalf("told READY %q still asks for the merge to be submitted", packet)
+			merges := 0
+			for line := range strings.Lines(packet) {
+				if strings.HasPrefix(line, "Merge:") {
+					merges++
+				}
+			}
+			if strings.Contains(packet, armedMergeLine) || merges != 1 {
+				t.Fatalf("told READY %q, want the merger's Merge line replaced, one Merge line left", packet)
 			}
 			if published := mergeQueuePublishes(t, pool); len(published) != 1 || published[0].Packet != packet {
 				t.Fatalf("merge queue publishes = %v, want the same packet the issue was told", published)

@@ -216,7 +216,7 @@ func TestSessionRegistry_RewatchRestartsStoppedWatcher(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open replacement JetStream: %v", err)
 	}
-	kv, err := js.KeyValue(SessionBucket)
+	kv, err := js.KeyValue(bus.SessionBucket)
 	if err != nil {
 		t.Fatalf("open replacement session bucket: %v", err)
 	}

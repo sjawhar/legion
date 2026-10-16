@@ -1,10 +1,10 @@
 package routes
 
-// Dev sign-in: GET /auth/_dev/signin issues the session cookie a sign-in-pool sign-in issues to the
-// person `login` names, with no pool exchange, so a local instance can be driven signed-in through
-// the production cookie identity. cmd/dispatch turns it on with DISPATCH_DEV_SIGNIN=1 behind its
-// boot fence, and BuildAppContext mounts it only for a loopback origin. Everything that can mint a
-// cookie without the sign-in pool is in this file.
+// Dev sign-in: GET /auth/_dev/signin issues the session cookie an issuer sign-in issues to the
+// person `login` names, with no issuer exchange, so a local instance can be driven signed-in
+// through the production cookie identity. cmd/dispatch turns it on with DISPATCH_DEV_SIGNIN=1
+// behind its boot fence, and BuildAppContext mounts it only for a loopback origin. Everything that
+// can mint a cookie without the sign-in issuer is in this file.
 
 import (
 	"fmt"
@@ -93,7 +93,7 @@ func (r *router) authDevSignIn(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "record person")
 		return
 	}
-	if !r.issueSession(w, req, email) {
+	if !r.issueSession(w, req, email, "") {
 		return
 	}
 	slog.Warn("dispatch: dev sign-in minted a session cookie", "email", email, "remote_addr", req.RemoteAddr)

@@ -24,8 +24,8 @@ type CookieIdentity struct {
 	SigningKey string
 	Sessions   auth.SessionStore
 	// Membership confirms, at least hourly, that the person a cookie names may still use Dispatch,
-	// and ends their session when the sign-in pool no longer says so. It is nil only on the local
-	// dev sign-in server, whose people never signed in through the pool.
+	// and ends their session when the sign-in issuer no longer says so. It is nil only on the local
+	// dev sign-in server, whose people never signed in through an issuer.
 	Membership *Membership
 }
 
