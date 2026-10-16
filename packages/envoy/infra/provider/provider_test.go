@@ -42,6 +42,9 @@ type schema struct {
 			Ref    string `json:"$ref"`
 		} `json:"inputProperties"`
 		RequiredInputs []string `json:"requiredInputs"`
+		Properties map[string]struct {
+			Secret bool `json:"secret"`
+		} `json:"properties"`
 	} `json:"resources"`
 	Types map[string]struct {
 		Properties map[string]struct {
@@ -138,6 +141,15 @@ func TestSchemaServesTheNatsHubComponentWithASecretAuthKey(t *testing.T) {
 	}
 	// core refuses an empty allow, so the schema requires it, and a generated SDK says so.
 	require.ElementsMatch(t, []string{"allow"}, schema.Types["envoy-infra:nats:Rules"].Required)
+}
+
+func TestSchemaServesTheDispatchComponentWithItsSecrets(t *testing.T) {
+	dispatch, ok := servedSchema(t).Resources["envoy-infra:gcp:Dispatch"]
+	require.True(t, ok, "the schema lists envoy-infra:gcp:Dispatch")
+	require.True(t, dispatch.IsComponent)
+	require.True(t, dispatch.InputProperties["tailnetAuthKey"].Secret)
+	require.True(t, dispatch.InputProperties["signInClientSecret"].Secret)
+	require.True(t, dispatch.Properties["agentToken"].Secret)
 }
 
 func TestSchemaServesTheNatsServiceComponentWithNoSecretInput(t *testing.T) {
