@@ -99,6 +99,42 @@ func TestRecentNamesExpireAfterListLag(t *testing.T) {
 	}
 }
 
+// slowStore is the AWS store with a longer documented lag, as Secret Manager's six hours.
+type slowStore struct{ secrets.AWS }
+
+func (slowStore) ListLag() time.Duration { return 6 * time.Hour }
+
+// TestAnchorsLastTheStoresOwnLag pins that the window is the store's: on a store whose metadata
+// may lag a write for hours, a reread that stopped serving a secret still holds past AWS's five
+// minutes against a listing that has not caught up, so a stale listing cannot reinstate it.
+func TestAnchorsLastTheStoresOwnLag(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierAgent, "v1"))
+	stale, err := store.ListSecrets(context.Background(), &secretsmanager.ListSecretsInput{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loader := policytest.Loader(store)
+	loader.Store = slowStore{policytest.StoreThrough(store, staleLister{Local: store, page: stale})} // still lists OLD_KEY as agent tier
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reread := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
+	now := reread
+	policy.SetNow(cur, func() time.Time { return now })
+	store.Put(policytest.Secret("OLD_KEY", "ada@example.com", policy.TierHuman, "v1"))
+	if lk, _ := cur.RefreshOne(context.Background(), "OLD_KEY"); lk.Secret.Tier != policy.TierHuman {
+		t.Fatalf("reread = %+v; want OLD_KEY human tier", lk)
+	}
+	now = reread.Add(time.Hour)
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := cur.Get().Secrets["OLD_KEY"].Tier; got != policy.TierHuman {
+		t.Fatalf("a reload an hour after the reread, inside the store's lag, served OLD_KEY as %s from the stale listing", got)
+	}
+}
+
 // slowLister answers a frozen page, then runs fetched: a reload whose listing is fetched at one
 // time and whose Load returns at a later one.
 type slowLister struct {

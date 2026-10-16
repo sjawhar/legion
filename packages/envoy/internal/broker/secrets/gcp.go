@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
@@ -88,6 +89,15 @@ func NewGCPClient(ctx context.Context) (*secretmanager.Client, error) {
 	}
 	return client, nil
 }
+
+// gcpListLag is how stale Secret Manager's metadata may be. Google documents every operation but
+// adding a version and reading it back by number as eventually consistent, converging "typically
+// within minutes, but may take a few hours" (Secret Manager's resource consistency reference), for
+// ListSecrets and GetSecret alike; six hours covers that bound.
+const gcpListLag = 6 * time.Hour
+
+// ListLag is Secret Manager's documented convergence bound for its metadata, six hours.
+func (GCP) ListLag() time.Duration { return gcpListLag }
 
 // ValidName refuses a full name whose secret id (the segment after secrets/) is not 1 to 255 of
 // letters, digits, hyphens and underscores, the only ids Secret Manager gives a secret.

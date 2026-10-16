@@ -199,13 +199,14 @@ rereads at once per session, refilled one every ten seconds: `DefaultMissRereads
 `packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
 served on its first request. A reread reads the one secret from
 Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
-as it finds it; a read of the whole namespace in the five minutes after reads that secret again
-alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
+as it finds it; a read of the whole namespace for as long as the store's listing may lag after (five minutes on
+AWS Secrets Manager, six hours on Google Secret Manager, whose metadata Google documents as
+eventually consistent for up to a few hours) reads that secret again alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
 `packages/envoy/internal/broker/policy/current.go`). A reread that finds no secret under a name
 the broker was not serving changed nothing, and is not read again — which is the one case that
 promise does not cover: a secret created and then deleted before any read served it is anchored by
 nothing, so the next read of the namespace can serve it from a listing that shows the creation and
-not the deletion, for up to five minutes after the delete, and a request for it is granted while a
+not the deletion, for up to that lag after the delete, and a request for it is granted while a
 grant's read of its value is refused `SECRET_NOT_IN_STORE`. A change nothing rereads, such
 as a tag edited in the AWS console, takes effect within about ten minutes: at the next read of the
 namespace, or the one after, since Secrets Manager's listing can lag a change by up to five

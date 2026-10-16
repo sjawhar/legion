@@ -2309,12 +2309,13 @@ bytes). `Loader.LoadOne` reads one name with `Store.Describe` (`DescribeSecret`,
 from their read to their store, a one-slot channel a waiter gives up on once its own context ends,
 so a reload stuck on a Secrets Manager that does not answer blocks no reread past its caller's
 deadline, and each ticker reload is given the refresh interval before it fails. Each full reload
-that begins (its clock read before its listing is fetched) within five minutes of an anchor
-(`listLag`, how far AWS documents `ListSecrets` may lag) reads that name again alone, so a lagging
+that begins (its clock read before its listing is fetched) within the store's `ListLag` of an anchor
+(five minutes for `secrets.AWS`, how far AWS documents `ListSecrets` may lag; six hours for
+`secrets.GCP`, the bound Google documents for Secret Manager's eventually consistent metadata) reads that name again alone, so a lagging
 listing neither drops a secret the reread served nor brings back one it found gone; a name is
 anchored by a reread whose answer `RefreshOne` kept and by a reload's own re-describe that found
 the answer differed from what the live set held, so a change no reread caught (a console delete, a
-tag that now refuses the secret) is kept for `listLag` from the reload that caught it rather than
+tag that now refuses the secret) is kept for `ListLag` from the reload that caught it rather than
 flipping back when the first anchor runs out. `RefreshOne` keeps no record of an absent answer for
 a name the live set did not serve: that changed nothing, and anyone can ask for a reread, so
 invented names would otherwise each cost every reload a `DescribeSecret` under the lock. A name no

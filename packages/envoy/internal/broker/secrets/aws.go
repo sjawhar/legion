@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -66,6 +67,13 @@ type AWS struct {
 	// any other key is not OnKey.
 	KeyARN string
 }
+
+// awsListLag is how stale ListSecrets may be: AWS documents that it "might not reflect changes from
+// the last five minutes" (ListSecrets API reference). DescribeSecret answers a write at once.
+const awsListLag = 5 * time.Minute
+
+// ListLag is ListSecrets' documented lag, five minutes.
+func (AWS) ListLag() time.Duration { return awsListLag }
 
 // maxSecretNameLength is the longest name Secrets Manager gives a secret. DescribeSecret answers a
 // longer SecretId as invalid input (ValidationException, or InvalidParameterException once it is

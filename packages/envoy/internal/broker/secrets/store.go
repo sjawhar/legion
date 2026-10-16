@@ -7,6 +7,7 @@ package secrets
 import (
 	"context"
 	"errors"
+	"time"
 )
 
 // BROKER_SECRETS_STORE's values: which store the broker reads the agent secrets from.
@@ -27,9 +28,8 @@ type Store interface {
 	// List answers every secret whose full name starts with prefix, deleted ones left out or
 	// marked Deleted, in no promised order. A store that answers more is filtered by the policy.
 	List(ctx context.Context, prefix string) ([]Listing, error)
-	// Describe answers one secret by its full name, read-after-write consistent where List may
-	// lag a change, or ErrNotFound when none exists. A secret scheduled for deletion is answered
-	// with Deleted set.
+	// Describe answers one secret by its full name, or ErrNotFound when none exists. A secret
+	// scheduled for deletion is answered with Deleted set.
 	Describe(ctx context.Context, id string) (Listing, error)
 	// Read answers the current value of the secret source names (Listing.Source): ErrNotFound
 	// for one the store no longer holds, one scheduled for deletion or one with no current value.
@@ -38,6 +38,10 @@ type Store interface {
 	// one past its length limit, or outside its character set. The error names the rule and never
 	// wraps a lookup's failure.
 	ValidName(id string) error
+	// ListLag is how long the store documents its metadata reads may answer a write's previous
+	// state: the policy keeps what a single-name read settled, and re-describes it on every
+	// reload, for that long.
+	ListLag() time.Duration
 }
 
 // Listing is one secret's metadata, the same shape from List and Describe.
