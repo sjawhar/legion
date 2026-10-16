@@ -391,10 +391,10 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
-	ghRoot, ghDefault := "", ""
+	ghRoot, ghDefault, ghWriter := "", "", strings.ToLower(spec.Repository.Owner())
 	if r.gitHubCredential != nil {
 		ghRoot = runtime.GHConfigDir(r.stateDir, spec.Claim)
-		bundle, err := r.gitHubCredential(ctx, spec.Role, spec.Repository.Owner())
+		bundle, err := r.gitHubCredential(ctx, spec.Role, ghWriter)
 		if err != nil {
 			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
 		}
@@ -417,15 +417,15 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
 		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHOwnersDir: ghRoot, GHDefault: ghDefault, GH: r.gh,
 	}, files)
-	return r.openPane(ctx, spec, ghDefault, paneCommand(pairs, command))
+	return r.openPane(ctx, spec, ghWriter, paneCommand(pairs, command))
 }
 
 // openPane puts the pane on the server under the launch lock: into the window of a pane of the
 // same issue that still verifies as its recorded process, else into a new window for the issue.
-// The pane is recorded — its incarnation read, the process watched with ghDefault, the default
-// owner of the gh bundle its launch wrote — before the lock is released, so the next spawn on the
-// issue can share its window and no orphan sweep mistakes it for one.
-func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghDefault string, pane []string) (runtime.Locator, error) {
+// The pane is recorded — its incarnation read, the process watched with ghWriter, the owner its
+// launch minted the gh bundle's write token for ("" for none) — before the lock is released, so the
+// next spawn on the issue can share its window and no orphan sweep mistakes it for one.
+func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghWriter string, pane []string) (runtime.Locator, error) {
 	r.launchMu.Lock()
 	defer r.launchMu.Unlock()
 
@@ -463,7 +463,7 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, ghDefaul
 		Incarnation: incarnation{pid: report.pid, ticks: ticks}.String(),
 		Tmux:        &runtime.TmuxLocator{Window: report.window, Pane: report.pane},
 	}
-	r.track(loc, spec.Issue, ghDefault)
+	r.track(loc, spec.Issue, ghWriter)
 	return loc, nil
 }
 
