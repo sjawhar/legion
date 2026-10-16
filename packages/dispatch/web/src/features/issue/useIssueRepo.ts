@@ -5,7 +5,7 @@ import { type IssueFieldWrite, projectListsKey, useIssueFieldWrite } from "./use
 
 /**
  * The one way the SPA writes an issue's own repository (owner/name, or null to inherit its
- * parent's or the project's default). The pick lands optimistically in the issue detail and every
+ * parent's or the project's default). The pick shows optimistically in the issue detail and every
  * project issue list; an own repository is also what the issue resolves to, while an inherited one
  * is left to the server's answer, which `useIssueFieldWrite` merges.
  */

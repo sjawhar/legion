@@ -147,9 +147,9 @@ func seedRemote(t *testing.T, root, defaultBranch string) string {
 
 	seed := filepath.Join(root, "seed")
 	runSetup(t, root, "jj", "git", "init", "--colocate", seed)
-	runSetup(t, root, "jj", "bookmark", "set", defaultBranch, "-R", seed)
+	runSetup(t, root, "jj", "bookmark", "set", jjString(defaultBranch), "-R", seed)
 	runSetup(t, root, "jj", "git", "remote", "add", "origin", remote, "-R", seed)
-	runSetup(t, root, "jj", "git", "push", "--remote", "origin", "--bookmark", defaultBranch, "--allow-empty-description", "-R", seed)
+	runSetup(t, root, "jj", "git", "push", "--remote", "origin", "--bookmark", "exact:"+jjString(defaultBranch), "--allow-empty-description", "-R", seed)
 	return remote
 }
 
@@ -251,17 +251,66 @@ func TestProvisionStartsAtADefaultBranchWithASlash(t *testing.T) {
 			}
 			for _, call := range run.Calls() {
 				for _, arg := range call.Argv {
-					if arg == "main" || strings.HasPrefix(arg, "main@") || strings.HasSuffix(arg, ":main") {
+					if arg == "main" || strings.Contains(arg, jjString("main")) || strings.HasPrefix(arg, "main@") || strings.HasSuffix(arg, ":main") {
 						t.Errorf("a command named main: %q", call.Argv)
 					}
 				}
 			}
 			if source == "feed" {
-				if fetch := findCall(t, run.Calls(), "jj", "git", "fetch"); !slices.Contains(fetch.Argv, "exact:release/v7.1") {
-					t.Errorf("the feed fetch %q names no exact:release/v7.1", fetch.Argv)
+				if fetch := findCall(t, run.Calls(), "jj", "git", "fetch"); !slices.Contains(fetch.Argv, "exact:"+jjString("release/v7.1")) {
+					t.Errorf("the feed fetch %q names no exact release/v7.1", fetch.Argv)
 				}
 			}
 		})
+	}
+}
+
+// A default branch whose name jj's own parser would read as syntax (`#`, `%`, `|`, `"`) names that
+// one branch and no other: on the host's path and on a pod's feed, provisioning starts at its head,
+// never at the decoy branch the bare name would select or fail on, both for the first workspace
+// and for one recreated after its directory and branch were lost, once the default branch has
+// moved on GitHub: the feed's fetch brings the branch by its exact name.
+func TestProvisionStartsAtADefaultBranchWhoseNameJJWouldParse(t *testing.T) {
+	for _, tc := range []struct{ branch, decoy string }{
+		{"release#stable", "release"},
+		{"release%2Fstable", "release/stable"},
+		{"release|stable", "release"},
+		{`say"hi`, "say"},
+	} {
+		for _, source := range []string{"github", "feed"} {
+			t.Run(tc.branch+"/"+source, func(t *testing.T) {
+				run := newLocalRunnerOnBranch(t, tc.branch)
+				decoy := pushRemoteBranch(t, run.remote, tc.decoy, "decoy.txt")
+				provision := func(what string) Workspace {
+					t.Helper()
+					req := provisionRequest(t)
+					req.StateDir = filepath.Join(filepath.Dir(run.remote), "legion state")
+					req.Source = FromGitHub("test-installation-token", req.StateDir)
+					req.DefaultBranch = tc.branch
+					if source == "feed" {
+						req = feedRequest(t, run, req)
+					}
+					working, err := Provision(context.Background(), run, req)
+					if err != nil {
+						t.Fatalf("%s: Provision at %q: %v", what, tc.branch, err)
+					}
+					head := strings.TrimSpace(runSetup(t, filepath.Dir(run.remote), "git", "--git-dir="+run.remote, "rev-parse", "refs/heads/"+tc.branch))
+					if parent := commitOf(t, working.Dir, "@-"); parent != head {
+						t.Fatalf("%s: the workspace's @- is %s, want %q's head %s (the decoy %q is %s)", what, parent, tc.branch, head, tc.decoy, decoy)
+					}
+					return working
+				}
+
+				first := provision("first provisioning")
+				runSetup(t, first.Clone, "jj", "bookmark", "delete", "exact:"+jjString(first.Bookmark), "--ignore-working-copy", "-R", first.Clone)
+				runSetup(t, first.Clone, "jj", "workspace", "forget", filepath.Base(first.Dir), "--ignore-working-copy", "-R", first.Clone)
+				if err := os.RemoveAll(first.Dir); err != nil {
+					t.Fatal(err)
+				}
+				pushRemoteBranch(t, run.remote, tc.branch, "moved.txt")
+				provision("provisioning after the workspace was lost")
+			})
+		}
 	}
 }
 
