@@ -80,11 +80,8 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	if m.fresh(membership) {
 		return nil
 	}
-	// Under a domain the refreshed token is checked against the account the address's sign-in
-	// recorded; a row that records none (a sign-in under a group, before the column, or any other
-	// way) has nothing to check it against, so it ends without asking Google.
-	if m.Rule.Domain != "" && membership.Subject == "" {
-		return m.end(ctx, email, "", "the address's sign-in recorded no Google account to confirm")
+	if !m.Rule.CanRefresh(membership.Subject) {
+		return m.end(ctx, email, membership.Subject, "the address's sign-in recorded no Google account to confirm")
 	}
 	session, err := m.SignIn.Refresh(ctx, membership.RefreshToken)
 	if err != nil {
@@ -97,24 +94,53 @@ func (m *Membership) refresh(ctx context.Context, email string) error {
 	if person != email {
 		return m.end(ctx, email, membership.Subject, "the refreshed sign-in names "+person)
 	}
-	var subject string
-	if m.Rule.Domain != "" {
-		if session.Claims.Subject != membership.Subject {
-			return m.end(ctx, email, membership.Subject, fmt.Sprintf("the refreshed sign-in is Google account %q, and the address's sign-in recorded %q", session.Claims.Subject, membership.Subject))
-		}
-		subject = membership.Subject
+	subject, err := m.Rule.ConfirmSubject(session.Claims, membership.Subject)
+	if err != nil {
+		return m.end(ctx, email, membership.Subject, err.Error())
 	}
 	return m.People.Confirm(ctx, email, subject, session.RefreshToken, m.now())
 }
 
-// end revokes every session of email and forgets their refresh token. Under a domain it does so
-// only while the address's row still records subject, the Google account this refresh read
-// (auth.PeopleStore.EndSubject): when another account has signed in to the address since, the
-// failure was the old account's, so it writes nothing and the old account's request is simply
-// not signed in.
+// end ends email's sign-in under m.Rule's end policy (SignInRule.End).
 func (m *Membership) end(ctx context.Context, email, subject, reason string) error {
-	if m.Rule.Domain != "" {
-		ended, err := m.People.EndSubject(ctx, email, subject)
+	return m.Rule.End(ctx, m.People, m.Sessions, email, subject, reason)
+}
+
+// CanRefresh says whether stored, the subject a membership's row records
+// (auth.PersonMembership.Subject, empty when it records none), lets r's rule confirm it without
+// asking the issuer first. Under a group there is always something to refresh. Under a domain,
+// the refreshed token is checked against the account the row recorded; a row that records none (a
+// sign-in under a group, from before the column, or any other way) has nothing to check it
+// against, so the caller ends without asking Google.
+func (r SignInRule) CanRefresh(stored string) bool {
+	return r.Domain == "" || stored != ""
+}
+
+// ConfirmSubject is the subject Membership.Confirm should record for a refresh whose verified
+// claims, and whose membership's stored subject, are given: empty under a group, which never
+// records one. Under a domain the issuer must still name the account stored records; a refreshed
+// token naming another account is an error whose text names both, for the caller to end the
+// sign-in with.
+func (r SignInRule) ConfirmSubject(claims oidc.Claims, stored string) (string, error) {
+	if r.Domain == "" {
+		return "", nil
+	}
+	if claims.Subject != stored {
+		return "", fmt.Errorf("the refreshed sign-in is Google account %q, and the address's sign-in recorded %q", claims.Subject, stored)
+	}
+	return stored, nil
+}
+
+// End ends email's sign-in under r: under a domain, only while the address's row still records
+// subject, the Google account this refresh read (auth.PeopleStore.EndSubject); when another
+// account has signed in to the address since, the failure was the old account's, so it writes
+// nothing and the old account's request is simply not signed in. Under a group it always ends the
+// address's sessions and forgets its refresh token (auth.SessionStore.RevokeSessions,
+// auth.PeopleStore.End). Either way it returns ErrNoIdentity once email's sign-in no longer
+// stands.
+func (r SignInRule) End(ctx context.Context, people auth.PeopleStore, sessions auth.SessionStore, email, subject, reason string) error {
+	if r.Domain != "" {
+		ended, err := people.EndSubject(ctx, email, subject)
 		if err != nil {
 			return err
 		}
@@ -126,10 +152,10 @@ func (m *Membership) end(ctx context.Context, email, subject, reason string) err
 		return ErrNoIdentity
 	}
 	slog.Warn("dispatch: sign-in ended: the sign-in pool did not confirm the person's membership", "email", email, "reason", reason)
-	if err := m.Sessions.RevokeSessions(ctx, email); err != nil {
+	if err := sessions.RevokeSessions(ctx, email); err != nil {
 		return err
 	}
-	if err := m.People.End(ctx, email); err != nil {
+	if err := people.End(ctx, email); err != nil {
 		return err
 	}
 	return ErrNoIdentity

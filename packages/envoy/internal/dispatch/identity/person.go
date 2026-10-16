@@ -3,6 +3,7 @@ package identity
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"slices"
 	"strings"
@@ -34,6 +35,36 @@ var emailShape = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
 type SignInRule struct {
 	Group  string
 	Domain string
+}
+
+// RefusalLogFields names the slog fields a sign-in refusal's log line carries, under rule's
+// issuer: under a domain, the email and hd Google's token carried; under a group, the username
+// the pool issued. Callers append "reason", err to what this returns.
+func (r SignInRule) RefusalLogFields(claims oidc.Claims) []any {
+	if r.Domain != "" {
+		return []any{"email", claims.Email, "hd", claims.HostedDomain}
+	}
+	return []any{"username", claims.Username}
+}
+
+// Subject is the Google account a sign-in under rule records with the person
+// (auth.PeopleStore.SignIn's subject): claims.Subject under a domain, empty under a group, which
+// never records one.
+func (r SignInRule) Subject(claims oidc.Claims) string {
+	if r.Domain == "" {
+		return ""
+	}
+	return claims.Subject
+}
+
+// BootLog logs that boot is signing people in under r through issuer as clientID, naming the
+// group or the domain r admits.
+func (r SignInRule) BootLog(issuer, clientID string) {
+	if r.Domain != "" {
+		slog.Info("dispatch: signing people in with Google for a Workspace domain", "issuer", issuer, "client_id", clientID, "domain", r.Domain)
+		return
+	}
+	slog.Info("dispatch: signing people in through the sign-in pool", "issuer", issuer, "client_id", clientID, "group", r.Group)
 }
 
 // Person names the person a verified ID token signs in, and checks they may use Dispatch under

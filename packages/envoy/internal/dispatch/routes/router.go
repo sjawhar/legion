@@ -300,21 +300,13 @@ func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusBadGateway, "sign-in failed: "+err.Error())
 		return
 	}
-	domain := r.ctx.SignInRule.Domain != ""
 	email, err := identity.Person(session.Claims, r.ctx.SignInRule)
 	if err != nil {
-		if domain {
-			slog.Warn("dispatch: sign-in refused", "email", session.Claims.Email, "hd", session.Claims.HostedDomain, "reason", err)
-		} else {
-			slog.Warn("dispatch: sign-in refused", "username", session.Claims.Username, "reason", err)
-		}
+		slog.Warn("dispatch: sign-in refused", append(r.ctx.SignInRule.RefusalLogFields(session.Claims), "reason", err)...)
 		writeSignInRefusedPage(w, email, err)
 		return
 	}
-	var subject string
-	if domain {
-		subject = session.Claims.Subject
-	}
+	subject := r.ctx.SignInRule.Subject(session.Claims)
 	if err := r.ctx.People.SignIn(req.Context(), email, subject, session.RefreshToken, time.Now()); err != nil {
 		slog.Error("dispatch: record sign-in failed", "email", email, "error", err)
 		writeError(w, http.StatusInternalServerError, "record sign-in")

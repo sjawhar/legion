@@ -241,11 +241,8 @@ func main() {
 		slog.Error("dispatch: discover the sign-in issuer", "error", err)
 		os.Exit(1)
 	}
-	switch {
-	case signIn != nil && boot.SignInDomain != "":
-		slog.Info("dispatch: signing people in with Google for a Workspace domain", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "domain", boot.SignInDomain)
-	case signIn != nil:
-		slog.Info("dispatch: signing people in through the sign-in pool", "issuer", boot.SignInIssuer, "client_id", boot.SignInClientID, "group", boot.SignInGroup)
+	if signIn != nil {
+		signInRule(boot).BootLog(boot.SignInIssuer, boot.SignInClientID)
 	}
 
 	people, signingKey, err := openPeople(boot, dataDir, database.Pool, signIn)
