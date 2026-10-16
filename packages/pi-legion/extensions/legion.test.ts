@@ -3539,8 +3539,9 @@ describe("the recreated-workspace notice", () => {
         : []
     );
   // A resumed session, its history uncompacted turns, whose role launcher said its workspace was
-  // recreated: at session start the plugin saves one notice naming the issue's branch, as a steer
-  // that starts no turn, so Oh My Pi stores it ahead of the next turn whatever starts that turn.
+  // recreated: at session start the plugin saves one notice naming the issue's branch, and no
+  // branch it assumes the repository's default to be, as a steer that starts no turn, so Oh My
+  // Pi stores it ahead of the next turn whatever starts that turn.
   test("a resume told LEGION_WORKSPACE_RECREATED=true saves one notice ahead of its next turn", async () => {
     process.env.LEGION_WORKSPACE_RECREATED = "true";
     const history = [
@@ -3560,15 +3561,14 @@ describe("the recreated-workspace notice", () => {
       {
         message: {
           customType: "legion-workspace-recreated",
-          content: expect.stringContaining(
-            "Your workspace was recreated since your last turn: it holds what was pushed to legion/REPO-43"
-          ),
+          content: expect.stringContaining("legion/REPO-43"),
           display: true,
           details: { id: expect.any(String) },
         },
         options: { deliverAs: "steer", triggerTurn: false },
       },
     ]);
+    expect(JSON.stringify(notices(pane))).not.toMatch(/\bmain\b/);
   });
 
   test("a resume told false, or nothing, saves no notice", async () => {

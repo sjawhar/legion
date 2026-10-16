@@ -1,6 +1,7 @@
 import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
 import { normalizeEnvoyUrl } from "./envoy-settings";
+import { machineID } from "./machine";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;
@@ -17,6 +18,11 @@ const InterestWireSchema = z.object({
 const SessionWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
+  // The session's real machine, as the client reported it (machineID()); machine_id stays the
+  // registering listener's own machine and keeps its routing meaning (session.go's hostFor,
+  // store.Registry.Match). Optional here only for a listener predating the field — the live
+  // listener always fills it in, falling back to machine_id itself (session.SessionEntry.HostOrMachine).
+  host: z.string().optional(),
   dir: z.string(),
   port: z.number().int(),
   title: z.string(),
@@ -30,6 +36,7 @@ const SessionWireSchema = z.object({
 const RoleWireSchema = z.object({
   role: z.string(),
   holder: z.string(),
+  host: z.string().optional(),
   last_seen: z.number().int(),
 });
 
@@ -298,6 +305,11 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             ...(input.selfSubscribed === undefined
               ? {}
               : { self_subscribed: input.selfSubscribed }),
+            // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
+            // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
+            // re-subscribes on each tick). The listener stores it separately from the registering
+            // listener's own machine_id, which keeps its routing meaning either way.
+            host: machineID(),
           })
         )
       ),

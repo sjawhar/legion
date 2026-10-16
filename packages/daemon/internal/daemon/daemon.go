@@ -247,6 +247,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		boot, cancelAfterMint = context.WithTimeout(context.WithoutCancel(ctx), bootTimeout)
 		defer cancelAfterMint()
 		plan.identity = workflow.identity
+		plan.defaultBranch = workflow.defaultBranches.Of
 		// Only a daemon with the workflow configured has issue records to read a phase or a tree
 		// from; Stage 2's supervision runs on claims alone, where every delivery holds and every
 		// tree closes.
@@ -491,6 +492,9 @@ func closeStore(st *store.Store, log *slog.Logger) {
 type plan struct {
 	// identity is the role's App bot identity, from the workflow's token source; nil without one.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// defaultBranch is a repository's default branch as GitHub names it, read with the workflow's
+	// token source (defaultBranches.Of); nil without one.
+	defaultBranch func(ctx context.Context, repo ghrepo.Repository) (string, error)
 	// phaseHolds and treeClosable are the workflow's answers to the supervisor's two predicates;
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
@@ -898,7 +902,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Store:   pruning(gateLaunch(tokens.Recording(st), p.checkLaunch), runtime.SecretsDir(cfg.StateDir), log),
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
-			identity: p.identity, designGate: cfg.Gates.Design,
+			identity: p.identity, defaultBranch: p.defaultBranch, designGate: cfg.Gates.Design,
 			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     p.identity,

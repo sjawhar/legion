@@ -18,6 +18,17 @@
   `policy.Secret.ARN` is `Source`, the same bytes in the policy version's digest.
   `agent-secrets secret` manages AWS Secrets Manager only in this release and refuses a broker on
   the GCP store by name; a Secret Manager secret is written with `gcloud secrets`.
+- Every live session now carries `host` beside `machine_id`: where the session process actually
+  runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
+  listener happened to register it. Sessions on separate machines registering through one shared
+  listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
+  keeps its routing meaning unchanged (the listener that owns the session's delivery,
+  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
+  session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
+  /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
+  whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
+  own defensive fallback to `machine_id` for a listener that predates the field too.
 
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
@@ -768,6 +779,10 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+
+- A closed issue can give up an external link (a write whose links are a subset of what it already
+  holds) so the link can move to the issue that replaced it; adding a new link to a closed issue
+  still refuses with `ISSUE_CLOSED`, as every other closed-issue content write does.
 
 - A bus client whose NATS connection closes while a publish is in flight now replaces it once,
   and `Close` and `Drain` close every connection it dialled (LEGION-765). The recovery the close

@@ -38,10 +38,15 @@ type Interest struct {
 
 // Session is the public subset of a live Envoy listener session.
 type Session struct {
-	SessionID    string   `json:"session_id"`
-	Title        string   `json:"title"`
-	Dir          string   `json:"dir"`
-	MachineID    string   `json:"machine_id"`
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+	Dir       string `json:"dir"`
+	MachineID string `json:"machine_id"`
+	// Host is where the session process actually runs, as the client reported it
+	// (envoy-client's machineID()); MachineID is always the registering listener's own
+	// machine and keeps its routing meaning. The listener falls back to MachineID when a
+	// session's plugin predates this field, so Host is never empty here.
+	Host         string   `json:"host"`
 	Roles        []string `json:"roles"`
 	Capabilities []string `json:"capabilities"`
 	LastSeen     int64    `json:"last_seen"`

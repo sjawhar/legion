@@ -5,6 +5,9 @@ interface FakeSession {
   readonly title: string;
   readonly dir?: string;
   readonly machine_id?: string;
+  // The session's real machine, as its own Envoy plugin reports it; the real listener falls
+  // back to machine_id when this is absent (an older plugin), which this fixture mirrors below.
+  readonly host?: string;
   readonly roles?: readonly string[];
   readonly capabilities?: readonly string[];
   readonly last_seen?: number;
@@ -64,7 +67,7 @@ let state = emptyState();
  *  seed that sets `last_seen` can be stale. One read stamps every row with the same `now`, so
  *  sessions seeded together tie, as the server's sorts by `last_seen` expect of one read. */
 function asSeen(session: FakeSession, now: number): FakeSession {
-  return { last_seen: now, ...session };
+  return { last_seen: now, ...session, host: session.host ?? session.machine_id };
 }
 
 Bun.serve({

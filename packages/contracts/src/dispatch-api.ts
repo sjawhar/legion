@@ -1430,6 +1430,15 @@ export interface Agent {
   readonly title: string;
   readonly dir: string;
   readonly machine_id: string;
+  /**
+   * The session's real machine, as its own Envoy plugin reported it (envoy-client's
+   * machineID(): `ENVOY_MACHINE_ID`, falling back to the kernel hostname). `machine_id` is
+   * always the listener that registered the session and owns its delivery, which may be a
+   * single shared listener for every machine; this is the one to show and filter on. The
+   * listener falls back to `machine_id` itself for a session whose plugin predates this field,
+   * so it is never empty.
+   */
+  readonly host: string;
   readonly roles: string[];
   /**
    * Wire value from the Envoy registry: an open string list. The known values

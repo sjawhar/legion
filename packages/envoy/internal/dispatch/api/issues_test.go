@@ -825,6 +825,88 @@ func TestIssuePatchExternalLinkTakenByAnotherIssue(t *testing.T) {
 	}
 }
 
+// A closed issue can give up an external link — a write that adds no URL it does not already
+// have, whether a full clear, a partial removal, or a same-set resend — so a link can move to
+// the issue that replaced it, but still refuses to gain a new one or to touch any other field
+// alongside the removal.
+func TestIssuePatchExternalLinksRemovalOnClosedIssue(t *testing.T) {
+	handler := newTestHandler(t)
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "CORE", "name": "Core",
+	}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	create := func(title string) model.Issue {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
+			"project": "CORE", "title": title,
+		}, "alice")
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %q: status=%d body=%s", title, response.Code, response.Body.String())
+		}
+		return decodeBody[model.Issue](t, response)
+	}
+	issue := create("Moved")
+	pullRequest := "https://github.com/owner/repo/pull/7"
+	secondLink := "https://github.com/owner/repo/pull/9"
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{{"url": pullRequest}, {"url": secondLink}},
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("link: status=%d body=%s", response.Code, response.Body.String())
+	}
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"status": "done",
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("close: status=%d body=%s", response.Code, response.Body.String())
+	}
+
+	// Adding a new link to a closed issue is still refused, like any other content write, even
+	// when the same request also drops an existing one.
+	newLink := "https://github.com/owner/repo/pull/8"
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{{"url": pullRequest}, {"url": newLink}},
+	}, "alice"); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("add link on closed issue: status=%d body=%s, want 409 ISSUE_CLOSED", response.Code, response.Body.String())
+	}
+	// A removal beside another field is still refused: only a removal alone passes.
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{}, "title": "Renamed",
+	}, "alice"); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
+		t.Fatalf("clear beside title on closed issue: status=%d body=%s, want 409 ISSUE_CLOSED", response.Code, response.Body.String())
+	}
+
+	// Dropping just one of two links (a partial removal, not a full clear) is allowed too: the
+	// request is still a subset of what the issue already holds.
+	partial := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{{"url": pullRequest}},
+	}, "alice")
+	if partial.Code != http.StatusOK {
+		t.Fatalf("partial removal on closed issue: status=%d body=%s", partial.Code, partial.Body.String())
+	}
+	if links := decodeBody[model.Issue](t, partial).ExternalLinks; len(links) != 1 || links[0].URL != pullRequest {
+		t.Fatalf("external links after partial removal = %#v, want only %s", links, pullRequest)
+	}
+
+	// Clearing the one remaining link is a full removal: it is allowed too.
+	cleared := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]any{
+		"external_links": []map[string]string{},
+	}, "alice")
+	if cleared.Code != http.StatusOK {
+		t.Fatalf("clear link on closed issue: status=%d body=%s", cleared.Code, cleared.Body.String())
+	}
+	if links := decodeBody[model.Issue](t, cleared).ExternalLinks; len(links) != 0 {
+		t.Fatalf("external links after clear = %#v, want none", links)
+	}
+
+	// Both URLs are now free for the replacement issue to claim.
+	replacement := create("Replacement")
+	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+replacement.Key, map[string]any{
+		"external_links": []map[string]string{{"url": pullRequest}, {"url": secondLink}},
+	}, "alice"); response.Code != http.StatusOK {
+		t.Fatalf("re-link freed URLs: status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 // PATCH `parent` is tri-state: a key moves the issue, null clears it. The issue's own
 // issue.updated carries the new parent, the old parent hears child.removed, and the new
 // parent hears child.added.

@@ -37,7 +37,7 @@ function resolveStatus(
       id,
       kind: "running",
       label: sessionLabel(id, agent.title),
-      machineId: agent.machine_id,
+      machineId: agent.host,
     };
   }
   return { id, kind: unresolved ? "unknown" : "not-running" };
