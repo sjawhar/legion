@@ -141,11 +141,14 @@ func newDispatchCloud(ctx *pulumi.Context, comp *Dispatch, name string, args *Di
 		return nil, err
 	}
 	// The principal lives in the cluster's Workload Identity pool, which Google creates with the
-	// cluster; IAM refuses a member of a pool that does not exist yet.
-	principal := pulumi.All(project.Number(), pool).ApplyT(func(values []interface{}) string {
-		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", values[0].(string), values[1].(string), s.namespace, s.hostname)
+	// cluster; IAM refuses a member of a pool that does not exist yet. It is built from the
+	// cluster's own WorkloadIdentityConfig, so it resolves only once the pool exists, and a
+	// consumer's grant taken from the `principal` output waits for the cluster instead of racing
+	// it (as a project-scoped roles/cloudsql.client grant in the same program must).
+	principal := pulumi.All(project.Number(), cluster.WorkloadIdentityConfig.WorkloadPool()).ApplyT(func(values []interface{}) string {
+		return fmt.Sprintf("principal://iam.googleapis.com/projects/%s/locations/global/workloadIdentityPools/%s/subject/ns/%s/sa/%s", outputString(values[0]), outputString(values[1]), s.namespace, s.hostname)
 	}).(pulumi.StringOutput)
-	_, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: args.NatsSeedSecret, Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
+	_, err = secretmanager.NewSecretIamMember(ctx, s.hostname+"-nats-seed-accessor", &secretmanager.SecretIamMemberArgs{SecretId: refuseDispatchSeed(args.NatsSeedSecret, dispatchType+" "+name, "natsSeedSecret"), Role: pulumi.String("roles/secretmanager.secretAccessor"), Member: principal}, child, pulumi.DependsOn([]pulumi.Resource{cluster}))
 	if err != nil {
 		return nil, err
 	}

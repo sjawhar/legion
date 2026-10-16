@@ -6,15 +6,16 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nats-io/nkeys"
 	gcpsdk "github.com/pulumi/pulumi-gcp/sdk/v10/go/gcp"
 	randomsdk "github.com/pulumi/pulumi-random/sdk/v4/go/random"
 	"github.com/pulumi/pulumi/sdk/v3/go/common/resource"
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sjawhar/envoy/infra/core"
 	"github.com/sjawhar/envoy/infra/gcp"
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const (
@@ -45,6 +46,10 @@ func dispatchArgs() *gcp.DispatchArgs {
 }
 
 func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
+	return runDispatchNamed(t, "example-dispatch", args, providers)
+}
+
+func runDispatchNamed(t *testing.T, name string, args *gcp.DispatchArgs, providers bool) (*pulumitest.Mocks, error) {
 	t.Helper()
 	m := newMocks()
 	err := m.Run(func(ctx *pulumi.Context) error {
@@ -60,7 +65,7 @@ func runDispatch(t *testing.T, args *gcp.DispatchArgs, providers bool) (*pulumit
 			}
 			opts = append(opts, pulumi.Providers(gcpProvider, randomProvider))
 		}
-		_, err := gcp.NewDispatch(ctx, "example-dispatch", args, opts...)
+		_, err := gcp.NewDispatch(ctx, name, args, opts...)
 		return err
 	})
 	return m, err
@@ -111,6 +116,8 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "an empty database tier", edit: func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef("") }, err: []string{"databaseTier", "empty"}},
 		{name: "an invalid namespace", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef("Dispatch") }, err: []string{"namespace", "DNS label"}},
 		{name: "an invalid allowed namespace", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", "Legion"} }, err: []string{"allowedNamespaces[1]", "DNS label"}},
+		{name: "a namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(strings.Repeat("a", 64)) }, err: []string{"namespace", "DNS label"}},
+		{name: "an allowed namespace longer than a DNS label", edit: func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{strings.Repeat("a", 64)} }, err: []string{"allowedNamespaces[0]", "DNS label"}},
 		{name: "no tailnet auth key", edit: func(a *gcp.DispatchArgs) { a.TailnetAuthKey = nil }, err: []string{"tailnetAuthKey", "required"}},
 		{name: "no NATS URL", edit: func(a *gcp.DispatchArgs) { a.NatsUrl = nil }, err: []string{"natsUrl", "required"}},
 		{name: "no NATS seed secret", edit: func(a *gcp.DispatchArgs) { a.NatsSeedSecret = nil }, err: []string{"natsSeedSecret", "required"}},
@@ -152,32 +159,99 @@ func TestDispatchRequiresGCPAndRandomProvidersBeforeRegistering(t *testing.T) {
 	require.Equal(t, []string{gcpProviderType}, m.Types())
 }
 
+// Every plain string input of the component has a row; the seed is found as bus.HoldsSeed finds
+// it: any type, either case, whole, inside a longer value, or split. tailnetAuthKey,
+// signInClientSecret and natsSeedSecret are Inputs, checked once they resolve
+// (TestConstructRefusesASeedInADispatchInput), and natsUrl once it resolves too
+// (TestDispatchRefusesABadNatsURLOnceItResolves).
 func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
-	key, err := nkeys.CreateUser()
-	require.NoError(t, err)
-	seed, err := key.Seed()
-	require.NoError(t, err)
-
-	args := dispatchArgs()
-	args.Region = string(seed)
-	_, err = gcp.ResolveDispatch(args)
-	require.ErrorContains(t, err, "region")
-	require.ErrorContains(t, err, "nkey seed")
-	require.NotContains(t, err.Error(), string(seed))
+	seed, _ := testnats.User(t)
+	lower := strings.ToLower(seed)
+	digest := "@sha256:" + strings.Repeat("0", 64)
+	for _, row := range []struct {
+		name, input string
+		edit        func(*gcp.DispatchArgs)
+	}{
+		{"a seed as the region", "region", func(a *gcp.DispatchArgs) { a.Region = seed }},
+		{"a seed as the hostname", "hostname", func(a *gcp.DispatchArgs) { a.Hostname = seed }},
+		{"a hostname split by a hyphen", "hostname", func(a *gcp.DispatchArgs) { a.Hostname = splitSeed(lower, "-") }},
+		{"a seed inside the tailnet DNS name", "tailnetDnsName", func(a *gcp.DispatchArgs) { a.TailnetDnsName = lower + ".ts.net" }},
+		{"a seed in a tag", "tags[0]", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:" + seed} }},
+		{"a lowercase seed in a tag", "tags[0]", func(a *gcp.DispatchArgs) { a.Tags = []string{"tag:" + lower} }},
+		{"a seed in the Envoy image", "envoyImage", func(a *gcp.DispatchArgs) { a.EnvoyImage = "example.invalid/" + seed + digest }},
+		{"a seed in the Tailscale image", "tailscaleImage", func(a *gcp.DispatchArgs) { a.TailscaleImage = "example.invalid/" + seed + digest }},
+		{"a seed in the Cloud SQL proxy image", "cloudSqlProxyImage", func(a *gcp.DispatchArgs) { a.CloudSqlProxyImage = "example.invalid/" + seed + digest }},
+		{"a seed as the sign-in client ID", "signInClientId", func(a *gcp.DispatchArgs) { a.SignInClientId = seed }},
+		{"a seed inside the sign-in domain", "signInDomain", func(a *gcp.DispatchArgs) { a.SignInDomain = lower + ".example.com" }},
+		{"a seed in the database version", "databaseVersion", func(a *gcp.DispatchArgs) { a.DatabaseVersion = pulumi.StringRef(seed) }},
+		{"a seed in the database tier", "databaseTier", func(a *gcp.DispatchArgs) { a.DatabaseTier = pulumi.StringRef(seed) }},
+		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
+		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			args := dispatchArgs()
+			row.edit(args)
+			_, err := gcp.ResolveDispatch(args)
+			require.EqualError(t, err, row.input+" holds an nkey seed (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+		})
+	}
 }
 
-func TestDispatchRefusesAnNKeySeedInAnAllowedNamespace(t *testing.T) {
-	key, err := nkeys.CreateUser()
-	require.NoError(t, err)
-	seed, err := key.Seed()
-	require.NoError(t, err)
+// NewDispatch quotes the name in every refusal (its "%s %s: %w" wrapper) and registers the
+// component under it, so a seed there is refused before anything registers, as NewNatsHub refuses
+// one in its own name.
+func TestDispatchRefusesASeedInTheComponentName(t *testing.T) {
+	seed, _ := testnats.User(t)
+	for _, row := range []struct {
+		name     string
+		dispatch string
+	}{
+		{"a whole seed", seed},
+		{"a seed inside a longer name", "dispatch-" + seed},
+		{"a lowercase seed", strings.ToLower(seed)},
+		{"a seed split by a hyphen", splitSeed(seed, "-")},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			m, err := runDispatchNamed(t, row.dispatch, dispatchArgs(), true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch: the component's name holds an nkey seed (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			require.ElementsMatch(t, []string{gcpProviderType, randomProviderType}, m.Types(),
+				"nothing registered beyond the test's providers")
+		})
+	}
+}
 
-	args := dispatchArgs()
-	args.AllowedNamespaces = []string{"envoy", string(seed)}
-	_, err = gcp.ResolveDispatch(args)
-	require.ErrorContains(t, err, "allowedNamespaces[1]")
-	require.ErrorContains(t, err, "nkey seed")
-	require.NotContains(t, err.Error(), string(seed))
+// natsUrl is an Input, checked inside the ApplyT that renders the listener's environment: core's
+// Env names its own inputs (natsUrls by index, socks5Proxy), neither of which gcp:Dispatch has,
+// so the component maps each refusal onto natsUrl, a core.InputError, and wraps it with its type
+// and name — it never panics, which would kill the provider process.
+func TestDispatchRefusesABadNatsURLOnceItResolves(t *testing.T) {
+	seed, _ := testnats.User(t)
+	rows := []struct {
+		name, url, want string
+	}{
+		{"a loopback URL", "nats://127.0.0.1:4222", "natsUrl names a local NATS server"},
+		{"a URL holding a seed", "nats://example:" + seed + "@example-hub.example-tailnet.ts.net:4222", "natsUrl holds an nkey seed (not echoed)"},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			err := gcp.DispatchListenerEnvError("example-dispatch", row.url)
+			var input *core.InputError
+			require.ErrorAs(t, err, &input)
+			require.Equal(t, "natsUrl", input.Input)
+			require.ErrorContains(t, err, row.want)
+			require.NotContains(t, err.Error(), "natsUrls")
+			require.NotContains(t, err.Error(), "socks5Proxy")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+
+			args := dispatchArgs()
+			args.NatsUrl = pulumi.String(row.url)
+			_, err = runDispatch(t, args, true)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.want)
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+		})
+	}
 }
 
 func TestDispatchRegistersItsCloudResources(t *testing.T) {
@@ -213,9 +287,12 @@ func TestDispatchSeedAccessorWaitsForTheCluster(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
 
-	deps := m.One(t, "gcp:secretmanager/secretIamMember:SecretIamMember").RPC.GetDependencies()
-	require.Contains(t, deps, "urn:pulumi:s::p::"+dispatchType+"$gcp:container/cluster:Cluster::example-dispatch",
+	member := m.One(t, "gcp:secretmanager/secretIamMember:SecretIamMember")
+	clusterURN := "urn:pulumi:s::p::" + dispatchType + "$gcp:container/cluster:Cluster::example-dispatch"
+	require.Contains(t, member.RPC.GetDependencies(), clusterURN,
 		"the seed accessor is granted after the cluster that creates its principal's pool")
+	require.Contains(t, member.RPC.GetPropertyDependencies()["member"].GetUrns(), clusterURN,
+		"the principal is built from the cluster's own Workload Identity pool, so it resolves only once the pool exists")
 }
 
 // GKE accepts only the project's own pool, named <project id>.svc.id.goog.

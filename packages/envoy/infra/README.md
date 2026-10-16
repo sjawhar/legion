@@ -10,7 +10,7 @@ Pulumi language needs only the Pulumi CLI:
 | `envoy-infra:aws:NatsService` | A NATS server with JetStream on ECS Fargate, reachable in the VPC through Cloud Map and on a tailnet through a Tailscale sidecar: see [The AWS components](#the-aws-components). |
 | `envoy-infra:aws:WebhookListener` | Envoy's webhook listener on ECS Fargate, behind your load balancer's target group, with an alarm on each log line that says a delivery or a start went wrong. |
 | `envoy-infra:gcp:NatsHub` | A NATS server with JetStream on one Google Cloud VM that joins a tailnet, where its clients reach it: see [docs/nats-hub.md](docs/nats-hub.md), which says what it deploys, its inputs and how it is updated, with an example. |
-| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL and a tailnet-only entry point: see [gcp:Dispatch](#gcpdispatch). |
+| `envoy-infra:gcp:Dispatch` | Dispatch on GKE Autopilot, with Cloud SQL, served over a tailnet and, only to the namespaces `allowedNamespaces` names, inside its own cluster: see [gcp:Dispatch](#gcpdispatch). |
 
 The listener creates the `ENVOY_NOTIFICATIONS` stream and its key-value buckets itself when it
 starts, so it needs only a NATS server with JetStream to reach.
@@ -156,8 +156,8 @@ Namespace from the program, and the next update deletes the namespace and everyt
 Tailscale state Secret included: first remove the Namespace from the stack's state
 (`pulumi state delete <the Namespace's URN>`), so the update leaves it in the cluster. The flag is
 for a cluster that already exists: on a first apply the component creates the cluster, so no other
-program can have made the namespace yet. `allowedNamespaces`, empty by default, names the
-in-cluster namespaces the NetworkPolicy admits on port 8766.
+program can have made the namespace yet. `allowedNamespaces`, empty by default, each a DNS label,
+names the in-cluster namespaces the NetworkPolicy admits on port 8766.
 
 `replicas` is the app Deployment's pod count, 1 by default; a value below 1 is refused by name
 before the component registers a resource. At 1 the app Deployment is recreated, stopping its pod
@@ -170,16 +170,22 @@ strategy follows from its replica count, and every value but one is wrong for th
 workloads.
 
 Every image must be pinned by SHA-256 digest. The component refuses invalid hostnames, tailnet DNS
-names, tags, image references, sign-in domains, namespaces, missing inputs, and nkey seeds in
-plain inputs before it registers a resource. It requires both `gcp` and `random` providers. It
+names, tags, image references, sign-in domains, namespaces, allowed namespaces, missing inputs,
+and nkey seeds in its own name and in plain inputs before it registers a resource; it refuses a
+seed in `tailnetAuthKey`, `signInClientSecret` and `natsSeedSecret` once each resolves, before any
+child takes it, and a `natsUrl` that holds a seed, is local (the pods reach NATS only through the
+front door's SOCKS5 proxy), is empty, or holds a comma or a control character once it
+resolves, each a refusal naming `natsUrl`. It requires both `gcp` and `random` providers. It
 creates its Kubernetes provider from the cluster's stable exec-plugin kubeconfig, so the machine
 running Pulumi needs `gke-gcloud-auth-plugin`.
 
-The generated `principal` output is the Kubernetes service account's Workload Identity principal.
-Before the first apply, the consumer grants that principal `roles/cloudsql.client` at project
-scope. The component itself grants that principal `roles/secretmanager.secretAccessor` only on the
-NATS seed secret. The three Deployments share that one Kubernetes service account, whose Role is
-limited to the Tailscale state Secret.
+The generated `principal` output is the Kubernetes service account's Workload Identity principal,
+built from the cluster's own Workload Identity pool, so it resolves only once the cluster that
+creates the pool exists. Before the first apply, the consumer grants that principal
+`roles/cloudsql.client` at project scope; a grant built from the `principal` output waits for the
+cluster, so it never names a pool that does not exist yet. The component itself grants that
+principal `roles/secretmanager.secretAccessor` only on the NATS seed secret. The three Deployments
+share that one Kubernetes service account, whose Role is limited to the Tailscale state Secret.
 
 ### The pods
 

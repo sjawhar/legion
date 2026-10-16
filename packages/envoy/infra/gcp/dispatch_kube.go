@@ -1,6 +1,7 @@
 package gcp
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/pulumi/pulumi/sdk/v3/go/pulumi"
 
 	"github.com/sjawhar/envoy/infra/core"
+	"github.com/sjawhar/envoy/internal/bus"
 )
 
 type dispatchKubernetes struct {
@@ -96,7 +98,65 @@ func secretEnv(name, secret, key string) corev1.EnvVarArgs {
 	}
 }
 
-func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
+// refuseDispatchSeed is value, a plain-typed Input of the component (the NATS seed secret's id),
+// with a seed refused once it resolves: the output fails naming input and never the value, so no
+// child is registered with it.
+func refuseDispatchSeed(value pulumi.StringInput, dispatch, input string) pulumi.StringOutput {
+	return value.ToStringOutput().ApplyT(func(v string) (string, error) {
+		if bus.HoldsSeed(v) {
+			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
+		}
+		return v, nil
+	}).(pulumi.StringOutput)
+}
+
+// refuseDispatchSeedInSecret is value, a secret Input of the component, as a secret, with a value
+// holding an nkey seed refused once it resolves: the output fails naming input and never the
+// value, so no child is registered with it. ApplyT keeps value's secretness, and ToSecret marks
+// the result secret whatever value's own marking.
+func refuseDispatchSeedInSecret(value pulumi.StringInput, dispatch, input string) pulumi.StringOutput {
+	return pulumi.ToSecret(value.ToStringOutput().ApplyT(func(v string) (string, error) {
+		if bus.HoldsSeed(v) {
+			return "", fmt.Errorf("%s: %w", dispatch, core.SeedRefusal(input))
+		}
+		return v, nil
+	})).(pulumi.StringOutput)
+}
+
+// dispatchListenerEnv renders the envoy-listener container's environment from the one NATS URL
+// once it resolves. core's Env names its own inputs — natsUrls by index and socks5Proxy, neither
+// an input of gcp:Dispatch — so each refusal is mapped onto natsUrl, this component's input. The
+// SOCKS5 proxy is fixed (the front door's Service, socks5Proxy), so its refusal means the URL
+// names a local server, which the pod's NATS clients can never reach through the tailnet proxy.
+// The listener serves on every address of its pod, and its API refuses to start on a non-loopback
+// listen host without a bearer (packages/envoy/cmd/listener/apiauth.go), so the environment names
+// the bearer in Secret listenerSecret.
+func dispatchListenerEnv(hostname, socks5Proxy, listenerSecret, url string) (corev1.EnvVarArray, error) {
+	env, err := (core.ListenerConfig{
+		MachineID:   hostname,
+		Port:        core.DefaultListenerPort,
+		ListenHost:  "0.0.0.0",
+		SOCKS5Proxy: socks5Proxy,
+	}).Env([]string{url})
+	if err != nil {
+		var input *core.InputError
+		if errors.As(err, &input) && input.Input == "socks5Proxy" {
+			return nil, core.InputErrorf("natsUrl", "natsUrl names a local NATS server; the pods reach NATS only through the front door's SOCKS5 proxy, so the URL must be remote (the hub's tailnet name)")
+		}
+		return nil, core.InputErrorf("natsUrl", "%s", strings.ReplaceAll(err.Error(), "natsUrls[0]", "natsUrl"))
+	}
+	values := make(corev1.EnvVarArray, 0, len(env)+2)
+	for _, item := range env {
+		name, value, _ := strings.Cut(item, "=")
+		values = append(values, valueEnv(name, value))
+	}
+	values = append(values, valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"))
+	values = append(values, secretEnv("ENVOY_API_TOKEN", listenerSecret, "ENVOY_API_TOKEN"))
+	return values, nil
+}
+
+func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, args *DispatchArgs, s dispatchSettings, cloud *dispatchCloud) (*dispatchKubernetes, error) {
+	dispatch := dispatchType + " " + name
 	kubeconfig := pulumi.All(cloud.cluster.Endpoint, cloud.cluster.MasterAuth.ClusterCaCertificate(), cloud.cluster.Name).ApplyT(func(values []interface{}) string {
 		return renderKubeconfig(outputString(values[0]), outputString(values[1]), outputString(values[2]))
 	}).(pulumi.StringOutput)
@@ -137,13 +197,13 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 	authKeyName := s.hostname + "-tailnet-auth-key"
-	if _, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": args.TailnetAuthKey}}, child...); err != nil {
+	if _, err := corev1.NewSecret(ctx, authKeyName, &corev1.SecretArgs{Metadata: metadata(authKeyName), StringData: pulumi.StringMap{"TS_AUTHKEY": refuseDispatchSeedInSecret(args.TailnetAuthKey, dispatch, "tailnetAuthKey")}}, child...); err != nil {
 		return nil, err
 	}
 	dispatchSecretName := s.hostname + "-dispatch"
 	databaseURL := pulumi.Sprintf("postgres://dispatch:%s@127.0.0.1:5432/dispatch?sslmode=disable", cloud.password.Result)
 	if _, err := corev1.NewSecret(ctx, dispatchSecretName, &corev1.SecretArgs{Metadata: metadata(dispatchSecretName), StringData: pulumi.StringMap{
-		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": args.SignInClientSecret,
+		"DATABASE_URL": databaseURL, "DISPATCH_AGENT_TOKEN": cloud.agentToken.Result, "DISPATCH_SIGNING_KEY": cloud.signing.Result, "DISPATCH_SIGNIN_CLIENT_SECRET": refuseDispatchSeedInSecret(args.SignInClientSecret, dispatch, "signInClientSecret"),
 	}}, child...); err != nil {
 		return nil, err
 	}
@@ -161,7 +221,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 		return nil, err
 	}
 	seedName := s.hostname + "-nats-seed"
-	seedPath := args.NatsSeedSecret.ToStringOutput().ApplyT(func(secret string) string {
+	seedPath := refuseDispatchSeed(args.NatsSeedSecret, dispatch, "natsSeedSecret").ApplyT(func(secret string) string {
 		return strings.TrimSuffix(secret, "/") + "/versions/latest"
 	}).(pulumi.StringOutput)
 	if _, err := apiextensions.NewCustomResource(ctx, seedName, &apiextensions.CustomResourceArgs{
@@ -180,26 +240,12 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, args *DispatchAr
 	socks5Proxy := clusterLocal(tailnetName, s.namespace) + ":" + socks5Port
 	listenerURL := "http://" + clusterLocal(listenerName, s.namespace) + ":" + listenerPort
 
-	listenerEnv := args.NatsUrl.ToStringOutput().ApplyT(func(url string) corev1.EnvVarArray {
-		env, err := (core.ListenerConfig{
-			MachineID:   s.hostname,
-			Port:        core.DefaultListenerPort,
-			ListenHost:  "0.0.0.0",
-			SOCKS5Proxy: socks5Proxy,
-		}).Env([]string{url})
+	listenerEnv := args.NatsUrl.ToStringOutput().ApplyT(func(url string) (corev1.EnvVarArray, error) {
+		env, err := dispatchListenerEnv(s.hostname, socks5Proxy, listenerName, url)
 		if err != nil {
-			panic(err)
+			return nil, fmt.Errorf("%s: %w", dispatch, err)
 		}
-		values := make(corev1.EnvVarArray, 0, len(env)+2)
-		for _, item := range env {
-			name, value, _ := strings.Cut(item, "=")
-			values = append(values, valueEnv(name, value))
-		}
-		values = append(values, valueEnv("NATS_NKEY_SEED_FILE", "/var/run/secrets/envoy/nats-seed"))
-		// The listener serves on every address of its pod, and its API refuses to start on a
-		// non-loopback listen host without a bearer (packages/envoy/cmd/listener/apiauth.go).
-		values = append(values, secretEnv("ENVOY_API_TOKEN", listenerName, "ENVOY_API_TOKEN"))
-		return values
+		return env, nil
 	}).(corev1.EnvVarArrayOutput)
 
 	// deployment registers one of the component's three workloads. A pod wears app=<its own name>

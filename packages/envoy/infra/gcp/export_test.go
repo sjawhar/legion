@@ -1,5 +1,7 @@
 package gcp
 
+import "strconv"
+
 // CloudConfig is the hub VM's cloud-config document, for the tests outside the package.
 type CloudConfig = cloudConfig
 
@@ -63,4 +65,13 @@ func ResolveDispatch(args *DispatchArgs) (DispatchSettings, error) {
 // DispatchKubeconfig renders the component's stable exec-plugin kubeconfig for the golden test.
 func DispatchKubeconfig(endpoint, ca, name string) string {
 	return renderKubeconfig(endpoint, ca, name)
+}
+
+// DispatchListenerEnvError resolves the listener container's environment from the one NATS URL,
+// for the refusal tests, with the front door's proxy in the default namespace: nil when the URL
+// renders an environment.
+func DispatchListenerEnvError(hostname, url string) error {
+	proxy := clusterLocal(hostname+"-tailnet", defaultDispatchNamespace) + ":" + strconv.Itoa(dispatchSOCKS5Port)
+	_, err := dispatchListenerEnv(hostname, proxy, hostname+"-listener", url)
+	return err
 }

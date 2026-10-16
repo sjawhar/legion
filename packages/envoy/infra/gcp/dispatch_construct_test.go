@@ -1,6 +1,7 @@
 package gcp_test
 
 import (
+	"strings"
 	"testing"
 
 	p "github.com/pulumi/pulumi-go-provider"
@@ -10,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sjawhar/envoy/infra/internal/pulumitest"
+	"github.com/sjawhar/envoy/internal/testnats"
 )
 
 const dispatchConstructURN = "urn:pulumi:stack::project::envoy-infra:gcp:Dispatch::example-dispatch"
@@ -87,4 +89,37 @@ func TestConstructRefusesDispatchReplicasFromAnotherResource(t *testing.T) {
 	m, _, err := constructDispatch(t, inputs, false)
 	require.ErrorContains(t, err, "replicas")
 	require.Empty(t, m.Types())
+}
+
+// tailnetAuthKey, signInClientSecret and natsSeedSecret are Inputs, which the component reads
+// only once they resolve: a value holding an nkey seed is refused then, naming the input and
+// never the value, so no child is registered with it, plainly or as a secret. Each arrives as
+// another resource's output, as a consumer's does.
+func TestConstructRefusesASeedInADispatchInput(t *testing.T) {
+	seed, _ := testnats.User(t)
+	for _, row := range []struct {
+		name, input string
+		value       property.Value
+	}{
+		{"a seed inside the tailnet auth key", "tailnetAuthKey", property.New("tskey-auth-" + seed).WithSecret(true)},
+		{"a lowercase seed as the sign-in client secret", "signInClientSecret", property.New(strings.ToLower(seed)).WithSecret(true)},
+		{"a seed inside the NATS seed secret id", "natsSeedSecret", property.New("projects/example-project/secrets/" + seed)},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			inputs := dispatchConstructInputs()
+			inputs["tailnetAuthKey"] = property.New("tskey-auth-example-0123456789").WithSecret(true)
+			inputs["natsUrl"] = property.New("nats://example-hub.example-tailnet.ts.net:4222")
+			inputs["natsSeedSecret"] = property.New("projects/example-project/secrets/example-nats-seed")
+			inputs["signInClientSecret"] = property.New("example-client-secret").WithSecret(true)
+			inputs[row.input] = row.value.WithDependencies([]resource.URN{upstream})
+			m, _, err := constructDispatch(t, inputs, false)
+			require.ErrorContains(t, err, "envoy-infra:gcp:Dispatch example-dispatch: "+row.input+" holds an nkey seed (not echoed)")
+			require.NotContains(t, strings.ToUpper(err.Error()), seed)
+			for _, r := range m.Registrations() {
+				for _, s := range allStrings(resource.NewProperty(r.Inputs)) {
+					require.NotContains(t, strings.ToUpper(s), seed, "%s %s holds the seed", r.Type, r.Name)
+				}
+			}
+		})
+	}
 }

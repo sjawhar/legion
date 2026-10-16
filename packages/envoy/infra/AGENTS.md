@@ -122,6 +122,17 @@ versions. Never add the module to the root `go.work`.
   hub joins that list, with a row in `TestNatsHubRefusesASeedInAnyPlainInput`. A user's name and
   rule entries are core's to refuse, and the hub's own user refusals, which run before core's,
   name a user by its index alone (`TestNatsHubPassesOnCoresSeedRefusalOfUsers`).
+  `gcp:Dispatch` follows the same shape: `NewDispatch` refuses a seed in its own name first
+  (`TestDispatchRefusesASeedInTheComponentName`); its resolver refuses a seed in every plain
+  string input the component carries (`gcp.dispatchSeededInput`, one row each in
+  `TestDispatchRefusesAnNKeySeedInAPlainInput`); `tailnetAuthKey`, `signInClientSecret` and
+  `natsSeedSecret` are checked for a seed once they resolve, before any child takes them
+  (`gcp.refuseDispatchSeedInSecret`, `gcp.refuseDispatchSeed`,
+  `TestConstructRefusesASeedInADispatchInput`); and `natsUrl` is checked inside the `ApplyT` that
+  renders the listener container's environment, where core's `Env` refusals — which name core's
+  own inputs, `natsUrls` and `socks5Proxy` — are mapped onto `natsUrl`, each a `core.InputError`
+  naming it, wrapped with the component's type and name and never a panic
+  (`gcp.dispatchListenerEnv`, `TestDispatchRefusesABadNatsURLOnceItResolves`).
 - **Plain or Input.** A field of a plain Go type (`string`, `*int`, a pointer to a struct) takes
   only a value the consumer's program knows when it runs: Construct refuses another resource's
   output there, naming the input (Pulumi SDK v3.265.0 `go/pulumi/provider.go`,
