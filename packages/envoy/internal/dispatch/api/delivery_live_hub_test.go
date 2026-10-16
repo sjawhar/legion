@@ -94,13 +94,12 @@ func (c *fakeHubClock) At(at time.Time, f func()) hubTimer {
 	c.mu.Lock()
 	hook := c.beforeArm
 	c.mu.Unlock()
-	if hook != nil && hook() {
-		c.mu.Lock()
-		c.beforeArm = nil
-		c.mu.Unlock()
-	}
+	cleared := hook != nil && hook()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if cleared {
+		c.beforeArm = nil
+	}
 	timer := &fakeHubTimer{clock: c, at: at, f: f}
 	timer.real = time.AfterFunc(at.Sub(c.nowLocked()), timer.fire)
 	c.timers = append(c.timers, timer)
