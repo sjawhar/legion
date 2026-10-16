@@ -37,7 +37,7 @@ flowchart LR
     reviewer -. changes requested .-> implementer
   end
   merger --> ready["READY on<br/>the issue"]
-  ready --> merge["The merger submits the merge;<br/>the repository's rules land it"]
+  ready --> merge["The daemon submits the merge;<br/>the repository's rules land it"]
   merge --> production["Production check<br/>(the implementer)"]
   production --> done["The architect<br/>closes the issue"]
 ```

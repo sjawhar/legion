@@ -41,6 +41,7 @@ services:
       DISPATCH_SIGNIN_CLIENT_ID: ${DISPATCH_SIGNIN_CLIENT_ID:-}
       DISPATCH_SIGNIN_CLIENT_SECRET: ${DISPATCH_SIGNIN_CLIENT_SECRET:-}
       DISPATCH_SIGNIN_GROUP: ${DISPATCH_SIGNIN_GROUP:-}
+      DISPATCH_SIGNIN_DOMAIN: ${DISPATCH_SIGNIN_DOMAIN:-}
       # Production uses cookie identity. header:<name> is only for test/local harnesses and
       # requires DISPATCH_IDENTITY_HEADER_TRUSTED=1; it never shares a deployment with sign-in.
       DISPATCH_IDENTITY: ${DISPATCH_IDENTITY:-cookie}

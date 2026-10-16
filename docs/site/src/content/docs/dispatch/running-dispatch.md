@@ -16,10 +16,10 @@ sign-in. Its source is `packages/envoy/cmd/dispatch`, and the web app it serves 
 | --- | --- | --- |
 | Postgres | `DATABASE_URL` | Required. Dispatch keeps everything here and applies its own migrations at start. Leave `pool_max_conns` out of the URL; Dispatch refuses it. |
 | A shared agent token | `DISPATCH_AGENT_TOKEN` | Required to start. A fallback credential for agents; agents normally use personal tokens made in Settings. To change it without locking agents out, set the new value followed by the old one, separated by a space, until every agent has moved, then the new one alone. |
-| Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, `DISPATCH_SIGNIN_GROUP` | The OpenID Connect sign-in pool people sign in to with Google Workspace, Dispatch's app client in it and that client's secret, and the pool group a person must be in. Required for the default cookie sign-in, all four together. |
-| The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. The sign-in pool's app client lists this address followed by `/auth/callback` as a callback URL. |
+| Google sign-in | `DISPATCH_SIGNIN_ISSUER`, `DISPATCH_SIGNIN_CLIENT_ID`, `DISPATCH_SIGNIN_CLIENT_SECRET`, and `DISPATCH_SIGNIN_GROUP` or `DISPATCH_SIGNIN_DOMAIN` | The OpenID Connect issuer people sign in through, Dispatch's client there and that client's secret, and exactly one of: the group a person must be in, through a Cognito sign-in pool; or the Google Workspace domain whose people may sign in, with Google itself as the issuer. Required for the default cookie sign-in. [Signing people in](#signing-people-in) covers both. |
+| The browser address | `DISPATCH_SERVER_URL` | The exact address people type, such as `https://dispatch.internal.example`. Dispatch's client at the issuer lists this address followed by `/auth/callback` as a callback URL. |
 | The GitHub App | `DISPATCH_APP_CLIENT_ID`, `DISPATCH_APP_PEM_B64` | Without it the server starts, but the web app's GitHub reads answer `503` and architecture sources cannot be saved. |
-| A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the sign-in pool's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the pool: after the key leaks, sign people out at the pool too. |
+| A stable session key | `DISPATCH_SIGNING_KEY` | Signs sign-in cookies and seals the issuer's refresh tokens Dispatch stores. When unset, Dispatch creates one under `~/.local/share/dispatch`; keep that directory on a volume, or every restart signs everyone out. Changing the key signs everyone out and leaves every stored refresh token unopenable, so each person signs in again, but revokes none at the issuer: after the key leaks, sign people out at the issuer too. |
 | An Envoy listener | `ENVOY_URL` | Where the Agents page finds live agent sessions. Defaults to `http://127.0.0.1:9020`. |
 | NATS | `NATS_URLS`, `NATS_NKEY_SEED_FILE` | Where Dispatch publishes its events for agents. The Agents page's live view also needs it. Dispatch refuses a NATS server on another machine unless `ENVOY_ALLOW_REMOTE_NATS=1`. Set `DISPATCH_NATS_DISABLED=1` to run without it. |
 | An address to listen on | `DISPATCH_LISTEN_HOST`, `DISPATCH_PORT` | Port `8766` by default. |
@@ -30,11 +30,92 @@ When neither `NATS_URLS` nor `DISPATCH_NATS_DISABLED=1` is set, Dispatch reads t
 from `envoy.natsUrls` in `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`, the file agents use,
 whatever that file's `envoy.enabled` says, so set one of them explicitly.
 
-People sign in with Google Workspace through the sign-in pool by default, and Dispatch names each
-person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request
-header instead; it is for tests and local harnesses only, needs `DISPATCH_IDENTITY_HEADER_TRUSTED=1`,
-and refuses every `DISPATCH_SIGNIN_*` setting. Serve Dispatch over HTTPS.
-`DISPATCH_INSECURE_COOKIE=1` is only for trying it over plain HTTP on your own machine.
+People sign in through a Cognito sign-in pool or with Google directly by default, and Dispatch
+names each person by their lowercase email. `DISPATCH_IDENTITY=header:<Header-Name>` names people by a request header instead; it is for
+tests and local harnesses only, needs `DISPATCH_IDENTITY_HEADER_TRUSTED=1`, and refuses every
+`DISPATCH_SIGNIN_*` setting. Serve Dispatch over HTTPS. `DISPATCH_INSECURE_COOKIE=1` is only for
+trying it over plain HTTP on your own machine.
+
+## Signing people in
+
+Dispatch signs people in with OpenID Connect's authorization code flow, in one of two ways, chosen
+by which of `DISPATCH_SIGNIN_GROUP` and `DISPATCH_SIGNIN_DOMAIN` is set beside the issuer, the client
+ID and the client secret. Setting both, or some of the settings without the others, refuses the
+start, naming what is wrong.
+
+- **Through a Cognito sign-in pool**, federating whatever identity provider the deployment
+  chooses: `DISPATCH_SIGNIN_ISSUER` is
+  the pool's issuer, the client is Dispatch's confidential app client in the pool, and
+  `DISPATCH_SIGNIN_GROUP` names the pool group (`cognito:groups`) a person must be in. Dispatch
+  names the person by the email in their pool username, never by the `email` claim, which a
+  person can write.
+- **With Google directly**, for one Workspace domain: `DISPATCH_SIGNIN_ISSUER` is
+  `https://accounts.google.com`, the client is a Google OAuth client, and
+  `DISPATCH_SIGNIN_DOMAIN` is the domain, a lowercase name such as `example.com`. A domain under
+  any other issuer, and a group under Google's, refuse the start: only Google's ID tokens carry
+  `hd`, and they carry no group. A person signs in when their ID token's `hd` (the account's
+  Workspace domain) is the domain and Google has verified their `email`; Dispatch names them by
+  that email, lowercased. Anyone else reaches a page saying why: not in the domain, email not
+  verified, or no email. No AWS account is involved.
+
+  Set `DISPATCH_SIGNIN_DOMAIN` to the organization's **primary** domain: Google puts the primary
+  domain in `hd` for every account of the organization, whichever domain its address is on. A
+  secondary domain in the setting admits nobody, and a member whose address is on a secondary
+  domain signs in, named by that address.
+
+The Google client to create, in the Google Cloud console of the organization whose Workspace it
+is, is a **web application** OAuth client with `<DISPATCH_SERVER_URL>/auth/callback` as an
+authorized redirect URI. Set its OAuth consent screen's user type to **Internal**, so that only the
+organization's own accounts can complete the sign-in at Google. Google accepts an `https` redirect
+whose host ends in a public suffix, or plain `http` to a loopback address such as
+`http://127.0.0.1:8766/auth/callback` for a server on your own machine. Its client ID and secret
+are `DISPATCH_SIGNIN_CLIENT_ID` and `DISPATCH_SIGNIN_CLIENT_SECRET`. Dispatch asks Google for
+offline access, with consent on every sign-in, so each sign-in returns the refresh token Dispatch
+confirms the person with, and names the domain to Google's account chooser as a hint; the check
+that admits a person is Dispatch's own.
+
+Either way, Dispatch keeps the issuer's refresh token, sealed, and confirms the person with it at
+least hourly: the first request after the hour refreshes the sign-in and applies the same rule to
+the refreshed ID token. A person the rule no longer admits loses every browser session, and so
+does anyone whose refresh fails for any reason, an outage at the issuer included: while the issuer
+cannot be reached, people are signed out as their hour lapses, and sign in again once it answers.
+Logout ends Dispatch's session only, not the issuer's.
+
+A person is their email address, so an address that passes from one account to another is one
+person to Dispatch. With Google directly, Dispatch also records the Google account (its `sub`,
+which Google never reuses) that signed in to each address: when another account signs in to the
+same address, as when a Workspace admin gives a deleted account's address to a new one, Dispatch
+ends every session of the address before it signs the new account in, and the hourly confirmation
+ends them should the refreshed sign-in name another account. Through a Cognito pool there is no
+such record: the old holder of a reassigned address keeps the sessions they already have until
+their cookie expires, 30 days after it was issued, unless the pool user is removed from
+`DISPATCH_SIGNIN_GROUP` or disabled.
+
+Moving a deployment from the Cognito pool to a domain needs no session-generation bump: the first
+sign-in under the domain records a subject the address's row did not hold before, which ends
+every session of the address by itself (the same check that ends a reassigned address's sessions,
+above). It still needs the refresh-token step: revoke everyone's refresh tokens at the pool (a
+global sign-out, or disabling the app client), then clear any still stored in plain text —
+`update people set refresh_token = null, confirmed_at = null where refresh_token not like 'v1:%'`
+— before the cutover: domain mode's own retirement sends such a row's token to Google's
+revocation endpoint instead, which cannot revoke a token Google never issued, and logs an ERROR
+every boot until the row is cleared or its person signs in again. A person's own next sign-in
+under the domain overwrites their sealed pool token anyway, but someone who never signs in again
+keeps theirs in `people` indefinitely, still redeemable at the pool until it is revoked there.
+
+Moving the other way, from a domain back to the Cognito pool, needs both steps: the group sign-in
+path never records or compares a subject, so nothing ends the domain sessions on its own, and it
+never clears the recorded subject either. Revoke the refresh tokens at Google (remove the
+client's access), then clear them in Dispatch's database, clear the recorded subject along with
+them, and end every browser session,
+`update people set refresh_token = null, confirmed_at = null, sub = null; update user_sessions set generation = generation + 1`,
+and start Dispatch with the new settings. Skipping the session step there leaves a cookie issued
+before the switch valid: the first sign-in under the pool records a fresh confirmation for the
+address, and that cookie's generation still matches. Skipping the `sub` clear leaves a later
+return to domain mode unprotected: the same Google account signing in again finds its own
+`sub` still on the row, so nothing ends sessions a pool-era cookie still held. Everyone then signs
+in again under the new issuer; a refresh token left from the old one would be refused at the
+first hourly confirmation, and is still redeemable at the old issuer until it is revoked there.
 
 ## Running it on your machine
 
@@ -79,15 +160,18 @@ with Docker, Bun, and Go installed:
    ```
 
    `DISPATCH_WEB_DIST` is where the web app was built. `DISPATCH_NATS_DISABLED=1` keeps this run off
-   any message bus. `DISPATCH_DEV_SIGNIN=1` lets you sign in without a sign-in pool.
+   any message bus. `DISPATCH_DEV_SIGNIN=1` lets you sign in without an issuer.
 
 4. Open `http://127.0.0.1:8766/auth/_dev/signin?login=<your email>`. It signs in anyone by the email
-   it names, with no sign-in pool. Dispatch accepts it only on your own machine, with every address
-   in the setup on that machine, and that server needs a database of its own.
+   it names, with no issuer. Dispatch accepts it only on your own machine, with every address in the
+   setup on that machine, and that server needs a database of its own.
 
-To sign in through a real sign-in pool instead, replace `DISPATCH_DEV_SIGNIN=1` in step 3 with the
-four `DISPATCH_SIGNIN_*` settings, and list `http://127.0.0.1:8766/auth/callback` as a callback URL
-of the pool's app client.
+To sign in for real instead, replace `DISPATCH_DEV_SIGNIN=1` in step 3 with the issuer, client ID,
+client secret and group or domain settings, and list `http://127.0.0.1:8766/auth/callback` as a
+callback URL of Dispatch's client: the sign-in pool's app client, or a Google web client, with
+`DISPATCH_SIGNIN_ISSUER=https://accounts.google.com` and `DISPATCH_SIGNIN_DOMAIN=example.com` for
+your domain. With Google directly, the server needs no AWS account or credentials: without them
+it logs that meaning search is unavailable and serves everything else.
 
 ## First steps after it starts
 
