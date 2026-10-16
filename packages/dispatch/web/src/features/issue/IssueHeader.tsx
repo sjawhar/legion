@@ -599,7 +599,7 @@ export function IssueHeader({
               </button>
             </div>
           )}
-          {/* The repository is where the work lands, like the parent, so it sits in this rail,
+          {/* The repository is where the work goes, like the parent, so it sits in this rail,
               which scrolls rather than wrapping: a repository name can be long, and the state
               row above must keep every control on one row at a phone width. */}
           <div className={`flex shrink-0 items-center gap-2 text-sm ${textSecondaryOnSurface}`}>
