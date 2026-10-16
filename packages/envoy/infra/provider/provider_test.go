@@ -42,7 +42,7 @@ type schema struct {
 			Ref    string `json:"$ref"`
 		} `json:"inputProperties"`
 		RequiredInputs []string `json:"requiredInputs"`
-		Properties map[string]struct {
+		Properties     map[string]struct {
 			Secret bool `json:"secret"`
 		} `json:"properties"`
 	} `json:"resources"`
