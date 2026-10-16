@@ -48,11 +48,18 @@ mount `legion-operator-route` in that namespace reads the same copy.
 
 ## Changing a role's model
 
-The two files in that directory are the operator's, and `apply.sh` is the only writer of the
-ConfigMap. To change the model a role uses, edit that role's line under `modelRoles` in
-`overlay.yml` and run the same `apply.sh` command; nothing in this repository changes. Pods started
-after that read the new file. A running pod keeps the files it started with until it restarts,
-because `pod.yml` mounts both by `subPath`, which the kubelet never refreshes.
+The two files in that directory are the operator's, and `apply.sh` writes the ConfigMap from them.
+To change the model a role uses, edit that role's line under `modelRoles` in `overlay.yml` and run
+the same `apply.sh` command; nothing in this repository changes. Pods started after that read the
+new file. A running pod keeps the files it started with until it restarts, because `pod.yml` mounts
+both by `subPath`, which the kubelet never refreshes.
+
+`apply.sh` writes with a server-side apply under its own field manager,
+`legion-operator-route-apply`, and forces conflicts. When another tool wrote the ConfigMap before
+(an earlier client-side apply, or an infrastructure tool's server-side apply), the script takes the
+two data keys over from it instead of failing, and leaves that tool's labels and annotations as they
+are. A tool that still declares the ConfigMap writes its own copy back at its next apply, so stop it
+declaring the ConfigMap before the operator's directory takes over.
 
 The ConfigMap carries no `legion.dev/project` label. A live harness run creates its own copy under a
 run-scoped name and deletes only objects labelled with its own run's project, so it never touches

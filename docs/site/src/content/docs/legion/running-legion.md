@@ -214,7 +214,9 @@ To stand it up:
    ```
 
    `--context` is required, and the script names the cluster it wrote to. It refuses a
-   `models.yml` that still holds the placeholder.
+   `models.yml` that still holds the placeholder. It writes with a server-side apply that forces
+   conflicts, so it takes the two keys over from a tool that wrote the ConfigMap before; stop that
+   tool declaring the ConfigMap first, or its next apply writes its own copy back.
 3. Put `pod.yml`'s contents under `runtime.kubernetes.pod` in `legion.yaml`, with your endpoint's
    token audience in place of `${MODEL_TOKEN_AUDIENCE}`.
 
