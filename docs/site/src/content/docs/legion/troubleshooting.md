@@ -213,8 +213,14 @@ says which budget ran out (`launch failures ran out`, `deaths with work outstand
 {"level":"ERROR","msg":"supervise: claim failed","why":"launch failures ran out","launchFailures":3,"deaths":0,…}
 ```
 
-Before it come `supervise: launch failed` or `supervise: process died` warnings, one per attempt.
-The state shows it too:
+Before it come `supervise: launch failed` or `supervise: process died` warnings, one per attempt,
+each but the last followed by `supervise: waiting before the next launch`: the tries are spaced by
+a backoff (1–2 s, then 2–4 s), so a fault that lasts a moment cannot spend the whole budget. Under
+the Kubernetes runtime, a launch whose requests the API server answers overloaded (a 429, or a 5xx
+such as `etcdserver: throttle: too many requests`) waits the server out and is charged nothing;
+its `sandbox runtime: the API server answered a launch's request overloaded` warning comes first,
+and the launch fails only when the server is still overloaded at the launch's own deadline. The
+state shows it too:
 
 ```sh
 legion state --config legion.yaml --json | jq '.issues["<KEY>"] | {phase, holdReason, architect, workers}'

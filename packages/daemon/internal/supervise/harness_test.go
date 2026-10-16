@@ -42,6 +42,17 @@ type fakeClock struct {
 	now    time.Time
 	timers []*fakeTimer
 	armed  int
+	// slept is every wait a machine asked to Sleep, in order.
+	slept []time.Duration
+}
+
+// Sleep records d and returns at once, with ctx's error when it has ended: a machine's wait costs
+// the test nothing, and the test reads what it waited.
+func (c *fakeClock) Sleep(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	c.slept = append(c.slept, d)
+	c.mu.Unlock()
+	return ctx.Err()
 }
 
 type fakeTimer struct {
@@ -338,6 +349,7 @@ func testTimeouts() Timeouts {
 		RPC:                   testRPC,
 		Probe:                 testProbe,
 		Stop:                  testStop,
+		LaunchBackoff:         testLaunchBackoff,
 	}
 }
 

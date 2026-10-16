@@ -2660,11 +2660,16 @@ export interface DeliveryRun {
   readonly conclusion: "success" | "failure" | "cancelled" | null;
   /** Null when the run has no production job. */
   readonly production: DeliveryRunProduction | null;
+  /** Every failed job, by when each started (a job that never started last), then by name in
+   *  byte order. */
   readonly failed_jobs: readonly DeliveryRunJob[];
   /** The earliest-finishing failed job that isn't a summary/guard job, falling back to the
-   *  earliest failed job overall; null on a run with no failed job. */
+   *  earliest failed job overall, the first by name in byte order among those finishing together
+   *  (a job that never finished last); null on a run with no failed job. */
   readonly root_failing_job: DeliveryRunJob | null;
-  /** Every window pull request this run shipped first, whatever facets the request names. */
+  /** Every window pull request this run shipped first, whatever facets the request names, by
+   *  `merged_at`, then by `id` in byte order. Of two production deploys completing in the same
+   *  second, the one with the lower run id ships a pull request both could. */
   readonly prs: readonly { readonly id: string; readonly title: string }[];
 }
 

@@ -808,6 +808,10 @@
   job's last failing run among runs that completed together, the one with the higher run id rather
   than whichever was listed last.
 
+- Two production deploys whose jobs complete in the same second are ordered by run id, and the
+  lower run id ships a pull request both could, so the live Delivery hub's sliding window no longer
+  swaps a pull request's `deploy_run` and a run's `prs` with no stored row changed (LEGION-690).
+
 - The approval carry holds the version a human approved to the document's asks rows as it holds
   the version his answer writes (LEGION-752). A block of the new version counts as unchanged since
   his approval only while the approved version holds a block under the same id whose stored
