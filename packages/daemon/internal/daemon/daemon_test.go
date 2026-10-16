@@ -542,15 +542,16 @@ func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.L
 	}
 }
 
-// repositoriesGitHub is GitHub's REST API answering the read of any repository with default
-// branch main, and every other request with 404, as github.com answers a token it never issued
-// with 401: a test daemon's launches read their repository's default branch, and nothing else the
-// test leaves unanswered reaches github.com.
+// repositoriesGitHub is GitHub's REST API answering a read of any repository,
+// /repos/<owner>/<name>, with default branch main, and every other request with 404: a test
+// daemon's launches read their repository's default branch here, and nothing a test leaves
+// unanswered reaches github.com.
 func repositoriesGitHub(t *testing.T) string {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/repos/"), "/")
-		if r.Method != http.MethodGet || !strings.HasPrefix(r.URL.Path, "/repos/") || len(parts) != 2 {
+		rest, isRepository := strings.CutPrefix(r.URL.Path, "/repos/")
+		parts := strings.Split(rest, "/")
+		if r.Method != http.MethodGet || !isRepository || len(parts) != 2 {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = io.WriteString(w, `{"message":"Not Found"}`)
 			return
