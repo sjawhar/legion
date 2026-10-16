@@ -264,7 +264,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 		return fmt.Errorf("open Envoy JetStream: %w", natsauth.WithLastError(err, conn))
 	}
 	w.log.Info("legion workflow boot stage", "stage", "intake")
-	heard, err := w.heardRepositories(ctx, w.repositories.Accepted())
+	heard, err := w.heardAtBoot(ctx)
 	if err != nil {
 		conn.Close()
 		w.conn = nil
@@ -382,9 +382,14 @@ func (w *workflowRuntime) reconcile(ctx context.Context) error {
 		return fmt.Errorf("read Dispatch consumer position: %w", err)
 	}
 	// The reconcile is its own transaction, so it owns the commit hooks its admission and workflow
-	// changes register (intake.OnCommit), as ApplyFact does for a fact.
+	// changes register (intake.OnCommit), as ApplyFact does for a fact, and it records issues, so it
+	// takes the lock every fact applies under: a mapping refresh never unsubscribes a repository it
+	// is recording an issue on.
 	scoped, committed := intake.WithCommitHooks(ctx)
 	if err := pgx.BeginFunc(scoped, w.pool, func(tx pgx.Tx) error {
+		if err := intake.SerializeFacts(scoped, tx); err != nil {
+			return fmt.Errorf("serialize the reconcile with every fact: %w", err)
+		}
 		return w.admission.Reconcile(scoped, tx, issues, target, position)
 	}); err != nil {
 		return fmt.Errorf("reconcile admission: %w", err)

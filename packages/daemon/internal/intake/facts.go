@@ -530,7 +530,7 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 			_ = tx.Rollback(ctx)
 		}
 	}()
-	if _, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))"); err != nil {
+	if err := SerializeFacts(ctx, tx); err != nil {
 		return Result{}, fmt.Errorf("serialize fact %s/%s: %w", source, eventID, err)
 	}
 
@@ -563,4 +563,15 @@ func ApplyFact(ctx context.Context, pool *pgxpool.Pool, source, eventID string, 
 	committed = true
 	committedHooks()
 	return result, nil
+}
+
+// SerializeFacts takes, for tx's life, the lock every fact applies under (ApplyFact): until tx
+// commits or rolls back, no fact resolves a repository and commits an issue recorded on it. The
+// boot's reconcile, which records issues in its own transaction, takes it, as does a refresh of
+// the repository mapping across its live-record snapshot, its subscription update and its
+// publication, so a repository an admission is recording an issue on is never unsubscribed under
+// it.
+func SerializeFacts(ctx context.Context, tx pgx.Tx) error {
+	_, err := tx.Exec(ctx, "select pg_advisory_xact_lock(hashtext('legion.apply_fact'))")
+	return err
 }

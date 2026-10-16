@@ -76,7 +76,7 @@ func TestAMappingChangeAtRuntimeChangesWhatTheDaemonServes(t *testing.T) {
 	if err := w.nameMapping(context.Background()); err != nil {
 		t.Fatalf("nameMapping: %v", err)
 	}
-	heard, err := w.heardRepositories(context.Background(), w.repositories.Accepted())
+	heard, err := w.heardAtBoot(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
