@@ -272,7 +272,7 @@ func (r *router) authStart(w http.ResponseWriter, req *http.Request) {
 // issuer's refresh token to confirm that hourly. Under a group the person is named by the email
 // their pool username carries; under a domain, by the email of a Google account of the domain,
 // and the account's subject is recorded with the sign-in, which ends the address's sessions when
-// another account held it (auth.PeopleStore.SignIn).
+// another account held it (auth.PeopleStore.SignInSubject).
 func (r *router) authCallback(w http.ResponseWriter, req *http.Request) {
 	if r.ctx.SignIn == nil {
 		signInUnconfigured(w)

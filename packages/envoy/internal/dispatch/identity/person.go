@@ -45,7 +45,7 @@ type SignInRule interface {
 	// "reason", err to what this returns.
 	RefusalLogFields(claims oidc.Claims) []any
 	// Subject is the account a sign-in under this rule records with the person
-	// (auth.PeopleStore.SignIn's subject); empty for a rule that records none.
+	// (auth.PeopleStore.SignInSubject's subject); empty for a rule that records none.
 	Subject(claims oidc.Claims) string
 	// BootLog logs that boot is signing people in under this rule through issuer as clientID.
 	BootLog(issuer, clientID string)

@@ -222,7 +222,7 @@ configuration reachable. One browser profile per account. Record:
   on one more sign-in, delete `prompt=consent` from the authorize URL and observe the 502 "the
   issuer returned no refresh token".
 - [ ] **A refresh that passes:** set `people.confirmed_at` two hours back in the local Postgres, as
-  the tests do through `people.Confirm` (`settings_test.go:629-638`), make one request, and record
+  the tests do through `ageConfirmation` (`settings_test.go:444-459`), make one request, and record
   that `confirmed_at` moved past the aged value and `whoami` answered 200: together these show
   `Refresh` got a verified `id_token` and the domain rule passed on it.
 - [ ] **Revocation:** revoke the app's access in the Google account, age the confirmation again, and

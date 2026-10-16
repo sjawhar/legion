@@ -86,14 +86,8 @@ func newMembershipRigFor(t *testing.T, rule SignInRule, hostedDomain string, cla
 		sessions: sessions,
 		now:      time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC),
 	}
-	var signInErr error
-	if subject != "" {
-		signInErr = rig.people.SignInSubject(context.Background(), memberEmail, subject, session.RefreshToken, rig.now)
-	} else {
-		signInErr = rig.people.SignIn(context.Background(), memberEmail, session.RefreshToken, rig.now)
-	}
-	if signInErr != nil {
-		t.Fatalf("record sign-in: %v", signInErr)
+	if err := rule.WriteSignIn(context.Background(), rig.people, memberEmail, subject, session.RefreshToken, rig.now); err != nil {
+		t.Fatalf("record sign-in: %v", err)
 	}
 	rig.membership = &Membership{
 		People:   rig.people,

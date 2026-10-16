@@ -95,7 +95,11 @@ Moving a deployment from the Cognito pool to a domain needs no session-generatio
 sign-in under the domain records a subject the address's row did not hold before, which ends
 every session of the address by itself (the same check that ends a reassigned address's sessions,
 above). It still needs the refresh-token step: revoke everyone's refresh tokens at the pool (a
-global sign-out, or disabling the app client) before the cutover. A person's own next sign-in
+global sign-out, or disabling the app client), then clear any still stored in plain text —
+`update people set refresh_token = null, confirmed_at = null where refresh_token not like 'v1:%'`
+— before the cutover: domain mode's own retirement sends such a row's token to Google's
+revocation endpoint instead, which cannot revoke a token Google never issued, and logs an ERROR
+every boot until the row is cleared or its person signs in again. A person's own next sign-in
 under the domain overwrites their sealed pool token anyway, but someone who never signs in again
 keeps theirs in `people` indefinitely, still redeemable at the pool until it is revoked there.
 

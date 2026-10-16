@@ -70,7 +70,7 @@ type memoryPeopleStore struct {
 	mu       sync.Mutex
 	people   map[string]auth.PersonMembership
 	sessions *memorySessionStore
-	// afterSignIn, when set, runs once after the next SignIn returns (SignIn).
+	// afterSignIn, when set, runs once after the next SignIn or SignInSubject returns.
 	afterSignIn func()
 }
 
@@ -88,8 +88,8 @@ func (s *memoryPeopleStore) Record(_ context.Context, email string) error {
 }
 
 func (s *memoryPeopleStore) runAfterSignIn() {
-	// afterSignIn runs once, after this sign-in has committed and released the store: a test's
-	// window between a sign-in's commit and its cookie.
+	// afterSignIn runs once, after a sign-in (SignIn or SignInSubject) has committed and released
+	// the store: a test's window between a sign-in's commit and its cookie.
 	if hook := s.afterSignIn; hook != nil {
 		s.afterSignIn = nil
 		hook()
