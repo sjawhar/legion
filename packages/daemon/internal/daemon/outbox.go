@@ -1153,7 +1153,6 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue), base)
 }
 
-
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
 	if r.supervisor == nil {
 		return errors.New("workspace removal has no claim supervisor")
