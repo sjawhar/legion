@@ -959,8 +959,10 @@ func captureStderr(t *testing.T) func() string {
 		_, _ = io.Copy(&buf, r)
 		_ = r.Close()
 	}()
+	restored := false
 	captured := func() string {
-		if os.Stderr == w {
+		if !restored {
+			restored = true
 			os.Stderr = saved
 			_ = w.Close()
 			<-drained

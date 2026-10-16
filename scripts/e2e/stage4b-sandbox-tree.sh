@@ -3627,10 +3627,11 @@ fixture_dir=/legion/workspaces/$repo/${tree2,,}
 # skip, so the success line is read from every container of the pod's log, and every container's
 # warm-up lines are kept as codegraph-warm-up.txt, which the fail line names.
 # codegraph_warm_up_lines: every warm-up line every container of tree 2's pod has logged, each
-# prefixed `[pod/<pod>/<container>]` and timestamped.
-codegraph_warm_up_lines() { op logs "$pod" --all-containers --timestamps --prefix | grep -F 'codegraph warm-up for'; }
+# prefixed `[pod/<pod>/<container>]` and timestamped, kept as the evidence every read below judges
+# (so a wait that times out leaves the file its fail line names).
+codegraph_warm_up_lines() { op logs "$pod" --all-containers --timestamps --prefix | grep -F 'codegraph warm-up for' >"$evidence/codegraph-warm-up.txt"; }
 # codegraph_built: a role shim of the pod logged the warm-up's success line.
-codegraph_built() { codegraph_warm_up_lines | grep -qF 'built the index'; }
+codegraph_built() { codegraph_warm_up_lines && grep -qF 'built the index' "$evidence/codegraph-warm-up.txt"; }
 # warm_up_built_elapsed CREATED reads prefixed, timestamped pod log lines on stdin and prints
 # `<container> <seconds>` for the first success line: the container of its `[pod/<pod>/<container>]`
 # prefix, and the whole seconds from CREATED, the pod's creationTimestamp, to its timestamp. With
@@ -3646,7 +3647,6 @@ warm_up_built_elapsed() {
   return 1
 }
 on_tree "$tree2" until_true 600 "a role shim of tree 2's pod to log the CodeGraph warm-up's success line for $fixture_dir" codegraph_built
-codegraph_warm_up_lines >"$evidence/codegraph-warm-up.txt"
 created=$(op get pod "$pod" -o jsonpath='{.metadata.creationTimestamp}') || fail "the operator could not read the creationTimestamp of tree 2's pod $pod"
 built=$(warm_up_built_elapsed "$created" <"$evidence/codegraph-warm-up.txt") ||
   fail "no container of $pod logged the warm-up's success line; its warm-up lines are in $evidence/codegraph-warm-up.txt"

@@ -712,7 +712,7 @@ func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
 	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
 		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
 	}
-	if sh.log.count("the CodeGraph warm-up is still running 3s") != 1 {
+	if sh.log.count(fmt.Sprintf("the CodeGraph warm-up is still running %v", shim.MinWarmUpDrain)) != 1 {
 		t.Fatalf("the shim left without saying the warm-up still ran %v; log:\n%s", shim.MinWarmUpDrain, sh.log)
 	}
 }

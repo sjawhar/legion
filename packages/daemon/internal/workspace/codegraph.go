@@ -372,7 +372,7 @@ func holdWarmLease(path, token string, heartbeat time.Duration) (release func())
 	return func() {
 		close(stop)
 		<-stopped
-		if current, err := os.ReadFile(path); err == nil && string(current) == token {
+		if warmLeaseHasToken(path, token) {
 			_ = os.Remove(path)
 		}
 	}
@@ -386,13 +386,20 @@ func holdWarmLease(path, token string, heartbeat time.Duration) (release func())
 // the call, never the tick's own value: a tick delivered late would otherwise set an mtime already
 // old, and a lease kept fresh must say when it was last known live.
 func refreshWarmLease(path, token string) bool {
-	current, err := os.ReadFile(path)
-	if err != nil || string(current) != token {
+	if !warmLeaseHasToken(path, token) {
 		return false
 	}
 	now := time.Now()
 	_ = os.Chtimes(path, now, now)
 	return true
+}
+
+// warmLeaseHasToken reports whether the lease at path still carries token, this holder's: the one
+// question the heartbeat and the release both ask before touching the file. A lease that cannot
+// be read is nobody's to touch.
+func warmLeaseHasToken(path, token string) bool {
+	current, err := os.ReadFile(path)
+	return err == nil && string(current) == token
 }
 
 // codegraphStep is the single next codegraph subcommand nextCodegraphStep decides, or none.
